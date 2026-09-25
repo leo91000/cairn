@@ -19,6 +19,7 @@ struct Scope {
     chat: bool,
     id: String,
 }
+
 struct Page {
     state: Value,
     events: Vec<crate::store::Event>,
@@ -61,7 +62,8 @@ async fn page(
             };
             let run_id = text(&run, "id");
             let (first, max): (i64, i64) = db.0.query_row(
-                "SELECT COALESCE((SELECT id FROM events WHERE run_id=?1 ORDER BY id LIMIT 1),0),COALESCE((SELECT id FROM events WHERE run_id=?1 ORDER BY id DESC LIMIT 1),0)",
+                "SELECT COALESCE((SELECT id FROM events WHERE run_id=?1 ORDER BY id LIMIT \
+                1),0),COALESCE((SELECT id FROM events WHERE run_id=?1 ORDER BY id DESC LIMIT 1),0)",
                 [run_id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
@@ -74,13 +76,19 @@ async fn page(
             // Stop reading rows at the byte budget, rather than allocating an
             // entire page of large historical outputs for every subscriber.
             if before.is_some() && reset {
-                return Err(Error::new(409, "History changed. Reconnect before loading older messages."));
+                return Err(Error::new(
+                    409,
+                    "History changed. Reconnect before loading older messages.",
+                ));
             }
             let tail = before.is_some() || (window && (after == 0 || reset));
             let (events, has_older) = if tail {
                 db.events_before(run_id, before.unwrap_or(i64::MAX))?
             } else {
-                (db.event_batch(run_id, if reset { 0 } else { after }, 100, 256 * 1024)?, false)
+                (
+                    db.event_batch(run_id, if reset { 0 } else { after }, 100, 256 * 1024)?,
+                    false,
+                )
             };
             let oldest = tail.then(|| events.first().map_or(before.unwrap_or(0), |e| e.id));
             let cursor = events
@@ -95,13 +103,22 @@ async fn page(
                     .collect()
             };
             artifacts.sort_by_key(|v| v["createdAt"].as_i64().unwrap_or(0));
-            let mut state = json!({"run":run,"chat":chat,"artifacts":artifacts,"cacheRevision":db.kv("conversation-cache-revision")?.unwrap_or("initial".into())});
+            let mut state = json!({
+                "run": run,
+                "chat": chat,
+                "artifacts": artifacts,
+                "cacheRevision": db
+                    .kv("conversation-cache-revision")?
+                    .unwrap_or("initial".into()),
+            });
             if scope.chat {
                 state["chats"] = crate::chats::list(&db)?.into();
             }
             // Delivered messages already live in the event history. Do not resend
             // the entire conversation as metadata on every paginated stream update.
-            if window && scope.chat && !scope.id.is_empty()
+            if window
+                && scope.chat
+                && !scope.id.is_empty()
                 && let Some(messages) = state["chat"]["messages"].as_array_mut()
             {
                 messages.retain(|m| m["status"] != "delivered");
@@ -187,6 +204,7 @@ struct Subscription {
     session: String,
     deltas: crate::live_text::TextDeltas,
 }
+
 impl Subscription {
     async fn next(&mut self) -> Result<Option<Event>> {
         loop {
@@ -226,7 +244,12 @@ impl Subscription {
             let changed = self.previous != current.state;
             let has_events = !current.events.is_empty();
             self.cursor = current.events.last().map_or(self.cursor, |e| e.id);
-            let mut data = json!({"events":self.deltas.encode(current.events, reset)?,"reset":reset,"more":current.more,"history":current.history});
+            let mut data = json!({
+                "events": self.deltas.encode(current.events, reset)?,
+                "reset": reset,
+                "more": current.more,
+                "history": current.history,
+            });
             if let Some(oldest) = current.oldest {
                 data["oldest"] = oldest.into();
                 data["hasOlder"] = current.has_older.into();
@@ -247,10 +270,14 @@ impl Subscription {
             }
             tokio::select! {
                 _ = self.s.shutdown.cancelled() => return Ok(None),
-                result = self.changes.changed() => if result.is_err() { return Ok(None); },
+                result = self.changes.changed() => {
+                    if result.is_err() {
+                        return Ok(None);
+                    }
+                }
                 // Revalidate session expiry and recover writes by an external
                 // maintenance process; normal delivery is notification driven.
-                _ = tokio::time::sleep(Duration::from_secs(15)) => {},
+                _ = tokio::time::sleep(Duration::from_secs(15)) => {}
             }
         }
     }
@@ -276,7 +303,10 @@ pub async fn history(s: &Service, kind: &str, id: &str, input: &Input) -> Result
         Some(before),
     )
     .await?;
-    Ok(
-        json!({"events":page.events,"history":page.history,"oldest":page.oldest,"hasOlder":page.has_older}),
-    )
+    Ok(json!({
+        "events": page.events,
+        "history": page.history,
+        "oldest": page.oldest,
+        "hasOlder": page.has_older,
+    }))
 }

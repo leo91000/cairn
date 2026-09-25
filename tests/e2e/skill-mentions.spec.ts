@@ -107,6 +107,7 @@ test('an empty skill catalog explains why $ has no suggestions without trapping 
     await composer.press('Backspace')
     await page.getByRole('button', { name: 'Send', exact: true }).click()
   }
+
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
   expect((await workspace.api(`/api/chats/${chat.id}`)).run.chatExecution.text).toBe('$css')
 })

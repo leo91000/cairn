@@ -1,8 +1,29 @@
 <script setup lang="ts">
 import type { GithubRepository, GithubRepositoryPage } from '../../shared/contracts'
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from 'vue'
 import { api } from '../api'
-import { Archive, Check, GitBranch, GitFork, Github, Globe, Lock, Pencil, RefreshCw, Search, SearchX, Star, X } from '../icons'
+import {
+  Archive,
+  Check,
+  GitBranch,
+  GitFork,
+  Github,
+  Globe,
+  Lock,
+  Pencil,
+  RefreshCw,
+  Search,
+  SearchX,
+  Star,
+  X,
+} from '../icons'
 import { iconButton } from '../ui'
 import Icon from './Icon.vue'
 import UiButton from './UiButton.vue'
@@ -28,8 +49,18 @@ const chosen = computed(() => repositories.value.find(repo => repo.fullName === 
 const counts = computed(() => ({ all: repositories.value.length, private: repositories.value.filter(repo => repo.private).length }))
 const filters = computed(() => [
   { value: 'all' as const, label: 'All', count: counts.value.all },
-  { value: 'private' as const, label: 'Private', icon: Lock, count: counts.value.private },
-  { value: 'public' as const, label: 'Public', icon: Globe, count: counts.value.all - counts.value.private },
+  {
+    value: 'private' as const,
+    label: 'Private',
+    icon: Lock,
+    count: counts.value.private,
+  },
+  {
+    value: 'public' as const,
+    label: 'Public',
+    icon: Globe,
+    count: counts.value.all - counts.value.private,
+  },
 ])
 // Searching and filtering keep fetching pages until enough matches are visible.
 const needsMore = computed(() => nextPage.value !== null && !error.value && (!!needle.value || visibility.value !== 'all') && filtered.value.length < 8)
@@ -51,20 +82,24 @@ async function load() {
   finally {
     loading.value = false
   }
+
   if (needsMore.value)
     await load()
 }
+
 function select(repo: GithubRepository) {
   if (props.disabled || repo.imported)
     return
   emit('select', repo)
   browsing.value = false
 }
+
 async function change() {
   browsing.value = true
   await nextTick()
   search.value?.focus()
 }
+
 function move(step: number) {
   const options = filtered.value
   if (!options.length)
@@ -75,9 +110,11 @@ function move(step: number) {
     if (!options[index]!.imported)
       break
   }
+
   active.value = index
   nextTick(() => list.value?.querySelector(`#github-repo-${index}`)?.scrollIntoView({ block: 'nearest' }))
 }
+
 function keydown(event: KeyboardEvent) {
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
     event.preventDefault()
@@ -94,29 +131,56 @@ function keydown(event: KeyboardEvent) {
     query.value = ''
   }
 }
+
 function owner(repo: GithubRepository) {
   return repo.owner || repo.fullName.split('/')[0]!
 }
+
 function reload() {
   repositories.value = []
   nextPage.value = 1
   load()
 }
+
 function parts(value: string) {
   const at = needle.value ? value.toLowerCase().indexOf(needle.value) : -1
   return at < 0 ? [{ text: value, match: false }] : [{ text: value.slice(0, at), match: false }, { text: value.slice(at, at + needle.value.length), match: true }, { text: value.slice(at + needle.value.length), match: false }]
 }
+
 function hue(value: string) {
   let hash = 0
   for (const char of value)
     hash = (Math.imul(hash, 31) + char.charCodeAt(0)) | 0
   return (hash >>> 0) % 360
 }
-const languageColors: Record<string, string> = { 'TypeScript': '#3178c6', 'JavaScript': '#f1e05a', 'Rust': '#dea584', 'Kotlin': '#a97bff', 'Python': '#3572a5', 'Go': '#00add8', 'Vue': '#41b883', 'Java': '#b07219', 'Swift': '#f05138', 'Ruby': '#701516', 'PHP': '#4f5d95', 'Shell': '#89e051', 'HTML': '#e34c26', 'CSS': '#663399', 'C#': '#178600', 'C++': '#f34b7d', 'C': '#555555', 'Dart': '#00b4ab' }
+
+const languageColors: Record<string, string> = {
+  'TypeScript': '#3178c6',
+  'JavaScript': '#f1e05a',
+  'Rust': '#dea584',
+  'Kotlin': '#a97bff',
+  'Python': '#3572a5',
+  'Go': '#00add8',
+  'Vue': '#41b883',
+  'Java': '#b07219',
+  'Swift': '#f05138',
+  'Ruby': '#701516',
+  'PHP': '#4f5d95',
+  'Shell': '#89e051',
+  'HTML': '#e34c26',
+  'CSS': '#663399',
+  'C#': '#178600',
+  'C++': '#f34b7d',
+  'C': '#555555',
+  'Dart': '#00b4ab',
+}
+
 function languageColor(language: string) {
   return languageColors[language] ?? `oklch(0.65 0.12 ${hue(language)})`
 }
+
 const relative = new Intl.RelativeTimeFormat('en', { numeric: 'auto' })
+
 function updated(value: string) {
   const time = Date.parse(value)
   if (Number.isNaN(time))
@@ -126,8 +190,10 @@ function updated(value: string) {
     if (Math.abs(seconds) >= size)
       return `Updated ${relative.format(Math.round(seconds / size), unit)}`
   }
+
   return 'Updated just now'
 }
+
 function stars(value: number) {
   return value >= 1000 ? `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k` : `${value}`
 }
@@ -157,7 +223,12 @@ onBeforeUnmount(() => observer?.disconnect())
         <span class="flex min-w-0 items-center gap-1.5 text-sm font-semibold text-ink"><Icon :name="Check" :size="15" class="text-accent" /><span class="min-w-0 break-all">{{ chosen.fullName }}</span></span>
         <span class="flex min-w-0 items-center gap-1.5 text-xs text-muted"><Icon :name="GitBranch" :size="13" />{{ chosen.defaultBranch || 'default branch' }} · cloned when you save</span>
       </div>
-      <UiButton type="button" size="small" :disabled="disabled" @click="change">
+      <UiButton
+        type="button"
+        size="small"
+        :disabled="disabled"
+        @click="change"
+      >
         <Icon :name="Pencil" :size="14" />Change
       </UiButton>
     </div>
@@ -167,7 +238,14 @@ onBeforeUnmount(() => observer?.disconnect())
           <Icon :name="Github" :size="15" class="text-ink" />
           <span>Pick a repository from your GitHub connection. It is cloned when you save.</span>
         </p>
-        <button type="button" :class="iconButton" :disabled="disabled || loading" aria-label="Reload repositories" title="Reload repositories" @click="reload">
+        <button
+          type="button"
+          :class="iconButton"
+          :disabled="disabled || loading"
+          aria-label="Reload repositories"
+          title="Reload repositories"
+          @click="reload"
+        >
           <Icon :name="RefreshCw" :size="15" :class="loading ? 'animate-spin' : ''" />
         </button>
       </div>
@@ -191,21 +269,49 @@ onBeforeUnmount(() => observer?.disconnect())
             :disabled="disabled"
             @keydown="keydown"
           >
-          <button v-if="query" type="button" class="grid size-6 place-items-center rounded text-muted hover:bg-soft hover:text-ink" aria-label="Clear search" @click="query = ''; search?.focus()">
+          <button
+            v-if="query"
+            type="button"
+            class="grid size-6 place-items-center rounded text-muted hover:bg-soft hover:text-ink"
+            aria-label="Clear search"
+            @click="query = ''; search?.focus()"
+          >
             <Icon :name="X" :size="14" />
           </button>
         </label>
-        <UiSegments v-model="visibility" label="Repository visibility" compact :options="filters" />
+        <UiSegments
+          v-model="visibility"
+          label="Repository visibility"
+          compact
+          :options="filters"
+        />
       </div>
       <div v-if="error" role="alert" class="flex min-w-0 flex-wrap items-center gap-3 rounded-lg border border-line bg-danger-surface px-4 py-3 text-sm text-danger">
         <span class="min-w-0 flex-1">{{ error }} <RouterLink to="/connections" class="underline">Connections</RouterLink></span>
-        <UiButton type="button" size="small" class="bg-surface" :disabled="disabled || loading" @click="load">
+        <UiButton
+          type="button"
+          size="small"
+          class="bg-surface"
+          :disabled="disabled || loading"
+          @click="load"
+        >
           <Icon :name="RefreshCw" :size="14" />Retry
         </UiButton>
       </div>
-      <div id="github-repositories" ref="list" class="grid max-h-80 min-w-0 content-start overflow-y-auto overscroll-contain rounded-xl border border-line bg-inset p-1.5" role="listbox" aria-label="Available repositories">
+      <div
+        id="github-repositories"
+        ref="list"
+        class="grid max-h-80 min-w-0 content-start overflow-y-auto overscroll-contain rounded-xl border border-line bg-inset p-1.5"
+        role="listbox"
+        aria-label="Available repositories"
+      >
         <template v-if="!repositories.length && loading">
-          <div v-for="n in 4" :key="n" class="flex animate-pulse items-center gap-3 px-2.5 py-2.5" aria-hidden="true">
+          <div
+            v-for="n in 4"
+            :key="n"
+            class="flex animate-pulse items-center gap-3 px-2.5 py-2.5"
+            aria-hidden="true"
+          >
             <span class="size-9 shrink-0 rounded-lg bg-line" />
             <span class="grid flex-1 gap-2"><span class="h-3 w-2/5 rounded bg-line" /><span class="h-2.5 w-3/4 rounded bg-line/70" /></span>
           </div>
@@ -227,7 +333,12 @@ onBeforeUnmount(() => observer?.disconnect())
             <span class="flex min-w-0 items-center gap-2">
               <span class="min-w-0 truncate text-sm"><span class="text-muted"><template v-for="(part, i) in parts(owner(repo))" :key="i"><mark v-if="part.match" class="rounded-sm bg-warning-surface px-px text-ink">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template>/</span><span class="font-semibold text-ink"><template v-for="(part, i) in parts(repo.name)" :key="i"><mark v-if="part.match" class="rounded-sm bg-warning-surface px-px">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></span></span>
               <span v-if="repo.imported" class="shrink-0 rounded-full bg-soft px-2 py-0.5 text-2xs font-medium text-accent">Added</span>
-              <Icon v-if="selected === repo.fullName" :name="Check" :size="16" class="ml-auto text-accent" />
+              <Icon
+                v-if="selected === repo.fullName"
+                :name="Check"
+                :size="16"
+                class="ml-auto text-accent"
+              />
             </span>
             <span v-if="repo.description" class="line-clamp-2 text-xs text-muted"><template v-for="(part, i) in parts(repo.description)" :key="i"><mark v-if="part.match" class="rounded-sm bg-warning-surface px-px text-ink">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></span>
             <span class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-subtle">
@@ -244,7 +355,12 @@ onBeforeUnmount(() => observer?.disconnect())
         <div v-if="repositories.length && !loading && !error && !filtered.length" class="grid justify-items-center gap-2 px-4 py-8 text-center text-sm text-muted">
           <Icon :name="SearchX" :size="22" />
           <span>No repository matches{{ query ? ` “${query.trim()}”` : '' }}.</span>
-          <UiButton v-if="query || visibility !== 'all'" type="button" size="small" @click="query = ''; visibility = 'all'">
+          <UiButton
+            v-if="query || visibility !== 'all'"
+            type="button"
+            size="small"
+            @click="query = ''; visibility = 'all'"
+          >
             Clear filters
           </UiButton>
         </div>
@@ -253,7 +369,12 @@ onBeforeUnmount(() => observer?.disconnect())
           <span>No repository is available with this GitHub connection.</span>
         </div>
         <div v-if="nextPage !== null && repositories.length" ref="sentinel" class="flex justify-center py-1.5">
-          <UiButton type="button" size="small" :disabled="disabled || loading || !!error" @click="load">
+          <UiButton
+            type="button"
+            size="small"
+            :disabled="disabled || loading || !!error"
+            @click="load"
+          >
             {{ loading ? 'Loading repositories…' : 'Load more repositories' }}
           </UiButton>
         </div>

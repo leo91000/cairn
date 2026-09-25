@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { twMerge } from 'tailwind-merge'
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import {
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from 'vue'
 import { api, date, duration } from '../api'
 import Empty from '../components/Empty.vue'
 import Icon from '../components/Icon.vue'
@@ -9,7 +14,17 @@ import Status from '../components/Status.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
 import VirtualSelect from '../components/VirtualSelect.vue'
-import { ArrowUpRight, CircleCheck, CirclePause, Clock, ListFilter, LoaderCircle, RefreshCw, Square, TriangleAlert } from '../icons'
+import {
+  ArrowUpRight,
+  CircleCheck,
+  CirclePause,
+  Clock,
+  ListFilter,
+  LoaderCircle,
+  RefreshCw,
+  Square,
+  TriangleAlert,
+} from '../icons'
 import { iconButton } from '../ui'
 
 const runs = ref<any[]>([])
@@ -19,13 +34,44 @@ const offset = ref(0)
 const busy = ref(false)
 const outcomes = [
   { value: '', label: 'All executions', icon: ListFilter },
-  { value: 'queued', label: 'Queued', icon: Clock, group: 'In progress' },
-  { value: 'running', label: 'Running', icon: LoaderCircle, group: 'In progress' },
-  { value: 'succeeded', label: 'Execution finished', icon: CircleCheck, group: 'Finished' },
-  { value: 'failed', label: 'Failed', icon: TriangleAlert, group: 'Finished' },
-  { value: 'cancelled', label: 'Cancelled', icon: Square, group: 'Finished' },
-  { value: 'interrupted', label: 'Interrupted', icon: CirclePause, group: 'Finished' },
+  {
+    value: 'queued',
+    label: 'Queued',
+    icon: Clock,
+    group: 'In progress',
+  },
+  {
+    value: 'running',
+    label: 'Running',
+    icon: LoaderCircle,
+    group: 'In progress',
+  },
+  {
+    value: 'succeeded',
+    label: 'Execution finished',
+    icon: CircleCheck,
+    group: 'Finished',
+  },
+  {
+    value: 'failed',
+    label: 'Failed',
+    icon: TriangleAlert,
+    group: 'Finished',
+  },
+  {
+    value: 'cancelled',
+    label: 'Cancelled',
+    icon: Square,
+    group: 'Finished',
+  },
+  {
+    value: 'interrupted',
+    label: 'Interrupted',
+    icon: CirclePause,
+    group: 'Finished',
+  },
 ]
+
 async function load() {
   busy.value = true
   try {
@@ -41,6 +87,7 @@ async function load() {
     busy.value = false
   }
 }
+
 watch(status, () => {
   offset.value = 0
   load()
@@ -68,7 +115,14 @@ onBeforeUnmount(() => clearInterval(timer))
   </div>
   <div class="toolbar flex items-center justify-between gap-5 mb-[23px] tablet:items-start tablet:flex-wrap phone:gap-4 phone:min-w-0">
     <span class="muted text-muted">{{ runs.length }} runs on this page</span><div class="inline-label flex flex-row items-center gap-2.5 text-xs text-muted whitespace-nowrap min-w-0 max-w-full">
-      <span>Status</span><VirtualSelect v-model="status" label="Status" :options="outcomes" compact hide-label clearable />
+      <span>Status</span><VirtualSelect
+        v-model="status"
+        label="Status"
+        :options="outcomes"
+        compact
+        hide-label
+        clearable
+      />
     </div>
   </div>
   <UiAlert v-if="error">

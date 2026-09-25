@@ -14,12 +14,20 @@ async function consent(url: string) {
   expect(response.status).toBe(302)
   return new URL(response.headers.get('location')!)
 }
+
 describe('outbound MCP connection lifecycle', () => {
   it('authorizes a pre-registered confidential OAuth client', async () => {
     const provider = await mcpProvider({ clientSecret: 'registered-secret' })
     const ctx = await fixture()
     try {
-      const item = await ctx.service.mcps.save({ name: 'Registered OAuth', url: `${provider.origin}/mcp`, auth: 'oauth', clientId: 'registered-client', clientSecret: 'registered-secret', allowPrivateNetwork: true })
+      const item = await ctx.service.mcps.save({
+        name: 'Registered OAuth',
+        url: `${provider.origin}/mcp`,
+        auth: 'oauth',
+        clientId: 'registered-client',
+        clientSecret: 'registered-secret',
+        allowPrivateNetwork: true,
+      })
       const started = await ctx.service.mcps.connect(item.id, 'session')
       const callback = await consent(started.url)
       expect(await ctx.service.mcps.callback(callback.searchParams, 'session')).toBe('connected')
@@ -33,7 +41,13 @@ describe('outbound MCP connection lifecycle', () => {
   it('discovers command servers and passes configured environment values', async () => {
     const ctx = await fixture()
     try {
-      const item = await ctx.service.mcps.save({ name: 'Local tool', transport: 'stdio', command: process.execPath, args: [path.resolve('tests/fixtures/mcp.mjs')], env: { TEST_PREFIX: 'private-prefix:' } })
+      const item = await ctx.service.mcps.save({
+        name: 'Local tool',
+        transport: 'stdio',
+        command: process.execPath,
+        args: [path.resolve('tests/fixtures/mcp.mjs')],
+        env: { TEST_PREFIX: 'private-prefix:' },
+      })
       expect((await ctx.service.mcps.test(item.id)).state).toBe('connected')
       const result = await ctx.service.mcps.withClient(ctx.service.mcps.get(item.id), client => client.callTool({ name: 'fixture_echo', arguments: { message: 'hello' } }))
       expect(result).toMatchObject({ content: [{ text: 'private-prefix:hello' }] })
@@ -49,7 +63,17 @@ describe('outbound MCP connection lifecycle', () => {
     const ctx = await fixture()
     try {
       const headers = await ctx.login()
-      const created = await ctx.app.inject({ method: 'POST', url: '/api/mcps', headers, payload: { name: 'OAuth tools', url: `${provider.origin}/mcp`, auth: 'oauth', allowPrivateNetwork: true } })
+      const created = await ctx.app.inject({
+        method: 'POST',
+        url: '/api/mcps',
+        headers,
+        payload: {
+          name: 'OAuth tools',
+          url: `${provider.origin}/mcp`,
+          auth: 'oauth',
+          allowPrivateNetwork: true,
+        },
+      })
       expect(created.statusCode).toBe(200)
       const item = created.json()
       const connect = await ctx.app.inject({ method: 'POST', url: `/api/mcps/${item.id}/connect`, headers })
@@ -85,7 +109,12 @@ describe('outbound MCP connection lifecycle', () => {
     const provider = await mcpProvider()
     const ctx = await fixture()
     try {
-      const item = await ctx.service.mcps.save({ name: 'OAuth', url: `${provider.origin}/mcp`, auth: 'oauth', allowPrivateNetwork: true })
+      const item = await ctx.service.mcps.save({
+        name: 'OAuth',
+        url: `${provider.origin}/mcp`,
+        auth: 'oauth',
+        allowPrivateNetwork: true,
+      })
       const first = await ctx.service.mcps.connect(item.id, 'session')
       const stale = await consent(first.url)
       const second = await ctx.service.mcps.connect(item.id, 'session')
@@ -115,7 +144,13 @@ describe('outbound MCP connection lifecycle', () => {
       const origin = `http://127.0.0.1:${(ctx.app.server.address() as {
         port: number
       }).port}`
-      const item = await ctx.service.mcps.save({ name: 'Token tools', url: `${provider.origin}/mcp`, auth: 'bearer', token: 'fixture-access-token', allowPrivateNetwork: true })
+      const item = await ctx.service.mcps.save({
+        name: 'Token tools',
+        url: `${provider.origin}/mcp`,
+        auth: 'bearer',
+        token: 'fixture-access-token',
+        allowPrivateNetwork: true,
+      })
       const agent = ctx.service.agent({ ...ctx.agent, access: { mcps: [item.id], mcpTools: { [item.id]: ['echo'] } } }, ctx.agent.id)
       expect(isolated(agent)).toBe(true)
       const run = await ctx.service.enqueue(ctx.task.id)
@@ -134,7 +169,12 @@ describe('outbound MCP connection lifecycle', () => {
       expect(await client.getPrompt({ name: 'review', arguments: { subject: 'changes' } })).toMatchObject({ messages: [{ content: { text: 'Review changes' } }] })
       await expect(client.callTool({ name: 'admin_reset', arguments: {} })).rejects.toThrow()
       ctx.service.store.updateRun(run.id, { status: 'succeeded' })
-      expect((await ctx.app.inject({ method: 'POST', url: `/mcp-gateway/${item.id}`, headers: { authorization: `Bearer ${config.env.LEO_MCP_RUN_TOKEN}` }, payload: {} })).statusCode).toBe(401)
+      expect((await ctx.app.inject({
+        method: 'POST',
+        url: `/mcp-gateway/${item.id}`,
+        headers: { authorization: `Bearer ${config.env.LEO_MCP_RUN_TOKEN}` },
+        payload: {},
+      })).statusCode).toBe(401)
       ctx.service.store.updateRun(run.id, { status: 'running' })
       await ctx.service.mcps.save({ ...item, enabled: false }, item.id)
       expect(() => ctx.service.mcps.grant(item.id, config.env.LEO_MCP_RUN_TOKEN)).toThrow()
@@ -157,19 +197,51 @@ describe('outbound MCP connection lifecycle', () => {
     try {
       expect((await ctx.app.inject({ url: '/api/mcps' })).statusCode).toBe(401)
       const headers = await ctx.login()
-      expect((await ctx.app.inject({ method: 'POST', url: '/api/mcps', headers: { cookie: headers.cookie }, payload: {} })).statusCode).toBe(403)
-      const item = await ctx.service.mcps.save({ name: 'Command', transport: 'stdio', command: 'node', env: { API_TOKEN: 'secret-unique-token' } })
+      expect((await ctx.app.inject({
+        method: 'POST',
+        url: '/api/mcps',
+        headers: { cookie: headers.cookie },
+        payload: {},
+      })).statusCode).toBe(403)
+      const item = await ctx.service.mcps.save({
+        name: 'Command',
+        transport: 'stdio',
+        command: 'node',
+        env: { API_TOKEN: 'secret-unique-token' },
+      })
       const update = await ctx.service.mcps.save({ ...item, name: 'Renamed' }, item.id)
       expect(update.envKeys).toEqual(['API_TOKEN'])
       expect(JSON.stringify(update)).not.toContain('secret-unique-token')
       expect(ctx.service.mcps.secrets(item.id).env?.API_TOKEN).toBe('secret-unique-token')
       await ctx.service.mcps.save({ ...update, removeEnv: ['API_TOKEN'] }, item.id)
       expect(ctx.service.mcps.secrets(item.id).env).toEqual({})
-      const legacy = { ...ctx.agent, access: { projects: [], skills: null, github: false, sandbox: 'yolo' } } as unknown as typeof ctx.agent
+      const legacy = {
+        ...ctx.agent,
+        access: {
+          projects: [],
+          skills: null,
+          github: false,
+          sandbox: 'yolo',
+        },
+      } as unknown as typeof ctx.agent
       expect(policy(legacy).mcps).toEqual([])
-      const legacyMain = { ...ctx.agent, id: MAIN_AGENT_ID, access: { projects: null, skills: null, github: true, sandbox: 'read-only' } } as unknown as typeof ctx.agent
+      const legacyMain = {
+        ...ctx.agent,
+        id: MAIN_AGENT_ID,
+        access: {
+          projects: null,
+          skills: null,
+          github: true,
+          sandbox: 'read-only',
+        },
+      } as unknown as typeof ctx.agent
       expect(policy(legacyMain).mcps).toBeNull()
-      await expect(ctx.service.mcps.save({ name: 'Unsafe', transport: 'stdio', command: 'node', env: { HOME: '/data' } })).rejects.toThrow('runtime')
+      await expect(ctx.service.mcps.save({
+        name: 'Unsafe',
+        transport: 'stdio',
+        command: 'node',
+        env: { HOME: '/data' },
+      })).rejects.toThrow('runtime')
       expect((await readFile(path.join(ctx.directory, 'data/mcp-encryption-key'))).length).toBe(32)
     }
     finally {

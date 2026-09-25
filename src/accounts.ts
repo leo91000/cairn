@@ -1,13 +1,35 @@
-import type { Account, Accounts, AccountStatus, Provider, SignIn, UsageWindow } from '../shared/accounts'
+import type {
+  Account,
+  Accounts,
+  AccountStatus,
+  Provider,
+  SignIn,
+  UsageWindow,
+} from '../shared/accounts'
 import type { IconName } from './icons'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { api, notify } from './api'
 import { BrandClaude, BrandOpenAI } from './icons'
 
 /** Each coding agent's brand mark and colors. */
-export const brands: Record<Provider, { icon: IconName, text: string, tile: string, chosen: string }> = {
-  codex: { icon: BrandOpenAI, text: 'text-ink', tile: 'bg-ink text-canvas', chosen: 'border-accent bg-accent/8 shadow-[0_0_0_1px_var(--color-accent)]' },
-  claude: { icon: BrandClaude, text: 'text-claude', tile: 'bg-claude text-white', chosen: 'border-claude bg-claude/8 shadow-[0_0_0_1px_var(--color-claude)]' },
+export const brands: Record<Provider, {
+  icon: IconName
+  text: string
+  tile: string
+  chosen: string
+}> = {
+  codex: {
+    icon: BrandOpenAI,
+    text: 'text-ink',
+    tile: 'bg-ink text-canvas',
+    chosen: 'border-accent bg-accent/8 shadow-[0_0_0_1px_var(--color-accent)]',
+  },
+  claude: {
+    icon: BrandClaude,
+    text: 'text-claude',
+    tile: 'bg-claude text-white',
+    chosen: 'border-claude bg-claude/8 shadow-[0_0_0_1px_var(--color-claude)]',
+  },
 }
 
 /** Short status shown beside an account. Ready accounts need no label. */
@@ -44,6 +66,7 @@ export function windowName(window: UsageWindow) {
     return `${window.durationMins / 60} h`
   return window.label
 }
+
 /** "in 2h 10m" within a day, then the local weekday and time. */
 export function resetsIn(seconds: number | null | undefined, now = Date.now()) {
   if (!seconds)
@@ -68,6 +91,7 @@ export function useAccounts() {
   const error = ref('')
   let timer: ReturnType<typeof setTimeout> | undefined
   let disposed = false
+
   function apply(value: Accounts) {
     const previous = signIn.value
     accounts.value = value.accounts
@@ -78,6 +102,7 @@ export function useAccounts() {
       notify(`${account?.name ?? 'Account'} connected`)
     }
   }
+
   async function load() {
     try {
       apply(await api<Accounts>('/accounts'))
@@ -90,12 +115,14 @@ export function useAccounts() {
       loaded.value = true
     }
   }
+
   async function poll() {
     clearTimeout(timer)
     await load()
     if (!disposed)
       timer = setTimeout(poll, signIn.value?.state === 'pending' ? 1500 : 5000)
   }
+
   async function action<T>(operation: () => Promise<T>): Promise<T | undefined> {
     busy.value = true
     error.value = ''
@@ -112,6 +139,7 @@ export function useAccounts() {
       busy.value = false
     }
   }
+
   const json = (method: string, body?: object): RequestInit => ({ method, ...(body ? { body: JSON.stringify(body) } : {}) })
   const refreshOnFocus = () => void poll()
   onMounted(() => {
@@ -139,4 +167,5 @@ export function useAccounts() {
     remove: (id: string) => action(() => api(`/accounts/${id}`, json('DELETE'))),
   }
 }
+
 export type AccountsState = ReturnType<typeof useAccounts>

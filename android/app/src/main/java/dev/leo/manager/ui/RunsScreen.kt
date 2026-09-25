@@ -5,10 +5,10 @@ package dev.leo.manager.ui
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -57,23 +57,24 @@ fun RunsScreen(vm: LeoViewModel, state: Workspace, open: (String) -> Unit) {
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 listOf(
-                    "" to "Toutes",
-                    "running" to "En cours",
-                    "queued" to "En attente",
-                    "succeeded" to "Terminées",
-                    "failed" to "Échecs",
-                    "cancelled" to "Annulées",
-                    "interrupted" to "Interrompues",
-                ).forEach { (key, label) ->
-                    SignalChip(label, status == key) {
-                        if (status != key) {
-                            status = key
-                            offset = 0
-                            runs = emptyList()
-                            loading = true
+                        "" to "Toutes",
+                        "running" to "En cours",
+                        "queued" to "En attente",
+                        "succeeded" to "Terminées",
+                        "failed" to "Échecs",
+                        "cancelled" to "Annulées",
+                        "interrupted" to "Interrompues",
+                    )
+                    .forEach { (key, label) ->
+                        SignalChip(label, status == key) {
+                            if (status != key) {
+                                status = key
+                                offset = 0
+                                runs = emptyList()
+                                loading = true
+                            }
                         }
                     }
-                }
             }
         }
         if (filters || taskId.isNotBlank())
@@ -139,7 +140,10 @@ fun RunScreen(
     val timelineKeys = remember(id) { TimelineKeys() }
     val timeline =
         remember(events, live.state?.artifacts) {
-            deliveryTimeline(timelineKeys.stabilize(live.history, timelineEntries(events)), live.state?.artifacts.orEmpty())
+            deliveryTimeline(
+                timelineKeys.stabilize(live.history, timelineEntries(events)),
+                live.state?.artifacts.orEmpty(),
+            )
         }
     var menu by remember { mutableStateOf(false) }
     var details by rememberSaveable(id) { mutableStateOf(false) }
@@ -366,22 +370,38 @@ fun RunScreen(
                                         ?.takeIf { current.status == "succeeded" }
                                         ?.let { outcome ->
                                             item(key = "outcome:${outcome.reportedAt}") {
-                                                CompletionEvidence(outcome, current.snapshot.agent.name)
+                                                CompletionEvidence(
+                                                    outcome,
+                                                    current.snapshot.agent.name,
+                                                )
                                             }
                                         }
                                 if (current.active)
                                     item(key = "agent-working") {
                                         WorkingIndicator(
                                             remember(events, current.status, current.startedAt) {
-                                                if (current.status == "queued") WorkingStep("En attente de l’agent", "", null)
-                                                else workingStep(events, current.snapshot.agent.name, current.startedAt)
+                                                if (current.status == "queued")
+                                                    WorkingStep("En attente de l’agent", "", null)
+                                                else
+                                                    workingStep(
+                                                        events,
+                                                        current.snapshot.agent.name,
+                                                        current.startedAt,
+                                                    )
                                             }
                                         )
                                     }
                                 if (events.isEmpty()) item { Text("L’activité apparaîtra ici.") }
                             }
-                            HistoryStatus(live, logState, loadOlder, live.status.takeIf { it != "En direct" })
-                            HistoryBottomButton(logState, follow, "Dernière activité") { follow = true }
+                            HistoryStatus(
+                                live,
+                                logState,
+                                loadOlder,
+                                live.status.takeIf { it != "En direct" },
+                            )
+                            HistoryBottomButton(logState, follow, "Dernière activité") {
+                                follow = true
+                            }
                         }
                     }
                     2 -> Page { ArtifactsPanel(vm, live.state.artifacts) }

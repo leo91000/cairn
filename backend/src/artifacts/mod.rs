@@ -1,6 +1,7 @@
 //! Durable run deliverables. Publishing succeeds only after bytes and metadata are committed.
 pub mod file;
 pub mod sharing;
+
 use crate::{
     config::{id, now},
     error::{Error, Result, required},
@@ -24,6 +25,7 @@ pub struct Artifacts {
     transfers: tokio::sync::Semaphore,
     commit: tokio::sync::Mutex<()>,
 }
+
 impl Default for Artifacts {
     fn default() -> Self {
         Self {
@@ -32,9 +34,48 @@ impl Default for Artifacts {
         }
     }
 }
+
 pub fn tool() -> Value {
-    json!({"name":"publish_artifact","description":"Publish a finished file for the user to view and download, including after this VM stops. Use for requested screenshots, videos, audio, documents and other deliverables. Files must be in the current run workspace or /tmp; max 512 MB. Use the same key for revisions of one deliverable. Wait for success before telling the user it is available. Publish each file separately; matching group values form a gallery. Returns a durable private URL and, when visibility is public, a publicUrl readable by anyone with the link. Files are private by default; only set visibility to public when the user requests public sharing. Each new version is private unless explicitly public. Never publish credentials or unrelated private files.","inputSchema":{"type":"object","properties":{"visibility":{"type":"string","enum":["private","public"]},"path":{"type":"string"},"title":{"type":"string","maxLength":160},"key":{"type":"string","maxLength":160},"group":{"type":"string","maxLength":160}},"required":["path","title","key"],"additionalProperties":false}})
+    json!({
+        "name": "publish_artifact",
+        "description": "Publish a finished file for the user to view and download, including after this VM \
+    stops. Use for requested screenshots, videos, audio, documents and other \
+    deliverables. Files must be in the current run workspace or /tmp; max 512 MB. Use the \
+    same key for revisions of one deliverable. Wait for success before telling the user \
+    it is available. Publish each file separately; matching group values form a gallery. \
+    Returns a durable private URL and, when visibility is public, a publicUrl readable by \
+    anyone with the link. Files are private by default; only set visibility to public \
+    when the user requests public sharing. Each new version is private unless explicitly \
+    public. Never publish credentials or unrelated private files.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "visibility": {
+                    "type": "string",
+                    "enum": ["private", "public"],
+                },
+                "path": {
+                    "type": "string",
+                },
+                "title": {
+                    "type": "string",
+                    "maxLength": 160,
+                },
+                "key": {
+                    "type": "string",
+                    "maxLength": 160,
+                },
+                "group": {
+                    "type": "string",
+                    "maxLength": 160,
+                },
+            },
+            "required": ["path", "title", "key"],
+            "additionalProperties": false,
+        },
+    })
 }
+
 fn bounded<'a>(value: &'a Value, key: &str, limit: usize) -> Result<&'a str> {
     let s = text(value, key).trim();
     if s.is_empty() || s.len() > limit {
@@ -42,6 +83,7 @@ fn bounded<'a>(value: &'a Value, key: &str, limit: usize) -> Result<&'a str> {
     }
     Ok(s)
 }
+
 impl Artifacts {
     pub async fn publish(&self, s: &Service, bearer: &str, args: &Value) -> Result<Value> {
         if args.get("visibility").is_some() {
@@ -70,7 +112,10 @@ impl Artifacts {
                 crate::nodes::transport::url(s, text(&run, "id")).await?
             ))
             .bearer_auth(credential)
-            .json(&json!({"runId":run_id,"path":path}))
+            .json(&json!({
+                "runId": run_id,
+                "path": path,
+            }))
             .timeout(Duration::from_secs(300))
             .send()
             .await
@@ -79,7 +124,8 @@ impl Artifacts {
             })?;
         if !response.status().is_success() {
             return Err(Error::bad(
-                "Cannot read artifact. Use a finished file in the run workspace or /tmp, without symlinks.",
+                "Cannot read artifact. Use a finished file in the run workspace or /tmp, without \
+                symlinks.",
             ));
         }
         let expected = response
@@ -101,7 +147,8 @@ impl Artifacts {
             size += chunk.len() as u64;
             if size > expected {
                 return Err(Error::bad(
-                    "Artifact changed during transfer. Finish writing it before publishing.",
+                    "Artifact changed during transfer. Finish writing it before \
+                    publishing.",
                 ));
             }
             let remaining = 8192usize.saturating_sub(sample.len());
@@ -165,7 +212,8 @@ impl Artifacts {
         {
             return Err(Error::new(
                 413,
-                "This conversation has reached its artifact limit (2 GB or 500 versions).",
+                "This conversation has reached its artifact limit (2 GB or 500 \
+                versions).",
             ));
         }
         let revision = existing
@@ -181,7 +229,27 @@ impl Artifacts {
             .unwrap_or("download");
         let (kind, media) = file::classify(name, &sample);
         let artifact_id = id();
-        let mut artifact = json!({"id":artifact_id,"runId":run_id,"messageId":run["chatExecution"]["messageId"],"key":key,"version":revision,"title":title,"name":name,"group":text(args,"group"),"kind":kind,"mediaType":media,"size":size,"digest":digest,"createdAt":now(),"url":format!("/api/runs/{run_id}/artifacts/{artifact_id}"),"previewStatus":if ["image","video","audio","pdf"].contains(&kind) {"pending"} else {"none"}});
+        let mut artifact = json!({
+            "id": artifact_id,
+            "runId": run_id,
+            "messageId": run["chatExecution"]["messageId"],
+            "key": key,
+            "version": revision,
+            "title": title,
+            "name": name,
+            "group": text(args, "group"),
+            "kind": kind,
+            "mediaType": media,
+            "size": size,
+            "digest": digest,
+            "createdAt": now(),
+            "url": format!("/api/runs/{run_id}/artifacts/{artifact_id}"),
+            "previewStatus": if ["image", "video", "audio", "pdf"].contains(&kind) {
+                "pending"
+            } else {
+                "none"
+            },
+        });
         if ["markdown", "code"].contains(&kind) {
             artifact["excerpt"] = String::from_utf8_lossy(&sample)
                 .chars()
@@ -239,7 +307,9 @@ impl Artifacts {
         Ok(artifact)
     }
 }
+
 pub(crate) mod preview;
+
 pub async fn list(s: &Service, run: &str) -> Result<Vec<Value>> {
     uuid(run)?;
     s.store.run(run).await?;
@@ -253,6 +323,7 @@ pub async fn list(s: &Service, run: &str) -> Result<Vec<Value>> {
     items.sort_by_key(|v| v["createdAt"].as_i64().unwrap_or(0));
     Ok(items)
 }
+
 pub async fn http(
     s: &Service,
     run: &str,

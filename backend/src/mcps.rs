@@ -9,10 +9,12 @@ use crate::{
 use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
+
 #[derive(Default)]
 pub struct Mcps {
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
+
 fn cancel_pending(db: &Db<'_>, id: &str) -> Result<()> {
     for (key, value) in db.keys("mcp-oauth:")? {
         if value["connectionId"] == id {
@@ -21,6 +23,7 @@ fn cancel_pending(db: &Db<'_>, id: &str) -> Result<()> {
     }
     Ok(())
 }
+
 pub fn toml(value: &Value) -> String {
     match value {
         Value::Array(items) => {
@@ -36,6 +39,7 @@ pub fn toml(value: &Value) -> String {
         _ => value.to_string(),
     }
 }
+
 impl Mcps {
     pub async fn lock(&self, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
         self.locks
@@ -47,27 +51,36 @@ impl Mcps {
             .lock_owned()
             .await
     }
+
     pub async fn get(&self, s: &Service, id: &str) -> Result<Value> {
         required(s.store.get("mcps", id).await?, "MCP connection not found.")
     }
+
     pub async fn secrets(&self, s: &Service, id: &str) -> Result<Value> {
         Ok(s.vault.get(id).await?.unwrap_or_else(|| json!({})))
     }
+
     pub async fn change_secrets(&self, s: &Service, id: &str, patch: Value) -> Result<()> {
         let mut secrets = self.secrets(s, id).await?;
         merge(&mut secrets, &patch);
         s.vault.set(id, &secrets).await
     }
+
     pub async fn view(&self, s: &Service, mut item: Value) -> Result<Value> {
         let secret = self.secrets(s, text(&item, "id")).await?;
         merge(
             &mut item,
             &json!({
-            "hasToken":!text(&secret,"token").is_empty(),"hasClientSecret":!text(&secret,"clientSecret").is_empty(),"envKeys":secret["env"].as_object().map(|env|env.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),"callbackUrl":format!("{}/oauth/mcp/callback",s.config.public_url)}
+                "hasToken": !text(&secret,"token").is_empty(),
+                "hasClientSecret": !text(&secret,"clientSecret").is_empty(),
+                "envKeys": secret["env"].as_object().map(|env|env.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
+                "callbackUrl": format!("{}/oauth/mcp/callback",s.config.public_url)
+            }
             ),
         );
         Ok(item)
     }
+
     pub async fn list(&self, s: &Service) -> Result<Vec<Value>> {
         let mut result = Vec::new();
         for item in s.store.list("mcps").await? {
@@ -75,6 +88,7 @@ impl Mcps {
         }
         Ok(result)
     }
+
     pub async fn assert_management(&self, s: &Service, id: &str) -> Result<()> {
         let item = self.get(s, id).await?;
         if item["transport"] != "http" {
@@ -92,11 +106,14 @@ impl Mcps {
         {
             return Err(Error::new(
                 409,
-                "This self-connection is serving an active request. Manage other connections here; test or change this connection directly from the MCPs UI after the request finishes.",
+                "This self-connection is serving an active request. Manage other \
+                    connections here; test or change this connection directly from the MCPs UI \
+                    after the request finishes.",
             ));
         }
         Ok(())
     }
+
     pub async fn save(&self, s: &Service, input: Value, existing: Option<&str>) -> Result<Value> {
         let mut settings = parse("mcp", input)?;
         let id = existing.map(str::to_owned).unwrap_or_else(id);
@@ -157,7 +174,14 @@ impl Mcps {
         merge(
             &mut settings,
             &json!({
-            "id":id,"createdAt":previous.as_ref().map(|p|p["createdAt"].clone()).unwrap_or_else(||now().into()),"revision":previous.as_ref().and_then(|p|p["revision"].as_u64()).unwrap_or(0)+1,"state":"untested","tools":previous.as_ref().map(|p|p["tools"].clone()).unwrap_or_else(||json!([])),"checkedAt":null,"error":""}
+                "id": id,
+                "createdAt": previous.as_ref().map(|p|p["createdAt"].clone()).unwrap_or_else(||now().into()),
+                "revision": previous.as_ref().and_then(|p|p["revision"].as_u64()).unwrap_or(0)+1,
+                "state": "untested",
+                "tools": previous.as_ref().map(|p|p["tools"].clone()).unwrap_or_else(||json!([])),
+                "checkedAt": null,
+                "error": ""
+            }
             ),
         );
         let vault = s.vault.clone();
@@ -170,7 +194,8 @@ impl Mcps {
                 db.audit(
                     "mcp.saved",
                     &json!({
-                    "id":id}
+                        "id": id
+                    }
                     ),
                 )?;
                 Ok(settings)
@@ -178,6 +203,7 @@ impl Mcps {
             .await?;
         self.view(s, item).await
     }
+
     pub async fn disconnect(&self, s: &Service, id: &str, remove: bool) -> Result<()> {
         let _guard = self.lock(id).await;
         let id = id.to_owned();
@@ -204,7 +230,11 @@ impl Mcps {
                     merge(
                         &mut item,
                         &json!({
-                        "revision":revision,"state":"untested","error":"","checkedAt":null}
+                            "revision": revision,
+                            "state": "untested",
+                            "error": "",
+                            "checkedAt": null
+                        }
                         ),
                     );
                     db.put("mcps", &item)?;
@@ -216,12 +246,14 @@ impl Mcps {
                         "mcp.disconnected"
                     },
                     &json!({
-                    "id":id}
+                        "id": id
+                    }
                     ),
                 )
             })
             .await
     }
+
     pub async fn failure(&self, s: &Service, mut item: Value, error: &Error) -> Result<()> {
         let known = [
             "Private network access is disabled for this connection.",
@@ -238,16 +270,20 @@ impl Mcps {
         merge(
             &mut item,
             &json!({
-            "state":if error.status==401{
+                "state": if error.status==401{
             "needs-auth"}
             else{
             "error"}
-            ,"error":message,"checkedAt":now()}
+            ,
+                "error": message,
+                "checkedAt": now()
+            }
             ),
         );
         s.store.put("mcps", item).await?;
         Ok(())
     }
+
     pub async fn test(&self, s: &Service, id: &str) -> Result<Value> {
         let _guard = self.lock(id).await;
         let mut item = self.get(s, id).await?;
@@ -263,7 +299,11 @@ impl Mcps {
                 merge(
                     &mut item,
                     &json!({
-                    "tools":tools,"state":"connected","error":"","checkedAt":now()}
+                        "tools": tools,
+                        "state": "connected",
+                        "error": "",
+                        "checkedAt": now()
+                    }
                     ),
                 );
                 s.store.put("mcps", item).await?;
@@ -272,13 +312,14 @@ impl Mcps {
         }
         self.view(s, self.get(s, id).await?).await
     }
+
     pub async fn run_configuration(&self, s: &Service, run: &Value) -> Result<Value> {
         let access = policy(&run["snapshot"]["agent"]);
         let token = token();
         let mut servers = json!({});
         let mut args = Vec::new();
         let mut redactions = vec![token.clone()];
-        let mut claude_mcps = json!({"mcpServers":{}});
+        let mut claude_mcps = json!({"mcpServers": {}});
         let mut claude_denied = Vec::<String>::new();
         for item in s.store.list("mcps").await? {
             let id = text(&item, "id");
@@ -304,21 +345,32 @@ impl Mcps {
             let secrets = self.secrets(s, id).await?;
             let mut config = if item["transport"] == "http" {
                 servers[id] = json!({
-                "revision":item["revision"],"tools":tools}
+                    "revision": item["revision"],
+                    "tools": tools
+                }
                 );
                 json!({
-                "url":format!("{}/mcp-gateway/{id}",s.config.public_url),"bearer_token_env_var":"LEO_MCP_RUN_TOKEN"}
+                    "url": format!("{}/mcp-gateway/{id}",s.config.public_url),
+                    "bearer_token_env_var": "LEO_MCP_RUN_TOKEN"
+                }
                 )
             } else {
                 json!({
-                "command":item["command"],"args":item["args"],"env":secrets.get("env").cloned().unwrap_or_else(||json!({
+                    "command": item["command"],
+                    "args": item["args"],
+                    "env": secrets.get("env").cloned().unwrap_or_else(||json!({
                 }
-                ))}
+                ))
+                }
                 )
             };
             let claude_name = format!("leo_{}", id.replace('-', "_"));
             let claude_config = if item["transport"] == "http" {
-                json!({"type":"http","url":config["url"],"headers":{"Authorization":format!("Bearer {token}")}})
+                json!({
+                    "type": "http",
+                    "url": config["url"],
+                    "headers": {"Authorization": format!("Bearer {token}")}
+                })
             } else {
                 if let Some(selected) = tools.as_array() {
                     for tool in item["tools"].as_array().into_iter().flatten() {
@@ -328,7 +380,12 @@ impl Mcps {
                         }
                     }
                 }
-                json!({"type":"stdio","command":config["command"],"args":config["args"],"env":config["env"]})
+                json!({
+                    "type": "stdio",
+                    "command": config["command"],
+                    "args": config["args"],
+                    "env": config["env"]
+                })
             };
             claude_mcps["mcpServers"][&claude_name] = claude_config;
             if !tools.is_null() {
@@ -351,8 +408,22 @@ impl Mcps {
         }
         let workspace = !s.config.runner_url.is_empty();
         if workspace {
-            claude_mcps["mcpServers"]["leo_workspace"] = json!({"type":"http","url":format!("{}/mcp-workspace",s.config.public_url),"headers":{"Authorization":format!("Bearer {token}")}});
-            args.extend(["-c".into(),format!("mcp_servers.leo_workspace={}",toml(&json!({"url":format!("{}/mcp-workspace",s.config.public_url),"bearer_token_env_var":"LEO_MCP_RUN_TOKEN","tool_timeout_sec":3660}))) ]);
+            claude_mcps["mcpServers"]["leo_workspace"] = json!({
+                "type": "http",
+                "url": format!("{}/mcp-workspace",s.config.public_url),
+                "headers": {"Authorization": format!("Bearer {token}")}
+            });
+            args.extend([
+                "-c".into(),
+                format!(
+                    "mcp_servers.leo_workspace={}",
+                    toml(&json!({
+                        "url": format!("{}/mcp-workspace", s.config.public_url),
+                        "bearer_token_env_var": "LEO_MCP_RUN_TOKEN",
+                        "tool_timeout_sec": 3660
+                    }))
+                ),
+            ]);
         }
         let mut env = json!({});
         if workspace || !servers.as_object().unwrap().is_empty() {
@@ -361,17 +432,28 @@ impl Mcps {
                 .set(
                     &format!("mcp-grant:{}", hex_digest(&token)),
                     json!({
-                    "runId":run["id"],"messageId":run["chatExecution"]["messageId"],"servers":servers,"workspace":workspace}
+                        "runId": run["id"],
+                        "messageId": run["chatExecution"]["messageId"],
+                        "servers": servers,
+                        "workspace": workspace
+                    }
                     ),
-                    crate::run_limits::budget_ms(&run["snapshot"]["agent"]).map(|budget| now() + budget),
+                    crate::run_limits::budget_ms(&run["snapshot"]["agent"])
+                        .map(|budget| now() + budget),
                 )
                 .await?;
         }
         redactions.retain(|r| r.len() > 3);
         Ok(json!({
-        "args":args,"env":env,"redactions":redactions,"claudeMcps":claude_mcps,"claudeDeniedTools":claude_denied}
+            "args": args,
+            "env": env,
+            "redactions": redactions,
+            "claudeMcps": claude_mcps,
+            "claudeDeniedTools": claude_denied
+        }
         ))
     }
+
     pub async fn grant(&self, s: &Service, id: &str, bearer: &str) -> Result<(Value, Value)> {
         let (id, bearer) = (id.to_owned(), bearer.to_owned());
         s.store
@@ -401,6 +483,7 @@ impl Mcps {
             })
             .await
     }
+
     pub async fn revoke_run(&self, s: &Service, id: &str) -> Result<()> {
         let id = id.to_owned();
         s.store

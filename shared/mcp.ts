@@ -28,6 +28,7 @@ export const mcpInput = z.object({
       ctx.addIssue({ code: 'custom', path: ['url'], message: 'Enter an HTTP(S) URL without embedded credentials or a fragment.' })
     }
   }
+
   if (value.transport === 'stdio' && !value.command)
     ctx.addIssue({ code: 'custom', path: ['command'], message: 'Enter an executable command.' })
   if (value.transport === 'stdio' && value.auth !== 'none')

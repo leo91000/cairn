@@ -18,7 +18,12 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 
 @Serializable
-data class ReadingPosition(val index: Int = 0, val offset: Int = 0, val follow: Boolean = true, val firstEvent: Long? = null)
+data class ReadingPosition(
+    val index: Int = 0,
+    val offset: Int = 0,
+    val follow: Boolean = true,
+    val firstEvent: Long? = null,
+)
 
 @Serializable
 data class CachedHistory(
@@ -101,8 +106,12 @@ class HistoryCache(
                     removeLocked(key)
                     return@withLock
                 }
-                val position = (value.position ?: memory[key]?.takeIf { it.history == value.history }?.position)
-                    ?.takeIf { it.firstEvent == null || it.firstEvent == value.events.firstOrNull()?.id }
+                val position =
+                    (value.position
+                            ?: memory[key]?.takeIf { it.history == value.history }?.position)
+                        ?.takeIf {
+                            it.firstEvent == null || it.firstEvent == value.events.firstOrNull()?.id
+                        }
                 val original = value.copy(position = position)
                 val next = recentHistory(original)
                 memory.remove(key)
@@ -118,7 +127,8 @@ class HistoryCache(
         withContext(Dispatchers.IO) {
             lock.withLock {
                 memory[key]?.let {
-                    if (value.firstEvent != null && value.firstEvent != it.events.firstOrNull()?.id) return@withLock
+                    if (value.firstEvent != null && value.firstEvent != it.events.firstOrNull()?.id)
+                        return@withLock
                     memory[key] = it.copy(position = value)
                     dirty.add(key)
                 }
@@ -265,5 +275,10 @@ internal fun recentHistory(value: CachedHistory): CachedHistory {
     if (kept.size == value.events.size) return value
     // A numeric list index is no longer valid after dropping a prefix.
     val oldest = kept.minOfOrNull { it.id } ?: (value.cursor + 1)
-    return value.copy(events = value.events.filter { it.id >= oldest }, oldest = oldest, hasOlder = true, position = null)
+    return value.copy(
+        events = value.events.filter { it.id >= oldest },
+        oldest = oldest,
+        hasOlder = true,
+        position = null,
+    )
 }

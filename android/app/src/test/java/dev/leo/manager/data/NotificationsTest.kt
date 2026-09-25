@@ -102,7 +102,8 @@ class NotificationsTest {
             Configuration.Builder().setExecutor(SynchronousExecutor()).build(),
         )
         MockWebServer().use { server ->
-            var alerts = """[{"id":"old","chatId":"chat","kind":"waiting","title":"Old","body":"Old","createdAt":1}]"""
+            var alerts =
+                """[{"id":"old","chatId":"chat","kind":"waiting","title":"Old","body":"Old","createdAt":1}]"""
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest) =
@@ -119,7 +120,8 @@ class NotificationsTest {
             val origin = server.url("/").toString()
             Preferences(context).setOrigin(origin)
             NotificationPreferences(context).setEnabled(true)
-            val vault = MemoryVault().apply { write(origin, "leo_session=fixture; Path=/; Max-Age=3600") }
+            val vault =
+                MemoryVault().apply { write(origin, "leo_session=fixture; Path=/; Max-Age=3600") }
             val worker =
                 TestListenableWorkerBuilder<QuestionWorker>(context)
                     .setWorkerFactory(
@@ -128,18 +130,26 @@ class NotificationsTest {
                                 appContext: Context,
                                 workerClassName: String,
                                 workerParameters: WorkerParameters,
-                            ): ListenableWorker = QuestionWorker(appContext, workerParameters, vault)
+                            ): ListenableWorker =
+                                QuestionWorker(appContext, workerParameters, vault)
                         }
                     )
                     .build()
             val manager = context.getSystemService(NotificationManager::class.java)
             assertEquals(ListenableWorker.Result.success(), worker.doWork())
             assertTrue(manager.activeNotifications.isEmpty())
-            alerts = """[{"id":"new","chatId":"chat","kind":"resumed","title":"Resumed","body":"English","createdAt":2},{"id":"old","chatId":"chat","kind":"waiting","createdAt":1}]"""
+            alerts =
+                """[{"id":"new","chatId":"chat","kind":"resumed","title":"Resumed","body":"English","createdAt":2},{"id":"old","chatId":"chat","kind":"waiting","createdAt":1}]"""
             assertEquals(ListenableWorker.Result.success(), worker.doWork())
             val notification = manager.activeNotifications.single().notification
-            assertEquals("Conversation reprise sur une autre node", notification.extras.getString("android.title"))
-            assertEquals("chat", shadowOf(notification.contentIntent).savedIntent.getStringExtra("chat"))
+            assertEquals(
+                "Conversation reprise sur une autre node",
+                notification.extras.getString("android.title"),
+            )
+            assertEquals(
+                "chat",
+                shadowOf(notification.contentIntent).savedIntent.getStringExtra("chat"),
+            )
             manager.cancelAll()
             assertEquals(ListenableWorker.Result.success(), worker.doWork())
             assertTrue(manager.activeNotifications.isEmpty())

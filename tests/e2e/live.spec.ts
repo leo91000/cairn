@@ -1,6 +1,12 @@
 import type { BrowserContext, Page } from '@playwright/test'
 import { randomUUID } from 'node:crypto'
-import { expect, expectChatReady, expectSingleScroll, initializeRepository, test } from './fixtures'
+import {
+  expect,
+  expectChatReady,
+  expectSingleScroll,
+  initializeRepository,
+  test,
+} from './fixtures'
 
 for (const kind of ['chat', 'task'] as const) {
   test(`${kind} automatically fills folded history without a click or scroll`, async ({ page, workspace }) => {
@@ -15,14 +21,24 @@ for (const kind of ['chat', 'task'] as const) {
       run = workspace.service.store.run(detail.run.id)!
       path = `/chats/${chat.id}`
     }
+
     for (let i = 0; i < 100; i++) {
       const text = `Buffered message ${i}: earlier conversation context.`
       workspace.service.store.event(run.id, 'item.completed', text, { item: { id: `buffer-${i}`, type: 'agent_message', text } })
     }
+
     // Several API pages collapse into one tool group, leaving no scrollbar.
     for (let i = 0; i < 250; i++) {
-      workspace.service.store.event(run.id, 'item.completed', 'Checked a file', { item: { id: `fold-${i}`, type: 'command_execution', command: 'cat README.md', exit_code: 0 } })
+      workspace.service.store.event(run.id, 'item.completed', 'Checked a file', {
+        item: {
+          id: `fold-${i}`,
+          type: 'command_execution',
+          command: 'cat README.md',
+          exit_code: 0,
+        },
+      })
     }
+
     workspace.service.store.event(run.id, 'item.completed', 'Latest short answer', { item: { id: 'latest-short', type: 'agent_message', text: 'Latest short answer' } })
     const requests: string[] = []
     page.on('request', (request) => {
@@ -49,8 +65,17 @@ for (const kind of ['chat', 'task'] as const) {
 
 test('automatic history pauses on errors and resumes only after retry', async ({ page, workspace }) => {
   const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
-  for (let i = 0; i < 220; i++)
-    workspace.service.store.event(run.id, 'item.completed', 'Checked a file', { item: { id: `retry-${i}`, type: 'command_execution', command: 'cat README.md', exit_code: 0 } })
+  for (let i = 0; i < 220; i++) {
+    workspace.service.store.event(run.id, 'item.completed', 'Checked a file', {
+      item: {
+        id: `retry-${i}`,
+        type: 'command_execution',
+        command: 'cat README.md',
+        exit_code: 0,
+      },
+    })
+  }
+
   let requests = 0
   let fail = true
   await page.route('**/history?**', async (route) => {
@@ -116,6 +141,7 @@ test('two independent clients follow deltas, recover offline, refresh mid-answer
     await expect(target.getByRole('heading', { name: 'Fil', exact: true })).toBeVisible()
     await target.goto(`${workspace.url}/chats/${chat.id}`)
   }
+
   const message = (target: Page) => target.locator('.activity-message').filter({ hasText: 'Streaming proof:' })
   const requests: string[] = []
   page.on('request', (request) => {
@@ -171,7 +197,8 @@ test('two independent clients follow deltas, recover offline, refresh mid-answer
     await expect(message(page)).toHaveCount(1)
   }
   finally {
-    for (const context of contexts) await context.close()
+    for (const context of contexts)
+      await context.close()
   }
 })
 
@@ -191,6 +218,7 @@ test('cached history survives reload before a delayed stream, then clear on logo
       read.onsuccess = () => resolve(read.result)
       tx.oncomplete = () => db.close()
     }
+
     request.onerror = () => reject(request.error)
   }))
   await expect.poll(count).toBeGreaterThan(0)
@@ -222,6 +250,7 @@ test('cached history survives reload before a delayed stream, then clear on logo
     release()
     await page.unrouteAll({ behavior: 'wait' })
   }
+
   await page.getByRole('button', { name: 'Sign out', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible()
   await expect.poll(count).toBe(0)
@@ -233,6 +262,7 @@ test('a cached run restores the reading offset while its stream is still connect
     const text = `Saved reading position ${i}. A longer paragraph to exercise the scrolling activity view across reloads.`
     workspace.service.store.event(run.id, 'item.completed', text, { item: { id: `cache-${i}`, type: 'agent_message', text } })
   }
+
   await page.goto(`${workspace.url}/runs/${run.id}`)
   await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
   await page.getByRole('button', { name: 'Sign in', exact: true }).click()
@@ -269,10 +299,12 @@ test('a cached run restores the reading offset while its stream is still connect
           store.put({ ...entry, text: JSON.stringify(value) })
         }
       }
+
       tx.oncomplete = () => {
         db.close()
         resolve()
       }
+
       tx.onerror = () => reject(tx.error)
     }
   }))
@@ -302,6 +334,7 @@ test('a cached run restores the reading offset while its stream is still connect
     release()
     await page.unrouteAll({ behavior: 'wait' })
   }
+
   await expect(page.getByRole('status').filter({ hasText: 'Updating…' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: /^Conversation/ })).toHaveAttribute('aria-pressed', 'true')
 })
@@ -312,6 +345,7 @@ test('recent history loads older pages without moving the reader and survives a 
     const text = `Paged line ${String(i).padStart(3, '0')}. A paragraph to retain a stable reading position.`
     workspace.service.store.event(run.id, 'item.completed', text, { item: { id: `page-${i}`, type: 'agent_message', text } })
   }
+
   await page.goto(`${workspace.url}/runs/${run.id}`)
   await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
   await page.getByRole('button', { name: 'Sign in', exact: true }).click()

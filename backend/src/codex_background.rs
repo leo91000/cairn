@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 pub const STOPPED: &str = "Background Codex execution stopped.";
 pub const YIELDED: &str = "Background Codex execution yielded to foreground work.";
+
 pub const UNAVAILABLE: &str =
     "No Codex account is available. Check Connections and its usage limits, then try again.";
 
@@ -128,7 +129,8 @@ pub async fn turn<T>(
     let mut acknowledged = false;
     loop {
         tokio::select! {
-            result = &mut request, if !acknowledged => { result?; acknowledged = true; }
+            result = &mut request,
+            if !acknowledged => { result?; acknowledged = true; }
             incoming = session.incoming.recv() => {
                 let incoming = incoming.ok_or_else(|| Error::bad("Background session disconnected."))?;
                 if session.handle_auth(&incoming).await? { continue }

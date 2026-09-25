@@ -26,6 +26,7 @@ export class RunnerLifecycle {
       })) {
         throw new Error('This execution attempt has already stopped.')
       }
+
       await this.create(id)
     })
   }

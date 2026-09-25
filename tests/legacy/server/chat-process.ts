@@ -23,9 +23,27 @@ const emit = (event: Record<string, unknown>) => process.stdout.write(`${JSON.st
 const input = (text: string) => [{ type: 'text', text, text_elements: [] }]
 // Keep the established Activity artifact contract independent of Codex's transport.
 export function chatItem(item: Record<string, any>) {
-  const types: Record<string, string> = { agentMessage: 'agent_message', commandExecution: 'command_execution', fileChange: 'file_change', mcpToolCall: 'mcp_tool_call', reasoning: 'reasoning', plan: 'reasoning', webSearch: 'web_search', collabAgentToolCall: 'collab_tool_call' }
-  return { ...item, type: types[item.type] ?? item.type, aggregated_output: item.aggregatedOutput, exit_code: item.exitCode, duration_ms: item.durationMs, text: item.text ?? item.summary?.join('\n'), changes: item.changes?.map((change: any) => ({ ...change, kind: typeof change.kind === 'object' ? change.kind.type : change.kind })) }
+  const types: Record<string, string> = {
+    agentMessage: 'agent_message',
+    commandExecution: 'command_execution',
+    fileChange: 'file_change',
+    mcpToolCall: 'mcp_tool_call',
+    reasoning: 'reasoning',
+    plan: 'reasoning',
+    webSearch: 'web_search',
+    collabAgentToolCall: 'collab_tool_call',
+  }
+  return {
+    ...item,
+    type: types[item.type] ?? item.type,
+    aggregated_output: item.aggregatedOutput,
+    exit_code: item.exitCode,
+    duration_ms: item.durationMs,
+    text: item.text ?? item.summary?.join('\n'),
+    changes: item.changes?.map((change: any) => ({ ...change, kind: typeof change.kind === 'object' ? change.kind.type : change.kind })),
+  }
 }
+
 export async function runChat(plan: ChatPlan, binary = 'codex') {
   let threadId = ''
   let turnId = ''
@@ -49,6 +67,7 @@ export async function runChat(plan: ChatPlan, binary = 'codex') {
     seen.add(id)
     emit({ type: 'chat.delivered', messageId: id })
   }
+
   const onItem = (item: any, type = 'item.completed') => {
     if (item.type === 'functionCallOutput' && ['request_user_input', 'request_user_input_async'].includes(item.name))
       return
@@ -57,6 +76,7 @@ export async function runChat(plan: ChatPlan, binary = 'codex') {
         acknowledge(item.clientId)
       return
     }
+
     if (item.type === 'agentMessage') {
       lastMessage = item.text || lastMessage
       if (type === 'item.completed' && item.questions?.length) {
@@ -65,8 +85,10 @@ export async function runChat(plan: ChatPlan, binary = 'codex') {
           emit({ type: 'chat.question', question: { id: questionId(item.id), blocking: false, fields: fields.data } })
       }
     }
+
     emit({ type, item: chatItem(item) })
   }
+
   const session = codexSession({ codexBin: binary, home: process.env.HOME } as Config, {
     args: plan.args,
     closed: () => rejectCompletion(new Error('Codex disconnected before finishing the response. Resume the conversation to continue.')),
@@ -74,7 +96,12 @@ export async function runChat(plan: ChatPlan, binary = 'codex') {
     serverRequest(method, params, reply, requestId) {
       if (method !== 'item/tool/requestUserInput' || !params?.itemId || (threadId && params.threadId !== threadId))
         return false
-      const fields = questionFields.safeParse(params.questions?.map((question: any) => ({ id: question.id, title: question.question, secret: question.isSecret ?? false, options: question.options ?? [] })))
+      const fields = questionFields.safeParse(params.questions?.map((question: any) => ({
+        id: question.id,
+        title: question.question,
+        secret: question.isSecret ?? false,
+        options: question.options ?? [],
+      })))
       if (!fields.success)
         return false
       const id = questionId(params.itemId)
@@ -95,10 +122,12 @@ export async function runChat(plan: ChatPlan, binary = 'codex') {
           emit({ type: 'chat.question.closed', questionId: id })
         }
       }
+
       if (method === 'turn/started') {
         turnId = params.turn.id
         emit({ type: 'turn.started' })
       }
+
       if (method === 'item/started' || method === 'item/completed')
         onItem(params.item, method.replace('/', '.'))
       if (method === 'item/agentMessage/delta') {
@@ -106,6 +135,7 @@ export async function runChat(plan: ChatPlan, binary = 'codex') {
         texts.set(params.itemId, text)
         emit({ type: 'item.updated', item: { id: params.itemId, type: 'agent_message', text } })
       }
+
       if (method === 'turn/completed') {
         finished = true
         settle(params.turn)
@@ -113,7 +143,14 @@ export async function runChat(plan: ChatPlan, binary = 'codex') {
     },
   })
   await session(process.env.CODEX_HOME!, async (rpc) => {
-    const settings = { cwd: plan.cwd, model: plan.model || undefined, approvalPolicy: 'never', sandbox: plan.sandbox === 'yolo' ? 'danger-full-access' : plan.sandbox, developerInstructions: plan.instructions, config: { 'features.default_mode_request_user_input': true, 'model_reasoning_effort': plan.reasoning, 'sandbox_workspace_write': { network_access: true, writable_roots: plan.writableRoots } } }
+    const settings = {
+      cwd: plan.cwd,
+      model: plan.model || undefined,
+      approvalPolicy: 'never',
+      sandbox: plan.sandbox === 'yolo' ? 'danger-full-access' : plan.sandbox,
+      developerInstructions: plan.instructions,
+      config: { 'features.default_mode_request_user_input': true, 'model_reasoning_effort': plan.reasoning, 'sandbox_workspace_write': { network_access: true, writable_roots: plan.writableRoots } },
+    }
     const result = await rpc.request<any>(plan.sessionId ? 'thread/resume' : 'thread/start', { ...settings, ...(plan.sessionId ? { threadId: plan.sessionId, excludeTurns: false } : {}) })
     threadId = result.thread.id
     emit({ type: 'chat.question.closed' })
@@ -125,28 +162,38 @@ export async function runChat(plan: ChatPlan, binary = 'codex') {
       turns.length = 0
       let cursor: string | undefined
       do {
-        const page = await rpc.request<any>('thread/turns/list', { threadId, cursor, limit: 100, itemsView: 'full', sortDirection: 'desc' })
+        const page = await rpc.request<any>('thread/turns/list', {
+          threadId,
+          cursor,
+          limit: 100,
+          itemsView: 'full',
+          sortDirection: 'desc',
+        })
         turns.push(...page.data)
         cursor = page.nextCursor ?? undefined
       } while (cursor)
     }
+
     for (const turn of turns) {
       for (const item of turn.items ?? []) {
         if (item.type === 'userMessage' && item.clientId)
           acknowledge(item.clientId)
       }
     }
+
     const acceptedTurn = turns.findLast((turn: any) => turn.items?.some((item: any) => item.clientId === plan.execution.messageId))
     const previous = acceptedTurn && plan.execution.recovery ? (result.thread.historyMode === 'paginated' ? turns[0] : turns.at(-1)) : acceptedTurn
     if (previous) {
       emit({ type: 'chat.delivered', messageId: plan.execution.messageId })
       if (previous.status === 'completed') {
-        for (const item of previous.items) onItem(item)
+        for (const item of previous.items)
+          onItem(item)
         await writeFile(plan.output, lastMessage)
         emit({ type: 'turn.completed' })
         return
       }
     }
+
     const recovering = !!previous
     const start = await rpc.request<any>('turn/start', {
       threadId,
@@ -175,7 +222,13 @@ export async function runChat(plan: ChatPlan, binary = 'codex') {
               question.reply({ answers: Object.fromEntries(Object.entries(message.answers).map(([id, answers]) => [id, { answers }])) })
               continue
             }
-            await rpc.request('turn/steer', { threadId, expectedTurnId: turnId, clientUserMessageId: message.id, input: input(message.text) })
+
+            await rpc.request('turn/steer', {
+              threadId,
+              expectedTurnId: turnId,
+              clientUserMessageId: message.id,
+              input: input(message.text),
+            })
             acknowledge(message.id)
           }
           catch {
@@ -193,21 +246,25 @@ export async function runChat(plan: ChatPlan, binary = 'codex') {
       clearInterval(timer)
       // Polling is cleared by the in-flight steering request.
       // eslint-disable-next-line no-unmodified-loop-condition
-      while (polling) await new Promise(resolve => setTimeout(resolve, 10))
+      while (polling)
+        await new Promise(resolve => setTimeout(resolve, 10))
       if (turn.status !== 'completed') {
         emit({ type: 'turn.failed', error: turn.error ?? { message: 'Conversation interrupted.' } })
         process.exitCode = 1
         return
       }
+
       await writeFile(plan.output, lastMessage)
       emit({ type: 'turn.completed' })
     }
     finally { clearInterval(timer) }
   })
 }
+
 if (process.argv[1] === import.meta.filename) {
   let data = ''
-  for await (const chunk of process.stdin) data += chunk
+  for await (const chunk of process.stdin)
+    data += chunk
   runChat(JSON.parse(data), process.argv[2]).catch((error) => {
     emit({ type: 'turn.failed', error: { message: error.message } })
     process.exitCode = 1

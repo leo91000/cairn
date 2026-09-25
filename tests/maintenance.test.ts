@@ -1,7 +1,14 @@
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
 import { fixture } from './helpers.ts'
 
 describe('deployment worker lease', () => {
@@ -18,9 +25,24 @@ describe('deployment worker lease', () => {
   it('requires its dedicated credential and prevents another lease owner from releasing it', async () => {
     const owner = randomUUID()
     expect((await ctx.app.inject({ method: 'POST', url, payload: { owner } })).statusCode).toBe(401)
-    expect((await ctx.app.inject({ method: 'POST', url, headers, payload: { owner } })).json()).toEqual({ paused: true, activeRuns: 0 })
-    expect((await ctx.app.inject({ method: 'DELETE', url, headers, payload: { owner: randomUUID() } })).statusCode).toBe(409)
-    expect((await ctx.app.inject({ method: 'DELETE', url, headers, payload: { owner } })).json()).toEqual({ paused: false, activeRuns: 0 })
+    expect((await ctx.app.inject({
+      method: 'POST',
+      url,
+      headers,
+      payload: { owner },
+    })).json()).toEqual({ paused: true, activeRuns: 0 })
+    expect((await ctx.app.inject({
+      method: 'DELETE',
+      url,
+      headers,
+      payload: { owner: randomUUID() },
+    })).statusCode).toBe(409)
+    expect((await ctx.app.inject({
+      method: 'DELETE',
+      url,
+      headers,
+      payload: { owner },
+    })).json()).toEqual({ paused: false, activeRuns: 0 })
   })
   it('blocks a task even if a tick was already scheduling when the lease arrived', async () => {
     const run = await ctx.service.enqueue(ctx.task.id)
@@ -31,12 +53,22 @@ describe('deployment worker lease', () => {
     vi.spyOn(ctx.service, 'schedule').mockImplementationOnce(() => scheduled)
     const tick = ctx.worker.tick()
     const owner = randomUUID()
-    await ctx.app.inject({ method: 'POST', url, headers, payload: { owner } })
+    await ctx.app.inject({
+      method: 'POST',
+      url,
+      headers,
+      payload: { owner },
+    })
     continueSchedule()
     await tick
     expect(ctx.service.store.run(run.id)?.status).toBe('queued')
     expect((await ctx.app.inject('/health')).json().maintenance).toBe(true)
-    await ctx.app.inject({ method: 'DELETE', url, headers, payload: { owner } })
+    await ctx.app.inject({
+      method: 'DELETE',
+      url,
+      headers,
+      payload: { owner },
+    })
     await ctx.worker.tick()
     await expect.poll(() => ctx.service.store.run(run.id)?.status, { timeout: 10000 }).toBe('succeeded')
   })

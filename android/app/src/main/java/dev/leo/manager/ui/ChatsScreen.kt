@@ -9,17 +9,15 @@ package dev.leo.manager.ui
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.background
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.content.contentReceiver
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.content.contentReceiver
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.input.InputTransformation
 import androidx.compose.foundation.text.input.TextFieldLineLimits
@@ -27,6 +25,7 @@ import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.clearText
 import androidx.compose.foundation.text.input.maxLength
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -34,12 +33,12 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.role
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.TextFieldValue
@@ -87,19 +86,24 @@ internal fun ConversationList(
         other = emptyList()
         if (view != "active") {
             fetching = true
-            try { other = vm.api.get("/chats?view=$view") }
-            catch (e: Exception) { listError = e.message }
-            finally { fetching = false }
+            try {
+                other = vm.api.get("/chats?view=$view")
+            } catch (e: Exception) {
+                listError = e.message
+            } finally {
+                fetching = false
+            }
         }
     }
     // The list can sit in a bottom sheet, above the app snackbar: it hosts its own undo.
     val snackbar = remember { SnackbarHostState() }
     val trash = rememberConversationTrash(vm, snackbar) { revision++ }
-    val chats = when (view) {
-        "active" -> activeChats.filter { it.id !in trash.hidden }
-        "trash" -> other
-        else -> other.filter { it.id !in trash.hidden }
-    }
+    val chats =
+        when (view) {
+            "active" -> activeChats.filter { it.id !in trash.hidden }
+            "trash" -> other
+            else -> other.filter { it.id !in trash.hidden }
+        }
     var query by rememberSaveable { mutableStateOf("") }
     val today =
         java.time.LocalDate.now()
@@ -128,12 +132,23 @@ internal fun ConversationList(
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("Conversations", Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
+                Text(
+                    "Conversations",
+                    Modifier.weight(1f),
+                    style = MaterialTheme.typography.headlineSmall,
+                )
                 Box {
                     ActionIcon("Afficher les conversations", LeoIcons.More) { menu = true }
                     DropdownMenu(menu, { menu = false }) {
-                        listOf("active" to "Actives", "trash" to "Corbeille").forEach { (key, label) ->
-                            DropdownMenuItem(text = { Text(label) }, onClick = { view = key; menu = false })
+                        listOf("active" to "Actives", "trash" to "Corbeille").forEach { (key, label)
+                            ->
+                            DropdownMenuItem(
+                                text = { Text(label) },
+                                onClick = {
+                                    view = key
+                                    menu = false
+                                },
+                            )
                         }
                     }
                 }
@@ -170,29 +185,52 @@ internal fun ConversationList(
                         items(items, key = { it.id }) { chat ->
                             Box(Modifier.animateItem()) {
                                 key(view) {
-                                    SwipeToTrashRow(enabled = view != "trash", onTrash = { trash.trash(chat.id) }) { swipe ->
+                                    SwipeToTrashRow(
+                                        enabled = view != "trash",
+                                        onTrash = { trash.trash(chat.id) },
+                                    ) { swipe ->
                                         Surface(
                                             modifier = swipe,
                                             onClick = { open(chat.id) },
                                             color =
-                                                if (chat.id == selected) MaterialTheme.colorScheme.primaryContainer
-                                                else MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0f),
+                                                if (chat.id == selected)
+                                                    MaterialTheme.colorScheme.primaryContainer
+                                                else
+                                                    MaterialTheme.colorScheme.surfaceContainerLow
+                                                        .copy(alpha = 0f),
                                             shape = RoundedCornerShape(16.dp),
                                         ) {
                                             Row(
-                                                Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(horizontal = 8.dp, vertical = 8.dp),
+                                                Modifier.fillMaxWidth()
+                                                    .heightIn(min = 64.dp)
+                                                    .padding(horizontal = 8.dp, vertical = 8.dp),
                                                 verticalAlignment = Alignment.CenterVertically,
                                             ) {
-                                                val working = chat.pendingQuestions == 0 && !chat.paused && chat.status == "running"
-                                                if (working) WorkingAvatar(chat.agentName.ifBlank { chat.title }, chat.agentId, 40.dp)
+                                                val working =
+                                                    chat.pendingQuestions == 0 &&
+                                                        !chat.paused &&
+                                                        chat.status == "running"
+                                                if (working)
+                                                    WorkingAvatar(
+                                                        chat.agentName.ifBlank { chat.title },
+                                                        chat.agentId,
+                                                        40.dp,
+                                                    )
                                                 else
                                                     AgentAvatar(
                                                         chat.agentName.ifBlank { chat.title },
                                                         chat.agentId,
                                                         40.dp,
                                                         when {
-                                                            chat.pendingQuestions > 0 || chat.status in setOf("failed", "interrupted") -> AvatarBadge.ATTENTION
-                                                            !chat.paused && chat.status == "queued" -> AvatarBadge.LIVE
+                                                            chat.pendingQuestions > 0 ||
+                                                                chat.status in
+                                                                    setOf(
+                                                                        "failed",
+                                                                        "interrupted",
+                                                                    ) -> AvatarBadge.ATTENTION
+                                                            !chat.paused &&
+                                                                chat.status == "queued" ->
+                                                                AvatarBadge.LIVE
                                                             else -> null
                                                         },
                                                     )
@@ -204,28 +242,55 @@ internal fun ConversationList(
                                                         maxLines = 2,
                                                         overflow = TextOverflow.Ellipsis,
                                                     )
-                                                    if (working) WorkingLabel(statusLabel(chat.status))
-                                                    else Text(
-                                                        when {
-                                                            chat.pendingQuestions > 0 -> "${chat.pendingQuestions} question(s) en attente"
-                                                            chat.paused -> "En pause"
-                                                            chat.status in listOf("running", "queued", "failed", "interrupted") ->
-                                                                statusLabel(chat.status)
-                                                            else -> listOfNotNull(chat.agentName.ifBlank { null }, chat.projectName).joinToString(" · ")
-                                                        },
-                                                        style = MaterialTheme.typography.bodySmall,
-                                                        color =
-                                                            if (chat.pendingQuestions > 0 || chat.status in setOf("failed", "interrupted")) signal.attention
-                                                            else MaterialTheme.colorScheme.onSurfaceVariant,
-                                                        maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis,
-                                                    )
+                                                    if (working)
+                                                        WorkingLabel(statusLabel(chat.status))
+                                                    else
+                                                        Text(
+                                                            when {
+                                                                chat.pendingQuestions > 0 ->
+                                                                    "${chat.pendingQuestions} question(s) en attente"
+                                                                chat.paused -> "En pause"
+                                                                chat.status in
+                                                                    listOf(
+                                                                        "running",
+                                                                        "queued",
+                                                                        "failed",
+                                                                        "interrupted",
+                                                                    ) -> statusLabel(chat.status)
+                                                                else ->
+                                                                    listOfNotNull(
+                                                                            chat.agentName.ifBlank {
+                                                                                null
+                                                                            },
+                                                                            chat.projectName,
+                                                                        )
+                                                                        .joinToString(" · ")
+                                                            },
+                                                            style =
+                                                                MaterialTheme.typography.bodySmall,
+                                                            color =
+                                                                if (
+                                                                    chat.pendingQuestions > 0 ||
+                                                                        chat.status in
+                                                                            setOf(
+                                                                                "failed",
+                                                                                "interrupted",
+                                                                            )
+                                                                )
+                                                                    signal.attention
+                                                                else
+                                                                    MaterialTheme.colorScheme
+                                                                        .onSurfaceVariant,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis,
+                                                        )
                                                 }
                                                 Spacer(Modifier.width(8.dp))
                                                 Text(
                                                     shortStamp(chat.updatedAt),
                                                     style = MaterialTheme.typography.labelSmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    color =
+                                                        MaterialTheme.colorScheme.onSurfaceVariant,
                                                 )
                                             }
                                         }
@@ -255,8 +320,9 @@ internal fun ChatPage(
     create: () -> Unit = back,
     openConnections: () -> Unit = {},
 ) {
-    val live = if (id == null) conversations else
-        rememberLive(vm, state, "/chats/${segment(id)}/stream", streaming = selected)
+    val live =
+        if (id == null) conversations
+        else rememberLive(vm, state, "/chats/${segment(id)}/stream", streaming = selected)
     val chat = live.state?.chat?.takeIf { it.id == id }
     var createdId by rememberSaveable(id) { mutableStateOf<String?>(null) }
     var agent by rememberSaveable(id) { mutableStateOf(initialAgent) }
@@ -362,15 +428,16 @@ internal fun ChatPage(
         }
     val skillNames = remember(skillOptions) { skillOptions.map { it.name }.toSet() }
     val mention =
-        if (!composer.selection.collapsed) null
-        else mentionAt(draft, composer.selection.start)
+        if (!composer.selection.collapsed) null else mentionAt(draft, composer.selection.start)
     // Moving to another `$` token forgets an earlier dismissal.
     LaunchedEffect(mentionAt(draft, composer.selection.start)?.start) { dismissedMention = null }
     val suggestions =
         if (mention == null || mention.start == dismissedMention) emptyList()
         else matchSkills(skillOptions, mention.query)
-    val showSkills = mention != null && mention.start != dismissedMention &&
-        (suggestions.isNotEmpty() || mention.query.firstOrNull()?.isDigit() != true)
+    val showSkills =
+        mention != null &&
+            mention.start != dismissedMention &&
+            (suggestions.isNotEmpty() || mention.query.firstOrNull()?.isDigit() != true)
     BackHandler(selected && showSkills) { dismissedMention = mention?.start }
     val projects =
         state.projects.filter {
@@ -436,10 +503,9 @@ internal fun ChatPage(
                         "/chats/${segment(chatId)}/attachments/${segment(entry.attachment.id)}?name=${segment(entry.attachment.name)}",
                         File(entry.localPath),
                     )
-                attachments =
-                    attachments.map {
-                        if (it.attachment.id == uploaded.id) it.copy(attachment = uploaded) else it
-                    }
+                attachments = attachments.map {
+                    if (it.attachment.id == uploaded.id) it.copy(attachment = uploaded) else it
+                }
             }
             val content = buildJsonObject {
                 put("text", draft.trim())
@@ -515,7 +581,10 @@ internal fun ChatPage(
                     put("provider", message.provider)
                     put("model", message.model)
                     put("reasoning", message.reasoning)
-                    put("attachmentIds", wireJson.encodeToJsonElement(message.attachments.map { it.id }))
+                    put(
+                        "attachmentIds",
+                        wireJson.encodeToJsonElement(message.attachments.map { it.id }),
+                    )
                 },
             )
         }
@@ -538,624 +607,796 @@ internal fun ChatPage(
         followGesture,
     )
     CompositionLocalProvider(LocalSkillNames provides skillNames) {
-    ArtifactLinkHost(vm, live.state?.artifacts.orEmpty()) {
-        Column(Modifier.fillMaxSize()) {
-            if (!fullscreen) {
-                val agentName = chat?.agentName?.ifBlank { null } ?: selectedAgent?.name ?: "Agent"
-                ConversationHeader(
-                    title = chat?.title ?: conversations.state?.chats?.find { it.id == id }?.title
-                        ?: if (id == null) "Nouvelle conversation" else "Conversation",
-                    agent = agentName,
-                    agentKey = chat?.agentId ?: agent,
-                    status = when {
-                        chat == null -> ""
-                        chat.paused -> "En pause"
-                        chat.run?.status == "queued" -> "En attente"
-                        else -> listOfNotNull(agentName, chat.projectName).joinToString(" · ")
-                    },
-                    live =
-                        if (chat?.run?.status == "running")
-                            listOf("$agentName travaille", elapsed(chat.run.startedAt)).filter { it.isNotBlank() }.joinToString(" · ")
-                        else null,
-                    back = {
-                        persistDraft()
-                        back()
-                    },
-                    choose = {
-                        persistDraft()
-                        choosing = true
-                    },
-                ) {
-                    val files = live.state?.artifacts?.size ?: 0
-                    if (id != null) {
-                        Box {
-                            RoundAction("Fichiers · $files", LeoIcons.Layers, size = 40.dp) { gallery = true }
-                            if (files > 0)
-                                Box(
-                                    Modifier.align(Alignment.TopEnd)
-                                        .padding(top = 2.dp, end = 2.dp)
-                                        .size(18.dp)
-                                        .clip(androidx.compose.foundation.shape.CircleShape)
-                                        .background(MaterialTheme.colorScheme.primary),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    Text(
-                                        if (files > 99) "99+" else files.toString(),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onPrimary,
-                                    )
+        ArtifactLinkHost(vm, live.state?.artifacts.orEmpty()) {
+            Column(Modifier.fillMaxSize()) {
+                if (!fullscreen) {
+                    val agentName =
+                        chat?.agentName?.ifBlank { null } ?: selectedAgent?.name ?: "Agent"
+                    ConversationHeader(
+                        title =
+                            chat?.title
+                                ?: conversations.state?.chats?.find { it.id == id }?.title
+                                ?: if (id == null) "Nouvelle conversation" else "Conversation",
+                        agent = agentName,
+                        agentKey = chat?.agentId ?: agent,
+                        status =
+                            when {
+                                chat == null -> ""
+                                chat.paused -> "En pause"
+                                chat.run?.status == "queued" -> "En attente"
+                                else ->
+                                    listOfNotNull(agentName, chat.projectName).joinToString(" · ")
+                            },
+                        live =
+                            if (chat?.run?.status == "running")
+                                listOf("$agentName travaille", elapsed(chat.run.startedAt))
+                                    .filter { it.isNotBlank() }
+                                    .joinToString(" · ")
+                            else null,
+                        back = {
+                            persistDraft()
+                            back()
+                        },
+                        choose = {
+                            persistDraft()
+                            choosing = true
+                        },
+                    ) {
+                        val files = live.state?.artifacts?.size ?: 0
+                        if (id != null) {
+                            Box {
+                                RoundAction("Fichiers · $files", LeoIcons.Layers, size = 40.dp) {
+                                    gallery = true
                                 }
+                                if (files > 0)
+                                    Box(
+                                        Modifier.align(Alignment.TopEnd)
+                                            .padding(top = 2.dp, end = 2.dp)
+                                            .size(18.dp)
+                                            .clip(androidx.compose.foundation.shape.CircleShape)
+                                            .background(MaterialTheme.colorScheme.primary),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Text(
+                                            if (files > 99) "99+" else files.toString(),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onPrimary,
+                                        )
+                                    }
+                            }
+                        }
+                        Box {
+                            ActionIcon("Options de la conversation", LeoIcons.More) { menu = true }
+                            DropdownMenu(menu, { menu = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("Nouvelle conversation") },
+                                    leadingIcon = { Icon(LeoIcons.Plus, null) },
+                                    onClick = {
+                                        menu = false
+                                        persistDraft()
+                                        create()
+                                    },
+                                )
+                                if (chat != null)
+                                    DropdownMenuItem(
+                                        text = { Text("Détails de la conversation") },
+                                        leadingIcon = { Icon(Icons.Default.Info, null) },
+                                        onClick = {
+                                            menu = false
+                                            details = true
+                                        },
+                                    )
+                                DropdownMenuItem(
+                                    text = { Text("Suivre les réponses") },
+                                    leadingIcon = { Icon(LeoIcons.Bottom, null) },
+                                    trailingIcon = { if (follow) Icon(LeoIcons.Check, "Activé") },
+                                    onClick = {
+                                        menu = false
+                                        follow = !follow
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Plein écran") },
+                                    onClick = {
+                                        menu = false
+                                        fullscreen = true
+                                    },
+                                )
+                                chat?.let { current ->
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                if (current.paused) "Reprendre"
+                                                else "Mettre en pause"
+                                            )
+                                        },
+                                        leadingIcon = {
+                                            Icon(
+                                                if (current.paused) Icons.Default.PlayArrow
+                                                else LeoIcons.Pause,
+                                                null,
+                                            )
+                                        },
+                                        enabled = !state.busy,
+                                        onClick = {
+                                            menu = false
+                                            togglePause(current)
+                                        },
+                                    )
+                                    current.runId?.let { runId ->
+                                        DropdownMenuItem(
+                                            text = { Text("Voir l’exécution") },
+                                            leadingIcon = { Icon(LeoIcons.Terminal, null) },
+                                            onClick = {
+                                                menu = false
+                                                openRun(runId)
+                                            },
+                                        )
+                                    }
+                                    if (active)
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    "Arrêter l’agent",
+                                                    color = MaterialTheme.colorScheme.error,
+                                                )
+                                            },
+                                            leadingIcon = {
+                                                Icon(
+                                                    LeoIcons.Stop,
+                                                    null,
+                                                    tint = MaterialTheme.colorScheme.error,
+                                                )
+                                            },
+                                            enabled = !state.busy,
+                                            onClick = {
+                                                menu = false
+                                                stopping = true
+                                            },
+                                        )
+                                }
+                            }
                         }
                     }
-                    Box {
-                        ActionIcon("Options de la conversation", LeoIcons.More) { menu = true }
-                        DropdownMenu(menu, { menu = false }) {
-                            DropdownMenuItem(
-                                text = { Text("Nouvelle conversation") },
-                                leadingIcon = { Icon(LeoIcons.Plus, null) },
-                                onClick = {
-                                    menu = false
+                }
+                if (fullscreen)
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Conversation",
+                            Modifier.weight(1f).padding(start = 16.dp),
+                            style = MaterialTheme.typography.titleSmall,
+                        )
+                        ActionIcon("Quitter le plein écran", Icons.Default.Close) {
+                            fullscreen = false
+                        }
+                    }
+                if (choosing) {
+                    ModalBottomSheet(
+                        onDismissRequest = { choosing = false },
+                        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+                    ) {
+                        Box(Modifier.fillMaxHeight(0.88f)) {
+                            ConversationList(
+                                conversations.state?.chats.orEmpty(),
+                                id,
+                                conversations.state == null,
+                                conversations.error,
+                                {
+                                    choosing = false
+                                    persistDraft()
+                                    openChat(it)
+                                },
+                                {
+                                    choosing = false
                                     persistDraft()
                                     create()
                                 },
+                                vm,
                             )
-                            if (chat != null)
-                                DropdownMenuItem(
-                                    text = { Text("Détails de la conversation") },
-                                    leadingIcon = { Icon(Icons.Default.Info, null) },
-                                    onClick = {
-                                        menu = false
-                                        details = true
-                                    },
-                                )
-                            DropdownMenuItem(
-                                text = { Text("Suivre les réponses") },
-                                leadingIcon = { Icon(LeoIcons.Bottom, null) },
-                                trailingIcon = { if (follow) Icon(LeoIcons.Check, "Activé") },
-                                onClick = {
-                                    menu = false
-                                    follow = !follow
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Plein écran") },
-                                onClick = {
-                                    menu = false
-                                    fullscreen = true
-                                },
-                            )
-                            chat?.let { current ->
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(if (current.paused) "Reprendre" else "Mettre en pause")
-                                    },
-                                    leadingIcon = {
-                                        Icon(
-                                            if (current.paused) Icons.Default.PlayArrow
-                                            else LeoIcons.Pause,
-                                            null,
-                                        )
-                                    },
-                                    enabled = !state.busy,
-                                    onClick = {
-                                        menu = false
-                                        togglePause(current)
-                                    },
-                                )
-                                current.runId?.let { runId ->
-                                    DropdownMenuItem(
-                                        text = { Text("Voir l’exécution") },
-                                        leadingIcon = { Icon(LeoIcons.Terminal, null) },
-                                        onClick = {
-                                            menu = false
-                                            openRun(runId)
-                                        },
-                                    )
-                                }
-                                if (active)
-                                    DropdownMenuItem(
-                                        text = { Text("Arrêter l’agent", color = MaterialTheme.colorScheme.error) },
-                                        leadingIcon = { Icon(LeoIcons.Stop, null, tint = MaterialTheme.colorScheme.error) },
-                                        enabled = !state.busy,
-                                        onClick = {
-                                            menu = false
-                                            stopping = true
-                                        },
-                                    )
-                            }
                         }
                     }
                 }
-            }
-            if (fullscreen)
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "Conversation",
-                        Modifier.weight(1f).padding(start = 16.dp),
-                        style = MaterialTheme.typography.titleSmall,
-                    )
-                    ActionIcon("Quitter le plein écran", Icons.Default.Close) { fullscreen = false }
-                }
-            if (choosing) {
-                ModalBottomSheet(
-                    onDismissRequest = { choosing = false },
-                    sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-                ) {
-                    Box(Modifier.fillMaxHeight(0.88f)) {
-                        ConversationList(
-                            conversations.state?.chats.orEmpty(),
-                            id,
-                            conversations.state == null,
-                            conversations.error,
-                            {
-                                choosing = false
-                                persistDraft()
-                                openChat(it)
-                            },
-                            {
-                                choosing = false
-                                persistDraft()
-                                create()
-                            },
-                            vm,
-                        )
-                    }
-                }
-            }
-            if (details)
-                DetailSheet("Détails de la conversation", { details = false }) {
-                    Text(
-                        chat?.title ?: "Nouvelle conversation",
-                        style = MaterialTheme.typography.titleLarge,
-                    )
-                    Text(chat?.agentName ?: selectedAgent?.name.orEmpty())
-                    Text(chat?.projectName ?: "Tous les projets autorisés")
-                    Text(
-                        if (chat?.paused == true) "En pause"
-                        else if (chat?.run?.status == "queued") "En attente"
-                        else if (active) "L’agent travaille…" else "Prêt"
-                    )
-                    Text(
-                        "${live.state?.artifacts?.size ?: 0} fichiers · ${questions.size} questions en attente"
-                    )
-                    chat?.run?.let {
-                        NodePlacement(vm, it)
+                if (details)
+                    DetailSheet("Détails de la conversation", { details = false }) {
                         Text(
-                            "Dernière activité : ${date(it.finishedAt ?: it.startedAt ?: it.createdAt)}"
-                        )
-                    }
-                }
-            chat?.error?.let {
-                Text(
-                    it,
-                    Modifier.padding(horizontal = 20.dp),
-                    color = MaterialTheme.colorScheme.error,
-                )
-            }
-            chatWaitNotice(chat?.run)?.let { ChatWaitingNotice(it, openConnections) }
-            if (gallery) {
-                ModalBottomSheet(
-                    onDismissRequest = { gallery = false },
-                    sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-                ) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            "Artifacts",
-                            Modifier.weight(1f),
+                            chat?.title ?: "Nouvelle conversation",
                             style = MaterialTheme.typography.titleLarge,
                         )
-                        ActionIcon("Fermer les artifacts", Icons.Default.Close) { gallery = false }
-                    }
-                    Box(Modifier.fillMaxHeight(0.85f)) {
-                        Page { ArtifactsPanel(vm, live.state?.artifacts.orEmpty()) }
-                    }
-                }
-            }
-            if (chat != null && chat.lifecycle != "active") {
-                Column(Modifier.weight(1f).fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.Center) {
-                    Text(when (chat.lifecycle) {
-                        "trash" -> "Cette conversation est dans la corbeille."
-                        "purging" -> "Effacement en cours…"
-                        else -> "Cette conversation est indisponible."
-                    }, style = MaterialTheme.typography.titleLarge)
-                    chat.purgeAt?.let { Text("Effacement prévu : ${date(it)}") }
-                    chat.lifecycleError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                    if (chat.lifecycle == "trash") Button(onClick = {
-                        vm.perform { api.request("POST", "/chats/${segment(chat.id)}/restore") }
-                    }, enabled = !state.busy) { Text("Restaurer la conversation") }
-                }
-            } else Column(
-                Modifier.weight(1f)
-                    .widthIn(max = 840.dp)
-                    .fillMaxWidth()
-                    .align(Alignment.CenterHorizontally)
-            ) {
-                if (chat?.restoredAt != null && chat.run?.status in setOf("failed", "interrupted") && !chat.sessionRestartRequested)
-                    TextButton({ newSession = true }) { Text("Repartir avec une nouvelle session agent") }
-                if (chat?.sessionRestartRequested == true) Text("Écrivez un nouveau message, puis reprenez la file pour continuer.")
-                val cancelled = chat?.messages.orEmpty().filter { it.status == "cancelled" }
-                if (cancelled.isNotEmpty()) {
-                    TextButton({ cancelledExpanded = !cancelledExpanded }) { Text("Messages annulés (${cancelled.size})") }
-                    if (cancelledExpanded) Column(Modifier.heightIn(max = 200.dp).verticalScroll(rememberScrollState())) {
-                        cancelled.forEach { message ->
-                            Text(message.text)
-                            TextButton({ composer.setTextAndPlaceCursorAtEnd(message.text); attachments = message.attachments.map { DraftAttachment(it) }; cancelledExpanded = false }) { Text("Copier dans le message") }
-                        }
-                    }
-                }
-                if (live.catchingUp && id != null) {
-                    Column(
-                        Modifier.weight(1f).fillMaxWidth(),
-                        verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                    ) {
-                        CircularProgressIndicator(Modifier.size(28.dp))
+                        Text(chat?.agentName ?: selectedAgent?.name.orEmpty())
+                        Text(chat?.projectName ?: "Tous les projets autorisés")
                         Text(
-                            live.error ?: live.status,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            if (chat?.paused == true) "En pause"
+                            else if (chat?.run?.status == "queued") "En attente"
+                            else if (active) "L’agent travaille…" else "Prêt"
                         )
-                    }
-                } else {
-                    Box(Modifier.weight(1f).fillMaxWidth()) {
-                        LazyColumn(
-                            Modifier.fillMaxSize()
-                                .testTag("conversation-history")
-                                .historyFollowGesture(followGesture),
-                            state = listState,
-                            overscrollEffect = rememberHistoryOverscroll(),
-                            contentPadding = PaddingValues(16.dp),
-                            // A short history sits above the composer, so older pages appear above it.
-                            verticalArrangement = Arrangement.spacedBy(12.dp, if (id == null) Alignment.Top else Alignment.Bottom),
-                        ) {
-                            if (id == null)
-                                item(key = "new-conversation") {
-                                    NewConversationIntro(
-                                        state.agents,
-                                        agent,
-                                        projects,
-                                        project,
-                                        enabled = createdId == null && !state.busy,
-                                        chooseAgent = {
-                                            agent = it
-                                            project = ""
-                                        },
-                                        chooseProject = { project = it },
-                                    )
-                                }
-                            items(timeline, key = { it.key }) {
-                                TimelineRow(vm, it, chat?.agentName ?: "Leo", rendering, hideRunning = chat?.run?.status == "running")
-                            }
-                            if (!active && delivery.sending.isEmpty() && !live.catchingUp)
-                                chat?.run?.outcome?.let { outcome ->
-                                    item(key = "outcome:${outcome.messageId}:${outcome.reportedAt}") {
-                                        CompletionEvidence(outcome, chat.agentName)
-                                    }
-                                }
-                            items(delivery.sending, key = { "sending:${it.message.id}" }) { sending ->
-                                Column {
-                                    EventRow(
-                                        vm,
-                                        RunEvent(
-                                            -1,
-                                            sending.message.createdAt,
-                                            "chat.user",
-                                            sending.message.text,
-                                            mapOf(
-                                                "text" to JsonPrimitive(sending.message.text),
-                                                "attachments" to
-                                                    wireJson.encodeToJsonElement(
-                                                        sending.message.attachments
-                                                    ),
-                                            ),
-                                        ),
-                                        chat?.agentName ?: "Leo",
-                                    )
-                                    Text(
-                                        sending.label,
-                                        Modifier.align(Alignment.End).padding(end = 16.dp),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                }
-                            }
-                            if (chat?.run?.status == "running" && !live.catchingUp)
-                                item(key = "agent-working") {
-                                    WorkingIndicator(
-                                        remember(live.events, chat.agentName, chat.run.startedAt) {
-                                            workingStep(live.events, chat.agentName, chat.run.startedAt)
-                                        }
-                                    )
-                                }
+                        Text(
+                            "${live.state?.artifacts?.size ?: 0} fichiers · ${questions.size} questions en attente"
+                        )
+                        chat?.run?.let {
+                            NodePlacement(vm, it)
+                            Text(
+                                "Dernière activité : ${date(it.finishedAt ?: it.startedAt ?: it.createdAt)}"
+                            )
                         }
-                        HistoryStatus(live, listState, loadOlder, (live.error ?: live.status).takeIf { live.status != "En direct" })
-                        HistoryBottomButton(listState, follow, "Derniers messages") { follow = true }
                     }
+                chat?.error?.let {
+                    Text(
+                        it,
+                        Modifier.padding(horizontal = 20.dp),
+                        color = MaterialTheme.colorScheme.error,
+                    )
                 }
-                if (questions.isNotEmpty())
-                    Surface(
-                        onClick = { asking = questions.first() },
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                        shape = RoundedCornerShape(18.dp),
-                        color = signal.attentionSoft,
+                chatWaitNotice(chat?.run)?.let { ChatWaitingNotice(it, openConnections) }
+                if (gallery) {
+                    ModalBottomSheet(
+                        onDismissRequest = { gallery = false },
+                        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
                     ) {
                         Row(
-                            Modifier.heightIn(min = 48.dp).padding(horizontal = 16.dp),
+                            Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Box(Modifier.size(8.dp).clip(androidx.compose.foundation.shape.CircleShape).background(signal.attention))
-                            Spacer(Modifier.width(10.dp))
                             Text(
-                                "${questions.size} ${if (questions.size == 1) "question" else "questions"} · Répondre",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = MaterialTheme.colorScheme.onSurface,
+                                "Artifacts",
+                                Modifier.weight(1f),
+                                style = MaterialTheme.typography.titleLarge,
                             )
+                            ActionIcon("Fermer les artifacts", Icons.Default.Close) {
+                                gallery = false
+                            }
+                        }
+                        Box(Modifier.fillMaxHeight(0.85f)) {
+                            Page { ArtifactsPanel(vm, live.state?.artifacts.orEmpty()) }
                         }
                     }
-                if (!fullscreen)
-                    Surface(
-                        Modifier.padding(horizontal = 12.dp, vertical = 8.dp).testTag("conversation-composer")
-                            // Text selection and editing own horizontal gestures in the composer.
-                            .pointerInput(Unit) { detectHorizontalDragGestures { _, _ -> } },
-                        shape = RoundedCornerShape(26.dp),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                        color = MaterialTheme.colorScheme.surface,
+                }
+                if (chat != null && chat.lifecycle != "active") {
+                    Column(
+                        Modifier.weight(1f).fillMaxWidth().padding(24.dp),
+                        verticalArrangement = Arrangement.Center,
                     ) {
-                        Column(Modifier.padding(4.dp)) {
-                            // Queued follow-ups open the composer itself, sharing its border and corners.
-                            if (pending.isNotEmpty()) {
-                                QueueStrip(
-                                    pending,
-                                    chat?.questions.orEmpty().filter { q -> q.fields.any { it.secret } }.map { it.id }.toSet(),
-                                    queueExpanded,
-                                    { queueExpanded = !queueExpanded },
-                                    busy = state.busy,
-                                    canSteer = active,
-                                    paused = chat?.paused == true,
-                                    edit = ::edit,
-                                    steer = ::steerQueued,
-                                    remove = { removing = it },
-                                    togglePause = { chat?.let(::togglePause) },
-                                    attachments = { AttachmentList(vm, it) },
-                                )
-                                HorizontalDivider(
-                                    Modifier.padding(horizontal = 12.dp),
-                                    color = MaterialTheme.colorScheme.outlineVariant,
-                                )
-                            }
-                            if (attachments.isNotEmpty())
-                                Box(Modifier.heightIn(max = 140.dp)) {
-                                    LazyColumn {
-                                        item {
-                                            AttachmentList(
-                                                vm,
-                                                attachments.map { it.attachment },
-                                                { key ->
-                                                    vm.files.discard(
-                                                        attachments.filter {
-                                                            it.attachment.id == key
-                                                        }
-                                                    )
-                                                    attachments =
-                                                        attachments.filter {
-                                                            it.attachment.id != key
-                                                        }
-                                                },
-                                                attachments
-                                                    .mapNotNull {
-                                                        it.localPath?.let { path ->
-                                                            it.attachment.id to path
-                                                        }
-                                                    }
-                                                    .toMap(),
-                                            )
-                                        }
-                                    }
-                                }
-                            if (editing != null)
-                                Row {
-                                    Text("Modifier le message en attente", Modifier.weight(1f))
-                                    TextButton(onClick = ::clearDraft) { Text("Annuler") }
-                                }
-                            if (showSkills)
-                                SkillSuggestions(
-                                    suggestions,
-                                    mention!!.query,
-                                    skillOptions.isNotEmpty(),
-                                    { scope ->
-                                        if (scope == "global") "Global"
-                                        else state.projects.find { it.id == scope }?.name ?: "Projet"
-                                    },
-                                ) { skill ->
-                                    val inserted =
-                                        insertSkill(
-                                            TextFieldValue(draft, composer.selection),
-                                            mention,
-                                            skill.name,
-                                        )
-                                    composer.edit {
-                                        replace(0, length, inserted.text)
-                                        selection = inserted.selection
-                                    }
-                                }
-                            BasicTextField(
-                                composer,
-                                Modifier.fillMaxWidth()
-                                    // Images pasted or inserted from the keyboard join the attachments.
-                                    .contentReceiver { content ->
-                                        val images = pastedImages(content)
-                                        attach(images.uris, images.mediaType)
-                                        images.rest
-                                    }
-                                    .heightIn(min = 48.dp)
-                                    .padding(top = 12.dp, bottom = 4.dp, start = 12.dp, end = 12.dp),
-                                textStyle =
-                                    MaterialTheme.typography.bodyLarge.copy(
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    ),
-                                cursorBrush =
-                                    androidx.compose.ui.graphics.SolidColor(
-                                        MaterialTheme.colorScheme.primary
-                                    ),
-                                inputTransformation = InputTransformation.maxLength(50000),
-                                keyboardOptions = InputKeyboards.Sentences,
-                                outputTransformation = SkillMentionHighlight(skillNames, skillMentionStyle()),
-                                lineLimits = TextFieldLineLimits.MultiLine(maxHeightInLines = 4),
-                                enabled = !state.busy,
-                                decorator = { inner ->
-                                    Box {
-                                        if (draft.isEmpty())
-                                            Text(
-                                                if (chat?.paused == true) "Ajouter à la file…"
-                                                else if (active) "Ajouter un message…"
-                                                else if (skillOptions.isNotEmpty()) "Votre message… $ pour les skills"
-                                                else "Votre message…",
-                                                color =
-                                                    MaterialTheme.colorScheme.onSurfaceVariant,
-                                            )
-                                        inner()
+                        Text(
+                            when (chat.lifecycle) {
+                                "trash" -> "Cette conversation est dans la corbeille."
+                                "purging" -> "Effacement en cours…"
+                                else -> "Cette conversation est indisponible."
+                            },
+                            style = MaterialTheme.typography.titleLarge,
+                        )
+                        chat.purgeAt?.let { Text("Effacement prévu : ${date(it)}") }
+                        chat.lifecycleError?.let {
+                            Text(it, color = MaterialTheme.colorScheme.error)
+                        }
+                        if (chat.lifecycle == "trash")
+                            Button(
+                                onClick = {
+                                    vm.perform {
+                                        api.request("POST", "/chats/${segment(chat.id)}/restore")
                                     }
                                 },
+                                enabled = !state.busy,
+                            ) {
+                                Text("Restaurer la conversation")
+                            }
+                    }
+                } else
+                    Column(
+                        Modifier.weight(1f)
+                            .widthIn(max = 840.dp)
+                            .fillMaxWidth()
+                            .align(Alignment.CenterHorizontally)
+                    ) {
+                        if (
+                            chat?.restoredAt != null &&
+                                chat.run?.status in setOf("failed", "interrupted") &&
+                                !chat.sessionRestartRequested
+                        )
+                            TextButton({ newSession = true }) {
+                                Text("Repartir avec une nouvelle session agent")
+                            }
+                        if (chat?.sessionRestartRequested == true)
+                            Text(
+                                "Écrivez un nouveau message, puis reprenez la file pour continuer."
                             )
-                            // Message first, then one toolbar: attach, agent/model/effort, send.
-                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                ActionIcon(
-                                    "Joindre",
-                                    LeoIcons.Attach,
-                                    !state.busy && attachments.size < 8,
+                        val cancelled = chat?.messages.orEmpty().filter { it.status == "cancelled" }
+                        if (cancelled.isNotEmpty()) {
+                            TextButton({ cancelledExpanded = !cancelledExpanded }) {
+                                Text("Messages annulés (${cancelled.size})")
+                            }
+                            if (cancelledExpanded)
+                                Column(
+                                    Modifier.heightIn(max = 200.dp)
+                                        .verticalScroll(rememberScrollState())
                                 ) {
-                                    picker.launch(arrayOf("*/*"))
-                                }
-                                Box(Modifier.weight(1f).padding(end = 4.dp)) {
-                                    ModelPicker(
-                                        if (chosenProvider == "claude") state.claudeModels else state.models,
-                                        model,
-                                        reasoning,
-                                        defaultModel,
-                                        defaultReasoning,
-                                        inherit = inheritAgentModel,
-                                        enabled = !state.busy,
-                                        refresh = { vm.refreshModels(chosenProvider) },
-                                        provider = chosenProvider,
-                                        changeProvider = ::chooseProvider,
-                                        switching = switchingProvider,
-                                    ) { m, r ->
-                                        model = m
-                                        reasoning = r
-                                    }
-                                }
-                                val canSend =
-                                    !state.busy &&
-                                        (draft.isNotBlank() || attachments.isNotEmpty()) &&
-                                        (id == null || chat != null) &&
-                                        live.error == null
-                                if (
-                                    active &&
-                                        editing == null &&
-                                        (draft.isNotBlank() || attachments.isNotEmpty())
-                                )
-                                    RoundAction(
-                                        "Intervenir maintenant",
-                                        LeoIcons.Steer,
-                                        container = MaterialTheme.colorScheme.primaryContainer,
-                                        content = MaterialTheme.colorScheme.onPrimaryContainer,
-                                        outlined = false,
-                                        size = 40.dp,
-                                        enabled = canSend && !switchingProvider,
-                                    ) {
-                                        send(if (switchingProvider) "queue" else "steer")
-                                    }
-                                if (active && draft.isBlank() && attachments.isEmpty())
-                                    RoundAction(
-                                        "Arrêter",
-                                        LeoIcons.StopSolid,
-                                        content = signal.attention,
-                                        size = 40.dp,
-                                        enabled = !state.busy,
-                                    ) {
-                                        stopping = true
-                                    }
-                                else
-                                    IconButton(
-                                        onClick = { send("queue") },
-                                        enabled = canSend,
-                                        modifier = Modifier.size(48.dp).testTag("conversation-send"),
-                                    ) {
-                                        // Keep the native touch target generous while the visible
-                                        // button stays discreet alongside the message field.
-                                        Surface(
-                                            Modifier.size(40.dp).testTag("conversation-send-face"),
-                                            shape = androidx.compose.foundation.shape.CircleShape,
-                                            color = if (canSend) MaterialTheme.colorScheme.primary
-                                                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f),
-                                            contentColor = if (canSend) MaterialTheme.colorScheme.onPrimary
-                                                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
-                                        ) {
-                                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                                Icon(
-                                                    if (editing != null) Icons.Default.Check
-                                                    else if (active || chat?.paused == true)
-                                                        Icons.Default.Add
-                                                    else LeoIcons.Up,
-                                                    if (editing != null) "Modifier"
-                                                    else if (active || chat?.paused == true)
-                                                        "Ajouter à la file"
-                                                    else "Envoyer",
-                                                    Modifier.size(18.dp),
-                                                )
-                                            }
+                                    cancelled.forEach { message ->
+                                        Text(message.text)
+                                        TextButton({
+                                            composer.setTextAndPlaceCursorAtEnd(message.text)
+                                            attachments =
+                                                message.attachments.map { DraftAttachment(it) }
+                                            cancelledExpanded = false
+                                        }) {
+                                            Text("Copier dans le message")
                                         }
                                     }
+                                }
+                        }
+                        if (live.catchingUp && id != null) {
+                            Column(
+                                Modifier.weight(1f).fillMaxWidth(),
+                                verticalArrangement =
+                                    Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                            ) {
+                                CircularProgressIndicator(Modifier.size(28.dp))
+                                Text(
+                                    live.error ?: live.status,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        } else {
+                            Box(Modifier.weight(1f).fillMaxWidth()) {
+                                LazyColumn(
+                                    Modifier.fillMaxSize()
+                                        .testTag("conversation-history")
+                                        .historyFollowGesture(followGesture),
+                                    state = listState,
+                                    overscrollEffect = rememberHistoryOverscroll(),
+                                    contentPadding = PaddingValues(16.dp),
+                                    // A short history sits above the composer, so older pages
+                                    // appear above it.
+                                    verticalArrangement =
+                                        Arrangement.spacedBy(
+                                            12.dp,
+                                            if (id == null) Alignment.Top else Alignment.Bottom,
+                                        ),
+                                ) {
+                                    if (id == null)
+                                        item(key = "new-conversation") {
+                                            NewConversationIntro(
+                                                state.agents,
+                                                agent,
+                                                projects,
+                                                project,
+                                                enabled = createdId == null && !state.busy,
+                                                chooseAgent = {
+                                                    agent = it
+                                                    project = ""
+                                                },
+                                                chooseProject = { project = it },
+                                            )
+                                        }
+                                    items(timeline, key = { it.key }) {
+                                        TimelineRow(
+                                            vm,
+                                            it,
+                                            chat?.agentName ?: "Leo",
+                                            rendering,
+                                            hideRunning = chat?.run?.status == "running",
+                                        )
+                                    }
+                                    if (!active && delivery.sending.isEmpty() && !live.catchingUp)
+                                        chat?.run?.outcome?.let { outcome ->
+                                            item(
+                                                key =
+                                                    "outcome:${outcome.messageId}:${outcome.reportedAt}"
+                                            ) {
+                                                CompletionEvidence(outcome, chat.agentName)
+                                            }
+                                        }
+                                    items(delivery.sending, key = { "sending:${it.message.id}" }) {
+                                        sending ->
+                                        Column {
+                                            EventRow(
+                                                vm,
+                                                RunEvent(
+                                                    -1,
+                                                    sending.message.createdAt,
+                                                    "chat.user",
+                                                    sending.message.text,
+                                                    mapOf(
+                                                        "text" to
+                                                            JsonPrimitive(sending.message.text),
+                                                        "attachments" to
+                                                            wireJson.encodeToJsonElement(
+                                                                sending.message.attachments
+                                                            ),
+                                                    ),
+                                                ),
+                                                chat?.agentName ?: "Leo",
+                                            )
+                                            Text(
+                                                sending.label,
+                                                Modifier.align(Alignment.End).padding(end = 16.dp),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
+                                    if (chat?.run?.status == "running" && !live.catchingUp)
+                                        item(key = "agent-working") {
+                                            WorkingIndicator(
+                                                remember(
+                                                    live.events,
+                                                    chat.agentName,
+                                                    chat.run.startedAt,
+                                                ) {
+                                                    workingStep(
+                                                        live.events,
+                                                        chat.agentName,
+                                                        chat.run.startedAt,
+                                                    )
+                                                }
+                                            )
+                                        }
+                                }
+                                HistoryStatus(
+                                    live,
+                                    listState,
+                                    loadOlder,
+                                    (live.error ?: live.status).takeIf {
+                                        live.status != "En direct"
+                                    },
+                                )
+                                HistoryBottomButton(listState, follow, "Derniers messages") {
+                                    follow = true
+                                }
                             }
                         }
+                        if (questions.isNotEmpty())
+                            Surface(
+                                onClick = { asking = questions.first() },
+                                modifier =
+                                    Modifier.fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                                shape = RoundedCornerShape(18.dp),
+                                color = signal.attentionSoft,
+                            ) {
+                                Row(
+                                    Modifier.heightIn(min = 48.dp).padding(horizontal = 16.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Box(
+                                        Modifier.size(8.dp)
+                                            .clip(androidx.compose.foundation.shape.CircleShape)
+                                            .background(signal.attention)
+                                    )
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(
+                                        "${questions.size} ${if (questions.size == 1) "question" else "questions"} · Répondre",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                }
+                            }
+                        if (!fullscreen)
+                            Surface(
+                                Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                                    .testTag("conversation-composer")
+                                    // Text selection and editing own horizontal gestures in the
+                                    // composer.
+                                    .pointerInput(Unit) {
+                                        detectHorizontalDragGestures { _, _ -> }
+                                    },
+                                shape = RoundedCornerShape(26.dp),
+                                border =
+                                    androidx.compose.foundation.BorderStroke(
+                                        1.dp,
+                                        MaterialTheme.colorScheme.outlineVariant,
+                                    ),
+                                color = MaterialTheme.colorScheme.surface,
+                            ) {
+                                Column(Modifier.padding(4.dp)) {
+                                    // Queued follow-ups open the composer itself, sharing its
+                                    // border and corners.
+                                    if (pending.isNotEmpty()) {
+                                        QueueStrip(
+                                            pending,
+                                            chat
+                                                ?.questions
+                                                .orEmpty()
+                                                .filter { q -> q.fields.any { it.secret } }
+                                                .map { it.id }
+                                                .toSet(),
+                                            queueExpanded,
+                                            { queueExpanded = !queueExpanded },
+                                            busy = state.busy,
+                                            canSteer = active,
+                                            paused = chat?.paused == true,
+                                            edit = ::edit,
+                                            steer = ::steerQueued,
+                                            remove = { removing = it },
+                                            togglePause = { chat?.let(::togglePause) },
+                                            attachments = { AttachmentList(vm, it) },
+                                        )
+                                        HorizontalDivider(
+                                            Modifier.padding(horizontal = 12.dp),
+                                            color = MaterialTheme.colorScheme.outlineVariant,
+                                        )
+                                    }
+                                    if (attachments.isNotEmpty())
+                                        Box(Modifier.heightIn(max = 140.dp)) {
+                                            LazyColumn {
+                                                item {
+                                                    AttachmentList(
+                                                        vm,
+                                                        attachments.map { it.attachment },
+                                                        { key ->
+                                                            vm.files.discard(
+                                                                attachments.filter {
+                                                                    it.attachment.id == key
+                                                                }
+                                                            )
+                                                            attachments = attachments.filter {
+                                                                it.attachment.id != key
+                                                            }
+                                                        },
+                                                        attachments
+                                                            .mapNotNull {
+                                                                it.localPath?.let { path ->
+                                                                    it.attachment.id to path
+                                                                }
+                                                            }
+                                                            .toMap(),
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    if (editing != null)
+                                        Row {
+                                            Text(
+                                                "Modifier le message en attente",
+                                                Modifier.weight(1f),
+                                            )
+                                            TextButton(onClick = ::clearDraft) { Text("Annuler") }
+                                        }
+                                    if (showSkills)
+                                        SkillSuggestions(
+                                            suggestions,
+                                            mention!!.query,
+                                            skillOptions.isNotEmpty(),
+                                            { scope ->
+                                                if (scope == "global") "Global"
+                                                else
+                                                    state.projects.find { it.id == scope }?.name
+                                                        ?: "Projet"
+                                            },
+                                        ) { skill ->
+                                            val inserted =
+                                                insertSkill(
+                                                    TextFieldValue(draft, composer.selection),
+                                                    mention,
+                                                    skill.name,
+                                                )
+                                            composer.edit {
+                                                replace(0, length, inserted.text)
+                                                selection = inserted.selection
+                                            }
+                                        }
+                                    BasicTextField(
+                                        composer,
+                                        Modifier.fillMaxWidth()
+                                            // Images pasted or inserted from the keyboard join the
+                                            // attachments.
+                                            .contentReceiver { content ->
+                                                val images = pastedImages(content)
+                                                attach(images.uris, images.mediaType)
+                                                images.rest
+                                            }
+                                            .heightIn(min = 48.dp)
+                                            .padding(
+                                                top = 12.dp,
+                                                bottom = 4.dp,
+                                                start = 12.dp,
+                                                end = 12.dp,
+                                            ),
+                                        textStyle =
+                                            MaterialTheme.typography.bodyLarge.copy(
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            ),
+                                        cursorBrush =
+                                            androidx.compose.ui.graphics.SolidColor(
+                                                MaterialTheme.colorScheme.primary
+                                            ),
+                                        inputTransformation = InputTransformation.maxLength(50000),
+                                        keyboardOptions = InputKeyboards.Sentences,
+                                        outputTransformation =
+                                            SkillMentionHighlight(skillNames, skillMentionStyle()),
+                                        lineLimits =
+                                            TextFieldLineLimits.MultiLine(maxHeightInLines = 4),
+                                        enabled = !state.busy,
+                                        decorator = { inner ->
+                                            Box {
+                                                if (draft.isEmpty())
+                                                    Text(
+                                                        if (chat?.paused == true)
+                                                            "Ajouter à la file…"
+                                                        else if (active) "Ajouter un message…"
+                                                        else if (skillOptions.isNotEmpty())
+                                                            "Votre message… $ pour les skills"
+                                                        else "Votre message…",
+                                                        color =
+                                                            MaterialTheme.colorScheme
+                                                                .onSurfaceVariant,
+                                                    )
+                                                inner()
+                                            }
+                                        },
+                                    )
+                                    // Message first, then one toolbar: attach, agent/model/effort,
+                                    // send.
+                                    Row(
+                                        Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        ActionIcon(
+                                            "Joindre",
+                                            LeoIcons.Attach,
+                                            !state.busy && attachments.size < 8,
+                                        ) {
+                                            picker.launch(arrayOf("*/*"))
+                                        }
+                                        Box(Modifier.weight(1f).padding(end = 4.dp)) {
+                                            ModelPicker(
+                                                if (chosenProvider == "claude") state.claudeModels
+                                                else state.models,
+                                                model,
+                                                reasoning,
+                                                defaultModel,
+                                                defaultReasoning,
+                                                inherit = inheritAgentModel,
+                                                enabled = !state.busy,
+                                                refresh = { vm.refreshModels(chosenProvider) },
+                                                provider = chosenProvider,
+                                                changeProvider = ::chooseProvider,
+                                                switching = switchingProvider,
+                                            ) { m, r ->
+                                                model = m
+                                                reasoning = r
+                                            }
+                                        }
+                                        val canSend =
+                                            !state.busy &&
+                                                (draft.isNotBlank() || attachments.isNotEmpty()) &&
+                                                (id == null || chat != null) &&
+                                                live.error == null
+                                        if (
+                                            active &&
+                                                editing == null &&
+                                                (draft.isNotBlank() || attachments.isNotEmpty())
+                                        )
+                                            RoundAction(
+                                                "Intervenir maintenant",
+                                                LeoIcons.Steer,
+                                                container =
+                                                    MaterialTheme.colorScheme.primaryContainer,
+                                                content =
+                                                    MaterialTheme.colorScheme.onPrimaryContainer,
+                                                outlined = false,
+                                                size = 40.dp,
+                                                enabled = canSend && !switchingProvider,
+                                            ) {
+                                                send(if (switchingProvider) "queue" else "steer")
+                                            }
+                                        if (active && draft.isBlank() && attachments.isEmpty())
+                                            RoundAction(
+                                                "Arrêter",
+                                                LeoIcons.StopSolid,
+                                                content = signal.attention,
+                                                size = 40.dp,
+                                                enabled = !state.busy,
+                                            ) {
+                                                stopping = true
+                                            }
+                                        else
+                                            IconButton(
+                                                onClick = { send("queue") },
+                                                enabled = canSend,
+                                                modifier =
+                                                    Modifier.size(48.dp)
+                                                        .testTag("conversation-send"),
+                                            ) {
+                                                // Keep the native touch target generous while the
+                                                // visible
+                                                // button stays discreet alongside the message
+                                                // field.
+                                                Surface(
+                                                    Modifier.size(40.dp)
+                                                        .testTag("conversation-send-face"),
+                                                    shape =
+                                                        androidx.compose.foundation.shape
+                                                            .CircleShape,
+                                                    color =
+                                                        if (canSend)
+                                                            MaterialTheme.colorScheme.primary
+                                                        else
+                                                            MaterialTheme.colorScheme.onSurface
+                                                                .copy(alpha = 0.10f),
+                                                    contentColor =
+                                                        if (canSend)
+                                                            MaterialTheme.colorScheme.onPrimary
+                                                        else
+                                                            MaterialTheme.colorScheme.onSurface
+                                                                .copy(alpha = 0.38f),
+                                                ) {
+                                                    Box(
+                                                        Modifier.fillMaxSize(),
+                                                        contentAlignment = Alignment.Center,
+                                                    ) {
+                                                        Icon(
+                                                            if (editing != null) Icons.Default.Check
+                                                            else if (active || chat?.paused == true)
+                                                                Icons.Default.Add
+                                                            else LeoIcons.Up,
+                                                            if (editing != null) "Modifier"
+                                                            else if (active || chat?.paused == true)
+                                                                "Ajouter à la file"
+                                                            else "Envoyer",
+                                                            Modifier.size(18.dp),
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                    }
+                                }
+                            }
                     }
             }
-        }
-        asking?.let { selected ->
-            val current = questions.find { it.id == selected.id }
-            if (current == null) LaunchedEffect(selected.id) { asking = null }
-            else QuestionDialog(vm, state, current, questions, { asking = it }) { asking = null }
-        }
-        if (newSession && chat != null) Confirm("Nouvelle session agent ?", "L’historique et les fichiers sont conservés. Votre prochain message utilisera une nouvelle session native.", state.busy, state.error, { newSession = false }) {
-            vm.perform {
-                api.request("POST", "/chats/${segment(chat.id)}/new-session", buildJsonObject { put("confirm", true) })
-                newSession = false
+            asking?.let { selected ->
+                val current = questions.find { it.id == selected.id }
+                if (current == null) LaunchedEffect(selected.id) { asking = null }
+                else
+                    QuestionDialog(vm, state, current, questions, { asking = it }) { asking = null }
             }
-        }
-        if (stopping && chat != null)
-            Confirm(
-                "Arrêter l’agent ?",
-                "La conversation sera mise en pause. Le travail déjà effectué sera conservé.",
-                state.busy,
-                state.error,
-                { stopping = false },
-            ) {
-                vm.perform {
-                    api.request("POST", "/chats/${segment(chat.id)}/stop")
-                    stopping = false
+            if (newSession && chat != null)
+                Confirm(
+                    "Nouvelle session agent ?",
+                    "L’historique et les fichiers sont conservés. Votre prochain message utilisera une nouvelle session native.",
+                    state.busy,
+                    state.error,
+                    { newSession = false },
+                ) {
+                    vm.perform {
+                        api.request(
+                            "POST",
+                            "/chats/${segment(chat.id)}/new-session",
+                            buildJsonObject { put("confirm", true) },
+                        )
+                        newSession = false
+                    }
+                }
+            if (stopping && chat != null)
+                Confirm(
+                    "Arrêter l’agent ?",
+                    "La conversation sera mise en pause. Le travail déjà effectué sera conservé.",
+                    state.busy,
+                    state.error,
+                    { stopping = false },
+                ) {
+                    vm.perform {
+                        api.request("POST", "/chats/${segment(chat.id)}/stop")
+                        stopping = false
+                    }
+                }
+            removing?.let { message ->
+                Confirm(
+                    "Retirer ce message ?",
+                    "Il sera supprimé de la file d’attente.",
+                    state.busy,
+                    state.error,
+                    { removing = null },
+                ) {
+                    vm.perform {
+                        api.request(
+                            "DELETE",
+                            "/chats/${segment(message.chatId)}/messages/${segment(message.id)}",
+                        )
+                        removing = null
+                    }
                 }
             }
-        removing?.let { message ->
-            Confirm(
-                "Retirer ce message ?",
-                "Il sera supprimé de la file d’attente.",
-                state.busy,
-                state.error,
-                { removing = null },
-            ) {
-                vm.perform {
-                    api.request(
-                        "DELETE",
-                        "/chats/${segment(message.chatId)}/messages/${segment(message.id)}",
-                    )
-                    removing = null
-                }
-            }
         }
-    }
     }
 }
 
@@ -1300,14 +1541,18 @@ private fun NewConversationIntro(
     Column(Modifier.fillMaxWidth().testTag("new-conversation")) {
         Text("On lance quoi ?", style = MaterialTheme.typography.headlineLarge)
         Eyebrow("Avec", Modifier.padding(top = 20.dp, bottom = 10.dp))
-        androidx.compose.foundation.lazy.LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        androidx.compose.foundation.lazy.LazyRow(
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
             items(agents, key = { it.id }) { item ->
                 AgentTile(item, item.id == agent, enabled) { chooseAgent(item.id) }
             }
         }
         Eyebrow("Dans", Modifier.padding(top = 20.dp, bottom = 4.dp))
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            SignalChip("Tous les projets autorisés", project.isEmpty()) { if (enabled) chooseProject("") }
+            SignalChip("Tous les projets autorisés", project.isEmpty()) {
+                if (enabled) chooseProject("")
+            }
             projects.forEach {
                 SignalChip(it.name, project == it.id, leading = identityColor(it.id)) {
                     if (enabled) chooseProject(it.id)
@@ -1330,11 +1575,14 @@ private fun AgentTile(agent: Agent, selected: Boolean, enabled: Boolean, choose:
         onClick = choose,
         enabled = enabled,
         shape = shape,
-        color = if (selected) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.background,
+        color =
+            if (selected) MaterialTheme.colorScheme.surface
+            else MaterialTheme.colorScheme.background,
         border =
             androidx.compose.foundation.BorderStroke(
                 if (selected) 2.dp else 1.dp,
-                if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+                if (selected) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.outlineVariant,
             ),
         modifier =
             Modifier.width(104.dp).semantics {
@@ -1360,7 +1608,12 @@ private fun AgentTile(agent: Agent, selected: Boolean, enabled: Boolean, choose:
                             .background(MaterialTheme.colorScheme.primary),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Icon(LeoIcons.Check, null, Modifier.size(11.dp), tint = MaterialTheme.colorScheme.onPrimary)
+                        Icon(
+                            LeoIcons.Check,
+                            null,
+                            Modifier.size(11.dp),
+                            tint = MaterialTheme.colorScheme.onPrimary,
+                        )
                     }
             }
             Text(

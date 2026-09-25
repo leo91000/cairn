@@ -27,6 +27,7 @@ use tokio::{
     sync::{Mutex, Notify, OnceCell, mpsc},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
+
 #[derive(Default)]
 pub struct Worker {
     pub active: Mutex<HashMap<String, CancellationToken>>,
@@ -36,16 +37,19 @@ pub struct Worker {
     maintenance: AtomicI64,
     tasks: TaskTracker,
 }
+
 struct Checkpoint {
     store: Store,
     id: String,
     value: Mutex<Value>,
     deadline: Option<i64>,
 }
+
 impl Checkpoint {
     async fn value(&self) -> Value {
         self.value.lock().await.clone()
     }
+
     async fn save(&self, patch: Value) -> Result<()> {
         let mut value = self.value.lock().await;
         merge(&mut value, &patch);
@@ -57,10 +61,12 @@ impl Checkpoint {
             .set(&format!("run-checkpoint:{}", self.id), value.clone(), None)
             .await
     }
+
     async fn memory(&self, key: &str, value: Value) {
         self.value.lock().await[key] = value;
     }
 }
+
 impl Worker {
     pub async fn initialize(&self, s: &Service) -> Result<()> {
         self.initialized
@@ -71,30 +77,32 @@ impl Worker {
                         let id = text(&run, "id");
                         if run["status"] != "running" {
                             if !run["cancelRequestedAt"].is_null() {
-                                db.patch_run(
-                                    id,
-                                    &json!({
-                                    "recoveryPending":true}
-                                    ),
-                                )?;
+                                db.patch_run(id, &json!({
+                                    "recoveryPending": true
+                                }
+                                ))?;
                             }
                             continue;
                         }
-                        if db.kv(&format!("run-checkpoint:{id}"))?.is_none() && !run["startedAt"].is_null() {
-                            db.patch_run(
-                                id,
-                                &json!({
-                                "status":"interrupted","finishedAt":now(),"summary":"This older run has no restart checkpoint. Review its working files before retrying."}
-                                ),
-                            )?;
+                        if db.kv(&format!("run-checkpoint:{id}"))?.is_none()
+                            && !run["startedAt"].is_null()
+                        {
+                            db.patch_run(id, &json!({
+                                "status": "interrupted",
+                                "finishedAt": now(),
+                                "summary": "This older run has no restart checkpoint. Review its working files before retrying."
+                            }
+                            ))?;
                             continue;
                         }
-                        db.patch_run(
-                            id,
-                            &json!({
-                            "status":"queued","recoveryPending":true,"finishedAt":null,"capacityWaitUntil":null,"accountWaitReason":"Recovering after worker restart."}
-                            ),
-                        )?;
+                        db.patch_run(id, &json!({
+                            "status": "queued",
+                            "recoveryPending": true,
+                            "finishedAt": null,
+                            "capacityWaitUntil": null,
+                            "accountWaitReason": "Recovering after worker restart."
+                        }
+                        ))?;
                         db.event(id, "status", "Recovering after worker restart", None)?;
                     }
                     Ok(())
@@ -103,6 +111,7 @@ impl Worker {
             .await
             .map(|_| ())
     }
+
     pub async fn start(self: &Arc<Self>, s: Arc<Service>) -> Result<()> {
         self.initialize(&s).await?;
         self.tasks.spawn(crate::chat_titles::run(s.clone()));
@@ -119,7 +128,10 @@ impl Worker {
                     _ = cleanup.shutdown.cancelled() => break,
                     result = cleanup.cleanup_conversations() => {
                         if let Err(error) = result {
-                            let _ = cleanup.store.audit("conversation.cleanup_failed", json!({"message":error.message})).await;
+                            let _ = cleanup
+                                .store
+                                .audit("conversation.cleanup_failed", json!({"message": error.message}))
+                                .await;
                         }
                     }
                 }
@@ -145,10 +157,12 @@ impl Worker {
         });
         Ok(())
     }
+
     /// Coalesce wakeups without losing work queued during an active scheduling pass.
     pub fn notify(&self) {
         self.wake.notify_one();
     }
+
     pub async fn deployment_lease(
         &self,
         s: &Service,
@@ -184,6 +198,7 @@ impl Worker {
         }
         Ok(json!({"paused": !release, "activeRuns": active_runs}))
     }
+
     pub async fn tick(self: &Arc<Self>, s: &Arc<Service>) -> Result<()> {
         let Ok(_tick) = self.tick_lock.try_lock() else {
             return Ok(());
@@ -195,9 +210,20 @@ impl Worker {
         if now() - self.maintenance.load(Ordering::Relaxed) > 3600000 {
             s.store
                 .write(|db| {
-                    db.0.execute("DELETE FROM kv WHERE expires IS NOT NULL AND expires<=?", [now()])?;
-                    db.0.execute("DELETE FROM audit WHERE created_at<?", [now() - 90 * 86400000_i64])?;
-                    db.0.execute("DELETE FROM events WHERE created_at<? AND run_id IN (SELECT id FROM runs WHERE status NOT IN ('queued','running') AND json_extract(data,'$.trigger')!='chat')", [now() - 30 * 86400000_i64])?;
+                    db.0.execute(
+                        "DELETE FROM kv WHERE expires IS NOT NULL AND expires<=?",
+                        [now()],
+                    )?;
+                    db.0.execute(
+                        "DELETE FROM audit WHERE created_at<?",
+                        [now() - 90 * 86400000_i64],
+                    )?;
+                    db.0.execute(
+                        "DELETE FROM events WHERE created_at<? AND run_id IN (SELECT id FROM runs \
+                        WHERE status NOT IN ('queued','running') AND \
+                        json_extract(data,'$.trigger')!='chat')",
+                        [now() - 30 * 86400000_i64],
+                    )?;
                     Ok(())
                 })
                 .await?;
@@ -250,57 +276,53 @@ impl Worker {
             }
             if run["recoveryPending"] == true {
                 let result = async {
-                    if !crate::nodes::moves::advance(s,&run).await? {return Ok(false);}
+                    if !crate::nodes::moves::advance(s, &run).await? {
+                        return Ok(false);
+                    }
                     recovery::fence(s, &run).await?;
                     s.mcps.revoke_run(s, run_id).await?;
                     s.accounts.recover_run(s, &run).await?;
                     if !s.store.run(run_id).await?["cancelRequestedAt"].is_null() {
-                        s.store
-                            .patch_run(
-                                run_id,
-                                json!({
-                                "status":"cancelled","finishedAt":now(),"accountWaitReason":null,"recoveryPending":false}
-                                ),
-                            )
-                            .await?;
+                        s.store.patch_run(run_id, json!({
+                            "status": "cancelled",
+                            "finishedAt": now(),
+                            "accountWaitReason": null,
+                            "recoveryPending": false
+                        }
+                        )).await?;
                         return Ok(false);
                     }
                     if let Some(checkpoint) = s.store.kv(&format!("run-checkpoint:{run_id}")).await? {
                         if checkpoint["settled"].is_object() {
                             let mut patch = checkpoint["settled"].clone();
-                            merge(
-                                &mut patch,
-                                &json!({
-                                "accountWaitReason":null,"recoveryPending":false}
-                                ),
-                            );
+                            merge(&mut patch, &json!({
+                                "accountWaitReason": null,
+                                "recoveryPending": false
+                            }
+                            ));
                             s.store.patch_run(run_id, patch).await?;
                             return Ok(false);
                         }
                         if checkpoint["completed"] == true {
-                            s.store
-                                .patch_run(
-                                    run_id,
-                                    json!({
-                                    "status":"succeeded","finishedAt":now(),"resumeAvailable":false,"accountWaitReason":null,"recoveryPending":false,"summary":if text(&checkpoint,"lastMessage").is_empty(){
-                                    "Conversation completed before worker restart. See Activity for the recorded result."}
-                                    else{
-                                    text(&checkpoint,"lastMessage")}
-                                    }
-                                    ),
-                                )
-                                .await?;
+                            s.store.patch_run(run_id, json!({
+                                "status": "succeeded",
+                                "finishedAt": now(),
+                                "resumeAvailable": false,
+                                "accountWaitReason": null,
+                                "recoveryPending": false,
+                                "summary": if text(&checkpoint,"lastMessage").is_empty(){
+                            "Conversation completed before worker restart. See Activity for the recorded result."}
+                            else{
+                            text(&checkpoint,"lastMessage")}
+                            }
+                            )).await?;
                             return Ok(false);
                         }
                     }
-                    s.store
-                        .patch_run(
-                            run_id,
-                            json!({
-                            "recoveryPending":false}
-                            ),
-                        )
-                        .await?;
+                    s.store.patch_run(run_id, json!({
+                        "recoveryPending": false
+                    }
+                    )).await?;
                     Ok::<_, Error>(true)
                 }
                 .await;
@@ -314,7 +336,8 @@ impl Worker {
                                 .patch_run(
                                     run_id,
                                     json!({
-                                    "accountWaitReason":message}
+                                        "accountWaitReason": message
+                                    }
                                     ),
                                 )
                                 .await?;
@@ -343,12 +366,7 @@ impl Worker {
                             .needs_attention(s, provider)
                             .await?
                             .then_some(provider);
-                        s.store
-                            .patch_run(
-                                run_id,
-                                json!({"accountWaitReason":error.message,"accountRequired":required}),
-                            )
-                            .await?;
+                        s.store.patch_run(run_id, json!({"accountWaitReason": error.message,"accountRequired": required})).await?;
                         s.store
                             .event(run_id, "status", &error.message, None)
                             .await?;
@@ -381,28 +399,52 @@ impl Worker {
                     loop {
                         let id = run_id.clone();
                         let lease = s.accounts.lease(&id).await;
-                        let saved = s.store.transaction(move |db| {
-                            let Some(current) = db.run(&id)? else { return Ok(()); };
-                            let key = format!("run-checkpoint:{id}");
-                            let mut checkpoint = db.kv(&key)?.unwrap_or_else(|| json!({"remainingMs":0}));
-                            if !["queued", "running"].contains(&text(&current, "status")) {
-                                checkpoint["settled"] = json!({"status":current["status"],"summary":current["summary"],"finishedAt":current["finishedAt"]});
-                            }
-                            db.set(&key, &checkpoint, None)?;
-                            let mut patch = json!({"status":"queued","recoveryPending":true,"finishedAt":null,"accountWaitReason":"Recovering after a worker error."});
-                            if let Some(lease) = lease { patch["accountId"] = lease.account_id.into(); }
-                            db.patch_run(&id, &patch)?;
-                            Ok(())
-                        }).await;
-                        if saved.is_ok() { break; }
-                        tokio::select! { _=s.shutdown.cancelled()=>break, _=tokio::time::sleep(Duration::from_secs(1))=>{} }
+                        let saved = s
+                            .store
+                            .transaction(move |db| {
+                                let Some(current) = db.run(&id)? else {
+                                    return Ok(());
+                                };
+                                let key = format!("run-checkpoint:{id}");
+                                let mut checkpoint =
+                                    db.kv(&key)?.unwrap_or_else(|| json!({"remainingMs": 0}));
+                                if !["queued", "running"].contains(&text(&current, "status")) {
+                                    checkpoint["settled"] = json!({
+                                        "status": current["status"],
+                                        "summary": current["summary"],
+                                        "finishedAt": current["finishedAt"]
+                                    });
+                                }
+                                db.set(&key, &checkpoint, None)?;
+                                let mut patch = json!({
+                                    "status": "queued",
+                                    "recoveryPending": true,
+                                    "finishedAt": null,
+                                    "accountWaitReason": "Recovering after a worker error."
+                                });
+                                if let Some(lease) = lease {
+                                    patch["accountId"] = lease.account_id.into();
+                                }
+                                db.patch_run(&id, &patch)?;
+                                Ok(())
+                            })
+                            .await;
+                        if saved.is_ok() {
+                            break;
+                        }
+                        tokio::select! {
+                            _ = s.shutdown.cancelled() => break,
+                            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                        }
                     }
                     let _ = s
                         .store
                         .audit(
                             "worker.execution_failed",
                             json!({
-                            "runId":run_id,"message":error.message}
+                                "runId": run_id,
+                                "message": error.message
+                            }
                             ),
                         )
                         .await;
@@ -413,6 +455,7 @@ impl Worker {
         }
         Ok(())
     }
+
     async fn execute(
         &self,
         s: &Arc<Service>,
@@ -425,7 +468,9 @@ impl Worker {
         let existing = saved.is_some();
         let value = saved.unwrap_or_else(|| {
             json!({
-            "launched":false,"remainingMs":crate::run_limits::budget_ms(&run["snapshot"]["agent"])}
+                "launched": false,
+                "remainingMs": crate::run_limits::budget_ms(&run["snapshot"]["agent"])
+            }
             )
         });
         let checkpoint = Arc::new(Checkpoint {
@@ -448,13 +493,14 @@ impl Worker {
                 let mut timer = tokio::time::interval(Duration::from_secs(5));
                 loop {
                     tokio::select! {
-                    _=stop.cancelled()=>break,_=timer.tick()=>{
-                    let _=crate::nodes::moves::pause_pending(&service,&c.id).await;
-                    let _=crate::nodes::placement::renew_local(&service,&c.id).await;
-                    let _=c.save(json!({
-                    }
-                    )).await;
-                    }
+                        _ = stop.cancelled() => break,
+                        _ = timer.tick() => {
+                            let _ = crate::nodes::moves::pause_pending(&service, &c.id).await;
+                            let _ = crate::nodes::placement::renew_local(&service, &c.id).await;
+                            let _ = c.save(json!({
+                            }
+                            )).await;
+                        }
                     }
                 }
             })
@@ -484,11 +530,9 @@ impl Worker {
                 && !cancel.is_cancelled()
                 && !s.shutdown.is_cancelled();
             if recover_controller {
-                checkpoint
-                    .save(json!({
-                        "controllerRecoveries":saved["controllerRecoveries"].as_u64().unwrap_or(0)+1
-                    }))
-                    .await?;
+                checkpoint.save(json!({
+                    "controllerRecoveries": saved["controllerRecoveries"].as_u64().unwrap_or(0)+1
+                })).await?;
             }
             let status = if cancel.is_cancelled() {
                 "cancelled"
@@ -503,8 +547,12 @@ impl Worker {
             if needs_fence && status != "queued" {
                 checkpoint
                     .save(json!({
-                    "settled":{
-                    "status":status,"summary":summary,"error":summary,"finishedAt":now()}
+                        "settled": {
+                            "status": status,
+                            "summary": summary,
+                            "error": summary,
+                            "finishedAt": now()
+                        }
                     }
                     ))
                     .await?;
@@ -513,15 +561,20 @@ impl Worker {
                 .patch_run(
                     &run_id,
                     json!({
-                    "status":if needs_fence{
+                        "status": if needs_fence{
                     "queued"}
                     else{
                     status}
-                    ,"recoveryPending":needs_fence||status=="queued","finishedAt":if needs_fence||status=="queued"{
+                    ,
+                        "recoveryPending": needs_fence||status=="queued",
+                        "finishedAt": if needs_fence||status=="queued"{
                     Value::Null}
                     else{
                     now().into()}
-                    ,"summary":summary,"error":if status=="failed"{json!(summary)}else{Value::Null},"accountWaitReason":if needs_fence{
+                    ,
+                        "summary": summary,
+                        "error": if status=="failed"{json!(summary)}else{Value::Null},
+                        "accountWaitReason": if needs_fence{
                     json!("Waiting for the previous VM to stop.")}
                     else if status=="queued"{
                     json!("Paused for worker restart. This run will resume automatically.")}
@@ -557,8 +610,11 @@ impl Worker {
             if current["status"] != "queued" {
                 checkpoint
                     .save(json!({
-                    "settled":{
-                    "status":current["status"],"summary":current["summary"],"finishedAt":current["finishedAt"]}
+                        "settled": {
+                            "status": current["status"],
+                            "summary": current["summary"],
+                            "finishedAt": current["finishedAt"]
+                        }
                     }
                     ))
                     .await?;
@@ -567,7 +623,11 @@ impl Worker {
                 .patch_run(
                     &run_id,
                     json!({
-                    "status":"queued","recoveryPending":true,"finishedAt":null,"accountWaitReason":"Waiting for the previous VM to stop."}
+                        "status": "queued",
+                        "recoveryPending": true,
+                        "finishedAt": null,
+                        "accountWaitReason": "Waiting for the previous VM to stop."
+                    }
                     ),
                 )
                 .await?;
@@ -581,7 +641,9 @@ impl Worker {
             merge(
                 &mut patch,
                 &json!({
-                "recoveryPending":false,"accountWaitReason":null}
+                    "recoveryPending": false,
+                    "accountWaitReason": null
+                }
                 ),
             );
             s.store.patch_run(&run_id, patch).await?;
@@ -594,7 +656,9 @@ impl Worker {
                 .audit(
                     "account.release_failed",
                     json!({
-                    "id":account.account_id,"runId":run_id}
+                        "id": account.account_id,
+                        "runId": run_id
+                    }
                     ),
                 )
                 .await?;
@@ -603,12 +667,12 @@ impl Worker {
         let pending = s.store.run(&run_id).await?;
         if pending["moveRequest"].is_object() && pending["cancelRequestedAt"].is_null() {
             checkpoint
-                .save(json!({"completed":false,"settled":null}))
+                .save(json!({"completed": false,"settled": null}))
                 .await?;
             s.store
                 .patch_run(
                     &run_id,
-                    json!({"status":"queued","recoveryPending":true,"finishedAt":null}),
+                    json!({"status": "queued","recoveryPending": true,"finishedAt": null}),
                 )
                 .await?;
         }
@@ -642,6 +706,7 @@ impl Worker {
         }
         Ok(())
     }
+
     async fn execute_inner(
         s: &Arc<Service>,
         run: &mut Value,
@@ -663,7 +728,15 @@ impl Worker {
         s.store
             .patch_run(
                 &id,
-                json!({"status":"running","startedAt":run["startedAt"].as_i64().unwrap_or_else(now),"finishedAt":null,"accountWaitReason":null,"accountRequired":null,"accountId":account.as_ref().map(|a|&a.account_id),"accountName":account_name}),
+                json!({
+                    "status": "running",
+                    "startedAt": run["startedAt"].as_i64().unwrap_or_else(now),
+                    "finishedAt": null,
+                    "accountWaitReason": null,
+                    "accountRequired": null,
+                    "accountId": account.as_ref().map(|a|&a.account_id),
+                    "accountName": account_name
+                }),
             )
             .await?;
         if let Some(name) = account_name.as_str() {
@@ -697,13 +770,14 @@ impl Worker {
         // Placement follows current grants, including whether execution needs a VM.
         run["snapshot"]["agent"]["access"]["nodes"] = current_policy["nodes"].clone();
         s.store
-            .patch_run(&id, json!({"snapshot":run["snapshot"]}))
+            .patch_run(&id, json!({"snapshot": run["snapshot"]}))
             .await?;
         let saved = checkpoint.value().await;
         if existing && !saved["prepared"].is_object() {
             checkpoint
                 .save(json!({
-                "generation":crate::config::id()[..8].to_owned()}
+                    "generation": crate::config::id()[..8].to_owned()
+                }
                 ))
                 .await?;
         }
@@ -735,7 +809,8 @@ impl Worker {
         };
         checkpoint
             .save(json!({
-            "prepared":prepared}
+                "prepared": prepared
+            }
             ))
             .await?;
         let codex_home = directory.join(if prepared["isolated"] == true {
@@ -754,7 +829,10 @@ impl Worker {
             s.accounts.relocate(s, account, &codex_home).await?;
         }
         let patch = json!({
-        "workspace":prepared["cwd"],"workspaces":prepared["workspaces"],"isolated":prepared["isolated"]}
+            "workspace": prepared["cwd"],
+            "workspaces": prepared["workspaces"],
+            "isolated": prepared["isolated"]
+        }
         );
         merge(run, &patch);
         s.store.patch_run(&id, patch).await?;
@@ -805,7 +883,10 @@ impl Worker {
                 .patch_run(
                     &id,
                     json!({
-                    "sessionId":session,"resumeCount":run["resumeCount"].as_u64().unwrap_or(0)+1,"resumeAvailable":true}
+                        "sessionId": session,
+                        "resumeCount": run["resumeCount"].as_u64().unwrap_or(0)+1,
+                        "resumeAvailable": true
+                    }
                     ),
                 )
                 .await?;
@@ -847,14 +928,25 @@ impl Worker {
                 );
             }
             let mut prompt = if resume.is_some() {
-                "Continue the same task from the saved conversation and current workspace. Execution was interrupted. Resume the original task from its last completed step. Preserve completed work and verify external effects before repeating any action.".into()
+                "Continue the same task from the saved conversation and current workspace. \
+                    Execution was interrupted. Resume the original task from its last completed \
+                    step. Preserve completed work and verify external effects before repeating \
+                    any action."
+                    .into()
             } else {
                 run_output::prompt(run, false)
             };
             if resume.is_some()
                 && let Some(restored) = run["restoredAt"].as_i64()
             {
-                prompt.push_str(&format!("\nThe VM files and native provider session were restored from recovery point at Unix time {restored} ms. Master chat may contain more recent messages and actions than this workspace. Review the master conversation history with Leo tools, reconcile file state, and verify external effects (commits, messages, deployments) before repeating them. Do not assume later chat messages prove those changes exist on this disk."));
+                prompt.push_str(&format!(
+                    "\nThe VM files and native provider session were restored from recovery \
+                    point at Unix time {restored} ms. Master chat may contain more recent \
+                    messages and actions than this workspace. Review the master conversation \
+                    history with Leo tools, reconcile file state, and verify external effects \
+                    (commits, messages, deployments) before repeating them. Do not assume later \
+                    chat messages prove those changes exist on this disk."
+                ));
             }
             if resume.is_some()
                 && let Some(restored) = run["restoredAt"].as_i64()
@@ -864,9 +956,17 @@ impl Worker {
                     .store
                     .read(move |db| db.events_before(&run_id, i64::MAX))
                     .await?;
-                let newer=events.into_iter().filter_map(|event|serde_json::to_value(event).ok()).filter(|event|event["createdAt"].as_i64().is_some_and(|at|at>restored)).map(|event|json!({"at":event["createdAt"],"type":event["type"],"text":event["text"]})).collect::<Vec<_>>();
+                let newer = events
+                    .into_iter()
+                    .filter_map(|event| serde_json::to_value(event).ok())
+                    .filter(|event| event["createdAt"].as_i64().is_some_and(|at| at > restored))
+                    .map(|event| json!({"at": event["createdAt"],"type": event["type"],"text": event["text"]}))
+                    .collect::<Vec<_>>();
                 if !newer.is_empty() {
-                    prompt.push_str("\nRecent master history after this recovery point (messages are history, not proof that disk changes survived):\n");
+                    prompt.push_str(
+                        "\nRecent master history after this recovery point (messages are history, \
+                        not proof that disk changes survived):\n",
+                    );
                     prompt.extend(serde_json::to_string(&newer)?.chars().take(16000));
                 }
             }
@@ -896,7 +996,12 @@ impl Worker {
                 if !run["chatExecution"].is_object() {
                     // Scheduled work uses the same authenticated protocol as
                     // chats, while retaining its own task brief and session.
-                    chat["execution"] = json!({"messageId":id,"text":prompt,"recovery":resume.is_some(),"attachments":[]});
+                    chat["execution"] = json!({
+                        "messageId": id,
+                        "text": prompt,
+                        "recovery": resume.is_some(),
+                        "attachments": []
+                    });
                 }
                 if !claude && text(&chat, "reasoning").is_empty() {
                     let source = account
@@ -932,7 +1037,10 @@ impl Worker {
                 crate::nodes::placement::materialize(s, &runner).await?;
                 checkpoint
                     .save(json!({
-                    "runnerId":runner,"nodeId":placement["nodeId"],"runtimeId":placement["runtimeId"]}
+                        "runnerId": runner,
+                        "nodeId": placement["nodeId"],
+                        "runtimeId": placement["runtimeId"]
+                    }
                     ))
                     .await?;
                 let plans = s.config.data_dir.join("runner-plans");
@@ -940,17 +1048,29 @@ impl Worker {
                 let mut mounts = prepared["mounts"].as_array().unwrap().clone();
                 if chat.is_some() {
                     mounts.push(json!({
-                    "source":directory.join("chat-input"),"target":"/run/leo-chat","readOnly":true}
+                        "source": directory.join("chat-input"),
+                        "target": "/run/leo-chat",
+                        "readOnly": true
+                    }
                     ));
                 }
                 let mut context = run.clone();
                 context["snapshot"]["skills"] = prepared["skills"].clone();
                 let mut plan = json!({
-                "id":runner,"runId":id,"args":args,"cwd":prepared["cwd"],"prompt":if resume.is_some(){
+                    "id": runner,
+                    "runId": id,
+                    "args": args,
+                    "cwd": prepared["cwd"],
+                    "prompt": if resume.is_some(){
                 prompt.clone()}
                 else{
                 run_output::prompt(&context,false)}
-                ,"imports":mounts,"expires":checkpoint.deadline,"sandbox":policy(&run["snapshot"]["agent"])["sandbox"],"mcpEnv":mcp["env"]}
+                ,
+                    "imports": mounts,
+                    "expires": checkpoint.deadline,
+                    "sandbox": policy(&run["snapshot"]["agent"])["sandbox"],
+                    "mcpEnv": mcp["env"]
+                }
                 );
                 plan["resources"] = placement["resources"].clone();
                 plan["nodeLeaseRequired"] = true.into();
@@ -964,9 +1084,9 @@ impl Worker {
                 let storage_policy = crate::storage::policy::Policy::for_node(&node_storage)?;
                 let grant = crate::nodes::disk_grants::new_disk(s, run, storage_node).await?;
                 plan["storage"] =
-                    json!({"master":s.config.public_url,"grant":grant,"policy":storage_policy});
+                    json!({"master": s.config.public_url,"grant": grant,"policy": storage_policy});
                 s.store
-                    .patch_run(&id, json!({"storage":{"mode":"on-demand"}}))
+                    .patch_run(&id, json!({"storage": {"mode": "on-demand"}}))
                     .await?;
                 crate::nodes::placement::renew_local(s, &id).await?;
                 if let Some(chat) = chat {
@@ -1007,7 +1127,12 @@ impl Worker {
                 s.store
                     .patch_run(
                         &id,
-                        json!({"nodeId":placement["nodeId"],"resources":placement["resources"],"nodeState":null,"movementError":null}),
+                        json!({
+                            "nodeId": placement["nodeId"],
+                            "resources": placement["resources"],
+                            "nodeState": null,
+                            "movementError": null
+                        }),
                     )
                     .await?;
                 env.insert("RUNNER_URL".into(), runner_url);
@@ -1027,14 +1152,19 @@ impl Worker {
                     .patch_run(
                         &id,
                         json!({
-                        "chatExecution":run["chatExecution"]}
+                            "chatExecution": run["chatExecution"]
+                        }
                         ),
                     )
                     .await?;
             }
             checkpoint
                 .save(json!({
-                "process":identity,"launched":true,"completed":false,"lastError":null}
+                    "process": identity,
+                    "launched": true,
+                    "completed": false,
+                    "lastError": null
+                }
                 ))
                 .await?;
             if cancel.is_cancelled() || s.shutdown.is_cancelled() {
@@ -1062,24 +1192,29 @@ impl Worker {
             tokio::pin!(timeout);
             while status.is_none() || open {
                 tokio::select! {
-                                    _=cancel.cancelled(),if status.is_none()=>{
-                child.stop().await;
-                status=Some(143);
-                }
+                    _ = cancel.cancelled(),
+                    if status.is_none() => {
+                        child.stop().await;
+                        status = Some(143);
+                    }
                 ,
-                                    _=s.shutdown.cancelled(),if status.is_none()=>{
-                child.stop().await;
-                status=Some(143);
-                }
+                    _ = s.shutdown.cancelled(),
+                    if status.is_none() => {
+                        child.stop().await;
+                        status = Some(143);
+                    }
                 ,
-                                    _=&mut timeout,if status.is_none()=>{
-                timed_out=true;
-                child.stop().await;
-                status=Some(143);
-                }
+                    _ = &mut timeout,
+                    if status.is_none() => {
+                        timed_out = true;
+                        child.stop().await;
+                        status = Some(143);
+                    }
                 ,
-                                    code=child.child.wait(),if status.is_none()=>status=Some(code?.code().unwrap_or(143)),
-                                    event=events.recv(),if open=>match event{
+                    code = child.child.wait(),
+                    if status.is_none() => status = Some(code?.code().unwrap_or(143)),
+                    event = events.recv(),
+                    if open => match event{
                 Some((diagnostic,raw))=>{
                 if let Some(account) = account.as_ref() {
                     for secret in s.accounts.redactions(s, account).await? {
@@ -1089,14 +1224,15 @@ impl Worker {
                 exhausted|=record(s,&id,&raw,diagnostic,checkpoint,sensitive,&mut total).await?;
                 }
                 ,None=>open=false}
-                                }
+                }
             }
             let _ = out.await;
             let _ = err.await;
             drop(_auth_broker);
             checkpoint
                 .save(json!({
-                "process":null}
+                    "process": null
+                }
                 ))
                 .await?;
             if prepared["isolated"] == true {
@@ -1132,13 +1268,21 @@ impl Worker {
                 let model = text(&run["snapshot"]["agent"], "model");
                 s.accounts.exhausted(s, &previous.account_id, model).await?;
                 s.accounts.release(&previous).await?;
+                s.store.patch_run(&id, json!({
+                    "accountWaitReason": format!("Usage exhausted. Waiting for an available {} account \
+                        to resume.", provider.label()),
+                    "accountId": null,
+                    "accountName": null
+                })).await?;
                 s.store
-                    .patch_run(
+                    .event(
                         &id,
-                        json!({"accountWaitReason":format!("Usage exhausted. Waiting for an available {} account to resume.", provider.label()),"accountId":null,"accountName":null}),
+                        "status",
+                        "Usage exhausted. Saving this session and restoring \
+                    capacity or switching accounts.",
+                        None,
                     )
                     .await?;
-                s.store.event(&id, "status", "Usage exhausted. Saving this session and restoring capacity or switching accounts.", None).await?;
                 s.accounts.refresh(s, &previous.account_id).await?;
                 while account.is_none()
                     && !cancel.is_cancelled()
@@ -1149,12 +1293,11 @@ impl Worker {
                         Ok(value) => *account = value,
                         Err(error) if error.status == 409 => {
                             tokio::select! {
-                            _=tokio::time::sleep(Duration::from_secs(1))=>{
-                            }
-                            ,_=cancel.cancelled()=>{
-                            }
-                            ,_=s.shutdown.cancelled()=>{
-                            }
+                                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                            ,
+                                _ = cancel.cancelled() => {}
+                            ,
+                                _ = s.shutdown.cancelled() => {}
                             }
                         }
                         Err(error) => return Err(error),
@@ -1168,12 +1311,7 @@ impl Worker {
                     }
                     sensitive.extend(s.accounts.redactions(s, account).await?);
                     let name = s.accounts.get(s, &account.account_id).await?["name"].clone();
-                    s.store
-                        .patch_run(
-                            &id,
-                            json!({"accountWaitReason":null,"accountId":account.account_id,"accountName":name}),
-                        )
-                        .await?;
+                    s.store.patch_run(&id, json!({"accountWaitReason": null,"accountId": account.account_id,"accountName": name})).await?;
                     s.store
                         .event(
                             &id,
@@ -1234,19 +1372,20 @@ impl Worker {
                 .chars()
                 .take(100000)
                 .collect::<String>();
-            s.store
-                .patch_run(
-                    &id,
-                    json!({
-                    "status":status,"finishedAt":now(),"resumeAvailable":(status!="succeeded"||run["chatExecution"].is_object())&&session.is_some(),"summary":summary,"error":if error.is_empty(){Value::Null}else{json!(run_output::redact(&error,sensitive))}}
-                    ),
-                )
-                .await?;
+            s.store.patch_run(&id, json!({
+                "status": status,
+                "finishedAt": now(),
+                "resumeAvailable": (status!="succeeded"||run["chatExecution"].is_object())&&session.is_some(),
+                "summary": summary,
+                "error": if error.is_empty(){Value::Null}else{json!(run_output::redact(&error,sensitive))}
+            }
+            )).await?;
             s.store.event(&id, "status", status, None).await?;
             break;
         }
         Ok(())
     }
+
     pub async fn cancel(&self, s: &Service, id: &str) -> Result<()> {
         let active = self.active.lock().await;
         let is_active = active.contains_key(id);
@@ -1260,21 +1399,26 @@ impl Worker {
                 db.patch_run(
                     &id_owned,
                     &json!({
-                    "cancelRequestedAt":now()}
+                        "cancelRequestedAt": now()
+                    }
                     ),
                 )?;
                 if !is_active && run["recoveryPending"] != true {
                     db.patch_run(
                         &id_owned,
                         &json!({
-                        "status":"cancelled","finishedAt":now(),"summary":"Cancelled before execution."}
+                            "status": "cancelled",
+                            "finishedAt": now(),
+                            "summary": "Cancelled before execution."
+                        }
                         ),
                     )?;
                 }
                 db.audit(
                     "run.cancelled",
                     &json!({
-                    "id":id_owned}
+                        "id": id_owned
+                    }
                     ),
                 )
             })
@@ -1285,6 +1429,7 @@ impl Worker {
         self.notify();
         Ok(())
     }
+
     pub async fn resume(&self, s: &Service, id: &str) -> Result<Value> {
         let active = self.active.lock().await;
         if active.contains_key(id) {
@@ -1294,24 +1439,46 @@ impl Worker {
             ));
         }
         let id = id.to_owned();
-        let result = s.store
+        let result = s
+            .store
             .transaction(move |db| {
                 let run = required(db.run(&id)?, "Run not found")?;
                 crate::conversation_lifecycle::require_active_run(db, &id)?;
-                if db.list("chats")?.iter().any(|c| c["runId"] == id && (c["cancelledByDeletion"] == true || c["sessionRestartRequested"] == true)) {
-                    return Err(Error::new(409,"Send a new message and resume the conversation queue to continue; cancelled work will not replay."));
+                if db.list("chats")?.iter().any(|c| {
+                    c["runId"] == id
+                        && (c["cancelledByDeletion"] == true
+                            || c["sessionRestartRequested"] == true)
+                }) {
+                    return Err(Error::new(
+                        409,
+                        "Send a new message and resume the conversation queue \
+                        to continue; cancelled work will not replay.",
+                    ));
                 }
                 let key = format!("run-checkpoint:{id}");
                 let checkpoint = db.kv(&key)?;
-                let before_launch = run["chatExecution"].is_object() && ["failed", "cancelled"].contains(&text(&run, "status")) && checkpoint.as_ref().is_none_or(|c| c["launched"] != true);
-                if !before_launch && (!["failed", "interrupted", "cancelled"].contains(&text(&run, "status")) || run["resumeAvailable"] != true || checkpoint.as_ref().is_none_or(|c| !c["prepared"].is_object()) || !run["workspaceCleanedAt"].is_null()) {
-                    return Err(Error::new(409, "This run has no saved conversation available to resume."));
+                let before_launch = run["chatExecution"].is_object()
+                    && ["failed", "cancelled"].contains(&text(&run, "status"))
+                    && checkpoint.as_ref().is_none_or(|c| c["launched"] != true);
+                if !before_launch
+                    && (!["failed", "interrupted", "cancelled"].contains(&text(&run, "status"))
+                        || run["resumeAvailable"] != true
+                        || checkpoint
+                            .as_ref()
+                            .is_none_or(|c| !c["prepared"].is_object())
+                        || !run["workspaceCleanedAt"].is_null())
+                {
+                    return Err(Error::new(
+                        409,
+                        "This run has no saved conversation available to resume.",
+                    ));
                 }
                 if db.active()?.iter().any(|a| a["taskId"] == run["taskId"]) {
                     return Err(Error::new(409, "This task already has an active run."));
                 }
                 if let Some(mut checkpoint) = checkpoint {
-                    checkpoint["remainingMs"] = crate::run_limits::budget_ms(&run["snapshot"]["agent"]).into();
+                    checkpoint["remainingMs"] =
+                        crate::run_limits::budget_ms(&run["snapshot"]["agent"]).into();
                     if !before_launch {
                         checkpoint["completed"] = false.into();
                     }
@@ -1321,7 +1488,13 @@ impl Worker {
                 let result = db.patch_run(
                     &id,
                     &json!({
-                    "status":"queued","error":null,"outcome":null,"recoveryPending":true,"cancelRequestedAt":null,"finishedAt":null,"accountWaitReason":if before_launch{
+                        "status": "queued",
+                        "error": null,
+                        "outcome": null,
+                        "recoveryPending": true,
+                        "cancelRequestedAt": null,
+                        "finishedAt": null,
+                        "accountWaitReason": if before_launch{
                     Value::Null}
                     else{
                     "Resuming saved conversation.".into()}
@@ -1335,12 +1508,14 @@ impl Worker {
         self.notify();
         Ok(result)
     }
+
     pub async fn close(&self) {
         let _guard = self.tick_lock.lock().await;
         self.tasks.close();
         self.tasks.wait().await;
     }
 }
+
 // Separate pipe readers keep stderr draining even while stdout applies database backpressure.
 async fn read_output(
     mut reader: impl AsyncRead + Unpin,
@@ -1385,6 +1560,7 @@ async fn read_output(
             .await;
     }
 }
+
 async fn record(
     s: &Service,
     id: &str,
@@ -1426,7 +1602,9 @@ async fn record(
         if event["type"] == "turn.failed" && !text(&event["error"], "message").is_empty() {
             let saved = checkpoint.value().await;
             if text(&saved, "lastError").is_empty() {
-                checkpoint.save(json!({"lastError":run_output::redact(text(&event["error"], "message"), secrets).chars().take(10000).collect::<String>()})).await?;
+                checkpoint.save(json!({
+                    "lastError": run_output::redact(text(&event["error"], "message"), secrets).chars().take(10000).collect::<String>()
+                })).await?;
             }
         }
         if event["type"] == "thread.started" && event["thread_id"].is_string() {
@@ -1434,7 +1612,9 @@ async fn record(
                 .patch_run(
                     id,
                     json!({
-                    "sessionId":event["thread_id"],"resumeAvailable":true}
+                        "sessionId": event["thread_id"],
+                        "resumeAvailable": true
+                    }
                     ),
                 )
                 .await?;
@@ -1454,7 +1634,8 @@ async fn record(
         if event["type"] == "turn.completed" {
             checkpoint
                 .save(json!({
-                "completed":true}
+                    "completed": true
+                }
                 ))
                 .await?;
             if !event["usage"].is_null() {
@@ -1462,7 +1643,8 @@ async fn record(
                     .patch_run(
                         id,
                         json!({
-                        "usage":event["usage"]}
+                            "usage": event["usage"]
+                        }
                         ),
                     )
                     .await?;
@@ -1521,11 +1703,13 @@ async fn record(
     }
     Ok(false)
 }
+
 mod id {
     pub fn new() -> String {
         crate::config::id()
     }
 }
+
 impl Worker {
     pub async fn cleanup(&self, s: &Service, id: &str) -> Result<Value> {
         let _active = self.active.lock().await;
@@ -1636,7 +1820,10 @@ impl Worker {
             .patch_run(
                 id,
                 json!({
-                "workspace":null,"resumeAvailable":false,"workspaceCleanedAt":now()}
+                    "workspace": null,
+                    "resumeAvailable": false,
+                    "workspaceCleanedAt": now()
+                }
                 ),
             )
             .await?;
@@ -1644,15 +1831,18 @@ impl Worker {
             .audit(
                 "run.workspace.cleaned",
                 json!({
-                "id":id}
+                    "id": id
+                }
                 ),
             )
             .await?;
         Ok(json!({
-        "cleaned":true}
+            "cleaned": true
+        }
         ))
     }
 }
+
 pub async fn routes(s: &Arc<Service>, input: &crate::http::Input) -> Option<Result<Value>> {
     if input.method != "POST" {
         return None;
@@ -1667,7 +1857,8 @@ pub async fn routes(s: &Arc<Service>, input: &crate::http::Input) -> Option<Resu
             async {
                 s.worker.cancel(s, id).await?;
                 Ok(json!({
-                "ok":true}
+                    "ok": true
+                }
                 ))
             }
             .await
@@ -1703,7 +1894,8 @@ pub async fn routes(s: &Arc<Service>, input: &crate::http::Input) -> Option<Resu
                     s.worker.cancel(s, id).await?;
                 }
                 Ok(json!({
-                "stopped":true}
+                    "stopped": true
+                }
                 ))
             }
             .await
@@ -1716,6 +1908,7 @@ pub async fn routes(s: &Arc<Service>, input: &crate::http::Input) -> Option<Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[tokio::test]
     async fn committed_work_and_deployment_release_wake_the_scheduler() {
         let root = tempfile::TempDir::new().unwrap();
@@ -1738,11 +1931,11 @@ mod tests {
         };
         let s = Service::new(config).await.unwrap();
         let chat = s
-            .chat_create(json!({"agentId":crate::config::MAIN_AGENT_ID}))
+            .chat_create(json!({"agentId": crate::config::MAIN_AGENT_ID}))
             .await
             .unwrap();
         let chat_id = text(&chat, "id");
-        s.chat_send(chat_id, json!({"id":crate::config::id(),"text":"Hello"}))
+        s.chat_send(chat_id, json!({"id": crate::config::id(),"text": "Hello"}))
             .await
             .unwrap();
         tokio::time::timeout(Duration::from_millis(100), s.worker.wake.notified())
@@ -1761,13 +1954,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        let task = s
-            .task(
-                json!({"name":"Wake test","prompt":"Hello","agentId":crate::config::MAIN_AGENT_ID}),
-                None,
-            )
-            .await
-            .unwrap();
+        let task = s.task(json!({"name": "Wake test","prompt": "Hello","agentId": crate::config::MAIN_AGENT_ID}), None).await.unwrap();
         let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
         tokio::time::timeout(Duration::from_millis(100), s.worker.wake.notified())
             .await
@@ -1791,6 +1978,7 @@ mod tests {
             .unwrap();
         assert!(s.store.kv("deployment-lease").await.unwrap().is_none());
     }
+
     #[tokio::test]
     async fn scheduling_wakeups_survive_a_busy_worker_and_coalesce() {
         let worker = Worker::default();

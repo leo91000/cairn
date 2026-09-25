@@ -14,6 +14,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 struct Slots {
     occupied: Vec<bool>,
 }
+
 impl Slots {
     fn reserve(&mut self, capacity: usize) -> Option<usize> {
         let index = match self.occupied.iter().position(|v| !v) {
@@ -28,12 +29,14 @@ impl Slots {
         Some(index + 1)
     }
 }
+
 pub struct Reservation {
     pool: Arc<Pool>,
     released: bool,
     slot: usize,
     vm: Option<Vm>,
 }
+
 pub struct Pool {
     capacity: usize,
     state: PathBuf,
@@ -42,6 +45,7 @@ pub struct Pool {
     stop: CancellationToken,
     cleanup: TaskTracker,
 }
+
 impl Pool {
     pub async fn new(
         state: PathBuf,
@@ -67,10 +71,17 @@ impl Pool {
             cleanup: TaskTracker::new(),
         }))
     }
+
     pub async fn health(&self) -> Value {
         let slots = self.slots.lock().await;
-        json!({"capacity":self.capacity,"occupied":slots.occupied.iter().filter(|v| **v).count(),"ready":0,"preparing":false})
+        json!({
+            "capacity": self.capacity,
+            "occupied": slots.occupied.iter().filter(|v| **v).count(),
+            "ready": 0,
+            "preparing": false
+        })
     }
+
     pub async fn reserve(self: &Arc<Self>, _run_id: &str) -> Result<Reservation> {
         let mut slots = self.slots.lock().await;
         if self.stop.is_cancelled() {
@@ -86,6 +97,7 @@ impl Pool {
             vm: None,
         })
     }
+
     pub async fn drain(&self) {
         self.cleanup.close();
         self.cleanup.wait().await;
@@ -143,6 +155,7 @@ impl Reservation {
         self.finish().await;
         result
     }
+
     async fn finish(&mut self) {
         if let Some(mut vm) = self.vm.take() {
             vm.shutdown().await;
@@ -151,6 +164,7 @@ impl Reservation {
         self.released = true;
     }
 }
+
 impl Drop for Reservation {
     fn drop(&mut self) {
         if self.released {
@@ -172,6 +186,7 @@ impl Drop for Reservation {
 mod tests {
     use super::*;
     use std::time::Duration;
+
     #[tokio::test]
     async fn finished_execution_cancels_captures_before_releasing_its_slot() {
         let root = tempfile::tempdir().unwrap();
@@ -199,6 +214,7 @@ mod tests {
         );
         assert_eq!(pool.health().await["occupied"], 0);
     }
+
     #[tokio::test]
     async fn abandoned_reservations_release_capacity_and_shutdown_rejects_work() {
         let root = tempfile::tempdir().unwrap();
@@ -229,6 +245,7 @@ mod tests {
         pool.drain().await;
         assert_eq!(pool.health().await["occupied"], 0);
     }
+
     #[tokio::test]
     async fn large_capacity_allocates_slots_on_demand_without_truncation() {
         let root = tempfile::tempdir().unwrap();
@@ -261,6 +278,7 @@ mod tests {
             .is_err()
         );
     }
+
     #[tokio::test]
     async fn restart_removes_only_unassigned_disks() {
         let root = tempfile::tempdir().unwrap();

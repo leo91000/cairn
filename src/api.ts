@@ -1,4 +1,9 @@
-import type { Agent, Project, Skill, Task } from '../shared/contracts'
+import type {
+  Agent,
+  Project,
+  Skill,
+  Task,
+} from '../shared/contracts'
 import type { McpView } from '../shared/mcp'
 import { reactive, watch } from 'vue'
 import { clearHistoryCache } from './history-cache'
@@ -29,6 +34,7 @@ export function notify(message: string) {
     clearTimeout(toastTimer)
   toastTimer = setTimeout(() => (state.toast = ''), 4500)
 }
+
 export class ApiError extends Error {
   constructor(message: string, readonly status: number) { super(message) }
 }
@@ -36,6 +42,7 @@ export function redirect(url: string) {
   const resume = () => {
     state.redirecting = false
   }
+
   state.redirecting = true
   // Restore polling if Back returns this document from the browser's page cache.
   window.addEventListener('pageshow', resume, { once: true })
@@ -48,6 +55,7 @@ export function redirect(url: string) {
     throw error
   }
 }
+
 export async function api<T = any>(
   url: string,
   options: RequestInit = {},
@@ -68,12 +76,15 @@ export async function api<T = any>(
       state.authenticated = false
     throw new ApiError(data.error || 'Request failed. Please try again.', response.status)
   }
+
   return data
 }
+
 export async function session() {
   Object.assign(state, await api('/session'))
   state.ready = true
 }
+
 export async function refresh() {
   const [agents, projects, tasks, skills, mcps] = await Promise.all([
     api<Agent[]>('/agents'),
@@ -82,8 +93,15 @@ export async function refresh() {
     api<Skill[]>('/skills'),
     api<McpView[]>('/mcps'),
   ])
-  Object.assign(state, { agents, projects, tasks, skills, mcps })
+  Object.assign(state, {
+    agents,
+    projects,
+    tasks,
+    skills,
+    mcps,
+  })
 }
+
 export function date(value: number | null | undefined) {
   return value
     ? new Intl.DateTimeFormat(undefined, {
@@ -92,6 +110,7 @@ export function date(value: number | null | undefined) {
       }).format(value)
     : '—'
 }
+
 export function relative(value: number) {
   const mins = Math.round((Date.now() - value) / 60000)
   if (mins < 1)
@@ -102,6 +121,7 @@ export function relative(value: number) {
     return `${Math.floor(mins / 60)}h ago`
   return date(value)
 }
+
 export function duration(start: number | null, end: number | null) {
   if (!start)
     return '—'
@@ -110,6 +130,7 @@ export function duration(start: number | null, end: number | null) {
     ? `${seconds}s`
     : `${Math.floor(seconds / 60)}m ${seconds % 60}s`
 }
+
 export async function signOut() {
   if (state.signingOut)
     return

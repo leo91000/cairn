@@ -14,6 +14,7 @@ const groups = computed(() => {
     files.push(item)
     groups.set(item.group, files)
   }
+
   return [...groups].map(([title, items]) => ({ title, items }))
 })
 </script>
@@ -28,11 +29,22 @@ const groups = computed(() => {
         <li v-for="item in group.items" :key="item.id" class="min-w-0">
           <button class="group flex h-full w-full flex-col overflow-hidden rounded-xl bg-surface text-left ring-1 ring-line/50 transition hover:bg-hover hover:ring-accent/50 focus-visible:outline-2 focus-visible:outline-accent" :aria-label="`Open ${item.title}`" @click="$emit('open', item)">
             <div class="relative flex aspect-[16/10] w-full items-center justify-center overflow-hidden bg-soft">
-              <img v-if="item.previewStatus === 'ready' || item.kind === 'image'" :src="artifactUrl(item, item.previewStatus === 'ready' ? 'preview' : undefined)" :alt="item.title" loading="lazy" class="size-full object-contain transition-transform duration-300 group-hover:scale-[1.03]">
+              <img
+                v-if="item.previewStatus === 'ready' || item.kind === 'image'"
+                :src="artifactUrl(item, item.previewStatus === 'ready' ? 'preview' : undefined)"
+                :alt="item.title"
+                loading="lazy"
+                class="size-full object-contain transition-transform duration-300 group-hover:scale-[1.03]"
+              >
               <p v-else-if="item.excerpt" class="m-0! h-full w-full overflow-hidden whitespace-pre-wrap break-words p-4 text-[10px] leading-relaxed text-subtle" :class="item.kind === 'code' ? 'font-mono' : ''">
                 {{ item.kind === 'markdown' ? item.excerpt.replace(/^#{1,6}\s+/gm, '').replaceAll('**', '') : item.excerpt }}
               </p>
-              <Icon v-else :name="item.kind === 'code' ? FileCode : item.kind === 'video' || item.kind === 'audio' ? Play : FileText" :size="32" class="text-accent/70" />
+              <Icon
+                v-else
+                :name="item.kind === 'code' ? FileCode : item.kind === 'video' || item.kind === 'audio' ? Play : FileText"
+                :size="32"
+                class="text-accent/70"
+              />
               <span v-if="item.kind === 'video'" class="absolute inset-0 grid place-items-center"><span class="grid size-11 place-items-center rounded-full bg-black/50 text-white backdrop-blur-sm"><Icon :name="Play" :size="22" /></span></span>
               <span v-if="item.duration" class="absolute right-2 bottom-2 rounded-md bg-black/65 px-1.5 py-0.5 text-[10px] text-white">{{ Math.floor(item.duration / 60) }}:{{ Math.floor(item.duration % 60).toString().padStart(2, '0') }}</span>
               <span v-if="item.version > 1" class="absolute top-2 right-2 rounded-md bg-surface/95 px-1.5 py-0.5 text-[10px] font-medium text-muted">v{{ item.version }}</span>

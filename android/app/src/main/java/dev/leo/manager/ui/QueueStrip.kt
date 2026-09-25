@@ -26,8 +26,8 @@ import dev.leo.manager.data.ChatAttachment
 import dev.leo.manager.data.ChatMessage
 
 /**
- * Follow-ups waiting for the agent, shown at the top of the composer. Each message keeps the
- * full width so it stays readable; the only inline action is sending the next one now. Tapping a message
+ * Follow-ups waiting for the agent, shown at the top of the composer. Each message keeps the full
+ * width so it stays readable; the only inline action is sending the next one now. Tapping a message
  * opens its actions (edit, pause the queue, remove) and swiping left reveals removal.
  */
 @Composable
@@ -47,31 +47,58 @@ internal fun QueueStrip(
 ) {
     var selected by rememberSaveable { mutableStateOf<String?>(null) }
     fun steerable(message: ChatMessage) =
-        canSteer && message.status == "queued" && message.questionId == null && message.mode != "steer"
+        canSteer &&
+            message.status == "queued" &&
+            message.questionId == null &&
+            message.mode != "steer"
     fun preview(message: ChatMessage) =
-        if (message.questionId in privateQuestions) "Réponse privée" else message.text.ifBlank { "Pièces jointes" }
+        if (message.questionId in privateQuestions) "Réponse privée"
+        else message.text.ifBlank { "Pièces jointes" }
     Column(
-        Modifier.fillMaxWidth().testTag("conversation-queue")
-            .padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = if (pending.size > 1) 0.dp else 4.dp)
+        Modifier.fillMaxWidth()
+            .testTag("conversation-queue")
+            .padding(
+                start = 12.dp,
+                end = 4.dp,
+                top = 8.dp,
+                bottom = if (pending.size > 1) 0.dp else 4.dp,
+            )
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(LeoIcons.Clock, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Icon(
+                LeoIcons.Clock,
+                null,
+                Modifier.size(14.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             Spacer(Modifier.width(6.dp))
             Text(
-                queueHeadline(paused, canSteer) + if (pending.size > 1) " · ${pending.size}" else "",
+                queueHeadline(paused, canSteer) +
+                    if (pending.size > 1) " · ${pending.size}" else "",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        Column(if (expanded) Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState()) else Modifier) {
+        Column(
+            if (expanded) Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState())
+            else Modifier
+        ) {
             (if (expanded) pending else pending.take(1)).forEachIndexed { index, message ->
                 key(message.id) {
-                    SwipeToRevealRow(enabled = message.status == "queued" && !busy, label = "Retirer", onDelete = { remove(message) }) { swipe ->
+                    SwipeToRevealRow(
+                        enabled = message.status == "queued" && !busy,
+                        label = "Retirer",
+                        onDelete = { remove(message) },
+                    ) { swipe ->
                         Row(
-                            swipe.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                                .clickable(onClickLabel = "Options du message en attente") { selected = message.id }
+                            swipe
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable(onClickLabel = "Options du message en attente") {
+                                    selected = message.id
+                                }
                                 .testTag("queued-message"),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
@@ -91,9 +118,14 @@ internal fun QueueStrip(
                                         else -> null
                                     }
                                 if (note != null)
-                                    Text(note, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text(
+                                        note,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
                             }
-                            // Only the next message gets the shortcut; the others offer it in their sheet.
+                            // Only the next message gets the shortcut; the others offer it in their
+                            // sheet.
                             if (index == 0 && steerable(message)) {
                                 Spacer(Modifier.width(8.dp))
                                 FilledTonalButton(
@@ -116,26 +148,32 @@ internal fun QueueStrip(
             TextButton(onClick = toggle, contentPadding = PaddingValues(horizontal = 0.dp)) {
                 Text(
                     if (expanded) "Réduire"
-                    else "+ ${pending.size - 1} autre${if (pending.size > 2) "s" else ""} message${if (pending.size > 2) "s" else ""}",
+                    else
+                        "+ ${pending.size - 1} autre${if (pending.size > 2) "s" else ""} message${if (pending.size > 2) "s" else ""}",
                     style = MaterialTheme.typography.labelMedium,
                 )
             }
     }
-    pending.firstOrNull { it.id == selected }?.let { message ->
-        QueuedMessageSheet(
-            message,
-            preview(message),
-            headline = queueHeadline(paused, canSteer),
-            busy = busy,
-            paused = paused,
-            steer = if (steerable(message)) ({ steer(message) }) else null,
-            edit = if (message.status == "queued" && message.questionId == null) ({ edit(message) }) else null,
-            remove = if (message.status == "queued") ({ remove(message) }) else null,
-            togglePause = togglePause,
-            attachments = attachments,
-            close = { selected = null },
-        )
-    }
+    pending
+        .firstOrNull { it.id == selected }
+        ?.let { message ->
+            QueuedMessageSheet(
+                message,
+                preview(message),
+                headline = queueHeadline(paused, canSteer),
+                busy = busy,
+                paused = paused,
+                steer = if (steerable(message)) ({ steer(message) }) else null,
+                edit =
+                    if (message.status == "queued" && message.questionId == null)
+                        ({ edit(message) })
+                    else null,
+                remove = if (message.status == "queued") ({ remove(message) }) else null,
+                togglePause = togglePause,
+                attachments = attachments,
+                close = { selected = null },
+            )
+        }
 }
 
 private fun queueHeadline(paused: Boolean, working: Boolean) =
@@ -165,15 +203,28 @@ private fun QueuedMessageSheet(
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         containerColor = MaterialTheme.colorScheme.background,
     ) {
-        Column(Modifier.fillMaxWidth().testTag("queued-message-sheet").padding(horizontal = 20.dp).padding(bottom = 24.dp)) {
+        Column(
+            Modifier.fillMaxWidth()
+                .testTag("queued-message-sheet")
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp)
+        ) {
             Text(
                 headline,
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(8.dp))
-            Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
-                Column(Modifier.fillMaxWidth().heightIn(max = 220.dp).verticalScroll(rememberScrollState()).padding(12.dp)) {
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+            ) {
+                Column(
+                    Modifier.fillMaxWidth()
+                        .heightIn(max = 220.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(12.dp)
+                ) {
                     Text(text, style = MaterialTheme.typography.bodyMedium)
                     if (message.attachments.isNotEmpty()) attachments(message.attachments)
                 }
@@ -193,17 +244,34 @@ private fun QueuedMessageSheet(
                     then(it),
                 )
             }
-            edit?.let { SheetAction(LeoIcons.Pencil, "Modifier", null, MaterialTheme.colorScheme.onSurface, !busy, then(it)) }
+            edit?.let {
+                SheetAction(
+                    LeoIcons.Pencil,
+                    "Modifier",
+                    null,
+                    MaterialTheme.colorScheme.onSurface,
+                    !busy,
+                    then(it),
+                )
+            }
             SheetAction(
                 if (paused) Icons.Default.PlayArrow else LeoIcons.Pause,
                 if (paused) "Reprendre la file" else "Mettre la file en pause",
-                if (paused) "Les messages repartent dans l’ordre" else "Rien ne part tant que vous ne reprenez pas",
+                if (paused) "Les messages repartent dans l’ordre"
+                else "Rien ne part tant que vous ne reprenez pas",
                 MaterialTheme.colorScheme.onSurface,
                 !busy,
                 then(togglePause),
             )
             remove?.let {
-                SheetAction(Icons.Default.Delete, "Retirer de la file", null, MaterialTheme.colorScheme.error, !busy, then(it))
+                SheetAction(
+                    Icons.Default.Delete,
+                    "Retirer de la file",
+                    null,
+                    MaterialTheme.colorScheme.error,
+                    !busy,
+                    then(it),
+                )
             }
             if (message.status == "sending")
                 Text(
@@ -226,16 +294,28 @@ private fun SheetAction(
     onClick: () -> Unit,
 ) {
     Row(
-        Modifier.fillMaxWidth().heightIn(min = 56.dp).clip(RoundedCornerShape(12.dp))
-            .clickable(enabled = enabled, onClick = onClick).padding(horizontal = 4.dp, vertical = 8.dp),
+        Modifier.fillMaxWidth()
+            .heightIn(min = 56.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 4.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(icon, null, Modifier.size(20.dp), tint = tint)
         Spacer(Modifier.width(16.dp))
         Column {
-            Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium, color = tint)
+            Text(
+                title,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium,
+                color = tint,
+            )
             if (detail != null)
-                Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
         }
     }
 }

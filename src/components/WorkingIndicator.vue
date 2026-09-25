@@ -14,7 +14,12 @@ onBeforeUnmount(() => clearInterval(timer))
 </script>
 
 <template>
-  <div class="agent-working flex min-w-0 items-center gap-3" role="status" aria-live="polite" :aria-label="[step.title, step.detail].filter(Boolean).join(': ')">
+  <div
+    class="agent-working flex min-w-0 items-center gap-3"
+    role="status"
+    aria-live="polite"
+    :aria-label="[step.title, step.detail].filter(Boolean).join(': ')"
+  >
     <span class="souffle-halo size-9 shrink-0">
       <span class="souffle-core grid size-5 place-items-center rounded-full bg-accent text-surface">
         <Icon :name="Zap" :size="10" />

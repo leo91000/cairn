@@ -346,11 +346,23 @@ test('dark appearance settings, empty states and connection sign-in feedback', a
   await page.goto('/tasks')
   await expect(page.getByRole('heading', { name: 'No missions yet', exact: true })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('empty-tasks.png'), fullPage: true, animations: 'disabled' })
-  await page.route('**/api/connections?*', route => route.fulfill({ json: [
-    { provider: 'github', installed: false, connected: false },
-  ] }))
+  await page.route('**/api/connections?*', route => route.fulfill({
+    json: [
+      { provider: 'github', installed: false, connected: false },
+    ],
+  }))
   // Synthetic feedback only: never initiate a real device login or capture a real code.
-  const signIn = { accountId: 'demo', provider: 'codex', state: 'pending', phase: 'authorizing', code: 'DEMO-CODE', url: 'https://example.com', acceptsCode: false, expiresAt: Date.now() + 600000, error: null }
+  const signIn = {
+    accountId: 'demo',
+    provider: 'codex',
+    state: 'pending',
+    phase: 'authorizing',
+    code: 'DEMO-CODE',
+    url: 'https://example.com',
+    acceptsCode: false,
+    expiresAt: Date.now() + 600000,
+    error: null,
+  }
   await page.route('**/api/accounts', route => route.fulfill({ json: { accounts: [], signIn } }))
   await page.goto('/connections')
   // A sign-in in progress reopens its window on page load.
@@ -359,8 +371,19 @@ test('dark appearance settings, empty states and connection sign-in feedback', a
     await page.setViewportSize({ width, height: width === 320 ? 568 : 1000 })
     await page.screenshot({ path: testInfo.outputPath(`${width}-connection-pending.png`), fullPage: true, animations: 'disabled' })
   }
+
   await page.unroute('**/api/accounts')
-  await page.route('**/api/accounts', route => route.fulfill({ json: { accounts: [], signIn: { ...signIn, state: 'failed', code: null, error: 'The verification code expired. Please try again.' } } }))
+  await page.route('**/api/accounts', route => route.fulfill({
+    json: {
+      accounts: [],
+      signIn: {
+        ...signIn,
+        state: 'failed',
+        code: null,
+        error: 'The verification code expired. Please try again.',
+      },
+    },
+  }))
   await expect(page.getByRole('heading', { name: 'Let’s try that again', exact: true })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('connection-failed.png'), fullPage: true, animations: 'disabled' })
 })

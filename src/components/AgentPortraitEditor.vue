@@ -21,6 +21,7 @@ onMounted(async () => {
   }
   catch (e) { error.value = (e as Error).message }
 })
+
 async function generate() {
   if (!props.agentId || busy.value || generating.value)
     return
@@ -32,6 +33,7 @@ async function generate() {
   catch (e) { error.value = (e as Error).message }
   finally { busy.value = false }
 }
+
 async function upload(event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
@@ -43,6 +45,7 @@ async function upload(event: Event) {
     error.value = 'Choose an image smaller than 5 MB.'
     return
   }
+
   busy.value = true
   try {
     updateAgentPortrait(await api<Agent>(`/agents/${props.agentId}/avatar`, {
@@ -74,13 +77,26 @@ async function upload(event: Event) {
         {{ configured ? 'Generation uses your connected Codex subscription quota. Changes are saved immediately.' : 'Upload an image to give your agent a face. Changes here are saved immediately.' }}
       </p>
       <div v-if="agentId" class="mt-3 flex flex-wrap gap-2">
-        <UiButton v-if="configured" size="small" :disabled="disabled || busy || generating" @click="generate">
+        <UiButton
+          v-if="configured"
+          size="small"
+          :disabled="disabled || busy || generating"
+          @click="generate"
+        >
           <Icon :name="agent?.avatar?.url ? RefreshCw : Sparkles" :size="14" />{{ agent?.avatar?.url ? 'Regenerate portrait' : 'Generate portrait' }}
         </UiButton>
         <UiButton size="small" :disabled="disabled || busy" @click="fileInput?.click()">
           {{ busy ? 'Please wait…' : 'Upload image' }}
         </UiButton>
-        <input ref="fileInput" class="hidden" type="file" accept="image/png,image/jpeg,image/webp" aria-label="Upload agent portrait" :disabled="disabled || busy" @change="upload">
+        <input
+          ref="fileInput"
+          class="hidden"
+          type="file"
+          accept="image/png,image/jpeg,image/webp"
+          aria-label="Upload agent portrait"
+          :disabled="disabled || busy"
+          @change="upload"
+        >
       </div>
       <p v-if="agentId" class="mt-2 text-xs text-muted">
         PNG, JPEG or WebP · up to 5 MB · cropped to a square.

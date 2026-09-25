@@ -2,7 +2,12 @@
 import type { Skill } from '../../shared/contracts'
 import { twMerge } from 'tailwind-merge'
 import { computed, ref } from 'vue'
-import { api, notify, refresh, state } from '../api'
+import {
+  api,
+  notify,
+  refresh,
+  state,
+} from '../api'
 import Empty from '../components/Empty.vue'
 import Icon from '../components/Icon.vue'
 import Markdown from '../components/Markdown.vue'
@@ -11,7 +16,19 @@ import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
 import UiSegments from '../components/UiSegments.vue'
 import VirtualSelect from '../components/VirtualSelect.vue'
-import { BookOpen, Code, Eye, FileCode, FolderGit2, Globe, Layers, Pencil, Plus, Search, Trash2 } from '../icons'
+import {
+  BookOpen,
+  Code,
+  Eye,
+  FileCode,
+  FolderGit2,
+  Globe,
+  Layers,
+  Pencil,
+  Plus,
+  Search,
+  Trash2,
+} from '../icons'
 import { iconButton } from '../ui'
 
 const query = ref('')
@@ -30,8 +47,20 @@ const file = ref('SKILL.md')
 const fileContent = ref('')
 const newFile = ref('')
 const scopes = computed(() => [
-  { value: 'global', label: 'Global', description: 'Available to every project', group: 'Workspace', icon: Globe },
-  ...state.projects.map(project => ({ value: project.id, label: project.name, description: project.path, group: 'Projects', icon: FolderGit2 })),
+  {
+    value: 'global',
+    label: 'Global',
+    description: 'Available to every project',
+    group: 'Workspace',
+    icon: Globe,
+  },
+  ...state.projects.map(project => ({
+    value: project.id,
+    label: project.name,
+    description: project.path,
+    group: 'Projects',
+    icon: FolderGit2,
+  })),
 ])
 const scopeFilters = computed(() => [{ value: 'all', label: 'All skills', icon: Layers }, ...scopes.value])
 const fileOptions = computed(() => [...new Set([...files.value, file.value])].map(entry => ({ value: entry, label: entry, icon: FileCode })))
@@ -44,6 +73,7 @@ const items = computed(() =>
         .includes(query.value.toLowerCase()),
   ),
 )
+
 async function edit(skill?: Skill) {
   original.value = skill
   name.value = skill?.name ?? ''
@@ -59,6 +89,7 @@ async function edit(skill?: Skill) {
     ? await api(`/skills/${skill.scope}/${skill.name}/files`)
     : []
 }
+
 async function save() {
   busy.value = true
   error.value = ''
@@ -75,6 +106,7 @@ async function save() {
         body: JSON.stringify({ path: file.value, content: fileContent.value }),
       })
     }
+
     await refresh()
     notify('Skill saved')
     open.value = false
@@ -86,6 +118,7 @@ async function save() {
     busy.value = false
   }
 }
+
 async function readFile(value: string) {
   error.value = ''
   try {
@@ -96,12 +129,14 @@ async function readFile(value: string) {
         )
       ).content
     }
+
     file.value = value
   }
   catch (e) {
     error.value = (e as Error).message
   }
 }
+
 async function remove() {
   try {
     await api(`/skills/${deleting.value!.scope}/${deleting.value!.name}`, {
@@ -128,7 +163,13 @@ async function remove() {
   </div>
   <div class="toolbar flex items-center justify-between gap-5 mb-[23px] tablet:items-start tablet:flex-wrap phone:gap-4 phone:min-w-0">
     <div class="inline-label flex flex-row items-center gap-2.5 text-xs text-muted whitespace-nowrap min-w-0 max-w-full">
-      <span>Scope</span><VirtualSelect v-model="scopeFilter" label="Scope" :options="scopeFilters" compact hide-label />
+      <span>Scope</span><VirtualSelect
+        v-model="scopeFilter"
+        label="Scope"
+        :options="scopeFilters"
+        compact
+        hide-label
+      />
     </div><label class="search-field flex flex-row items-center gap-[7px] text-subtle bg-raised border border-line rounded-[7px] min-w-0 phone:w-full px-2.5 py-0"><Icon :name="Search" :size="17" /><input
       v-model="query"
       placeholder="Search skills"
@@ -198,11 +239,29 @@ async function remove() {
             required
             pattern="[a-z0-9][a-z0-9\-]{0,63}"
             placeholder="my-skill"
-          ><small>Match the name in your YAML frontmatter.</small></label><VirtualSelect v-model="scope" label="Scope" :options="scopes" :disabled="!!original" />
+          ><small>Match the name in your YAML frontmatter.</small></label><VirtualSelect
+            v-model="scope"
+            label="Scope"
+            :options="scopes"
+            :disabled="!!original"
+          />
         </div>
         <div class="editor-toolbar flex justify-between items-center mt-4.5 mb-2.5 text-xs text-muted phone:flex-wrap phone:gap-2.5">
-          <VirtualSelect v-if="original" :model-value="file" label="Skill file" :options="fileOptions" compact hide-label @update:model-value="readFile" /><span v-else>SKILL.md</span>
-          <UiSegments v-model="preview" label="Skill editor view" compact :options="[{ value: false, label: 'Write', icon: Code }, { value: true, label: 'Preview', icon: Eye }]" />
+          <VirtualSelect
+            v-if="original"
+            :model-value="file"
+            label="Skill file"
+            :options="fileOptions"
+            compact
+            hide-label
+            @update:model-value="readFile"
+          /><span v-else>SKILL.md</span>
+          <UiSegments
+            v-model="preview"
+            label="Skill editor view"
+            compact
+            :options="[{ value: false, label: 'Write', icon: Code }, { value: true, label: 'Preview', icon: Eye }]"
+          />
         </div>
         <div v-if="preview" class="skill-preview h-82.5 overflow-auto border border-line rounded-lg p-5">
           <Markdown :content="file === 'SKILL.md' ? content : fileContent" />

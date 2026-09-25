@@ -14,6 +14,7 @@ use reqwest::{
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
+
 async fn get(item: &Value, url: &str) -> Result<Value> {
     let response = network::fetch(
         url,
@@ -28,6 +29,7 @@ async fn get(item: &Value, url: &str) -> Result<Value> {
     }
     response.json()
 }
+
 fn valid_url(item: &Value, value: &str) -> Result<url::Url> {
     let url = url::Url::parse(value).map_err(|_| Error::bad("Unsupported authorization URL."))?;
     if !["http", "https"].contains(&url.scheme())
@@ -40,19 +42,24 @@ fn valid_url(item: &Value, value: &str) -> Result<url::Url> {
     }
     Ok(url)
 }
+
 async fn discover(s: &Service, item: &Value) -> Result<Value> {
     let endpoint = valid_url(item, text(item, "url"))?;
     let probe = json!({
-    "jsonrpc":"2.0","id":1,"method":"server/discover","params":{
-    "_meta":{
-    "io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{
-    "name":"leo-mcp-client","version":env!("CARGO_PKG_VERSION")}
-    ,"io.modelcontextprotocol/clientCapabilities":{
-    }
-    }
-    }
-    }
-    );
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "server/discover",
+        "params": {
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "leo-mcp-client",
+                    "version": env!("CARGO_PKG_VERSION")
+                },
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }
+        }
+    });
     let headers = HeaderMap::from_iter([
         (
             "content-type".parse().unwrap(),
@@ -132,19 +139,23 @@ async fn discover(s: &Service, item: &Value) -> Result<Value> {
         .ok_or_else(|| Error::bad("OAuth authorization server is missing."))?;
     let metadata = authorization_metadata(item, server).await?;
     let result = json!({
-    "authorizationServerUrl":server,"resourceMetadataUrl":metadata_url,"resourceMetadata":resource,"authorizationServerMetadata":metadata}
-    );
+        "authorizationServerUrl": server,
+        "resourceMetadataUrl": metadata_url,
+        "resourceMetadata": resource,
+        "authorizationServerMetadata": metadata
+    });
     s.mcps
         .change_secrets(
             s,
             text(item, "id"),
             json!({
-            "discovery":result}
-            ),
+                "discovery": result
+            }),
         )
         .await?;
     Ok(result)
 }
+
 async fn authorization_metadata(item: &Value, server: &str) -> Result<Value> {
     let issuer = valid_url(item, server)?;
     let suffix = issuer.path().trim_end_matches('/');
@@ -178,12 +189,13 @@ async fn authorization_metadata(item: &Value, server: &str) -> Result<Value> {
     }
     Ok(metadata)
 }
+
 async fn client(s: &Service, item: &Value, discovery: &Value) -> Result<Value> {
     let secret = s.mcps.secrets(s, text(item, "id")).await?;
     if !text(item, "clientId").is_empty() {
         let mut client = json!({
-        "client_id":item["clientId"]}
-        );
+            "client_id": item["clientId"]
+        });
         if !text(&secret, "clientSecret").is_empty() {
             client["client_secret"] = secret["clientSecret"].clone();
         }
@@ -203,8 +215,12 @@ async fn client(s: &Service, item: &Value, discovery: &Value) -> Result<Value> {
     }
     valid_url(item, registration)?;
     let mut metadata = json!({
-    "client_name":"Leo Agent Manager","redirect_uris":[format!("{}/oauth/mcp/callback",s.config.public_url)],"grant_types":["authorization_code","refresh_token"],"response_types":["code"],"token_endpoint_auth_method":"none"}
-    );
+        "client_name": "Leo Agent Manager",
+        "redirect_uris": [format!("{}/oauth/mcp/callback", s.config.public_url)],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none"
+    });
     if !text(item, "scopes").is_empty() {
         metadata["scope"] = item["scopes"].clone();
     }
@@ -234,12 +250,13 @@ async fn client(s: &Service, item: &Value, discovery: &Value) -> Result<Value> {
             s,
             text(item, "id"),
             json!({
-            "client":client}
-            ),
+                "client": client
+            }),
         )
         .await?;
     Ok(client)
 }
+
 async fn exchange(
     s: &Service,
     item: &Value,
@@ -348,11 +365,13 @@ async fn exchange(
             s,
             text(item, "id"),
             json!({
-            "tokens":tokens,"tokenExpiresAt":expires}
-            ),
+                "tokens": tokens,
+                "tokenExpiresAt": expires
+            }),
         )
         .await
 }
+
 pub async fn refresh(s: &Service, item: &Value) -> Result<()> {
     let secrets = s.mcps.secrets(s, text(item, "id")).await?;
     let refresh = text(&secrets["tokens"], "refresh_token");
@@ -375,13 +394,16 @@ pub async fn refresh(s: &Service, item: &Value) -> Result<()> {
     )
     .await
 }
+
 impl Mcps {
     pub async fn connect(&self, s: &Service, id: &str, session: &str) -> Result<Value> {
         self.connect_mode(s, id, session, false).await
     }
+
     pub async fn connect_native(&self, s: &Service, id: &str, session: &str) -> Result<Value> {
         self.connect_mode(s, id, session, true).await
     }
+
     async fn connect_mode(
         &self,
         s: &Service,
@@ -409,15 +431,20 @@ impl Mcps {
             s,
             id,
             json!({
-            "tokens":null,"verifier":null,"discovery":null,"tokenExpiresAt":null}
-            ),
+                "tokens": null,
+                "verifier": null,
+                "discovery": null,
+                "tokenExpiresAt": null
+            }),
         )
         .await?;
         merge(
             &mut item,
             &json!({
-            "state":"needs-auth","error":"","checkedAt":null}
-            ),
+                "state": "needs-auth",
+                "error": "",
+                "checkedAt": null
+            }),
         );
         s.store.put("mcps", item.clone()).await?;
         let result = async {
@@ -425,9 +452,36 @@ impl Mcps {
             let client = client(s, &item, &discovery).await?;
             let verifier = token();
             let nonce = token();
-            let mut authorization = valid_url(&item, text(&discovery["authorizationServerMetadata"], "authorization_endpoint"))?;
-            authorization.query_pairs_mut().extend_pairs([("response_type", "code"), ("client_id", text(&client, "client_id")), ("redirect_uri", &format!("{}/oauth/mcp/callback", s.config.public_url)), ("code_challenge", &digest(&verifier)), ("code_challenge_method", "S256"), ("state", &nonce), ("resource", text(&discovery["resourceMetadata"], "resource"))]);
-            let scope = if text(&item, "scopes").is_empty() { discovery["resourceMetadata"]["scopes_supported"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(" ") } else { text(&item, "scopes").into() };
+            let mut authorization = valid_url(
+                &item,
+                text(
+                    &discovery["authorizationServerMetadata"],
+                    "authorization_endpoint",
+                ),
+            )?;
+            authorization.query_pairs_mut().extend_pairs([
+                ("response_type", "code"),
+                ("client_id", text(&client, "client_id")),
+                (
+                    "redirect_uri",
+                    &format!("{}/oauth/mcp/callback", s.config.public_url),
+                ),
+                ("code_challenge", &digest(&verifier)),
+                ("code_challenge_method", "S256"),
+                ("state", &nonce),
+                ("resource", text(&discovery["resourceMetadata"], "resource")),
+            ]);
+            let scope = if text(&item, "scopes").is_empty() {
+                discovery["resourceMetadata"]["scopes_supported"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            } else {
+                text(&item, "scopes").into()
+            };
             if !scope.is_empty() {
                 authorization.query_pairs_mut().append_pair("scope", &scope);
             }
@@ -435,8 +489,8 @@ impl Mcps {
                 s,
                 id,
                 json!({
-                "verifier":verifier}
-                ),
+                    "verifier": verifier
+                }),
             )
             .await?;
             let expires = now() + 600000;
@@ -444,14 +498,19 @@ impl Mcps {
                 .set(
                     &format!("mcp-oauth:{}", hex_digest(&nonce)),
                     json!({
-                    "connectionId":id,"revision":item["revision"],"session":hex_digest(session),"nonce":nonce,"native":native,"expiresAt":expires}
-                    ),
+                        "connectionId": id,
+                        "revision": item["revision"],
+                        "session": hex_digest(session),
+                        "nonce": nonce,
+                        "native": native,
+                        "expiresAt": expires
+                    }),
                     Some(expires),
                 )
                 .await?;
             Ok(json!({
-            "url":authorization.as_str()}
-            ))
+                "url": authorization.as_str()
+            }))
         }
         .await;
         if let Err(error) = &result {
@@ -459,6 +518,7 @@ impl Mcps {
         }
         result
     }
+
     /// The browser may return a code, but only the initiating authenticated native
     /// session can exchange it. No session cookie or token is transferred to the browser.
     pub async fn capture_native_callback(
@@ -498,6 +558,7 @@ impl Mcps {
             })
             .await
     }
+
     pub async fn finish_native_callback(
         &self,
         s: &Service,
@@ -516,15 +577,24 @@ impl Mcps {
                     && v["session"] == hex_digest(session)
             });
         let Some(pending) = pending else {
-            return Ok(json!({"pending":false,"result":"expired"}));
+            return Ok(json!({
+                "pending": false,
+                "result": "expired"
+            }));
         };
         if pending["callback"].is_null() {
-            return Ok(json!({"pending":true}));
+            return Ok(json!({
+                "pending": true
+            }));
         }
         let parameters = serde_json::from_value(pending["callback"].clone())?;
         let result = self.callback(s, &parameters, session).await?;
-        Ok(json!({"pending":false,"result":result}))
+        Ok(json!({
+            "pending": false,
+            "result": result
+        }))
     }
+
     pub async fn callback(
         &self,
         s: &Service,
@@ -573,21 +643,46 @@ impl Mcps {
                 return Err(Error::bad("Authorization session expired."));
             }
             let expected = text(&discovery["authorizationServerMetadata"], "issuer");
-            if parameters.get("iss").is_some_and(|issuer| issuer != expected) || (discovery["authorizationServerMetadata"]["authorization_response_iss_parameter_supported"] == true && !parameters.contains_key("iss")) {
-                return Err(Error::bad("OAuth callback issuer does not match the authorization server."));
+            if parameters
+                .get("iss")
+                .is_some_and(|issuer| issuer != expected)
+                || (discovery["authorizationServerMetadata"]["authorization_response_iss_parameter_supported"]
+                    == true
+                    && !parameters.contains_key("iss"))
+            {
+                return Err(Error::bad(
+                    "OAuth callback issuer does not match the authorization server.",
+                ));
             }
             // Re-discover the issuer metadata before exchanging the code, binding it to
             // the issuer recorded at redirect time instead of trusting callback input.
             let metadata = authorization_metadata(&item, expected).await?;
             if metadata["issuer"] != discovery["authorizationServerMetadata"]["issuer"] {
-                return Err(Error::bad("OAuth authorization server changed during sign-in."));
+                return Err(Error::bad(
+                    "OAuth authorization server changed during sign-in.",
+                ));
             }
-            exchange(s, &item, HashMap::from([("grant_type".into(), "authorization_code".into()), ("code".into(), code.clone()), ("redirect_uri".into(), format!("{}/oauth/mcp/callback", s.config.public_url)), ("code_verifier".into(), text(&secrets, "verifier").into())]), discovery).await?;
+            exchange(
+                s,
+                &item,
+                HashMap::from([
+                    ("grant_type".into(), "authorization_code".into()),
+                    ("code".into(), code.clone()),
+                    (
+                        "redirect_uri".into(),
+                        format!("{}/oauth/mcp/callback", s.config.public_url),
+                    ),
+                    ("code_verifier".into(), text(&secrets, "verifier").into()),
+                ]),
+                discovery,
+            )
+            .await?;
             self.change_secrets(
                 s,
                 id,
                 json!({
-                "verifier":null}
+                    "verifier": null
+                }
                 ),
             )
             .await?;
@@ -602,8 +697,11 @@ impl Mcps {
                 merge(
                     &mut item,
                     &json!({
-                    "state":"connected","tools":tools,"error":"","checkedAt":now()}
-                    ),
+                        "state": "connected",
+                        "tools": tools,
+                        "error": "",
+                        "checkedAt": now()
+                    }),
                 );
                 s.store.put("mcps", item).await?;
                 Ok("connected".into())

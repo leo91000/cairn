@@ -21,6 +21,7 @@ onMounted(async () => {
     error.value = (e as Error).message
   }
 })
+
 async function consent(approved: boolean) {
   busy.value = true
   try {

@@ -1,6 +1,12 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+} from 'vitest'
 import { MAIN_AGENT_ID } from '../shared/contracts.ts'
 import { LOCAL_NODE_ID } from '../shared/nodes.ts'
 import { fixture } from './helpers.ts'
@@ -19,9 +25,23 @@ describe('agent access and task inheritance', () => {
   })
   it('creates a default main agent and allows project-free tasks', async () => {
     const main = ctx.service.store.get('agents', MAIN_AGENT_ID)!
-    expect(main.access).toEqual({ nodes: [LOCAL_NODE_ID], maxResources: null, projects: null, skills: null, mcps: null, mcpTools: {}, github: true, sandbox: 'yolo' })
+    expect(main.access).toEqual({
+      nodes: [LOCAL_NODE_ID],
+      maxResources: null,
+      projects: null,
+      skills: null,
+      mcps: null,
+      mcpTools: {},
+      github: true,
+      sandbox: 'yolo',
+    })
     expect(() => ctx.service.remove('agents', main.id)).toThrow(/cannot be removed/)
-    const task = ctx.service.task({ name: 'Cross-project review', prompt: 'Review projects', agentId: main.id, worktree: false })
+    const task = ctx.service.task({
+      name: 'Cross-project review',
+      prompt: 'Review projects',
+      agentId: main.id,
+      worktree: false,
+    })
     expect(task.projectId).toBeNull()
     const secondPath = path.join(ctx.directory, 'second')
     await mkdir(secondPath)
@@ -34,7 +54,12 @@ describe('agent access and task inheritance', () => {
     const agent = ctx.service.agent({ name: 'Restricted', access: { projects: [], skills: [], github: false } })
     expect(isolated(agent)).toBe(true)
     expect(() => ctx.service.task({ ...ctx.task, agentId: agent.id })).toThrow(/unavailable/)
-    expect(() => ctx.service.task({ ...ctx.task, projectId: null, agentId: agent.id, skills: ['global/release'] })).toThrow(/outside/)
+    expect(() => ctx.service.task({
+      ...ctx.task,
+      projectId: null,
+      agentId: agent.id,
+      skills: ['global/release'],
+    })).toThrow(/outside/)
     expect(() => ctx.service.agent({ name: 'Leaky credentials', access: { projects: [] } })).toThrow(/GitHub/)
     const task = ctx.service.task({ name: 'No resources', prompt: 'Think', agentId: agent.id })
     const run = await ctx.service.enqueue(task.id)
@@ -49,7 +74,15 @@ describe('agent access and task inheritance', () => {
     expect(ctx.service.store.run(run.id)?.summary).toContain('access changed')
   })
   it('preserves restrictions when older API clients omit access during profile edits', () => {
-    const agent = ctx.service.agent({ name: 'Restricted', access: { projects: [], skills: [], github: false, sandbox: 'read-only' } })
+    const agent = ctx.service.agent({
+      name: 'Restricted',
+      access: {
+        projects: [],
+        skills: [],
+        github: false,
+        sandbox: 'read-only',
+      },
+    })
     const updated = ctx.service.agent({ name: 'Renamed' }, agent.id)
     expect(updated.access).toEqual(agent.access)
   })
@@ -66,7 +99,15 @@ describe('agent access and task inheritance', () => {
     await ctx.service.skills.save('review', '---\nname: review\ndescription: Review\n---\nReview carefully')
     await ctx.service.skills.file('review', 'references/checks.md', 'Expected checks')
     await ctx.service.skills.save('release', '---\nname: release\ndescription: Release\n---\nPublish')
-    const agent = ctx.service.agent({ name: 'Reviewer', access: { projects: [ctx.project.id], skills: ['global/review'], github: false, sandbox: 'read-only' } })
+    const agent = ctx.service.agent({
+      name: 'Reviewer',
+      access: {
+        projects: [ctx.project.id],
+        skills: ['global/review'],
+        github: false,
+        sandbox: 'read-only',
+      },
+    })
     const task = ctx.service.task({ ...ctx.task, agentId: agent.id, skills: null })
     const run = await ctx.service.enqueue(task.id)
     const prepared = await prepareExecution(run, { ...ctx.service.config, runnerUrl: 'http://runner' })
@@ -87,7 +128,12 @@ describe('agent access and task inheritance', () => {
     const headers = await ctx.login()
     const agent = ctx.service.agent({ name: 'Private connection', access: { github: false } })
     const url = `/api/agents/${agent.id}/github-token`
-    const saved = await ctx.app.inject({ method: 'PUT', url, headers, payload: { token: 'fixture-private-credential' } })
+    const saved = await ctx.app.inject({
+      method: 'PUT',
+      url,
+      headers,
+      payload: { token: 'fixture-private-credential' },
+    })
     expect(saved.statusCode).toBe(200)
     expect(saved.json()).toEqual({ configured: true })
     const read = await ctx.app.inject({ method: 'GET', url, headers })

@@ -1,10 +1,22 @@
 <script setup lang="ts">
 import type { ChatView } from '../../shared/chats'
 import type { FilItem } from '../signal'
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import {
+  computed,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from 'vue'
 import { useRouter } from 'vue-router'
 import { api, notify, state } from '../api'
-import { CheckCheck, ListFilter, RotateCcw, Search, X } from '../icons'
+import {
+  CheckCheck,
+  ListFilter,
+  RotateCcw,
+  Search,
+  X,
+} from '../icons'
 import { refreshMissionRuns, useMissionRuns } from '../mission-runs'
 import { typingTarget } from '../shortcuts'
 import { filOf, greeting, shortAge } from '../signal'
@@ -24,10 +36,12 @@ const clock = setInterval(() => now.value = Date.now(), 30000)
 onBeforeUnmount(() => clearInterval(clock))
 
 const fil = computed(() => filOf(props.chats, state.tasks, runs.value))
+
 function matches(item: FilItem) {
   const query = filter.value.trim().toLowerCase()
   return !query || [item.title, item.subtitle, item.agent, item.project ?? ''].some(value => value.toLowerCase().includes(query))
 }
+
 const sections = computed(() => [
   { key: 'for-you', label: 'For you', items: fil.value.forYou.filter(matches) },
   { key: 'live', label: 'Live', items: fil.value.live.filter(matches) },
@@ -47,14 +61,23 @@ watch(() => props.selected, (id) => {
 function current(item: FilItem) {
   return (item.chatId && item.chatId === props.selected) || cursor.value === item.key
 }
+
 function badge(item: FilItem) {
   return item.kind === 'question' ? 'question' : item.kind === 'failed' || item.kind === 'failed-mission' ? 'failed' : item.kind === 'queued' ? 'queued' : item.kind === 'paused' ? 'paused' : null
 }
-const labels: Partial<Record<FilItem['kind'], string>> = { 'question': 'Needs your answer', 'failed': 'Failed', 'failed-mission': 'Mission failed', 'review': 'Needs review' }
+
+const labels: Partial<Record<FilItem['kind'], string>> = {
+  'question': 'Needs your answer',
+  'failed': 'Failed',
+  'failed-mission': 'Mission failed',
+  'review': 'Needs review',
+}
+
 function open(item: FilItem) {
   cursor.value = item.key
   void router.push(item.to)
 }
+
 async function runAgain(item: FilItem) {
   try {
     await api(`/tasks/${item.taskId}/run`, { method: 'POST' })
@@ -75,6 +98,7 @@ function move(delta: number) {
   cursor.value = next.key
   document.querySelector(`[data-fil-key="${CSS.escape(next.key)}"]`)?.scrollIntoView({ block: 'nearest' })
 }
+
 function key(event: KeyboardEvent) {
   if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || typingTarget(event.target) || document.querySelector('dialog[open]'))
     return
@@ -95,6 +119,7 @@ function key(event: KeyboardEvent) {
     filterInput.value?.focus()
   }
 }
+
 onMounted(() => document.addEventListener('keydown', key))
 onBeforeUnmount(() => document.removeEventListener('keydown', key))
 </script>
@@ -126,7 +151,13 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
           @keydown.esc.stop="filter = ''; filterInput?.blur()"
         >
         <kbd v-if="!filter" class="keycap phone:hidden">/</kbd>
-        <button v-else type="button" class="grid size-6 place-items-center rounded-md hover:bg-hover" aria-label="Clear filter" @click="filter = ''">
+        <button
+          v-else
+          type="button"
+          class="grid size-6 place-items-center rounded-md hover:bg-hover"
+          aria-label="Clear filter"
+          @click="filter = ''"
+        >
           <Icon :name="X" :size="14" />
         </button>
       </label>
@@ -146,7 +177,12 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
           <p v-if="section.key === 'for-you' && !section.items.length && !filter" class="mx-2 flex items-center gap-2 rounded-2xl border border-dashed border-line px-4 py-3 text-[13px] text-muted">
             <Icon :name="CheckCheck" :size="16" class="text-success" /> All clear — nothing is waiting on you.
           </p>
-          <TransitionGroup tag="div" name="fil-row" class="relative flex flex-col" :class="section.key === 'for-you' ? 'gap-2 px-1' : 'gap-0.5'">
+          <TransitionGroup
+            tag="div"
+            name="fil-row"
+            class="relative flex flex-col"
+            :class="section.key === 'for-you' ? 'gap-2 px-1' : 'gap-0.5'"
+          >
             <template v-if="section.key === 'for-you'">
               <article
                 v-for="item in section.items"
@@ -157,7 +193,12 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
               >
                 <span class="absolute inset-y-0 left-0 w-[3px]" :class="item.kind === 'review' ? 'bg-warning' : 'bg-coral'" />
                 <button type="button" class="flex w-full items-start gap-3 px-4 pb-3 pt-3.5 text-left" @click="open(item)">
-                  <AgentAvatar :name="item.agent" :identity="item.agentKey" :size="34" :badge="badge(item)" />
+                  <AgentAvatar
+                    :name="item.agent"
+                    :identity="item.agentKey"
+                    :size="34"
+                    :badge="badge(item)"
+                  />
                   <span class="min-w-0 flex-1">
                     <span class="flex items-center gap-2 whitespace-nowrap text-[11.5px] font-semibold">
                       <span :class="item.kind === 'review' ? 'text-warning' : 'text-coral'">{{ labels[item.kind] }}</span>
@@ -170,10 +211,22 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                   </span>
                 </button>
                 <div class="flex gap-1.5 px-4 pb-3.5 pl-[62px]">
-                  <button v-if="item.kind === 'failed-mission'" type="button" :aria-label="`Run “${item.title}” again`" class="press flex h-8 items-center gap-1.5 rounded-full bg-coral-soft px-3 text-[12.5px] font-semibold text-coral" @click="runAgain(item)">
+                  <button
+                    v-if="item.kind === 'failed-mission'"
+                    type="button"
+                    :aria-label="`Run “${item.title}” again`"
+                    class="press flex h-8 items-center gap-1.5 rounded-full bg-coral-soft px-3 text-[12.5px] font-semibold text-coral"
+                    @click="runAgain(item)"
+                  >
                     <Icon :name="RotateCcw" :size="14" /> Run again
                   </button>
-                  <button type="button" :aria-label="`${item.kind === 'question' ? 'Answer' : item.kind === 'failed' ? 'Resume' : 'Open'} “${item.title}”`" class="press h-8 rounded-full px-3 text-[12.5px] font-semibold" :class="item.kind === 'question' ? 'bg-accent text-surface' : 'text-muted hover:bg-hover'" @click="open(item)">
+                  <button
+                    type="button"
+                    :aria-label="`${item.kind === 'question' ? 'Answer' : item.kind === 'failed' ? 'Resume' : 'Open'} “${item.title}”`"
+                    class="press h-8 rounded-full px-3 text-[12.5px] font-semibold"
+                    :class="item.kind === 'question' ? 'bg-accent text-surface' : 'text-muted hover:bg-hover'"
+                    @click="open(item)"
+                  >
                     {{ item.kind === 'question' ? 'Answer' : item.kind === 'failed' ? 'Resume' : 'Open' }}
                   </button>
                 </div>
@@ -191,7 +244,13 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                 @click="open(item)"
               >
                 <span class="absolute left-0 top-1/2 h-6 w-[3px] -translate-y-1/2 rounded-full bg-accent transition-transform duration-300" :class="current(item) ? 'scale-y-100' : 'scale-y-0'" />
-                <AgentAvatar :name="item.agent" :identity="item.agentKey" :size="34" :working="item.kind === 'running'" :badge="badge(item)" />
+                <AgentAvatar
+                  :name="item.agent"
+                  :identity="item.agentKey"
+                  :size="34"
+                  :working="item.kind === 'running'"
+                  :badge="badge(item)"
+                />
                 <span class="min-w-0 flex-1">
                   <span class="block truncate text-[13.5px] font-semibold leading-tight text-ink">{{ item.title }}</span>
                   <span class="mt-1 flex min-w-0 items-center text-[12px] leading-tight">

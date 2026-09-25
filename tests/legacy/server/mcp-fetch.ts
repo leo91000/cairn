@@ -16,6 +16,7 @@ for (const [address, bits] of [['::', 128], ['::1', 128], ['fc00::', 7], ['fe80:
 export function isPrivateAddress(address: string) {
   return privateRanges.check(address, isIP(address) === 6 ? 'ipv6' : 'ipv4')
 }
+
 // DNS validation and the connection use the same resolved IP; redirects never bypass it.
 export function mcpFetch(allowPrivateNetwork: boolean): typeof fetch {
   return async (input, init) => {
@@ -46,16 +47,20 @@ export function mcpFetch(allowPrivateNetwork: boolean): typeof fetch {
           reject(new Error('The endpoint redirects. Configure its final URL.'))
           return
         }
+
         const headers = new Headers()
         for (const [key, value] of Object.entries(res.headers)) {
           if (value !== undefined)
             headers.set(key, Array.isArray(value) ? value.join(', ') : value)
         }
+
         let size = 0
-        const limit = new Transform({ transform(chunk, _encoding, callback) {
-          size += chunk.length
-          callback(size > 8 * 1024 * 1024 ? new Error('MCP response exceeds 8 MB.') : null, chunk)
-        } })
+        const limit = new Transform({
+          transform(chunk, _encoding, callback) {
+            size += chunk.length
+            callback(size > 8 * 1024 * 1024 ? new Error('MCP response exceeds 8 MB.') : null, chunk)
+          },
+        })
         res.on('error', error => limit.destroy(error))
         limit.on('close', () => res.destroy())
         res.pipe(limit)

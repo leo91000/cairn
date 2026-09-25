@@ -16,6 +16,7 @@ async function main() {
       return value
     })
   }
+
   const { app } = await buildApp(settings)
   await app.listen({ host: settings.host, port: settings.port })
   app.log.info(

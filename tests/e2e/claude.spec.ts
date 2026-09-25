@@ -89,6 +89,7 @@ test('switching coding agents preserves one chat, context and provider selection
     await page.keyboard.press('Escape')
     await expect(menu).toHaveCount(0)
   }
+
   await page.getByLabel('Message', { exact: true }).fill('Continue with Claude using the previous decisions.')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   await expect.poll(async () => {

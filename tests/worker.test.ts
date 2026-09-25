@@ -2,10 +2,21 @@ import { execFile } from 'node:child_process'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { promisify } from 'node:util'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+} from 'vitest'
 import { fixture } from './helpers.ts'
 import { deviceDetails } from './legacy/server/connections.ts'
-import { codexArgs, redact, redactPayload, Worker } from './legacy/server/worker.ts'
+import {
+  codexArgs,
+  redact,
+  redactPayload,
+  Worker,
+} from './legacy/server/worker.ts'
 import { mcpProvider } from './mcp-provider.ts'
 
 const exec = promisify(execFile)
@@ -35,7 +46,13 @@ describe('real worker subprocess lifecycle', () => {
     try {
       await ctx.app.listen({ host: '127.0.0.1', port: 0 })
       ctx.service.config.publicUrl = `http://127.0.0.1:${(ctx.app.server.address() as { port: number }).port}`
-      await ctx.service.mcps.save({ name: 'Worker tools', url: `${provider.origin}/mcp`, auth: 'bearer', token: 'fixture-access-token', allowPrivateNetwork: true })
+      await ctx.service.mcps.save({
+        name: 'Worker tools',
+        url: `${provider.origin}/mcp`,
+        auth: 'bearer',
+        token: 'fixture-access-token',
+        allowPrivateNetwork: true,
+      })
       ctx.service.task({ ...ctx.task, prompt: 'fixture:mcp' }, ctx.task.id)
       const run = await ctx.service.enqueue(ctx.task.id)
       await ctx.worker.tick()

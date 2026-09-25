@@ -20,9 +20,11 @@ class Files(private val context: Context) {
     // `mediaType` covers pasted content whose provider does not report a type.
     suspend fun stage(uri: Uri, mediaType: String? = null): DraftAttachment =
         withContext(Dispatchers.IO) {
-            val mime = context.contentResolver.getType(uri) ?: mediaType ?: "application/octet-stream"
+            val mime =
+                context.contentResolver.getType(uri) ?: mediaType ?: "application/octet-stream"
             var name =
-                if (mime.startsWith("image/")) "image.${mime.substringAfter('/').substringBefore('+')}"
+                if (mime.startsWith("image/"))
+                    "image.${mime.substringAfter('/').substringBefore('+')}"
                 else "pièce-jointe"
             context.contentResolver
                 .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)

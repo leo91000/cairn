@@ -5,7 +5,12 @@ import type { Worker } from './worker.ts'
 import { toNodeHandler } from '@modelcontextprotocol/node'
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server'
 import { z } from 'zod'
-import { agentInput, agentUpdate, projectInput, taskInput } from '../../../shared/contracts.ts'
+import {
+  agentInput,
+  agentUpdate,
+  projectInput,
+  taskInput,
+} from '../../../shared/contracts.ts'
 import { mcpInput } from '../../../shared/mcp.ts'
 import { version } from '../../../shared/version.ts'
 import { AppError, requireValue } from './errors.ts'
@@ -28,6 +33,7 @@ export function mountMcp(
       )
       return reply.code(401).send({ error: 'unauthorized' })
     }
+
     const handler = createMcpHandler(
       () => {
         const server = new McpServer({
@@ -89,6 +95,7 @@ export function mountMcp(
             },
           )
         }
+
         tool(
           'list_agents',
           'List configured Codex agent profiles.',

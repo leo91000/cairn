@@ -2,7 +2,19 @@
 import type { ActivityArtifact } from '../activity'
 import { computed, ref, useId } from 'vue'
 import { actionSentence, agentSteps } from '../agent-steps'
-import { Check, ChevronDown, ChevronRight, Clock, FileText, Folder, Pencil, Plug, Search, Sparkles, Terminal } from '../icons'
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Clock,
+  FileText,
+  Folder,
+  Pencil,
+  Plug,
+  Search,
+  Sparkles,
+  Terminal,
+} from '../icons'
 import ActivityArtifactCard from './ActivityArtifactCard.vue'
 import Icon from './Icon.vue'
 import Modal from './Modal.vue'
@@ -20,15 +32,29 @@ const steps = computed(() => agentSteps(shown.value))
 const sentence = computed(() => actionSentence(shown.value))
 const failures = computed(() => steps.value.filter(step => step.failed).length)
 const kinds = computed(() => [...new Set(shown.value.map(artifact => artifact.kind))].filter(kind => kind !== 'notice').slice(0, 4))
-const glyphs = { command: Terminal, output: Terminal, read: FileText, files: Pencil, browse: Folder, search: Search, plan: Check, thinking: Sparkles, tool: Plug, notice: Clock }
+const glyphs = {
+  command: Terminal,
+  output: Terminal,
+  read: FileText,
+  files: Pencil,
+  browse: Folder,
+  search: Search,
+  plan: Check,
+  thinking: Sparkles,
+  tool: Plug,
+  notice: Clock,
+}
 const openedStep = computed(() => opened.value === null ? undefined : steps.value[opened.value])
+
 function status(step: (typeof steps.value)[number]) {
   if (step.failed) {
     const code = step.items.find(item => item.exitCode !== undefined && item.exitCode !== 0)?.exitCode
     return code === undefined ? 'Failed' : `Exit ${code}`
   }
+
   return step.running ? 'running' : ''
 }
+
 // The sheet names the step's state, including an expected outcome such as "No matches".
 function stepState(step: (typeof steps.value)[number]) {
   if (step.failed)
@@ -41,8 +67,18 @@ function stepState(step: (typeof steps.value)[number]) {
 </script>
 
 <template>
-  <section v-if="steps.length" class="agent-actions my-3 overflow-hidden rounded-[18px]" :class="expanded ? 'border border-line bg-surface' : 'bg-variant'" data-testid="agent-actions">
-    <button class="flex min-h-12 w-full items-center gap-2.5 px-3 py-2.5 text-left" :aria-expanded="expanded" :aria-controls="timelineId" @click="expanded = !expanded">
+  <section
+    v-if="steps.length"
+    class="agent-actions my-3 overflow-hidden rounded-[18px]"
+    :class="expanded ? 'border border-line bg-surface' : 'bg-variant'"
+    data-testid="agent-actions"
+  >
+    <button
+      class="flex min-h-12 w-full items-center gap-2.5 px-3 py-2.5 text-left"
+      :aria-expanded="expanded"
+      :aria-controls="timelineId"
+      @click="expanded = !expanded"
+    >
       <span v-if="!expanded" class="flex shrink-0 -space-x-2" aria-hidden="true">
         <span v-for="kind in kinds" :key="kind" class="grid size-6.5 place-items-center rounded-full border-2 border-variant bg-surface text-muted"><Icon :name="glyphs[kind]" :size="13" /></span>
       </span>
@@ -55,11 +91,21 @@ function stepState(step: (typeof steps.value)[number]) {
           </template>
         </span>
       </span>
-      <Icon :name="ChevronDown" :size="18" class="shrink-0 text-muted transition-transform" :class="expanded ? 'rotate-180' : ''" />
+      <Icon
+        :name="ChevronDown"
+        :size="18"
+        class="shrink-0 text-muted transition-transform"
+        :class="expanded ? 'rotate-180' : ''"
+      />
     </button>
     <ol v-if="expanded" :id="timelineId" class="m-0! list-none pr-2.5 pb-3 pl-3.5">
       <li v-for="(step, index) in steps" :key="step.id">
-        <button class="flex w-full rounded-xl text-left hover:bg-hover/60" data-testid="agent-step" :aria-label="[step.title, status(step), step.detail].filter(Boolean).join(', ')" @click="opened = index">
+        <button
+          class="flex w-full rounded-xl text-left hover:bg-hover/60"
+          data-testid="agent-step"
+          :aria-label="[step.title, status(step), step.detail].filter(Boolean).join(', ')"
+          @click="opened = index"
+        >
           <span class="flex shrink-0 flex-col items-center self-stretch">
             <span class="grid size-6.5 shrink-0 place-items-center rounded-full" :class="step.failed ? 'bg-coral-soft text-coral' : step.running ? 'bg-accent text-surface' : 'bg-variant text-muted'"><Icon :name="glyphs[step.items[0]!.kind]" :size="13" /></span>
             <span v-if="index < steps.length - 1" class="w-0.5 flex-1 bg-line" />
@@ -68,7 +114,12 @@ function stepState(step: (typeof steps.value)[number]) {
             <span class="flex items-center gap-2">
               <span class="min-w-0 flex-1 truncate text-base font-semibold text-ink">{{ step.title }}</span>
               <span v-if="status(step)" class="shrink-0 text-2xs font-bold" :class="step.failed ? 'text-coral' : 'text-accent'">{{ status(step) }}</span>
-              <Icon v-else :name="ChevronRight" :size="14" class="shrink-0 text-muted/60" />
+              <Icon
+                v-else
+                :name="ChevronRight"
+                :size="14"
+                class="shrink-0 text-muted/60"
+              />
             </span>
             <span v-if="step.detail" class="block truncate text-2xs text-muted" :class="step.items[0]!.kind === 'thinking' || step.items[0]!.kind === 'notice' ? '' : 'font-mono'">{{ step.detail }}</span>
           </span>
@@ -76,7 +127,13 @@ function stepState(step: (typeof steps.value)[number]) {
       </li>
     </ol>
   </section>
-  <Modal v-if="openedStep" :title="openedStep.title" sheet wide @close="opened = null">
+  <Modal
+    v-if="openedStep"
+    :title="openedStep.title"
+    sheet
+    wide
+    @close="opened = null"
+  >
     <div class="grid gap-3 px-5 pt-4 pb-6 phone:px-4" data-testid="agent-step-sheet">
       <div class="flex items-center gap-3">
         <span class="grid size-10 shrink-0 place-items-center rounded-xl" :class="openedStep.failed ? 'bg-coral-soft text-coral' : openedStep.running ? 'bg-soft text-accent' : 'bg-variant text-muted'"><Icon :name="glyphs[openedStep.items[0]!.kind]" :size="20" /></span>
@@ -84,14 +141,25 @@ function stepState(step: (typeof steps.value)[number]) {
           {{ [stepState(openedStep), openedStep.failed ? status(openedStep).replace('Failed', '') : '', `step ${opened! + 1} of ${steps.length}`].filter(Boolean).join(' · ') }}
         </p>
       </div>
-      <section v-for="(artifact, index) in openedStep.items" :key="artifact.id" class="grid gap-3" :class="index ? 'border-t border-line pt-3' : ''" :aria-label="artifact.title">
+      <section
+        v-for="(artifact, index) in openedStep.items"
+        :key="artifact.id"
+        class="grid gap-3"
+        :class="index ? 'border-t border-line pt-3' : ''"
+        :aria-label="artifact.title"
+      >
         <h3 v-if="openedStep.items.length > 1" class="m-0! text-base font-semibold">
           {{ artifact.title }}
         </h3>
         <p v-if="artifact.kind === 'notice' && artifact.subtitle" class="m-0! text-sm text-muted">
           {{ artifact.subtitle }}
         </p>
-        <ActivityArtifactCard :artifact="artifact" :active="active" expanded bare />
+        <ActivityArtifactCard
+          :artifact="artifact"
+          :active="active"
+          expanded
+          bare
+        />
       </section>
     </div>
   </Modal>

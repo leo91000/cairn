@@ -28,9 +28,11 @@ const RESET_AT: f64 = 2.;
 fn secret(id: &str) -> String {
     format!("codex-account:{id}")
 }
+
 fn reset_key(id: &str) -> String {
     format!("codex-reset:{id}")
 }
+
 fn subject(token: &str) -> String {
     token
         .split('.')
@@ -40,6 +42,7 @@ fn subject(token: &str) -> String {
         .and_then(|v| v["sub"].as_str().map(str::to_owned))
         .unwrap_or_default()
 }
+
 fn auth_input(value: Value) -> Result<Value> {
     if text(&value["tokens"], "access_token").is_empty() {
         return Err(Error::bad(
@@ -48,6 +51,7 @@ fn auth_input(value: Value) -> Result<Value> {
     }
     Ok(value)
 }
+
 fn limits_input(value: Value) -> Result<Value> {
     if !value["rateLimits"].is_object() {
         return Err(Error::new(502, "Codex returned invalid usage data."));
@@ -70,6 +74,7 @@ fn limits_input(value: Value) -> Result<Value> {
     }
     Ok(value)
 }
+
 /// Codex reports a general bucket and one bucket per limited model, each with a short and
 /// a long window.
 pub fn normalize(limits: &Value) -> Value {
@@ -87,7 +92,15 @@ pub fn normalize(limits: &Value) -> Value {
             } else {
                 format!("{name} · {}", usage::duration_label(minutes))
             };
-            windows.push(json!({"id":format!("{key}:{slot}"),"label":label,"usedPercent":window["usedPercent"],"resetsAt":window["resetsAt"],"durationMins":minutes,"models":models,"reached":!text(bucket,"rateLimitReachedType").is_empty() || bucket["spendControlReached"]==true}));
+            windows.push(json!({
+                "id": format!("{key}:{slot}"),
+                "label": label,
+                "usedPercent": window["usedPercent"],
+                "resetsAt": window["resetsAt"],
+                "durationMins": minutes,
+                "models": models,
+                "reached": !text(bucket,"rateLimitReachedType").is_empty() || bucket["spendControlReached"]==true
+            }));
         }
     };
     add("main", &limits["rateLimits"], Vec::new());
@@ -109,8 +122,17 @@ pub fn normalize(limits: &Value) -> Value {
         add(key, bucket, models);
     }
     let credits = &limits["rateLimitResetCredits"];
-    json!({"allowed":limits["ordinaryUsageAllowed"] != false,"windows":windows,"checkedAt":now(),"resets":if credits.is_object() {json!({"available":credits["availableCount"].as_u64().unwrap_or(0),"credits":credits["credits"].as_array().cloned().unwrap_or_default()})} else {Value::Null}})
+    json!({
+        "allowed": limits["ordinaryUsageAllowed"] != false,
+        "windows": windows,
+        "checkedAt": now(),
+        "resets": if credits.is_object() {json!({
+            "available": credits["availableCount"].as_u64().unwrap_or(0),
+            "credits": credits["credits"].as_array().cloned().unwrap_or_default()
+        })} else {Value::Null}
+    })
 }
+
 async fn read_limits(rpc: &mut Session, auth: &Value) -> Result<Value> {
     let limits = limits_input(rpc.request("account/rateLimits/read", json!({})).await?)?;
     if !text(&limits, "accountId").is_empty()
@@ -158,6 +180,7 @@ async fn capture(s: &Service, id: &str, home: &Path) -> Result<()> {
     .await?;
     Ok(())
 }
+
 /// Writes the vault credentials into a manager-only Codex home.
 async fn materialize(s: &Service, id: &str, home: &Path) -> Result<()> {
     // A previous process may have refreshed just before a crash or a failed vault write.
@@ -173,6 +196,7 @@ async fn materialize(s: &Service, id: &str, home: &Path) -> Result<()> {
     atomic_write(&home.join("auth.json"), &serde_json::to_vec(&auth)?).await?;
     atomic_write(&home.join("config.toml"), CONFIG).await
 }
+
 /// Runs a manager-only app-server session on the account, saving any rotated credentials.
 async fn with_session<T>(
     s: &Service,
@@ -221,7 +245,7 @@ async fn read_usage(
     rpc: &mut Session,
 ) -> Result<()> {
     let identity = rpc
-        .request("account/read", json!({"refreshToken":false}))
+        .request("account/read", json!({"refreshToken": false}))
         .await?;
     if identity["account"]["type"] != "chatgpt" {
         return Err(Error::bad(
@@ -257,7 +281,15 @@ async fn read_usage(
     }
     merge(
         &mut account,
-        &json!({"identity":fingerprint,"email":identity["account"]["email"],"plan":identity["account"]["planType"],"state":"ready","checkedAt":now(),"error":"","usage":current}),
+        &json!({
+            "identity": fingerprint,
+            "email": identity["account"]["email"],
+            "plan": identity["account"]["planType"],
+            "state": "ready",
+            "checkedAt": now(),
+            "error": "",
+            "usage": current
+        }),
     );
     // A natural reset comes first: it leaves banked resets for later.
     super::replenish(&mut account, &Codex);
@@ -279,12 +311,13 @@ async fn read_usage(
     }
     merge(
         &mut account,
-        &json!({"usage":current,"resetError":reset_error}),
+        &json!({"usage": current,"resetError": reset_error}),
     );
     super::replenish(&mut account, &Codex);
     s.store.put(KIND, account).await?;
     Ok(())
 }
+
 /// Redeems one banked reset when the limiting window reaches 2% remaining. A persisted request
 /// key is reused across timeouts and restarts, and a confirmed redemption cannot spend another
 /// credit until fresh usage shows capacity again.
@@ -338,7 +371,8 @@ async fn reset(
                     && c["expiresAt"].as_i64().is_none_or(|t| t * 1000 > now())
             })
             .min_by_key(|c| c["expiresAt"].as_i64().unwrap_or(i64::MAX));
-        let mut value = json!({"params":{"idempotencyKey":id()},"model":model,"confirmed":false});
+        let mut value =
+            json!({"params": {"idempotencyKey": id()},"model": model,"confirmed": false});
         if let Some(credit) = credit {
             value["params"]["creditId"] = credit["id"].clone();
         }
@@ -373,7 +407,7 @@ async fn reset(
                 s.store
                     .audit(
                         "account.reset",
-                        json!({"id":account["id"],"outcome":result["outcome"]}),
+                        json!({"id": account["id"],"outcome": result["outcome"]}),
                     )
                     .await?;
                 current = normalize(&read_limits(rpc, auth).await?);
@@ -430,6 +464,7 @@ async fn upgrade_records(s: &Service) -> Result<()> {
 }
 
 pub struct Codex;
+
 #[async_trait::async_trait]
 impl Driver for Codex {
     async fn initialize(&self, s: &Service) -> Result<()> {
@@ -474,17 +509,20 @@ impl Driver for Codex {
         s.store
             .audit(
                 "account.imported",
-                json!({"id":account["id"],"provider":"codex"}),
+                json!({"id": account["id"],"provider": "codex"}),
             )
             .await
     }
+
     async fn managed(&self, s: &Service) -> Result<bool> {
         Ok(s.store.kv(MANAGED).await?.is_some())
     }
+
     /// From the first added account on, Codex runs need a managed account, never the host login.
     fn added(&self, db: &mut crate::store::Db<'_>) -> Result<()> {
         db.set(MANAGED, &json!(true), None)
     }
+
     async fn authorize(&self, s: &Service, home: &Path, login: &Login) -> Result<()> {
         private_dir(&home.join(".codex")).await?;
         atomic_write(&home.join(".codex/config.toml"), CONFIG).await?;
@@ -492,6 +530,7 @@ impl Driver for Codex {
         config.home = home.to_owned();
         crate::codex_login::run(&config, home, &login.view, &login.stop).await
     }
+
     async fn adopt(&self, s: &Service, id: &str, home: &Path) -> Result<()> {
         let previous = s.vault.get(&secret(id)).await?;
         capture(s, id, &home.join(".codex")).await?;
@@ -505,6 +544,7 @@ impl Driver for Codex {
         }
         verified
     }
+
     async fn refresh(&self, s: &Service, id: &str, models: &[String]) -> Result<()> {
         let account = s.accounts.get(s, id).await?;
         // Watch the model closest to exhaustion among the account's runs.
@@ -528,6 +568,7 @@ impl Driver for Codex {
         })
         .await
     }
+
     async fn due(&self, s: &Service, account: &Value, attempted: i64) -> Result<bool> {
         let id = text(account, "id");
         let model = s
@@ -556,26 +597,33 @@ impl Driver for Codex {
         };
         Ok(now() - attempted >= interval)
     }
+
     fn fresh_for(&self) -> i64 {
         90_000
     }
+
     fn requires_usage(&self) -> bool {
         true
     }
+
     async fn supports(&self, s: &Service, id: &str, model: &str) -> Result<bool> {
         crate::models::account_supports(s, id, model).await
     }
+
     fn home(&self, s: &Service, run_id: &str) -> PathBuf {
         s.config.data_dir.join("runs").join(run_id).join("codex")
     }
+
     async fn prepare(&self, _s: &Service, _id: &str, home: &Path) -> Result<()> {
         private_dir(home).await?;
         atomic_write(&home.join("leo-managed-auth"), b"1").await?;
         remove_file(&home.join("auth.json")).await
     }
+
     async fn clear(&self, home: &Path) -> Result<()> {
         remove_file(&home.join("auth.json")).await
     }
+
     async fn recover(&self, s: &Service, run_id: &str) -> Result<()> {
         let run = s.config.data_dir.join("runs").join(run_id);
         for home in ["codex", "home/.codex"] {
@@ -583,6 +631,7 @@ impl Driver for Codex {
         }
         Ok(())
     }
+
     async fn access(&self, s: &Service, lease: &Lease, request: &Value) -> Result<Value> {
         // Rotation is serialized with usage monitoring; ordinary reads only need the vault.
         let _rotation = if request["refresh"] == true {
@@ -600,7 +649,7 @@ impl Driver for Codex {
         {
             with_session(s, &lease.account_id, "codex-monitor", async |session, _| {
                 session
-                    .request("account/read", json!({"refreshToken":true}))
+                    .request("account/read", json!({"refreshToken": true}))
                     .await
             })
             .await?;
@@ -614,10 +663,13 @@ impl Driver for Codex {
         if account_id.is_empty() {
             return Err(Error::bad("Reconnect this account to verify its identity."));
         }
-        Ok(
-            json!({"accessToken":auth["tokens"]["access_token"],"chatgptAccountId":account_id,"chatgptPlanType":account["plan"]}),
-        )
+        Ok(json!({
+            "accessToken": auth["tokens"]["access_token"],
+            "chatgptAccountId": account_id,
+            "chatgptPlanType": account["plan"]
+        }))
     }
+
     async fn redactions(&self, s: &Service, id: &str) -> Result<Vec<String>> {
         let auth = s.vault.get(&secret(id)).await?.unwrap_or(Value::Null);
         Ok(["access_token", "refresh_token", "id_token"]
@@ -630,6 +682,7 @@ impl Driver for Codex {
             })
             .collect())
     }
+
     async fn forget(&self, s: &Service, id: &str) -> Result<()> {
         let id = id.to_owned();
         s.store
@@ -648,10 +701,12 @@ pub struct Client {
     previous: String,
     account: String,
 }
+
 impl Client {
     pub fn new(home: &Path) -> Option<Self> {
         Self::from_socket(broker::socket(home))
     }
+
     pub fn from_socket(path: PathBuf) -> Option<Self> {
         path.exists().then_some(Self {
             path,
@@ -659,10 +714,11 @@ impl Client {
             account: String::new(),
         })
     }
+
     pub async fn tokens(&mut self, refresh: bool) -> Result<Value> {
         let result = broker::request(
             &self.path,
-            &json!({"refresh":refresh,"previous":self.previous}),
+            &json!({"refresh": refresh,"previous": self.previous}),
             Duration::from_secs(9),
         )
         .await?;
@@ -676,6 +732,7 @@ impl Client {
         self.account = text(&result, "chatgptAccountId").into();
         Ok(result)
     }
+
     pub async fn login(&mut self, session: &mut Session) -> Result<()> {
         let mut tokens = self.tokens(false).await?;
         tokens["type"] = "chatgptAuthTokens".into();
@@ -688,6 +745,7 @@ impl Client {
         }
         Ok(())
     }
+
     pub async fn refresh(&mut self, rpc: &crate::rpc::Rpc, incoming: &Incoming) -> Result<()> {
         let id = incoming
             .id

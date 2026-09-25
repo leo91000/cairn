@@ -19,13 +19,16 @@ use tokio::{
     sync::{Mutex, mpsc, oneshot},
 };
 use tokio_util::sync::CancellationToken;
+
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value>>>>>;
+
 #[derive(Debug)]
 pub struct Incoming {
     pub method: String,
     pub params: Value,
     pub id: Option<Value>,
 }
+
 #[derive(Clone)]
 pub struct Rpc {
     jsonrpc: bool,
@@ -35,6 +38,7 @@ pub struct Rpc {
     closed: CancellationToken,
     failure: Arc<Mutex<Option<(u16, String)>>>,
 }
+
 pub struct Session {
     pub auth: Option<crate::accounts::codex::Client>,
     pub rpc: Rpc,
@@ -42,11 +46,13 @@ pub struct Session {
     stop: CancellationToken,
     finished: Option<oneshot::Receiver<()>>,
 }
+
 impl Drop for Session {
     fn drop(&mut self) {
         self.stop.cancel();
     }
 }
+
 impl Session {
     pub async fn codex(
         config: &Config,
@@ -81,22 +87,26 @@ impl Session {
             let initialize = rpc.request(
                 "initialize",
                 json!({
-                "clientInfo":{
-                "name":"leo_agent_manager","version":env!("CARGO_PKG_VERSION")}
-                ,"capabilities":{
-                "experimentalApi":true}
+                    "clientInfo": {
+                        "name": "leo_agent_manager",
+                        "version": env!("CARGO_PKG_VERSION")
+                    }
+                ,
+                    "capabilities": {
+                        "experimentalApi": true
+                    }
                 }
                 ),
             );
             tokio::pin!(initialize);
             loop {
                 tokio::select! {
-                                result=&mut initialize=>{
+                    result = &mut initialize => {
                 result?;
                 break;
                 }
                 ,
-                                incoming=session.incoming.recv()=>{
+                    incoming = session.incoming.recv() => {
                 if let Some(incoming)=incoming {
                 if let Some(id)=incoming.id {
                 rpc.reject(id).await?;
@@ -106,7 +116,7 @@ impl Session {
                 return Err(unavailable());
                 }
                 }
-                            }
+                }
             }
             rpc.notify("initialized", json!({})).await?;
             Ok::<_, Error>(())
@@ -120,9 +130,11 @@ impl Session {
         }
         Ok(session)
     }
+
     pub async fn spawn(command: tokio::process::Command) -> Result<Self> {
         Self::spawn_with_protocol(command, false).await
     }
+
     pub async fn spawn_with_protocol(
         mut command: tokio::process::Command,
         jsonrpc: bool,
@@ -226,23 +238,27 @@ impl Session {
             let drain = async { tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await };
             tokio::pin!(writer, reader, drain);
             tokio::select! {
-            _=stopping.cancelled()=>{
+                _ = stopping.cancelled() => {
             }
-            ,_=closed.cancelled()=>{
+            ,
+                _ = closed.cancelled() => {
             }
-            ,_=child.wait()=>{
+            ,
+                _ = child.wait() => {
             }
-            ,_=&mut writer=>{
+            ,
+                _ = &mut writer => {
             }
-            ,result=&mut reader=>{
+            ,
+                result = &mut reader => {
                 if let Err(error) = result {
                     *failure.lock().await = Some((error.status, error.message));
                 }
             }
-            ,_=async{
+            ,
+                _ = async{
             let _=(&mut drain).await;
-            std::future::pending::<()>().await}
-            =>{
+            std::future::pending::<()>().await} => {
             }
             }
             closed.cancel();
@@ -270,6 +286,7 @@ impl Session {
             finished: Some(finished),
         })
     }
+
     pub async fn handle_auth(&mut self, incoming: &Incoming) -> Result<bool> {
         if incoming.method == "account/chatgptAuthTokens/refresh"
             && incoming.id.is_some()
@@ -280,13 +297,15 @@ impl Session {
         }
         Ok(false)
     }
+
     pub async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
         let rpc = self.rpc.clone();
         let request = rpc.request(method, params);
         tokio::pin!(request);
         loop {
             tokio::select! {
-            result=&mut request=>return result,incoming=self.incoming.recv()=>{
+                result = &mut request => return result,
+                incoming = self.incoming.recv() => {
             let Some(incoming)=incoming else{
             return Err(unavailable());
             }
@@ -298,6 +317,7 @@ impl Session {
             }
         }
     }
+
     pub async fn close(mut self) {
         self.stop.cancel();
         if let Some(finished) = self.finished.take() {
@@ -305,6 +325,7 @@ impl Session {
         }
     }
 }
+
 impl Rpc {
     pub async fn failure(&self) -> Error {
         match &*self.failure.lock().await {
@@ -312,29 +333,38 @@ impl Rpc {
             None => unavailable(),
         }
     }
+
     async fn send(&self, mut value: Value) -> Result<()> {
         if self.jsonrpc {
             value["jsonrpc"] = "2.0".into();
         }
         tokio::select! {
-        _=self.closed.cancelled()=>Err(self.failure().await),result=self.outgoing.send(value)=>result.map_err(|_|unavailable())}
+            _ = self.closed.cancelled() => Err(self.failure().await),
+            result = self.outgoing.send(value) => result.map_err(|_|unavailable())
+        }
     }
+
     pub async fn request(&self, method: &str, params: Value) -> Result<Value> {
         let id = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
         let result = async {
             self.send(json!({
-            "id":id,"method":method,"params":params}
+                "id": id,
+                "method": method,
+                "params": params
+            }
             ))
             .await?;
             tokio::select! {
-            _=self.closed.cancelled()=>Err(self.failure().await),result=rx=>match result {
+                _ = self.closed.cancelled() => Err(self.failure().await),
+                result = rx => match result {
                 Ok(Ok(value)) => Ok(value),
                 _ if self.closed.is_cancelled() => Err(self.failure().await),
                 Ok(Err(error)) => Err(error),
                 Err(_) => Err(unavailable()),
-            }}
+            }
+            }
         };
         let result = tokio::time::timeout(Duration::from_secs(20), result)
             .await
@@ -342,30 +372,42 @@ impl Rpc {
         self.pending.lock().await.remove(&id);
         result
     }
+
     pub async fn notify(&self, method: &str, params: Value) -> Result<()> {
         self.send(json!({
-        "method":method,"params":params}
-        ))
-        .await
-    }
-    pub async fn reply(&self, id: Value, result: Value) -> Result<()> {
-        self.send(json!({
-        "id":id,"result":result}
-        ))
-        .await
-    }
-    pub async fn reject(&self, id: Value) -> Result<()> {
-        self.send(json!({
-        "id":id,"error":{
-        "code":-32601,"message":"Interactive tool requests are unavailable. Ask the user in a plain assistant message instead."}
+            "method": method,
+            "params": params
         }
         ))
         .await
     }
+
+    pub async fn reply(&self, id: Value, result: Value) -> Result<()> {
+        self.send(json!({
+            "id": id,
+            "result": result
+        }
+        ))
+        .await
+    }
+
+    pub async fn reject(&self, id: Value) -> Result<()> {
+        self.send(json!({
+            "id": id,
+            "error": {
+                "code": -32601,
+                "message": "Interactive tool requests are unavailable. Ask the user in a plain assistant message instead."
+            }
+        }
+        ))
+        .await
+    }
+
     pub async fn closed(&self) {
         self.closed.cancelled().await;
     }
 }
+
 fn unavailable() -> Error {
     Error::new(
         503,

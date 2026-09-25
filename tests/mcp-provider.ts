@@ -18,7 +18,17 @@ export async function mcpProvider(options: { clientSecret?: string, beforeAuthor
   const metadata = () => ({ resource: `${origin}/mcp`, authorization_servers: [origin], scopes_supported: ['tools:read'] })
   app.get('/.well-known/oauth-protected-resource/mcp', metadata)
   app.get('/.well-known/oauth-protected-resource', metadata)
-  app.get('/.well-known/oauth-authorization-server', () => ({ issuer: origin, authorization_endpoint: `${origin}/authorize`, token_endpoint: `${origin}/token`, registration_endpoint: `${origin}/register`, response_types_supported: ['code'], grant_types_supported: ['authorization_code', 'refresh_token'], token_endpoint_auth_methods_supported: ['none', 'client_secret_post'], code_challenge_methods_supported: ['S256'], authorization_response_iss_parameter_supported: true }))
+  app.get('/.well-known/oauth-authorization-server', () => ({
+    issuer: origin,
+    authorization_endpoint: `${origin}/authorize`,
+    token_endpoint: `${origin}/token`,
+    registration_endpoint: `${origin}/register`,
+    response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code', 'refresh_token'],
+    token_endpoint_auth_methods_supported: ['none', 'client_secret_post'],
+    code_challenge_methods_supported: ['S256'],
+    authorization_response_iss_parameter_supported: true,
+  }))
   app.post('/register', request => ({ ...(request.body as object), client_id: 'fixture-client' }))
   app.get('/authorize', async (request, reply) => {
     await options.beforeAuthorize?.()
@@ -44,7 +54,14 @@ export async function mcpProvider(options: { clientSecret?: string, beforeAuthor
         return reply.code(400).send({ error: 'invalid_grant' })
       exchanges++
     }
-    return { access_token: accessToken, refresh_token: 'fixture-refresh-token', token_type: 'Bearer', expires_in: 3600, scope: 'tools:read' }
+
+    return {
+      access_token: accessToken,
+      refresh_token: 'fixture-refresh-token',
+      token_type: 'Bearer',
+      expires_in: 3600,
+      scope: 'tools:read',
+    }
   })
   const handler = createMcpHandler(() => {
     const server = new McpServer({ name: 'fixture-tools', version: '1.0.0' })

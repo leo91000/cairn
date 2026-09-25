@@ -30,8 +30,7 @@ class HistoryFollowDeviceTest : HistoryFollowCases() {
     // Reuse the active Compose rule so CI's existing device selection also checks paging.
     @Test
     fun olderPagesChainUntilEnoughHistoryIsBuffered() {
-        object : HistoryPagingCases(compose) {}
-            .shortRowsKeepLoadingUntilSeveralScreensAreBuffered()
+        object : HistoryPagingCases(compose) {}.shortRowsKeepLoadingUntilSeveralScreensAreBuffered()
     }
 
     @Test
@@ -42,8 +41,7 @@ class HistoryFollowDeviceTest : HistoryFollowCases() {
 
     @Test
     fun olderPageAtTheVeryStartKeepsTheFirstParagraph() {
-        object : HistoryPagingCases(compose) {}
-            .pageArrivingAtTheVeryStartKeepsTheFirstParagraph()
+        object : HistoryPagingCases(compose) {}.pageArrivingAtTheVeryStartKeepsTheFirstParagraph()
     }
 
     // The existing CI device entry point also exercises the complete native app.
@@ -56,40 +54,58 @@ class HistoryFollowDeviceTest : HistoryFollowCases() {
 
     @Test fun adaptiveTaskLayout() = ParityDeviceCases(compose).adaptiveTaskLayout()
 
-    /** Like EdgeEffect, the stretch only advances from its own draw and is plain, unobserved state. */
+    /**
+     * Like EdgeEffect, the stretch only advances from its own draw and is plain, unobserved state.
+     */
     private class StretchEffect : OverscrollEffect {
         @Volatile var stretched = true
         val draws = AtomicInteger()
-        override fun applyToScroll(delta: Offset, source: NestedScrollSource, performScroll: (Offset) -> Offset) =
-            performScroll(delta)
-        override suspend fun applyToFling(velocity: Velocity, performFling: suspend (Velocity) -> Velocity) {
+
+        override fun applyToScroll(
+            delta: Offset,
+            source: NestedScrollSource,
+            performScroll: (Offset) -> Offset,
+        ) = performScroll(delta)
+
+        override suspend fun applyToFling(
+            velocity: Velocity,
+            performFling: suspend (Velocity) -> Velocity,
+        ) {
             performFling(velocity)
         }
-        override val isInProgress get() = stretched
-        override val node: DelegatableNode = object : Modifier.Node(), DrawModifierNode {
-            override fun ContentDrawScope.draw() {
-                draws.incrementAndGet()
-                drawContent()
+
+        override val isInProgress
+            get() = stretched
+
+        override val node: DelegatableNode =
+            object : Modifier.Node(), DrawModifierNode {
+                override fun ContentDrawScope.draw() {
+                    draws.incrementAndGet()
+                    drawContent()
+                }
             }
-        }
     }
 
     // An overscroll in progress turns every touch on the history into a drag: a stretch that
     // stopped drawing swallowed taps on files and chat swipes for as long as the agent worked.
-    @Test fun historyStretchKeepsDrawingUntilItSettles() {
+    @Test
+    fun historyStretchKeepsDrawingUntilItSettles() {
         val stretch = StretchEffect()
         compose.mainClock.autoAdvance = false
         compose.setContent { Box(Modifier.size(100.dp).overscroll(RelaxingOverscroll(stretch))) }
-        fun frames(count: Int) = repeat(count) {
-            compose.mainClock.advanceTimeByFrame()
-            SystemClock.sleep(50) // let the invalidated layer reach the display
-        }
+        fun frames(count: Int) =
+            repeat(count) {
+                compose.mainClock.advanceTimeByFrame()
+                SystemClock.sleep(50) // let the invalidated layer reach the display
+            }
         frames(2)
         assertTrue("The wrapped effect still draws its stretch", stretch.draws.get() > 0)
         val settling = stretch.draws.get()
         frames(20)
-        assertTrue("An unsettled stretch gets frames to relax: $settling then ${stretch.draws.get()}",
-            stretch.draws.get() - settling >= 10)
+        assertTrue(
+            "An unsettled stretch gets frames to relax: $settling then ${stretch.draws.get()}",
+            stretch.draws.get() - settling >= 10,
+        )
         stretch.stretched = false
         frames(3)
         val settled = stretch.draws.get()

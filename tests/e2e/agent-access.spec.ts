@@ -26,6 +26,7 @@ test('agent access editor and task inheritance work on mobile in both themes', a
     await page.screenshot({ path: testInfo.outputPath(`agent-access-${colorScheme}.png`), animations: 'disabled' })
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   }
+
   await dialog.getByRole('button', { name: 'Save agent', exact: true }).click()
   await expect(dialog).toHaveCount(0)
   await page.getByRole('link', { name: 'Missions', exact: true }).filter({ visible: true }).click()

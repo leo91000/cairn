@@ -5,12 +5,18 @@ import { highlight } from '../highlight'
 import { Check, Copy } from '../icons'
 import Icon from './Icon.vue'
 
-const props = defineProps<{ code: string, label: string, language?: string, copyCode?: string }>()
+const props = defineProps<{
+  code: string
+  label: string
+  language?: string
+  copyCode?: string
+}>()
 const expanded = ref(false)
 const copied = ref(false)
 let timer: ReturnType<typeof setTimeout>
 const shown = computed(() => expanded.value ? props.code : props.code.slice(0, 12000))
 const html = computed(() => highlight(shown.value, props.language))
+
 async function copy() {
   try {
     await navigator.clipboard.writeText(props.copyCode ?? props.code)
@@ -22,6 +28,7 @@ async function copy() {
     notify('Clipboard unavailable. Select the text to copy it.')
   }
 }
+
 onBeforeUnmount(() => clearTimeout(timer))
 </script>
 

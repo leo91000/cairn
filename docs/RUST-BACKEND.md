@@ -53,7 +53,7 @@ pnpm install --frozen-lockfile
 pnpm dev
 pnpm test:backend
 cargo clippy --locked --workspace --all-targets -- -D warnings
-cargo fmt --all --check
+node scripts/rust-format.mjs --check
 pnpm check
 cargo build --bin leo
 pnpm test:e2e

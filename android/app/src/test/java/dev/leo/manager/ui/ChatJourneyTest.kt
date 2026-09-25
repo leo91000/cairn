@@ -351,7 +351,9 @@ class ChatJourneyTest {
             compose.onNode(hasText("Modèle du serveur") and isSelectable()).performClick()
             compose.onNodeWithTag("reasoning-slider").performSemanticsAction(
                 androidx.compose.ui.semantics.SemanticsActions.SetProgress
-            ) { it(2f) }
+            ) {
+                it(2f)
+            }
             compose.onNodeWithText("Terminé").performClick()
             compose.onNodeWithContentDescription("Envoyer").performClick()
             waitText("1 question · Répondre")
@@ -458,14 +460,19 @@ class ChatJourneyTest {
                 .onNodeWithTag("conversation-history")
                 .performScrollToNode(hasTestTag("agent-actions"))
             // Collapsed, the actions read as one sentence; expanded, as a timeline of steps.
-            compose.onNodeWithTag("agent-actions").assert(hasText("A lancé 1 commande")).performClick()
+            compose
+                .onNodeWithTag("agent-actions")
+                .assert(hasText("A lancé 1 commande"))
+                .performClick()
             compose.onNodeWithText("État du dépôt Git").assertExists()
             compose.onNodeWithText("État du dépôt Git").performClick()
             compose.onNodeWithTag("agent-step-sheet").assertExists()
             compose.onNodeWithText("Workspace clean").assertExists()
             screenshot("chat-tools-dark")
             compose.onNodeWithContentDescription("Fermer").performClick()
-            compose.waitUntil(10000) { compose.onAllNodesWithTag("agent-step-sheet").fetchSemanticsNodes().isEmpty() }
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithTag("agent-step-sheet").fetchSemanticsNodes().isEmpty()
+            }
             compose.onNodeWithTag("agent-actions").performClick()
             compose
                 .onNode(hasSetTextAction())
@@ -511,7 +518,9 @@ class ChatJourneyTest {
             compose.onNodeWithContentDescription("Options de la conversation").performClick()
             compose.onNodeWithText("Nouvelle conversation").performClick()
             assertEquals("Brouillon à conserver", vm.chatDrafts[chatId]?.text)
-            compose.onNode(hasContentDescription("Changer de conversation", substring = true)).performClick()
+            compose
+                .onNode(hasContentDescription("Changer de conversation", substring = true))
+                .performClick()
             compose.waitUntil(10000) {
                 compose.onAllNodesWithText("Revue du projet").fetchSemanticsNodes().isNotEmpty()
             }

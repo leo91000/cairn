@@ -25,6 +25,7 @@ async function main() {
           finishedAt: Date.now() - i * 60000,
         })
       }
+
       for (let i = 0; i < 1000; i++) {
         ctx.service.store.event(
           base.id,
@@ -51,6 +52,7 @@ async function main() {
           samples.push(performance.now() - start)
         bytes = response.rawPayload.length
       }
+
       samples.sort((a, b) => a - b)
       measurements.push({
         url,
@@ -59,6 +61,7 @@ async function main() {
         bytes,
       })
     }
+
     const output = {
       node: process.version,
       runs: count + 1,
@@ -75,6 +78,7 @@ async function main() {
     await ctx.dispose()
   }
 }
+
 main().catch((error) => {
   console.error(error)
   process.exitCode = 1

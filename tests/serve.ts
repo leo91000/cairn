@@ -27,6 +27,7 @@ async function main() {
   for (const signal of ['SIGINT', 'SIGTERM'] as const)
     process.once(signal, () => void app.close())
 }
+
 main().catch((error) => {
   console.error(error)
   process.exitCode = 1

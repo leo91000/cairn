@@ -8,6 +8,7 @@ import { remainingUsage, usageBlocked } from './codex-account-types.ts'
 export const RESET_REMAINING_PERCENT = 2
 const outcomeSchema = z.object({ outcome: z.enum(['reset', 'alreadyRedeemed', 'nothingToReset', 'noCredit']) })
 const resetKey = (id: string) => `codex-reset:${id}`
+
 interface ResetAttempt {
   params: { idempotencyKey: string, creditId?: string }
   model: string
@@ -40,6 +41,7 @@ export class CodexAccountResets {
       this.remove(account.id)
       return { limits, resetError: '', resetConfirmed: attempt.confirmed }
     }
+
     if (attempt?.confirmed) {
       // Never spend another credit while the backend still reports the old low window.
       if (!restored(limits, attempt.model))
@@ -47,6 +49,7 @@ export class CodexAccountResets {
       this.remove(account.id)
       return { limits, resetError: '', resetConfirmed: true }
     }
+
     const remaining = remainingUsage(limits, model)
     if (!account.enabled || (!account.exhausted && (remaining === null || remaining > RESET_REMAINING_PERCENT)))
       return { limits, resetError: '', resetConfirmed: false }
@@ -61,12 +64,14 @@ export class CodexAccountResets {
       // Persist before sending: a lost reply or worker restart must reuse this exact request.
       this.store.set(key, attempt)
     }
+
     try {
       const { outcome } = outcomeSchema.parse(await rpc.request('account/rateLimitResetCredit/consume', attempt.params))
       if (outcome === 'nothingToReset' || outcome === 'noCredit') {
         this.remove(account.id)
         return { limits, resetError: outcome === 'nothingToReset' ? 'Banked reset is not eligible yet; checking again automatically.' : 'No banked reset available; waiting for capacity or another account.', resetConfirmed: false }
       }
+
       attempt.confirmed = true
       this.store.set(key, attempt)
       this.store.audit('codex.account.reset', { id: account.id, outcome })

@@ -29,17 +29,35 @@ class WorkingIndicatorTest {
     @get:Rule val compose = createComposeRule()
 
     private fun tool(id: Long, command: String, running: Boolean = false, exit: Int = 0) =
-        RunEvent(id, 1000 + id, if (running) "item.started" else "item.completed", "", mapOf("item" to buildJsonObject {
-            put("type", "command_execution")
-            put("command", command)
-            if (running) put("status", "in_progress") else put("exit_code", exit)
-        }))
+        RunEvent(
+            id,
+            1000 + id,
+            if (running) "item.started" else "item.completed",
+            "",
+            mapOf(
+                "item" to
+                    buildJsonObject {
+                        put("type", "command_execution")
+                        put("command", command)
+                        if (running) put("status", "in_progress") else put("exit_code", exit)
+                    }
+            ),
+        )
 
     private fun user(id: Long, at: Long) = RunEvent(id, at, "chat.user", "Vérifie les tests")
 
     @Test
     fun `the step in progress is named with its command`() {
-        val step = workingStep(listOf(user(1, 5000), tool(2, "cat README.md"), tool(3, "./gradlew testDebugUnitTest", running = true)), "Leo", 10)
+        val step =
+            workingStep(
+                listOf(
+                    user(1, 5000),
+                    tool(2, "cat README.md"),
+                    tool(3, "./gradlew testDebugUnitTest", running = true),
+                ),
+                "Leo",
+                10,
+            )
         assertEquals("Exécuter les tests", step.title)
         assertEquals("./gradlew testDebugUnitTest", step.detail)
         // Time runs from the latest message, not from the start of the conversation run.
@@ -48,18 +66,20 @@ class WorkingIndicatorTest {
 
     @Test
     fun `without a running step the agent works and shows its last step`() {
-        val step = workingStep(listOf(user(1, 5000), tool(2, "sed -n 1,20p ui/Signal.kt")), "Leo", null)
+        val step =
+            workingStep(listOf(user(1, 5000), tool(2, "sed -n 1,20p ui/Signal.kt")), "Leo", null)
         assertEquals("Leo travaille", step.title)
         assertEquals("Dernière étape : Lire Signal.kt", step.detail)
     }
 
     @Test
     fun `steps from an earlier turn and session notices are ignored`() {
-        val events = listOf(
-            tool(1, "./gradlew build", running = true),
-            user(2, 7000),
-            RunEvent(3, 7100, "turn.started", """{"type":"turn.started"}"""),
-        )
+        val events =
+            listOf(
+                tool(1, "./gradlew build", running = true),
+                user(2, 7000),
+                RunEvent(3, 7100, "turn.started", """{"type":"turn.started"}"""),
+            )
         val step = workingStep(events, "", 3000)
         assertEquals("L’agent travaille", step.title)
         assertEquals("", step.detail)
@@ -91,15 +111,24 @@ class WorkingIndicatorTest {
         compose.setContent {
             LeoTheme(if (dark) "dark" else "light") {
                 Column(Modifier.background(MaterialTheme.colorScheme.background).padding(20.dp)) {
-                    WorkingIndicator(WorkingStep("Exécuter les tests", "./gradlew testDebugUnitTest", started))
+                    WorkingIndicator(
+                        WorkingStep("Exécuter les tests", "./gradlew testDebugUnitTest", started)
+                    )
                     Spacer(Modifier.height(20.dp))
-                    WorkingIndicator(WorkingStep("Leo travaille", "Dernière étape : Lire Signal.kt", started))
+                    WorkingIndicator(
+                        WorkingStep("Leo travaille", "Dernière étape : Lire Signal.kt", started)
+                    )
                 }
             }
         }
         compose.mainClock.advanceTimeBy(700)
         val node = compose.onAllNodesWithTag("agent-working")[0]
-        node.assert(SemanticsMatcher.expectValue(SemanticsProperties.ContentDescription, listOf("Exécuter les tests : ./gradlew testDebugUnitTest")))
+        node.assert(
+            SemanticsMatcher.expectValue(
+                SemanticsProperties.ContentDescription,
+                listOf("Exécuter les tests : ./gradlew testDebugUnitTest"),
+            )
+        )
         node.assert(SemanticsMatcher.keyIsDefined(SemanticsProperties.LiveRegion))
         compose.onAllNodesWithTag("agent-working").assertCountEquals(2)
         capture("working-light")
@@ -139,7 +168,9 @@ class WorkingIndicatorTest {
         compose.mainClock.autoAdvance = false
         compose.setContent {
             LeoTheme("light") {
-                Box(Modifier.background(MaterialTheme.colorScheme.background).padding(24.dp)) { WorkingAvatar("Leo", "leo", 96.dp) }
+                Box(Modifier.background(MaterialTheme.colorScheme.background).padding(24.dp)) {
+                    WorkingAvatar("Leo", "leo", 96.dp)
+                }
             }
         }
         // One orbit takes 1.8 s; eight frames show the head going round the rounded frame.
@@ -153,7 +184,14 @@ class WorkingIndicatorTest {
     private fun capture(name: String) {
         val dir = System.getProperty("leo.screenshots.dir") ?: return
         File(dir).mkdirs()
-        compose.onRoot().captureToImage().asAndroidBitmap()
-            .compress(android.graphics.Bitmap.CompressFormat.PNG, 100, File(dir, "$name.png").outputStream())
+        compose
+            .onRoot()
+            .captureToImage()
+            .asAndroidBitmap()
+            .compress(
+                android.graphics.Bitmap.CompressFormat.PNG,
+                100,
+                File(dir, "$name.png").outputStream(),
+            )
     }
 }

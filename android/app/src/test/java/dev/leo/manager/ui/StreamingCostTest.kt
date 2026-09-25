@@ -10,8 +10,8 @@ import io.noties.markwon.Markwon
 import io.noties.markwon.ext.strikethrough.StrikethroughPlugin
 import io.noties.markwon.ext.tables.TablePlugin
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Rule
@@ -32,17 +32,19 @@ class StreamingCostTest {
     @Test
     fun `measure long streamed text through accumulator cache and native markdown`() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Application>()
-        fun markdown() = Markwon.builder(context)
-            .usePlugin(TablePlugin.create(context))
-            .usePlugin(StrikethroughPlugin.create())
-            .build()
-        fun textView() = TextView(context).apply {
-            layoutParams = ViewGroup.LayoutParams(380, ViewGroup.LayoutParams.WRAP_CONTENT)
-            textSize = 16f
-            setLineSpacing(0f, 1.2f)
-            includeFontPadding = false
-            setTextIsSelectable(true)
-        }
+        fun markdown() =
+            Markwon.builder(context)
+                .usePlugin(TablePlugin.create(context))
+                .usePlugin(StrikethroughPlugin.create())
+                .build()
+        fun textView() =
+            TextView(context).apply {
+                layoutParams = ViewGroup.LayoutParams(380, ViewGroup.LayoutParams.WRAP_CONTENT)
+                textSize = 16f
+                setLineSpacing(0f, 1.2f)
+                includeFontPadding = false
+                setTextIsSelectable(true)
+            }
         // Disk I/O and JSON are real; this isolated timing excludes hardware Keystore encryption.
         val cache = HistoryCache(directory.root, { _, bytes -> bytes }, { _, bytes -> bytes })
         for (optimized in listOf(false, true)) {
@@ -51,18 +53,30 @@ class StreamingCostTest {
                 val blocksRenderer = MarkdownBlocks(stableRenderer)
                 val views = mutableListOf<MarkdownTextView>()
                 val accumulator = LiveAccumulator()
-                val paragraph = "## Étape\n\nUne **réponse détaillée** avec du texte, une liste et un lien.\n\n- Premier point\n- Deuxième point\n\n"
+                val paragraph =
+                    "## Étape\n\nUne **réponse détaillée** avec du texte, une liste et un lien.\n\n- Premier point\n- Deuxième point\n\n"
                 var text = paragraph.repeat(length / paragraph.length + 1).take(length)
                 var cursor = count.toLong() + 1
-                fun message(id: Long, field: String, value: String) = RunEvent(
-                    id, id, "item.updated", if (field == "text") value else "",
-                    mapOf("item" to buildJsonObject {
-                        put("id", "stream-message")
-                        put("type", "agent_message")
-                        put(field, value)
-                    }),
+                fun message(id: Long, field: String, value: String) =
+                    RunEvent(
+                        id,
+                        id,
+                        "item.updated",
+                        if (field == "text") value else "",
+                        mapOf(
+                            "item" to
+                                buildJsonObject {
+                                    put("id", "stream-message")
+                                    put("type", "agent_message")
+                                    put(field, value)
+                                }
+                        ),
+                    )
+                accumulator.append(
+                    (1..count).map {
+                        RunEvent(it.toLong(), it.toLong(), "output", "Prior output $it")
+                    } + message(cursor, "text", text)
                 )
-                accumulator.append((1..count).map { RunEvent(it.toLong(), it.toLong(), "output", "Prior output $it") } + message(cursor, "text", text))
                 val reduce = mutableListOf<Double>()
                 val persist = mutableListOf<Double>()
                 val merge = mutableListOf<Double>()
@@ -79,7 +93,10 @@ class StreamingCostTest {
                     val rows = accumulator.append(listOf(message(cursor, "delta", suffix)))
                     val reduceMs = (System.nanoTime() - start) / 1e6
                     start = System.nanoTime()
-                    cache.save("$length-$count", CachedHistory(cursor, "v1:fixture:1", LiveState(), rows))
+                    cache.save(
+                        "$length-$count",
+                        CachedHistory(cursor, "v1:fixture:1", LiveState(), rows),
+                    )
                     val persistMs = (System.nanoTime() - start) / 1e6
                     start = System.nanoTime()
                     val merged = mergeHistory(rows.dropLast(1), rows.takeLast(1))
@@ -93,19 +110,33 @@ class StreamingCostTest {
                     val renderer = if (optimized) stableRenderer else markdown()
                     val creationMs = (System.nanoTime() - start) / 1e6
                     start = System.nanoTime()
-                    val blocks = if (optimized) withContext(Dispatchers.Default) { blocksRenderer.render(text) } else emptyList()
+                    val blocks =
+                        if (optimized)
+                            withContext(Dispatchers.Default) { blocksRenderer.render(text) }
+                        else emptyList()
                     if (!optimized) renderer.setMarkdown(view!!, text)
                     val renderMs = (System.nanoTime() - start) / 1e6
                     start = System.nanoTime()
                     if (optimized) {
-                        while (views.size < blocks.size) views.add(MarkdownTextView(context).apply { layoutParams = ViewGroup.LayoutParams(380, ViewGroup.LayoutParams.WRAP_CONTENT) })
+                        while (views.size < blocks.size) views.add(
+                            MarkdownTextView(context).apply {
+                                layoutParams =
+                                    ViewGroup.LayoutParams(380, ViewGroup.LayoutParams.WRAP_CONTENT)
+                            }
+                        )
                         blocks.forEachIndexed { index, block ->
                             views[index].bind(renderer, block)
-                            views[index].measure(View.MeasureSpec.makeMeasureSpec(380, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+                            views[index].measure(
+                                View.MeasureSpec.makeMeasureSpec(380, View.MeasureSpec.EXACTLY),
+                                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                            )
                             views[index].layout(0, 0, 380, views[index].measuredHeight)
                         }
                     } else {
-                        view!!.measure(View.MeasureSpec.makeMeasureSpec(380, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+                        view!!.measure(
+                            View.MeasureSpec.makeMeasureSpec(380, View.MeasureSpec.EXACTLY),
+                            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                        )
                         view.layout(0, 0, 380, view.measuredHeight)
                     }
                     val layoutMs = (System.nanoTime() - start) / 1e6
@@ -125,23 +156,29 @@ class StreamingCostTest {
                 fun stats(samples: List<Double>) = buildJsonObject {
                     val sorted = samples.sorted()
                     put("p50_ms", sorted[sorted.size / 2])
-                    put("p95_ms", sorted[(sorted.size * 0.95).toInt().coerceAtMost(sorted.lastIndex)])
+                    put(
+                        "p95_ms",
+                        sorted[(sorted.size * 0.95).toInt().coerceAtMost(sorted.lastIndex)],
+                    )
                 }
                 assertEquals(1, keys.size)
-                println("STREAM_PROFILE " + buildJsonObject {
-                    put("mode", if (optimized) "blocks" else "full_text_baseline")
-                    put("characters", length)
-                    put("prior_events", count)
-                    put("samples", reduce.size)
-                    put("message_keys", keys.size)
-                    put("accumulator", stats(reduce))
-                    put("cache_without_keystore", stats(persist))
-                    put("history_merge", stats(merge))
-                    put("timeline", stats(timeline))
-                    put("view_and_renderer_creation", stats(creation))
-                    put("markdown", stats(render))
-                    put("text_layout", stats(layout))
-                })
+                println(
+                    "STREAM_PROFILE " +
+                        buildJsonObject {
+                            put("mode", if (optimized) "blocks" else "full_text_baseline")
+                            put("characters", length)
+                            put("prior_events", count)
+                            put("samples", reduce.size)
+                            put("message_keys", keys.size)
+                            put("accumulator", stats(reduce))
+                            put("cache_without_keystore", stats(persist))
+                            put("history_merge", stats(merge))
+                            put("timeline", stats(timeline))
+                            put("view_and_renderer_creation", stats(creation))
+                            put("markdown", stats(render))
+                            put("text_layout", stats(layout))
+                        }
+                )
             }
         }
     }

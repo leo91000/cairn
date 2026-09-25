@@ -2,8 +2,20 @@
 import type { Task } from '../../shared/contracts'
 import { computed, ref, watch } from 'vue'
 import { MAIN_AGENT_ID } from '../../shared/constants'
-import { api, notify, refresh, state } from '../api'
-import { Bot, CalendarDays, CalendarRange, Clock, FolderGit2, Play } from '../icons'
+import {
+  api,
+  notify,
+  refresh,
+  state,
+} from '../api'
+import {
+  Bot,
+  CalendarDays,
+  CalendarRange,
+  Clock,
+  FolderGit2,
+  Play,
+} from '../icons'
 import Icon from './Icon.vue'
 import Modal from './Modal.vue'
 import UiAlert from './UiAlert.vue'
@@ -31,19 +43,49 @@ const agents = computed(() => state.agents.map(agent => ({ value: agent.id, labe
 const selectedAgent = computed(() => state.agents.find(agent => agent.id === form.value.agentId))
 const allowedProjects = computed(() => state.projects.filter(project => selectedAgent.value?.access?.projects === null || selectedAgent.value?.access.projects?.includes(project.id)))
 const projects = computed(() => [{ value: '', label: 'Let the agent choose', description: 'Work across its allowed projects' }, ...allowedProjects.value.map(project => ({ value: project.id, label: project.name, description: project.path }))])
-const projectChoice = computed({ get: () => form.value.projectId ?? '', set: (value: string) => {
-  form.value.projectId = value || null
-} })
+const projectChoice = computed({
+  get: () => form.value.projectId ?? '',
+  set: (value: string) => {
+    form.value.projectId = value || null
+  },
+})
 const advanced = ref(!!props.task?.projectId || !!props.task?.skills?.length)
-const inheritedSkills = computed({ get: () => form.value.skills === null, set: (value: boolean) => {
-  form.value.skills = value ? null : []
-} })
+const inheritedSkills = computed({
+  get: () => form.value.skills === null,
+  set: (value: boolean) => {
+    form.value.skills = value ? null : []
+  },
+})
 const scopeDescription = computed(() => selectedAgent.value?.access.projects === null ? 'All projects' : `${allowedProjects.value.length} allowed ${allowedProjects.value.length === 1 ? 'project' : 'projects'}`)
 const cadences = [
-  { value: 'once', label: 'One-off', description: 'Run when you’re ready', icon: Play, group: 'On demand' },
-  { value: 'daily', label: 'Every day', description: 'Daily at 09:00 in your timezone', icon: CalendarDays, group: 'Recurring' },
-  { value: 'weekly', label: 'Every Monday', description: 'Weekly at 09:00 in your timezone', icon: CalendarRange, group: 'Recurring' },
-  { value: 'custom', label: 'Custom schedule', description: 'Set your own cron expression', icon: Clock, group: 'Recurring' },
+  {
+    value: 'once',
+    label: 'One-off',
+    description: 'Run when you’re ready',
+    icon: Play,
+    group: 'On demand',
+  },
+  {
+    value: 'daily',
+    label: 'Every day',
+    description: 'Daily at 09:00 in your timezone',
+    icon: CalendarDays,
+    group: 'Recurring',
+  },
+  {
+    value: 'weekly',
+    label: 'Every Monday',
+    description: 'Weekly at 09:00 in your timezone',
+    icon: CalendarRange,
+    group: 'Recurring',
+  },
+  {
+    value: 'custom',
+    label: 'Custom schedule',
+    description: 'Set your own cron expression',
+    icon: Clock,
+    group: 'Recurring',
+  },
 ]
 const tagText = computed({
   get: () => form.value.tags.join(', '),
@@ -92,6 +134,7 @@ watch(cadence, (value) => {
           : (form.value.cron ?? '0 9 * * 1')
   occurrences.value = []
 })
+
 async function preview() {
   error.value = ''
   try {
@@ -106,6 +149,7 @@ async function preview() {
     error.value = (e as Error).message
   }
 }
+
 async function save() {
   busy.value = true
   error.value = ''
@@ -149,7 +193,16 @@ async function save() {
           placeholder="Describe the outcome, constraints, and how your agent should verify its work."
         /><small>Be specific about whether the agent may push, merge, or
           release.</small></label>
-        <VirtualSelect v-model="form.agentId" class="span-2 col-span-2 phone:col-span-1" label="Agent" :options="agents" :icon="Bot" placeholder="Choose an agent" empty-text="Add an agent to get started" required />
+        <VirtualSelect
+          v-model="form.agentId"
+          class="span-2 col-span-2 phone:col-span-1"
+          label="Agent"
+          :options="agents"
+          :icon="Bot"
+          placeholder="Choose an agent"
+          empty-text="Add an agent to get started"
+          required
+        />
         <p v-if="selectedAgent" class="inline-note bg-surface rounded-lg text-xs leading-[1.7] text-muted span-2 col-span-2 phone:col-span-1 agent-scope-summary px-[15px] py-[13px]">
           <Icon :name="Bot" :size="17" /><span>{{ scopeDescription }} · {{ selectedAgent.access.skills === null ? 'All available skills' : `${selectedAgent.access.skills.length} selected ${selectedAgent.access.skills.length === 1 ? 'skill' : 'skills'}` }} · {{ selectedAgent.access.sandbox === 'yolo' ? 'YOLO' : selectedAgent.access.sandbox }}</span>
         </p>
@@ -186,7 +239,13 @@ async function save() {
         </div>
         <label class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] span-2 col-span-2 phone:col-span-1 mx-0 my-[9px]"><input v-model="advanced" type="checkbox">Customize mission scope</label>
         <template v-if="advanced">
-          <VirtualSelect v-model="projectChoice" class="span-2 col-span-2 phone:col-span-1" label="Project context" :options="projects" :icon="FolderGit2" />
+          <VirtualSelect
+            v-model="projectChoice"
+            class="span-2 col-span-2 phone:col-span-1"
+            label="Project context"
+            :options="projects"
+            :icon="FolderGit2"
+          />
           <label class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] span-2 col-span-2 phone:col-span-1 mx-0 my-[9px]"><input v-model="inheritedSkills" type="checkbox">Use the agent’s available skills</label>
           <fieldset v-if="!inheritedSkills && available.length" class="span-2 col-span-2 phone:col-span-1">
             <legend>
@@ -213,7 +272,8 @@ async function save() {
         <UiButton type="button" @click="emit('close')">
           Cancel
         </UiButton><UiButton
-          variant="primary" type="submit"
+          variant="primary"
+          type="submit"
           :disabled="busy || !state.agents.length"
         >
           {{ busy ? "Saving…" : task ? "Save changes" : "Create mission" }}

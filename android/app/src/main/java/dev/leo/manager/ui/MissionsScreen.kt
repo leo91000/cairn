@@ -52,12 +52,12 @@ internal fun missionFilter(task: Task, filter: String): Boolean =
 internal fun missionOrder(tasks: List<Task>, latest: Map<String, Run>): List<Task> =
     tasks.sortedWith(
         compareBy<Task> {
-            when (taskGroup(it, latest[it.id])) {
-                "En cours" -> 0
-                "À examiner" -> 1
-                else -> 2
+                when (taskGroup(it, latest[it.id])) {
+                    "En cours" -> 0
+                    "À examiner" -> 1
+                    else -> 2
+                }
             }
-        }
             .thenBy { if (it.enabled && it.nextRun != null) it.nextRun else Long.MAX_VALUE }
             .thenBy { it.name.lowercase() }
     )
@@ -127,16 +127,24 @@ fun MissionsScreen(vm: LeoViewModel, state: Workspace, openRun: (String) -> Unit
             Column(if (wide) Modifier.width(420.dp).fillMaxHeight() else Modifier.fillMaxSize()) {
                 Column(Modifier.padding(start = 20.dp, end = 16.dp, top = 12.dp)) {
                     val active = state.tasks.count { !it.archived && it.enabled }
-                    val next = state.tasks.filter { it.enabled && !it.archived && it.nextRun != null }.minOfOrNull { it.nextRun!! }
+                    val next =
+                        state.tasks
+                            .filter { it.enabled && !it.archived && it.nextRun != null }
+                            .minOfOrNull { it.nextRun!! }
                     ScreenTitle(
                         "Missions",
                         listOfNotNull(
-                            if (active == 1) "1 active" else "$active actives",
-                            next?.let { "prochaine : ${upcomingStamp(it).replaceFirstChar { c -> c.lowercase() }}" },
-                        ).joinToString(" · "),
+                                if (active == 1) "1 active" else "$active actives",
+                                next?.let {
+                                    "prochaine : ${upcomingStamp(it).replaceFirstChar { c -> c.lowercase() }}"
+                                },
+                            )
+                            .joinToString(" · "),
                     ) {
                         Row {
-                            RoundAction("Rechercher une mission", LeoIcons.Search) { searching = !searching }
+                            RoundAction("Rechercher une mission", LeoIcons.Search) {
+                                searching = !searching
+                            }
                             RoundAction(
                                 "Créer une mission",
                                 LeoIcons.Plus,
@@ -154,24 +162,34 @@ fun MissionsScreen(vm: LeoViewModel, state: Workspace, openRun: (String) -> Unit
                         }
                 }
                 Row(
-                    Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 6.dp),
+                    Modifier.horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     filters.forEach { (key, label) ->
-                        SignalChip(label, filter == key, state.tasks.count { missionFilter(it, key) }) { filter = key }
+                        SignalChip(
+                            label,
+                            filter == key,
+                            state.tasks.count { missionFilter(it, key) },
+                        ) {
+                            filter = key
+                        }
                     }
                 }
                 if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
                 LazyColumn(
                     Modifier.weight(1f).testTag("missions"),
-                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp),
+                    contentPadding =
+                        PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     if (visible.isEmpty())
                         item {
                             Empty(
-                                if (state.tasks.isEmpty()) "Aucune mission" else "Aucune mission dans cette vue",
-                                if (state.tasks.isEmpty()) "Créez une mission et confiez-la à un agent."
+                                if (state.tasks.isEmpty()) "Aucune mission"
+                                else "Aucune mission dans cette vue",
+                                if (state.tasks.isEmpty())
+                                    "Créez une mission et confiez-la à un agent."
                                 else "Modifiez la recherche ou les filtres.",
                             )
                         }
@@ -194,13 +212,30 @@ fun MissionsScreen(vm: LeoViewModel, state: Workspace, openRun: (String) -> Unit
                     val shown = selected ?: visible.firstOrNull()
                     if (shown != null)
                         key(shown.id) {
-                            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp)) {
-                                MissionDetail(vm, state, shown, latest[shown.id], actions, sheet = false)
+                            Column(
+                                Modifier.fillMaxSize()
+                                    .verticalScroll(rememberScrollState())
+                                    .padding(24.dp)
+                            ) {
+                                MissionDetail(
+                                    vm,
+                                    state,
+                                    shown,
+                                    latest[shown.id],
+                                    actions,
+                                    sheet = false,
+                                )
                             }
                         }
                     else
-                        Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-                            Empty("Vos missions, au même endroit", "Créez une mission pour démarrer.")
+                        Box(
+                            Modifier.fillMaxSize().padding(24.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Empty(
+                                "Vos missions, au même endroit",
+                                "Créez une mission pour démarrer.",
+                            )
                         }
                 }
             }
@@ -285,8 +320,10 @@ private fun MissionCard(
     SignalCard(
         Modifier.fillMaxWidth(),
         onClick = open,
-        color = if (highlighted) MaterialTheme.colorScheme.primaryContainer
-            else if (quiet) MaterialTheme.colorScheme.background else MaterialTheme.colorScheme.surface,
+        color =
+            if (highlighted) MaterialTheme.colorScheme.primaryContainer
+            else if (quiet) MaterialTheme.colorScheme.background
+            else MaterialTheme.colorScheme.surface,
         outlined = quiet || MaterialTheme.colorScheme.background.luminance() < 0.2f,
         padding = PaddingValues(start = 16.dp, end = 12.dp, top = 14.dp, bottom = 14.dp),
     ) {
@@ -301,7 +338,9 @@ private fun MissionCard(
                     task.name,
                     Modifier.padding(top = 8.dp),
                     style = MaterialTheme.typography.titleMedium,
-                    color = if (quiet) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
+                    color =
+                        if (quiet) MaterialTheme.colorScheme.onSurfaceVariant
+                        else MaterialTheme.colorScheme.onSurface,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -321,14 +360,16 @@ private fun MissionCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    task.nextRun?.takeIf { task.enabled && !task.archived && task.cron != null }?.let {
-                        Text(
-                            "  ·  ${upcomingStamp(it).substringBefore(" · ")}",
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                        )
-                    }
+                    task.nextRun
+                        ?.takeIf { task.enabled && !task.archived && task.cron != null }
+                        ?.let {
+                            Text(
+                                "  ·  ${upcomingStamp(it).substringBefore(" · ")}",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                            )
+                        }
                 }
                 val group = taskGroup(task, run)
                 if (group == "À examiner" && run != null)
@@ -339,7 +380,8 @@ private fun MissionCard(
                         fontWeight = FontWeight.SemiBold,
                         color = signal.attention,
                     )
-                if (runs.isNotEmpty()) RunStrip(runs.take(12).reversed(), Modifier.padding(top = 10.dp))
+                if (runs.isNotEmpty())
+                    RunStrip(runs.take(12).reversed(), Modifier.padding(top = 10.dp))
             }
             Spacer(Modifier.width(10.dp))
             when {
@@ -364,7 +406,8 @@ private fun MissionCard(
                         "Lancer ${task.name}",
                         LeoIcons.Play,
                         container = if (quiet) MaterialTheme.colorScheme.background else signal.ink,
-                        content = if (quiet) MaterialTheme.colorScheme.onSurfaceVariant else signal.onInk,
+                        content =
+                            if (quiet) MaterialTheme.colorScheme.onSurfaceVariant else signal.onInk,
                         outlined = quiet,
                         size = 52.dp,
                         enabled = !state.busy && !task.archived,
@@ -391,8 +434,10 @@ internal fun RunStrip(runs: List<Run>, modifier: Modifier = Modifier) {
                     .background(
                         when (it.status) {
                             "succeeded" -> signal.success
-                            "failed", "interrupted" -> signal.attention
-                            "running", "queued" -> MaterialTheme.colorScheme.primary
+                            "failed",
+                            "interrupted" -> signal.attention
+                            "running",
+                            "queued" -> MaterialTheme.colorScheme.primary
                             else -> MaterialTheme.colorScheme.outlineVariant
                         }
                     )
@@ -411,7 +456,10 @@ private fun MissionDetail(
     sheet: Boolean,
 ) {
     var history by remember(task.id) { mutableStateOf<List<Run>?>(null) }
-    var occurrences by remember(task.id, task.cron, task.timezone, task.enabled) { mutableStateOf<List<Long>>(emptyList()) }
+    var occurrences by
+        remember(task.id, task.cron, task.timezone, task.enabled) {
+            mutableStateOf<List<Long>>(emptyList())
+        }
     var menu by remember { mutableStateOf(false) }
     var promptExpanded by rememberSaveable(task.id) { mutableStateOf(false) }
     val connected = state.session.authenticated
@@ -428,7 +476,12 @@ private fun MissionDetail(
         if (connected && cron != null && task.enabled && !task.archived)
             occurrences =
                 try {
-                    vm.api.send<Occurrences>("POST", "/schedule/preview", body("cron" to cron, "timezone" to task.timezone))
+                    vm.api
+                        .send<Occurrences>(
+                            "POST",
+                            "/schedule/preview",
+                            body("cron" to cron, "timezone" to task.timezone),
+                        )
                         .occurrences
                         .take(2)
                 } catch (e: Exception) {
@@ -438,8 +491,9 @@ private fun MissionDetail(
     }
     val agent = state.agents.find { it.id == task.agentId }
     val project = state.projects.find { it.id == task.projectId }
-    fun toggle(copy: Task) =
-        vm.perform { save("tasks", task.id, wireJson.encodeToJsonElement(copy)) }
+    fun toggle(copy: Task) = vm.perform {
+        save("tasks", task.id, wireJson.encodeToJsonElement(copy))
+    }
     Row(verticalAlignment = Alignment.CenterVertically) {
         AgentAvatar(agent?.name ?: "?", task.agentId, 30.dp)
         Spacer(Modifier.width(10.dp))
@@ -453,7 +507,12 @@ private fun MissionDetail(
             ProjectLabel(project?.name ?: "Tous les projets autorisés", project?.id)
         }
         Box {
-            RoundAction("Autres actions", LeoIcons.More, container = MaterialTheme.colorScheme.background, outlined = false) {
+            RoundAction(
+                "Autres actions",
+                LeoIcons.More,
+                container = MaterialTheme.colorScheme.background,
+                outlined = false,
+            ) {
                 menu = true
             }
             DropdownMenu(menu, { menu = false }) {
@@ -467,7 +526,12 @@ private fun MissionDetail(
                                 "tasks",
                                 "",
                                 wireJson.encodeToJsonElement(
-                                    task.copy(id = "", name = task.name.take(92) + " (copie)", enabled = false, archived = false)
+                                    task.copy(
+                                        id = "",
+                                        name = task.name.take(92) + " (copie)",
+                                        enabled = false,
+                                        archived = false,
+                                    )
                                 ),
                             )
                         }
@@ -499,7 +563,12 @@ private fun MissionDetail(
             }
         }
         if (sheet)
-            RoundAction("Fermer", LeoIcons.Close, container = MaterialTheme.colorScheme.background, outlined = false) {
+            RoundAction(
+                "Fermer",
+                LeoIcons.Close,
+                container = MaterialTheme.colorScheme.background,
+                outlined = false,
+            ) {
                 actions.close()
             }
     }
@@ -517,10 +586,16 @@ private fun MissionDetail(
         val time = Regex("\\d{2}:\\d{2}$").find(wording)?.value
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Eyebrow(if (time != null) wording.substringBefore(" · $time").removePrefix("En pause · ") else "Planification")
+                Eyebrow(
+                    if (time != null)
+                        wording.substringBefore(" · $time").removePrefix("En pause · ")
+                    else "Planification"
+                )
                 Text(
                     time ?: wording,
-                    style = if (time != null) MaterialTheme.typography.headlineLarge else MaterialTheme.typography.titleMedium,
+                    style =
+                        if (time != null) MaterialTheme.typography.headlineLarge
+                        else MaterialTheme.typography.titleMedium,
                 )
                 if (cron != null)
                     Text(
@@ -536,10 +611,15 @@ private fun MissionDetail(
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        Modifier.padding(top = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
                         occurrences.forEachIndexed { index, value ->
                             Surface(
-                                color = if (index == 0) signal.ink else MaterialTheme.colorScheme.surfaceVariant,
+                                color =
+                                    if (index == 0) signal.ink
+                                    else MaterialTheme.colorScheme.surfaceVariant,
                                 shape = CircleShape,
                             ) {
                                 Text(
@@ -547,7 +627,9 @@ private fun MissionDetail(
                                     Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
                                     style = MaterialTheme.typography.labelMedium,
                                     fontWeight = FontWeight.SemiBold,
-                                    color = if (index == 0) signal.onInk else MaterialTheme.colorScheme.onSurface,
+                                    color =
+                                        if (index == 0) signal.onInk
+                                        else MaterialTheme.colorScheme.onSurface,
                                 )
                             }
                         }
@@ -583,7 +665,10 @@ private fun MissionDetail(
         }
     }
     val runs = history
-    Row(Modifier.padding(top = 20.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        Modifier.padding(top = 20.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Eyebrow("Historique", Modifier.weight(1f))
         val finished = runs.orEmpty().filter { !it.active }
         if (finished.isNotEmpty()) {
@@ -611,7 +696,9 @@ private fun MissionDetail(
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        RoundAction("Modifier la mission", LeoIcons.Pencil, size = 52.dp, enabled = !state.busy) { actions.edit(task) }
+        RoundAction("Modifier la mission", LeoIcons.Pencil, size = 52.dp, enabled = !state.busy) {
+            actions.edit(task)
+        }
         if (!task.archived && task.cron != null)
             RoundAction(
                 if (task.enabled) "Mettre en pause" else "Reprendre la planification",
@@ -637,7 +724,11 @@ private fun MissionDetail(
 
 @Composable
 private fun HistoryRow(run: Run, open: () -> Unit) {
-    Surface(onClick = open, color = androidx.compose.ui.graphics.Color.Transparent, shape = RoundedCornerShape(12.dp)) {
+    Surface(
+        onClick = open,
+        color = androidx.compose.ui.graphics.Color.Transparent,
+        shape = RoundedCornerShape(12.dp),
+    ) {
         Row(
             Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -664,7 +755,12 @@ private fun HistoryRow(run: Run, open: () -> Unit) {
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Icon(LeoIcons.Right, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Icon(
+                LeoIcons.Right,
+                null,
+                Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

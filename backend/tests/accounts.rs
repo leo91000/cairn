@@ -10,7 +10,22 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 fn config(root: &TempDir) -> Config {
-    serde_json::from_value(json!({"dataDir":root.path().join("data"),"home":root.path().join("home"),"workspaceRoots":[root.path()],"publicUrl":"http://localhost:4310","host":"127.0.0.1","port":0,"setupToken":"test","codexBin":"/nonexistent-codex","claudeBin":std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/claude.mjs"),"ghBin":"gh","concurrency":1,"logger":false,"workerEnabled":false,"runnerUrl":""})).unwrap()
+    serde_json::from_value(json!({
+        "dataDir": root.path().join("data"),
+        "home": root.path().join("home"),
+        "workspaceRoots": [root.path()],
+        "publicUrl": "http://localhost:4310",
+        "host": "127.0.0.1",
+        "port": 0,
+        "setupToken": "test",
+        "codexBin": "/nonexistent-codex",
+        "claudeBin": std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/claude.mjs"),
+        "ghBin": "gh",
+        "concurrency": 1,
+        "logger": false,
+        "workerEnabled": false,
+        "runnerUrl": ""
+    })).unwrap()
 }
 
 #[tokio::test]
@@ -22,12 +37,64 @@ async fn codex_accounts_and_the_single_claude_login_migrate_into_one_pool() {
     {
         // State written by earlier versions.
         let store = Store::open(&c.data_dir).unwrap();
-        let limits = json!({"ordinaryUsageAllowed":true,"rateLimits":{"limitId":"codex","primary":{"usedPercent":20,"windowDurationMins":300,"resetsAt":1},"secondary":{"usedPercent":70,"windowDurationMins":10080,"resetsAt":2}},"rateLimitResetCredits":{"availableCount":3,"credits":[]}});
-        store.put("codexAccounts", json!({"id":codex,"name":"Work","enabled":true,"email":"work@example.test","plan":"plus","identity":"fingerprint","createdAt":1,"checkedAt":now(),"state":"ready","error":"","limits":limits,"lastUsedAt":null,"exhausted":{"at":1,"model":"","limits":limits},"maxConcurrentRuns":2})).await.unwrap();
+        let limits = json!({
+            "ordinaryUsageAllowed": true,
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": {"usedPercent": 20,"windowDurationMins": 300,"resetsAt": 1},
+                "secondary": {"usedPercent": 70,"windowDurationMins": 10080,"resetsAt": 2}
+            },
+            "rateLimitResetCredits": {"availableCount": 3,"credits": []}
+        });
+        store
+            .put(
+                "codexAccounts",
+                json!({
+                    "id": codex,
+                    "name": "Work",
+                    "enabled": true,
+                    "email": "work@example.test",
+                    "plan": "plus",
+                    "identity": "fingerprint",
+                    "createdAt": 1,
+                    "checkedAt": now(),
+                    "state": "ready",
+                    "error": "",
+                    "limits": limits,
+                    "lastUsedAt": null,
+                    "exhausted": {"at": 1,"model": "","limits": limits},
+                    "maxConcurrentRuns": 2
+                }),
+            )
+            .await
+            .unwrap();
         store
             .write(move |db| {
-                db.add_run(&json!({"id":"codex-run","taskId":"a","status":"succeeded","createdAt":1,"codexAccountId":codex,"codexAccountName":"Work","codexAuthMode":"external","snapshot":{"agent":{}}}), None)?;
-                db.add_run(&json!({"id":"claude-run","taskId":"b","status":"succeeded","createdAt":2,"sessionId":session,"isolated":false,"snapshot":{"agent":{"provider":"claude"}}}), None)?;
+                db.add_run(
+                    &json!({
+                        "id": "codex-run",
+                        "taskId": "a",
+                        "status": "succeeded",
+                        "createdAt": 1,
+                        "codexAccountId": codex,
+                        "codexAccountName": "Work",
+                        "codexAuthMode": "external",
+                        "snapshot": {"agent": {}}
+                    }),
+                    None,
+                )?;
+                db.add_run(
+                    &json!({
+                        "id": "claude-run",
+                        "taskId": "b",
+                        "status": "succeeded",
+                        "createdAt": 2,
+                        "sessionId": session,
+                        "isolated": false,
+                        "snapshot": {"agent": {"provider": "claude"}}
+                    }),
+                    None,
+                )?;
                 Ok(())
             })
             .await
@@ -35,7 +102,7 @@ async fn codex_accounts_and_the_single_claude_login_migrate_into_one_pool() {
         store
             .set(
                 "claude-status",
-                json!({"connected":true,"email":"old@example.test","subscriptionType":"pro"}),
+                json!({"connected": true,"email": "old@example.test","subscriptionType": "pro"}),
                 None,
             )
             .await
@@ -45,13 +112,15 @@ async fn codex_accounts_and_the_single_claude_login_migrate_into_one_pool() {
             .await
             .unwrap();
         store
-            .set("claude-usage", json!({"windows":[]}), None)
+            .set("claude-usage", json!({"windows": []}), None)
             .await
             .unwrap();
     }
     let legacy = c.data_dir.join("claude");
     std::fs::create_dir_all(legacy.join("projects/-data-project")).unwrap();
-    std::fs::write(legacy.join(".credentials.json"), json!({"claudeAiOauth":{"accessToken":"old","refreshToken":"old-refresh","expiresAt":now()+3600000}}).to_string()).unwrap();
+    std::fs::write(legacy.join(".credentials.json"), json!({
+        "claudeAiOauth": {"accessToken": "old","refreshToken": "old-refresh","expiresAt": now()+3600000}
+    }).to_string()).unwrap();
     std::fs::write(legacy.join(".claude.json"), "{}").unwrap();
     // The old serialized credential transfer was interrupted.
     std::fs::write(legacy.join("sync-required"), "claude-run").unwrap();
@@ -121,7 +190,12 @@ async fn each_coding_agent_has_its_own_next_account_and_paused_accounts_are_skip
     ] {
         let mut account = s.accounts.create(&s, provider, name).await.unwrap();
         account["state"] = "ready".into();
-        account["usage"] = json!({"allowed":true,"checkedAt":now(),"windows":[{"id":"w","usedPercent":used,"models":[]}],"resets":null});
+        account["usage"] = json!({
+            "allowed": true,
+            "checkedAt": now(),
+            "windows": [{"id": "w","usedPercent": used,"models": []}],
+            "resets": null
+        });
         s.store.put(KIND, account.clone()).await.unwrap();
         ids.push(text(&account, "id").to_owned());
     }
@@ -133,7 +207,7 @@ async fn each_coding_agent_has_its_own_next_account_and_paused_accounts_are_skip
     assert_eq!(status(&list, &ids[1]), "next");
     assert_eq!(status(&list, &ids[2]), "next");
     s.accounts
-        .update(&s, &ids[1], &json!({"enabled":false}))
+        .update(&s, &ids[1], &json!({"enabled": false}))
         .await
         .unwrap();
     let list = s.accounts.list(&s).await.unwrap();
@@ -145,7 +219,7 @@ async fn each_coding_agent_has_its_own_next_account_and_paused_accounts_are_skip
     );
     // Once every Claude account is paused, Claude runs wait for the user.
     s.accounts
-        .update(&s, &ids[2], &json!({"enabled":false}))
+        .update(&s, &ids[2], &json!({"enabled": false}))
         .await
         .unwrap();
     assert_eq!(

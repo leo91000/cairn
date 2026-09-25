@@ -41,8 +41,13 @@ pub async fn run(
     let executor = Arc::new(super::executor::Executor::default());
     let result = loop {
         let response = tokio::select! {
-            _=stop.cancelled()=>break Ok(()),
-            result=client.post(master.join("internal/nodes/poll").map_err(Error::internal)?).bearer_auth(&token).json(&json!({})).timeout(Duration::from_secs(25)).send()=>result,
+            _ = stop.cancelled() => break Ok(()),
+            result = client
+                .post(master.join("internal/nodes/poll").map_err(Error::internal)?)
+                .bearer_auth(&token)
+                .json(&json!({}))
+                .timeout(Duration::from_secs(25))
+                .send() => result,
         };
         let command = match response {
             Ok(response) if response.status() == 401 => {
@@ -53,7 +58,10 @@ pub async fn run(
         };
         while tasks.try_join_next().is_some() {}
         let Some(command) = command.filter(Value::is_object) else {
-            tokio::select! { _=stop.cancelled()=>break Ok(()),_=tokio::time::sleep(Duration::from_millis(250))=>{} }
+            tokio::select! {
+                _ = stop.cancelled() => break Ok(()),
+                _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+            }
             continue;
         };
         let permit = permits
@@ -99,6 +107,7 @@ pub async fn run(
     }
     result
 }
+
 fn route(method: &str, path: &str) -> Result<()> {
     let parts = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
     let allowed = match parts.as_slice() {
@@ -145,6 +154,7 @@ fn route(method: &str, path: &str) -> Result<()> {
     }
     Ok(())
 }
+
 async fn forward(
     client: &reqwest::Client,
     master: &url::Url,
@@ -174,7 +184,12 @@ async fn forward(
             client,
             master,
             token,
-            &json!({"id":id,"sequence":0,"status":status,"done":true}),
+            &json!({
+                "id": id,
+                "sequence": 0,
+                "status": status,
+                "done": true
+            }),
         )
         .await;
     }
@@ -221,11 +236,29 @@ async fn forward(
     let mut response = match response {
         Ok(Ok(response)) => response,
         _ => {
-            send(client,master,token,&json!({"id":id,"sequence":0,"status":503,"done":true,"data":STANDARD.encode(b"VM controller unavailable")})).await?;
+            send(
+                client,
+                master,
+                token,
+                &json!({
+                    "id": id,
+                    "sequence": 0,
+                    "status": 503,
+                    "done": true,
+                    "data": STANDARD.encode(b"VM controller unavailable")
+                }),
+            )
+            .await?;
             return Ok(());
         }
     };
-    let head = json!({"id":id,"sequence":0,"status":response.status().as_u16(),"length":response.content_length(),"contentType":response.headers().get("content-type").and_then(|v|v.to_str().ok()).unwrap_or("")});
+    let head = json!({
+        "id": id,
+        "sequence": 0,
+        "status": response.status().as_u16(),
+        "length": response.content_length(),
+        "contentType": response.headers().get("content-type").and_then(|v|v.to_str().ok()).unwrap_or("")
+    });
     send(client, master, token, &head).await?;
     // Bulk data uses one continuous, backpressured request. Keep control/log
     // frames and old masters on the existing protocol (including /wait's result).
@@ -268,7 +301,7 @@ async fn forward(
                 client,
                 master,
                 token,
-                &json!({"id":id,"sequence":sequence,"data":STANDARD.encode(chunk)}),
+                &json!({"id": id,"sequence": sequence,"data": STANDARD.encode(chunk)}),
             )
             .await?;
             sequence += 1;
@@ -284,10 +317,11 @@ async fn forward(
         client,
         master,
         token,
-        &json!({"id":id,"sequence":sequence,"done":true}),
+        &json!({"id": id,"sequence": sequence,"done": true}),
     )
     .await
 }
+
 async fn send(
     client: &reqwest::Client,
     master: &url::Url,

@@ -17,8 +17,15 @@ describe('durable storage and API boundaries', () => {
       const recent = await ctx.service.enqueue(other.id)
       ctx.service.store.updateRun(recent.id, { status: 'succeeded' })
       for (let index = 0; index < 110; index++) {
-        ctx.service.store.addRun({ ...recent, id: `history-${index.toString().padStart(3, '0')}`, status: 'succeeded', createdAt: recent.createdAt + 1000, summary: 'Not in the list' })
+        ctx.service.store.addRun({
+          ...recent,
+          id: `history-${index.toString().padStart(3, '0')}`,
+          status: 'succeeded',
+          createdAt: recent.createdAt + 1000,
+          summary: 'Not in the list',
+        })
       }
+
       const response = await ctx.app.inject({ url: '/api/tasks/activity', headers })
       expect(response.statusCode).toBe(200)
       const items = response.json()
@@ -51,6 +58,7 @@ describe('durable storage and API boundaries', () => {
       finally {
         upgraded.close()
       }
+
       const reopened = new Store(path.join(ctx.directory, 'data'))
       expect(reopened.events(run.id).at(-1)?.payload?.item).toEqual({ type: 'agent_message', text: 'Done' })
       reopened.close()
@@ -117,6 +125,7 @@ describe('durable storage and API boundaries', () => {
             .statusCode,
         ).toBe(400)
       }
+
       const archived = ctx.service.task(
         { ...ctx.task, archived: true, cron: '* * * * *' },
         ctx.task.id,

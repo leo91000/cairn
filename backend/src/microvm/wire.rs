@@ -68,6 +68,7 @@ pub async fn write(writer: &mut (impl AsyncWrite + Unpin), value: &Value) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[tokio::test]
     async fn archive_frames_preserve_bytes_and_reject_truncated_or_oversized_data() {
         let data = (0..MAX_CHUNK).map(|i| i as u8).collect::<Vec<_>>();
@@ -99,14 +100,20 @@ mod tests {
                 .is_err()
         );
     }
+
     #[tokio::test]
     async fn fragmented_archive_frames_do_not_consume_the_following_control_message() {
         let mut encoded = Vec::new();
         write_chunk(&mut encoded, b"archive\0\n{}").await.unwrap();
         write_chunk(&mut encoded, &[]).await.unwrap();
-        write(&mut encoded, &serde_json::json!({"ok":true}))
-            .await
-            .unwrap();
+        write(
+            &mut encoded,
+            &serde_json::json!({
+                "ok": true
+            }),
+        )
+        .await
+        .unwrap();
         let (mut sender, receiver) = tokio::io::duplex(5);
         let writing = async move {
             for chunk in encoded.chunks(3) {
@@ -123,6 +130,7 @@ mod tests {
         };
         tokio::join!(writing, reading);
     }
+
     #[tokio::test]
     async fn rejects_truncation_and_bounds_frames() {
         assert!(read(&mut &b"{\"x\":1}"[..]).await.is_err());

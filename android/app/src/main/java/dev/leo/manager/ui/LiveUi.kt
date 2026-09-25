@@ -5,7 +5,6 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -61,46 +60,54 @@ fun rememberLive(
             var cacheGeneration = vm.historyCache.generation
             val key = vm.historyCache.key(workspace.origin, api.csrf, path)
             // A resumed session is already at least as recent as its cache.
-            if (session.path != path) vm.historyCache.read(key)?.let {
-                session.restore(it, path, api.streamGeneration.get())
-                value = session.snapshot
-            }
+            if (session.path != path)
+                vm.historyCache.read(key)?.let {
+                    session.restore(it, path, api.streamGeneration.get())
+                    value = session.snapshot
+                }
             try {
                 owner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
                     try {
-                        // A preview settles on its first complete snapshot, then releases the stream:
-                        // a restored session emits it before connecting, so a cached preview never connects.
+                        // A preview settles on its first complete snapshot, then releases the
+                        // stream:
+                        // a restored session emits it before connecting, so a cached preview never
+                        // connects.
                         api.live(path, session)
-                            .transformWhile { emit(it); streaming || (it.catchingUp && it.httpStatus == null) }
-                            .collect {
-                            vm.acceptCacheRevision(it.state?.cacheRevision)
-                            cacheGeneration = vm.historyCache.generation
-                            if (!it.catchingUp || it.httpStatus != null) value = display(it)
-                            if (it.httpStatus in listOf(401, 403, 404, 409)) {
-                                vm.historyCache.remove(key)
-                                value =
-                                    LiveSnapshot(
-                                        httpStatus = it.httpStatus,
-                                        status = it.status,
-                                        error = it.error,
-                                    )
-                            } else if (!it.catchingUp && it.state != null && it.history != null) {
-                                vm.historyCache.save(
-                                    key,
-                                    CachedHistory(
-                                        it.cursor,
-                                        it.history,
-                                        it.state,
-                                        value.events,
-                                        oldest = value.oldest,
-                                        hasOlder = value.hasOlder,
-                                    ),
-                                    expectedGeneration = cacheGeneration,
-                                )
+                            .transformWhile {
+                                emit(it)
+                                streaming || (it.catchingUp && it.httpStatus == null)
                             }
-                            if (it.httpStatus == 401)
-                                vm.report(ApiException(401, "Session expirée"))
-                        }
+                            .collect {
+                                vm.acceptCacheRevision(it.state?.cacheRevision)
+                                cacheGeneration = vm.historyCache.generation
+                                if (!it.catchingUp || it.httpStatus != null) value = display(it)
+                                if (it.httpStatus in listOf(401, 403, 404, 409)) {
+                                    vm.historyCache.remove(key)
+                                    value =
+                                        LiveSnapshot(
+                                            httpStatus = it.httpStatus,
+                                            status = it.status,
+                                            error = it.error,
+                                        )
+                                } else if (
+                                    !it.catchingUp && it.state != null && it.history != null
+                                ) {
+                                    vm.historyCache.save(
+                                        key,
+                                        CachedHistory(
+                                            it.cursor,
+                                            it.history,
+                                            it.state,
+                                            value.events,
+                                            oldest = value.oldest,
+                                            hasOlder = value.hasOlder,
+                                        ),
+                                        expectedGeneration = cacheGeneration,
+                                    )
+                                }
+                                if (it.httpStatus == 401)
+                                    vm.report(ApiException(401, "Session expirée"))
+                            }
                     } finally {
                         withContext(NonCancellable) { vm.historyCache.flush(key) }
                     }
@@ -180,7 +187,11 @@ fun rememberLive(
  * gets a requested position, so a drag or fling in progress is never interrupted.
  */
 @Composable
-internal fun rememberHistoryPaging(live: LiveSnapshot, list: LazyListState, ready: Boolean): () -> Unit {
+internal fun rememberHistoryPaging(
+    live: LiveSnapshot,
+    list: LazyListState,
+    ready: Boolean,
+): () -> Unit {
     val current by rememberUpdatedState(live)
     val load = { if (current.hasOlder && !current.loadingOlder) current.loadOlder() }
     val page = remember(list) { longArrayOf(live.oldest) }
@@ -197,15 +208,19 @@ internal fun rememberHistoryPaging(live: LiveSnapshot, list: LazyListState, read
     LaunchedEffect(list, ready) {
         if (ready)
             snapshotFlow {
-                    val snapshot = current
-                    val info = list.layoutInfo
-                    // Pages can fold into only a few rows; keep loading until enough is buffered.
-                    val near = info.visibleItemsInfo.isNotEmpty() &&
+                val snapshot = current
+                val info = list.layoutInfo
+                // Pages can fold into only a few rows; keep loading until enough is buffered.
+                val near =
+                    info.visibleItemsInfo.isNotEmpty() &&
                         list.distanceToStart() < HISTORY_PREFETCH_SCREENS * info.viewportSize.height
-                    // The boundary changes with each page, even when a fast response is applied
-                    // before a loading frame was ever observed.
-                    (near && snapshot.hasOlder && !snapshot.loadingOlder && snapshot.olderError == null) to snapshot.oldest
-                }
+                // The boundary changes with each page, even when a fast response is applied
+                // before a loading frame was ever observed.
+                (near &&
+                    snapshot.hasOlder &&
+                    !snapshot.loadingOlder &&
+                    snapshot.olderError == null) to snapshot.oldest
+            }
                 .collect { (load) -> if (load) current.loadOlder() }
     }
     return load
@@ -213,7 +228,9 @@ internal fun rememberHistoryPaging(live: LiveSnapshot, list: LazyListState, read
 
 internal const val HISTORY_PREFETCH_SCREENS = 3
 
-/** Estimated pixels above the viewport; unmeasured rows are assumed to be as tall as visible ones. */
+/**
+ * Estimated pixels above the viewport; unmeasured rows are assumed to be as tall as visible ones.
+ */
 internal fun LazyListState.distanceToStart(): Int {
     val info = layoutInfo
     val visible = info.visibleItemsInfo
@@ -228,7 +245,12 @@ internal fun LazyListState.distanceToStart(): Int {
  * scroll anchor and push the reader's text down when a page arrives.
  */
 @Composable
-internal fun BoxScope.HistoryStatus(live: LiveSnapshot, list: LazyListState, retry: () -> Unit, connection: String? = null) {
+internal fun BoxScope.HistoryStatus(
+    live: LiveSnapshot,
+    list: LazyListState,
+    retry: () -> Unit,
+    connection: String? = null,
+) {
     val atStart by remember(list) { derivedStateOf { !list.canScrollBackward } }
     val error = live.olderError
     Column(
@@ -262,7 +284,10 @@ internal fun BoxScope.HistoryStatus(live: LiveSnapshot, list: LazyListState, ret
             StatusPill {
                 if (error == null) {
                     CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                    Text("Chargement des messages précédents…", style = MaterialTheme.typography.labelMedium)
+                    Text(
+                        "Chargement des messages précédents…",
+                        style = MaterialTheme.typography.labelMedium,
+                    )
                 } else {
                     Text(
                         error,
@@ -307,27 +332,38 @@ internal class TimelineKeys {
             this.history = history
             owners = emptyMap()
         }
-        val used = entries.filter { !it.key.startsWith("activity:") }.mapTo(mutableSetOf()) { it.key }
+        val used =
+            entries.filter { !it.key.startsWith("activity:") }.mapTo(mutableSetOf()) { it.key }
         val keys = arrayOfNulls<String>(entries.size)
         // Event ids are unique; item ids only help when a folded update replaced the known event.
-        for (identity in listOf<(RunEvent) -> String?>({ "event:${it.id}" }, { it.itemIdentity() })) {
+        for (identity in
+            listOf<(RunEvent) -> String?>({ "event:${it.id}" }, { it.itemIdentity() })) {
             entries.forEachIndexed { index, entry ->
                 if (keys[index] == null && entry.key.startsWith("activity:"))
-                    entry.events.firstNotNullOfOrNull { event -> identity(event)?.let(owners::get)?.takeIf { it !in used } }
-                        ?.let { keys[index] = it; used.add(it) }
+                    entry.events
+                        .firstNotNullOfOrNull { event ->
+                            identity(event)?.let(owners::get)?.takeIf { it !in used }
+                        }
+                        ?.let {
+                            keys[index] = it
+                            used.add(it)
+                        }
             }
         }
         val result = entries.mapIndexed { index, entry ->
-            val key = keys[index] ?: entry.key.takeIf { it !in used || !it.startsWith("activity:") }
-                ?: "${entry.key}:$index"
+            val key =
+                keys[index]
+                    ?: entry.key.takeIf { it !in used || !it.startsWith("activity:") }
+                    ?: "${entry.key}:$index"
             used.add(key)
             if (key == entry.key) entry else entry.copy(key = key)
         }
         owners = buildMap {
-            for (entry in result) if (entry.key.startsWith("activity:")) for (event in entry.events) {
-                put("event:${event.id}", entry.key)
-                event.itemIdentity()?.let { put(it, entry.key) }
-            }
+            for (entry in result) if (entry.key.startsWith("activity:"))
+                for (event in entry.events) {
+                    put("event:${event.id}", entry.key)
+                    event.itemIdentity()?.let { put(it, entry.key) }
+                }
         }
         return result
     }
@@ -370,13 +406,13 @@ internal fun rememberHistoryPosition(
         if (ready && visible) {
             try {
                 snapshotFlow {
-                        ReadingPosition(
-                            list.firstVisibleItemIndex,
-                            list.firstVisibleItemScrollOffset,
-                            currentFollow,
-                            firstEvent,
-                        )
-                    }
+                    ReadingPosition(
+                        list.firstVisibleItemIndex,
+                        list.firstVisibleItemScrollOffset,
+                        currentFollow,
+                        firstEvent,
+                    )
+                }
                     .collectLatest { vm.historyCache.position(key, it) }
             } finally {
                 withContext(NonCancellable) {
@@ -584,15 +620,28 @@ fun EventRow(vm: LeoViewModel, event: RunEvent, agent: String = "Leo") {
                 color =
                     if (user) MaterialTheme.colorScheme.surfaceContainerHigh
                     else MaterialTheme.colorScheme.background,
-                shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp, bottomStart = 16.dp, bottomEnd = 4.dp),
-                modifier = if (user) Modifier.widthIn(max = maxWidth * 0.9f) else Modifier.fillMaxWidth(),
+                shape =
+                    RoundedCornerShape(
+                        topStart = 16.dp,
+                        topEnd = 16.dp,
+                        bottomStart = 16.dp,
+                        bottomEnd = 4.dp,
+                    ),
+                modifier =
+                    if (user) Modifier.widthIn(max = maxWidth * 0.9f) else Modifier.fillMaxWidth(),
             ) {
                 Column(
-                    Modifier.padding(horizontal = if (user) 16.dp else 0.dp, vertical = if (user) 12.dp else 8.dp),
+                    Modifier.padding(
+                        horizontal = if (user) 16.dp else 0.dp,
+                        vertical = if (user) 12.dp else 8.dp,
+                    ),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     if (!user)
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
                             Text(
                                 agent,
                                 Modifier.weight(1f),
@@ -603,8 +652,8 @@ fun EventRow(vm: LeoViewModel, event: RunEvent, agent: String = "Leo") {
                                 java.text
                                     .SimpleDateFormat(
                                         "HH:mm",
-                                        androidx.compose.ui.platform.LocalConfiguration.current.locales[
-                                                0],
+                                        androidx.compose.ui.platform.LocalConfiguration.current
+                                            .locales[0],
                                     )
                                     .format(java.util.Date(event.createdAt)),
                                 style = MaterialTheme.typography.labelSmall,
@@ -614,27 +663,35 @@ fun EventRow(vm: LeoViewModel, event: RunEvent, agent: String = "Leo") {
                     if (user)
                         androidx.compose.foundation.text.selection.SelectionContainer {
                             Text(
-                                highlightSkills(content, LocalSkillNames.current, skillMentionStyle()),
+                                highlightSkills(
+                                    content,
+                                    LocalSkillNames.current,
+                                    skillMentionStyle(),
+                                ),
                                 style = MaterialTheme.typography.bodyLarge,
                             )
                         }
                     else Markdown(content)
                     if (user)
                         Text(
-                            java.text.SimpleDateFormat("HH:mm", androidx.compose.ui.platform.LocalConfiguration.current.locales[0])
+                            java.text
+                                .SimpleDateFormat(
+                                    "HH:mm",
+                                    androidx.compose.ui.platform.LocalConfiguration.current.locales[
+                                            0],
+                                )
                                 .format(java.util.Date(event.createdAt)),
                             Modifier.align(Alignment.End),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                    val attachments =
-                        runCatching {
-                                event.payload?.get("attachments")?.let {
-                                    wireJson.decodeFromJsonElement<List<ChatAttachment>>(it)
-                                }
-                            }
-                            .getOrNull()
-                            .orEmpty()
+                    val attachments = runCatching {
+                        event.payload?.get("attachments")?.let {
+                            wireJson.decodeFromJsonElement<List<ChatAttachment>>(it)
+                        }
+                    }
+                        .getOrNull()
+                        .orEmpty()
                     if (attachments.isNotEmpty()) AttachmentList(vm, attachments)
                 }
             }

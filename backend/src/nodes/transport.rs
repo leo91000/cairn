@@ -21,10 +21,12 @@ use std::{
 use tokio::sync::{Notify, mpsc, oneshot};
 
 type Head = (u16, Option<u64>, String);
+
 struct Frame {
     bytes: Bytes,
     done: bool,
 }
+
 struct Call {
     node: String,
     command: Value,
@@ -34,20 +36,24 @@ struct Call {
     streaming: bool,
     length: Option<u64>,
 }
+
 #[derive(Default)]
 struct StateData {
     calls: HashMap<String, Call>,
     pending: HashMap<String, VecDeque<String>>,
 }
+
 #[derive(Default)]
 pub struct Transport {
     state: Mutex<StateData>,
     changed: Notify,
 }
+
 struct Pending {
     hub: Arc<Transport>,
     id: String,
 }
+
 impl Drop for Pending {
     fn drop(&mut self) {
         let mut state = self.hub.state.lock().unwrap();
@@ -58,6 +64,7 @@ impl Drop for Pending {
         }
     }
 }
+
 impl Transport {
     pub async fn request(
         self: &Arc<Self>,
@@ -74,7 +81,24 @@ impl Transport {
             if state.calls.values().filter(|c| c.node == node).count() >= 64 {
                 return Err(Error::new(503, "Node transport is busy."));
             }
-            state.calls.insert(id.clone(),Call { node:node.into(),command:json!({"id":id,"method":method,"path":path,"body":STANDARD.encode(body),"streamBody":true}),head:Some(head_tx),body:body_tx,sequence:0,streaming:false,length:None });
+            state.calls.insert(
+                id.clone(),
+                Call {
+                    node: node.into(),
+                    command: json!({
+                        "id": id,
+                        "method": method,
+                        "path": path,
+                        "body": STANDARD.encode(body),
+                        "streamBody": true
+                    }),
+                    head: Some(head_tx),
+                    body: body_tx,
+                    sequence: 0,
+                    streaming: false,
+                    length: None,
+                },
+            );
             state
                 .pending
                 .entry(node.into())
@@ -131,6 +155,7 @@ impl Transport {
             .body(Body::from_stream(stream))
             .map_err(Error::internal)
     }
+
     pub async fn poll(&self, node: &str) -> Result<Value> {
         let wait = async {
             loop {
@@ -152,6 +177,7 @@ impl Transport {
             .await
             .unwrap_or(Ok(Value::Null))
     }
+
     pub async fn reply(&self, node: &str, value: Value) -> Result<Value> {
         let id = text(&value, "id");
         let bytes = STANDARD
@@ -169,7 +195,7 @@ impl Transport {
                 .filter(|c| c.node == node && !c.streaming)
                 .ok_or_else(|| Error::new(409, "Execution request no longer exists."))?;
             if sequence < call.sequence {
-                return Ok(json!({"ack":sequence}));
+                return Ok(json!({"ack": sequence}));
             }
             if sequence != call.sequence {
                 return Err(Error::new(409, "Node response out of order."));
@@ -189,7 +215,7 @@ impl Transport {
             .filter(|c| c.node == node && !c.streaming)
             .ok_or_else(|| Error::new(409, "Execution request no longer exists."))?;
         if sequence < call.sequence {
-            return Ok(json!({"ack":sequence}));
+            return Ok(json!({"ack": sequence}));
         }
         if sequence != call.sequence {
             return Err(Error::new(409, "Node response out of order."));
@@ -222,7 +248,7 @@ impl Transport {
         if value["done"] == true {
             state.calls.remove(id);
         }
-        Ok(json!({"ack":sequence}))
+        Ok(json!({"ack": sequence}))
     }
 
     /// One authenticated HTTP upload per bulk response, with bounded backpressure.
@@ -253,9 +279,8 @@ impl Transport {
         let mut received = 0u64;
         loop {
             let next = tokio::select! {
-                _=sender.closed()=>return Err(Error::new(409,"Execution reader closed.")),
-                next=tokio::time::timeout(Duration::from_secs(60),body.next())=>
-                    next.map_err(|_|Error::new(503,"Node upload stalled."))?,
+                _ = sender.closed() => return Err(Error::new(409,"Execution reader closed.")),
+                next = tokio::time::timeout(Duration::from_secs(60),body.next()) => next.map_err(|_|Error::new(503,"Node upload stalled."))?,
             };
             let Some(bytes) = next else { break };
             let bytes = bytes.map_err(|_| Error::new(503, "Node upload interrupted."))?;
@@ -310,8 +335,9 @@ pub async fn stream(State(app): State<App>, request: Request) -> Result<axum::Js
         .node_transport
         .stream(&node, &id, request.into_body())
         .await?;
-    Ok(axum::Json(json!({"complete":true})))
+    Ok(axum::Json(json!({"complete": true})))
 }
+
 pub async fn authenticate(s: &Service, headers: &axum::http::HeaderMap) -> Result<String> {
     let credential = headers
         .get("authorization")
@@ -330,6 +356,7 @@ pub async fn authenticate(s: &Service, headers: &axum::http::HeaderMap) -> Resul
     }
     Ok(node)
 }
+
 pub async fn proxy(State(app): State<App>, request: Request) -> Result<Response> {
     let s = &app.service;
     let token = crate::execution::secret(&s.config.data_dir, "runner-secret").await?;
@@ -371,6 +398,7 @@ pub async fn proxy(State(app): State<App>, request: Request) -> Result<Response>
         .request(&node, &method, &path, body.to_vec())
         .await
 }
+
 /// All manager callers, including artifact and project operations, use the same destination.
 pub async fn url(s: &Service, run: &str) -> Result<String> {
     let checkpoint = s

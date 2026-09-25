@@ -7,7 +7,9 @@ use std::{
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
+
 type ClientCache = HashMap<(String, Vec<SocketAddr>), (Instant, reqwest::Client)>;
+
 fn pinned_client(host: &str, addresses: &[SocketAddr]) -> Result<reqwest::Client> {
     static CLIENTS: OnceLock<Mutex<ClientCache>> = OnceLock::new();
     let mut addresses = addresses.to_vec();
@@ -44,6 +46,7 @@ fn pinned_client(host: &str, addresses: &[SocketAddr]) -> Result<reqwest::Client
     clients.insert(key, (Instant::now(), client.clone()));
     Ok(client)
 }
+
 pub fn private(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(ip) => {
@@ -77,6 +80,7 @@ pub fn private(address: IpAddr) -> bool {
         }
     }
 }
+
 fn metadata(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(ip) => ip == Ipv4Addr::new(169, 254, 169, 254),
@@ -87,17 +91,20 @@ fn metadata(address: IpAddr) -> bool {
         }
     }
 }
+
 pub struct Response {
     pub status: u16,
     pub headers: reqwest::header::HeaderMap,
     pub bytes: Vec<u8>,
 }
+
 impl Response {
     pub fn json(&self) -> Result<Value> {
         serde_json::from_slice(&self.bytes)
             .map_err(|_| Error::new(502, "The endpoint returned invalid JSON."))
     }
 }
+
 pub async fn fetch(
     url: &str,
     method: reqwest::Method,

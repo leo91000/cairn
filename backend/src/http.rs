@@ -25,6 +25,7 @@ use tower_http::{
     compression::CompressionLayer,
     services::{ServeDir, ServeFile},
 };
+
 #[derive(Clone)]
 pub struct App {
     pub service: Arc<Service>,
@@ -32,7 +33,9 @@ pub struct App {
     maintenance: String,
     pub toolkit: Value,
 }
+
 type RateLimits = HashMap<(IpAddr, String), (i64, u32)>;
+
 pub async fn router(service: Arc<Service>) -> Result<Router> {
     let maintenance = secret(&service.config.data_dir, "maintenance-token").await?;
     let toolkit = if let Ok(directory) = std::env::var("LEO_TOOLKIT_DIR") {
@@ -91,12 +94,14 @@ pub async fn router(service: Arc<Service>) -> Result<Router> {
         .layer(middleware::from_fn_with_state(app.clone(), security))
         .with_state(app))
 }
+
 fn header<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
     headers
         .get(name)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
 }
+
 pub fn cookie(headers: &HeaderMap) -> String {
     header(headers, "cookie")
         .split(';')
@@ -105,6 +110,7 @@ pub fn cookie(headers: &HeaderMap) -> String {
         .map(|(_, value)| value.to_owned())
         .unwrap_or_default()
 }
+
 async fn security(State(app): State<App>, mut request: Request, next: Next) -> Response {
     let path = request.uri().path().to_owned();
     let peer = request
@@ -136,7 +142,10 @@ async fn security(State(app): State<App>, mut request: Request, next: Next) -> R
         ("x-frame-options", "DENY"),
         (
             "content-security-policy",
-            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' \
+            'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; connect-src \
+            'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action \
+            'self'",
         ),
     ] {
         if !response.headers().contains_key(name) {
@@ -172,6 +181,7 @@ async fn security(State(app): State<App>, mut request: Request, next: Next) -> R
     }
     response
 }
+
 async fn check_security(
     app: &App,
     headers: &HeaderMap,
@@ -277,6 +287,7 @@ async fn check_security(
     }
     Ok(())
 }
+
 pub struct Input {
     pub method: String,
     pub path: String,
@@ -284,6 +295,7 @@ pub struct Input {
     pub headers: HeaderMap,
     pub body: Value,
 }
+
 impl Input {
     pub async fn read(request: Request) -> Result<Self> {
         let (parts, body) = request.into_parts();
@@ -319,6 +331,7 @@ impl Input {
             body,
         })
     }
+
     pub fn number(&self, name: &str, default: i64, min: i64, max: i64) -> Result<i64> {
         let n = self
             .query
@@ -336,6 +349,7 @@ impl Input {
         }
         Ok(n)
     }
+
     pub fn string(&self, name: &str, max: usize) -> Result<&str> {
         let text = self.body[name]
             .as_str()
@@ -345,12 +359,14 @@ impl Input {
         }
         Ok(text)
     }
+
     pub fn boolean(&self, name: &str) -> Result<bool> {
         self.body[name]
             .as_bool()
             .ok_or_else(|| Error::bad(format!("{name}: expected a boolean")))
     }
 }
+
 fn session_response(app: &App, session: Value) -> Response {
     let cookie = format!(
         "leo_session={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800{}",
@@ -362,14 +378,16 @@ fn session_response(app: &App, session: Value) -> Response {
         }
     );
     let mut response = Json(json!({
-    "authenticated":true,"csrf":session["csrf"]}
-    ))
+        "authenticated": true,
+        "csrf": session["csrf"],
+    }))
     .into_response();
     response
         .headers_mut()
         .insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
     response
 }
+
 async fn health(State(app): State<App>, request: Request) -> Result<Response> {
     if !["GET", "HEAD"].contains(&request.method().as_str()) {
         return Err(Error::new(405, "Method not allowed."));
@@ -378,7 +396,10 @@ async fn health(State(app): State<App>, request: Request) -> Result<Response> {
     let commit = env("APP_COMMIT").unwrap_or_else(|| "development".into());
     let active = app.service.worker.active.lock().await.len();
     let execution = if app.service.config.runner_url.is_empty() {
-        json!({"backend":"local","ready":true})
+        json!({
+            "backend": "local",
+            "ready": true,
+        })
     } else {
         let health = async {
             let response = app
@@ -395,15 +416,40 @@ async fn health(State(app): State<App>, request: Request) -> Result<Response> {
             response.json::<Value>().await.ok()
         }
         .await;
-        json!({"backend":"firecracker","ready":health.as_ref().is_some_and(|h|h["backend"]=="firecracker" && h["status"]=="ok" && h["runtimeId"]==env("APP_RUNTIME_ID").unwrap_or_else(||"development".into()))})
+        json!({
+            "backend": "firecracker",
+            "ready": health.as_ref().is_some_and(|h| {
+                h["backend"] == "firecracker"
+                    && h["status"] == "ok"
+                    && h["runtimeId"]
+                        == env("APP_RUNTIME_ID").unwrap_or_else(|| "development".into())
+            }),
+        })
     };
-    Ok((if execution["ready"]==true {StatusCode::OK}else{StatusCode::SERVICE_UNAVAILABLE},Json(json!({
-    "status":"ok","commit":commit,"runtimeId":env("APP_RUNTIME_ID").unwrap_or(commit),"baseImage":env("APP_BASE_IMAGE"),"tools":{
-    "codex":env("APP_CODEX_VERSION"),"gh":env("APP_GH_VERSION")}
-    ,"toolkit":app.toolkit,"execution":execution,"activeRuns":active,"maintenance":app.service.store.kv("deployment-lease").await?.is_some()}
-    )))
-    .into_response())
+    Ok((
+        if execution["ready"] == true {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        },
+        Json(json!({
+            "status": "ok",
+            "commit": commit,
+            "runtimeId": env("APP_RUNTIME_ID").unwrap_or(commit),
+            "baseImage": env("APP_BASE_IMAGE"),
+            "tools": {
+                "codex": env("APP_CODEX_VERSION"),
+                "gh": env("APP_GH_VERSION"),
+            },
+            "toolkit": app.toolkit,
+            "execution": execution,
+            "activeRuns": active,
+            "maintenance": app.service.store.kv("deployment-lease").await?.is_some(),
+        })),
+    )
+        .into_response())
 }
+
 async fn lease(State(app): State<App>, request: Request) -> Result<Json<Value>> {
     let input = Input::read(request).await?;
     if !["POST", "DELETE"].contains(&input.method.as_str()) {
@@ -425,6 +471,7 @@ async fn lease(State(app): State<App>, request: Request) -> Result<Json<Value>> 
             .await?,
     ))
 }
+
 async fn api(State(app): State<App>, request: Request) -> Result<Response> {
     let path = request.uri().path().to_owned();
     let segments: Vec<_> = path.split('/').collect();
@@ -482,8 +529,9 @@ async fn api(State(app): State<App>, request: Request) -> Result<Response> {
         ("GET", "/api/session") => {
             let session = s.auth.read(&cookie(&input.headers)).await?;
             let mut result = json!({
-            "authenticated":session.is_some(),"setupRequired":s.store.kv("admin").await?.is_none()}
-            );
+                "authenticated": session.is_some(),
+                "setupRequired": s.store.kv("admin").await?.is_none(),
+            });
             if let Some(session) = session {
                 result["csrf"] = session["csrf"].clone();
             }
@@ -507,8 +555,8 @@ async fn api(State(app): State<App>, request: Request) -> Result<Response> {
         ("POST", "/api/logout") => {
             s.auth.logout(&cookie(&input.headers)).await?;
             let mut response = Json(json!({
-            "ok":true}
-            ))
+                "ok": true,
+            }))
             .into_response();
             response.headers_mut().insert(
                 header::SET_COOKIE,
@@ -561,6 +609,7 @@ async fn api(State(app): State<App>, request: Request) -> Result<Response> {
     }
     Ok(Json(crate::api::dispatch(s, &input).await?).into_response())
 }
+
 async fn oauth(State(app): State<App>, request: Request) -> Result<Response> {
     let input = Input::read(request).await?;
     let auth = &app.service.auth;
@@ -571,12 +620,22 @@ async fn oauth(State(app): State<App>, request: Request) -> Result<Response> {
             .capture_native_callback(&app.service, &input.query)
             .await?
         {
-            return Ok(([
-                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-                (header::CACHE_CONTROL, "no-store"),
-                (header::REFERRER_POLICY, "no-referrer"),
-                (header::CONTENT_SECURITY_POLICY, "default-src 'none'; frame-ancestors 'none'"),
-            ], "<!doctype html><html lang=fr><meta name=viewport content='width=device-width,initial-scale=1'><title>Leo</title><h1>Revenez dans Leo</h1><p>Fermez cet onglet pour terminer la connexion dans l’application Android.</p></html>").into_response());
+            return Ok((
+                [
+                    (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                    (header::CACHE_CONTROL, "no-store"),
+                    (header::REFERRER_POLICY, "no-referrer"),
+                    (
+                        header::CONTENT_SECURITY_POLICY,
+                        "default-src 'none'; frame-ancestors 'none'",
+                    ),
+                ],
+                "<!doctype html><html lang=fr><meta name=viewport \
+                content='width=device-width,initial-scale=1'><title>Leo</title><h1>Revenez dans \
+                Leo</h1><p>Fermez cet onglet pour terminer la connexion dans l’application \
+                Android.</p></html>",
+            )
+                .into_response());
         }
         let result = if let Some(session) = auth.read(&cookie(&input.headers)).await? {
             app.service
@@ -622,6 +681,7 @@ async fn oauth(State(app): State<App>, request: Request) -> Result<Response> {
     };
     Ok(Json(result).into_response())
 }
+
 async fn metadata(State(app): State<App>, request: Request) -> Result<Json<Value>> {
     if request.method() != "GET" {
         return Err(Error::new(405, "Method not allowed."));
@@ -630,12 +690,25 @@ async fn metadata(State(app): State<App>, request: Request) -> Result<Json<Value
     match request.uri().path() {
         "/.well-known/oauth-protected-resource" | "/.well-known/oauth-protected-resource/mcp" => {
             Ok(Json(json!({
-            "resource":format!("{url}/mcp"),"authorization_servers":[url],"scopes_supported":["read","run","manage"],"bearer_methods_supported":["header"],"resource_name":"Leo Agent Manager"}
-            )))
+                "resource": format!("{url}/mcp"),
+                "authorization_servers": [url],
+                "scopes_supported": ["read", "run", "manage"],
+                "bearer_methods_supported": ["header"],
+                "resource_name": "Leo Agent Manager",
+            })))
         }
         "/.well-known/oauth-authorization-server" => Ok(Json(json!({
-        "issuer":url,"authorization_endpoint":format!("{url}/oauth/authorize"),"token_endpoint":format!("{url}/oauth/token"),"registration_endpoint":format!("{url}/oauth/register"),"revocation_endpoint":format!("{url}/oauth/revoke"),"response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token"],"code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":["none"],"scopes_supported":["read","run","manage"]}
-        ))),
+            "issuer": url,
+            "authorization_endpoint": format!("{url}/oauth/authorize"),
+            "token_endpoint": format!("{url}/oauth/token"),
+            "registration_endpoint": format!("{url}/oauth/register"),
+            "revocation_endpoint": format!("{url}/oauth/revoke"),
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code", "refresh_token"],
+            "code_challenge_methods_supported": ["S256"],
+            "token_endpoint_auth_methods_supported": ["none"],
+            "scopes_supported": ["read", "run", "manage"],
+        }))),
         _ => Err(Error::new(404, "Not found")),
     }
 }

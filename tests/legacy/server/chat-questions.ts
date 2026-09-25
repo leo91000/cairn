@@ -25,7 +25,13 @@ export class ChatQuestions {
     if (existing)
       return this.save({ ...existing, blocking: existing.status === 'pending' && parsed.data.blocking })
     return this.service.store.transaction(() => {
-      const question = this.save({ ...parsed.data, runId, chatId: chat.id, status: 'pending', createdAt: Date.now() })
+      const question = this.save({
+        ...parsed.data,
+        runId,
+        chatId: chat.id,
+        status: 'pending',
+        createdAt: Date.now(),
+      })
       this.service.notifications.enqueue(question)
       return question
     })

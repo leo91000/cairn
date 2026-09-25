@@ -12,9 +12,11 @@ use std::{
 
 const BLOCK: u64 = 4 * 1024 * 1024;
 const MAX_IO: usize = 8 * 1024 * 1024;
+
 fn failure(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
 }
+
 fn block_digest(bytes: &[u8]) -> String {
     hex::encode(aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, bytes).as_ref())
 }
@@ -102,6 +104,7 @@ impl LazyDisk {
     ) -> io::Result<Self> {
         Self::create_at_generation(directory, manifest, source, 1)
     }
+
     /// A rebuilt disk keeps its grant and advances the same publication sequence.
     pub(crate) fn create_at_generation(
         directory: &Path,
@@ -115,9 +118,11 @@ impl LazyDisk {
         }
         Self::connect(directory, Some((manifest, generation)), source)
     }
+
     pub fn open(directory: &Path, source: Arc<dyn BlockSource>) -> io::Result<Self> {
         Self::connect(directory, None, source)
     }
+
     fn connect(
         directory: &Path,
         initial: Option<(&Value, i64)>,
@@ -223,6 +228,7 @@ impl LazyDisk {
             metrics: Default::default(),
         })
     }
+
     fn record(row: &rusqlite::Row<'_>, size: u64) -> io::Result<(u64, Vec<u8>)> {
         let start: i64 = row.get(0).map_err(failure)?;
         let reference = row.get_ref(1).map_err(failure)?;
@@ -245,6 +251,7 @@ impl LazyDisk {
         }
         Ok((start as u64, data.to_vec()))
     }
+
     fn checksum(sequence: i64, generation: i64, offset: u64, bytes: &[u8]) -> String {
         let mut hash = Sha256::new();
         hash.update(sequence.to_le_bytes());
@@ -254,12 +261,14 @@ impl LazyDisk {
         hash.update(bytes);
         hex::encode(hash.finalize())
     }
+
     fn check(&self, offset: u64, length: usize) -> io::Result<()> {
         if length > MAX_IO {
             return Err(failure("Disk request exceeds the I/O limit"));
         }
         super::device::range(self.size, offset, length)
     }
+
     fn cached(&self, key: &str) -> io::Result<Option<Arc<Vec<u8>>>> {
         let mut memory = self.memory.lock().map_err(failure)?;
         Ok(memory
@@ -272,6 +281,7 @@ impl LazyDisk {
                 bytes
             }))
     }
+
     fn cached_record(&self, row: &rusqlite::Row<'_>) -> io::Result<(u64, Arc<Vec<u8>>)> {
         let start: i64 = row.get(0).map_err(failure)?;
         let key = format!(
@@ -287,6 +297,7 @@ impl LazyDisk {
         let (offset, bytes) = Self::record(row, self.size)?;
         Ok((offset, self.remember(&key, bytes)?))
     }
+
     fn remember(&self, hash: &str, bytes: Vec<u8>) -> io::Result<Arc<Vec<u8>>> {
         let bytes = Arc::new(bytes);
         let mut memory = self.memory.lock().map_err(failure)?;
@@ -297,6 +308,7 @@ impl LazyDisk {
         memory.push_back((hash.to_owned(), bytes.clone()));
         Ok(bytes)
     }
+
     fn base_block(&self, block: &Value) -> io::Result<Arc<Vec<u8>>> {
         let length = block["size"]
             .as_u64()
@@ -391,6 +403,7 @@ impl LazyDisk {
         self.remember(hash, bytes)
     }
 }
+
 impl LazyDisk {
     /// Older journals enabled auto-vacuum after entering WAL mode, which left it
     /// disabled. Convert only an empty journal: never copy unsynchronized blobs
@@ -433,7 +446,13 @@ impl LazyDisk {
             // because no journal write can exceed MAX_IO bytes. Bound both
             // ends of the indexed range instead of scanning the whole journal
             // in sequence order for every small read.
-            let mut statement = db.prepare_cached("SELECT start, data, checksum, seq, generation, end FROM writes INDEXED BY write_ranges WHERE end > ?1 AND end < ?2 AND start < ?3 AND generation <= ?4 ORDER BY seq DESC").map_err(failure)?;
+            let mut statement = db
+                .prepare_cached(
+                    "SELECT start, data, checksum, seq, generation, end FROM writes INDEXED BY \
+                write_ranges WHERE end > ?1 AND end < ?2 AND start < ?3 AND generation <= \
+                ?4 ORDER BY seq DESC",
+                )
+                .map_err(failure)?;
             let mut rows = statement
                 .query(params![start, end + MAX_IO as i64, end, generation])
                 .map_err(failure)?;
@@ -511,12 +530,15 @@ impl LazyDisk {
         Ok(())
     }
 }
+
 mod generations;
 mod state;
+
 impl Disk for LazyDisk {
     fn size(&self) -> u64 {
         self.size
     }
+
     fn read_at(&self, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
         let sample = self.metrics.reads.start();
         let _publication = self.publication.read().map_err(failure)?;
@@ -524,6 +546,7 @@ impl Disk for LazyDisk {
         sample.finish(bytes.len());
         Ok(())
     }
+
     fn write_at(&self, offset: u64, bytes: &[u8]) -> io::Result<()> {
         let sample = self.metrics.writes.start();
         self.check(offset, bytes.len())?;
@@ -566,6 +589,7 @@ impl Disk for LazyDisk {
         sample.finish(bytes.len());
         Ok(())
     }
+
     fn sync(&self) -> io::Result<()> {
         let sample = self.metrics.syncs.start();
         let db = self.db.lock().map_err(failure)?;
@@ -576,5 +600,6 @@ impl Disk for LazyDisk {
         Ok(())
     }
 }
+
 #[cfg(test)]
 mod tests;

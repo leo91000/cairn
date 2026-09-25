@@ -13,7 +13,16 @@ const subscriptionInput = z.object({
   endpoint: z.string().url().max(4096),
   keys: z.object({ p256dh: z.string().regex(/^[\w-]+={0,2}$/).max(100), auth: z.string().regex(/^[\w-]+={0,2}$/).max(30) }),
 })
-interface Delivery { subscriptionId: string, chatId: string, questionId: string, attempts: number, nextAt: number, expiresAt: number }
+
+interface Delivery {
+  subscriptionId: string
+  chatId: string
+  questionId: string
+  attempts: number
+  nextAt: number
+  expiresAt: number
+}
+
 export class Notifications {
   private vault: McpVault
   private timer?: ReturnType<typeof setInterval>
@@ -28,6 +37,7 @@ export class Notifications {
       keys = webpush.generateVAPIDKeys()
       this.vault.set('push-vapid', keys)
     }
+
     return keys
   }
 
@@ -61,6 +71,7 @@ export class Notifications {
       if (data.subscriptionId === id)
         this.store.delete(key)
     }
+
     return { ok: true }
   }
 
@@ -68,8 +79,16 @@ export class Notifications {
     for (const { key } of this.store.keys('push-device:')) {
       const subscriptionId = key.slice('push-device:'.length)
       const id = `push-outbox:${question.id}:${subscriptionId}`
-      if (!this.store.kv(id))
-        this.store.set(id, { subscriptionId, questionId: question.id, chatId: question.chatId, attempts: 0, nextAt: Date.now(), expiresAt: Date.now() + 3600000 } satisfies Delivery)
+      if (!this.store.kv(id)) {
+        this.store.set(id, {
+          subscriptionId,
+          questionId: question.id,
+          chatId: question.chatId,
+          attempts: 0,
+          nextAt: Date.now(),
+          expiresAt: Date.now() + 3600000,
+        } satisfies Delivery)
+      }
     }
   }
 
@@ -93,9 +112,20 @@ export class Notifications {
         this.store.delete(key)
         continue
       }
+
       try {
         const subject = this.config.publicUrl.startsWith('https:') ? this.config.publicUrl : 'mailto:notifications@example.com'
-        await this.send(subscription, JSON.stringify({ title: 'Your agent has a question', body: 'Open the chat to answer.', chatId: delivery.chatId, questionId: delivery.questionId }), { TTL: 3600, urgency: 'high', timeout: 5000, vapidDetails: { subject, ...this.keys() } })
+        await this.send(subscription, JSON.stringify({
+          title: 'Your agent has a question',
+          body: 'Open the chat to answer.',
+          chatId: delivery.chatId,
+          questionId: delivery.questionId,
+        }), {
+          TTL: 3600,
+          urgency: 'high',
+          timeout: 5000,
+          vapidDetails: { subject, ...this.keys() },
+        })
         this.store.delete(key)
       }
       catch (error) {
@@ -104,6 +134,7 @@ export class Notifications {
           this.unsubscribe(delivery.subscriptionId)
           continue
         }
+
         // Store no endpoint, response body, question text, or subscription secret in logs.
         this.store.set(key, { ...delivery, attempts: delivery.attempts + 1, nextAt: Date.now() + Math.min(300000, 10000 * 2 ** delivery.attempts) })
       }

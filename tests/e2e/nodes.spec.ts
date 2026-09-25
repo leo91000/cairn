@@ -12,13 +12,22 @@ test('registers, configures and revokes a node through the owner interface', asy
   await page.getByRole('button', { name: 'Create enrollment code' }).click()
   const code = await page.getByLabel('Single-use enrollment code').textContent()
   expect(code).toHaveLength(43)
-  const response = await page.request.post(`${workspace.url}/internal/nodes/enroll`, { data: {
-    code,
-    name: 'Browser Linux',
-    protocol: 1,
-    runtimeId: 'fixture',
-    capabilities: { os: 'linux', arch: 'x86_64', kvm: true, cpu: 8, memoryMiB: 16384, diskMiB: 65536 },
-  } })
+  const response = await page.request.post(`${workspace.url}/internal/nodes/enroll`, {
+    data: {
+      code,
+      name: 'Browser Linux',
+      protocol: 1,
+      runtimeId: 'fixture',
+      capabilities: {
+        os: 'linux',
+        arch: 'x86_64',
+        kvm: true,
+        cpu: 8,
+        memoryMiB: 16384,
+        diskMiB: 65536,
+      },
+    },
+  })
   expect(response.ok()).toBe(true)
   await page.reload()
   const node = page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'Browser Linux' }) })
@@ -61,7 +70,22 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
   const detail = await workspace.api(`/api/chats/${chat.id}`)
   const invitation = await workspace.api('/api/nodes/enrollments', 'POST', { name: 'Recovery server' })
-  const response = await page.request.post(`${workspace.url}/internal/nodes/enroll`, { data: { code: invitation.code, name: 'Recovery server', protocol: 1, runtimeId: 'fixture', capabilities: { os: 'linux', arch: 'x86_64', kvm: true, cpu: 8, memoryMiB: 16384, diskMiB: 65536 } } })
+  const response = await page.request.post(`${workspace.url}/internal/nodes/enroll`, {
+    data: {
+      code: invitation.code,
+      name: 'Recovery server',
+      protocol: 1,
+      runtimeId: 'fixture',
+      capabilities: {
+        os: 'linux',
+        arch: 'x86_64',
+        kvm: true,
+        cpu: 8,
+        memoryMiB: 16384,
+        diskMiB: 65536,
+      },
+    },
+  })
   expect(response.ok()).toBe(true)
   const node = await response.json()
   const agent = (await workspace.api('/api/agents')).find((agent: { id: string }) => agent.id === detail.run.snapshot.agent.id)

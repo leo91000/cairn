@@ -8,6 +8,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
+
 pub async fn process_identity(pid: u32) -> Result<Option<Value>> {
     let stat = match tokio::fs::read_to_string(format!("/proc/{pid}/stat")).await {
         Ok(s) => s,
@@ -26,9 +27,12 @@ pub async fn process_identity(pid: u32) -> Result<Option<Value>> {
         .ok_or_else(|| Error::internal("Invalid process status"))?;
     let boot = tokio::fs::read_to_string("/proc/sys/kernel/random/boot_id").await?;
     Ok(Some(json!({
-    "pid":pid,"start":start,"boot":boot.trim()}
-    )))
+        "pid": pid,
+        "start": start,
+        "boot": boot.trim()
+    })))
 }
+
 async fn matches(identity: &Value) -> Result<bool> {
     Ok(
         process_identity(identity["pid"].as_u64().unwrap_or(0) as u32)
@@ -38,6 +42,7 @@ async fn matches(identity: &Value) -> Result<bool> {
             }),
     )
 }
+
 pub async fn fence_process(identity: &Value) -> Result<()> {
     let pid = identity["pid"]
         .as_u64()
@@ -65,6 +70,7 @@ pub async fn fence_process(identity: &Value) -> Result<()> {
     }
     Ok(())
 }
+
 pub async fn fence(s: &Service, run: &Value) -> Result<()> {
     let key = format!("run-checkpoint:{}", text(run, "id"));
     let checkpoint = s.store.kv(&key).await?;
@@ -140,6 +146,7 @@ pub async fn fence(s: &Service, run: &Value) -> Result<()> {
     }
     Ok(())
 }
+
 pub async fn session(s: &Service, run: &Value, home: &Path, cwd: &Path) -> Result<String> {
     if crate::provider::Provider::of_run(run) == crate::provider::Provider::Claude {
         return run["sessionId"]
@@ -168,8 +175,9 @@ pub async fn session(s: &Service, run: &Value, home: &Path, cwd: &Path) -> Resul
                     .request(
                         "thread/read",
                         json!({
-                        "threadId":id,"includeTurns":false}
-                        ),
+                            "threadId": id,
+                            "includeTurns": false
+                        }),
                     )
                     .await?;
                 if result["thread"]["id"] == id {
@@ -181,12 +189,15 @@ pub async fn session(s: &Service, run: &Value, home: &Path, cwd: &Path) -> Resul
                 .request(
                     "thread/list",
                     json!({
-                    "limit":2,"cwd":cwd,"sourceKinds":[if run["chatExecution"].is_object(){
-                    "appServer"}
-                    else{
-                    "exec"}
-                    ],"archived":false}
-                    ),
+                        "limit": 2,
+                        "cwd": cwd,
+                        "sourceKinds": [if run["chatExecution"].is_object() {
+                            "appServer"
+                        } else {
+                            "exec"
+                        }],
+                        "archived": false
+                    }),
                 )
                 .await?;
             let matches = result["data"]
@@ -207,5 +218,11 @@ pub async fn session(s: &Service, run: &Value, home: &Path, cwd: &Path) -> Resul
         result
     }
     .await;
-    result.map_err(|_| Error::new(409, "The saved Codex conversation is unavailable. Working files were preserved; review them before starting a new run."))
+    result.map_err(|_| {
+        Error::new(
+            409,
+            "The saved Codex conversation is unavailable. Working files were preserved; \
+        review them before starting a new run.",
+        )
+    })
 }

@@ -48,6 +48,7 @@ export function describeCron(cron: string) {
     if (/^\d+$/.test(minute))
       return minute === '0' ? 'Every hour' : `Every hour at :${minute.padStart(2, '0')}`
   }
+
   const time = clock(minute, hour)
   if (!time)
     return raw
@@ -87,7 +88,12 @@ export function upcomingStamp(value: number, now = Date.now()) {
     ? 'Today'
     : days === 1
       ? 'Tomorrow'
-      : moment.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', ...(moment.getFullYear() === new Date(now).getFullYear() ? {} : { year: 'numeric' }) })
+      : moment.toLocaleDateString('en-US', {
+          weekday: 'short',
+          month: 'short',
+          day: 'numeric',
+          ...(moment.getFullYear() === new Date(now).getFullYear() ? {} : { year: 'numeric' }),
+        })
   return `${label} · ${time}`
 }
 
@@ -124,7 +130,12 @@ export function missionGroup(run?: Pick<RunListItem, 'status' | 'outcome'>): Mis
 
 /** Running first, then what needs review, then the next scheduled ones, then by name. */
 export function missionOrder(tasks: Task[], latest: Map<string, Pick<RunListItem, 'status' | 'outcome'>>) {
-  const rank = (task: Task) => ({ running: 0, review: 1, ready: 2, finished: 2 })[missionGroup(latest.get(task.id))]
+  const rank = (task: Task) => ({
+    running: 0,
+    review: 1,
+    ready: 2,
+    finished: 2,
+  })[missionGroup(latest.get(task.id))]
   const next = (task: Task) => task.enabled && task.nextRun !== null ? task.nextRun : Number.MAX_SAFE_INTEGER
   return tasks.toSorted((a, b) => rank(a) - rank(b) || next(a) - next(b) || a.name.toLowerCase().localeCompare(b.name.toLowerCase()))
 }

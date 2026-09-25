@@ -15,21 +15,26 @@ export function newer(current, available) {
     if (left[index] !== right[index])
       return right[index] > left[index] ? available : current
   }
+
   return current
 }
+
 function validImage(image, repository) {
   if (!image?.startsWith(`ghcr.io/${repository}@sha256:`) || !/@sha256:[a-f0-9]{64}$/.test(image))
     throw new Error('Expected an immutable image from this repository.')
   return image
 }
+
 async function json(url, options = {}) {
   const response = await fetch(url, { ...options, redirect: 'error', signal: AbortSignal.timeout(15000) })
   if (!response.ok) {
     await response.body?.cancel()
     throw new Error(`Request failed (HTTP ${response.status}).`)
   }
+
   return response.json()
 }
+
 export async function currentImage(config) {
   const envs = await json(`${config.coolifyUrl}/api/v1/services/${encodeURIComponent(config.serviceUuid)}/envs`, { headers: { authorization: `Bearer ${config.token}` } })
   const image = envs.find(entry => entry.key === 'LEO_IMAGE')
@@ -37,6 +42,7 @@ export async function currentImage(config) {
     throw new Error('Coolify hides environment values. The deployment token needs read:sensitive permission.')
   return validImage(image?.value, config.repository)
 }
+
 export async function discover(config) {
   const [image, health, codex, github] = await Promise.all([
     currentImage(config),
@@ -49,8 +55,17 @@ export async function discover(config) {
   if (github.draft || github.prerelease)
     throw new Error('GitHub CLI latest release is not stable.')
   const versions = { codex: newer(health.tools?.codex, codex.version), gh: newer(health.tools?.gh, github.tag_name?.replace(/^v/, '')) }
-  return { installedToolkit: health.toolkit || null, image, baseImage: validImage(health.baseImage || image, config.repository), commit: health.commit, previousRuntimeId: health.runtimeId, versions, changed: versions.codex !== health.tools.codex || versions.gh !== health.tools.gh }
+  return {
+    installedToolkit: health.toolkit || null,
+    image,
+    baseImage: validImage(health.baseImage || image, config.repository),
+    commit: health.commit,
+    previousRuntimeId: health.runtimeId,
+    versions,
+    changed: versions.codex !== health.tools.codex || versions.gh !== health.tools.gh,
+  }
 }
+
 export async function deployUpdate(config, plan, image, options = { timeoutMs: 300000 }) {
   validImage(image, config.repository)
   const owner = randomUUID()
@@ -65,13 +80,28 @@ export async function deployUpdate(config, plan, image, options = { timeoutMs: 3
     if (health.commit !== plan.commit || health.runtimeId !== plan.previousRuntimeId || await currentImage(config) !== plan.image)
       return { deployed: false, reason: 'Runtime changed before deployment. Update deferred.' }
     try {
-      await deploy({ ...config, image, commit: plan.commit, runtimeId: config.runtimeId }, options)
-      return { deployed: true, image, runtimeId: config.runtimeId, versions: plan.versions }
+      await deploy({
+        ...config,
+        image,
+        commit: plan.commit,
+        runtimeId: config.runtimeId,
+      }, options)
+      return {
+        deployed: true,
+        image,
+        runtimeId: config.runtimeId,
+        versions: plan.versions,
+      }
     }
     catch (error) {
       if (await currentImage(config) !== image)
         throw new Error('Update failed; image changed externally, so automatic rollback was not attempted.', { cause: error })
-      await deploy({ ...config, image: plan.image, commit: plan.commit, runtimeId: plan.previousRuntimeId }, options)
+      await deploy({
+        ...config,
+        image: plan.image,
+        commit: plan.commit,
+        runtimeId: plan.previousRuntimeId,
+      }, options)
       throw new Error('CLI update failed verification. The previous image was restored.', { cause: error })
     }
   }
@@ -79,6 +109,7 @@ export async function deployUpdate(config, plan, image, options = { timeoutMs: 3
     await lease('DELETE')
   }
 }
+
 export function toolkitUpdate(plan, available, now = Date.now()) {
   const installed = plan.installedToolkit
   if (Object.keys(installed.tools).sort().join() !== Object.keys(available.tools).sort().join())
@@ -89,29 +120,49 @@ export function toolkitUpdate(plan, available, now = Date.now()) {
     toolkit.tools[tool] = newerTool(tool, installed.tools[tool], version)
     changed ||= toolkit.tools[tool] !== installed.tools[tool]
   }
+
   return { toolkit, changed }
 }
+
 function configuration() {
   for (const key of ['COOLIFY_URL', 'COOLIFY_SERVICE_UUID', 'COOLIFY_TOKEN', 'LEO_PUBLIC_URL', 'GITHUB_REPOSITORY']) {
     if (!process.env[key])
       throw new Error(`Missing ${key}`)
   }
+
   for (const key of ['COOLIFY_URL', 'LEO_PUBLIC_URL']) {
     const url = new URL(process.env[key])
     if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash)
       throw new Error(`${key} must be an HTTPS origin.`)
   }
-  return { coolifyUrl: process.env.COOLIFY_URL.replace(/\/$/, ''), serviceUuid: process.env.COOLIFY_SERVICE_UUID, token: process.env.COOLIFY_TOKEN, publicUrl: process.env.LEO_PUBLIC_URL.replace(/\/$/, ''), repository: process.env.GITHUB_REPOSITORY.toLowerCase(), githubToken: process.env.GH_TOKEN, maintenanceToken: process.env.LEO_MAINTENANCE_TOKEN, runtimeId: process.env.UPDATE_ID }
+
+  return {
+    coolifyUrl: process.env.COOLIFY_URL.replace(/\/$/, ''),
+    serviceUuid: process.env.COOLIFY_SERVICE_UUID,
+    token: process.env.COOLIFY_TOKEN,
+    publicUrl: process.env.LEO_PUBLIC_URL.replace(/\/$/, ''),
+    repository: process.env.GITHUB_REPOSITORY.toLowerCase(),
+    githubToken: process.env.GH_TOKEN,
+    maintenanceToken: process.env.LEO_MAINTENANCE_TOKEN,
+    runtimeId: process.env.UPDATE_ID,
+  }
 }
+
 if (import.meta.main) {
   try {
     const config = configuration()
     if (process.argv[2] === 'check') {
       const plan = await discover(config)
       if (plan.installedToolkit) {
-        const available = JSON.parse(execFileSync('docker', ['run', '--rm', '--env', 'GITHUB_TOKEN', '--entrypoint', '/usr/local/bin/node', plan.image, '/opt/leo-toolkit/manage.mjs', 'resolve'], { env: { ...process.env, GITHUB_TOKEN: config.githubToken || '' }, encoding: 'utf8', timeout: 240000, maxBuffer: 1024 * 1024 }))
+        const available = JSON.parse(execFileSync('docker', ['run', '--rm', '--env', 'GITHUB_TOKEN', '--entrypoint', '/usr/local/bin/node', plan.image, '/opt/leo-toolkit/manage.mjs', 'resolve'], {
+          env: { ...process.env, GITHUB_TOKEN: config.githubToken || '' },
+          encoding: 'utf8',
+          timeout: 240000,
+          maxBuffer: 1024 * 1024,
+        }))
         Object.assign(plan, toolkitUpdate(plan, available))
       }
+
       await writeFile('cli-update-plan.json', JSON.stringify(plan, null, 2))
       if (process.env.GITHUB_OUTPUT)
         await appendFile(process.env.GITHUB_OUTPUT, `changed=${plan.changed}\nbase_image=${plan.baseImage}\ncommit=${plan.commit}\ncodex=${plan.versions.codex}\ngh=${plan.versions.gh}\n`)

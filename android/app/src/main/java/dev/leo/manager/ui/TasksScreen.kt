@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.ui.Modifier
 import dev.leo.manager.data.*
 import kotlinx.serialization.json.encodeToJsonElement
 
@@ -152,7 +151,10 @@ internal fun TaskEditor(
                             api.send<Occurrences>(
                                     "POST",
                                     "/schedule/preview",
-                                    body("cron" to form.cron.orEmpty(), "timezone" to form.timezone),
+                                    body(
+                                        "cron" to form.cron.orEmpty(),
+                                        "timezone" to form.timezone,
+                                    ),
                                 )
                                 .occurrences
                     }

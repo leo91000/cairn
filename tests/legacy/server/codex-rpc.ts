@@ -17,7 +17,13 @@ export function codexEnvironment(config: Config, home: string) {
   return env
 }
 
-export function codexSession(config: Config, options: { args?: string[], cwd?: string, closed?: () => void, serverRequest?: (method: string, params: any, reply: (result: unknown) => void, id: string | number) => boolean, notification?: (method: string, params: any) => void } = {}): CodexSession {
+export function codexSession(config: Config, options: {
+  args?: string[]
+  cwd?: string
+  closed?: () => void
+  serverRequest?: (method: string, params: any, reply: (result: unknown) => void, id: string | number) => boolean
+  notification?: (method: string, params: any) => void
+} = {}): CodexSession {
   return async (home, operation) => {
     const child: ChildProcessWithoutNullStreams = spawn(config.codexBin, [...options.args ?? [], '-c', 'cli_auth_credentials_store="file"', '-c', 'forced_login_method="chatgpt"', 'app-server', '--listen', 'stdio://'], { cwd: options.cwd, env: codexEnvironment(config, home), stdio: ['pipe', 'pipe', 'pipe'] })
     const pending = new Map<number, { resolve: (value: unknown) => void, reject: (error: Error) => void }>()
@@ -27,9 +33,11 @@ export function codexSession(config: Config, options: { args?: string[], cwd?: s
       if (!closed)
         options.closed?.()
       closed = true
-      for (const request of pending.values()) request.reject(new AppError(503, 'Codex account service stopped. Check the CLI installation and reconnect the account.'))
+      for (const request of pending.values())
+        request.reject(new AppError(503, 'Codex account service stopped. Check the CLI installation and reconnect the account.'))
       pending.clear()
     }
+
     child.on('error', fail)
     child.on('close', fail)
     child.stdin.on('error', fail)
@@ -48,21 +56,25 @@ export function codexSession(config: Config, options: { args?: string[], cwd?: s
             replied = true
             child.stdin.write(`${JSON.stringify({ id: message.id, result })}\n`)
           }
+
           if (options.serverRequest?.(message.method, message.params, reply, message.id))
             return
           child.stdin.write(`${JSON.stringify({ id: message.id, error: { code: -32601, message: 'Interactive tool requests are unavailable. Ask the user in a plain assistant message instead.' } })}\n`)
           return
         }
+
         if (message.method && message.id === undefined) {
           options.notification?.(message.method, message.params)
           return
         }
+
         const request = pending.get(message.id)
         if (!request)
           return
         if (message.error)
           request.reject(new AppError(502, message.error.code === -32601 ? 'Update Codex to support this account operation.' : 'Codex could not read or update this account. Reconnect it and try again.'))
-        else request.resolve(message.result)
+        else
+          request.resolve(message.result)
         pending.delete(message.id)
       }
       catch {
@@ -78,13 +90,16 @@ export function codexSession(config: Config, options: { args?: string[], cwd?: s
           pending.delete(id)
           reject(new AppError(504, 'Codex account request timed out.'))
         }, 20000)
-        pending.set(id, { resolve: (value) => {
-          clearTimeout(timer)
-          resolve(value as T)
-        }, reject: (error) => {
-          clearTimeout(timer)
-          reject(error)
-        } })
+        pending.set(id, {
+          resolve: (value) => {
+            clearTimeout(timer)
+            resolve(value as T)
+          },
+          reject: (error) => {
+            clearTimeout(timer)
+            reject(error)
+          },
+        })
         child.stdin.write(`${JSON.stringify({ id, method, params })}\n`)
       }),
     }

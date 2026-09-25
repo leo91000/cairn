@@ -8,7 +8,14 @@ const tone = computed(() => props.muted ? 'bg-subtle opacity-60' : props.remaini
 </script>
 
 <template>
-  <span role="progressbar" :aria-label="label" :aria-valuenow="Math.round(remaining)" aria-valuemin="0" aria-valuemax="100" class="block h-[5px] overflow-hidden rounded-full bg-hover">
+  <span
+    role="progressbar"
+    :aria-label="label"
+    :aria-valuenow="Math.round(remaining)"
+    aria-valuemin="0"
+    aria-valuemax="100"
+    class="block h-[5px] overflow-hidden rounded-full bg-hover"
+  >
     <span class="block h-full rounded-full transition-[width] duration-500 motion-reduce:transition-none" :class="tone" :style="{ width: `${Math.max(remaining, remaining > 0 ? 2 : 0)}%` }" />
   </span>
 </template>

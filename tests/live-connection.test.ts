@@ -1,4 +1,10 @@
-import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import {
+  afterEach,
+  beforeEach,
+  expect,
+  it,
+  vi,
+} from 'vitest'
 import { liveConnection } from '../src/live-connection'
 
 class Source extends EventTarget {
@@ -15,6 +21,7 @@ class Source extends EventTarget {
     this.dispatchEvent(new MessageEvent('batch', { lastEventId: id, data }))
   }
 }
+
 beforeEach(() => {
   vi.useFakeTimers()
   Source.instances = []
@@ -58,6 +65,7 @@ it('recovers silent connections, keeps idle healthy streams open, and resumes af
     vi.advanceTimersByTime(10000)
     Source.instances[0].dispatchEvent(new MessageEvent('ping', { data: '{}' }))
   }
+
   expect(Source.instances).toHaveLength(1)
   vi.advanceTimersByTime(45500)
   expect(Source.instances).toHaveLength(2)

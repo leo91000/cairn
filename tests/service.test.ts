@@ -1,8 +1,19 @@
 import { execFile } from 'node:child_process'
-import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
+import {
+  mkdir,
+  readFile,
+  symlink,
+  writeFile,
+} from 'node:fs/promises'
 import path from 'node:path'
 import { promisify } from 'node:util'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+} from 'vitest'
 import { fixture } from './helpers.ts'
 import { nextOccurrences } from './legacy/server/service.ts'
 import { boundedPath } from './legacy/server/skills.ts'
@@ -195,6 +206,7 @@ describe('tasks, schedules, and skills', () => {
         ctx.service.skills.file('review', file, 'bad'),
       ).rejects.toThrow(/path/)
     }
+
     await symlink(ctx.projectPath, path.join(root, 'outside'))
     await writeFile(path.join(ctx.projectPath, 'secret'), 'unchanged')
     await expect(

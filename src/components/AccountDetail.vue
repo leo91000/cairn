@@ -6,7 +6,13 @@ import { computed, ref, watch } from 'vue'
 import { generalWindows, providers, remainingPercent } from '../../shared/accounts'
 import { resetsIn } from '../accounts'
 import { api } from '../api'
-import { Minus, Plus, RefreshCw, RotateCcw, Trash2 } from '../icons'
+import {
+  Minus,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Trash2,
+} from '../icons'
 import AccountBadge from './AccountBadge.vue'
 import AgentAvatar from './AgentAvatar.vue'
 import Icon from './Icon.vue'
@@ -35,13 +41,16 @@ watch(() => running.value.join(), async () => {
     runs.value = []
     return
   }
+
   const active = await api<RunListItem[]>('/runs?status=running&limit=100').catch(() => [])
   runs.value = active.filter(run => running.value.includes(run.id))
 }, { immediate: true })
+
 async function rename() {
   if (name.value.trim() && name.value.trim() !== props.account.name)
     await props.accounts.update(props.account.id, { name: name.value.trim() })
 }
+
 async function remove() {
   await props.accounts.remove(props.account.id)
   if (!props.accounts.error.value) {
@@ -49,6 +58,7 @@ async function remove() {
     emit('close')
   }
 }
+
 const note = computed(() => {
   const { usage, state } = props.account
   if (state === 'pending')
@@ -63,7 +73,12 @@ const note = computed(() => {
   <Modal :title="account.name" drawer @close="emit('close')">
     <template #heading>
       <span class="flex min-w-0 items-center gap-3.5">
-        <AgentAvatar :name="account.name" :identity="account.id" :size="44" :working="running.length > 0" />
+        <AgentAvatar
+          :name="account.name"
+          :identity="account.id"
+          :size="44"
+          :working="running.length > 0"
+        />
         <span class="min-w-0">
           <span class="block truncate font-heading text-[19px] leading-tight font-extrabold tracking-[-0.02em]">{{ account.name }}</span>
           <span class="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs font-normal text-muted">
@@ -132,7 +147,13 @@ const note = computed(() => {
         <p v-if="!running.length" class="text-sm text-muted">
           Nothing is running on this account.
         </p>
-        <RouterLink v-for="id in running" :key="id" :to="`/runs/${id}`" class="mt-2 flex items-center gap-2.5 rounded-xl bg-inset px-3 py-2.5 text-sm text-ink hover:bg-hover" @click="emit('close')">
+        <RouterLink
+          v-for="id in running"
+          :key="id"
+          :to="`/runs/${id}`"
+          class="mt-2 flex items-center gap-2.5 rounded-xl bg-inset px-3 py-2.5 text-sm text-ink hover:bg-hover"
+          @click="emit('close')"
+        >
           <AgentAvatar :name="runs.find(run => run.id === id)?.agentName || 'Agent'" :size="24" working />
           <span class="min-w-0 flex-1 truncate">{{ runs.find(run => run.id === id)?.taskName || 'Run' }}</span>
           <span class="shrink-0 text-2xs text-muted">{{ runs.find(run => run.id === id)?.agentName }}</span>
@@ -142,23 +163,49 @@ const note = computed(() => {
       <section class="grid gap-4 px-6.5 py-5 phone:px-5" aria-label="Account settings">
         <label class="gap-1.5 text-sm text-ink">
           Name
-          <input v-model="name" maxlength="100" autocomplete="off" :disabled="busy" @change="rename" @keydown.enter.prevent="rename">
+          <input
+            v-model="name"
+            maxlength="100"
+            autocomplete="off"
+            :disabled="busy"
+            @change="rename"
+            @keydown.enter.prevent="rename"
+          >
         </label>
         <div class="flex items-center justify-between gap-4 text-sm">
           <span>Parallel runs<small class="block text-2xs text-muted">Lowering it lets current runs finish</small></span>
           <span class="inline-flex h-9 items-center rounded-full border border-line">
-            <button type="button" class="grid size-9 place-items-center rounded-full text-muted hover:text-ink disabled:opacity-40" aria-label="Fewer parallel runs" :disabled="busy || account.maxConcurrentRuns <= 1" @click="accounts.update(account.id, { maxConcurrentRuns: account.maxConcurrentRuns - 1 })">
+            <button
+              type="button"
+              class="grid size-9 place-items-center rounded-full text-muted hover:text-ink disabled:opacity-40"
+              aria-label="Fewer parallel runs"
+              :disabled="busy || account.maxConcurrentRuns <= 1"
+              @click="accounts.update(account.id, { maxConcurrentRuns: account.maxConcurrentRuns - 1 })"
+            >
               <Icon :name="Minus" :size="14" />
             </button>
             <b class="min-w-7 text-center font-heading tabular-nums" aria-live="polite">{{ account.maxConcurrentRuns }}</b>
-            <button type="button" class="grid size-9 place-items-center rounded-full text-muted hover:text-ink disabled:opacity-40" aria-label="More parallel runs" :disabled="busy" @click="accounts.update(account.id, { maxConcurrentRuns: account.maxConcurrentRuns + 1 })">
+            <button
+              type="button"
+              class="grid size-9 place-items-center rounded-full text-muted hover:text-ink disabled:opacity-40"
+              aria-label="More parallel runs"
+              :disabled="busy"
+              @click="accounts.update(account.id, { maxConcurrentRuns: account.maxConcurrentRuns + 1 })"
+            >
               <Icon :name="Plus" :size="14" />
             </button>
           </span>
         </div>
         <label class="flex-row items-center justify-between gap-4 text-sm text-ink">
           <span>Use for new runs<small class="block text-2xs text-muted">Turn off to pause this account</small></span>
-          <input type="checkbox" role="switch" class="account-switch" :checked="account.enabled" :disabled="busy || account.state === 'pending'" @change="accounts.update(account.id, { enabled: !account.enabled })">
+          <input
+            type="checkbox"
+            role="switch"
+            class="account-switch"
+            :checked="account.enabled"
+            :disabled="busy || account.state === 'pending'"
+            @change="accounts.update(account.id, { enabled: !account.enabled })"
+          >
         </label>
       </section>
 
@@ -166,7 +213,12 @@ const note = computed(() => {
         <UiButton size="small" :disabled="busy || running.length > 0" @click="emit('reconnect')">
           <Icon :name="RefreshCw" :size="14" />{{ account.state === 'pending' ? 'Sign in' : 'Reconnect' }}
         </UiButton>
-        <UiButton size="small" class="ml-auto border-transparent text-danger" :disabled="busy || running.length > 0" @click="removing = true">
+        <UiButton
+          size="small"
+          class="ml-auto border-transparent text-danger"
+          :disabled="busy || running.length > 0"
+          @click="removing = true"
+        >
           <Icon :name="Trash2" :size="14" />Remove
         </UiButton>
       </footer>

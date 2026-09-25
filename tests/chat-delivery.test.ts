@@ -4,11 +4,38 @@ import { describe, expect, it } from 'vitest'
 import { chatDelivery, chatWaitNotice } from '../src/chat-delivery'
 
 function message(id: string, overrides: Partial<ChatMessage> = {}): ChatMessage {
-  return { id, chatId: 'chat', text: id, status: 'queued', mode: 'queue', model: '', createdAt: 1, ...overrides }
+  return {
+    id,
+    chatId: 'chat',
+    text: id,
+    status: 'queued',
+    mode: 'queue',
+    model: '',
+    createdAt: 1,
+    ...overrides,
+  }
 }
+
 function chat(messages: ChatMessage[], run: Partial<Run> | null = null, paused = false): ChatDetail {
-  return { id: 'chat', title: 'Chat', agentId: 'agent', agentName: 'Agent', projectId: null, projectName: null, runId: run?.id ?? null, paused, createdAt: 1, updatedAt: 1, status: run?.status ?? 'idle', pendingQuestions: 0, questions: [], messages, run: run as Run | null }
+  return {
+    id: 'chat',
+    title: 'Chat',
+    agentId: 'agent',
+    agentName: 'Agent',
+    projectId: null,
+    projectName: null,
+    runId: run?.id ?? null,
+    paused,
+    createdAt: 1,
+    updatedAt: 1,
+    status: run?.status ?? 'idle',
+    pendingQuestions: 0,
+    questions: [],
+    messages,
+    run: run as Run | null,
+  }
 }
+
 const running = { id: 'run', status: 'running' as const, chatExecution: { messageId: 'first', text: 'first', recovery: false } }
 
 describe('chat delivery presentation', () => {
@@ -59,7 +86,14 @@ describe('chat delivery presentation', () => {
     const outgoing = message('first')
     expect(chatDelivery(null, [], outgoing).sending).toHaveLength(1)
     expect(chatDelivery(chat([message('first', { status: 'sending' })], running), [], outgoing).sending).toHaveLength(1)
-    const events: RunEvent[] = [{ id: 1, runId: 'run', type: 'chat.user', text: 'first', createdAt: 1, payload: { messageId: 'first' } }]
+    const events: RunEvent[] = [{
+      id: 1,
+      runId: 'run',
+      type: 'chat.user',
+      text: 'first',
+      createdAt: 1,
+      payload: { messageId: 'first' },
+    }]
     // Either arrival order (event or metadata first) keeps a single visible message.
     expect(chatDelivery(chat([message('first', { status: 'sending' })], running), events, outgoing).sending).toEqual([])
     expect(chatDelivery(chat([message('first', { status: 'delivered' })], running), [], outgoing).sending).toHaveLength(1)
@@ -83,7 +117,12 @@ describe('chat delivery presentation', () => {
     expect(result.queued.map(item => item.id)).toEqual(['answer'])
   })
   it('leaves question answers in their dedicated UI, including private answers', () => {
-    const answer = message('answer', { questionId: 'private', text: 'sensitive answer', mode: 'steer', status: 'sending' })
+    const answer = message('answer', {
+      questionId: 'private',
+      text: 'sensitive answer',
+      mode: 'steer',
+      status: 'sending',
+    })
     expect(chatDelivery(chat([answer], running), [])).toEqual({ sending: [], queued: [] })
   })
 })

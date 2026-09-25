@@ -72,20 +72,31 @@ async fn fixture() -> (
     .unwrap();
     let task = s
         .task(
-            json!({"name":"Artifacts","prompt":"Create a report","agentId":MAIN_AGENT_ID}),
+            json!({
+                "name": "Artifacts",
+                "prompt": "Create a report",
+                "agentId": MAIN_AGENT_ID
+            }),
             None,
         )
         .await
         .unwrap();
     let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
     s.store
-        .patch_run(text(&run, "id"), json!({"status":"running"}))
+        .patch_run(
+            text(&run, "id"),
+            json!({
+                "status": "running"
+            }),
+        )
         .await
         .unwrap();
     s.store
         .set(
             &format!("run-checkpoint:{}", text(&run, "id")),
-            json!({"runnerId":id()}),
+            json!({
+                "runnerId": id()
+            }),
             None,
         )
         .await
@@ -98,8 +109,12 @@ async fn fixture() -> (
 #[tokio::test]
 async fn publication_is_idempotent_versioned_and_readable_after_restart_without_a_vm() {
     let (_root, s, run, token, server) = fixture().await;
-    let args =
-        json!({"path":"/tmp/report.md","title":"Release report","key":"report","group":"Release"});
+    let args = json!({
+        "path": "/tmp/report.md",
+        "title": "Release report",
+        "key": "report",
+        "group": "Release"
+    });
     let (first, retry) = tokio::join!(
         s.artifacts.publish(&s, &token, &args),
         s.artifacts.publish(&s, &token, &args)
@@ -125,7 +140,12 @@ async fn publication_is_idempotent_versioned_and_readable_after_restart_without_
     assert_eq!(events.iter().filter(|e| e["type"] == "artifact").count(), 2);
     server.abort();
     s.store
-        .patch_run(text(&run, "id"), json!({"status":"succeeded"}))
+        .patch_run(
+            text(&run, "id"),
+            json!({
+                "status": "succeeded"
+            }),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -203,7 +223,11 @@ async fn publication_is_idempotent_versioned_and_readable_after_restart_without_
 #[tokio::test]
 async fn publication_checks_grants_and_downloads_require_authentication_and_correct_run() {
     let (_root, s, run, token, server) = fixture().await;
-    let args = json!({"path":"/tmp/report.md","title":"Report","key":"report"});
+    let args = json!({
+        "path": "/tmp/report.md",
+        "title": "Report",
+        "key": "report"
+    });
     assert_eq!(
         s.artifacts
             .publish(&s, "wrong-token", &args)
@@ -233,7 +257,11 @@ async fn publication_checks_grants_and_downloads_require_authentication_and_corr
     }
     let task = s
         .task(
-            json!({"name":"Other","prompt":"Other","agentId":MAIN_AGENT_ID}),
+            json!({
+                "name": "Other",
+                "prompt": "Other",
+                "agentId": MAIN_AGENT_ID
+            }),
             None,
         )
         .await
@@ -325,7 +353,11 @@ fn media_detection_and_byte_ranges_do_not_trust_file_extensions() {
 #[tokio::test]
 async fn interrupted_transfers_and_revoked_in_flight_grants_do_not_publish_partial_files() {
     let (_root, s, run, token, server) = fixture().await;
-    let args = json!({"path":"/tmp/truncated.md","title":"Report","key":"report"});
+    let args = json!({
+        "path": "/tmp/truncated.md",
+        "title": "Report",
+        "key": "report"
+    });
     assert!(s.artifacts.publish(&s, &token, &args).await.is_err());
     assert!(
         artifacts::list(&s, text(&run, "id"))
@@ -333,7 +365,11 @@ async fn interrupted_transfers_and_revoked_in_flight_grants_do_not_publish_parti
             .unwrap()
             .is_empty()
     );
-    let args = json!({"path":"/tmp/slow.md","title":"Report","key":"report"});
+    let args = json!({
+        "path": "/tmp/slow.md",
+        "title": "Report",
+        "key": "report"
+    });
     let revoke = async {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         s.mcps.revoke_run(&s, text(&run, "id")).await.unwrap();
@@ -366,7 +402,11 @@ async fn preview_is_prepared_asynchronously_or_reports_missing_optional_tools_wi
         .publish(
             &s,
             &token,
-            &json!({"path":"/tmp/preview.png","title":"Preview","key":"preview"}),
+            &json!({
+                "path": "/tmp/preview.png",
+                "title": "Preview",
+                "key": "preview"
+            }),
         )
         .await
         .unwrap();
@@ -422,7 +462,11 @@ async fn public_links_are_scoped_revocable_and_survive_restart_without_exposing_
         .publish(
             &s,
             &token,
-            &json!({"path":"/tmp/report.md","title":"Report","key":"public-test"}),
+            &json!({
+                "path": "/tmp/report.md",
+                "title": "Report",
+                "key": "public-test"
+            }),
         )
         .await
         .unwrap();
@@ -529,7 +573,10 @@ async fn public_links_are_scoped_revocable_and_survive_restart_without_exposing_
     let disabled = artifacts::sharing::for_agent(
         &s,
         &token,
-        &json!({"artifactId":item["id"],"visibility":"private"}),
+        &json!({
+            "artifactId": item["id"],
+            "visibility": "private"
+        }),
     )
     .await
     .unwrap();
@@ -541,7 +588,10 @@ async fn public_links_are_scoped_revocable_and_survive_restart_without_exposing_
     let enabled = artifacts::sharing::for_agent(
         &s,
         &token,
-        &json!({"artifactId":item["id"],"visibility":"public"}),
+        &json!({
+            "artifactId": item["id"],
+            "visibility": "public"
+        }),
     )
     .await
     .unwrap();
@@ -551,7 +601,10 @@ async fn public_links_are_scoped_revocable_and_survive_restart_without_exposing_
         artifacts::sharing::for_agent(
             &s,
             "invalid",
-            &json!({"artifactId":item["id"],"visibility":"public"})
+            &json!({
+                "artifactId": item["id"],
+                "visibility": "public"
+            })
         )
         .await
         .unwrap_err()
@@ -562,7 +615,10 @@ async fn public_links_are_scoped_revocable_and_survive_restart_without_exposing_
         artifacts::sharing::for_agent(
             &s,
             &token,
-            &json!({"artifactId":id(),"visibility":"public"})
+            &json!({
+                "artifactId": id(),
+                "visibility": "public"
+            })
         )
         .await
         .unwrap_err()
@@ -573,7 +629,10 @@ async fn public_links_are_scoped_revocable_and_survive_restart_without_exposing_
         artifacts::sharing::for_agent(
             &s,
             &token,
-            &json!({"artifactId":item["id"],"visibility":"invalid"})
+            &json!({
+                "artifactId": item["id"],
+                "visibility": "invalid"
+            })
         )
         .await
         .is_err()
@@ -581,7 +640,11 @@ async fn public_links_are_scoped_revocable_and_survive_restart_without_exposing_
     // A grant for another active run cannot change a known artifact ID.
     let other_task = s
         .task(
-            json!({"name":"Other","prompt":"Other task","agentId":MAIN_AGENT_ID}),
+            json!({
+                "name": "Other",
+                "prompt": "Other task",
+                "agentId": MAIN_AGENT_ID
+            }),
             None,
         )
         .await
@@ -591,7 +654,12 @@ async fn public_links_are_scoped_revocable_and_survive_restart_without_exposing_
         .await
         .unwrap();
     s.store
-        .patch_run(text(&other_run, "id"), json!({"status":"running"}))
+        .patch_run(
+            text(&other_run, "id"),
+            json!({
+                "status": "running"
+            }),
+        )
         .await
         .unwrap();
     let other_config = s.mcps.run_configuration(&s, &other_run).await.unwrap();
@@ -600,7 +668,10 @@ async fn public_links_are_scoped_revocable_and_survive_restart_without_exposing_
         artifacts::sharing::for_agent(
             &s,
             other_token,
-            &json!({"artifactId":item["id"],"visibility":"private"})
+            &json!({
+                "artifactId": item["id"],
+                "visibility": "private"
+            })
         )
         .await
         .unwrap_err()
@@ -625,7 +696,10 @@ async fn public_links_are_scoped_revocable_and_survive_restart_without_exposing_
         artifacts::sharing::for_agent(
             &s,
             &token,
-            &json!({"artifactId":item["id"],"visibility":"public"})
+            &json!({
+                "artifactId": item["id"],
+                "visibility": "public"
+            })
         )
         .await
         .unwrap_err()
@@ -638,7 +712,12 @@ async fn public_links_are_scoped_revocable_and_survive_restart_without_exposing_
 #[tokio::test]
 async fn agent_publication_is_explicit_per_version_and_idempotent() {
     let (_root, s, run, token, server) = fixture().await;
-    let mut args = json!({"path":"/tmp/report.md","title":"Public report","key":"report","visibility":"public"});
+    let mut args = json!({
+        "path": "/tmp/report.md",
+        "title": "Public report",
+        "key": "report",
+        "visibility": "public"
+    });
     let first = s.artifacts.publish(&s, &token, &args).await.unwrap();
     assert_eq!(first["visibility"], "public");
     let again = s.artifacts.publish(&s, &token, &args).await.unwrap();
@@ -656,7 +735,20 @@ async fn agent_publication_is_explicit_per_version_and_idempotent() {
         artifacts::list(&s, text(&run, "id")).await.unwrap().len(),
         2
     );
-    let rpc=leo_agent_manager::project_workspaces::rpc(&s,&token,"tools/call",&json!({"name":"set_artifact_visibility","arguments":{"artifactId":public["id"],"visibility":"private"}})).await.unwrap();
+    let rpc = leo_agent_manager::project_workspaces::rpc(
+        &s,
+        &token,
+        "tools/call",
+        &json!({
+            "name": "set_artifact_visibility",
+            "arguments": {
+                "artifactId": public["id"],
+                "visibility": "private"
+            }
+        }),
+    )
+    .await
+    .unwrap();
     assert_eq!(rpc["structuredContent"]["visibility"], "private");
     server.abort();
 }

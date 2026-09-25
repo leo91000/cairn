@@ -46,6 +46,7 @@ pub fn authorize_in(db: &crate::store::Db<'_>, bearer: &str) -> Result<Value> {
     }
     Ok(run)
 }
+
 pub async fn authorize(s: &Service, bearer: &str) -> Result<Value> {
     let bearer = bearer.to_owned();
     s.store.read(move |db| authorize_in(db, &bearer)).await
@@ -112,7 +113,7 @@ impl Projects {
         let credential = crate::execution::secret(&s.config.data_dir, "runner-secret").await?;
         let response = s.http.post(format!("{}/runs/{attempt}/projects/{project_id}",crate::nodes::transport::url(s,text(&run,"id")).await?))
             .bearer_auth(credential)
-            .json(&json!({"runId":run["id"],"source":entry["path"],"target":entry["path"]}))
+            .json(&json!({"runId": run["id"],"source": entry["path"],"target": entry["path"]}))
             .timeout(Duration::from_secs(300)).send().await
             .map_err(|_| Error::new(503,"Project transfer was interrupted. Retry open_project; saved files are preserved."))?;
         if !response.status().is_success() {
@@ -140,13 +141,22 @@ impl Projects {
                     entries.push(entry_copy);
                 }
                 run["workspaces"] = entries.into();
-                db.patch_run(&id, &json!({"workspaces":run["workspaces"]}))?;
+                db.patch_run(
+                    &id,
+                    &json!({
+                        "workspaces": run["workspaces"]
+                    }),
+                )?;
                 Ok(())
             })
             .await?;
-        Ok(
-            json!({"projectId":project_id,"name":project["name"],"path":entry["path"],"reused":response["reused"],"revision":entry["revision"]}),
-        )
+        Ok(json!({
+            "projectId": project_id,
+            "name": project["name"],
+            "path": entry["path"],
+            "reused": response["reused"],
+            "revision": entry["revision"]
+        }))
     }
 }
 
@@ -155,10 +165,10 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         let run = authorize(s, bearer).await?;
         return Ok(match crate::nodes::moves::list(s, &run).await {
             Ok(value) => {
-                json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value})
+                json!({"content": [{"type": "text","text": value.to_string()}],"structuredContent": value})
             }
             Err(error) => {
-                json!({"isError":true,"content":[{"type":"text","text":error.message}]})
+                json!({"isError": true,"content": [{"type": "text","text": error.message}]})
             }
         });
     }
@@ -167,10 +177,10 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         return Ok(
             match crate::nodes::moves::request_by_agent(s, &run, &params["arguments"]).await {
                 Ok(value) => {
-                    json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value})
+                    json!({"content": [{"type": "text","text": value.to_string()}],"structuredContent": value})
                 }
                 Err(error) => {
-                    json!({"isError":true,"content":[{"type":"text","text":error.message}]})
+                    json!({"isError": true,"content": [{"type": "text","text": error.message}]})
                 }
             },
         );
@@ -179,10 +189,22 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         return Ok(
             match crate::onepassword::call(s, bearer, &params["arguments"]).await {
                 Ok(result) => {
-                    json!({"content":[{"type":"text","text":result.to_string()}],"structuredContent":result})
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": result.to_string()
+                        }],
+                        "structuredContent": result
+                    })
                 }
                 Err(error) => {
-                    json!({"isError":true,"content":[{"type":"text","text":error.message}]})
+                    json!({
+                        "isError": true,
+                        "content": [{
+                            "type": "text",
+                            "text": error.message
+                        }]
+                    })
                 }
             },
         );
@@ -191,10 +213,22 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         return Ok(
             match crate::outcome::report(s, bearer, &params["arguments"]).await {
                 Ok(result) => {
-                    json!({"content":[{"type":"text","text":"Outcome saved."}],"structuredContent":result})
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": "Outcome saved."
+                        }],
+                        "structuredContent": result
+                    })
                 }
                 Err(error) => {
-                    json!({"isError":true,"content":[{"type":"text","text":error.message}]})
+                    json!({
+                        "isError": true,
+                        "content": [{
+                            "type": "text",
+                            "text": error.message
+                        }]
+                    })
                 }
             },
         );
@@ -203,10 +237,26 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         return Ok(
             match crate::artifacts::sharing::for_agent(s, bearer, &params["arguments"]).await {
                 Ok(result) => {
-                    json!({"content":[{"type":"text","text":format!("Artifact {}. {}", text(&result,"visibility"), text(&result,"publicUrl"))}],"structuredContent":result})
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!(
+                                "Artifact {}. {}",
+                                text(&result, "visibility"),
+                                text(&result, "publicUrl")
+                            )
+                        }],
+                        "structuredContent": result
+                    })
                 }
                 Err(error) => {
-                    json!({"isError":true,"content":[{"type":"text","text":error.message}]})
+                    json!({
+                        "isError": true,
+                        "content": [{
+                            "type": "text",
+                            "text": error.message
+                        }]
+                    })
                 }
             },
         );
@@ -215,17 +265,51 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         return Ok(
             match s.artifacts.publish(s, bearer, &params["arguments"]).await {
                 Ok(result) => {
-                    json!({"content":[{"type":"text","text":format!("Published {}: {}",text(&result,"title"),result["publicUrl"].as_str().unwrap_or(text(&result,"url")))}],"structuredContent":result})
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!(
+                                "Published {}: {}",
+                                text(&result, "title"),
+                                result["publicUrl"].as_str().unwrap_or(text(&result, "url"))
+                            )
+                        }],
+                        "structuredContent": result
+                    })
                 }
                 Err(error) => {
-                    json!({"isError":true,"content":[{"type":"text","text":error.message}]})
+                    json!({
+                        "isError": true,
+                        "content": [{
+                            "type": "text",
+                            "text": error.message
+                        }]
+                    })
                 }
             },
         );
     }
     match method {
         "tools/list" => {
-            let mut catalog = json!({"tools":[{"name":"open_project","description":"Open an authorized project in this conversation's private workspace. Call only when you need its files. Repeated calls reuse existing files and changes. Use the returned path for commands and read its AGENTS.md before editing.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string","format":"uuid"}},"required":["projectId"],"additionalProperties":false}}]});
+            let mut catalog = json!({
+                "tools": [{
+                    "name": "open_project",
+                    "description": "Open an authorized project in this conversation's private workspace. Call only when you \
+                        need its files. Repeated calls reuse existing files and changes. Use the returned path \
+                        for commands and read its AGENTS.md before editing.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "projectId": {
+                                "type": "string",
+                                "format": "uuid"
+                            }
+                        },
+                        "required": ["projectId"],
+                        "additionalProperties": false
+                    }
+                }]
+            });
             catalog["tools"]
                 .as_array_mut()
                 .unwrap()
@@ -259,16 +343,38 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
                 .await;
             Ok(match result {
                 Ok(result) => {
-                    json!({"content":[{"type":"text","text":format!("{} is ready at {}",text(&result,"name"),text(&result,"path"))}],"structuredContent":result})
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!(
+                                "{} is ready at {}",
+                                text(&result, "name"),
+                                text(&result, "path")
+                            )
+                        }],
+                        "structuredContent": result
+                    })
                 }
                 Err(error) => {
-                    json!({"isError":true,"content":[{"type":"text","text":error.message}]})
+                    json!({
+                        "isError": true,
+                        "content": [{
+                            "type": "text",
+                            "text": error.message
+                        }]
+                    })
                 }
             })
         }
-        "resources/list" => Ok(json!({"resources":[]})),
-        "resources/templates/list" => Ok(json!({"resourceTemplates":[]})),
-        "prompts/list" => Ok(json!({"prompts":[]})),
+        "resources/list" => Ok(json!({
+            "resources": []
+        })),
+        "resources/templates/list" => Ok(json!({
+            "resourceTemplates": []
+        })),
+        "prompts/list" => Ok(json!({
+            "prompts": []
+        })),
         _ => Err(Error::new(404, "Unknown workspace operation.")),
     }
 }

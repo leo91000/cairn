@@ -15,16 +15,20 @@ use tokio::{
     sync::{Mutex, watch},
 };
 use tokio_util::sync::CancellationToken;
+
 static CODE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"\b[A-Z0-9]{4}-[A-Z0-9]{4,5}\b").unwrap());
+
 static URL: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"https://github\.com/[\w/-]+").unwrap());
+
 #[derive(Clone)]
 pub struct DeviceLogin {
     pub flow: watch::Sender<Value>,
     pub stop: CancellationToken,
     finished: watch::Receiver<bool>,
 }
+
 impl DeviceLogin {
     /// GitHub's device flow through the `gh` CLI.
     pub fn start(config: &Config, home: &Path) -> Result<Self> {
@@ -52,8 +56,12 @@ impl DeviceLogin {
         let mut stdout = child.stdout.take().unwrap();
         let mut stderr = child.stderr.take().unwrap();
         let mut stdin = child.stdin.take().unwrap();
-        let (flow, _) =
-            watch::channel(json!({"provider":"github","state":"pending","url":"","code":""}));
+        let (flow, _) = watch::channel(json!({
+            "provider": "github",
+            "state": "pending",
+            "url": "",
+            "code": ""
+        }));
         let (done, finished) = watch::channel(false);
         let stop = CancellationToken::new();
         let login = Self {
@@ -73,16 +81,18 @@ impl DeviceLogin {
             tokio::pin!(deadline);
             let success = loop {
                 tokio::select! {
-                                    _=stop.cancelled()=>break false,
-                                    _=&mut deadline=>break false,
-                                    result=child.wait()=>break result.is_ok_and(|s|s.success()),
-                                    result=stdout.read(&mut out),if stdout_open=>match result {
+                    _ = stop.cancelled() => break false,
+                    _ = &mut deadline => break false,
+                    result = child.wait() => break result.is_ok_and(|s|s.success()),
+                    result = stdout.read(&mut out),
+                    if stdout_open => match result {
                 Ok(0)|Err(_)=>stdout_open=false,Ok(n)=>receive(&flow,&mut buffer,&out[..n])}
                 ,
-                                    result=stderr.read(&mut err),if stderr_open=>match result {
+                    result = stderr.read(&mut err),
+                    if stderr_open => match result {
                 Ok(0)|Err(_)=>stderr_open=false,Ok(n)=>receive(&flow,&mut buffer,&err[..n])}
                 ,
-                                }
+                }
             };
             if !success {
                 if let Some(pid) = child.id() {
@@ -107,9 +117,11 @@ impl DeviceLogin {
         });
         Ok(login)
     }
+
     pub fn running(&self) -> bool {
         !*self.finished.borrow()
     }
+
     pub async fn wait(&self) {
         let mut finished = self.finished.clone();
         while !*finished.borrow() {
@@ -118,14 +130,17 @@ impl DeviceLogin {
             }
         }
     }
+
     pub async fn cancel(&self) {
         self.stop.cancel();
         self.wait().await;
     }
+
     pub fn view(&self) -> Value {
         self.flow.borrow().clone()
     }
 }
+
 fn receive(flow: &watch::Sender<Value>, buffer: &mut Vec<u8>, bytes: &[u8]) {
     buffer.extend_from_slice(bytes);
     if buffer.len() > 16000 {
@@ -141,11 +156,13 @@ fn receive(flow: &watch::Sender<Value>, buffer: &mut Vec<u8>, bytes: &[u8]) {
         }
     });
 }
+
 #[derive(Default)]
 pub struct Connections {
     cache: Mutex<Option<(i64, Value)>>,
     pub login: Mutex<Option<DeviceLogin>>,
 }
+
 impl Connections {
     pub async fn status(&self, s: &Service, force: bool) -> Result<Value> {
         let mut cache = self.cache.lock().await;
@@ -159,6 +176,7 @@ impl Connections {
         *cache = Some((now(), value.clone()));
         Ok(value)
     }
+
     pub async fn start(&self, s: &Arc<Service>) -> Result<Value> {
         let mut login = self.login.lock().await;
         if login.as_ref().is_some_and(DeviceLogin::running) {
@@ -205,6 +223,7 @@ impl Connections {
         *self.cache.lock().await = None;
         Ok(result)
     }
+
     pub async fn flow(&self) -> Value {
         self.login
             .lock()
@@ -213,6 +232,7 @@ impl Connections {
             .map(DeviceLogin::view)
             .unwrap_or(Value::Null)
     }
+
     pub async fn cancel(&self) {
         if let Some(login) = self.login.lock().await.take() {
             login.cancel().await;
@@ -220,9 +240,16 @@ impl Connections {
         *self.cache.lock().await = None;
     }
 }
+
 async fn check(config: &Config) -> Value {
     let env = codex_environment(config, &config.home.join(".codex"));
-    let unavailable = json!({"provider":"github","installed":false,"connected":false,"account":"CLI not installed","version":""});
+    let unavailable = json!({
+        "provider": "github",
+        "installed": false,
+        "connected": false,
+        "account": "CLI not installed",
+        "version": ""
+    });
     let Ok(version) = bounded_output(
         command(&config.gh_bin, &["--version".into()], &env, None),
         Duration::from_secs(5),
@@ -254,7 +281,14 @@ async fn check(config: &Config) -> Value {
     let account = login
         .as_ref()
         .map(|o| o.stdout.lines().last().unwrap_or("").trim().to_owned());
-    json!({"workflowPermission":login.as_ref().and_then(|o| workflow_scope(&o.stdout)),"provider":"github","installed":true,"version":version.stdout.lines().next().unwrap_or(""),"connected":login.is_some(),"account":account.as_deref().unwrap_or("Not signed in")})
+    json!({
+        "workflowPermission": login.as_ref().and_then(|o| workflow_scope(&o.stdout)),
+        "provider": "github",
+        "installed": true,
+        "version": version.stdout.lines().next().unwrap_or(""),
+        "connected": login.is_some(),
+        "account": account.as_deref().unwrap_or("Not signed in")
+    })
 }
 
 fn workflow_scope(output: &str) -> Option<bool> {

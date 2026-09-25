@@ -1,7 +1,13 @@
 import { Buffer } from 'node:buffer'
 import { readFileSync } from 'node:fs'
 import { createServer } from 'node:http'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+} from 'vitest'
 import { parse, stringify } from 'yaml'
 import { deploy } from '../scripts/deploy-coolify.mjs'
 import { firecrackerRunnerCompose, nativeRunnerCompose, persistentRunnerCompose } from '../scripts/runner-compose.mjs'
@@ -45,20 +51,24 @@ describe('coolify deployment over HTTP', () => {
           if (normalizeCompose)
             compose = compose.replace('entrypoint: [/usr/local/bin/leo, runner-broker]', 'entrypoint:\n      - /usr/local/bin/leo\n      - runner-broker')
         }
+
         response.statusCode = request.method === 'PATCH' ? patchStatus : 200
         response.end(JSON.stringify({ docker_compose_raw: compose }))
         return
       }
+
       if (request.url === '/health') {
         const health = healthResponses.length > 1 ? healthResponses.shift() : healthResponses[0]
         response.statusCode = health ? 200 : 503
         response.end(JSON.stringify(health))
         return
       }
+
       if (request.url === '/internal/nodes/release') {
         response.end(JSON.stringify({ protocol: 2, commit: config.commit, image: releaseImage ?? config.image }))
         return
       }
+
       response.statusCode = request.method === 'PATCH' ? patchStatus : 200
       response.end('{}')
     })

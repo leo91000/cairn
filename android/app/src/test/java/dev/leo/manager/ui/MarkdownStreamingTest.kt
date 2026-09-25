@@ -31,11 +31,12 @@ class MarkdownStreamingTest {
     @get:Rule val compose = createComposeRule()
 
     private fun views(): List<MarkdownTextView> {
-        fun collect(view: View): List<MarkdownTextView> = when (view) {
-            is MarkdownTextView -> listOf(view)
-            is ViewGroup -> (0 until view.childCount).flatMap { collect(view.getChildAt(it)) }
-            else -> emptyList()
-        }
+        fun collect(view: View): List<MarkdownTextView> =
+            when (view) {
+                is MarkdownTextView -> listOf(view)
+                is ViewGroup -> (0 until view.childCount).flatMap { collect(view.getChildAt(it)) }
+                else -> emptyList()
+            }
         return WindowInspector.getGlobalWindowViews().flatMap(::collect)
     }
 
@@ -49,7 +50,11 @@ class MarkdownStreamingTest {
             val rendering = remember { MarkdownRendering() }
             SideEffect { savedList = list }
             LaunchedEffect(Unit) {
-                restoreHistoryPosition(list, dev.leo.manager.data.ReadingPosition(0, 400, false), rendering)
+                restoreHistoryPosition(
+                    list,
+                    dev.leo.manager.data.ReadingPosition(0, 400, false),
+                    rendering,
+                )
                 restored = true
             }
             LeoTheme("dark") {
@@ -85,8 +90,15 @@ class MarkdownStreamingTest {
             }
         }
         compose.waitUntil(20000) { views().isNotEmpty() }
-        compose.runOnIdle { source = (1..100).joinToString("\n\n") { "Paragraphe **$it** : une longue réponse." } + "\n\nFIN" }
-        compose.waitUntil(20000) { views().lastOrNull()?.text?.contains("FIN") == true && savedList?.canScrollForward == false }
+        compose.runOnIdle {
+            source =
+                (1..100).joinToString("\n\n") { "Paragraphe **$it** : une longue réponse." } +
+                    "\n\nFIN"
+        }
+        compose.waitUntil(20000) {
+            views().lastOrNull()?.text?.contains("FIN") == true &&
+                savedList?.canScrollForward == false
+        }
         compose.runOnIdle { follow = false }
         compose.onNode(hasScrollAction()).performScrollToIndex(0)
         compose.waitForIdle()
@@ -100,12 +112,18 @@ class MarkdownStreamingTest {
 
     @Test
     fun `streaming retains prefix views delivers final text and replaces edited documents`() {
-        val prefix = "# Une réponse en direct\n\n" + (1..16).joinToString("\n\n") { "Paragraphe **$it** : une réponse avec du texte et un [lien](https://example.com)." }
+        val prefix =
+            "# Une réponse en direct\n\n" +
+                (1..16).joinToString("\n\n") {
+                    "Paragraphe **$it** : une réponse avec du texte et un [lien](https://example.com)."
+                }
         var source by mutableStateOf(prefix + "\n\nDébut")
         compose.setContent {
             LeoTheme("dark") {
                 Surface(Modifier.fillMaxSize()) {
-                    Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp)) { Markdown(source) }
+                    Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp)) {
+                        Markdown(source)
+                    }
                 }
             }
         }
@@ -125,7 +143,10 @@ class MarkdownStreamingTest {
             }
         }
         compose.runOnIdle { source = "Une réponse corrigée et **complète**." }
-        compose.waitUntil(20000) { views().size == 1 && views().single().text.toString() == "Une réponse corrigée et complète." }
+        compose.waitUntil(20000) {
+            views().size == 1 &&
+                views().single().text.toString() == "Une réponse corrigée et complète."
+        }
         assertSame(first, views().single())
         compose.runOnIdle { source = "" }
         compose.waitUntil(20000) { views().isEmpty() }

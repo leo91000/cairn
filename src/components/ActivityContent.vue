@@ -9,12 +9,14 @@ import Markdown from './Markdown.vue'
 
 const props = defineProps<{ content: string, label?: string, language?: string }>()
 const sourceOpen = ref(new Set<number>())
+
 function toggleSource(index: number, event: Event) {
   if ((event.target as HTMLDetailsElement).open)
     sourceOpen.value.add(index)
   else
     sourceOpen.value.delete(index)
 }
+
 const parts = computed(() => props.language && !['json', 'plaintext'].includes(props.language) ? [{ kind: 'text' as const, text: props.content }] : contentParts(props.content))
 </script>
 
@@ -28,7 +30,13 @@ const parts = computed(() => props.language && !['json', 'plaintext'].includes(p
         <ActivityDataNode :value="part.value" />
       </div>
       <details class="data-source [border-top:1px_solid_light-dark(#deddea,_var(--dark-border))] bg-surface" @toggle="toggleSource(index, $event)">
-        <summary><Icon :name="Braces" :size="14" />View JSON<Icon :name="ChevronDown" :size="14" /></summary><ActivityCode v-if="sourceOpen.has(index)" label="JSON" :code="JSON.stringify(part.value, null, 2)" :copy-code="part.source" language="json" />
+        <summary><Icon :name="Braces" :size="14" />View JSON<Icon :name="ChevronDown" :size="14" /></summary><ActivityCode
+          v-if="sourceOpen.has(index)"
+          label="JSON"
+          :code="JSON.stringify(part.value, null, 2)"
+          :copy-code="part.source"
+          language="json"
+        />
       </details>
     </section>
     <section v-else-if="part.kind === 'incomplete'" class="activity-data border border-line rounded-[14px] overflow-hidden bg-raised min-w-0 text-ink [box-shadow:0_3px_12px_light-dark(#26243c05,_#00000005)] mx-0 my-4" aria-label="Incomplete result">
@@ -42,11 +50,21 @@ const parts = computed(() => props.language && !['json', 'plaintext'].includes(p
       </div>
       <details class="data-source [border-top:1px_solid_light-dark(#deddea,_var(--dark-border))] bg-surface" @toggle="toggleSource(index, $event)">
         <summary><Icon :name="Braces" :size="14" />View saved source<Icon :name="ChevronDown" :size="14" /></summary>
-        <ActivityCode v-if="sourceOpen.has(index)" label="Saved source" :code="part.source" language="json" />
+        <ActivityCode
+          v-if="sourceOpen.has(index)"
+          label="Saved source"
+          :code="part.source"
+          language="json"
+        />
       </details>
     </section>
     <template v-else-if="part.text.trim()">
-      <ActivityCode v-if="label" :label="label" :code="part.text" :language="language" />
+      <ActivityCode
+        v-if="label"
+        :label="label"
+        :code="part.text"
+        :language="language"
+      />
       <Markdown v-else :content="part.text" />
     </template>
   </template>

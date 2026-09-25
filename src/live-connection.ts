@@ -13,12 +13,14 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
   let stopped = false
   let failures = 0
   let resetConsumer = false
+
   function disconnect() {
     source?.close()
     source = undefined
     clearTimeout(timer)
     clearTimeout(watchdog)
   }
+
   function retry() {
     disconnect()
     if (stopped)
@@ -27,10 +29,12 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
     if (navigator.onLine)
       timer = setTimeout(connect, Math.min(15000, 500 * 2 ** Math.min(failures++, 5)))
   }
+
   function alive() {
     clearTimeout(watchdog)
     watchdog = setTimeout(retry, 45000)
   }
+
   function connect() {
     disconnect()
     if (stopped)
@@ -39,6 +43,7 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
       status('offline')
       return
     }
+
     status(failures ? 'reconnecting' : 'connecting')
     const current = new EventSource(`/api${path}?after=${cursor}${history ? `&history=${encodeURIComponent(history)}` : ''}${path === '/chats/stream' ? '' : '&window=1'}`)
     source = current
@@ -61,6 +66,7 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
           history = undefined
           throw new Error('Server no longer supports history validation')
         }
+
         try {
           accept(resetConsumer ? { ...batch, reset: true } : batch, Number(event.lastEventId))
           resetConsumer = false
@@ -71,6 +77,7 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
           resetConsumer = true
           throw error
         }
+
         cursor = event.lastEventId
         history = batch.history
         failures = 0
@@ -84,14 +91,17 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
         retry()
     }
   }
+
   function visible() {
     if (!document.hidden)
       connect()
   }
+
   function offline() {
     disconnect()
     status('offline')
   }
+
   window.addEventListener('online', connect)
   window.addEventListener('offline', offline)
   window.addEventListener('pageshow', visible)

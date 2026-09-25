@@ -12,6 +12,7 @@ use axum::{
 };
 use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
+
 pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Result<()> {
     let _operation = s.node_backup_operation.lock().await;
     let manifest = super::publication::manifest(s, backup).await?;
@@ -26,11 +27,21 @@ pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Resu
     } else {
         format!("{}/internal/execution/{node}", s.config.public_url)
     };
-    let response = s.http.post(format!("{base}/disks/{}/restore",text(run,"id")))
-        .bearer_auth(crate::execution::secret(&s.config.data_dir,"runner-secret").await?)
-        .json(&json!({"manifest":manifest,"master":s.config.public_url,"grant":credential,"backupId":backup["id"],"policy":policy}))
+    let response = s
+        .http
+        .post(format!("{base}/disks/{}/restore", text(run, "id")))
+        .bearer_auth(crate::execution::secret(&s.config.data_dir, "runner-secret").await?)
+        .json(&json!({
+            "manifest": manifest,
+            "master": s.config.public_url,
+            "grant": credential,
+            "backupId": backup["id"],
+            "policy": policy
+        }))
         .timeout(Duration::from_secs(120))
-        .send().await.map_err(|_|Error::new(503,"VM restore connection interrupted."))?;
+        .send()
+        .await
+        .map_err(|_| Error::new(503, "VM restore connection interrupted."))?;
     if !response.status().is_success() {
         return Err(Error::new(
             503,
@@ -39,6 +50,7 @@ pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Resu
     }
     Ok(())
 }
+
 pub async fn handle(State(app): State<App>, request: Request) -> Result<Response> {
     let s = &app.service;
     if request.method() != "GET"
@@ -55,7 +67,7 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
     let _read = s.node_disk_reads.read().await;
     if let Some(grant) = super::disk_grants::authorize(s, credential).await? {
         if request.method() == "POST" {
-            return Ok(axum::Json(json!({"renewed":true})).into_response());
+            return Ok(axum::Json(json!({"renewed": true})).into_response());
         }
         let hash = request
             .uri()
@@ -91,6 +103,7 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
     }
     Err(Error::new(401, "Disk grant expired."))
 }
+
 pub async fn controller(state: &Path, run: &str, value: Value) -> Result<Value> {
     crate::validation::uuid(run)?;
     let manifest = &value["manifest"];
@@ -122,7 +135,7 @@ pub async fn controller(state: &Path, run: &str, value: Value) -> Result<Value> 
         && crate::storage::runtime::exists(&directory)
         && !directory.join("restore.pending").exists()
     {
-        return Ok(json!({"ready":true}));
+        return Ok(json!({"ready": true}));
     }
     let origin = super::connector::master(text(&value, "master"))?;
     let _replacement = crate::storage::runtime::replacement(&directory).await?;
@@ -137,7 +150,8 @@ pub async fn controller(state: &Path, run: &str, value: Value) -> Result<Value> 
     if !Path::new("/dev/fuse").exists() {
         return Err(Error::new(409, "Node has no FUSE device."));
     }
-    let context = json!({"master":origin.as_str(),"grant":value["grant"],"policy":value["policy"]});
+    let context =
+        json!({"master": origin.as_str(),"grant": value["grant"],"policy": value["policy"]});
     let root = directory.join("lazy");
     drop(crate::storage::runtime::create(&root, manifest, &context).await?);
     crate::skills::atomic_write(
@@ -147,10 +161,10 @@ pub async fn controller(state: &Path, run: &str, value: Value) -> Result<Value> 
     .await?;
     crate::skills::atomic_write(
         &recovery,
-        &serde_json::to_vec(&json!({"backupId":value["backupId"]}))?,
+        &serde_json::to_vec(&json!({"backupId": value["backupId"]}))?,
     )
     .await?;
     tokio::fs::remove_file(directory.join("restore.pending")).await?;
     tokio::fs::File::open(&directory).await?.sync_all().await?;
-    Ok(json!({"ready":true}))
+    Ok(json!({"ready": true}))
 }

@@ -23,6 +23,7 @@ export function chatSkills(skills: Skill[], agent: Agent | undefined, projectId:
     if (!byName.has(skill.name) || skill.scope !== 'global')
       byName.set(skill.name, { name: skill.name, description: skill.description, scope: skill.scope })
   }
+
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name))
 }
 
@@ -54,6 +55,7 @@ function rank(skill: SkillOption, query: string) {
     if (char === query[index])
       index++
   }
+
   if (index === query.length)
     return 4
   return skill.description.toLowerCase().includes(query) ? 5 : -1
@@ -88,6 +90,7 @@ export function mentionSegments(text: string, names: ReadonlySet<string>): Menti
     segments.push({ text: match[0], skill: name })
     last = match.index + match[0].length
   }
+
   if (last < text.length || !segments.length)
     segments.push({ text: text.slice(last) })
   return segments

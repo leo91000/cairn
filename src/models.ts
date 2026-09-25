@@ -12,6 +12,7 @@ function stored(key: string): ModelCatalog['models'] {
     return []
   }
 }
+
 function store(key: string, catalog: ModelCatalog) {
   try {
     localStorage.setItem(key, JSON.stringify({ models: catalog.models }))
@@ -19,7 +20,13 @@ function store(key: string, catalog: ModelCatalog) {
   catch {}
 }
 
-export const modelCatalog = reactive({ models: stored('leo-models:codex'), checkedAt: null as number | null, stale: false, error: '', loading: false })
+export const modelCatalog = reactive({
+  models: stored('leo-models:codex'),
+  checkedAt: null as number | null,
+  stale: false,
+  error: '',
+  loading: false,
+})
 let pending: Promise<void> | undefined
 export function loadModels() {
   if (pending)
@@ -39,7 +46,13 @@ export function loadModels() {
   return pending
 }
 
-export const claudeCatalog = reactive({ models: stored('leo-models:claude'), checkedAt: null as number | null, stale: false, error: '', loading: false })
+export const claudeCatalog = reactive({
+  models: stored('leo-models:claude'),
+  checkedAt: null as number | null,
+  stale: false,
+  error: '',
+  loading: false,
+})
 let claudePending: Promise<void> | undefined
 export function loadClaudeModels() {
   if (claudePending)

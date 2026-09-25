@@ -18,8 +18,11 @@
     "test:e2e": "playwright test",
     "check": "pnpm lint && pnpm test && pnpm build",
     "format": "pnpm lint:fix",
-    "lint": "eslint . && cargo fmt --all --check",
-    "lint:fix": "eslint . --fix && cargo fmt --all",
+    "format:rust": "node scripts/rust-format.mjs",
+    "format:android": "cd android && ./gradlew spotlessApply --no-daemon",
+    "lint:android": "cd android && ./gradlew spotlessCheck --no-daemon",
+    "lint": "eslint . && node scripts/rust-format.mjs --check",
+    "lint:fix": "eslint . --fix && node scripts/rust-format.mjs",
     "build:backend": "cargo build --release --bin leo",
     "test:backend": "node scripts/test-backend.mjs"
   },
@@ -37,6 +40,8 @@
   },
   "devDependencies": {
     "@antfu/eslint-config": "9.5.1",
+    "@ast-grep/lang-rust": "0.0.7",
+    "@ast-grep/napi": "0.45.3",
     "@egoist/tailwindcss-icons": "1.9.2",
     "@fastify/cookie": "11.1.2",
     "@fastify/formbody": "9.0.0",

@@ -5,6 +5,7 @@ globalThis.addEventListener('push', (event) => {
     data = event.data.json()
   }
   catch { return }
+
   if (!/^[\da-f-]{36}$/.test(data.chatId))
     return
   // Execution alerts (node unavailable, failover, backup failure) carry their own short text.
@@ -18,6 +19,7 @@ globalThis.addEventListener('push', (event) => {
     }))
     return
   }
+
   if (!/^[a-f0-9]{64}$/.test(data.questionId))
     return
   event.waitUntil(globalThis.registration.showNotification('Your agent has a question', {
@@ -41,6 +43,7 @@ globalThis.addEventListener('notificationclick', (event) => {
       await client.focus()
       return
     }
+
     await globalThis.clients.openWindow(url.href)
   })())
 })
@@ -49,6 +52,7 @@ globalThis.addEventListener('message', (event) => {
     return
   event.waitUntil((async () => {
     const notifications = await globalThis.registration.getNotifications({ tag: `question-${event.data.questionId}` })
-    for (const notification of notifications) notification.close()
+    for (const notification of notifications)
+      notification.close()
   })())
 })

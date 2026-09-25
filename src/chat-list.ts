@@ -1,5 +1,10 @@
 import type { ChatView } from '../shared/chats'
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import {
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from 'vue'
 import { api, state } from './api'
 
 // Active conversations known to the shell (search, badges). Live views publish their stream
@@ -36,6 +41,7 @@ export function useChatList() {
     clearTimeout(first)
     first = setTimeout(() => stale() && refreshChats(), 3000)
   }
+
   onMounted(() => {
     start()
     timer = setInterval(() => {

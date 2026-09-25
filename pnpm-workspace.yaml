@@ -6,5 +6,6 @@ packages:
   - .
 
 allowBuilds:
+  '@ast-grep/lang-rust': true
   esbuild: true
   simple-git-hooks: false

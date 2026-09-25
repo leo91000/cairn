@@ -22,15 +22,16 @@ import org.commonmark.renderer.html.HtmlRenderer
 internal class MarkdownBlock(val signature: String, val text: Spanned)
 
 /**
- * Parse the full document so references, unfinished fences and lists stay correct.
- * Render small groups of complete top-level nodes, retaining unchanged groups.
- * HTML is only a canonical AST fingerprint (never displayed or loaded in a WebView).
- * Each instance belongs to one sequential background collector.
+ * Parse the full document so references, unfinished fences and lists stay correct. Render small
+ * groups of complete top-level nodes, retaining unchanged groups. HTML is only a canonical AST
+ * fingerprint (never displayed or loaded in a WebView). Each instance belongs to one sequential
+ * background collector.
  */
 internal class MarkdownBlocks(private val markwon: Markwon) {
-    private val signatures = HtmlRenderer.builder()
-        .extensions(listOf(TablesExtension.create(), StrikethroughExtension.create()))
-        .build()
+    private val signatures =
+        HtmlRenderer.builder()
+            .extensions(listOf(TablesExtension.create(), StrikethroughExtension.create()))
+            .build()
     private var previous = emptyList<MarkdownBlock>()
 
     fun render(content: String): List<MarkdownBlock> {
@@ -49,7 +50,10 @@ internal class MarkdownBlocks(private val markwon: Markwon) {
             }
             val signature = signatures.render(group)
             val cached = previous.getOrNull(result.size)
-            result.add(if (cached?.signature == signature) cached else MarkdownBlock(signature, markwon.render(group)))
+            result.add(
+                if (cached?.signature == signature) cached
+                else MarkdownBlock(signature, markwon.render(group))
+            )
         }
         previous = result
         return result
@@ -57,7 +61,8 @@ internal class MarkdownBlocks(private val markwon: Markwon) {
 }
 
 /** Binding an unchanged group must not call TextView.setText or request a new text layout. */
-internal class MarkdownTextView(context: Context, copyText: (() -> String)? = null) : TextView(context) {
+internal class MarkdownTextView(context: Context, copyText: (() -> String)? = null) :
+    TextView(context) {
     private var bound: MarkdownBlock? = null
 
     init {
@@ -68,22 +73,29 @@ internal class MarkdownTextView(context: Context, copyText: (() -> String)? = nu
         // Selectable text installs ArrowKeyMovementMethod, so Markwon's default
         // (only installed when movementMethod is null) never handles link taps.
         movementMethod = LinkMovementMethod.getInstance()
-        if (copyText != null) customSelectionActionModeCallback = object : ActionMode.Callback {
-            private val copyAll = View.generateViewId()
-            override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
-                menu.add(Menu.NONE, copyAll, Menu.NONE, "Copier tout le texte")
-                return true
-            }
-            override fun onPrepareActionMode(mode: ActionMode, menu: Menu) = false
-            override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
-                if (item.itemId != copyAll) return false
-                context.getSystemService(ClipboardManager::class.java)
-                    .setPrimaryClip(ClipData.newPlainText("Leo", copyText()))
-                mode.finish()
-                return true
-            }
-            override fun onDestroyActionMode(mode: ActionMode) = Unit
-        }
+        if (copyText != null)
+            customSelectionActionModeCallback =
+                object : ActionMode.Callback {
+                    private val copyAll = View.generateViewId()
+
+                    override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
+                        menu.add(Menu.NONE, copyAll, Menu.NONE, "Copier tout le texte")
+                        return true
+                    }
+
+                    override fun onPrepareActionMode(mode: ActionMode, menu: Menu) = false
+
+                    override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
+                        if (item.itemId != copyAll) return false
+                        context
+                            .getSystemService(ClipboardManager::class.java)
+                            .setPrimaryClip(ClipData.newPlainText("Leo", copyText()))
+                        mode.finish()
+                        return true
+                    }
+
+                    override fun onDestroyActionMode(mode: ActionMode) = Unit
+                }
     }
 
     fun bind(markwon: Markwon, block: MarkdownBlock) {
@@ -97,28 +109,42 @@ internal class MarkdownTextView(context: Context, copyText: (() -> String)? = nu
 internal class MarkdownRendering {
     var pending by mutableIntStateOf(0)
         private set
+
     var revision by mutableIntStateOf(0)
         private set
-    fun changed() { revision++ }
-    fun begin() { pending++ }
-    fun end() { pending-- }
+
+    fun changed() {
+        revision++
+    }
+
+    fun begin() {
+        pending++
+    }
+
+    fun end() {
+        pending--
+    }
+
     suspend fun awaitLayout() {
-        withFrameNanos { }
+        withFrameNanos {}
         snapshotFlow { pending }.first { it == 0 }
-        withFrameNanos { }
+        withFrameNanos {}
     }
 }
+
 internal val LocalMarkdownRendering = compositionLocalOf<MarkdownRendering?> { null }
 
 /** A render and its disposal can both finish the same initial layout. */
 internal class MarkdownRenderPass(private val rendering: MarkdownRendering?) {
     private var pending = false
+
     fun begin() {
         if (!pending) {
             pending = true
             rendering?.begin()
         }
     }
+
     fun finish() {
         if (pending) {
             pending = false

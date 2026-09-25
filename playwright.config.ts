@@ -26,7 +26,12 @@ export default defineConfig({
     { name: 'journeys-deliverables', testMatch: 'deliverables.spec.ts' },
     { name: 'layout-webkit-deliverables', testMatch: 'deliverables.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
     { name: 'layout-ui-review', testMatch: 'ui-review.spec.ts' },
-    { name: 'layout-webkit-resources', testMatch: 'ui-review.spec.ts', grep: /keeps projects/, use: { browserName: 'webkit' } },
+    {
+      name: 'layout-webkit-resources',
+      testMatch: 'ui-review.spec.ts',
+      grep: /keeps projects/,
+      use: { browserName: 'webkit' },
+    },
     { name: 'journeys-models', testMatch: 'models.spec.ts' },
     { name: 'layout-webkit-models', testMatch: 'models.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
     { name: 'journeys-signal', testMatch: 'signal.spec.ts' },

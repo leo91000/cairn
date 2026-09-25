@@ -8,12 +8,27 @@ import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
 
 // GitHub through the server's `gh` login, with its device-code sign-in.
-interface Status { provider: 'github', installed: boolean, connected: boolean, account: string, version: string, workflowPermission: boolean | null }
-interface Flow { state: 'pending' | 'complete' | 'failed', url?: string, code?: string, error?: string }
+interface Status {
+  provider: 'github'
+  installed: boolean
+  connected: boolean
+  account: string
+  version: string
+  workflowPermission: boolean | null
+}
+
+interface Flow {
+  state: 'pending' | 'complete' | 'failed'
+  url?: string
+  code?: string
+  error?: string
+}
+
 const status = ref<Status>()
 const flow = ref<Flow | null>(null)
 const busy = ref(false)
 const error = ref('')
+
 async function load(refresh = false) {
   try {
     status.value = (await api<Status[]>(`/connections${refresh ? '?refresh=true' : ''}`)).find(item => item.provider === 'github')
@@ -22,6 +37,7 @@ async function load(refresh = false) {
     error.value = (e as Error).message
   }
 }
+
 async function connect() {
   busy.value = true
   error.value = ''
@@ -35,10 +51,12 @@ async function connect() {
     busy.value = false
   }
 }
+
 async function cancel() {
   await api('/connections/login', { method: 'DELETE' })
   flow.value = null
 }
+
 let timer: ReturnType<typeof setInterval>
 onMounted(() => {
   void load(true)
@@ -73,7 +91,12 @@ onBeforeUnmount(() => clearInterval(timer))
         </p>
       </div>
       <span v-if="status?.connected && status.workflowPermission !== false" class="inline-flex items-center gap-1.5 text-xs font-semibold text-success"><Icon :name="CheckCircle2" :size="14" />Connected</span>
-      <UiButton v-if="!status?.connected || status.workflowPermission === false" size="small" :disabled="busy || !status?.installed || flow?.state === 'pending'" @click="connect">
+      <UiButton
+        v-if="!status?.connected || status.workflowPermission === false"
+        size="small"
+        :disabled="busy || !status?.installed || flow?.state === 'pending'"
+        @click="connect"
+      >
         {{ status?.connected ? 'Enable workflow updates' : 'Connect' }}<Icon :name="ArrowUpRight" :size="14" />
       </UiButton>
     </div>
@@ -92,7 +115,13 @@ onBeforeUnmount(() => clearInterval(timer))
         Waiting for a verification code…
       </p>
       <div class="flex flex-wrap gap-2">
-        <a v-if="flow.url" :class="[buttonBase, buttonVariants.primary, buttonSizes.small]" :href="flow.url" target="_blank" rel="noopener noreferrer">Open GitHub<Icon :name="ArrowUpRight" :size="14" /></a>
+        <a
+          v-if="flow.url"
+          :class="[buttonBase, buttonVariants.primary, buttonSizes.small]"
+          :href="flow.url"
+          target="_blank"
+          rel="noopener noreferrer"
+        >Open GitHub<Icon :name="ArrowUpRight" :size="14" /></a>
         <UiButton size="small" @click="cancel">
           Cancel sign-in
         </UiButton>

@@ -6,6 +6,7 @@ import process from 'node:process'
 import { createInterface } from 'node:readline'
 
 const emit = value => process.stdout.write(`${JSON.stringify(value)}\n`)
+
 async function main() {
   let endpoint
   for await (const line of createInterface({ input: process.stdin })) {
@@ -23,6 +24,7 @@ async function main() {
       endpoint = params.chatgptAccountId
       result = { type: 'chatgptAuthTokens' }
     }
+
     if (method === 'model/list')
       result = { data: [{ model: 'gpt-6-astra', isDefault: true, supportedReasoningEfforts: [] }], nextCursor: null }
     if (method === 'thread/start') {
@@ -40,6 +42,7 @@ async function main() {
       assert.ok(!process.env.CODEX_API_KEY)
       result = { thread: { id: 'portrait-thread' } }
     }
+
     if (method === 'turn/start') {
       assert.equal(params.model, 'gpt-6-astra')
       assert.equal(params.threadId, 'portrait-thread')
@@ -47,11 +50,26 @@ async function main() {
       // Notifications deliberately precede the response to catch lost fast results.
       const response = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...params, fixturePid: process.pid }) })
       const item = await response.json()
-      emit({ method: 'item/completed', params: { threadId: params.threadId, item: response.ok ? item : { type: 'imageGeneration', status: 'failed', result: '', failure: item } } })
+      emit({
+        method: 'item/completed',
+        params: {
+          threadId: params.threadId,
+          item: response.ok
+            ? item
+            : {
+                type: 'imageGeneration',
+                status: 'failed',
+                result: '',
+                failure: item,
+              },
+        },
+      })
       emit({ method: 'turn/completed', params: { threadId: params.threadId, turn: { status: 'completed' } } })
       result = { turn: { id: 'portrait-turn' } }
     }
+
     emit({ id, result })
   }
 }
+
 main().catch(() => process.exit(1))

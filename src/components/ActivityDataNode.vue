@@ -1,17 +1,29 @@
 <script setup lang="ts">
 import type { DataValue } from '../activity-data'
 import { computed, ref } from 'vue'
-import { dataObject, dataSummary, fieldLabel, statusTone } from '../activity-data'
-import { Check, ChevronRight, CircleAlert, FileCode } from '../icons'
+import {
+  dataObject,
+  dataSummary,
+  fieldLabel,
+  statusTone,
+} from '../activity-data'
+import {
+  Check,
+  ChevronRight,
+  CircleAlert,
+  FileCode,
+} from '../icons'
 import Icon from './Icon.vue'
 
 const props = withDefaults(defineProps<{ value: DataValue, depth?: number, field?: string }>(), { depth: 0, field: '' })
 const limit = ref(8)
 const opened = ref(new Set<string>())
 const closed = ref(new Set<string>())
+
 function isOpen(key: string) {
   return !closed.value.has(key) && (opened.value.has(key) || (props.depth < 2 && ['jobs', 'files'].includes(key)))
 }
+
 function toggled(key: string, event: Event) {
   const open = (event.target as HTMLDetailsElement).open
   if (open) {
@@ -23,10 +35,12 @@ function toggled(key: string, event: Event) {
     closed.value.add(key)
   }
 }
+
 const items = computed(() => Array.isArray(props.value) ? props.value.slice(0, limit.value) : [])
 const fields = computed(() => dataObject(props.value) ? Object.entries(props.value) : [])
 const scalars = computed(() => fields.value.filter(([, value]) => value === null || typeof value !== 'object'))
 const nested = computed(() => fields.value.filter(([, value]) => value !== null && typeof value === 'object'))
+
 function itemTitle(value: DataValue, index: number) {
   if (dataObject(value)) {
     for (const key of ['name', 'title', 'path', 'id']) {
@@ -34,10 +48,13 @@ function itemTitle(value: DataValue, index: number) {
         return `${key === 'id' ? 'Run #' : ''}${value[key]}`
     }
   }
+
   return `Item ${index + 1}`
 }
+
 const checks = computed(() => Array.isArray(props.value) ? props.value.filter(item => dataObject(item) && typeof item.name === 'string' && typeof item.conclusion === 'string') : [])
 const passed = computed(() => checks.value.filter(item => dataObject(item) && ['success', 'succeeded', 'passed'].includes(`${item.conclusion}`)).length)
+
 function compactCheck(value: DataValue) {
   return dataObject(value) && typeof value.name === 'string' && typeof value.conclusion === 'string' && Object.keys(value).every(key => ['name', 'status', 'conclusion'].includes(key))
 }
@@ -88,7 +105,13 @@ function compactCheck(value: DataValue) {
           </dd>
         </div>
       </dl>
-      <details v-for="([key, item]) in nested" :key="key" class="data-section mt-2.5 border border-line rounded-lg overflow-hidden" :open="isOpen(key)" @toggle="toggled(key, $event)">
+      <details
+        v-for="([key, item]) in nested"
+        :key="key"
+        class="data-section mt-2.5 border border-line rounded-lg overflow-hidden"
+        :open="isOpen(key)"
+        @toggle="toggled(key, $event)"
+      >
         <summary><Icon :name="ChevronRight" :size="14" /><strong>{{ fieldLabel(key) }}</strong><span>{{ dataSummary(item) }}</span></summary>
         <div v-if="isOpen(key) && depth < 12" class="data-section-body pt-0 pb-2 phone:[padding-inline:9px] px-3">
           <ActivityDataNode :value="item" :field="key" :depth="depth + 1" />

@@ -18,6 +18,7 @@ export async function workspaceDirectory(
       'Project directory does not exist or is not accessible.',
     )
   }
+
   const roots = await Promise.all(
     allowedRoots.map(root => realpath(root).catch(() => null)),
   )
@@ -31,5 +32,6 @@ export async function workspaceDirectory(
       'Project must be inside a configured workspace root.',
     )
   }
+
   return actual
 }

@@ -16,7 +16,9 @@ use tokio::process::Command;
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 type PendingRead = OnceCell<Result<bytes::Bytes>>;
+
 type ReadKey = (String, String, u64, Option<String>, String);
+
 pub(crate) const HOT_WRITE_CONCURRENCY: usize = 4;
 
 #[derive(PartialEq, Eq)]
@@ -53,8 +55,11 @@ impl HotS3 {
     }
 
     pub(crate) fn performance(&self) -> Value {
-        json!({"get":self.get_metrics.snapshot(),"put":self.put_metrics.snapshot(),
-            "purgeKey":self.purge_metrics.snapshot()})
+        json!({
+            "get": self.get_metrics.snapshot(),
+            "put": self.put_metrics.snapshot(),
+            "purgeKey": self.purge_metrics.snapshot()
+        })
     }
 
     async fn client(&self, endpoint: Option<&str>, region: &str) -> aws_sdk_s3::Client {
@@ -116,6 +121,7 @@ pub struct Storage {
     region: String,
     hot: Arc<HotS3>,
 }
+
 fn setting(config: &Value, suffix: &str, key: &str) -> String {
     std::env::var(format!("STORAGE_S3_{suffix}"))
         .ok()
@@ -127,6 +133,7 @@ fn setting(config: &Value, suffix: &str, key: &str) -> String {
         })
         .unwrap_or_else(|| config[key].as_str().unwrap_or("").into())
 }
+
 impl Storage {
     pub fn configured(s: &Service) -> Result<Self> {
         let primary = s.config.data_dir.join("storage-s3.json");
@@ -181,9 +188,11 @@ impl Storage {
             hot: s.hot_s3.clone(),
         })
     }
+
     async fn call(&self, args: Vec<String>) -> Result<Value> {
         self.optional(args, None).await
     }
+
     async fn optional(&self, args: Vec<String>, missing: Option<&str>) -> Result<Value> {
         let mut command = Command::new(&self.binary);
         command.args(args).args(["--output", "json"]);
@@ -220,6 +229,7 @@ impl Storage {
         serde_json::from_slice(&output.stdout)
             .map_err(|_| Error::new(503, "Invalid response from object storage."))
     }
+
     pub async fn validate(&self) -> Result<()> {
         let block = self
             .optional(
@@ -281,7 +291,8 @@ impl Storage {
             .await?;
         if lock["ObjectLockConfiguration"]["ObjectLockEnabled"] == "Enabled" {
             return Err(Error::bad(
-                "Object Lock is incompatible with automatic trash deletion. Use a dedicated bucket without Object Lock.",
+                "Object Lock is incompatible with automatic trash deletion. Use a dedicated \
+                    bucket without Object Lock.",
             ));
         }
         self.call(vec![
@@ -293,6 +304,7 @@ impl Storage {
         .await?;
         Ok(())
     }
+
     /// Providers without public access blocks (OVHcloud) must show a private ACL and no bucket policy.
     async fn validate_private(&self) -> Result<()> {
         let acl = self
@@ -325,16 +337,19 @@ impl Storage {
         match policy {
             Ok(Value::Null) => Ok(()),
             Ok(_) => Err(Error::bad(
-                "Use a dedicated storage bucket without a bucket policy; grant access through the server's credentials.",
+                "Use a dedicated storage bucket without a bucket policy; grant access \
+                    through the server's credentials.",
             )),
             // Providers without bucket policies (OVHcloud) cannot expose the bucket through one.
             Err(_) if self.endpoint.is_some() => Ok(()),
             Err(error) => Err(error),
         }
     }
+
     fn uri(&self, key: &str) -> String {
         format!("s3://{}/{key}", self.bucket)
     }
+
     pub async fn upload_bytes(&self, bytes: Vec<u8>, key: &str) -> Result<()> {
         let sample = self.hot.put_metrics.start();
         let _permit = self.hot.writes.acquire().await.map_err(Error::internal)?;
@@ -357,6 +372,7 @@ impl Storage {
         sample.finish(bytes.len());
         self.verify_bytes(key, &bytes).await
     }
+
     async fn verify_bytes(&self, key: &str, bytes: &[u8]) -> Result<()> {
         let remote = self.download_bytes(key, bytes.len() as u64).await?;
         if remote != bytes {
@@ -364,11 +380,13 @@ impl Storage {
         }
         Ok(())
     }
+
     /// Verify a cached block or manifest before publishing its recovery point.
     pub async fn upload_file_verified(&self, path: &Path, key: &str) -> Result<()> {
         let bytes = tokio::fs::read(path).await?;
         self.upload_bytes(bytes, key).await
     }
+
     /// The response body is bounded even if a provider ignores Content-Length or Range.
     pub async fn download_bytes(&self, key: &str, limit: u64) -> Result<Vec<u8>> {
         let request = (
@@ -472,6 +490,7 @@ impl Storage {
         sample.finish(bytes.len());
         Ok(bytes)
     }
+
     /// Collect one immutable publication object, including versions and delete markers.
     /// Exact-key filtering prevents a prefix match from deleting a sibling object.
     /// Publication uses PutObject only, so this path has no multipart uploads to abort.
@@ -627,6 +646,7 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[tokio::test]
     async fn recovery_reads_distinguish_permanent_refusals_from_temporary_outages() {
         use aws_sdk_s3::config::{Credentials, Region, retry::RetryConfig};

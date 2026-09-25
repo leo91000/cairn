@@ -42,6 +42,7 @@ export function config(overrides: Partial<Config> = {}): Config {
   ) {
     throw new Error('CONCURRENCY must be a positive integer.')
   }
+
   if (
     !Number.isInteger(settings.port)
     || settings.port < 0
@@ -49,6 +50,7 @@ export function config(overrides: Partial<Config> = {}): Config {
   ) {
     throw new Error('PORT must be a valid port number.')
   }
+
   const url = new URL(settings.publicUrl)
   if (
     !['http:', 'https:'].includes(url.protocol)
@@ -62,6 +64,7 @@ export function config(overrides: Partial<Config> = {}): Config {
       'PUBLIC_URL must be an HTTP(S) origin without a path or credentials.',
     )
   }
+
   settings.publicUrl = url.origin
   return settings
 }

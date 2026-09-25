@@ -1,6 +1,18 @@
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import {
+  mkdir,
+  readFile,
+  stat,
+  writeFile,
+} from 'node:fs/promises'
 import path from 'node:path'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
 import { accountFixture, credential, limits } from './codex-account-fixture'
 import { fixture } from './helpers'
 import { remainingUsage, usageRecovered } from './legacy/server/codex-account-types'
@@ -36,7 +48,8 @@ describe('codex account pool', () => {
     await data.pool.release(lease)
     await data.pool.release(second)
     await expect(readFile(path.join(lease.home, 'auth.json'))).rejects.toThrow()
-    for (const account of data.pool.list()) await data.pool.remove(account.id)
+    for (const account of data.pool.list())
+      await data.pool.remove(account.id)
     await expect(data.pool.acquire(ctx.task.id)).rejects.toThrow(/Waiting/)
   })
 
@@ -140,8 +153,18 @@ describe('codex account pool', () => {
     ctx.service.accounts = new CodexAccounts(ctx.service.store, ctx.service.config)
     const headers = await ctx.login()
     expect((await ctx.app.inject('/api/codex/accounts')).statusCode).toBe(401)
-    expect((await ctx.app.inject({ method: 'POST', url: '/api/codex/accounts/login', headers: { cookie: headers.cookie }, payload: { name: 'Personal' } })).statusCode).toBe(403)
-    const login = await ctx.app.inject({ method: 'POST', url: '/api/codex/accounts/login', headers, payload: { name: 'Personal' } })
+    expect((await ctx.app.inject({
+      method: 'POST',
+      url: '/api/codex/accounts/login',
+      headers: { cookie: headers.cookie },
+      payload: { name: 'Personal' },
+    })).statusCode).toBe(403)
+    const login = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/codex/accounts/login',
+      headers,
+      payload: { name: 'Personal' },
+    })
     expect(login.statusCode, login.body).toBe(200)
     const id = login.json().accountId
     await expect.poll(() => ctx.service.accounts.flow()?.state).toBe('complete')
@@ -151,7 +174,12 @@ describe('codex account pool', () => {
     // The legacy adapter reports verified sign-in before its asynchronous
     // credential-directory cleanup releases the account for editing.
     await expect.poll(async () => {
-      const updated = await ctx.app.inject({ method: 'PUT', url: `/api/codex/accounts/${id}`, headers, payload: { name: 'Renamed', enabled: false } })
+      const updated = await ctx.app.inject({
+        method: 'PUT',
+        url: `/api/codex/accounts/${id}`,
+        headers,
+        payload: { name: 'Renamed', enabled: false },
+      })
       return { status: updated.statusCode, ...updated.json() }
     }).toMatchObject({ status: 200, name: 'Renamed', enabled: false })
     expect((await ctx.app.inject({ method: 'DELETE', url: `/api/codex/accounts/${id}`, headers })).statusCode).toBe(200)
@@ -173,6 +201,7 @@ describe('codex account pool', () => {
       await data.pool.close()
       vi.useRealTimers()
     }
+
     expect(usageRecovered(limits(97, 98), limits(0, 98), '')).toBe(true)
     expect(usageRecovered(limits(97, 98), limits(97, 98), '')).toBe(false)
   })
@@ -272,7 +301,8 @@ describe('codex account pool', () => {
   })
 
   it('does not confuse command output, model failures or temporary throttling with exhaustion', () => {
-    for (const event of [{ type: 'item.completed', item: { text: 'You\'ve hit your usage limit.' } }, { type: 'turn.failed', error: { message: '429 Too Many Requests' } }, { type: 'turn.failed', error: { message: 'Connection failed' } }]) expect(usageExhausted(event)).toBe(false)
+    for (const event of [{ type: 'item.completed', item: { text: 'You\'ve hit your usage limit.' } }, { type: 'turn.failed', error: { message: '429 Too Many Requests' } }, { type: 'turn.failed', error: { message: 'Connection failed' } }])
+      expect(usageExhausted(event)).toBe(false)
     expect(usageExhausted({ type: 'turn.failed', error: { message: 'You\'ve hit your usage limit. Try again later.' } })).toBe(true)
   })
 })

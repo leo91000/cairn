@@ -12,6 +12,7 @@ use std::{
 };
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+
 pub async fn capture(
     state: &Path,
     run: &str,
@@ -46,7 +47,7 @@ pub async fn capture(
         if !emergency {
             let reply = tokio::time::timeout(
                 Duration::from_secs(30),
-                host::guest_request(socket, &json!({"op":"freeze"})),
+                host::guest_request(socket, &json!({"op": "freeze"})),
             )
             .await;
             frozen = true;
@@ -149,14 +150,15 @@ pub async fn capture(
     )
     .await?;
     timing.finish();
-    Ok(json!({"id":id,"manifest":manifest,"grantId":volume.source.grant_id()}))
+    Ok(json!({"id": id,"manifest": manifest,"grantId": volume.source.grant_id()}))
 }
+
 async fn thaw(socket: &Path, stop: &CancellationToken) -> Result<()> {
-    let request = json!({"op":"thaw"});
+    let request = json!({"op": "thaw"});
     loop {
         tokio::select! {
-            _=stop.cancelled()=>return Err(Error::new(409,"VM stopped during capture.")),
-            result=tokio::time::timeout(Duration::from_secs(5),host::guest_request(socket,&request))=>if matches!(result,Ok(Ok(value)) if value["ok"]==true){return Ok(());}
+            _ = stop.cancelled() => return Err(Error::new(409,"VM stopped during capture.")),
+            result = tokio::time::timeout(Duration::from_secs(5),host::guest_request(socket,&request)) => if matches!(result,Ok(Ok(value)) if value["ok"]==true){return Ok(());}
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

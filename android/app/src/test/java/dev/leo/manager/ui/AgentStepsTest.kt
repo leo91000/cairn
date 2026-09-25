@@ -29,12 +29,26 @@ import org.robolectric.annotation.GraphicsMode
 class AgentStepsTest {
     @get:Rule val compose = createComposeRule()
 
-    private fun item(id: Long, type: String, started: Boolean = false, body: JsonObjectBuilder.() -> Unit) =
-        RunEvent(id, 1000 + id, if (started) "item.started" else "item.completed", "", mapOf("item" to buildJsonObject {
-            put("type", type)
-            put("id", "i$id")
-            body()
-        }))
+    private fun item(
+        id: Long,
+        type: String,
+        started: Boolean = false,
+        body: JsonObjectBuilder.() -> Unit,
+    ) =
+        RunEvent(
+            id,
+            1000 + id,
+            if (started) "item.started" else "item.completed",
+            "",
+            mapOf(
+                "item" to
+                    buildJsonObject {
+                        put("type", type)
+                        put("id", "i$id")
+                        body()
+                    }
+            ),
+        )
 
     private fun command(id: Long, command: String, exit: Int = 0, output: String = "") =
         item(id, "command_execution") {
@@ -50,13 +64,34 @@ class AgentStepsTest {
             command(3, "sed -n 1,60p android/app/src/main/java/dev/leo/manager/ui/Signal.kt"),
             command(4, "rg -n \"ConversationHeader\" android/app/src"),
             item(5, "file_change") {
-                put("changes", buildJsonArray {
-                    add(buildJsonObject { put("path", "ui/ConversationPresentation.kt"); put("kind", "update") })
-                    add(buildJsonObject { put("path", "ui/ChatsScreen.kt"); put("kind", "update") })
-                })
+                put(
+                    "changes",
+                    buildJsonArray {
+                        add(
+                            buildJsonObject {
+                                put("path", "ui/ConversationPresentation.kt")
+                                put("kind", "update")
+                            }
+                        )
+                        add(
+                            buildJsonObject {
+                                put("path", "ui/ChatsScreen.kt")
+                                put("kind", "update")
+                            }
+                        )
+                    },
+                )
             },
-            command(6, "./gradlew testDebugUnitTest", exit = 1, output = "ChatJourneyTest > header FAILED\n1 failed"),
-            item(7, "command_execution", started = true) { put("command", "./gradlew testDebugUnitTest"); put("status", "in_progress") },
+            command(
+                6,
+                "./gradlew testDebugUnitTest",
+                exit = 1,
+                output = "ChatJourneyTest > header FAILED\n1 failed",
+            ),
+            item(7, "command_execution", started = true) {
+                put("command", "./gradlew testDebugUnitTest")
+                put("status", "in_progress")
+            },
         )
 
     private val presentations = events.map(::presentActivity)
@@ -64,7 +99,10 @@ class AgentStepsTest {
     @Test
     fun `the sentence summarises finished actions by kind`() {
         val finished = presentations.filter { !it.isRunning() }
-        assertEquals("A lu 2 fichiers, cherché 1 fois, modifié 2 fichiers, lancé 1 commande", actionSentence(finished))
+        assertEquals(
+            "A lu 2 fichiers, cherché 1 fois, modifié 2 fichiers, lancé 1 commande",
+            actionSentence(finished),
+        )
         assertEquals("A réfléchi", actionSentence(presentations.take(1)))
         val notice = presentActivity(RunEvent(1, 1, "run.started", "Le worker démarre"))
         assertEquals("Suivi de l’exécution", actionSentence(listOf(notice)))
@@ -74,7 +112,14 @@ class AgentStepsTest {
     fun `consecutive reads fold into one step and edits name their files`() {
         val steps = agentSteps(presentations)
         assertEquals(
-            listOf("Réflexion", "Lire 2 fichiers", "Rechercher dans les fichiers", "Fichiers modifiés", "Exécuter les tests", "Exécuter les tests"),
+            listOf(
+                "Réflexion",
+                "Lire 2 fichiers",
+                "Rechercher dans les fichiers",
+                "Fichiers modifiés",
+                "Exécuter les tests",
+                "Exécuter les tests",
+            ),
             steps.map { it.title },
         )
         assertEquals("ChatsScreen.kt · Signal.kt", steps[1].detail)
@@ -92,13 +137,20 @@ class AgentStepsTest {
         var dark by mutableStateOf(false)
         compose.setContent {
             LeoTheme(if (dark) "dark" else "light") {
-                Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).padding(16.dp)) {
+                Column(
+                    Modifier.fillMaxSize()
+                        .background(MaterialTheme.colorScheme.background)
+                        .padding(16.dp)
+                ) {
                     AgentActions("activity:1", presentations, hideRunning = true)
                 }
             }
         }
-        compose.onNodeWithTag("agent-actions")
-            .assert(hasText("A lu 2 fichiers, cherché 1 fois, modifié 2 fichiers, lancé 1 commande"))
+        compose
+            .onNodeWithTag("agent-actions")
+            .assert(
+                hasText("A lu 2 fichiers, cherché 1 fois, modifié 2 fichiers, lancé 1 commande")
+            )
             .assert(hasText("5 étapes"))
             .assert(hasText(" 1 échec"))
         capture("agent-actions-collapsed")
@@ -114,7 +166,9 @@ class AgentStepsTest {
         compose.onNodeWithText("Copier la sortie").assertExists()
         capture("agent-step-sheet")
         compose.onNodeWithContentDescription("Fermer").performClick()
-        compose.waitUntil(10000) { compose.onAllNodesWithTag("agent-step-sheet").fetchSemanticsNodes().isEmpty() }
+        compose.waitUntil(10000) {
+            compose.onAllNodesWithTag("agent-step-sheet").fetchSemanticsNodes().isEmpty()
+        }
         compose.runOnIdle { dark = true }
         compose.waitForIdle()
         capture("agent-actions-expanded-dark")
@@ -124,7 +178,9 @@ class AgentStepsTest {
 
     @Test
     fun `a group with only the running step shows nothing while the agent works`() {
-        compose.setContent { LeoTheme { AgentActions("activity:7", presentations.takeLast(1), hideRunning = true) } }
+        compose.setContent {
+            LeoTheme { AgentActions("activity:7", presentations.takeLast(1), hideRunning = true) }
+        }
         compose.onNodeWithTag("agent-actions").assertDoesNotExist()
     }
 
@@ -132,8 +188,17 @@ class AgentStepsTest {
         val dir = System.getProperty("leo.screenshots.dir") ?: return
         compose.waitForIdle()
         File(dir).mkdirs()
-        val target = if (compose.onAllNodes(isDialog()).fetchSemanticsNodes().isNotEmpty()) compose.onNode(isDialog()) else compose.onRoot()
-        target.captureToImage().asAndroidBitmap()
-            .compress(android.graphics.Bitmap.CompressFormat.PNG, 100, File(dir, "$name.png").outputStream())
+        val target =
+            if (compose.onAllNodes(isDialog()).fetchSemanticsNodes().isNotEmpty())
+                compose.onNode(isDialog())
+            else compose.onRoot()
+        target
+            .captureToImage()
+            .asAndroidBitmap()
+            .compress(
+                android.graphics.Bitmap.CompressFormat.PNG,
+                100,
+                File(dir, "$name.png").outputStream(),
+            )
     }
 }

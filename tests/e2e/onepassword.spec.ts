@@ -19,6 +19,7 @@ test('1Password accounts keep tokens private and persist explicit agent grants',
     await expectSingleScroll(page)
     await dialog.screenshot({ path: testInfo.outputPath(`onepassword-editor-${width}.png`) })
   }
+
   await dialog.getByRole('button', { name: 'Save account' }).click()
   await expect(dialog).toHaveCount(0)
   const accounts = await workspace.api('/api/onepassword')

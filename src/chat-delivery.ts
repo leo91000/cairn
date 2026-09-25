@@ -49,5 +49,6 @@ export function chatDelivery(chat: ChatDetail | null, events: RunEvent[], outgoi
       queued.push(message)
     }
   }
+
   return { sending, queued }
 }

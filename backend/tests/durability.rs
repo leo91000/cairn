@@ -8,6 +8,7 @@ use leo_agent_manager::{
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
+
 fn config(root: &TempDir) -> Config {
     Config {
         data_dir: root.path().join("data"),
@@ -34,25 +35,70 @@ async fn restart_restores_missing_chat_summaries_once_without_repeating_existing
     let service = Service::new(config.clone()).await.unwrap();
     let ids = [id(), id(), id(), id(), id(), id(), id()];
     let fixtures = ids.clone();
-    service.store.transaction(move |db| {
-        for (index, run_id) in fixtures.iter().enumerate() {
-            let status = match index { 3 => "running", 4 => "failed", _ => "succeeded" };
-            db.add_run(&json!({"id":run_id,"taskId":id(),"projectId":null,"status":status,
-                "createdAt":1,"finishedAt":2,"trigger":"chat","summary":if index == 5 { "x".repeat(100000) } else if index == 6 { " \n\t".into() } else { "The requested work is complete.".into() }}), None)?;
-            if index == 1 || index == 2 {
-                db.event(run_id, "item.completed", "The requested work is complete.", Some(&json!({
-                    "type":"item.completed","item":{"id":"existing","type":"agent_message","text":"The requested work is complete.\n"}
-                })))?;
+    service
+        .store
+        .transaction(move |db| {
+            for (index, run_id) in fixtures.iter().enumerate() {
+                let status = match index {
+                    3 => "running",
+                    4 => "failed",
+                    _ => "succeeded",
+                };
+                db.add_run(
+                    &json!({
+                        "id": run_id,
+                        "taskId": id(),
+                        "projectId": null,
+                        "status": status,
+                        "createdAt": 1,
+                        "finishedAt": 2,
+                        "trigger": "chat",
+                        "summary": if index == 5 {
+                            "x".repeat(100000)
+                        } else if index == 6 {
+                            " \n\t".into()
+                        } else {
+                            "The requested work is complete.".into()
+                        }
+                    }),
+                    None,
+                )?;
+                if index == 1 || index == 2 {
+                    db.event(
+                        run_id,
+                        "item.completed",
+                        "The requested work is complete.",
+                        Some(&json!({
+                            "type": "item.completed",
+                            "item": {
+                                "id": "existing",
+                                "type": "agent_message",
+                                "text": "The requested work is complete.\n"
+                            }
+                        })),
+                    )?;
+                }
+                if index == 5 {
+                    db.event(
+                        run_id,
+                        "item.completed",
+                        "",
+                        Some(&json!({
+                            "item": {
+                                "type": "agent_message",
+                                "text": "x".repeat(100001)
+                            }
+                        })),
+                    )?;
+                }
+                if index == 2 {
+                    db.event(run_id, "chat.user", "Check again", None)?;
+                }
             }
-            if index == 5 {
-                db.event(run_id, "item.completed", "", Some(&json!({"item":{"type":"agent_message","text":"x".repeat(100001)}})))?;
-            }
-            if index == 2 {
-                db.event(run_id, "chat.user", "Check again", None)?;
-            }
-        }
-        Ok(())
-    }).await.unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
     for _ in 0..2 {
         let restarted = Service::new(config.clone()).await.unwrap();
         restarted.worker.initialize(&restarted).await.unwrap();
@@ -86,7 +132,9 @@ fn weekly_schedules_and_dst_transitions_match_the_existing_scheduler() {
         ["0 0 29 2 *", "UTC", "2026-01-01T00:00:00Z"],
         ["15 4 1 * MON", "UTC", "2026-09-11T08:00:00Z"]
     ]);
-    let script = "import{CronExpressionParser}from'cron-parser';console.log(JSON.stringify(JSON.parse(process.argv[1]).map(([cron,tz,date])=>{const p=CronExpressionParser.parse(cron,{tz,currentDate:new Date(date)});return Array.from({length:5},()=>p.next().getTime())})))";
+    let script = "import{CronExpressionParser}from'cron-parser';console.log(JSON.stringify(JSON.parse(process.argv[1]).map(([cron,tz,date])=>{const \
+        p=CronExpressionParser.parse(cron,{tz,currentDate:new Date(date)});return \
+        Array.from({length:5},()=>p.next().getTime())})))";
     let output = std::process::Command::new("node")
         .args(["--input-type=module", "-e", script, &cases.to_string()])
         .current_dir(
@@ -127,14 +175,41 @@ async fn restricted_agents_cannot_escalate_projects_skills_or_the_main_policy() 
     tokio::fs::create_dir(&config.home).await.unwrap();
     let s = Service::new(config).await.unwrap();
     let project = s
-        .project(json!({"name":"Allowed","path":root.path()}), None)
+        .project(
+            json!({
+                "name": "Allowed",
+                "path": root.path()
+            }),
+            None,
+        )
         .await
         .unwrap();
-    let agent = s.agent(json!({"name":"Restricted","access":{"projects":[project["id"]],"skills":[],"mcps":[],"github":false,"sandbox":"read-only"}}),None).await.unwrap();
+    let agent = s
+        .agent(
+            json!({
+                "name": "Restricted",
+                "access": {
+                    "projects": [project["id"]],
+                    "skills": [],
+                    "mcps": [],
+                    "github": false,
+                    "sandbox": "read-only"
+                }
+            }),
+            None,
+        )
+        .await
+        .unwrap();
     assert!(leo_agent_manager::service::isolated(&agent));
     assert!(
         s.agent(
-            json!({"name":"Escalation","access":{"projects":[],"github":true}}),
+            json!({
+                "name": "Escalation",
+                "access": {
+                    "projects": [],
+                    "github": true
+                }
+            }),
             None
         )
         .await
@@ -142,7 +217,13 @@ async fn restricted_agents_cannot_escalate_projects_skills_or_the_main_policy() 
     );
     assert!(
         s.agent(
-            json!({"name":"Main","access":{"projects":[],"github":false}}),
+            json!({
+                "name": "Main",
+                "access": {
+                    "projects": [],
+                    "github": false
+                }
+            }),
             Some(MAIN_AGENT_ID)
         )
         .await
@@ -150,7 +231,12 @@ async fn restricted_agents_cannot_escalate_projects_skills_or_the_main_policy() 
     );
     assert!(
         s.task(
-            json!({"name":"Foreign","agentId":agent["id"],"projectId":id(),"prompt":"no"}),
+            json!({
+                "name": "Foreign",
+                "agentId": agent["id"],
+                "projectId": id(),
+                "prompt": "no"
+            }),
             None
         )
         .await
@@ -158,7 +244,12 @@ async fn restricted_agents_cannot_escalate_projects_skills_or_the_main_policy() 
     );
     let task = s
         .task(
-            json!({"name":"Allowed","agentId":agent["id"],"prompt":"inspect","worktree":false}),
+            json!({
+                "name": "Allowed",
+                "agentId": agent["id"],
+                "prompt": "inspect",
+                "worktree": false
+            }),
             None,
         )
         .await
@@ -183,11 +274,18 @@ async fn restricted_agents_cannot_escalate_projects_skills_or_the_main_policy() 
     let link = root.path().join("escape");
     std::os::unix::fs::symlink(outside.path(), &link).unwrap();
     assert!(
-        s.project(json!({"name":"Escape","path":link}), None)
-            .await
-            .is_err()
+        s.project(
+            json!({
+                "name": "Escape",
+                "path": link
+            }),
+            None
+        )
+        .await
+        .is_err()
     );
 }
+
 #[tokio::test]
 async fn writes_serialize_and_failed_transactions_roll_back() {
     let root = TempDir::new().unwrap();
@@ -221,6 +319,7 @@ async fn writes_serialize_and_failed_transactions_roll_back() {
     let reopened = Store::open(root.path()).unwrap();
     assert_eq!(reopened.kv("counter").await.unwrap(), Some(json!(100)));
 }
+
 #[tokio::test]
 async fn vault_accepts_node_ciphertext_and_authentication_rejects_tampering() {
     let root = TempDir::new().unwrap();
@@ -236,7 +335,9 @@ async fn vault_accepts_node_ciphertext_and_authentication_rejects_tampering() {
     let ciphertext = Value::String(String::from_utf8(output.stdout).unwrap());
     assert_eq!(
         vault.decrypt("fixture", &ciphertext).unwrap(),
-        json!({"token":"test-only"})
+        json!({
+            "token": "test-only"
+        })
     );
     assert!(vault.decrypt("another-record", &ciphertext).is_err());
     let mut encoded = ciphertext.as_str().unwrap().as_bytes().to_vec();
@@ -247,6 +348,7 @@ async fn vault_accepts_node_ciphertext_and_authentication_rejects_tampering() {
             .is_err()
     );
 }
+
 #[tokio::test]
 async fn binary_vault_records_preserve_bytes_and_reject_wrong_scope_or_damage() {
     let root = TempDir::new().unwrap();
@@ -275,6 +377,7 @@ async fn binary_vault_records_preserve_bytes_and_reject_wrong_scope_or_damage() 
         assert!(vault.decrypt_bytes("backup-block", &damaged).is_err());
     }
 }
+
 #[tokio::test]
 async fn passwords_and_sessions_remain_compatible_with_node() {
     let root = TempDir::new().unwrap();
@@ -287,7 +390,10 @@ async fn passwords_and_sessions_remain_compatible_with_node() {
     store
         .set(
             "admin",
-            json!({"salt":"salt-string","hash":String::from_utf8(output.stdout).unwrap()}),
+            json!({
+                "salt": "salt-string",
+                "hash": String::from_utf8(output.stdout).unwrap()
+            }),
             None,
         )
         .await
@@ -303,17 +409,27 @@ async fn passwords_and_sessions_remain_compatible_with_node() {
     auth.logout(token).await.unwrap();
     assert!(auth.read(token).await.unwrap().is_none());
 }
+
 #[tokio::test]
 async fn refresh_rotation_and_reuse_revoke_the_entire_family() {
     let root = TempDir::new().unwrap();
     let store = Store::open(root.path()).unwrap();
     let auth = Auth::new(store, "http://localhost:4310".into());
     let client = auth
-        .register(json!({"redirect_uris":["http://localhost:9999/callback"]}))
+        .register(json!({
+            "redirect_uris": ["http://localhost:9999/callback"]
+        }))
         .await
         .unwrap();
     let verifier = "a".repeat(43);
-    let authorization = json!({"client_id":client["client_id"],"redirect_uri":"http://localhost:9999/callback","response_type":"code","code_challenge_method":"S256","code_challenge":digest(&verifier),"scope":"read run"});
+    let authorization = json!({
+        "client_id": client["client_id"],
+        "redirect_uri": "http://localhost:9999/callback",
+        "response_type": "code",
+        "code_challenge_method": "S256",
+        "code_challenge": digest(&verifier),
+        "scope": "read run"
+    });
     let redirect = url::Url::parse(&auth.consent(authorization, true).await.unwrap()).unwrap();
     let code = redirect
         .query_pairs()
@@ -321,8 +437,22 @@ async fn refresh_rotation_and_reuse_revoke_the_entire_family() {
         .unwrap()
         .1
         .into_owned();
-    let grant = auth.exchange(json!({"grant_type":"authorization_code","client_id":client["client_id"],"redirect_uri":"http://localhost:9999/callback","code":code,"code_verifier":verifier})).await.unwrap();
-    let refresh = json!({"grant_type":"refresh_token","client_id":client["client_id"],"refresh_token":grant["refresh_token"],"scope":"read"});
+    let grant = auth
+        .exchange(json!({
+            "grant_type": "authorization_code",
+            "client_id": client["client_id"],
+            "redirect_uri": "http://localhost:9999/callback",
+            "code": code,
+            "code_verifier": verifier
+        }))
+        .await
+        .unwrap();
+    let refresh = json!({
+        "grant_type": "refresh_token",
+        "client_id": client["client_id"],
+        "refresh_token": grant["refresh_token"],
+        "scope": "read"
+    });
     let rotated = auth.exchange(refresh.clone()).await.unwrap();
     assert!(
         auth.verify(rotated["access_token"].as_str().unwrap(), Some("read"))
@@ -346,38 +476,66 @@ async fn refresh_rotation_and_reuse_revoke_the_entire_family() {
             .is_err()
     );
 }
+
 #[test]
 fn schemas_apply_defaults_but_reject_ambiguous_questions_and_bad_mcp() {
-    let agent = parse("agent", json!({"name":" Alice ","unknown":true})).unwrap();
+    let agent = parse(
+        "agent",
+        json!({
+            "name": " Alice ",
+            "unknown": true
+        }),
+    )
+    .unwrap();
     assert_eq!(agent["name"], "Alice");
     assert!(agent.get("unknown").is_none());
     assert_eq!(agent["access"]["sandbox"], "yolo");
     assert!(
         parse(
             "questions",
-            json!([{"id":"q","title":"One"},{"id":"q","title":"Two"}])
+            json!([
+                {
+                    "id": "q",
+                    "title": "One"
+                },
+                {
+                    "id": "q",
+                    "title": "Two"
+                }
+            ])
         )
         .is_err()
     );
     assert!(
         parse(
             "mcp",
-            json!({"name":"Bad","transport":"http","url":"https://secret@example.com/mcp"})
+            json!({
+                "name": "Bad",
+                "transport": "http",
+                "url": "https://secret@example.com/mcp"
+            })
         )
         .is_err()
     );
 }
+
 #[tokio::test]
 async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
     let root = TempDir::new().unwrap();
     let config = config(&root);
     let service = Service::new(config.clone()).await.unwrap();
     let chat = service
-        .chat_create(json!({"agentId":MAIN_AGENT_ID}))
+        .chat_create(json!({
+            "agentId": MAIN_AGENT_ID
+        }))
         .await
         .unwrap();
     let chat_id = chat["id"].as_str().unwrap();
-    let message = json!({"id":id(),"text":"Investigate this","mode":"queue"});
+    let message = json!({
+        "id": id(),
+        "text": "Investigate this",
+        "mode": "queue"
+    });
     let (a, b) = tokio::join!(
         service.chat_send(chat_id, message.clone()),
         service.chat_send(chat_id, message.clone())
@@ -387,16 +545,37 @@ async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
     let mut chat = chat.clone();
     chat["runId"] = run_id.clone().into();
     service.store.put("chats", chat).await.unwrap();
-    let run = json!({"id":run_id,"taskId":chat_id,"projectId":null,"status":"running","createdAt":now(),"trigger":"chat"});
+    let run = json!({
+        "id": run_id,
+        "taskId": chat_id,
+        "projectId": null,
+        "status": "running",
+        "createdAt": now(),
+        "trigger": "chat"
+    });
     service
         .store
         .write(move |db| db.add_run(&run, None))
         .await
         .unwrap();
-    let question = json!({"id":"a".repeat(64),"blocking":false,"fields":[{"id":"choice","title":"Which approach?","secret":true}]});
+    let question = json!({
+        "id": "a".repeat(64),
+        "blocking": false,
+        "fields": [{
+            "id": "choice",
+            "title": "Which approach?",
+            "secret": true
+        }]
+    });
     service
         .store
-        .set("push-device:fixture", json!({"createdAt":now()}), None)
+        .set(
+            "push-device:fixture",
+            json!({
+                "createdAt": now()
+            }),
+            None,
+        )
         .await
         .unwrap();
     service
@@ -409,7 +588,12 @@ async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
         .unwrap();
     assert_eq!(service.store.keys("push-outbox:").await.unwrap().len(), 1);
     let question_id = question["id"].as_str().unwrap();
-    let answer = json!({"id":id(),"answers":{"choice":["A private answer"]}});
+    let answer = json!({
+        "id": id(),
+        "answers": {
+            "choice": ["A private answer"]
+        }
+    });
     let (a, b) = tokio::join!(
         service.question_answer(chat_id, question_id, answer.clone()),
         service.question_answer(chat_id, question_id, answer.clone())
@@ -488,12 +672,27 @@ async fn microvm_migration_preserves_linked_worktree_commits_and_uncommitted_cha
     let s = Service::new(config).await.unwrap();
     let project = s
         .project(
-            json!({"name":"Fixture","path":repo,"baseBranch":"main"}),
+            json!({
+                "name": "Fixture",
+                "path": repo,
+                "baseBranch": "main"
+            }),
             None,
         )
         .await
         .unwrap();
-    let task = s.task(json!({"name":"Migrate","agentId":MAIN_AGENT_ID,"projectId":project["id"],"prompt":"inspect"}),None).await.unwrap();
+    let task = s
+        .task(
+            json!({
+                "name": "Migrate",
+                "agentId": MAIN_AGENT_ID,
+                "projectId": project["id"],
+                "prompt": "inspect"
+            }),
+            None,
+        )
+        .await
+        .unwrap();
     let run = s
         .enqueue(task["id"].as_str().unwrap(), "manual", None)
         .await
@@ -513,7 +712,14 @@ async fn microvm_migration_preserves_linked_worktree_commits_and_uncommitted_cha
     tokio::fs::write(home.join("sessions/saved.jsonl"), "saved session")
         .await
         .unwrap();
-    let prepared = json!({"isolated":false,"workspaces":[{"projectId":project["id"],"path":old,"kind":"worktree"}]});
+    let prepared = json!({
+        "isolated": false,
+        "workspaces": [{
+            "projectId": project["id"],
+            "path": old,
+            "kind": "worktree"
+        }]
+    });
     let migrated = leo_agent_manager::execution::restore(&run, prepared, &s.config, None)
         .await
         .unwrap();

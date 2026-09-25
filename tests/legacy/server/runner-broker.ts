@@ -20,12 +20,14 @@ export function translateMount(source: string, mounts: { Source: string, Destina
     throw new Error('Runner mount is outside the manager volumes.')
   return path.join(mount.Source, path.relative(mount.Destination, source))
 }
+
 async function planFor(id: string): Promise<RunnerPlan> {
   const plan = JSON.parse(await readFile(path.join(dataDirectory, 'runner-plans', `${id}.json`), 'utf8')) as RunnerPlan
   if (plan.id !== id || (plan.expires !== null && (!Number.isSafeInteger(plan.expires) || plan.expires <= Date.now() || plan.expires > Date.now() + 13 * 3600000)))
     throw new Error('Run plan is invalid or expired.')
   return plan
 }
+
 async function createRun(id: string) {
   const plan = await planFor(id)
   const host = await dockerJson('GET', `/containers/${encodeURIComponent(manager)}/json`)
@@ -59,12 +61,14 @@ async function createRun(id: string) {
   })
   await dockerJson('POST', `/containers/${containerName(id)}/start`)
 }
+
 async function removeRun(id: string) {
   await dockerJson('DELETE', `/containers/${containerName(id)}?force=true&v=true`).catch((error) => {
     if (error.statusCode !== 404)
       throw error
   })
 }
+
 async function main() {
   const lifecycle = new RunnerLifecycle(process.env.RUNNER_STATE_DIR || '/runner-state', createRun, removeRun)
   const server = http.createServer(async (request, response) => {
@@ -73,17 +77,20 @@ async function main() {
         response.end('ok')
         return
       }
+
       const secret = (await readFile(path.join(dataDirectory, 'runner-secret'), 'utf8')).trim()
       const supplied = request.headers.authorization?.replace(/^Bearer /, '') ?? ''
       if (secret.length !== supplied.length || !timingSafeEqual(Buffer.from(secret), Buffer.from(supplied))) {
         response.writeHead(401).end()
         return
       }
+
       const match = request.url?.match(/^\/runs\/([a-f0-9-]{36})(?:\/(logs|wait))?$/)
       if (!match) {
         response.writeHead(404).end()
         return
       }
+
       const [, id, action] = match
       if (request.method === 'POST' && !action) {
         await lifecycle.start(id)
@@ -104,6 +111,7 @@ async function main() {
             header.writeUInt32BE(frame.data.length, 4)
             response.write(Buffer.concat([header, frame.data]))
           }
+
           response.end()
         }
         finally {
@@ -146,6 +154,7 @@ async function main() {
   }, 30000)
   cleanup.unref()
 }
+
 if (process.argv[1] === import.meta.filename) {
   main().catch((error) => {
     console.error(error)

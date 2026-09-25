@@ -1,13 +1,26 @@
 <script setup lang="ts">
 import { twMerge } from 'tailwind-merge'
-import { nextTick, onBeforeUnmount, onMounted, ref, useId } from 'vue'
+import {
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  useId,
+} from 'vue'
 import { X } from '../icons'
 import { iconButton } from '../ui'
 import Icon from './Icon.vue'
 
 // `drawer` opens a panel along the right edge, and a bottom sheet on phones like `sheet`.
 // `headless` names the dialog without a title bar; the content draws its own heading.
-const props = defineProps<{ title: string, wide?: boolean, sheet?: boolean, drawer?: boolean, headless?: boolean, returnFocus?: HTMLElement }>()
+const props = defineProps<{
+  title: string
+  wide?: boolean
+  sheet?: boolean
+  drawer?: boolean
+  headless?: boolean
+  returnFocus?: HTMLElement
+}>()
 const emit = defineEmits<{ close: [] }>()
 const dialog = ref<HTMLDialogElement>()
 const titleId = useId()

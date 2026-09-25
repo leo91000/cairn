@@ -10,7 +10,29 @@ pub fn visibility(args: &Value) -> Result<&str> {
 }
 
 pub fn tool() -> Value {
-    json!({"name":"set_artifact_visibility","description":"Enable or revoke a public link for an artifact in the current conversation/run. Public links let anyone with the link read this specific file version without signing in. Only make files public when requested by the user. Revoking a link does not remove copies already downloaded. Returns the updated artifact and publicUrl when public.","inputSchema":{"type":"object","properties":{"artifactId":{"type":"string","format":"uuid"},"visibility":{"type":"string","enum":["private","public"]}},"required":["artifactId","visibility"],"additionalProperties":false}})
+    json!({
+        "name": "set_artifact_visibility",
+        "description": "Enable or revoke a public link for an artifact in the current conversation/run. \
+    Public links let anyone with the link read this specific file version without signing \
+    in. Only make files public when requested by the user. Revoking a link does not \
+    remove copies already downloaded. Returns the updated artifact and publicUrl when \
+    public.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "artifactId": {
+                    "type": "string",
+                    "format": "uuid",
+                },
+                "visibility": {
+                    "type": "string",
+                    "enum": ["private", "public"],
+                },
+            },
+            "required": ["artifactId", "visibility"],
+            "additionalProperties": false,
+        },
+    })
 }
 
 pub(super) fn apply(db: &Db<'_>, record: &mut Value, visibility: &str, origin: &str) -> Result<()> {
@@ -23,7 +45,10 @@ pub(super) fn apply(db: &Db<'_>, record: &mut Value, visibility: &str, origin: &
         };
         db.set(
             &format!("artifact-share:{token}"),
-            &json!({"runId":record["runId"],"id":record["id"]}),
+            &json!({
+                "runId": record["runId"],
+                "id": record["id"],
+            }),
             None,
         )?;
         record["publicUrl"] = format!(
@@ -54,7 +79,10 @@ pub async fn set(
     uuid(artifact)?;
     let run = run.to_owned();
     let artifact = artifact.to_owned();
-    let value = visibility(&json!({"visibility":value}))?.to_owned();
+    let value = visibility(&json!({
+        "visibility": value,
+    }))?
+    .to_owned();
     let bearer = bearer.map(str::to_owned);
     let origin = s.config.public_url.clone();
     s.store

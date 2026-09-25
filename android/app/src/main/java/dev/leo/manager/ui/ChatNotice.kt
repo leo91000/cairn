@@ -16,7 +16,8 @@ private val connectionFailure =
 
 internal fun ActivityPresentation.connectionInterrupted(): Boolean =
     kind == ActivityKind.NOTICE &&
-        connectionSource.containsMatchIn(raw) && connectionFailure.containsMatchIn(raw)
+        connectionSource.containsMatchIn(raw) &&
+        connectionFailure.containsMatchIn(raw)
 
 /** Only clear retry notices when work actually continues in the same turn. */
 internal fun recoveredChatConnections(events: List<RunEvent>, messages: Set<Long>): Set<Long> {
@@ -26,11 +27,16 @@ internal fun recoveredChatConnections(events: List<RunEvent>, messages: Set<Long
         if (event.type in listOf("turn.started", "turn.failed", "chat.user")) pending.clear()
         val item = event.item()
         val success =
-            event.type == "item.completed" && item.string("type") == "command_execution" &&
+            event.type == "item.completed" &&
+                item.string("type") == "command_execution" &&
                 (item?.get("exit_code") as? JsonPrimitive)?.intOrNull == 0 &&
                 item.string("status") != "failed"
-        if (event.type == "turn.completed" || item.string("type") == "agent_message" ||
-            (event.id in messages && event.type != "chat.user") || success) {
+        if (
+            event.type == "turn.completed" ||
+                item.string("type") == "agent_message" ||
+                (event.id in messages && event.type != "chat.user") ||
+                success
+        ) {
             recovered.addAll(pending)
             pending.clear()
         }

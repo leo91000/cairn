@@ -103,7 +103,7 @@ impl Service {
             }
             db.delete(&format!("chat-title-pending:{id}"))?;
             if let Some(run) = run && ["queued", "running"].contains(&text(&run, "status")) {
-                db.patch_run(text(&run, "id"), &json!({"cancelRequestedAt":now()}))?;
+                db.patch_run(text(&run, "id"), &json!({"cancelRequestedAt": now()}))?;
             }
             chat["cancelledByDeletion"] = busy.into();
             for prefix in ["push-outbox:", "mcp-grant:"] {
@@ -117,7 +117,7 @@ impl Service {
             chat["purgeAt"] = (now() + 30 * DAY).into();
             chat["paused"] = true.into();
             db.set("conversation-cache-revision", &crate::config::id().into(), None)?;
-            db.audit("chat.trashed", &json!({"id":id}))?;
+            db.audit("chat.trashed", &json!({"id": id}))?;
             db.put("chats", &chat)
         }).await?;
         if let Some(run) = result["runId"].as_str() {
@@ -159,7 +159,7 @@ impl Service {
                 chat["previousLifecycle"] = Value::Null;
                 chat["retryAfter"] = Value::Null;
                 chat["lifecycleError"] = Value::Null;
-                db.audit("chat.recovered", &json!({"id":id}))?;
+                db.audit("chat.recovered", &json!({"id": id}))?;
                 db.put("chats", &chat)
             })
             .await
@@ -263,7 +263,7 @@ impl Service {
                 db.set(&key, &checkpoint, None)?;
                 db.patch_run(
                     text(&run, "id"),
-                    &json!({"sessionId":null,"resumeAvailable":false}),
+                    &json!({"sessionId": null,"resumeAvailable": false}),
                 )?;
                 chat["sessionRestartRequested"] = true.into();
                 chat["paused"] = true.into();

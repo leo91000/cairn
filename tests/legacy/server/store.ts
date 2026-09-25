@@ -22,16 +22,20 @@ interface Records {
   projects: Project
   tasks: Task
 }
+
 interface RunQuery {
   status?: string
   taskId?: string
   limit?: number
   offset?: number
 }
+
 const runListColumns = 'json_remove(data,\'$.snapshot\',\'$.summary\') AS data,json_extract(data,\'$.snapshot.task.name\') AS taskName,json_extract(data,\'$.snapshot.agent.name\') AS agentName'
+
 function runListItem(row: Record<string, unknown>): RunListItem {
   return { ...JSON.parse(row.data as string), taskName: row.taskName, agentName: row.agentName }
 }
+
 export class Store {
   db: DatabaseSync
   constructor(directory: string) {
@@ -44,6 +48,7 @@ export class Store {
         'This database belongs to a newer application version. Restore a compatible backup or upgrade the application.',
       )
     }
+
     this.db
       .exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS records (id TEXT PRIMARY KEY,kind TEXT NOT NULL,data TEXT NOT NULL,updated_at INTEGER NOT NULL);
@@ -63,6 +68,7 @@ export class Store {
         this.db.exec('ALTER TABLE events ADD COLUMN payload TEXT; PRAGMA user_version=2;')
       })
     }
+
     if (version < 4) {
       this.transaction(() => this.db.exec(`CREATE TABLE IF NOT EXISTS chat_messages(id TEXT PRIMARY KEY,chat_id TEXT NOT NULL,data TEXT NOT NULL,created_at INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id,created_at); PRAGMA user_version=4;`))
@@ -102,7 +108,12 @@ export class Store {
   }
 
   private runRows(
-    { status, taskId, limit = 40, offset = 0 }: RunQuery = {},
+    {
+      status,
+      taskId,
+      limit = 40,
+      offset = 0,
+    }: RunQuery = {},
     columns = 'data',
   ) {
     const where: string[] = []
@@ -111,10 +122,12 @@ export class Store {
       where.push('status=?')
       values.push(status)
     }
+
     if (taskId) {
       where.push('task_id=?')
       values.push(taskId)
     }
+
     return this.db
       .prepare(
         `SELECT ${columns} FROM runs ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`,

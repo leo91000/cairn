@@ -26,9 +26,9 @@ async fn save(value: &Value) -> Result<()> {
 pub async fn publish(source: &Path, target: &Path, restricted: bool) -> Result<()> {
     if !restricted {
         tokio::fs::rename(source, target).await?;
-        return save(&json!({"path":target,"readOnly":false})).await;
+        return save(&json!({"path": target,"readOnly": false})).await;
     }
-    let value = json!({"path":target,"source":source,"readOnly":true});
+    let value = json!({"path": target,"source": source,"readOnly": true});
     // A reboot at any subsequent point can reconstruct the published mount.
     save(&value).await?;
     apply(&value).await
@@ -41,7 +41,7 @@ pub async fn reopen(target: &Path, restricted: bool) -> Result<bool> {
             if !target.exists() {
                 return Ok(false);
             }
-            json!({"path":target})
+            json!({"path": target})
         }
         Err(error) => return Err(error.into()),
     };

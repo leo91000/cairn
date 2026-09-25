@@ -10,6 +10,7 @@
     preference = normalize(localStorage.getItem(key))
   }
   catch { /* Privacy settings may disable storage; system mode still works. */ }
+
   function apply() {
     const resolved = preference === 'system' ? media.matches ? 'dark' : 'light' : preference
     root.dataset.theme = resolved
@@ -19,6 +20,7 @@
     for (const subscriber of subscribers)
       subscriber(preference)
   }
+
   window.leoTheme = {
     getPreference: () => preference,
     setPreference(value) {
@@ -27,6 +29,7 @@
         localStorage.setItem(key, preference)
       }
       catch { /* Keep the selection for this page when storage is unavailable. */ }
+
       apply()
     },
     subscribe(callback) {

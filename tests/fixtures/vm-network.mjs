@@ -26,6 +26,7 @@ function udp(host, port) {
     const socket = createSocket('udp4')
     const timer = setTimeout(finish, 3000, false)
     let finished = false
+
     function finish(result) {
       if (finished)
         return
@@ -34,6 +35,7 @@ function udp(host, port) {
       socket.close()
       resolve(result)
     }
+
     socket.once('error', () => finish(false))
     socket.once('message', data => finish(data.toString() === response))
     socket.send('probe', port, host)
@@ -69,6 +71,7 @@ async function main() {
     process.stdout.write(`network.${mode}.passed\n`)
   }
 }
+
 main().catch((error) => {
   console.error(error)
   process.exitCode = 1

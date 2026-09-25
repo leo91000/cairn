@@ -38,6 +38,7 @@ export async function verifyBuild(directory, config) {
     || evidence.sha256 !== manifest.sha256 || evidence.size !== manifest.size) {
     throw new Error('Android build evidence does not match this release')
   }
+
   return evidence
 }
 

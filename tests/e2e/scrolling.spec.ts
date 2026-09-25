@@ -11,6 +11,7 @@ test('keeps activity scrolling inside the workspace and gives tabs breathing roo
       workspace.service.store.event(run.id, 'item.completed', text, { item: { id: `layout-${index}`, type: 'agent_message', text } })
     }
   }
+
   await page.goto('/tasks')
   await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
   await page.getByRole('button', { name: 'Sign in', exact: true }).click()
@@ -46,8 +47,15 @@ test('keeps activity scrolling inside the workspace and gives tabs breathing roo
         const chain = []
         for (let parent: Element | null = element; parent; parent = parent.parentElement) {
           const style = getComputedStyle(parent)
-          chain.push({ name: parent.className, height: parent.clientHeight, min: style.minHeight, flex: style.flex, display: style.display })
+          chain.push({
+            name: parent.className,
+            height: parent.clientHeight,
+            min: style.minHeight,
+            flex: style.flex,
+            display: style.display,
+          })
         }
+
         return chain
       })
       expect(box!.y + box!.height, JSON.stringify({ geometry })).toBeLessThanOrEqual(viewport.height)

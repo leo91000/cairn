@@ -28,7 +28,7 @@ pub(crate) async fn run(
         // Keep them queued here so an immediately completed login is not lost.
         let started = tokio::select! {
             _ = stop.cancelled() => return Err(cancelled()),
-            result = session.rpc.request("account/login/start", json!({"type":"chatgptDeviceCode"})) => result?,
+            result = session.rpc.request("account/login/start", json!({"type": "chatgptDeviceCode"})) => result?,
         };
         let (id, code, url) = challenge(&started)?;
         login_id = Some(id.to_owned());
@@ -69,9 +69,12 @@ pub(crate) async fn run(
     {
         let _ = tokio::time::timeout(
             Duration::from_secs(2),
-            session
-                .rpc
-                .request("account/login/cancel", json!({"loginId":id})),
+            session.rpc.request(
+                "account/login/cancel",
+                json!({
+                    "loginId": id
+                }),
+            ),
         )
         .await;
     }
@@ -118,7 +121,12 @@ mod tests {
 
     #[test]
     fn validates_structured_codes_without_assuming_terminal_format() {
-        let mut value = json!({"type":"chatgptDeviceCode","loginId":"fixture-login","userCode":"ABCD-12345","verificationUrl":"https://auth.openai.com/codex/device"});
+        let mut value = json!({
+            "type": "chatgptDeviceCode",
+            "loginId": "fixture-login",
+            "userCode": "ABCD-12345",
+            "verificationUrl": "https://auth.openai.com/codex/device"
+        });
         for code in ["ABCD-1234", "ABCD-12345", "abcd-12345"] {
             value["userCode"] = code.into();
             assert_eq!(challenge(&value).unwrap().1, code);

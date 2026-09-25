@@ -20,4 +20,9 @@ export interface LiveBatch {
   more: boolean
 }
 
-export interface HistoryPage { events: RunEvent[], history: string, oldest: number, hasOlder: boolean }
+export interface HistoryPage {
+  events: RunEvent[]
+  history: string
+  oldest: number
+  hasOlder: boolean
+}

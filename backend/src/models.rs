@@ -14,6 +14,7 @@ use std::{
 use tokio::sync::Mutex;
 
 const TTL: i64 = 300_000;
+
 #[derive(Default)]
 pub struct Models {
     refresh: Mutex<()>,
@@ -24,6 +25,7 @@ pub async fn discover(session: &mut Session) -> Result<Value> {
         .await
         .unwrap_or_else(|_| Err(Error::new(504, "Codex model discovery timed out.")))
 }
+
 async fn discover_pages(session: &mut Session) -> Result<Value> {
     let mut models = BTreeMap::new();
     let mut cursor = Value::Null;
@@ -32,7 +34,11 @@ async fn discover_pages(session: &mut Session) -> Result<Value> {
         let page = session
             .request(
                 "model/list",
-                json!({"limit":100,"includeHidden":true,"cursor":cursor}),
+                json!({
+                    "limit": 100,
+                    "includeHidden": true,
+                    "cursor": cursor
+                }),
             )
             .await?;
         let rows = page["data"]
@@ -44,11 +50,41 @@ async fn discover_pages(session: &mut Session) -> Result<Value> {
             {
                 return Err(Error::new(502, "Codex returned an invalid model."));
             }
-            let efforts = row["supportedReasoningEfforts"].as_array().unwrap().iter().filter(|e| {
-                let effort = text(e, "reasoningEffort");
-                !effort.is_empty() && effort.len() <= 40 && effort.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-            }).map(|e| json!({"reasoningEffort":e["reasoningEffort"],"description":text(e,"description")})).collect::<Vec<_>>();
-            models.insert(model.to_owned(), json!({"model":model,"displayName":if text(row,"displayName").is_empty(){model}else{text(row,"displayName")},"description":text(row,"description"),"hidden":row["hidden"]==true,"isDefault":row["isDefault"]==true,"defaultReasoningEffort":text(row,"defaultReasoningEffort"),"supportedReasoningEfforts":efforts}));
+            let efforts = row["supportedReasoningEfforts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|e| {
+                    let effort = text(e, "reasoningEffort");
+                    !effort.is_empty()
+                        && effort.len() <= 40
+                        && effort.bytes().all(|b| {
+                            b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-'
+                        })
+                })
+                .map(|e| {
+                    json!({
+                        "reasoningEffort": e["reasoningEffort"],
+                        "description": text(e, "description")
+                    })
+                })
+                .collect::<Vec<_>>();
+            models.insert(
+                model.to_owned(),
+                json!({
+                    "model": model,
+                    "displayName": if text(row, "displayName").is_empty() {
+                        model
+                    } else {
+                        text(row, "displayName")
+                    },
+                    "description": text(row, "description"),
+                    "hidden": row["hidden"] == true,
+                    "isDefault": row["isDefault"] == true,
+                    "defaultReasoningEffort": text(row, "defaultReasoningEffort"),
+                    "supportedReasoningEfforts": efforts
+                }),
+            );
         }
         cursor = page["nextCursor"].clone();
         if cursor.is_null() {
@@ -69,6 +105,7 @@ fn due(cached: &Value) -> bool {
             .as_i64()
             .is_none_or(|at| now() - at > 30_000)
 }
+
 async fn record(s: &Service, key: &str, mut cached: Value, result: Result<Value>) -> Result<Value> {
     if cached.is_null() {
         cached = json!({});
@@ -81,6 +118,7 @@ async fn record(s: &Service, key: &str, mut cached: Value, result: Result<Value>
     s.store.set(key, cached.clone(), None).await?;
     Ok(cached)
 }
+
 pub async fn refresh_from_session(s: &Service, source: &str, session: &mut Session) -> Result<()> {
     let key = format!("codex-models:{source}");
     let cached = s.store.kv(&key).await?.unwrap_or(Value::Null);
@@ -89,6 +127,7 @@ pub async fn refresh_from_session(s: &Service, source: &str, session: &mut Sessi
     }
     Ok(())
 }
+
 impl Models {
     pub async fn list(&self, s: &Service) -> Result<Value> {
         // Deduplicate simultaneous editor/chat requests, with a short retry backoff.
@@ -166,7 +205,12 @@ impl Models {
         } else {
             ""
         };
-        Ok(json!({"models":models,"checkedAt":checked_at,"stale":stale,"error":error}))
+        Ok(json!({
+            "models": models,
+            "checkedAt": checked_at,
+            "stale": stale,
+            "error": error
+        }))
     }
 }
 
@@ -226,6 +270,7 @@ pub async fn cached_defaults(
         .and_then(|cached| defaults(cached, model))
         .map(|(model, effort)| (model.to_owned(), effort.to_owned())))
 }
+
 fn defaults<'a>(cached: &'a Value, model: &str) -> Option<(&'a str, &'a str)> {
     let age = now().checked_sub(cached["checkedAt"].as_i64()?)?;
     if !(0..=TTL).contains(&age) {
@@ -254,12 +299,29 @@ fn defaults<'a>(cached: &'a Value, model: &str) -> Option<(&'a str, &'a str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn cached_efforts_require_fresh_matching_capabilities() {
-        let mut cached = json!({"checkedAt":now(),"models":[
-            {"model":"default-model","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]},
-            {"model":"fast-model","defaultReasoningEffort":"low","supportedReasoningEfforts":[{"reasoningEffort":"low"}]}
-        ]});
+        let mut cached = json!({
+            "checkedAt": now(),
+            "models": [
+                {
+                "model": "default-model",
+                "isDefault": true,
+                "defaultReasoningEffort": "high",
+                "supportedReasoningEfforts": [{
+                    "reasoningEffort": "high"
+                }]
+            },
+                {
+                "model": "fast-model",
+                "defaultReasoningEffort": "low",
+                "supportedReasoningEfforts": [{
+                    "reasoningEffort": "low"
+                }]
+            }
+            ]
+        });
         assert_eq!(defaults(&cached, ""), Some(("default-model", "high")));
         assert_eq!(defaults(&cached, "fast-model"), Some(("fast-model", "low")));
         assert_eq!(defaults(&cached, "custom-alias"), None);

@@ -198,13 +198,19 @@ private suspend fun notifyAlerts(
     prefs.setAlertsUntil(maxOf(newest, until ?: 0))
     if (until == null) return
     manager.createNotificationChannel(
-        NotificationChannel(EXECUTION_CHANNEL, "Exécution des conversations", NotificationManager.IMPORTANCE_DEFAULT)
+        NotificationChannel(
+            EXECUTION_CHANNEL,
+            "Exécution des conversations",
+            NotificationManager.IMPORTANCE_DEFAULT,
+        )
     )
     for (alert in alerts.filter { it.createdAt > until }.sortedBy { it.createdAt }.takeLast(5)) {
         val intent =
             Intent(context, MainActivity::class.java)
                 .setAction("dev.leo.manager.OPEN_CHAT")
-                .setData("leo-manager://chat/${segment(alert.chatId)}?origin=${segment(origin)}".toUri())
+                .setData(
+                    "leo-manager://chat/${segment(alert.chatId)}?origin=${segment(origin)}".toUri()
+                )
                 .putExtra("chat", alert.chatId)
                 .putExtra("origin", origin)
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
@@ -213,9 +219,18 @@ private suspend fun notifyAlerts(
                 .setSmallIcon(R.drawable.ic_leo)
                 .setContentTitle(alert.localized().first.take(120))
                 .setContentText(alert.localized().second.take(300))
-                .setStyle(NotificationCompat.BigTextStyle().bigText(alert.localized().second.take(300)))
+                .setStyle(
+                    NotificationCompat.BigTextStyle().bigText(alert.localized().second.take(300))
+                )
                 .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-                .setContentIntent(PendingIntent.getActivity(context, alert.id.hashCode(), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+                .setContentIntent(
+                    PendingIntent.getActivity(
+                        context,
+                        alert.id.hashCode(),
+                        intent,
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                    )
+                )
                 .setAutoCancel(true)
                 .build()
         if (notificationsAllowed(context)) manager.notify("node-${alert.id}", 2, notification)

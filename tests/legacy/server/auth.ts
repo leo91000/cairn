@@ -14,11 +14,13 @@ export const token = () => randomBytes(32).toString('base64url')
 export function digest(value: string) {
   return createHash('sha256').update(value).digest('base64url')
 }
+
 export function safeEqual(a: string, b: string) {
   const left = Buffer.from(a)
   const right = Buffer.from(b)
   return left.length === right.length && timingSafeEqual(left, right)
 }
+
 export interface Session {
   csrf: string
   createdAt: number
@@ -103,6 +105,7 @@ export class Auth {
       catch {
         throw new AppError(400, 'Invalid redirect URI.')
       }
+
       if (
         url.hash
         || url.username
@@ -119,6 +122,7 @@ export class Auth {
         )
       }
     }
+
     if (this.store.keys('client:').length >= 100)
       throw new AppError(429, 'Client registration limit reached.')
     const clientId = token()
@@ -155,6 +159,7 @@ export class Auth {
         'Authorization requires code flow with S256 PKCE.',
       )
     }
+
     const resource = params.resource || `${this.publicUrl}/mcp`
     if (resource !== `${this.publicUrl}/mcp`)
       throw new AppError(400, 'Resource does not match this MCP server.')
@@ -165,6 +170,7 @@ export class Auth {
     ) {
       throw new AppError(400, 'Unsupported scope.')
     }
+
     return { client, resource, scopes }
   }
 
@@ -177,6 +183,7 @@ export class Auth {
       redirect.searchParams.set('error', 'access_denied')
       return redirect.href
     }
+
     const code = token()
     this.store.set(
       `code:${digest(code)}`,
@@ -248,6 +255,7 @@ export class Auth {
             'Invalid or expired authorization code, verifier, or resource.',
           )
         }
+
         this.store.delete(`code:${digest(params.code)}`)
         return this.issue({
           clientId: code.clientId,
@@ -258,6 +266,7 @@ export class Auth {
         })
       })
     }
+
     if (params.grant_type === 'refresh_token') {
       const key = `refresh:${digest(params.refresh_token ?? '')}`
       const previous = this.store.kv<Grant>(key)
@@ -268,6 +277,7 @@ export class Auth {
           'Refresh token reuse detected. Reconnect this client.',
         )
       }
+
       if (
         !previous
         || previous.clientId !== params.client_id
@@ -275,6 +285,7 @@ export class Auth {
       ) {
         throw new OAuthError('invalid_grant', 'Invalid refresh token.')
       }
+
       return this.store.transaction(() => {
         this.store.set(key, { ...previous, used: true }, previous.expiresAt)
         if (
@@ -288,6 +299,7 @@ export class Auth {
             'Refresh cannot add permissions.',
           )
         }
+
         return this.issue({
           ...previous,
           scopes: params.scope
@@ -296,6 +308,7 @@ export class Auth {
         })
       })
     }
+
     throw new OAuthError('unsupported_grant_type', 'Unsupported grant type.')
   }
 
@@ -318,6 +331,7 @@ export class Auth {
     ) {
       throw new AppError(400, 'Choose a token name and valid scopes.')
     }
+
     const value = token()
     const family = token()
     const grant = {
@@ -348,6 +362,7 @@ export class Auth {
           this.store.delete(entry.key)
       }
     }
+
     this.store.delete(`grant:${family}`)
   }
 }

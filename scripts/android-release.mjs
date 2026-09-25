@@ -21,6 +21,7 @@ export function updateManifest(tag, bytes, metadata) {
     || metadata.elements[0].versionName !== version.versionName) {
     throw new Error('Built APK metadata does not match the release tag')
   }
+
   if (!bytes.length || bytes.length > 100 * 1024 * 1024)
     throw new Error('Invalid APK size')
   return {

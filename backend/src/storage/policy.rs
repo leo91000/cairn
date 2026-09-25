@@ -16,6 +16,7 @@ pub struct Policy {
     #[serde(rename = "enabled", skip_serializing)]
     pub _legacy_enabled: Option<bool>,
 }
+
 impl Default for Policy {
     fn default() -> Self {
         Self {
@@ -29,6 +30,7 @@ impl Default for Policy {
         }
     }
 }
+
 impl Policy {
     pub fn validate(&self) -> Result<()> {
         if self.cache_mi_b > 16 * 1024 * 1024
@@ -43,6 +45,7 @@ impl Policy {
         }
         Ok(())
     }
+
     /// Old node records may carry the former opt-in flag. Preserve their
     /// limits while ignoring that flag for every new execution.
     pub fn for_node(value: &serde_json::Value) -> Result<Self> {
@@ -56,9 +59,11 @@ impl Policy {
         policy.validate()?;
         Ok(policy)
     }
+
     pub fn reserve(&self, total: u64) -> u64 {
         (self.reserve_mi_b * 1024 * 1024).max(total / 100 * self.reserve_percent)
     }
+
     pub fn pause_reason(
         &self,
         total: u64,
@@ -77,6 +82,7 @@ impl Policy {
         None
     }
 }
+
 pub fn space(path: &Path) -> std::io::Result<(u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
     let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
@@ -90,9 +96,11 @@ pub fn space(path: &Path) -> std::io::Result<(u64, u64)> {
         stat.f_bavail.saturating_mul(stat.f_frsize),
     ))
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn idle_saved_disks_do_not_pause_and_dirty_disks_resume_only_when_safe() {
         let policy = Policy::default();

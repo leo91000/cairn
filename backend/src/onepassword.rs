@@ -12,7 +12,20 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 const KIND: &str = "onepassword";
-pub const AGENT_INSTRUCTIONS: &str = "1Password: When a task needs credentials, use leo_workspace.onepassword, backed by the server-side 1Password CLI. Start with accounts to discover the enabled service accounts explicitly authorized for this agent, then vaults, items, fields and read as needed. Service account tokens stay on the server; do not expect an authenticated op CLI in the task environment. Some website accounts require a passkey. This integration cannot retrieve or use passkeys. If a sign-in requires a passkey, stop that sign-in and ask the user to enable a TOTP authenticator on the website and save its one-time password configuration in the matching 1Password item, if the website supports it. Wait for the user to confirm setup before retrying. Do not try to bypass the passkey requirement or change authentication settings yourself. If TOTP is unavailable, report the blocked sign-in and ask the user how to proceed. For unattended tasks, report the required user action instead of retrying. Never ask the user to paste passwords, TOTP seeds or recovery codes into chat, and never print credentials in messages, logs or artifacts.";
+
+pub const AGENT_INSTRUCTIONS: &str = "1Password: When a task needs credentials, use leo_workspace.onepassword, backed by the \
+    server-side 1Password CLI. Start with accounts to discover the enabled service accounts \
+    explicitly authorized for this agent, then vaults, items, fields and read as needed. \
+    Service account tokens stay on the server; do not expect an authenticated op CLI in the \
+    task environment. Some website accounts require a passkey. This integration cannot \
+    retrieve or use passkeys. If a sign-in requires a passkey, stop that sign-in and ask the \
+    user to enable a TOTP authenticator on the website and save its one-time password \
+    configuration in the matching 1Password item, if the website supports it. Wait for the \
+    user to confirm setup before retrying. Do not try to bypass the passkey requirement or \
+    change authentication settings yourself. If TOTP is unavailable, report the blocked \
+    sign-in and ask the user how to proceed. For unattended tasks, report the required user \
+    action instead of retrying. Never ask the user to paste passwords, TOTP seeds or recovery \
+    codes into chat, and never print credentials in messages, logs or artifacts.";
 
 fn secret_key(id: &str) -> String {
     format!("onepassword:{id}")
@@ -52,15 +65,22 @@ pub async fn save(s: &Service, input: &Value, existing: Option<&str>) -> Result<
         .ok_or_else(|| Error::bad("Choose whether this account is enabled."))?;
     let account_id = existing.map(str::to_owned).unwrap_or_else(id);
     uuid(&account_id)?;
-    let record =
-        json!({"id":account_id,"name":name,"agentIds":agents,"enabled":enabled,"updatedAt":now()});
+    let record = json!({
+        "id": account_id,
+        "name": name,
+        "agentIds": agents,
+        "enabled": enabled,
+        "updatedAt": now()
+    });
     let encrypted = if token.is_empty() {
         None
     } else {
-        Some(
-            s.vault
-                .encrypt(&secret_key(&account_id), &json!({"token":token}))?,
-        )
+        Some(s.vault.encrypt(
+            &secret_key(&account_id),
+            &json!({
+                "token": token
+            }),
+        )?)
     };
     let updating = existing.is_some();
     s.store
@@ -81,7 +101,12 @@ pub async fn save(s: &Service, input: &Value, existing: Option<&str>) -> Result<
                 )?;
             }
             db.put(KIND, &record)?;
-            db.audit("onepassword.saved", &json!({"id":account_id}))?;
+            db.audit(
+                "onepassword.saved",
+                &json!({
+                    "id": account_id
+                }),
+            )?;
             Ok(record)
         })
         .await
@@ -94,8 +119,15 @@ pub async fn remove(s: &Service, account_id: &str) -> Result<Value> {
         .transaction(move |db| {
             db.remove(KIND, &account_id)?;
             db.delete(&format!("mcp-secret:{}", secret_key(&account_id)))?;
-            db.audit("onepassword.deleted", &json!({"id":account_id}))?;
-            Ok(json!({"deleted":true}))
+            db.audit(
+                "onepassword.deleted",
+                &json!({
+                    "id": account_id
+                }),
+            )?;
+            Ok(json!({
+                "deleted": true
+            }))
         })
         .await
 }
@@ -124,14 +156,53 @@ pub async fn routes(s: &Service, input: &Input) -> Result<Value> {
                 &["vault".into(), "list".into(), "--format=json".into()],
             )
             .await?;
-            Ok(json!({"ok":true}))
+            Ok(json!({
+                "ok": true
+            }))
         }
         _ => Err(Error::new(404, "Not found")),
     }
 }
 
 pub fn tool() -> Value {
-    json!({"name":"onepassword","description":format!("Read-only secret access. items requires vault; fields requires vault and item and returns field references without values; read resolves an op://vault/item/field reference. {AGENT_INSTRUCTIONS}"),"inputSchema":{"type":"object","properties":{"operation":{"type":"string","enum":["accounts","vaults","items","fields","read"]},"accountId":{"type":"string","format":"uuid"},"vault":{"type":"string","minLength":1,"maxLength":200},"item":{"type":"string","minLength":1,"maxLength":200},"reference":{"type":"string","pattern":"^op://","maxLength":2000}},"required":["operation"],"additionalProperties":false}})
+    json!({
+        "name": "onepassword",
+        "description": format!(
+            "Read-only secret access. items requires vault; fields requires vault and item and \
+                returns field references without values; read resolves an op://vault/item/field \
+                reference. {AGENT_INSTRUCTIONS}"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": ["accounts", "vaults", "items", "fields", "read"]
+                },
+                "accountId": {
+                    "type": "string",
+                    "format": "uuid"
+                },
+                "vault": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                },
+                "item": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                },
+                "reference": {
+                    "type": "string",
+                    "pattern": "^op://",
+                    "maxLength": 2000
+                }
+            },
+            "required": ["operation"],
+            "additionalProperties": false
+        }
+    })
 }
 
 fn permitted(account: &Value, agent_id: &str) -> bool {
@@ -208,6 +279,7 @@ fn arguments(input: &Value) -> Result<Vec<String>> {
 pub async fn call(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
     call_with_binary(s, bearer, input, "/usr/local/bin/op").await
 }
+
 async fn call_with_binary(s: &Service, bearer: &str, input: &Value, binary: &str) -> Result<Value> {
     if text(input, "operation") == "accounts" {
         let bearer = bearer.to_owned();
@@ -215,9 +287,17 @@ async fn call_with_binary(s: &Service, bearer: &str, input: &Value, binary: &str
             .store
             .read(move |db| {
                 let run = authorize_in(db, &bearer)?;
-                Ok(json!({"accounts": db.list(KIND)?.into_iter()
-                .filter(|a| permitted(a, text(&run["snapshot"]["agent"], "id")))
-                .map(|a| json!({"id":a["id"],"name":a["name"]})).collect::<Vec<_>>()}))
+                Ok(json!({
+                    "accounts": db
+                        .list(KIND)?
+                        .into_iter()
+                        .filter(|a| permitted(a, text(&run["snapshot"]["agent"], "id")))
+                        .map(|a| json!({
+                        "id": a["id"],
+                        "name": a["name"]
+                    }))
+                        .collect::<Vec<_>>()
+                }))
             })
             .await;
     }
@@ -234,27 +314,43 @@ async fn call_with_binary(s: &Service, bearer: &str, input: &Value, binary: &str
         ));
     }
     if input["operation"] == "read" {
-        Ok(json!({"value":output}))
+        Ok(json!({
+            "value": output
+        }))
     } else {
         let value: Value = serde_json::from_str(&output)
             .map_err(|_| Error::new(502, "Invalid 1Password response."))?;
         if input["operation"] == "fields" {
             Ok(field_references(&value))
         } else {
-            Ok(json!({"items":value}))
+            Ok(json!({
+                "items": value
+            }))
         }
     }
 }
 
 fn field_references(item: &Value) -> Value {
-    json!({"fields":item["fields"].as_array().into_iter().flatten().map(|field|
-        json!({"id":field["id"],"label":field["label"],"type":field["type"],"reference":field["reference"],"section":field["section"]["label"]})
-    ).collect::<Vec<_>>()})
+    json!({
+        "fields": item["fields"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|field| json!({
+            "id": field["id"],
+            "label": field["label"],
+            "type": field["type"],
+            "reference": field["reference"],
+            "section": field["section"]["label"]
+        }))
+            .collect::<Vec<_>>()
+    })
 }
 
 async fn execute(token: &str, args: &[String]) -> Result<String> {
     execute_with_binary(token, args, "/usr/local/bin/op").await
 }
+
 async fn execute_with_binary(token: &str, args: &[String], binary: &str) -> Result<String> {
     let home = tempfile::tempdir()?;
     // No inherited Connect tokens, desktop sessions, agent env or persistent cache.
@@ -278,7 +374,8 @@ async fn execute_with_binary(token: &str, args: &[String], binary: &str) -> Resu
     if !output.success {
         return Err(Error::new(
             502,
-            "1Password request failed. Check the token, vault permissions, reference, and service account limits.",
+            "1Password request failed. Check the token, vault permissions, reference, \
+                and service account limits.",
         ));
     }
     Ok(output.stdout)
@@ -318,26 +415,44 @@ mod tests {
         .unwrap();
         let task = s
             .task(
-                json!({"name":"Probe","agentId":MAIN_AGENT_ID,"prompt":"Hello"}),
+                json!({
+                    "name": "Probe",
+                    "agentId": MAIN_AGENT_ID,
+                    "prompt": "Hello"
+                }),
                 None,
             )
             .await
             .unwrap();
         let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
         s.store
-            .patch_run(text(&run, "id"), json!({"status":"running"}))
+            .patch_run(
+                text(&run, "id"),
+                json!({
+                    "status": "running"
+                }),
+            )
             .await
             .unwrap();
         let config = s.mcps.run_configuration(&s, &run).await.unwrap();
         let bearer = text(&config["env"], "LEO_MCP_RUN_TOKEN").to_owned();
         let binary = root.path().join("op");
-        std::fs::write(&binary, "#!/bin/sh\n[ \"$OP_SERVICE_ACCOUNT_TOKEN\" = ops_fixture ] || exit 1\n[ -z \"$OP_CONNECT_TOKEN\" ] || exit 2\n[ \"$OP_CACHE\" = false ] || exit 3\ncase \"$1\" in\nread) printf 'secret-with-no-newline' ;;\n*) printf '[{\"id\":\"vault\"}]' ;;\nesac\n").unwrap();
+        std::fs::write(&binary, "#!/bin/sh\n[ \"$OP_SERVICE_ACCOUNT_TOKEN\" = ops_fixture ] || exit 1\n[ -z \
+            \"$OP_CONNECT_TOKEN\" ] || exit 2\n[ \"$OP_CACHE\" = false ] || exit 3\ncase \"$1\" \
+            in\nread) printf 'secret-with-no-newline' ;;\n*) printf '[{\"id\":\"vault\"}]' ;;\nesac\n").unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
         (root, s, bearer, binary.to_string_lossy().into_owned())
     }
+
     fn account() -> Value {
-        json!({"name":"Production","token":"ops_fixture","enabled":true,"agentIds":[]})
+        json!({
+            "name": "Production",
+            "token": "ops_fixture",
+            "enabled": true,
+            "agentIds": []
+        })
     }
+
     #[tokio::test]
     async fn encrypted_credentials_live_grants_rotation_and_deletion() {
         let (_root, s, bearer, binary) = fixture().await;
@@ -355,8 +470,11 @@ mod tests {
             s.vault.get(&secret_key(id)).await.unwrap().unwrap()["token"],
             "ops_fixture"
         );
-        let args =
-            json!({"operation":"read","accountId":id,"reference":"op://vault/item/password"});
+        let args = json!({
+            "operation": "read",
+            "accountId": id,
+            "reference": "op://vault/item/password"
+        });
         assert_eq!(
             call_with_binary(&s, &bearer, &args, &binary)
                 .await
@@ -365,18 +483,30 @@ mod tests {
             403
         );
         assert_eq!(
-            call(&s, &bearer, &json!({"operation":"accounts"}))
-                .await
-                .unwrap()["accounts"],
+            call(
+                &s,
+                &bearer,
+                &json!({
+                    "operation": "accounts"
+                })
+            )
+            .await
+            .unwrap()["accounts"],
             json!([])
         );
         let mut update = saved.clone();
         update["agentIds"] = json!([MAIN_AGENT_ID]);
         save(&s, &update, Some(id)).await.unwrap(); // omitted token preserves it
         assert_eq!(
-            call(&s, &bearer, &json!({"operation":"accounts"}))
-                .await
-                .unwrap()["accounts"][0]["id"],
+            call(
+                &s,
+                &bearer,
+                &json!({
+                    "operation": "accounts"
+                })
+            )
+            .await
+            .unwrap()["accounts"][0]["id"],
             id
         );
         assert_eq!(
@@ -388,7 +518,11 @@ mod tests {
                 call_with_binary(
                     &s,
                     &bearer,
-                    &json!({"operation":operation,"accountId":id,"vault":"vault"}),
+                    &json!({
+                        "operation": operation,
+                        "accountId": id,
+                        "vault": "vault"
+                    }),
                     &binary
                 )
                 .await
@@ -422,7 +556,15 @@ mod tests {
             s.vault.get(&secret_key(id)).await.unwrap().unwrap()["token"],
             "ops_rotated"
         );
-        let temporary = s.agent(json!({"name":"Temporary"}), None).await.unwrap();
+        let temporary = s
+            .agent(
+                json!({
+                    "name": "Temporary"
+                }),
+                None,
+            )
+            .await
+            .unwrap();
         update["agentIds"] = json!([temporary["id"]]);
         save(&s, &update, Some(id)).await.unwrap();
         s.remove("agents", text(&temporary, "id")).await.unwrap();
@@ -437,6 +579,7 @@ mod tests {
             403
         );
     }
+
     #[tokio::test]
     async fn errors_never_echo_tokens_and_revoked_runs_cannot_read() {
         let (root, s, bearer, binary) = fixture().await;
@@ -450,7 +593,11 @@ mod tests {
         assert!(s.store.list(KIND).await.unwrap().is_empty());
         input["agentIds"] = json!([MAIN_AGENT_ID]);
         let saved = save(&s, &input, None).await.unwrap();
-        let args = json!({"operation":"read","accountId":saved["id"],"reference":"op://vault/item/password"});
+        let args = json!({
+            "operation": "read",
+            "accountId": saved["id"],
+            "reference": "op://vault/item/password"
+        });
         std::fs::write(
             &binary,
             "#!/bin/sh\necho ops_fixture >&2\necho ops_fixture\nexit 1\n",
@@ -492,40 +639,71 @@ mod tests {
             .unwrap();
         s.mcps.revoke_run(&s, text(&run, "id")).await.unwrap();
         assert_eq!(
-            call(&s, &bearer, &json!({"operation":"accounts"}))
-                .await
-                .unwrap_err()
-                .status,
+            call(
+                &s,
+                &bearer,
+                &json!({
+                    "operation": "accounts"
+                })
+            )
+            .await
+            .unwrap_err()
+            .status,
             401
         );
     }
+
     #[test]
     fn cli_arguments_cannot_inject_options_or_write_operations() {
-        let fields = field_references(
-            &json!({"fields":[{"id":"password","value":"hidden-secret","reference":"op://vault/item/password"}]}),
-        );
+        let fields = field_references(&json!({
+            "fields": [{
+                "id": "password",
+                "value": "hidden-secret",
+                "reference": "op://vault/item/password"
+            }]
+        }));
         assert!(!fields.to_string().contains("hidden-secret"));
         assert_eq!(fields["fields"][0]["reference"], "op://vault/item/password");
-        let args =
-            arguments(&json!({"operation":"fields","vault":"vault","item":"--help"})).unwrap();
+        let args = arguments(&json!({
+            "operation": "fields",
+            "vault": "vault",
+            "item": "--help"
+        }))
+        .unwrap();
         assert_eq!(&args[4..], &["--", "--help"]);
         assert_eq!(
             crate::run_output::redact("ops_abcdefghijklmnopq", &[]),
             "[redacted]"
         );
         assert_eq!(
-            crate::run_output::payload(&json!({"OP_SERVICE_ACCOUNT_TOKEN":"short"}), &[])["OP_SERVICE_ACCOUNT_TOKEN"],
+            crate::run_output::payload(
+                &json!({
+                    "OP_SERVICE_ACCOUNT_TOKEN": "short"
+                }),
+                &[]
+            )["OP_SERVICE_ACCOUNT_TOKEN"],
             "[redacted]"
         );
         for input in [
-            json!({"operation":"write"}),
-            json!({"operation":"read","reference":"--out-file=/tmp/leak"}),
-            json!({"operation":"items"}),
+            json!({
+                "operation": "write"
+            }),
+            json!({
+                "operation": "read",
+                "reference": "--out-file=/tmp/leak"
+            }),
+            json!({
+                "operation": "items"
+            }),
         ] {
             assert!(arguments(&input).is_err());
         }
         assert_eq!(
-            arguments(&json!({"operation":"items","vault":"--help"})).unwrap()[2],
+            arguments(&json!({
+                "operation": "items",
+                "vault": "--help"
+            }))
+            .unwrap()[2],
             "--vault=--help"
         );
     }

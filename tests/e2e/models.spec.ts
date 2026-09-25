@@ -1,4 +1,9 @@
-import { expect, expectSingleScroll, initializeRepository, test } from './fixtures'
+import {
+  expect,
+  expectSingleScroll,
+  initializeRepository,
+  test,
+} from './fixtures'
 
 test('selects live models and supported reasoning for agents and queued chat turns', async ({ page, workspace }, testInfo) => {
   test.setTimeout(60000)

@@ -76,6 +76,7 @@ export const lowPercent = 10
 export function generalWindows(usage: Usage | null) {
   return (usage?.windows ?? []).filter(window => !window.models.length).sort((a, b) => (a.durationMins ?? 0) - (b.durationMins ?? 0))
 }
+
 export function remainingPercent(window: UsageWindow) {
   return Math.max(0, Math.min(100, 100 - window.usedPercent))
 }

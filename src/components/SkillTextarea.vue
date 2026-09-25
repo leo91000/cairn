@@ -1,9 +1,20 @@
 <script setup lang="ts">
 import type { Mention, SkillOption } from '../skill-mentions'
-import { computed, nextTick, ref, useId, watch } from 'vue'
+import {
+  computed,
+  nextTick,
+  ref,
+  useId,
+  watch,
+} from 'vue'
 import { state } from '../api'
 import { BookOpen } from '../icons'
-import { insertSkill, matchSkills, mentionAt, mentionSegments } from '../skill-mentions'
+import {
+  insertSkill,
+  matchSkills,
+  mentionAt,
+  mentionSegments,
+} from '../skill-mentions'
 import Icon from './Icon.vue'
 
 defineOptions({ inheritAttrs: false })
@@ -34,6 +45,7 @@ function track() {
   caret.value = textarea.value?.selectionStart ?? model.value.length
   scrollTop.value = textarea.value?.scrollTop ?? 0
 }
+
 function focus() {
   dismissed.value = null
   track()
@@ -43,14 +55,17 @@ function focus() {
       track()
   })
 }
+
 function scope(skill: SkillOption) {
   return skill.scope === 'global' ? 'Global' : state.projects.find(project => project.id === skill.scope)?.name ?? 'Project'
 }
+
 function parts(name: string) {
   const query = mention.value?.query ?? ''
   const index = query ? name.indexOf(query) : -1
   return index < 0 ? [name, '', ''] : [name.slice(0, index), query, name.slice(index + query.length)]
 }
+
 async function choose(skill: SkillOption) {
   if (!mention.value)
     return
@@ -61,6 +76,7 @@ async function choose(skill: SkillOption) {
   textarea.value?.setSelectionRange(next.caret, next.caret)
   track()
 }
+
 function key(event: KeyboardEvent) {
   if (open.value && !event.isComposing) {
     const count = matches.value.length
@@ -70,11 +86,13 @@ function key(event: KeyboardEvent) {
       document.getElementById(`${listId}-${active.value}`)?.scrollIntoView({ block: 'nearest' })
       return
     }
+
     if (count > 0 && ((event.key === 'Enter' && !event.shiftKey) || (event.key === 'Tab' && !event.shiftKey))) {
       event.preventDefault()
       void choose(matches.value[active.value]!)
       return
     }
+
     if (event.key === 'Escape') {
       event.preventDefault()
       event.stopPropagation()
@@ -82,14 +100,22 @@ function key(event: KeyboardEvent) {
       return
     }
   }
+
   emit('keydown', event)
 }
+
 defineExpose({ focus: () => textarea.value?.focus() })
 </script>
 
 <template>
   <div class="relative">
-    <div v-if="open" :id="listId" :role="matches.length ? 'listbox' : 'status'" aria-label="Skills" class="skill-menu absolute inset-x-0 bottom-full z-20 mb-6 overflow-hidden rounded-xl border border-line bg-raised shadow-[0_12px_40px_#0000001f] phone:mb-5">
+    <div
+      v-if="open"
+      :id="listId"
+      :role="matches.length ? 'listbox' : 'status'"
+      aria-label="Skills"
+      class="skill-menu absolute inset-x-0 bottom-full z-20 mb-6 overflow-hidden rounded-xl border border-line bg-raised shadow-[0_12px_40px_#0000001f] phone:mb-5"
+    >
       <div class="flex items-center justify-between gap-3 border-b border-line/70 px-3 py-2 text-[11px] text-muted">
         <span class="font-semibold uppercase tracking-wide">Skills</span>
         <span v-if="matches.length" class="phone:hidden"><kbd>↑</kbd><kbd>↓</kbd> navigate · <kbd>↵</kbd> insert · <kbd>Esc</kbd> dismiss</span>
@@ -103,7 +129,18 @@ defineExpose({ focus: () => textarea.value?.focus() })
         </p>
       </div>
       <ul v-else class="m-0 max-h-64 list-none overflow-auto p-1">
-        <li v-for="(skill, index) in matches" :id="`${listId}-${index}`" :key="skill.name" role="option" :aria-selected="index === active" class="flex min-h-12 cursor-pointer items-center gap-3 rounded-lg px-3 py-2" :class="index === active ? 'bg-accent/10' : ''" @mousedown.prevent @mousemove="active = index" @click="choose(skill)">
+        <li
+          v-for="(skill, index) in matches"
+          :id="`${listId}-${index}`"
+          :key="skill.name"
+          role="option"
+          :aria-selected="index === active"
+          class="flex min-h-12 cursor-pointer items-center gap-3 rounded-lg px-3 py-2"
+          :class="index === active ? 'bg-accent/10' : ''"
+          @mousedown.prevent
+          @mousemove="active = index"
+          @click="choose(skill)"
+        >
           <span class="flex size-7 shrink-0 items-center justify-center rounded-md bg-accent/10 text-accent"><Icon :name="BookOpen" :size="15" /></span>
           <span class="min-w-0 flex-1">
             <span class="flex min-w-0 items-center gap-2">
@@ -123,9 +160,21 @@ defineExpose({ focus: () => textarea.value?.focus() })
       </div>
     </div>
     <textarea
-      ref="textarea" v-model="model" v-bind="$attrs" aria-autocomplete="list" :aria-controls="open ? listId : undefined" :aria-activedescendant="open && matches.length ? `${listId}-${active}` : undefined"
+      ref="textarea"
+      v-model="model"
+      v-bind="$attrs"
+      aria-autocomplete="list"
+      :aria-controls="open ? listId : undefined"
+      :aria-activedescendant="open && matches.length ? `${listId}-${active}` : undefined"
       class="relative block max-h-40 min-h-14 w-full resize-none border-0! bg-transparent! p-0! text-sm! phone:text-[16px]! shadow-none! outline-none! focus:ring-0!"
-      @keydown="key" @input="track" @click="track" @keyup="track" @focus="focus" @select="track" @scroll="track" @blur="dismissed = mention?.start ?? null"
+      @keydown="key"
+      @input="track"
+      @click="track"
+      @keyup="track"
+      @focus="focus"
+      @select="track"
+      @scroll="track"
+      @blur="dismissed = mention?.start ?? null"
     />
   </div>
 </template>

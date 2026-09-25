@@ -27,6 +27,7 @@ onMounted(async () => {
   catch (e) { error.value = (e as Error).message }
   finally { loading.value = false }
 })
+
 async function toggle() {
   if (busy.value)
     return
@@ -38,6 +39,7 @@ async function toggle() {
       denied.value = Notification.permission === 'denied'
       return
     }
+
     registration ??= await navigator.serviceWorker.register('/sw.js')
     await navigator.serviceWorker.ready
     let subscription = await registration.pushManager.getSubscription()
@@ -50,6 +52,7 @@ async function toggle() {
       enabled.value = false
       return
     }
+
     const { publicKey } = await api<{ publicKey: string }>('/notifications')
     const key = Uint8Array.from(atob(publicKey.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0))
     subscription ??= await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key })
@@ -85,7 +88,12 @@ async function toggle() {
       Notifications are blocked. Allow them in this site’s browser settings, then reopen this panel.
     </p>
     <div v-else class="flex items-center gap-3">
-      <UiButton size="small" :variant="enabled ? 'default' : 'primary'" :disabled="busy || loading" @click="toggle">
+      <UiButton
+        size="small"
+        :variant="enabled ? 'default' : 'primary'"
+        :disabled="busy || loading"
+        @click="toggle"
+      >
         {{ busy ? 'Updating…' : enabled ? 'Disable on this device' : 'Enable on this device' }}
       </UiButton><span v-if="enabled" class="text-[11px] text-accent" role="status">Notifications on</span>
     </div>

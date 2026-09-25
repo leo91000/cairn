@@ -11,26 +11,32 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use tokio::sync::Semaphore;
+
 pub fn token() -> String {
     let mut bytes = [0; 32];
     rand::rng().fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
 }
+
 pub fn digest(value: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(value.as_bytes()))
 }
+
 pub fn hex_digest(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
+
 pub fn safe_equal(a: &str, b: &str) -> bool {
     bool::from(a.as_bytes().ct_eq(b.as_bytes()))
 }
+
 #[derive(Clone)]
 pub struct Auth {
     pub store: Store,
     pub public_url: String,
     hash_slots: Arc<Semaphore>,
 }
+
 impl Auth {
     pub fn new(store: Store, public_url: String) -> Self {
         Self {
@@ -39,6 +45,7 @@ impl Auth {
             hash_slots: Arc::new(Semaphore::new(2)),
         }
     }
+
     async fn password(&self, password: &str, salt: &str) -> Result<String> {
         let permit = self
             .hash_slots
@@ -62,6 +69,7 @@ impl Auth {
         .await
         .map_err(Error::internal)?
     }
+
     pub async fn setup(&self, password: &str) -> Result<()> {
         if !(12..=200).contains(&password.chars().count()) {
             return Err(Error::bad("Use a password between 12 and 200 characters."));
@@ -79,13 +87,15 @@ impl Auth {
                 db.set(
                     "admin",
                     &json!({
-                    "salt":salt,"hash":hash}
-                    ),
+                        "salt": salt,
+                        "hash": hash
+                    }),
                     None,
                 )
             })
             .await
     }
+
     pub async fn login(&self, password: &str) -> Result<Value> {
         if password.len() > 800 {
             return Err(Error::bad("Password is too long."));
@@ -101,11 +111,13 @@ impl Auth {
         }
         self.session().await
     }
+
     pub async fn session(&self) -> Result<Value> {
         let value = token();
         let session = json!({
-        "csrf":token(),"createdAt":now()}
-        );
+            "csrf": token(),
+            "createdAt": now()
+        });
         self.store
             .set(
                 &format!("session:{}", digest(&value)),
@@ -117,17 +129,20 @@ impl Auth {
         session["value"] = value.into();
         Ok(session)
     }
+
     pub async fn read(&self, value: &str) -> Result<Option<Value>> {
         if value.is_empty() {
             return Ok(None);
         }
         self.store.kv(&format!("session:{}", digest(value))).await
     }
+
     pub async fn logout(&self, value: &str) -> Result<()> {
         self.store
             .delete(&format!("session:{}", digest(value)))
             .await
     }
+
     pub async fn register(&self, input: Value) -> Result<Value> {
         let uris = input["redirect_uris"]
             .as_array()
@@ -152,8 +167,18 @@ impl Auth {
             }
         }
         let client = json!({
-        "client_id":token(),"client_name":input["client_name"].as_str().unwrap_or("MCP client").chars().take(100).collect::<String>(),"redirect_uris":uris,"token_endpoint_auth_method":"none","grant_types":["authorization_code","refresh_token"],"response_types":["code"]}
-        );
+            "client_id": token(),
+            "client_name": input["client_name"]
+                .as_str()
+                .unwrap_or("MCP client")
+                .chars()
+                .take(100)
+                .collect::<String>(),
+            "redirect_uris": uris,
+            "token_endpoint_auth_method": "none",
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"]
+        });
         self.store
             .transaction(move |db| {
                 if db.keys("client:")?.len() >= 100 {
@@ -168,6 +193,7 @@ impl Auth {
             })
             .await
     }
+
     pub async fn authorization(&self, params: &Value) -> Result<Value> {
         let client = self
             .store
@@ -209,9 +235,12 @@ impl Auth {
             .collect::<Vec<_>>();
         valid_scopes(&scopes)?;
         Ok(json!({
-        "client":client,"resource":resource,"scopes":scopes}
-        ))
+            "client": client,
+            "resource": resource,
+            "scopes": scopes
+        }))
     }
+
     pub async fn consent(&self, params: Value, approved: bool) -> Result<String> {
         let details = self.authorization(&params).await?;
         let mut redirect = url::Url::parse(text(&params, "redirect_uri"))
@@ -230,48 +259,90 @@ impl Auth {
             .set(
                 &format!("code:{}", digest(&code)),
                 json!({
-                "clientId":details["client"]["client_id"],"redirectUri":params["redirect_uri"],"challenge":params["code_challenge"],"resource":details["resource"],"scopes":details["scopes"],"label":details["client"]["client_name"]}
-                ),
+                    "clientId": details["client"]["client_id"],
+                    "redirectUri": params["redirect_uri"],
+                    "challenge": params["code_challenge"],
+                    "resource": details["resource"],
+                    "scopes": details["scopes"],
+                    "label": details["client"]["client_name"]
+                }),
                 Some(now() + 300000),
             )
             .await?;
         redirect.query_pairs_mut().append_pair("code", &code);
         Ok(redirect.to_string())
     }
+
     pub async fn exchange(&self, params: Value) -> Result<Value> {
         self.store
             .transaction(move |db| match text(&params, "grant_type") {
                 "authorization_code" => {
                     let key = format!("code:{}", digest(text(&params, "code")));
-                    let code = db.kv(&key)?.ok_or_else(|| Error::oauth("invalid_grant", "Invalid or expired authorization code, verifier, or resource."))?;
+                    let code = db.kv(&key)?.ok_or_else(|| {
+                        Error::oauth(
+                            "invalid_grant",
+                            "Invalid or expired authorization code, verifier, or resource.",
+                        )
+                    })?;
                     let verifier = text(&params, "code_verifier");
-                    if params["client_id"] != code["clientId"] || params["redirect_uri"] != code["redirectUri"] || !(43..=128).contains(&verifier.len()) || digest(verifier) != text(&code, "challenge") || (!text(&params, "resource").is_empty() && params["resource"] != code["resource"]) {
-                        return Err(Error::oauth("invalid_grant", "Invalid or expired authorization code, verifier, or resource."));
+                    if params["client_id"] != code["clientId"]
+                        || params["redirect_uri"] != code["redirectUri"]
+                        || !(43..=128).contains(&verifier.len())
+                        || digest(verifier) != text(&code, "challenge")
+                        || (!text(&params, "resource").is_empty()
+                            && params["resource"] != code["resource"])
+                    {
+                        return Err(Error::oauth(
+                            "invalid_grant",
+                            "Invalid or expired authorization code, verifier, or resource.",
+                        ));
                     }
                     db.delete(&key)?;
                     issue(
                         db,
                         json!({
-                        "clientId":code["clientId"],"resource":code["resource"],"scopes":code["scopes"],"label":code["label"],"family":token()}
+                            "clientId": code["clientId"],
+                            "resource": code["resource"],
+                            "scopes": code["scopes"],
+                            "label": code["label"],
+                            "family": token()
+                        }
                         ),
                     )
                 }
                 "refresh_token" => {
                     let key = format!("refresh:{}", digest(text(&params, "refresh_token")));
-                    let mut previous = db.kv(&key)?.ok_or_else(|| Error::oauth("invalid_grant", "Invalid refresh token."))?;
+                    let mut previous = db
+                        .kv(&key)?
+                        .ok_or_else(|| Error::oauth("invalid_grant", "Invalid refresh token."))?;
                     if previous["used"] == true {
                         revoke(db, text(&previous, "family"))?;
                         return Ok(json!({
-                        "_oauthError":"Refresh token reuse detected. Reconnect this client."}
+                            "_oauthError": "Refresh token reuse detected. Reconnect this client."
+                        }
                         ));
                     }
-                    if params["client_id"] != previous["clientId"] || (!text(&params, "resource").is_empty() && params["resource"] != previous["resource"]) {
+                    if params["client_id"] != previous["clientId"]
+                        || (!text(&params, "resource").is_empty()
+                            && params["resource"] != previous["resource"])
+                    {
                         return Err(Error::oauth("invalid_grant", "Invalid refresh token."));
                     }
                     if !text(&params, "scope").is_empty() {
-                        let scopes = text(&params, "scope").split(' ').filter(|s| !s.is_empty()).map(|s| Value::String(s.into())).collect::<Vec<_>>();
-                        if scopes.iter().any(|scope| !previous["scopes"].as_array().is_some_and(|allowed| allowed.contains(scope))) {
-                            return Err(Error::oauth("invalid_scope", "Refresh cannot add permissions."));
+                        let scopes = text(&params, "scope")
+                            .split(' ')
+                            .filter(|s| !s.is_empty())
+                            .map(|s| Value::String(s.into()))
+                            .collect::<Vec<_>>();
+                        if scopes.iter().any(|scope| {
+                            !previous["scopes"]
+                                .as_array()
+                                .is_some_and(|allowed| allowed.contains(scope))
+                        }) {
+                            return Err(Error::oauth(
+                                "invalid_scope",
+                                "Refresh cannot add permissions.",
+                            ));
                         }
                         previous["scopes"] = scopes.into();
                     }
@@ -280,11 +351,21 @@ impl Auth {
                     db.set(&key, &used, used["expiresAt"].as_i64())?;
                     issue(db, previous)
                 }
-                _ => Err(Error::oauth("unsupported_grant_type", "Unsupported grant type.")),
+                _ => Err(Error::oauth(
+                    "unsupported_grant_type",
+                    "Unsupported grant type.",
+                )),
             })
             .await
-            .and_then(|value| if let Some(error) = value["_oauthError"].as_str() { Err(Error::oauth("invalid_grant", error)) } else { Ok(value) })
+            .and_then(|value| {
+                if let Some(error) = value["_oauthError"].as_str() {
+                    Err(Error::oauth("invalid_grant", error))
+                } else {
+                    Ok(value)
+                }
+            })
     }
+
     pub async fn verify(&self, value: &str, scope: Option<&str>) -> Result<Value> {
         let grant = self
             .store
@@ -303,6 +384,7 @@ impl Auth {
         }
         Ok(grant)
     }
+
     pub async fn personal(&self, label: &str, scopes: Vec<&str>) -> Result<Value> {
         if label.trim().is_empty() || label.len() > 400 {
             return Err(Error::bad("Choose a token name and valid scopes."));
@@ -311,8 +393,13 @@ impl Auth {
         let value = token();
         let family = token();
         let grant = json!({
-        "clientId":"personal","label":label.chars().take(100).collect::<String>(),"scopes":scopes,"resource":format!("{}/mcp",self.public_url),"family":family,"expiresAt":now()+30*86400000_i64}
-        );
+            "clientId": "personal",
+            "label": label.chars().take(100).collect::<String>(),
+            "scopes": scopes,
+            "resource": format!("{}/mcp", self.public_url),
+            "family": family,
+            "expiresAt": now() + 30 * 86400000_i64
+        });
         self.store
             .transaction(move |db| {
                 db.set(
@@ -326,15 +413,18 @@ impl Auth {
                     grant["expiresAt"].as_i64(),
                 )?;
                 Ok(json!({
-                "token":value,"expiresAt":grant["expiresAt"]}
-                ))
+                    "token": value,
+                    "expiresAt": grant["expiresAt"]
+                }))
             })
             .await
     }
+
     pub async fn revoke(&self, family: &str) -> Result<()> {
         let family = family.to_owned();
         self.store.transaction(move |db| revoke(db, &family)).await
     }
+
     pub async fn revoke_token(&self, value: &str, client_id: &str) -> Result<()> {
         for prefix in ["access:", "refresh:"] {
             if let Some(grant) = self.store.kv(&format!("{prefix}{}", digest(value))).await?
@@ -346,6 +436,7 @@ impl Auth {
         Ok(())
     }
 }
+
 fn valid_scopes(scopes: &[&str]) -> Result<()> {
     if scopes.is_empty()
         || scopes
@@ -356,6 +447,7 @@ fn valid_scopes(scopes: &[&str]) -> Result<()> {
     }
     Ok(())
 }
+
 fn issue(db: &Db<'_>, grant: Value) -> Result<Value> {
     let access = token();
     let refresh = token();
@@ -370,8 +462,8 @@ fn issue(db: &Db<'_>, grant: Value) -> Result<Value> {
     merge(
         &mut refresh_grant,
         &json!({
-        "expiresAt":now()+30*86400000_i64}
-        ),
+            "expiresAt": now() + 30 * 86400000_i64
+        }),
     );
     db.set(
         &format!("refresh:{}", digest(&refresh)),
@@ -386,9 +478,20 @@ fn issue(db: &Db<'_>, grant: Value) -> Result<Value> {
         Some(now() + 30 * 86400000_i64),
     )?;
     Ok(json!({
-    "access_token":access,"refresh_token":refresh,"token_type":"Bearer","expires_in":3600,"scope":grant["scopes"].as_array().unwrap().iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")}
-    ))
+        "access_token": access,
+        "refresh_token": refresh,
+        "token_type": "Bearer",
+        "expires_in": 3600,
+        "scope": grant["scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }))
 }
+
 fn revoke(db: &Db<'_>, family: &str) -> Result<()> {
     for prefix in ["access:", "refresh:"] {
         for (key, value) in db.keys(prefix)? {

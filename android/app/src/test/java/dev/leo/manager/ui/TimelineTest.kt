@@ -8,16 +8,17 @@ import org.junit.Test
 class TimelineTest {
     @Test
     fun `chat removes routine notices and empty groups while run history keeps them`() {
-        val events = listOf(
-            event(1, "thread.started"),
-            event(2, "turn.started"),
-            event(3, "status").copy(text = "running"),
-            event(4, "item.started", "tool"),
-            event(5, "item.completed", "tool", status = "completed"),
-            event(6, "item.completed", "answer", "agent_message"),
-            event(7, "turn.completed"),
-            event(8, "status").copy(text = "succeeded"),
-        )
+        val events =
+            listOf(
+                event(1, "thread.started"),
+                event(2, "turn.started"),
+                event(3, "status").copy(text = "running"),
+                event(4, "item.started", "tool"),
+                event(5, "item.completed", "tool", status = "completed"),
+                event(6, "item.completed", "answer", "agent_message"),
+                event(7, "turn.completed"),
+                event(8, "status").copy(text = "succeeded"),
+            )
         val rows = timelineEntries(events, chat = true)
         assertEquals(listOf("activity:4", "message:6"), rows.map { it.key })
         assertEquals("completed", rows.first().events.single().item().string("status"))
@@ -27,14 +28,15 @@ class TimelineTest {
 
     @Test
     fun `chat keeps failures and interruptions visible between tools`() {
-        val events = listOf(
-            event(1, "item.completed", "first", status = "completed"),
-            event(2, "error").copy(text = "Access denied"),
-            event(3, "item.completed", "second", status = "failed"),
-            event(4, "status").copy(text = "failed"),
-            event(5, "status").copy(text = "cancelled"),
-            event(6, "status").copy(text = "interrupted"),
-        )
+        val events =
+            listOf(
+                event(1, "item.completed", "first", status = "completed"),
+                event(2, "error").copy(text = "Access denied"),
+                event(3, "item.completed", "second", status = "failed"),
+                event(4, "status").copy(text = "failed"),
+                event(5, "status").copy(text = "cancelled"),
+                event(6, "status").copy(text = "interrupted"),
+            )
         val rows = timelineEntries(events, chat = true)
         assertEquals(listOf(false, true, false, true, true, true), rows.map { it.notice })
         assertEquals(events.map { it.id }, rows.flatMap { it.events }.map { it.id })
@@ -43,15 +45,33 @@ class TimelineTest {
 
     @Test
     fun `chat hides recovered connections but preserves unresolved and failed turns`() {
-        val retry = event(1, "diagnostic").copy(text = "WebSocket connection failed: 503 Service Unavailable")
+        val retry =
+            event(1, "diagnostic")
+                .copy(text = "WebSocket connection failed: 503 Service Unavailable")
         assertTrue(timelineEntries(listOf(retry), chat = true).single().notice)
-        val successfulTool = event(2, "item.completed", "tool", status = "completed").let {
-            it.copy(payload = mapOf("item" to JsonObject(it.item()!! + ("exit_code" to JsonPrimitive(0)))))
-        }
-        for (continued in listOf(event(2, "turn.completed"), event(2, "item.completed", "answer", "agent_message"), event(2, "item.completed").copy(text = "Recovered answer"), successfulTool)) {
+        val successfulTool =
+            event(2, "item.completed", "tool", status = "completed").let {
+                it.copy(
+                    payload =
+                        mapOf("item" to JsonObject(it.item()!! + ("exit_code" to JsonPrimitive(0))))
+                )
+            }
+        for (continued in
+            listOf(
+                event(2, "turn.completed"),
+                event(2, "item.completed", "answer", "agent_message"),
+                event(2, "item.completed").copy(text = "Recovered answer"),
+                successfulTool,
+            )) {
             assertFalse(timelineEntries(listOf(retry, continued), chat = true).any { it.notice })
         }
-        val failed = listOf(retry, event(2, "turn.failed"), event(3, "turn.started"), event(4, "turn.completed"))
+        val failed =
+            listOf(
+                retry,
+                event(2, "turn.failed"),
+                event(3, "turn.started"),
+                event(4, "turn.completed"),
+            )
         assertEquals(2, timelineEntries(failed, chat = true).count { it.notice })
         assertEquals(4, timelineEntries(failed).single().events.size)
     }
@@ -85,15 +105,26 @@ class TimelineTest {
         val accumulator = dev.leo.manager.data.LiveAccumulator()
         val first = accumulator.append(listOf(event(1, "item.started", "answer", "agent_message")))
         val key = timelineEntries(first).single().key
-        val updated = accumulator.append(listOf(event(9, "item.updated", "answer", "agent_message")))
+        val updated =
+            accumulator.append(listOf(event(9, "item.updated", "answer", "agent_message")))
         assertEquals(9L, updated.single().id)
         assertEquals(key, timelineEntries(updated).single().key)
         val restored = dev.leo.manager.data.LiveAccumulator()
         val encoded = dev.leo.manager.data.wireJson.encodeToString(updated.single())
-        restored.restore(listOf(dev.leo.manager.data.wireJson.decodeFromString<RunEvent>(encoded)), 9)
-        val resumed = restored.append(listOf(event(10, "item.completed", "answer", "agent_message")))
+        restored.restore(
+            listOf(dev.leo.manager.data.wireJson.decodeFromString<RunEvent>(encoded)),
+            9,
+        )
+        val resumed =
+            restored.append(listOf(event(10, "item.completed", "answer", "agent_message")))
         assertEquals(key, timelineEntries(resumed).single().key)
-        val nextTurn = restored.append(listOf(event(11, "turn.started"), event(12, "item.started", "answer", "agent_message")))
+        val nextTurn =
+            restored.append(
+                listOf(
+                    event(11, "turn.started"),
+                    event(12, "item.started", "answer", "agent_message"),
+                )
+            )
         val keys = timelineEntries(nextTurn).filter { it.message }.map { it.key }
         assertEquals(2, keys.distinct().size)
         assertEquals(key, keys.first())
@@ -192,34 +223,48 @@ class TimelineTest {
     @Test
     fun `an older page extending the first activity group keeps its row key`() {
         val keys = TimelineKeys()
-        val window = listOf(
-            event(10, "item.completed", "cmd-2", status = "completed"),
-            event(11, "item.completed", "cmd-3", status = "completed"),
-            event(12, "item.completed", "answer", "agent_message"),
-        )
+        val window =
+            listOf(
+                event(10, "item.completed", "cmd-2", status = "completed"),
+                event(11, "item.completed", "cmd-3", status = "completed"),
+                event(12, "item.completed", "answer", "agent_message"),
+            )
         val first = keys.stabilize("v1:run:1", timelineEntries(window, chat = true))
         val group = first.first().key
         // The page ends inside the same group and folds the start of a command already shown.
-        val page = listOf(
-            event(5, "chat.user"),
-            event(6, "item.started", "cmd-1"),
-            event(7, "item.started", "cmd-2"),
-        )
+        val page =
+            listOf(
+                event(5, "chat.user"),
+                event(6, "item.started", "cmd-1"),
+                event(7, "item.started", "cmd-2"),
+            )
         val extended = keys.stabilize("v1:run:1", timelineEntries(page + window, chat = true))
         assertEquals(listOf("message:5", group, "message:12"), extended.map { it.key })
         assertEquals(3, extended[1].events.size)
         assertEquals("Keys stay unique", extended.size, extended.map { it.key }.distinct().size)
         // A different history starts from natural keys again.
-        assertEquals(timelineEntries(page + window, chat = true).map { it.key },
-            keys.stabilize("v1:other:1", timelineEntries(page + window, chat = true)).map { it.key })
+        assertEquals(
+            timelineEntries(page + window, chat = true).map { it.key },
+            keys.stabilize("v1:other:1", timelineEntries(page + window, chat = true)).map {
+                it.key
+            },
+        )
     }
 
     @Test
     fun `a folded command that was the only row of the first group keeps its key`() {
         val keys = TimelineKeys()
-        val window = listOf(event(20, "item.completed", "cmd", status = "completed"), event(21, "item.completed", "answer", "agent_message"))
+        val window =
+            listOf(
+                event(20, "item.completed", "cmd", status = "completed"),
+                event(21, "item.completed", "answer", "agent_message"),
+            )
         val group = keys.stabilize("h", timelineEntries(window, chat = true)).first().key
-        val extended = keys.stabilize("h", timelineEntries(listOf(event(19, "item.started", "cmd")) + window, chat = true))
+        val extended =
+            keys.stabilize(
+                "h",
+                timelineEntries(listOf(event(19, "item.started", "cmd")) + window, chat = true),
+            )
         assertEquals(group, extended.first().key)
     }
 }

@@ -27,19 +27,30 @@ export interface ActivityArtifact {
   attention?: boolean
 }
 export type ActivityEntry
-  = | { kind: 'message', role?: 'user', id: string, time: number, text: string, delivery?: string, attachments?: import('../shared/chats').ChatAttachment[] }
-    | { kind: 'group', id: string, artifacts: ActivityArtifact[] }
-    | { kind: 'notice', id: string, artifact: ActivityArtifact }
+  = | {
+    kind: 'message'
+    role?: 'user'
+    id: string
+    time: number
+    text: string
+    delivery?: string
+    attachments?: import('../shared/chats').ChatAttachment[]
+  }
+  | { kind: 'group', id: string, artifacts: ActivityArtifact[] }
+  | { kind: 'notice', id: string, artifact: ActivityArtifact }
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 }
+
 function text(value: unknown) {
   return typeof value === 'string' ? value : ''
 }
+
 function pretty(value: unknown) {
   return typeof value === 'string' ? value : JSON.stringify(value, null, 2) ?? ''
 }
+
 function payload(event: RunEvent) {
   if (event.payload)
     return event.payload
@@ -51,6 +62,7 @@ function payload(event: RunEvent) {
     return {}
   }
 }
+
 function readable(value: string) {
   return value.replaceAll(/[._]/g, ' ').replace(/^./, letter => letter.toUpperCase())
 }
@@ -61,6 +73,7 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
   const artifacts = new Map<string, ActivityArtifact>()
   const messages = new Map<string, Extract<ActivityEntry, { kind: 'message' }>>()
   let connectionNotices: ActivityArtifact[] = []
+
   function recovered() {
     for (const notice of connectionNotices) {
       notice.status = 'info'
@@ -68,17 +81,27 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
       notice.subtitle = 'Connection restored; work continued'
       notice.attention = false
     }
+
     connectionNotices = []
   }
+
   let turn = 0
   let legacyTool: ActivityArtifact | undefined
   for (const event of events) {
     if (event.type === 'artifact')
       continue
     if (event.type === 'chat.user') {
-      entries.push({ kind: 'message', role: 'user', id: `user:${event.id}`, time: typeof event.payload?.createdAt === 'number' && Number.isFinite(event.payload.createdAt) && event.payload.createdAt > 0 && event.payload.createdAt <= event.createdAt ? event.payload.createdAt : event.createdAt, text: typeof event.payload?.text === 'string' ? event.payload.text : event.text, attachments: Array.isArray(event.payload?.attachments) ? event.payload.attachments : [] })
+      entries.push({
+        kind: 'message',
+        role: 'user',
+        id: `user:${event.id}`,
+        time: typeof event.payload?.createdAt === 'number' && Number.isFinite(event.payload.createdAt) && event.payload.createdAt > 0 && event.payload.createdAt <= event.createdAt ? event.payload.createdAt : event.createdAt,
+        text: typeof event.payload?.text === 'string' ? event.payload.text : event.text,
+        attachments: Array.isArray(event.payload?.attachments) ? event.payload.attachments : [],
+      })
       continue
     }
+
     const data = payload(event)
     const item = record(data.item)
     const type = text(item.type)
@@ -86,6 +109,7 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
       connectionNotices = []
       turn++
     }
+
     if (event.type === 'turn.failed')
       connectionNotices = []
     if (event.type === 'turn.completed' || (type === 'command_execution' && event.type === 'item.completed' && item.exit_code === 0 && item.status !== 'failed'))
@@ -102,12 +126,19 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
         existing.text = content
       }
       else {
-        const message = { kind: 'message' as const, id, time: event.createdAt, text: content }
+        const message = {
+          kind: 'message' as const,
+          id,
+          time: event.createdAt,
+          text: content,
+        }
         entries.push(message)
         messages.set(id, message)
       }
+
       continue
     }
+
     if (legacyTool && legacy && event.type === 'item.completed') {
       legacyTool.kind = 'output'
       Object.assign(legacyTool, outputSummary(event.text))
@@ -119,6 +150,7 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
       legacyTool = undefined
       continue
     }
+
     const status = text(item.status)
     const failed = status === 'failed' || event.type.includes('failed') || event.type === 'error' || type === 'error' || (event.type === 'status' && event.text === 'failed') || (typeof item.exit_code === 'number' && item.exit_code !== 0)
     const running = !failed && (status === 'in_progress' || event.type.endsWith('.started')) && event.type.startsWith('item.')
@@ -139,6 +171,7 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
       if (value !== undefined && value !== null && value !== '')
         artifact.blocks.push({ label, code: pretty(value), language })
     }
+
     if (type === 'command_execution') {
       const command = describeCommand(text(item.command))
       artifact.kind = command.kind
@@ -165,6 +198,7 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
         artifact.files.push({ path: text(file.path), kind: text(file.kind) || 'update' })
         block(text(file.path) || 'Changes', file.diff ?? file.patch, 'diff')
       }
+
       artifact.subtitle = artifact.files.map(file => file.path).join(' · ')
     }
     else if (type === 'mcp_tool_call' || type === 'web_search') {
@@ -177,6 +211,7 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
         const part = record(content)
         block('Result', part.text)
       }
+
       if (!artifact.blocks.some(entry => entry.label === 'Result'))
         block('Result', item.result, 'json')
       block('Error', item.error, 'json')
@@ -218,16 +253,19 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
       if (typeof usage.input_tokens === 'number' && typeof usage.output_tokens === 'number')
         artifact.subtitle = `${usage.input_tokens.toLocaleString()} input · ${usage.output_tokens.toLocaleString()} output tokens`
     }
+
     if (artifact.kind === 'notice' && ['error', 'diagnostic', 'item.completed'].includes(event.type) && /websocket|reconnecting\.\.\.|reconnecting\s+\d+\//i.test(artifact.raw) && /503|reconnect|falling back|connection.*(?:closed|failed)/i.test(artifact.raw)) {
       artifact.title = 'Connection interrupted'
       artifact.attention = true
       connectionNotices.push(artifact)
     }
+
     const previous = artifacts.get(id)
     if (previous) {
       Object.assign(previous, artifact, { time: previous.time, durationMs: running ? undefined : Math.max(0, event.createdAt - previous.time) })
       continue
     }
+
     artifacts.set(id, artifact)
     const last = entries.at(-1)
     if (last?.kind === 'group')
@@ -237,6 +275,7 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
     if (legacy && event.type === 'item.started')
       legacyTool = Object.assign(artifact, { kind: 'output' as const, title: 'Recorded step', historical: true })
   }
+
   return chat ? chatEntries(entries) : entries
 }
 
@@ -248,6 +287,7 @@ function chatEntries(entries: ActivityEntry[]): ActivityEntry[] {
       result.push(entry)
       continue
     }
+
     let group: Extract<ActivityEntry, { kind: 'group' }> | undefined
     for (const artifact of entry.artifacts) {
       if (artifact.kind === 'notice') {
@@ -255,14 +295,18 @@ function chatEntries(entries: ActivityEntry[]): ActivityEntry[] {
           result.push({ kind: 'notice', id: `notice:${artifact.id}`, artifact })
           group = undefined
         }
+
         continue
       }
+
       if (!group) {
         group = { kind: 'group', id: `group:${artifact.id}`, artifacts: [] }
         result.push(group)
       }
+
       group.artifacts.push(artifact)
     }
   }
+
   return result
 }

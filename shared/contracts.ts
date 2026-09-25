@@ -102,7 +102,15 @@ export interface TaskOutcome {
 }
 export interface Run {
   nodeId?: string | null
-  storage?: { mode: string, waitingFor?: string | null, dirtyBytes?: number, localBytes?: number, dirtySince?: number | null, freeBytes?: number, reserveBytes?: number }
+  storage?: {
+    mode: string
+    waitingFor?: string | null
+    dirtyBytes?: number
+    localBytes?: number
+    dirtySince?: number | null
+    freeBytes?: number
+    reserveBytes?: number
+  }
   nodeState?: string | null
   pinnedNodeId?: string | null
   preferredNodeId?: string | null
@@ -110,7 +118,13 @@ export interface Run {
   capacityWaitUntil?: number | null
   restoredAt?: number | null
   movementError?: string | null
-  backup?: { id?: string, capturedAt?: number, status: string, error?: string, uploadedBytes?: number }
+  backup?: {
+    id?: string
+    capturedAt?: number
+    status: string
+    error?: string
+    uploadedBytes?: number
+  }
 
   outcome?: TaskOutcome | null
   chatExecution?: import('./chats').ChatExecution
@@ -135,7 +149,12 @@ export interface Run {
   error?: string | null
   sessionId: string | null
   workspace: string | null
-  workspaces?: { projectId: string, path: string, revision?: string | null, kind: 'worktree' | 'clone' | 'copy' | 'direct' }[]
+  workspaces?: {
+    projectId: string
+    path: string
+    revision?: string | null
+    kind: 'worktree' | 'clone' | 'copy' | 'direct'
+  }[]
   isolated?: boolean
   workspaceCleanedAt?: number
   snapshot: {

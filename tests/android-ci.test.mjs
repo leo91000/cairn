@@ -1,13 +1,37 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import {
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import {
+  afterEach,
+  describe,
+  expect,
+  it,
+} from 'vitest'
 import { artifactName, recordBuild, verifyBuild } from '../scripts/android-build.mjs'
 import { androidVersion } from '../scripts/android-release.mjs'
 import { AndroidValidationPendingError, resolveAndroidRelease, trustedAndroidRun } from '../scripts/resolve-android-release.mjs'
 
-const config = { repository: 'leo91000/leo-agent-manager', commit: 'a'.repeat(40), tag: 'v0.31.0', runId: 123 }
-const run = { id: config.runId, event: 'push', head_branch: 'main', head_sha: config.commit, head_repository: { full_name: config.repository }, path: '.github/workflows/android.yaml', status: 'completed', conclusion: 'success' }
+const config = {
+  repository: 'leo91000/leo-agent-manager',
+  commit: 'a'.repeat(40),
+  tag: 'v0.31.0',
+  runId: 123,
+}
+const run = {
+  id: config.runId,
+  event: 'push',
+  head_branch: 'main',
+  head_sha: config.commit,
+  head_repository: { full_name: config.repository },
+  path: '.github/workflows/android.yaml',
+  status: 'completed',
+  conclusion: 'success',
+}
 const directories = []
 
 async function fixture(directory, context = config) {

@@ -1,5 +1,12 @@
 import { execFile, spawn } from 'node:child_process'
-import { access, mkdir, open, readFile, rename, writeFile } from 'node:fs/promises'
+import {
+  access,
+  mkdir,
+  open,
+  readFile,
+  rename,
+  writeFile,
+} from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -11,6 +18,7 @@ const exec = promisify(execFile)
 const port = 5580
 const serial = `emulator-${port}`
 const stateFile = env => path.join(env.ANDROID_USER_HOME, 'leo-emulator.json')
+
 async function identity(pid) {
   const fields = (await readFile(`/proc/${pid}/stat`, 'utf8')).split(') ').at(-1).split(' ')
   if (fields[0] === 'Z')
@@ -28,22 +36,32 @@ async function running(env) {
   }
   catch { return null }
 }
+
 async function adb(env, args) {
   const result = await exec(path.join(env.ANDROID_HOME, 'platform-tools/adb'), ['-s', serial, ...args], { env, timeout: 10000, maxBuffer: 1024 * 1024 })
   return result.stdout.trim()
 }
+
 export function apiLevel(value) {
   if (!/^\d{2}$/.test(value || '') || Number(value) < 29 || Number(value) > 99)
     throw new Error('Choose an Android API level between 29 and 99.')
   return value
 }
+
 export async function emulator(action, args, env, setup, run) {
   const current = await running(env)
   if (action === 'status') {
     const booted = current && await adb(env, ['shell', 'getprop', 'sys.boot_completed']).catch(() => '') === '1'
-    output(JSON.stringify({ state: booted ? 'ready' : current ? 'booting' : 'stopped', serial: current ? serial : null, acceleration: current?.acceleration, api: current?.api, image: current ? current.image || 'google-apis' : null }))
+    output(JSON.stringify({
+      state: booted ? 'ready' : current ? 'booting' : 'stopped',
+      serial: current ? serial : null,
+      acceleration: current?.acceleration,
+      api: current?.api,
+      image: current ? current.image || 'google-apis' : null,
+    }))
     return
   }
+
   if (action === 'stop') {
     if (current) {
       await adb(env, ['emu', 'kill']).catch(() => {})
@@ -55,9 +73,11 @@ export async function emulator(action, args, env, setup, run) {
       if (await running(env))
         process.kill(current.pid, 'SIGKILL')
     }
+
     output('Android emulator stopped. Device data is preserved.')
     return
   }
+
   if (action !== 'start')
     throw new Error('Usage: leo-android emulator start <API> [--aosp] [--accept-licenses] | status | stop')
   const api = apiLevel(args[0])
@@ -86,6 +106,7 @@ export async function emulator(action, args, env, setup, run) {
       const lines = config.split('\n').filter(line => !Object.hasOwn(display, line.split('=')[0].trim()))
       await writeFile(configPath, [...lines, ...Object.entries(display).map(([key, value]) => `${key}=${value}`)].join('\n'))
     }
+
     const acceleration = await access('/dev/kvm', 6).then(() => 'kvm', () => 'software')
     const logPath = path.join(env.ANDROID_USER_HOME, 'leo-emulator.log')
     const log = await open(logPath, 'w', 0o600)
@@ -96,23 +117,41 @@ export async function emulator(action, args, env, setup, run) {
     })
     await log.close()
     child.unref()
-    state = { pid: child.pid, ...await identity(child.pid), serial, api, image, acceleration, logPath }
+    state = {
+      pid: child.pid,
+      ...await identity(child.pid),
+      serial,
+      api,
+      image,
+      acceleration,
+      logPath,
+    }
     const temporary = `${stateFile(env)}.tmp`
     await writeFile(temporary, JSON.stringify(state), { mode: 0o600 })
     await rename(temporary, stateFile(env))
     output(`Booting Android API ${api} (${acceleration}). Log: ${logPath}`)
   }
+
   // Nested KVM on older hosts can exceed three minutes even while boot progresses.
   const deadline = Date.now() + 600000
   while (Date.now() < deadline) {
     if (!await running(env))
       throw new Error(`Emulator exited. Inspect ${state.logPath}.`)
     if (await adb(env, ['shell', 'getprop', 'sys.boot_completed']).catch(() => '') === '1') {
-      output(JSON.stringify({ state: 'ready', serial, api, image: state.image || 'google-apis', acceleration: state.acceleration, adb: `adb -s ${serial}` }))
+      output(JSON.stringify({
+        state: 'ready',
+        serial,
+        api,
+        image: state.image || 'google-apis',
+        acceleration: state.acceleration,
+        adb: `adb -s ${serial}`,
+      }))
       return
     }
+
     await sleep(2000)
   }
+
   if (await running(env))
     process.kill(state.pid, 'SIGTERM')
   throw new Error(`Android boot timed out (${state.acceleration}); emulator stopped. Inspect ${state.logPath}. JVM tests are not a replacement for device validation.`)

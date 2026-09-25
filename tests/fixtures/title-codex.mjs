@@ -25,6 +25,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     account = params.chatgptAccountId
     result = { type: 'chatgptAuthTokens' }
   }
+
   if (method === 'model/list')
     result = { data: [{ model: 'gpt-6-luna', supportedReasoningEfforts: [{ reasoningEffort: account === 'unsupported' ? 'low' : 'xhigh' }] }], nextCursor: null }
   if (method === 'thread/start') {
@@ -39,6 +40,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     thread = `title-thread-${++threads}`
     result = { thread: { id: thread } }
   }
+
   if (method === 'turn/start') {
     assert.equal(params.threadId, thread)
     assert.equal(params.model, 'gpt-6-luna')
@@ -49,6 +51,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       emit({ id, result: { turn: { id: 'title-turn' } } })
       continue
     }
+
     const input = JSON.parse(params.input[0].text)
     assert.ok(Array.isArray(input.messages))
     assert.ok(JSON.stringify(input.messages).length <= 64_000)
@@ -72,11 +75,13 @@ for await (const line of createInterface({ input: process.stdin })) {
     else {
       output = { title: transcript.includes('Android') ? 'Mises à jour Android' : input.currentTitle }
     }
+
     const text = account === 'malformed' ? 'not JSON' : JSON.stringify(output)
     // Notifications deliberately precede the response to catch lost fast results.
     emit({ method: 'item/completed', params: { threadId: thread, item: { type: 'agentMessage', text } } })
     emit({ method: 'turn/completed', params: { threadId: thread, turn: { status: account === 'failed' ? 'failed' : 'completed' } } })
     result = { turn: { id: 'title-turn' } }
   }
+
   emit({ id, result })
 }

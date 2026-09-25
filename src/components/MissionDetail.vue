@@ -1,17 +1,56 @@
 <script setup lang="ts">
 import type { RunListItem, Task } from '../../shared/contracts'
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import {
+  computed,
+  onBeforeUnmount,
+  ref,
+  watch,
+} from 'vue'
 import { api, date, state } from '../api'
-import { Archive, ArrowUpRight, Check, ChevronDown, ChevronRight, Clock, Copy, MoreHorizontal, Pause, Pencil, Play, Trash2, X } from '../icons'
-import { activeRun, describeSchedule, elapsedMinutes, runDuration, successRate, upcomingStamp } from '../missions'
+import {
+  Archive,
+  ArrowUpRight,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Clock,
+  Copy,
+  MoreHorizontal,
+  Pause,
+  Pencil,
+  Play,
+  Trash2,
+  X,
+} from '../icons'
+import {
+  activeRun,
+  describeSchedule,
+  elapsedMinutes,
+  runDuration,
+  successRate,
+  upcomingStamp,
+} from '../missions'
 import AgentAvatar from './AgentAvatar.vue'
 import Icon from './Icon.vue'
 import Markdown from './Markdown.vue'
 import ProjectLabel from './ProjectLabel.vue'
 
 // One mission as on Android: who runs it, when, what it asks, how it went, and what to do next.
-const props = defineProps<{ task: Task, latest?: RunListItem, sheet?: boolean, busy?: boolean }>()
-const emit = defineEmits<{ run: [], edit: [], pause: [], duplicate: [], archive: [], remove: [], close: [] }>()
+const props = defineProps<{
+  task: Task
+  latest?: RunListItem
+  sheet?: boolean
+  busy?: boolean
+}>()
+const emit = defineEmits<{
+  run: []
+  edit: []
+  pause: []
+  duplicate: []
+  archive: []
+  remove: []
+  close: []
+}>()
 const history = ref<RunListItem[] | null>(null)
 const occurrences = ref<number[]>([])
 const promptOpen = ref(false)
@@ -22,12 +61,14 @@ const wording = computed(() => describeSchedule(props.task))
 const time = computed(() => wording.value.match(/\d{2}:\d{2}$/)?.[0])
 const rate = computed(() => history.value && successRate(history.value))
 let timer: ReturnType<typeof setInterval> | undefined
+
 async function loadHistory() {
   try {
     history.value = await api<RunListItem[]>(`/runs?taskId=${encodeURIComponent(props.task.id)}&limit=10`)
   }
   catch { history.value ??= [] }
 }
+
 watch(() => props.task.id, () => {
   history.value = null
   promptOpen.value = false
@@ -49,6 +90,7 @@ watch(() => props.latest?.status, (now, before) => {
     void loadHistory()
 })
 onBeforeUnmount(() => clearInterval(timer))
+
 function act(event: 'duplicate' | 'archive' | 'remove') {
   menu.value = false
   if (event === 'duplicate')
@@ -58,8 +100,16 @@ function act(event: 'duplicate' | 'archive' | 'remove') {
   else
     emit('remove')
 }
+
 const tile = (status: RunListItem['status']) => status === 'succeeded' ? { icon: Check, class: 'bg-success/14 text-success' } : status === 'failed' || status === 'interrupted' ? { icon: X, class: 'bg-coral/14 text-coral' } : activeRun(status) ? { icon: Play, class: 'bg-accent/14 text-accent' } : { icon: Pause, class: 'bg-muted/14 text-muted' }
-const statusLabels: Record<RunListItem['status'], string> = { queued: 'Queued', running: 'Running', succeeded: 'Finished', failed: 'Failed', cancelled: 'Cancelled', interrupted: 'Interrupted' }
+const statusLabels: Record<RunListItem['status'], string> = {
+  queued: 'Queued',
+  running: 'Running',
+  succeeded: 'Finished',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+  interrupted: 'Interrupted',
+}
 </script>
 
 <template>
@@ -73,17 +123,37 @@ const statusLabels: Record<RunListItem['status'], string> = { queued: 'Queued', 
         <ProjectLabel :name="project?.name ?? 'All allowed projects'" :identity="project?.id" />
       </div>
       <div class="relative">
-        <button class="grid size-10 place-items-center rounded-full text-muted hover:bg-hover hover:text-ink" aria-label="Mission actions" :aria-expanded="menu" @click="menu = !menu">
+        <button
+          class="grid size-10 place-items-center rounded-full text-muted hover:bg-hover hover:text-ink"
+          aria-label="Mission actions"
+          :aria-expanded="menu"
+          @click="menu = !menu"
+        >
           <Icon :name="MoreHorizontal" :size="19" />
         </button>
         <div v-if="menu" class="absolute top-11 right-0 z-20 w-56 rounded-xl border border-line bg-raised p-1.5 shadow-[0_9px_25px_#0002]" role="menu">
-          <button class="mission-menu-item" role="menuitem" :disabled="busy" @click="act('duplicate')">
+          <button
+            class="mission-menu-item"
+            role="menuitem"
+            :disabled="busy"
+            @click="act('duplicate')"
+          >
             <Icon :name="Copy" :size="15" />Duplicate (paused)
           </button>
-          <button class="mission-menu-item" role="menuitem" :disabled="busy" @click="act('archive')">
+          <button
+            class="mission-menu-item"
+            role="menuitem"
+            :disabled="busy"
+            @click="act('archive')"
+          >
             <Icon :name="Archive" :size="15" />{{ task.archived ? 'Restore (paused)' : 'Archive' }}
           </button>
-          <RouterLink v-if="latest" class="mission-menu-item" role="menuitem" :to="`/runs/${latest.id}`">
+          <RouterLink
+            v-if="latest"
+            class="mission-menu-item"
+            role="menuitem"
+            :to="`/runs/${latest.id}`"
+          >
             <Icon :name="ArrowUpRight" :size="15" />Open the latest run
           </RouterLink>
           <button class="mission-menu-item text-danger" role="menuitem" @click="act('remove')">
@@ -91,7 +161,12 @@ const statusLabels: Record<RunListItem['status'], string> = { queued: 'Queued', 
           </button>
         </div>
       </div>
-      <button v-if="sheet" class="grid size-10 place-items-center rounded-full text-muted hover:bg-hover hover:text-ink" aria-label="Close mission" @click="emit('close')">
+      <button
+        v-if="sheet"
+        class="grid size-10 place-items-center rounded-full text-muted hover:bg-hover hover:text-ink"
+        aria-label="Close mission"
+        @click="emit('close')"
+      >
         <Icon :name="X" :size="19" />
       </button>
     </div>
@@ -118,7 +193,13 @@ const statusLabels: Record<RunListItem['status'], string> = { queued: 'Queued', 
           Next
         </p>
         <p class="mt-1.5! mb-0! flex justify-end gap-1.5">
-          <span v-for="(value, index) in occurrences" :key="value" class="rounded-full px-2.5 py-1 text-xs font-semibold" :class="index ? 'bg-variant text-ink' : 'bg-ink text-canvas'" :title="date(value)">{{ upcomingStamp(value).split(' · ')[0] }}</span>
+          <span
+            v-for="(value, index) in occurrences"
+            :key="value"
+            class="rounded-full px-2.5 py-1 text-xs font-semibold"
+            :class="index ? 'bg-variant text-ink' : 'bg-ink text-canvas'"
+            :title="date(value)"
+          >{{ upcomingStamp(value).split(' · ')[0] }}</span>
         </p>
       </div>
     </section>
@@ -160,10 +241,21 @@ const statusLabels: Record<RunListItem['status'], string> = { queued: 'Queued', 
       </li>
     </ul>
     <div class="mt-4 flex items-center gap-2.5">
-      <button class="mission-round" aria-label="Edit mission" :disabled="busy" @click="emit('edit')">
+      <button
+        class="mission-round"
+        aria-label="Edit mission"
+        :disabled="busy"
+        @click="emit('edit')"
+      >
         <Icon :name="Pencil" :size="18" />
       </button>
-      <button v-if="!task.archived && task.cron" class="mission-round" :aria-label="task.enabled ? 'Pause schedule' : 'Resume schedule'" :disabled="busy" @click="emit('pause')">
+      <button
+        v-if="!task.archived && task.cron"
+        class="mission-round"
+        :aria-label="task.enabled ? 'Pause schedule' : 'Resume schedule'"
+        :disabled="busy"
+        @click="emit('pause')"
+      >
         <Icon :name="task.enabled ? Pause : Clock" :size="18" />
       </button>
       <button class="flex h-13 min-w-0 flex-1 items-center justify-center gap-2 rounded-full bg-ink px-5 text-sm font-semibold text-canvas hover:opacity-90 disabled:opacity-40" :disabled="busy || task.archived" @click="emit('run')">

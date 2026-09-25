@@ -16,10 +16,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.graphics.vector.path
@@ -62,7 +62,10 @@ internal fun identityColor(key: String): Color =
 internal fun initial(name: String): String =
     name.trim().firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()?.toString() ?: "?"
 
-internal enum class AvatarBadge { LIVE, ATTENTION }
+internal enum class AvatarBadge {
+    LIVE,
+    ATTENTION,
+}
 
 @Composable
 internal fun AgentAvatar(
@@ -73,7 +76,9 @@ internal fun AgentAvatar(
 ) {
     Box(Modifier.clearAndSetSemantics {}) {
         Box(
-            Modifier.size(size).clip(RoundedCornerShape(size * 0.3f)).background(identityColor(key)),
+            Modifier.size(size)
+                .clip(RoundedCornerShape(size * 0.3f))
+                .background(identityColor(key)),
             contentAlignment = Alignment.Center,
         ) {
             AgentPortraitImage(key) {
@@ -106,12 +111,19 @@ internal fun AgentAvatar(
 @Composable
 internal fun ProjectLabel(name: String, key: String?, modifier: Modifier = Modifier) {
     Row(modifier, verticalAlignment = Alignment.CenterVertically) {
-        // No project means "every allowed project": a neutral outline rather than an identity colour.
+        // No project means "every allowed project": a neutral outline rather than an identity
+        // colour.
         Box(
-            Modifier.size(7.dp).then(
-                if (key != null) Modifier.background(identityColor(key), CircleShape)
-                else Modifier.border(1.dp, MaterialTheme.colorScheme.onSurfaceVariant, CircleShape)
-            )
+            Modifier.size(7.dp)
+                .then(
+                    if (key != null) Modifier.background(identityColor(key), CircleShape)
+                    else
+                        Modifier.border(
+                            1.dp,
+                            MaterialTheme.colorScheme.onSurfaceVariant,
+                            CircleShape,
+                        )
+                )
         )
         Spacer(Modifier.width(6.dp))
         Text(
@@ -186,7 +198,11 @@ internal fun RoundAction(
                     .background(if (enabled) container else container.copy(alpha = 0.5f))
                     .then(
                         if (outlined)
-                            Modifier.border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
+                            Modifier.border(
+                                1.dp,
+                                MaterialTheme.colorScheme.outlineVariant,
+                                CircleShape,
+                            )
                         else Modifier
                     ),
                 contentAlignment = Alignment.Center,
@@ -231,7 +247,12 @@ internal fun SignalButton(
                     .clip(CircleShape)
                     .background(if (enabled) container else container.copy(alpha = 0.4f))
                     .then(
-                        if (border) Modifier.border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
+                        if (border)
+                            Modifier.border(
+                                1.dp,
+                                MaterialTheme.colorScheme.outlineVariant,
+                                CircleShape,
+                            )
                         else Modifier
                     )
                     .padding(horizontal = 16.dp),
@@ -263,15 +284,18 @@ internal fun SignalChip(
 ) {
     val ink = signal.ink
     Row(
-        Modifier.heightIn(min = 48.dp)
-            .selectable(selected, role = Role.Tab, onClick = onClick),
+        Modifier.heightIn(min = 48.dp).selectable(selected, role = Role.Tab, onClick = onClick),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Row(
             Modifier.height(36.dp)
                 .clip(CircleShape)
                 .background(if (selected) ink else Color.Transparent)
-                .border(1.dp, if (selected) ink else MaterialTheme.colorScheme.outlineVariant, CircleShape)
+                .border(
+                    1.dp,
+                    if (selected) ink else MaterialTheme.colorScheme.outlineVariant,
+                    CircleShape,
+                )
                 .padding(horizontal = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(7.dp),
@@ -307,9 +331,16 @@ internal fun SignalCard(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val shape = RoundedCornerShape(22.dp)
-    val border = if (outlined) BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant) else null
+    val border =
+        if (outlined) BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant) else null
     if (onClick != null)
-        Surface(onClick = onClick, modifier = modifier, shape = shape, color = color, border = border) {
+        Surface(
+            onClick = onClick,
+            modifier = modifier,
+            shape = shape,
+            color = color,
+            border = border,
+        ) {
             Column(Modifier.padding(padding), content = content)
         }
     else
@@ -322,7 +353,8 @@ internal fun SignalCard(
 @Composable
 internal fun LiveChip(text: String, modifier: Modifier = Modifier) {
     Row(
-        modifier.clip(CircleShape)
+        modifier
+            .clip(CircleShape)
             .background(MaterialTheme.colorScheme.primary)
             .padding(horizontal = 8.dp, vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -350,7 +382,11 @@ internal fun elapsed(start: Long?, now: Long = System.currentTimeMillis()): Stri
 }
 
 /** Short relative stamp for lists: time today, "Hier", weekday this week, else a date. */
-internal fun shortStamp(value: Long, now: Long = System.currentTimeMillis(), zone: ZoneId = ZoneId.systemDefault()): String {
+internal fun shortStamp(
+    value: Long,
+    now: Long = System.currentTimeMillis(),
+    zone: ZoneId = ZoneId.systemDefault(),
+): String {
     if (value <= 0) return ""
     val day = Instant.ofEpochMilli(value).atZone(zone)
     val today = Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
@@ -358,15 +394,23 @@ internal fun shortStamp(value: Long, now: Long = System.currentTimeMillis(), zon
     return when {
         date == today -> DateTimeFormatter.ofPattern("HH:mm").format(day)
         date == today.minusDays(1) -> "Hier"
-        date.isAfter(today.minusDays(7)) -> DateTimeFormatter.ofPattern("EEE", Locale.FRENCH).format(day)
-            .replaceFirstChar { it.titlecase(Locale.FRENCH) }
+        date.isAfter(today.minusDays(7)) ->
+            DateTimeFormatter.ofPattern("EEE", Locale.FRENCH).format(day).replaceFirstChar {
+                it.titlecase(Locale.FRENCH)
+            }
         date.year == today.year -> DateTimeFormatter.ofPattern("d MMM", Locale.FRENCH).format(day)
         else -> DateTimeFormatter.ofPattern("d MMM yyyy", Locale.FRENCH).format(day)
     }
 }
 
-/** Upcoming date for schedules: "Aujourd’hui · 09:00", "Demain · 09:00", "lun. 29 sept. · 09:00". */
-internal fun upcomingStamp(value: Long, now: Long = System.currentTimeMillis(), zone: ZoneId = ZoneId.systemDefault()): String {
+/**
+ * Upcoming date for schedules: "Aujourd’hui · 09:00", "Demain · 09:00", "lun. 29 sept. · 09:00".
+ */
+internal fun upcomingStamp(
+    value: Long,
+    now: Long = System.currentTimeMillis(),
+    zone: ZoneId = ZoneId.systemDefault(),
+): String {
     if (value <= 0) return ""
     val moment = Instant.ofEpochMilli(value).atZone(zone)
     val today = Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
@@ -376,7 +420,8 @@ internal fun upcomingStamp(value: Long, now: Long = System.currentTimeMillis(), 
         when {
             day == today -> "Aujourd’hui"
             day == today.plusDays(1) -> "Demain"
-            day.year == today.year -> DateTimeFormatter.ofPattern("EEE d MMM", Locale.FRENCH).format(moment)
+            day.year == today.year ->
+                DateTimeFormatter.ofPattern("EEE d MMM", Locale.FRENCH).format(moment)
             else -> DateTimeFormatter.ofPattern("EEE d MMM yyyy", Locale.FRENCH).format(moment)
         }
     return "$label · $time"
@@ -420,7 +465,9 @@ internal fun LeoDock(
                     Modifier.weight(if (on) 1.35f else 1f)
                         .fillMaxHeight()
                         .clip(CircleShape)
-                        .background(if (on) MaterialTheme.colorScheme.primary else Color.Transparent)
+                        .background(
+                            if (on) MaterialTheme.colorScheme.primary else Color.Transparent
+                        )
                         .selectable(on, role = Role.Tab) { navigate(item.route) },
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically,

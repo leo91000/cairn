@@ -54,6 +54,7 @@ async fn authorize(s: &Service, node: &str, attempt: &str) -> Result<(Value, Val
     }
     Ok((run, plan))
 }
+
 pub async fn handle(State(app): State<App>, request: Request) -> Result<Response> {
     let input = Input::read(request).await?;
     let s = &app.service;
@@ -97,15 +98,15 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
                 })
                 .await?;
             super::record_lease(s, attempt, lease_ms).await;
-            Ok(Json(json!({"remainingMs":lease_ms})).into_response())
+            Ok(Json(json!({"remainingMs": lease_ms})).into_response())
         }
-        "plan" => Ok(Json(json!({"plan":plan,"dataRoot":s.config.data_dir})).into_response()),
+        "plan" => Ok(Json(json!({"plan": plan,"dataRoot": s.config.data_dir})).into_response()),
         "inbox" => {
             let path = root.join("chat-input/messages.json");
             let bytes = tokio::fs::read(path)
                 .await
                 .unwrap_or_else(|_| b"[]".to_vec());
-            Ok(Json(json!({"messages":serde_json::from_slice::<Value>(&bytes)?})).into_response())
+            Ok(Json(json!({"messages": serde_json::from_slice::<Value>(&bytes)?})).into_response())
         }
         "seed" => {
             let source = match text(&input.body, "kind") {
@@ -151,11 +152,12 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
                 return Err(Error::bad("Result exceeds limit."));
             }
             crate::skills::atomic_write(&root.join("output/result.md"), result.as_bytes()).await?;
-            Ok(Json(json!({"ok":true})).into_response())
+            Ok(Json(json!({"ok": true})).into_response())
         }
         _ => Err(Error::new(404, "Unknown workspace operation.")),
     }
 }
+
 async fn relay_auth(path: &Path, value: &Value) -> Result<Value> {
     if serde_json::to_vec(value)?.len() > 32768 {
         return Err(Error::bad("Invalid authentication request."));
@@ -170,6 +172,7 @@ async fn relay_auth(path: &Path, value: &Value) -> Result<Value> {
     .await
     .map_err(|_| Error::new(503, "Authentication unavailable."))?
 }
+
 pub async fn fetch(
     client: &reqwest::Client,
     master: &url::Url,
@@ -197,6 +200,7 @@ pub async fn fetch(
     }
     Ok(response)
 }
+
 pub async fn seed(
     client: &reqwest::Client,
     master: &url::Url,
@@ -224,6 +228,7 @@ pub async fn seed(
     tokio::fs::rename(temp.path(), target).await?;
     Ok(())
 }
+
 pub async fn auth_listener(
     path: PathBuf,
     client: reqwest::Client,
@@ -239,7 +244,8 @@ pub async fn auth_listener(
     use std::os::unix::fs::PermissionsExt;
     tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await?;
     loop {
-        let accepted = tokio::select! {_=stop.cancelled()=>break,result=listener.accept()=>result};
+        let accepted =
+            tokio::select! {_ = stop.cancelled() => break,result = listener.accept() => result};
         let Ok((socket, _)) = accepted else { break };
         let operation = async {
             let mut stream = BufReader::new(socket);
@@ -255,7 +261,10 @@ pub async fn auth_listener(
             stream.get_mut().shutdown().await?;
             Ok::<_, Error>(())
         };
-        tokio::select! {_=stop.cancelled()=>break,_=tokio::time::timeout(Duration::from_secs(45), operation)=>{}}
+        tokio::select! {
+            _ = stop.cancelled() => break,
+            _ = tokio::time::timeout(Duration::from_secs(45), operation) => {}
+        }
     }
     let _ = tokio::fs::remove_file(path).await;
     Ok(())

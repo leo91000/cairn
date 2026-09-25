@@ -18,6 +18,7 @@ struct Fixture {
     run: String,
     server: tokio::task::JoinHandle<()>,
 }
+
 impl Fixture {
     async fn new() -> Self {
         let root = TempDir::new().unwrap();
@@ -43,7 +44,11 @@ impl Fixture {
         let token = text(&service.auth.session().await.unwrap(), "value").to_owned();
         let task = service
             .task(
-                json!({"name":"Live test","prompt":"Test","agentId":MAIN_AGENT_ID}),
+                json!({
+                    "name": "Live test",
+                    "prompt": "Test",
+                    "agentId": MAIN_AGENT_ID
+                }),
                 None,
             )
             .await
@@ -62,6 +67,7 @@ impl Fixture {
             server,
         }
     }
+
     async fn open(&self, after: i64) -> Stream {
         self.open_path(
             &format!("/api/runs/{}/stream?after={after}", self.run),
@@ -69,6 +75,7 @@ impl Fixture {
         )
         .await
     }
+
     async fn open_path(&self, path: &str, last: Option<i64>) -> Stream {
         let mut request = reqwest::Client::new()
             .get(format!("{}{path}", self.url))
@@ -91,6 +98,7 @@ impl Fixture {
             pending: String::new(),
         }
     }
+
     async fn append(&self, count: usize) {
         let run = self.run.clone();
         self.service
@@ -105,12 +113,14 @@ impl Fixture {
             .unwrap();
     }
 }
+
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.service.shutdown.cancel();
         self.server.abort();
     }
 }
+
 async fn serve(service: Arc<Service>) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -120,10 +130,12 @@ async fn serve(service: Arc<Service>) -> (String, tokio::task::JoinHandle<()>) {
     });
     (url, server)
 }
+
 struct Stream {
     response: reqwest::Response,
     pending: String,
 }
+
 impl Stream {
     async fn batch(&mut self) -> (i64, Value) {
         tokio::time::timeout(Duration::from_secs(4), async {
@@ -157,6 +169,7 @@ impl Stream {
         .await
         .expect("stream stalled")
     }
+
     async fn through(&mut self, end: i64) -> Vec<i64> {
         let mut ids = Vec::new();
         loop {
@@ -174,6 +187,7 @@ impl Stream {
         }
     }
 }
+
 async fn ids(f: &Fixture) -> Vec<i64> {
     let run = f.run.clone();
     f.service
@@ -304,7 +318,13 @@ async fn metadata_auth_revocation_and_invalid_requests() {
     stream.batch().await;
     f.service
         .store
-        .patch_run(&f.run, json!({"status":"succeeded","result":"Done"}))
+        .patch_run(
+            &f.run,
+            json!({
+                "status": "succeeded",
+                "result": "Done"
+            }),
+        )
         .await
         .unwrap();
     let (_, batch) = stream.batch().await;
@@ -369,7 +389,10 @@ async fn chat_state_questions_and_artifacts_update_without_text_events() {
         .store
         .set(
             &format!("chat-question:{chat_id}:question"),
-            json!({"id":"question","status":"pending"}),
+            json!({
+                "id": "question",
+                "status": "pending"
+            }),
             None,
         )
         .await
@@ -382,7 +405,10 @@ async fn chat_state_questions_and_artifacts_update_without_text_events() {
         .store
         .set(
             &format!("artifact:{}:file", f.run),
-            json!({"id":"file","previewStatus":"pending"}),
+            json!({
+                "id": "file",
+                "previewStatus": "pending"
+            }),
             None,
         )
         .await
@@ -395,7 +421,10 @@ async fn chat_state_questions_and_artifacts_update_without_text_events() {
         .store
         .set(
             &format!("artifact:{}:file", f.run),
-            json!({"id":"file","previewStatus":"ready"}),
+            json!({
+                "id": "file",
+                "previewStatus": "ready"
+            }),
             None,
         )
         .await
@@ -443,7 +472,13 @@ async fn wire_deltas_reestablish_baselines_after_reconnect_and_keep_rest_compati
                 &f.run,
                 "item.updated",
                 content,
-                Some(json!({"item":{"id":"message","type":"agent_message","text":content}})),
+                Some(json!({
+                    "item": {
+                        "id": "message",
+                        "type": "agent_message",
+                        "text": content
+                    }
+                })),
             )
             .await
             .unwrap();
@@ -621,12 +656,22 @@ async fn paginated_chat_metadata_keeps_pending_messages_without_replaying_delive
     let id = text(&chat, "id").to_owned();
     f.service.store.put("chats", chat).await.unwrap();
     let chat_id = id.clone();
-    f.service.store.transaction(move |db| {
-        for status in ["delivered", "queued"] {
-            db.put_message(&json!({"id":status,"chatId":chat_id,"createdAt":1,"status":status,"text":"A message"}))?;
-        }
-        Ok(())
-    }).await.unwrap();
+    f.service
+        .store
+        .transaction(move |db| {
+            for status in ["delivered", "queued"] {
+                db.put_message(&json!({
+                    "id": status,
+                    "chatId": chat_id,
+                    "createdAt": 1,
+                    "status": status,
+                    "text": "A message"
+                }))?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
     let mut modern = f
         .open_path(&format!("/api/chats/{id}/stream?window=1"), None)
         .await;
@@ -660,7 +705,13 @@ async fn profile_long_answer_delivery_with_small_wire_deltas() {
                     &f.run,
                     "item.updated",
                     value,
-                    Some(json!({"item":{"id":"profile","type":"agent_message","text":value}})),
+                    Some(json!({
+                        "item": {
+                            "id": "profile",
+                            "type": "agent_message",
+                            "text": value
+                        }
+                    })),
                 )
                 .await
                 .unwrap();
@@ -682,7 +733,13 @@ async fn profile_long_answer_delivery_with_small_wire_deltas() {
         times.sort_by(|a, b| a.total_cmp(b));
         println!(
             "STREAM_SERVER_PROFILE {}",
-            json!({"characters":length,"samples":times.len(),"p50_ms":times[9],"p95_ms":times[17],"max_batch_bytes":bytes.into_iter().max()})
+            json!({
+                "characters": length,
+                "samples": times.len(),
+                "p50_ms": times[9],
+                "p95_ms": times[17],
+                "max_batch_bytes": bytes.into_iter().max()
+            })
         );
     }
 }
@@ -699,7 +756,13 @@ async fn backwards_pages_skip_superseded_long_answers_but_keep_reused_ids_in_old
                 &run,
                 "item.completed",
                 "previous turn",
-                Some(&json!({"item":{"id":"m","type":"agent_message","text":"previous turn"}})),
+                Some(&json!({
+                    "item": {
+                        "id": "m",
+                        "type": "agent_message",
+                        "text": "previous turn"
+                    }
+                })),
             )?;
             db.event(&run, "turn.completed", "", None)?;
             db.event(&run, "turn.started", "", None)?;
@@ -710,7 +773,13 @@ async fn backwards_pages_skip_superseded_long_answers_but_keep_reused_ids_in_old
                     &run,
                     "item.updated",
                     &text,
-                    Some(&json!({"item":{"id":"m","type":"agent_message","text":text}})),
+                    Some(&json!({
+                        "item": {
+                            "id": "m",
+                            "type": "agent_message",
+                            "text": text
+                        }
+                    })),
                 )?;
             }
             Ok(())

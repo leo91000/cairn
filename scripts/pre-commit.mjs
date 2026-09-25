@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import process from 'node:process'
 
 const diff = () => execFileSync('git', ['diff', '--no-ext-diff', '--binary'], { maxBuffer: 64 * 1024 * 1024 })
+
 function run(command, args) {
   const result = spawnSync(command, args, { stdio: 'inherit' })
 
@@ -16,6 +17,11 @@ function run(command, args) {
 
 const before = diff()
 run('pnpm', ['lint:fix'])
+
+const staged = execFileSync('git', ['diff', '--cached', '--name-only', '-z'], { encoding: 'utf8' }).split('\0')
+
+if (staged.some(file => file.startsWith('android/') && /\.kts?$/.test(file)))
+  run('pnpm', ['format:android'])
 
 if (!before.equals(diff())) {
   console.error('Lint fixes changed tracked files. Review and stage the fixes, then retry your commit.')

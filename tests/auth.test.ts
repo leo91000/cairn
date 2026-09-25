@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
 import { fixture } from './helpers.ts'
 import { digest, safeEqual } from './legacy/server/auth.ts'
 
@@ -156,6 +163,7 @@ describe('administrator and OAuth credentials', () => {
         /Invalid/,
       )
     }
+
     const tokens = ctx.auth.exchange(exchange)
     expect(ctx.auth.verify(tokens.access_token, 'run').scopes).toEqual([
       'read',
@@ -202,6 +210,7 @@ describe('administrator and OAuth credentials', () => {
         /HTTPS/,
       )
     }
+
     const { exchange } = authorization()
     const tokens = ctx.auth.exchange(exchange)
     ctx.auth.revokeToken(tokens.refresh_token, exchange.client_id)

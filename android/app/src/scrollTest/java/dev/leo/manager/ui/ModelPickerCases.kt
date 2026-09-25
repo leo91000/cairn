@@ -99,10 +99,7 @@ abstract class ModelPickerCases {
         captureReasoning()
         compose.onNodeWithText("Terminé").performClick()
         restoration.emulateSavedInstanceStateRestore()
-        compose
-            .onNodeWithTag("model-picker")
-            .assertTextContains("Ultra")
-            .performClick()
+        compose.onNodeWithTag("model-picker").assertTextContains("Ultra").performClick()
         compose.onNodeWithTag("reasoning-default").performScrollTo().performClick()
         compose
             .onNodeWithTag("reasoning-slider")
@@ -136,7 +133,12 @@ abstract class ModelPickerCases {
         val claude =
             ModelCatalog(
                 listOf(
-                    CodexModel("default", "Default (recommended)", "Opus avec 1M de contexte", isDefault = true),
+                    CodexModel(
+                        "default",
+                        "Default (recommended)",
+                        "Opus avec 1M de contexte",
+                        isDefault = true,
+                    ),
                     CodexModel("sonnet", "Sonnet"),
                 )
             )
@@ -147,7 +149,8 @@ abstract class ModelPickerCases {
         }
         compose.onNodeWithTag("model-picker").performClick()
         compose.onAllNodes(hasText("Default (recommended)") and isSelectable()).assertCountEquals(0)
-        compose.onNode(hasText("Modèle par défaut") and isSelectable())
+        compose
+            .onNode(hasText("Modèle par défaut") and isSelectable())
             .assertIsSelected()
             .assert(hasText("Opus avec 1M de contexte"))
         compose.onNodeWithText("Sonnet").assertExists()

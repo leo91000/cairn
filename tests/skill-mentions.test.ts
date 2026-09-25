@@ -1,11 +1,41 @@
 import type { Agent, Skill } from '../shared/contracts'
 import { describe, expect, it } from 'vitest'
-import { chatSkills, insertSkill, matchSkills, mentionAt, mentionSegments } from '../src/skill-mentions'
+import {
+  chatSkills,
+  insertSkill,
+  matchSkills,
+  mentionAt,
+  mentionSegments,
+} from '../src/skill-mentions'
 
 const project = '11111111-1111-4111-8111-111111111111'
 const other = '22222222-2222-4222-8222-222222222222'
-const skill = (name: string, scope = 'global', extra: Partial<Skill> = {}): Skill => ({ name, scope, description: `${name} description`, content: '', path: '', valid: true, ...extra })
-const agent = (access: Partial<Agent['access']> = {}) => ({ access: { projects: null, skills: null, mcps: null, mcpTools: {}, github: true, sandbox: 'yolo', ...access } }) as unknown as Agent
+
+function skill(name: string, scope = 'global', extra: Partial<Skill> = {}): Skill {
+  return {
+    name,
+    scope,
+    description: `${name} description`,
+    content: '',
+    path: '',
+    valid: true,
+    ...extra,
+  }
+}
+
+function agent(access: Partial<Agent['access']> = {}) {
+  return ({
+    access: {
+      projects: null,
+      skills: null,
+      mcps: null,
+      mcpTools: {},
+      github: true,
+      sandbox: 'yolo',
+      ...access,
+    },
+  }) as unknown as Agent
+}
 
 describe('skill mentions', () => {
   it('offers valid skills the chat agent can use in its project', () => {

@@ -1,7 +1,12 @@
 import { execFileSync } from 'node:child_process'
 import { mkdir } from 'node:fs/promises'
 import path from 'node:path'
-import { expect, expectSingleScroll, initializeRepository, test } from './fixtures'
+import {
+  expect,
+  expectSingleScroll,
+  initializeRepository,
+  test,
+} from './fixtures'
 
 test('reviews the open workspace layout and compact chat controls across themes and sizes', async ({ page, workspace }, testInfo) => {
   test.setTimeout(90000)
@@ -23,6 +28,7 @@ test('reviews the open workspace layout and compact chat controls across themes 
       await page.screenshot({ animations: 'disabled', path: testInfo.outputPath(`chat-new-${theme}-${viewport.width}.png`) })
     }
   }
+
   // The inline selector opens above the composer and keeps keyboard selection.
   const project = page.getByRole('combobox', { name: 'Chat project' })
   await project.click()
@@ -52,6 +58,7 @@ test('reviews the open workspace layout and compact chat controls across themes 
     await expect(page.getByRole('button', { name: 'Stop response' })).toBeInViewport()
     await page.screenshot({ animations: 'disabled', path: testInfo.outputPath(`chat-conversation-dark-${viewport.width}.png`) })
   }
+
   await page.setViewportSize({ width: 1440, height: 1000 })
   await page.getByRole('button', { name: 'Conversations', exact: true }).click()
   await expect(page.getByRole('dialog', { name: 'Conversations' })).toBeVisible()
@@ -70,10 +77,12 @@ test('reviews the open workspace layout and compact chat controls across themes 
       await expectSingleScroll(page)
       await page.screenshot({ animations: 'disabled', path: testInfo.outputPath(`${route.slice(1)}-${theme}.png`) })
     }
+
     await page.setViewportSize({ width: 390, height: 844 })
     await expectSingleScroll(page)
     await page.screenshot({ animations: 'disabled', path: testInfo.outputPath(`${route.slice(1)}-mobile.png`) })
   }
+
   expect(errors).toEqual([])
 })
 
@@ -86,6 +95,7 @@ test('keeps projects compact and agent summaries readable with several resources
     execFileSync('git', ['-C', projectPath, 'remote', 'add', 'origin', `https://github.com/example/${directory}.git`])
     projects.push(await workspace.service.project({ name, path: projectPath, baseBranch: directory === 'documentation' ? 'docs/developer-guides' : 'main' }))
   }
+
   workspace.service.agent({ name: 'UI builder', description: 'Builds interfaces, checks accessibility and reviews the mobile experience.', access: { projects: [projects[0]!.id], github: false } })
   workspace.service.agent({ name: 'Code reviewer', description: 'Reviews changes across repositories and keeps regressions out.', access: { projects: projects.map(project => project.id), github: false } })
   await page.emulateMedia({ reducedMotion: 'reduce' })
@@ -105,10 +115,12 @@ test('keeps projects compact and agent summaries readable with several resources
           const rows = await page.locator('.resource-card').evaluateAll(elements => elements.map(element => element.getBoundingClientRect().height))
           expect(rows.every(height => height < 110)).toBe(true)
         }
+
         await page.screenshot({ animations: 'disabled', path: testInfo.outputPath(`compact-${resource}-${colorScheme}-${width}.png`) })
       }
     }
   }
+
   await page.goto('/projects')
   await page.getByRole('button', { name: 'Web app', exact: true }).click()
   await expect(page.getByRole('dialog').getByLabel('Project directory')).toHaveValue(projects[0]!.path)
@@ -123,8 +135,26 @@ test('reviews workflow permission, fresh project sources and explicit blocked ou
   await workspace.restart()
   // The latest mission run; earlier journeys in this worker also leave conversation runs.
   const run = workspace.service.store.runs().filter(item => item.trigger !== 'chat').sort((a, b) => b.createdAt - a.createdAt)[0]!
-  workspace.service.store.updateRun(run.id, { status: 'succeeded', summary: 'Validated locally. Delivery is blocked by the missing GitHub workflow permission.', outcome: { status: 'blocked', reason: 'The changes passed validation, but GitHub refused the workflow update.', evidence: ['42 tests passed', 'Push refused: missing workflow permission'], reportedAt: Date.now() } })
-  await page.route('**/api/connections?*', route => route.fulfill({ json: [{ provider: 'github', installed: true, connected: true, account: 'fixture', version: 'gh fixture', workflowPermission: false }] }))
+  workspace.service.store.updateRun(run.id, {
+    status: 'succeeded',
+    summary: 'Validated locally. Delivery is blocked by the missing GitHub workflow permission.',
+    outcome: {
+      status: 'blocked',
+      reason: 'The changes passed validation, but GitHub refused the workflow update.',
+      evidence: ['42 tests passed', 'Push refused: missing workflow permission'],
+      reportedAt: Date.now(),
+    },
+  })
+  await page.route('**/api/connections?*', route => route.fulfill({
+    json: [{
+      provider: 'github',
+      installed: true,
+      connected: true,
+      account: 'fixture',
+      version: 'gh fixture',
+      workflowPermission: false,
+    }],
+  }))
   await page.goto('/connections')
   await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
   await page.getByRole('button', { name: 'Sign in', exact: true }).click()
@@ -135,6 +165,7 @@ test('reviews workflow permission, fresh project sources and explicit blocked ou
     await expectSingleScroll(page)
     await page.screenshot({ animations: 'disabled', path: testInfo.outputPath(`github-permission-${colorScheme}.png`) })
   }
+
   await page.goto('/projects')
   await page.getByRole('button', { name: 'Design system', exact: true }).click()
   const mode = page.getByRole('combobox', { name: 'New work starts from' })
@@ -159,6 +190,7 @@ test('reviews workflow permission, fresh project sources and explicit blocked ou
     await expectSingleScroll(page)
     await page.screenshot({ animations: 'disabled', path: testInfo.outputPath(`blocked-outcome-${colorScheme}.png`) })
   }
+
   // The blocked mission says so on its card, as on Android.
   await page.goto('/tasks')
   await expect(page.locator('.mission-card').filter({ hasText: run.snapshot.task.name })).toContainText('Blocked')

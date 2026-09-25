@@ -18,7 +18,12 @@ export interface ExecutionNode {
   status: 'online' | 'offline' | 'revoked' | 'local'
   tags: string[]
   systemTags?: string[]
-  capabilities: NodeResources & { os: string, arch: string, kvm: boolean, fuse?: boolean }
+  capabilities: NodeResources & {
+    os: string
+    arch: string
+    kvm: boolean
+    fuse?: boolean
+  }
   limits: NodeResources
   reserved?: NodeResources
   available?: NodeResources

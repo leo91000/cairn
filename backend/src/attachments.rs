@@ -24,9 +24,11 @@ use tokio::io::AsyncReadExt;
 
 pub const MAX_FILE: usize = 10 * 1024 * 1024;
 const MAX_MESSAGE: u64 = 40 * 1024 * 1024;
+
 fn key(chat: &str, id: &str) -> String {
     format!("chat-attachment:{chat}:{id}")
 }
+
 fn filename(name: &str) -> String {
     let mut clean = String::new();
     for c in name.chars() {
@@ -47,6 +49,7 @@ fn filename(name: &str) -> String {
         name.into()
     }
 }
+
 fn media(bytes: &[u8]) -> &'static str {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return "image/png";
@@ -62,6 +65,7 @@ fn media(bytes: &[u8]) -> &'static str {
     }
     "application/octet-stream"
 }
+
 pub fn message(db: &Db<'_>, chat: &str, value: &mut Value) -> Result<()> {
     let ids = value["attachmentIds"]
         .as_array()
@@ -97,6 +101,7 @@ pub fn message(db: &Db<'_>, chat: &str, value: &mut Value) -> Result<()> {
     value.as_object_mut().unwrap().remove("attachmentIds");
     Ok(())
 }
+
 pub fn same(a: &Value, b: &Value) -> bool {
     a["attachments"]
         .as_array()
@@ -107,6 +112,7 @@ pub fn same(a: &Value, b: &Value) -> bool {
             .map(Vec::as_slice)
             .unwrap_or(&[])
 }
+
 impl Service {
     fn attachment_path(&self, chat: &str, id: &str) -> PathBuf {
         self.config
@@ -115,6 +121,7 @@ impl Service {
             .join(chat)
             .join(id)
     }
+
     pub async fn attachment_http(
         &self,
         chat: &str,
@@ -171,7 +178,20 @@ impl Service {
                     ));
                 }
                 let media_type = media(&bytes);
-                let attachment = json!({"id":id,"chatId":chat,"name":name,"size":bytes.len(),"mediaType":media_type,"kind":if media_type.starts_with("image/") {"image"} else {"file"},"digest":digest,"createdAt":now()});
+                let attachment = json!({
+                    "id": id,
+                    "chatId": chat,
+                    "name": name,
+                    "size": bytes.len(),
+                    "mediaType": media_type,
+                    "kind": if media_type.starts_with("image/") {
+                        "image"
+                    } else {
+                        "file"
+                    },
+                    "digest": digest,
+                    "createdAt": now(),
+                });
                 let path = self.attachment_path(chat, id);
                 private_dir(path.parent().unwrap()).await?;
                 atomic_write(&path, &bytes).await?;
@@ -232,6 +252,7 @@ impl Service {
             _ => Err(Error::new(405, "Method not allowed.")),
         }
     }
+
     pub async fn prepare_chat_files(&self, run_id: &str, attachments: &Value) -> Result<()> {
         uuid(run_id)?;
         for attachment in attachments.as_array().into_iter().flatten() {
@@ -276,16 +297,32 @@ impl Service {
         Ok(())
     }
 }
+
 pub fn input(message: &str, attachments: &Value, directory: &Path) -> Value {
-    let mut content = vec![json!({"type":"text","text":message,"text_elements":[]})];
+    let mut content = vec![json!({
+        "type": "text",
+        "text": message,
+        "text_elements": [],
+    })];
     for attachment in attachments.as_array().into_iter().flatten() {
         let path = directory
             .join("attachments")
             .join(text(attachment, "id"))
             .join(filename(text(attachment, "name")));
-        content.push(json!({"type":"text","text":format!("Attached file: {}\nLocal path: {}",text(attachment,"name"),path.display()),"text_elements":[]}));
+        content.push(json!({
+            "type": "text",
+            "text": format!(
+                "Attached file: {}\nLocal path: {}",
+                text(attachment, "name"),
+                path.display()
+            ),
+            "text_elements": [],
+        }));
         if attachment["kind"] == "image" {
-            content.push(json!({"type":"localImage","path":path}));
+            content.push(json!({
+                "type": "localImage",
+                "path": path,
+            }));
         }
     }
     content.into()
@@ -294,6 +331,7 @@ pub fn input(message: &str, attachments: &Value, directory: &Path) -> Value {
 #[cfg(test)]
 mod tests {
     use super::filename;
+
     #[test]
     fn file_names_preserve_dotfiles_and_bound_utf8_bytes_without_path_components() {
         assert_eq!(filename(".env"), ".env");

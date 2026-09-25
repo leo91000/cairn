@@ -35,6 +35,7 @@ test('uploads a persistent portrait, preserves it on edits and shows it in conve
     await page.screenshot({ path: testInfo.outputPath(`portrait-editor-${colorScheme}.png`) })
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   }
+
   await dialog.getByLabel('Description', { exact: true }).fill('A new role without changing identity')
   await dialog.getByRole('button', { name: 'Save agent', exact: true }).click()
   await expect(dialog).toHaveCount(0)

@@ -2,7 +2,18 @@ import type { Config } from './config.ts'
 import type { Run } from './contracts.ts'
 import { execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { access, copyFile, cp, lstat, mkdir, readdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises'
+import {
+  access,
+  copyFile,
+  cp,
+  lstat,
+  mkdir,
+  readdir,
+  readFile,
+  realpath,
+  symlink,
+  writeFile,
+} from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 import { promisify } from 'node:util'
@@ -32,16 +43,20 @@ export async function runnerSecret(dataDir: string) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST')
       throw error
   }
+
   return (await readFile(filename, 'utf8')).trim()
 }
+
 async function copyTree(source: string, target: string) {
   // Skill resources must stay inside their selected skill; do not copy escaping links.
   for (const name of await readdir(source, { recursive: true })) {
     if ((await lstat(path.join(source, name))).isSymbolicLink())
       throw new AppError(400, 'Selected skill resources must not contain symbolic links.')
   }
+
   await cp(source, target, { recursive: true, dereference: false })
 }
+
 export async function prepareExecution(run: Run, config: Config, githubToken?: string, codexHome?: string, generation?: string) {
   const directory = path.join(config.dataDir, 'runs', run.id)
   const isIsolated = isolated(run.snapshot.agent)
@@ -80,6 +95,7 @@ export async function prepareExecution(run: Run, config: Config, githubToken?: s
             parsed.password = ''
             url = parsed.toString()
           }
+
           await exec('git', ['-C', target, 'remote', 'set-url', 'origin', url], { timeout: 10000 })
         }
       }
@@ -90,16 +106,27 @@ export async function prepareExecution(run: Run, config: Config, githubToken?: s
         await exec('git', ['-C', source, 'worktree', 'add', '-b', `feat/run-${run.id.slice(0, 8)}-${project.id.slice(0, 8)}${generation ? `-${generation}` : ''}`, target, project.baseBranch], { timeout: 30000, maxBuffer: 100000 })
       }
     }
+
     workspaces.push({ projectId: project.id, path: target, kind })
     if (isIsolated)
       mounts.push({ source: target, target, readOnly: accessPolicy.sandbox === 'read-only' })
   }
+
   const cwd = workspaces.length === 1 ? workspaces[0].path : root
   const outputDirectory = path.join(directory, 'output')
   await mkdir(outputDirectory, { recursive: true, mode: 0o700 })
   const output = path.join(outputDirectory, 'result.md')
-  if (!isIsolated)
-    return { cwd, output, workspaces, isolated: false, mounts, skills: run.snapshot.skills }
+  if (!isIsolated) {
+    return {
+      cwd,
+      output,
+      workspaces,
+      isolated: false,
+      mounts,
+      skills: run.snapshot.skills,
+    }
+  }
+
   const home = path.join(directory, 'home')
   await mkdir(path.join(home, '.codex'), { recursive: true, mode: 0o700 })
   const auth = path.join(codexHome ?? path.join(config.home, '.codex'), 'auth.json')
@@ -123,6 +150,7 @@ export async function prepareExecution(run: Run, config: Config, githubToken?: s
     await writeFile(path.join(target, 'SKILL.md'), skill.content)
     skills.push({ ...skill, path: path.join('/home/node/.agents/skills', `${index}/${skill.name}`, 'SKILL.md') })
   }
+
   mounts.unshift({ source: root, target: root, readOnly: false })
   mounts.push({ source: home, target: '/home/node', readOnly: false }, { source: outputDirectory, target: outputDirectory, readOnly: false })
   const empty = path.join(directory, 'empty')
@@ -134,7 +162,15 @@ export async function prepareExecution(run: Run, config: Config, githubToken?: s
         mounts.push({ source: empty, target: path.join(workspace.path, relative), readOnly: true })
     }
   }
-  return { cwd, output, workspaces, isolated: true, mounts, skills }
+
+  return {
+    cwd,
+    output,
+    workspaces,
+    isolated: true,
+    mounts,
+    skills,
+  }
 }
 
 // Unrestricted runs retain user configuration while auth and session state stay per run.
@@ -146,6 +182,7 @@ export async function prepareCodexHome(config: Config, home: string) {
         throw error
     })
   }
+
   for (const directory of ['rules', 'skills', 'plugins']) {
     if (!await access(path.join(source, directory)).then(() => true).catch(() => false))
       continue
@@ -165,16 +202,19 @@ export async function restoreExecution(run: Run, prepared: Awaited<ReturnType<ty
     if (await workspaceDirectory(project.path, config.workspaceRoots) !== project.path)
       throw new AppError(409, 'A project moved outside its permitted location.')
   }
+
   const root = path.join(config.dataDir, 'runs', run.id)
   const allowed = [root, ...prepared.workspaces.filter(workspace => workspace.kind === 'direct').map(workspace => requireProject(run, workspace.projectId))]
   for (const source of new Set([prepared.cwd, path.dirname(prepared.output), ...prepared.workspaces.map(workspace => workspace.path), ...prepared.mounts.map(mount => mount.source)])) {
     if (await workspaceDirectory(source, allowed) !== source)
       throw new AppError(409, 'A saved workspace changed location. Working files were preserved.')
   }
+
   if (prepared.isolated)
     await prepareGithubHome(path.join(root, 'home'), config, policy(run.snapshot.agent).github, githubToken)
   return prepared
 }
+
 function requireProject(run: Run, id: string) {
   const project = runProjects(run).find(project => project.id === id)
   if (!project)
@@ -189,6 +229,7 @@ async function prepareGithubHome(home: string, config: Config, shared: boolean, 
     if (await access(github).then(() => true).catch(() => false))
       await cp(github, path.join(home, '.config', 'gh'), { recursive: true })
   }
+
   if (githubToken && !shared) {
     await mkdir(path.join(home, '.config', 'gh'), { recursive: true })
     await writeFile(path.join(home, '.config', 'gh', 'hosts.yml'), YAML.stringify({ 'github.com': { oauth_token: githubToken, git_protocol: 'https' } }), { mode: 0o600 })

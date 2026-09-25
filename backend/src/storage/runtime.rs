@@ -12,15 +12,19 @@ use std::{
     },
 };
 use tokio_util::sync::CancellationToken;
+
 enum Entry {
     Open(Weak<Volume>),
     Replacing,
 }
+
 type Registry = Mutex<HashMap<PathBuf, Entry>>;
+
 fn registry() -> &'static Registry {
     static REGISTRY: OnceLock<Registry> = OnceLock::new();
     REGISTRY.get_or_init(Default::default)
 }
+
 pub struct Volume {
     pub disk: Arc<LazyDisk>,
     pub source: Arc<RemoteSource>,
@@ -31,14 +35,17 @@ pub struct Volume {
     fault: AtomicBool,
     paused: AtomicBool,
 }
+
 impl Drop for Volume {
     fn drop(&mut self) {
         self.stop.cancel();
     }
 }
+
 pub fn exists(directory: &Path) -> bool {
     directory.join("lazy/journal.sqlite").exists()
 }
+
 pub fn live(directory: &Path) -> Option<Arc<Volume>> {
     let registry = registry().try_lock().ok()?;
     match registry.get(directory)? {
@@ -46,6 +53,7 @@ pub fn live(directory: &Path) -> Option<Arc<Volume>> {
         Entry::Replacing => None,
     }
 }
+
 pub fn open(directory: &Path) -> Result<Arc<Volume>> {
     let mut registry = registry().lock().map_err(Error::internal)?;
     match registry.get(directory) {
@@ -87,6 +95,7 @@ pub fn open(directory: &Path) -> Result<Arc<Volume>> {
 pub struct Replacement {
     directory: PathBuf,
 }
+
 impl Drop for Replacement {
     fn drop(&mut self) {
         if let Ok(mut registry) = registry().lock() {
@@ -94,6 +103,7 @@ impl Drop for Replacement {
         }
     }
 }
+
 pub async fn replacement(directory: &Path) -> Result<Replacement> {
     let directory = directory.to_owned();
     blocking(move || {
@@ -112,6 +122,7 @@ pub async fn replacement(directory: &Path) -> Result<Replacement> {
     })
     .await
 }
+
 async fn blocking<T: Send + 'static>(
     operation: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
@@ -124,10 +135,12 @@ async fn blocking<T: Send + 'static>(
     .await
     .map_err(Error::internal)?
 }
+
 pub async fn load(directory: &Path) -> Result<Arc<Volume>> {
     let directory = directory.to_owned();
     blocking(move || open(&directory)).await
 }
+
 /// Initialize and synchronize a journal on the same bounded pool as journal opens.
 pub(crate) async fn create(
     directory: &Path,
@@ -136,6 +149,7 @@ pub(crate) async fn create(
 ) -> Result<Arc<LazyDisk>> {
     create_at_generation(directory, manifest, context, 1).await
 }
+
 pub(crate) async fn create_at_generation(
     directory: &Path,
     manifest: &Value,
@@ -158,6 +172,7 @@ pub(crate) async fn create_at_generation(
     })
     .await
 }
+
 /// Retain the mounted disk's authorization and monotone publication sequence
 /// through resize; the next acknowledged publication can then retire its old base.
 pub(crate) async fn rebuild_identity(directory: &Path) -> Result<(Value, i64)> {
@@ -171,25 +186,31 @@ pub(crate) async fn rebuild_identity(directory: &Path) -> Result<(Value, i64)> {
     })
     .await
 }
+
 impl Volume {
     pub fn paused(&self) -> bool {
         self.paused.load(Ordering::SeqCst)
     }
+
     pub fn set_paused(&self, value: bool) {
         self.paused.store(value, Ordering::SeqCst);
     }
+
     pub async fn seal(self: &Arc<Self>) -> Result<i64> {
         let disk = self.disk.clone();
         blocking(move || Ok(disk.seal()?)).await
     }
+
     pub async fn inspect(self: &Arc<Self>) -> Result<Value> {
         let volume = self.clone();
         blocking(move || volume.status()).await
     }
+
     pub async fn needs_pause(self: &Arc<Self>) -> Result<bool> {
         let volume = self.clone();
         blocking(move || Ok(!volume.health()?["waitingFor"].is_null())).await
     }
+
     /// Called under the attempt's control lock, shared with checkpoint capture.
     pub async fn enforce_limits(
         self: &Arc<Self>,
@@ -229,6 +250,7 @@ impl Volume {
         }
         Ok(())
     }
+
     fn policy(&self) -> io::Result<Policy> {
         let state = self
             .directory
@@ -245,6 +267,7 @@ impl Volume {
             Err(e) => Err(e),
         }
     }
+
     pub fn status(&self) -> Result<Value> {
         let mut status = self.health()?;
         status["localBytes"] = allocated(&self.directory)?.into();
@@ -252,6 +275,7 @@ impl Volume {
         status["performance"] = self.disk.performance();
         Ok(status)
     }
+
     fn health(&self) -> Result<Value> {
         let mut status = self.disk.accounting()?;
         let state = self
@@ -285,10 +309,12 @@ impl Volume {
         Ok(status)
     }
 }
+
 impl Disk for Volume {
     fn size(&self) -> u64 {
         self.disk.size()
     }
+
     fn read_at(&self, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
         let result = self.disk.read_at(offset, bytes);
         if result.as_ref().is_err_and(|e| {
@@ -301,6 +327,7 @@ impl Disk for Volume {
         }
         result
     }
+
     fn write_at(&self, offset: u64, bytes: &[u8]) -> io::Result<()> {
         // Serialized admission across the node closes the free-space race between
         // concurrent writers. Space for SQLite WAL/pages is reserved conservatively.
@@ -324,6 +351,7 @@ impl Disk for Volume {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
+
     fn sync(&self) -> io::Result<()> {
         self.disk.sync()
     }
@@ -387,6 +415,7 @@ pub async fn materialize(directory: &Path, stop: &CancellationToken) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[tokio::test]
     async fn missing_remote_block_requires_resolution_and_preserves_local_work() {
         permanent_remote_failure_preserves_local_work(axum::http::StatusCode::CONFLICT).await;
@@ -420,7 +449,7 @@ mod tests {
             reserve_percent: 1,
             ..Default::default()
         };
-        let context = json!({"master":origin,"grant":"fixture","policy":policy});
+        let context = json!({"master": origin,"grant": "fixture","policy": policy});
         let source = Arc::new(
             RemoteSource::new(
                 &context,
@@ -431,8 +460,12 @@ mod tests {
         );
         let disk = LazyDisk::create(
             &directory.join("lazy"),
-            &json!({"version":1,"size":4096,"blockSize":4194304,
-                "blocks":[{"offset":0,"size":4096,"hash":"a".repeat(64)}]}),
+            &json!({
+                "version": 1,
+                "size": 4096,
+                "blockSize": 4194304,
+                "blocks": [{"offset": 0,"size": 4096,"hash": "a".repeat(64)}]
+            }),
             source,
         )
         .unwrap();
@@ -472,10 +505,17 @@ mod tests {
     async fn replacement_excludes_openers_and_releases_the_disk_after_failure() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("disks/conversation");
-        let manifest = json!({"version":1,"size":4096,"blockSize":4194304,
-            "blocks":[{"offset":0,"size":4096,"hash":null}]});
-        let context = json!({"master":"http://127.0.0.1:1/","grant":"fixture",
-            "policy":Policy::default()});
+        let manifest = json!({
+            "version": 1,
+            "size": 4096,
+            "blockSize": 4194304,
+            "blocks": [{"offset": 0,"size": 4096,"hash": null}]
+        });
+        let context = json!({
+            "master": "http://127.0.0.1:1/",
+            "grant": "fixture",
+            "policy": Policy::default()
+        });
         drop(
             create(&directory.join("lazy"), &manifest, &context)
                 .await
@@ -503,7 +543,7 @@ mod tests {
             reserve_mi_b: 16 * 1024 * 1024,
             ..Default::default()
         };
-        let context = json!({"master":"http://127.0.0.1:1/","grant":"test","policy":policy});
+        let context = json!({"master": "http://127.0.0.1:1/","grant": "test","policy": policy});
         let source = Arc::new(
             RemoteSource::new(
                 &context,
@@ -512,7 +552,17 @@ mod tests {
             )
             .unwrap(),
         );
-        let disk=LazyDisk::create(&directory.join("lazy"),&json!({"version":1,"size":4096,"blockSize":4194304,"blocks":[{"offset":0,"size":4096,"hash":null}]}),source).unwrap();
+        let disk = LazyDisk::create(
+            &directory.join("lazy"),
+            &json!({
+                "version": 1,
+                "size": 4096,
+                "blockSize": 4194304,
+                "blocks": [{"offset": 0,"size": 4096,"hash": null}]
+            }),
+            source,
+        )
+        .unwrap();
         disk.set_context(&context).unwrap();
         drop(disk);
         let volume = open(&directory).unwrap();

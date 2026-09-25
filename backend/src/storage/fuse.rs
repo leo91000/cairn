@@ -15,6 +15,7 @@ struct DiskFilesystem {
     disk: Arc<dyn Disk>,
     uid: u32,
 }
+
 impl DiskFilesystem {
     fn attr(&self, inode: INodeNo) -> FileAttr {
         let directory = inode == INodeNo::ROOT;
@@ -45,6 +46,7 @@ impl DiskFilesystem {
         }
     }
 }
+
 impl Filesystem for DiskFilesystem {
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         if parent == INodeNo::ROOT && name == "data.ext4" {
@@ -53,6 +55,7 @@ impl Filesystem for DiskFilesystem {
             reply.error(Errno::ENOENT);
         }
     }
+
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
         if ino == INodeNo::ROOT || ino == INodeNo(2) {
             reply.attr(&Duration::ZERO, &self.attr(ino));
@@ -60,6 +63,7 @@ impl Filesystem for DiskFilesystem {
             reply.error(Errno::ENOENT);
         }
     }
+
     fn open(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
         if ino != INodeNo(2) {
             reply.error(Errno::ENOENT);
@@ -67,6 +71,7 @@ impl Filesystem for DiskFilesystem {
         }
         reply.opened(FileHandle(0), FopenFlags::empty());
     }
+
     fn read(
         &self,
         _req: &Request,
@@ -93,6 +98,7 @@ impl Filesystem for DiskFilesystem {
             Err(_) => reply.error(Errno::EIO),
         }
     }
+
     fn write(
         &self,
         _req: &Request,
@@ -114,6 +120,7 @@ impl Filesystem for DiskFilesystem {
             Err(_) => reply.error(Errno::EIO),
         }
     }
+
     fn flush(
         &self,
         _req: &Request,
@@ -131,6 +138,7 @@ impl Filesystem for DiskFilesystem {
             Err(_) => reply.error(Errno::EIO),
         }
     }
+
     fn fsync(
         &self,
         _req: &Request,
@@ -153,12 +161,14 @@ impl Filesystem for DiskFilesystem {
 /// Mount under the jail root before launching Firecracker. The mount is private
 /// to its configured UID (plus host root); dropping the handle unmounts it.
 pub struct MountedDisk(Option<BackgroundSession>);
+
 impl MountedDisk {
     /// Stop the VMM and cancel remote transfers before closing its mount.
     pub fn close(mut self) -> io::Result<()> {
         self.0.take().expect("owned mount").umount_and_join()
     }
 }
+
 impl Drop for MountedDisk {
     fn drop(&mut self) {
         if let Some(session) = self.0.take() {
@@ -181,6 +191,7 @@ pub fn mount_disk(disk: Arc<dyn Disk>, target: &Path, uid: u32) -> io::Result<Mo
     fuser::spawn_mount(DiskFilesystem { disk, uid }, target, &config)
         .map(|session| MountedDisk(Some(session)))
 }
+
 /// Activation probe runs with the same controller identity and mount namespace.
 pub fn probe(state: &Path) -> io::Result<()> {
     use std::os::unix::fs::FileExt;
@@ -246,6 +257,7 @@ mod tests {
     use super::*;
     use crate::storage::{Disk, LocalDisk};
     use std::{os::unix::fs::FileExt, sync::Arc};
+
     #[test]
     #[ignore = "requires /dev/fuse and mount privileges"]
     fn mount_preserves_positional_io_and_flush() {

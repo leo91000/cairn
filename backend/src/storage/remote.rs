@@ -16,12 +16,15 @@ pub struct RemoteSource {
     stop: CancellationToken,
     waiting: AtomicUsize,
 }
+
 struct Waiting<'a>(&'a AtomicUsize);
+
 impl Drop for Waiting<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
+
 impl RemoteSource {
     pub fn new(
         context: &Value,
@@ -46,15 +49,19 @@ impl RemoteSource {
             waiting: AtomicUsize::new(0),
         })
     }
+
     pub fn grant_id(&self) -> String {
         crate::auth::digest(&self.credential)
     }
+
     pub fn waiting(&self) -> bool {
         self.waiting.load(Ordering::SeqCst) > 0
     }
+
     fn interrupted() -> io::Error {
         io::Error::new(io::ErrorKind::Interrupted, "Disk read cancelled")
     }
+
     async fn renew(&self) -> io::Result<()> {
         let request = self
             .client
@@ -66,7 +73,10 @@ impl RemoteSource {
             .bearer_auth(&self.credential)
             .json(&json!({}))
             .send();
-        let response = tokio::select! { _=self.stop.cancelled()=>return Err(Self::interrupted()), result=request=>result.map_err(|_| io::Error::new(io::ErrorKind::WouldBlock,"Storage authorization temporarily unavailable"))? };
+        let response = tokio::select! {
+            _ = self.stop.cancelled() => return Err(Self::interrupted()),
+            result = request => result.map_err(|_| io::Error::new(io::ErrorKind::WouldBlock,"Storage authorization temporarily unavailable"))?
+        };
         if response.status().is_success() {
             Ok(())
         } else if matches!(response.status().as_u16(), 401 | 403 | 404) {
@@ -82,6 +92,7 @@ impl RemoteSource {
         }
     }
 }
+
 impl BlockSource for RemoteSource {
     fn fetch(&self, hash: &str) -> io::Result<Vec<u8>> {
         if !crate::nodes::snapshots::valid_hash(hash) {
@@ -94,29 +105,64 @@ impl BlockSource for RemoteSource {
             let mut waiting = None;
             let mut delay = Duration::from_millis(100);
             loop {
-                let request = self.client.get(self.origin.join(&format!("internal/node-restore/{hash}")).map_err(io::Error::other)?).bearer_auth(&self.credential).send();
-                let response = tokio::select! { _=self.stop.cancelled()=>return Err(Self::interrupted()), result=request=>result };
+                let request = self
+                    .client
+                    .get(
+                        self.origin
+                            .join(&format!("internal/node-restore/{hash}"))
+                            .map_err(io::Error::other)?,
+                    )
+                    .bearer_auth(&self.credential)
+                    .send();
+                let response = tokio::select! {
+                    _ = self.stop.cancelled() => return Err(Self::interrupted()),
+                    result = request => result
+                };
                 if let Ok(response) = response {
                     let status = response.status();
                     if status.is_success() {
                         let transfer = crate::nodes::snapshots::response_block(response);
-                        let result = tokio::select! { _=self.stop.cancelled()=>return Err(Self::interrupted()), result=transfer=>result };
+                        let result = tokio::select! {
+                            _ = self.stop.cancelled() => return Err(Self::interrupted()),
+                            result = transfer => result
+                        };
                         match result {
-                            Ok(bytes)=>return Ok(bytes),
-                            Err(error) if error.status == 400 =>return Err(io::Error::new(io::ErrorKind::InvalidData,"Invalid remote disk block")),
-                            Err(_)=>{}
+                            Ok(bytes) => return Ok(bytes),
+                            Err(error) if error.status == 400 => {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "Invalid remote disk block",
+                                ));
+                            }
+                            Err(_) => {}
                         }
-                    } else if status.as_u16()==401 {
-                        match self.renew().await { Ok(())=>{}, Err(error) if error.kind()==io::ErrorKind::WouldBlock=>{}, Err(error)=>return Err(error) }
-                    } else if matches!(status.as_u16(),403|404) {
-                        return Err(io::Error::new(io::ErrorKind::PermissionDenied,"Disk read authorization revoked"));
-                    } else if !status.is_server_error() && !matches!(status.as_u16(),408|429) {
-                        return Err(io::Error::new(io::ErrorKind::InvalidData,"Remote disk block rejected"));
+                    } else if status.as_u16() == 401 {
+                        match self.renew().await {
+                            Ok(()) => {}
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                            Err(error) => return Err(error),
+                        }
+                    } else if matches!(status.as_u16(), 403 | 404) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "Disk read authorization revoked",
+                        ));
+                    } else if !status.is_server_error() && !matches!(status.as_u16(), 408 | 429) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Remote disk block rejected",
+                        ));
                     }
                 }
-                if waiting.is_none() { self.waiting.fetch_add(1,Ordering::SeqCst); waiting=Some(Waiting(&self.waiting)); }
-                tokio::select! { _=self.stop.cancelled()=>return Err(Self::interrupted()), _=tokio::time::sleep(delay)=>{} }
-                delay=(delay*2).min(Duration::from_secs(5));
+                if waiting.is_none() {
+                    self.waiting.fetch_add(1, Ordering::SeqCst);
+                    waiting = Some(Waiting(&self.waiting));
+                }
+                tokio::select! {
+                    _ = self.stop.cancelled() => return Err(Self::interrupted()),
+                    _ = tokio::time::sleep(delay) => {}
+                }
+                delay = (delay * 2).min(Duration::from_secs(5));
             }
         })
     }
@@ -126,6 +172,7 @@ impl BlockSource for RemoteSource {
 mod tests {
     use super::*;
     use std::sync::{Arc, atomic::AtomicBool};
+
     #[tokio::test]
     async fn outage_waits_then_recovers_and_cancellation_interrupts_a_waiting_read() {
         use axum::{Router, http::StatusCode, routing::get};
@@ -150,7 +197,7 @@ mod tests {
         let stop = CancellationToken::new();
         let source = Arc::new(
             RemoteSource::new(
-                &json!({"master":origin,"grant":"fixture-scoped-token"}),
+                &json!({"master": origin,"grant": "fixture-scoped-token"}),
                 tokio::runtime::Handle::current(),
                 stop.clone(),
             )

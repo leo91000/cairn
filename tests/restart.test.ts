@@ -5,7 +5,14 @@ import http from 'node:http'
 import path from 'node:path'
 import process from 'node:process'
 import { promisify } from 'node:util'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
 import { accountFixture, credential, limits } from './codex-account-fixture.ts'
 import { fixture } from './helpers.ts'
 import { prepareExecution } from './legacy/server/execution.ts'
@@ -29,24 +36,29 @@ describe('durable conversation recovery', () => {
       child.kill('SIGTERM')
       await stopped
     }
-    for (const worker of workers.splice(0)) await worker.close()
+
+    for (const worker of workers.splice(0))
+      await worker.close()
     await ctx.dispose()
   })
   const waitForWork = async (id: string) => {
     await expect.poll(async () => readFile(path.join(ctx.service.store.run(id)?.workspace ?? ctx.projectPath, 'restart-work.txt'), 'utf8').catch(() => ''), { timeout: 10000 }).toBe('preserved before restart')
     await expect.poll(() => ctx.service.store.run(id)?.sessionId, { timeout: 10000 }).toBe('fixture-session')
   }
+
   const restart = async () => {
     const worker = new Worker(ctx.service)
     workers.push(worker)
     await worker.tick()
     return worker
   }
+
   const succeeded = async (id: string) => {
     await expect.poll(async () => {
       // These workers have no interval. Recovery can defer a run while its old
       // process is being fenced, so keep scheduling as the real worker does.
-      for (const worker of workers) await worker.tick()
+      for (const worker of workers)
+        await worker.tick()
       return ctx.service.store.run(id)?.status
     }, { timeout: 10000 }).toBe('succeeded')
     expect(ctx.service.store.run(id)?.summary).toContain('saved conversation and work survived')
@@ -60,7 +72,12 @@ describe('durable conversation recovery', () => {
     await ctx.worker.close()
     const paused = ctx.service.store.run(run.id)!
     const budget = ctx.worker.recovery.get(run.id)!.remainingMs!
-    expect(paused).toMatchObject({ status: 'queued', recoveryPending: true, sessionId: 'fixture-session', finishedAt: null })
+    expect(paused).toMatchObject({
+      status: 'queued',
+      recoveryPending: true,
+      sessionId: 'fixture-session',
+      finishedAt: null,
+    })
     expect(budget).toBeLessThan(run.snapshot.agent.timeoutMinutes * 60000)
     const worker = await restart()
     await succeeded(run.id)
