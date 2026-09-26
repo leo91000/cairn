@@ -24,6 +24,7 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     mkdir -p backend/src && printf 'fn main() {}\n' > backend/src/main.rs \
     && printf '' > backend/src/lib.rs && cargo build --locked --release --bin leo
 COPY backend ./backend
+COPY deploy/nodes ./deploy/nodes
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     touch backend/src/main.rs backend/src/lib.rs && \
     cargo build --locked --release --bin leo && cp target/release/leo /usr/local/bin/leo

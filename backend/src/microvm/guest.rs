@@ -121,7 +121,7 @@ async fn handle(
         "status" => {
             wire::write(
                 &mut write,
-                &json!({"version":1,"binaryImports":true,"initialized":Path::new(INITIALIZED).exists()}),
+                &json!({"version":1,"binaryImports":true,"filesystemSnapshots":true,"initialized":Path::new(INITIALIZED).exists()}),
             )
             .await
         }

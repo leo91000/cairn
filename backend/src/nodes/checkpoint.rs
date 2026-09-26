@@ -13,6 +13,9 @@ use std::{
 };
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+pub const ACTIVE_CAPTURE_UNSUPPORTED: &str =
+    "This retained VM runtime requires a paused capture; active backups are unavailable.";
+
 pub async fn capture(
     state: &Path,
     run: &str,
@@ -71,6 +74,10 @@ pub async fn capture(
     let mut paused = false;
     let operation=async {
         if let Some(socket)=&socket {
+            let status = guest(socket,"status").await?;
+            if status["filesystemSnapshots"] != true {
+                return Err(Error::new(412,ACTIVE_CAPTURE_UNSUPPORTED));
+            }
             frozen=true;
             let result=guest(socket,"freeze").await?;
             if result["ok"]!=true {return Err(Error::new(503,"Guest filesystem freeze failed."));}

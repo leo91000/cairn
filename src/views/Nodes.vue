@@ -129,6 +129,9 @@ function save() {
         <p class="mt-2">
           {{ node.limits.cpu }} CPU · {{ node.limits.memoryMiB }} MiB RAM · {{ node.limits.diskMiB }} MiB disk allowed
         </p>
+        <p v-if="node.reserved" class="mt-2 text-sm text-muted">
+          Reserved: {{ node.reserved.cpu }} CPU · {{ node.reserved.memoryMiB }} MiB RAM · {{ node.reserved.diskMiB }} MiB disk
+        </p>
         <p v-if="node.available" class="mt-2 text-sm text-muted">
           Available: {{ node.available.cpu }} CPU · {{ node.available.memoryMiB }} MiB RAM · {{ node.available.diskMiB }} MiB disk
         </p>

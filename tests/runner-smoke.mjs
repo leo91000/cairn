@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import { execFileSync } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import os from 'node:os'
@@ -205,8 +205,17 @@ console.log('probe.done');
                 assert.deepEqual(opened, { ok: true, reused: true })
                 await writeFile(path.join(source, 'chat-input/messages.json'), '[{"text":"reopened"}]')
               }
-              if (text.includes('probe.pause') && mode === 'cancel')
+              if (text.includes('probe.pause') && mode === 'cancel') {
+                const point = await (await api(`/runs/${id}/snapshot`, 'POST')).json()
+                assert.ok(point.manifest.size > 0)
+                const block = point.manifest.blocks.find(block => block.hash)
+                assert.ok(block, 'Active capture must contain durable guest data')
+                const bytes = Buffer.from(await (await api(`/snapshots/${point.id}/${block.hash}`)).arrayBuffer())
+                assert.equal(createHash('sha256').update(bytes).digest('hex'), block.hash)
+                await api(`/snapshots/${point.id}/discard`, 'DELETE')
+                process.stdout.write(`${JSON.stringify({ mode: 'active-capture', pauseMs: point.manifest.pauseMs, indexMs: point.manifest.indexMs, status: 'passed' })}\n`)
                 await api(`/runs/${id}`, 'DELETE')
+              }
               if (text.includes('probe.pause') && mode === 'crash') {
                 docker('kill', '--signal', 'KILL', name)
                 docker('start', name)

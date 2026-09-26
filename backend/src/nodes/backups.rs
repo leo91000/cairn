@@ -68,6 +68,13 @@ pub async fn capture(s: &Service, run: &Value) -> Result<Value> {
         .send()
         .await
         .map_err(|_| Error::new(503, "Snapshot capture interrupted."))?;
+    // A missing guest capability is actionable; never expose arbitrary controller bodies.
+    if response.status() == reqwest::StatusCode::PRECONDITION_FAILED {
+        return Err(Error::new(
+            412,
+            super::checkpoint::ACTIVE_CAPTURE_UNSUPPORTED,
+        ));
+    }
     if !response.status().is_success() {
         return Err(Error::new(503, "Unable to capture a coherent VM snapshot."));
     }

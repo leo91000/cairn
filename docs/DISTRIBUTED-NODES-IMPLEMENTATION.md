@@ -26,7 +26,9 @@ has not been merged, deployed or released.
   Android. Chat remains current even when restoring an older disk state.
 - Assisted Linux installation, a root-owned systemd supervisor, immutable master
   image selection, bounded drain/stop, health rollback, retried acknowledgements
-  and retained compatible runtimes. Offline nodes catch up on reconnect.
+  and retained compatible runtimes. Offline nodes catch up on reconnect. Older
+  guest images without active-capture support keep executing and report the
+  limitation; their stopped disks can still be captured.
 
 ## Validation
 
@@ -50,6 +52,8 @@ The repeatable checks live beside the implementation:
 - Android `NodePlacementTest` / `NodePlacementDeviceTest`: placement and node
   management through the real UI with a fixture HTTP backend. The device class is
   included in Android CI; JVM results alone are not device evidence.
+- `node tests/runner-smoke.mjs <image>` also verifies active capture and block
+  integrity on the exact image built by CI.
 - `node tests/node-recovery-smoke.mjs <assets> <leo-binary>`: real KVM cold restore
   between separately stopped/started controllers. Untracked files, an installed
   tool, a Docker volume and real native Codex/Claude sessions survive. The native

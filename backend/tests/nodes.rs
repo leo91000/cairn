@@ -1658,7 +1658,7 @@ async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_
                 if route.ends_with("/snapshot") {
                     assert_eq!(route, format!("/disks/{run}/snapshot"), "Idle movement must capture by disk, without destination attempt history");
                     if cancel.load(Ordering::SeqCst) { service.store.patch_run(&run,json!({"cancelRequestedAt":now(),"status":"cancelled"})).await.unwrap(); }
-                    if failed.load(Ordering::SeqCst) { return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(); }
+                    if failed.load(Ordering::SeqCst) { return axum::http::StatusCode::PRECONDITION_FAILED.into_response(); }
                     let mut manifest = snapshots::index(&state.join("disks").join(&run).join("data.ext4")).await.unwrap();
                     manifest["runtime"] = json!({"runtimeId":"fixture"});
                     manifest["capturedAt"] = now().into();
@@ -1756,7 +1756,10 @@ async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_
     let settled = owner.service.store.run(&run).await.unwrap();
     assert_eq!(settled["status"], "succeeded");
     assert_eq!(settled["recoveryPending"], false);
-    assert!(settled["movementError"].is_string());
+    assert_eq!(
+        settled["movementError"],
+        "This retained VM runtime requires a paused capture; active backups are unavailable."
+    );
     assert_eq!(settled["nodeId"], source);
     cancel_during_capture.store(true, Ordering::SeqCst);
     moves::request(&owner.service, &settled, &args)

@@ -120,7 +120,7 @@ async fn a_lost_pause_acknowledgement_resumes_and_thaws_before_returning_error()
             }
             socket
                 .get_mut()
-                .write_all(b"{\"ok\":true}\n")
+                .write_all(b"{\"ok\":true,\"filesystemSnapshots\":true}\n")
                 .await
                 .unwrap();
         }
@@ -201,4 +201,63 @@ async fn stopped_disk_capture_reclaims_abandoned_transfers_and_failed_indexing()
         std::fs::read(disk.join("data.ext4")).unwrap(),
         b"retained environment"
     );
+}
+
+#[tokio::test]
+async fn older_guest_runtimes_refuse_active_capture_without_interrupting_the_vm() {
+    use leo_agent_manager::{config::id, nodes::checkpoint};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+        net::UnixListener,
+    };
+    let root = TempDir::new().unwrap();
+    let run = id();
+    std::fs::create_dir_all(root.path().join("disks").join(&run)).unwrap();
+    let socket = root.path().join("guest.sock");
+    let guest = UnixListener::bind(&socket).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            let (stream, _) = guest.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            stream.get_mut().write_all(b"OK 5200\n").await.unwrap();
+            line.clear();
+            stream.read_line(&mut line).await.unwrap();
+            counter.fetch_add(1, Ordering::SeqCst);
+            // The pre-node guest supports status but has no filesystem capture protocol.
+            stream
+                .get_mut()
+                .write_all(b"{\"version\":1,\"binaryImports\":true}\n")
+                .await
+                .unwrap();
+        }
+    });
+    let stop = tokio_util::sync::CancellationToken::new();
+    let result = checkpoint::capture(
+        root.path(),
+        &run,
+        Some(socket),
+        Arc::new(tokio::sync::Mutex::new(())),
+        stop.clone(),
+        &id(),
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(
+        !stop.is_cancelled(),
+        "A retained older runtime must keep executing when active capture is unsupported"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "Reject before freezing or thawing the old guest"
+    );
+    task.abort();
 }

@@ -1,10 +1,6 @@
 package dev.leo.manager.ui
 
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import dev.leo.manager.data.*
@@ -57,6 +53,7 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
                 Text("Détecté : ${node.capabilities.cpu} CPU · ${node.capabilities.memoryMiB} Mio RAM · ${node.capabilities.diskMiB} Mio disque")
                 if (node.runtimeId.isNotBlank()) Text("Runtime : ${node.runtimeId}")
                 Text("${node.limits.cpu} CPU · ${node.limits.memoryMiB} Mio RAM · ${node.limits.diskMiB} Mio disque autorisés")
+                node.reserved?.let { Text("Réservé : ${it.cpu} CPU · ${it.memoryMiB} Mio RAM · ${it.diskMiB} Mio disque") }
                 node.available?.let { Text("Disponible : ${it.cpu} CPU · ${it.memoryMiB} Mio RAM · ${it.diskMiB} Mio disque") }
                 node.maintenance?.let { Text(if (it == "draining") "Mise en pause et sauvegarde des conversations" else "Prête à redémarrer pour la mise à jour")
                     node.maintenanceError?.let { message -> Text(message, color = MaterialTheme.colorScheme.error) }
@@ -107,27 +104,18 @@ private fun NodeEditor(node: ExecutionNode, state: Workspace, dismiss: () -> Uni
     var cpu by remember(node.id) { mutableStateOf(node.limits.cpu.toString()) }
     var memory by remember(node.id) { mutableStateOf(node.limits.memoryMiB.toString()) }
     var disk by remember(node.id) { mutableStateOf(node.limits.diskMiB.toString()) }
-    AlertDialog(
-        onDismissRequest = dismiss,
-        title = { Text("Configurer la node") },
-        text = {
-            Column(Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState())) {
-                Field("Nom", name, { name = it })
-                Field("Tags séparés par des virgules", tags, { tags = it })
-                Field("Plafond CPU", cpu, { cpu = it })
-                Field("Plafond RAM (Mio)", memory, { memory = it })
-                Field("Plafond disque (Mio)", disk, { disk = it })
-                Toggle("Accepter de nouveaux travaux", accepting, { accepting = it })
-                state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-            }
-        },
-        confirmButton = {
-            TextButton(enabled = !state.busy && name.isNotBlank() && (cpu.toIntOrNull() ?: 0) > 0 && (memory.toLongOrNull() ?: 0) >= 128 && (disk.toLongOrNull() ?: 0) >= 128, onClick = {
-                save(NodeConfiguration(name, accepting, tags.split(',').map(String::trim).filter(String::isNotEmpty), NodeResources(cpu.toInt(), memory.toLong(), disk.toLong())))
-            }) { Text("Enregistrer") }
-        },
-        dismissButton = { TextButton(onClick = dismiss) { Text("Annuler") } },
-    )
+    Editor(
+        "Configurer la node", state.busy, state.error, close = dismiss,
+        valid = name.isNotBlank() && (cpu.toIntOrNull() ?: 0) > 0 && (memory.toLongOrNull() ?: 0) >= 128 && (disk.toLongOrNull() ?: 0) >= 128,
+        save = { save(NodeConfiguration(name, accepting, tags.split(',').map(String::trim).filter(String::isNotEmpty), NodeResources(cpu.toInt(), memory.toLong(), disk.toLong()))) },
+    ) {
+        Field("Nom", name, { name = it }, enabled = !state.busy)
+        Field("Tags séparés par des virgules", tags, { tags = it }, enabled = !state.busy)
+        Field("Plafond CPU", cpu, { cpu = it }, enabled = !state.busy)
+        Field("Plafond RAM (Mio)", memory, { memory = it }, enabled = !state.busy)
+        Field("Plafond disque (Mio)", disk, { disk = it }, enabled = !state.busy)
+        Toggle("Accepter de nouveaux travaux", accepting, { if (!state.busy) accepting = it })
+    }
 }
 
 @Composable
@@ -139,22 +127,22 @@ private fun RecoveryEditor(settings: NodeBackupSettings, state: Workspace, dismi
     var wait by remember { mutableStateOf(settings.maxCapacityWaitSeconds.toString()) }
     var retention by remember { mutableStateOf(settings.retention.toString()) }
     var budget by remember { mutableStateOf(settings.budgetMiB.toString()) }
-    AlertDialog(onDismissRequest = dismiss, title = { Text("Sauvegardes de VM") }, text = {
-        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Les blocs modifiés sont envoyés en arrière-plan après une capture cohérente. La date réellement restaurable est visible dans le chat.")
-            Row {
-                FilterChip(selected = destination == "master", onClick = { destination = "master" }, label = { Text("Master") })
-                FilterChip(selected = destination == "s3", onClick = { destination = "s3" }, label = { Text("S3 configuré") })
-            }
-            Field("Intervalle (secondes)", interval, { interval = it })
-            Field("Suspension après déconnexion (secondes)", disconnect, { disconnect = it })
-            Field("Préparation de l’arrêt (secondes)", shutdown, { shutdown = it })
-            Field("Attente de capacité maximale (secondes)", wait, { wait = it })
-            Field("Points conservés", retention, { retention = it })
-            Field("Budget master (Mio)", budget, { budget = it })
-            Text("Une capture peut dépasser l’intervalle. Le cache des sauvegardes S3 utilise aussi ce budget.")
+    Editor(
+        "Sauvegardes de VM", state.busy, state.error, close = dismiss,
+        valid = disconnect.toLongOrNull() in 10L..300L && shutdown.toLongOrNull() in 30L..300L && wait.toLongOrNull() in 0L..3600L && interval.toLongOrNull() in 5L..3600L && retention.toIntOrNull() in 1..100 && budget.toLongOrNull() in 128L..1048576L,
+        save = { save(NodeBackupSettings(destination, interval.toLong(), retention.toInt(), budget.toLong(), disconnect.toLong(), shutdown.toLong(), wait.toLong())) },
+    ) {
+        Text("Les blocs modifiés sont envoyés en arrière-plan après une capture cohérente. La date réellement restaurable est visible dans le chat.")
+        Row {
+            FilterChip(selected = destination == "master", enabled = !state.busy, onClick = { destination = "master" }, label = { Text("Master") })
+            FilterChip(selected = destination == "s3", enabled = !state.busy, onClick = { destination = "s3" }, label = { Text("S3 configuré") })
         }
-    }, confirmButton = {
-        TextButton(enabled = !state.busy && disconnect.toLongOrNull() in 10L..300L && shutdown.toLongOrNull() in 30L..300L && wait.toLongOrNull() in 0L..3600L && interval.toLongOrNull() in 5L..3600L && retention.toIntOrNull() in 1..100 && budget.toLongOrNull() in 128L..1048576L, onClick = { save(NodeBackupSettings(destination, interval.toLong(), retention.toInt(), budget.toLong(), disconnect.toLong(), shutdown.toLong(), wait.toLong())) }) { Text("Enregistrer") }
-    }, dismissButton = { TextButton(onClick = dismiss) { Text("Annuler") } })
+        Field("Intervalle (secondes)", interval, { interval = it }, enabled = !state.busy)
+        Field("Suspension après déconnexion (secondes)", disconnect, { disconnect = it }, enabled = !state.busy)
+        Field("Préparation de l’arrêt (secondes)", shutdown, { shutdown = it }, enabled = !state.busy)
+        Field("Attente de capacité maximale (secondes)", wait, { wait = it }, enabled = !state.busy)
+        Field("Points conservés", retention, { retention = it }, enabled = !state.busy)
+        Field("Budget master (Mio)", budget, { budget = it }, enabled = !state.busy)
+        Text("Une capture peut dépasser l’intervalle. Le cache des sauvegardes S3 utilise aussi ce budget.")
+    }
 }
