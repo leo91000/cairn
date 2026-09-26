@@ -1939,3 +1939,179 @@ async fn node_agent_grants_are_edited_from_the_node_without_narrowing_all_node_a
         .unwrap();
     assert!(agent["access"]["nodes"].is_null());
 }
+
+#[tokio::test]
+async fn agents_cannot_request_more_than_their_limit_and_older_clients_keep_it() {
+    use leo_agent_manager::nodes::moves;
+    let owner = Owner::new().await;
+    let (status, agent) = owner
+        .call(
+            "POST",
+            "/api/agents",
+            json!({"name":"Limited","access":{"maxResources":{"cpu":2,"memoryMiB":4096,"diskMiB":32768}}}),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{agent}");
+    let id = agent["id"].as_str().unwrap();
+    // An update that omits the limit, like an older client, keeps it.
+    let (status, updated) = owner
+        .call(
+            "PUT",
+            &format!("/api/agents/{id}"),
+            json!({"name":"Limited","access":{"nodes":null}}),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{updated}");
+    assert_eq!(updated["access"]["maxResources"]["cpu"], 2);
+    let run = json!({"id":leo_agent_manager::config::id(),"snapshot":{"agent":{"id":id}}});
+    let error = moves::request_by_agent(
+        &owner.service,
+        &run,
+        &json!({"cpu":8,"memoryMiB":4096,"diskMiB":32768}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, 403);
+    assert!(error.message.contains("at most 2 CPU"), "{}", error.message);
+    let listed = moves::list(&owner.service, &run).await.unwrap();
+    assert_eq!(listed["maxResources"]["memoryMiB"], 4096);
+}
+
+#[tokio::test]
+async fn node_alerts_reach_the_conversation_and_clients_without_repeating() {
+    use leo_agent_manager::{config::id, nodes::alerts};
+    let owner = Owner::new().await;
+    let run = id();
+    let chat = id();
+    let record =
+        json!({"id":run,"taskId":"fixture","createdAt":0,"status":"running","trigger":"chat"});
+    owner
+        .service
+        .store
+        .write(move |db| db.add_run(&record, None))
+        .await
+        .unwrap();
+    owner
+        .service
+        .store
+        .put("chats", json!({"id":chat,"runId":run,"title":"Fixture"}))
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        alerts::raise(
+            &owner.service,
+            &run,
+            "waiting",
+            "Conversation waiting for its node",
+            "The node is unavailable.",
+        )
+        .await
+        .unwrap();
+    }
+    let (status, listed) = owner
+        .call("GET", "/api/nodes/alerts", Value::Null, None)
+        .await;
+    assert_eq!(status, 200);
+    let listed = listed.as_array().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["chatId"], chat);
+    assert_eq!(listed[0]["title"], "Conversation waiting for its node");
+    let events = owner
+        .service
+        .store
+        .read(move |db| db.events(&run, 0, 100))
+        .await
+        .unwrap();
+    assert!(
+        json!(events)
+            .to_string()
+            .contains("The node is unavailable.")
+    );
+}
+
+#[tokio::test]
+async fn stale_node_disks_are_reported_and_freed_on_request() {
+    use leo_agent_manager::{config::id, nodes::LOCAL_NODE_ID};
+    use std::sync::{Arc, Mutex};
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let recorded = calls.clone();
+    let runner = axum::Router::new().fallback(move |request: axum::extract::Request| {
+        let recorded = recorded.clone();
+        async move {
+            recorded
+                .lock()
+                .unwrap()
+                .push(request.uri().path().to_owned());
+            axum::Json(json!({}))
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, runner).await.unwrap() });
+    let owner = Owner::with_runner("localhost:4310".into(), url).await;
+    let other = id();
+    owner.service.store.put("nodes",json!({"id":LOCAL_NODE_ID,"name":"Current runner","local":true,"revoked":false,"accepting":true,"tags":[],"capabilities":{"kvm":true},"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536}})).await.unwrap();
+    let (moved, current) = (id(), id());
+    for (run, node, total) in [
+        (&moved, &other, 1024),
+        (&current, &LOCAL_NODE_ID.to_owned(), 3072),
+    ] {
+        let record = json!({"id":run,"taskId":"fixture","createdAt":0,"status":"succeeded"});
+        owner
+            .service
+            .store
+            .write(move |db| db.add_run(&record, None))
+            .await
+            .unwrap();
+        owner
+            .service
+            .store
+            .set(
+                &format!("run-checkpoint:{run}"),
+                json!({"nodeId":node}),
+                None,
+            )
+            .await
+            .unwrap();
+        owner.service.store.put("node-volumes",json!({"id":format!("{run}:{LOCAL_NODE_ID}"),"runId":run,"nodeId":LOCAL_NODE_ID,"materialized":true,"diskMiB":total,"activeDiskMiB":1024})).await.unwrap();
+    }
+    let (_, nodes) = owner.call("GET", "/api/nodes", Value::Null, None).await;
+    let local = nodes
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == LOCAL_NODE_ID)
+        .unwrap()
+        .clone();
+    assert_eq!(local["staleDisks"], json!({"count":2,"diskMiB":3072}));
+    let (status, freed) = owner
+        .call(
+            "POST",
+            &format!("/api/nodes/{LOCAL_NODE_ID}/stale-disks/delete"),
+            json!({}),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{freed}");
+    assert_eq!(freed, json!({"freedMiB":3072,"failed":0}));
+    let calls = calls.lock().unwrap().clone();
+    assert!(
+        calls.contains(&format!("/disks/{moved}/delete")),
+        "{calls:?}"
+    );
+    assert!(
+        calls.contains(&format!("/disks/{current}/prune")),
+        "{calls:?}"
+    );
+    let (_, nodes) = owner.call("GET", "/api/nodes", Value::Null, None).await;
+    let local = nodes
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == LOCAL_NODE_ID)
+        .unwrap()
+        .clone();
+    assert_eq!(local["staleDisks"], json!({"count":0,"diskMiB":0}));
+}

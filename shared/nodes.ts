@@ -30,6 +30,8 @@ export interface ExecutionNode {
   runtimeId: string
   lastSeen: number | null
   agents?: NodeAgent[]
+  // Disk kept on the node that no conversation needs there any more.
+  staleDisks?: { count: number, diskMiB: number }
 }
 
 export interface NodeAgent {

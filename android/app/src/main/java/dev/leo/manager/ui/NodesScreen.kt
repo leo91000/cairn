@@ -3,6 +3,7 @@ package dev.leo.manager.ui
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
 import dev.leo.manager.data.*
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -24,6 +25,7 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
     var editing by remember { mutableStateOf<ExecutionNode?>(null) }
     var revoking by remember { mutableStateOf<ExecutionNode?>(null) }
     var granting by remember { mutableStateOf<ExecutionNode?>(null) }
+    var cleaning by remember { mutableStateOf<ExecutionNode?>(null) }
     var advanced by remember { mutableStateOf(false) }
     var showRevoked by remember { mutableStateOf(false) }
     suspend fun load() {
@@ -79,6 +81,10 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
                 Text("Autorisé : ${formatResources(node.limits)}" + (node.reserved?.let { " · réservé : ${formatResources(it)}" } ?: ""), style = MaterialTheme.typography.bodySmall)
                 Text("Détecté : ${node.capabilities.cpu} CPU · ${formatMiB(node.capabilities.memoryMiB)} RAM · ${formatMiB(node.capabilities.diskMiB)} disque · KVM ${if (node.capabilities.kvm) "disponible" else "indisponible"}", style = MaterialTheme.typography.bodySmall)
                 if (node.agents.isNotEmpty()) Text("Utilisée par ${node.agents.joinToString(", ") { if (it.allNodes) "${it.name} (toutes les nodes)" else it.name }}")
+                if (node.staleDisks.count > 0) Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    Text("Anciens disques : ${formatMiB(node.staleDisks.diskMiB)} (${node.staleDisks.count} conversation${if (node.staleDisks.count > 1) "s" else ""})", Modifier.weight(1f))
+                    TextButton(onClick = { cleaning = node }) { Text("Libérer") }
+                }
                 node.maintenance?.let { Text(if (it == "draining") "Mise en pause et sauvegarde des conversations pour une mise à jour" else "Prête à redémarrer pour la mise à jour")
                     node.maintenanceError?.let { message -> Text(message, color = MaterialTheme.colorScheme.error) }
                 }
@@ -126,6 +132,20 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
                 notify("Accès des agents enregistré")
                 load()
                 refresh()
+            }
+        }
+    }
+    cleaning?.let { node ->
+        Confirm(
+            "Libérer les anciens disques de ${node.name} ?",
+            "Ces disques appartiennent à des conversations qui tournent maintenant sur une autre machine, ou sont d’anciennes copies mises de côté lors d’une reprise. Après une bascule, un ancien disque peut contenir des changements plus récents que le point de reprise utilisé. La suppression est définitive. La machine doit être en ligne ; les disques des conversations en cours ou en déplacement sont conservés.",
+            state.busy, state.error, { cleaning = null },
+        ) {
+            vm.perform {
+                val result: StaleDiskCleanup = api.send("POST", "/nodes/${node.id}/stale-disks/delete", buildJsonObject {})
+                cleaning = null
+                notify(if (result.failed > 0) "${formatMiB(result.freedMiB)} libérés ; ${result.failed} disques utilisés ou machine injoignable" else "${formatMiB(result.freedMiB)} libérés")
+                load()
             }
         }
     }

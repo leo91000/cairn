@@ -45,7 +45,27 @@ data class ExecutionNode(
     val systemTags: List<String> = emptyList(),
     val maintenanceError: String? = null,
     val agents: List<NodeAgent> = emptyList(),
+    val staleDisks: StaleDisks = StaleDisks(),
 )
+
+/** Disk kept on a node that no conversation needs there any more. */
+@Serializable
+data class StaleDisks(val count: Int = 0, val diskMiB: Long = 0)
+
+@Serializable
+data class StaleDiskCleanup(val freedMiB: Long = 0, val failed: Int = 0)
+
+@Serializable
+data class NodeAlert(val id: String, val chatId: String = "", val kind: String = "", val title: String = "", val body: String = "", val createdAt: Long = 0)
+
+/** The app speaks French; the master's English text remains the fallback for unknown kinds. */
+fun NodeAlert.localized(): Pair<String, String> = when (kind) {
+    "waiting" -> "Conversation en attente de sa node" to "Sa machine est indisponible et aucune autre ne peut la reprendre pour l’instant. Elle repartira dès que possible."
+    "resumed" -> "Conversation reprise sur une autre node" to "Sa machine est devenue indisponible ; elle a repris depuis son dernier point de reprise. Des fichiers récents peuvent manquer."
+    "move-failed" -> "Échec du déplacement" to "Le transfert de l’environnement a échoué. Le disque d’origine est conservé."
+    "backup-failed" -> "Point de reprise en échec" to "Un nouveau point de reprise n’a pas pu être enregistré. Ouvrez la conversation pour le détail."
+    else -> title to body
+}
 
 @Serializable
 data class NodeEnrollment(val code: String, val expiresAt: Long, val installCommand: String? = null)

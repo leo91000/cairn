@@ -165,7 +165,7 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
     if method == "tools/call" && params["name"] == "request_capacity" {
         let run = authorize(s, bearer).await?;
         return Ok(
-            match crate::nodes::moves::request(s, &run, &params["arguments"]).await {
+            match crate::nodes::moves::request_by_agent(s, &run, &params["arguments"]).await {
                 Ok(value) => {
                     json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value})
                 }

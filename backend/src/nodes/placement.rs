@@ -67,7 +67,8 @@ pub async fn reserve(s: &Service, run: &Value, attempt: &str) -> Result<Value> {
             let id=text(&node,"id");
             let mut resources=resources.clone();
             if requested.is_none() {
-                for key in ["cpu","memoryMiB","diskMiB"] {resources[key]=resources[key].as_u64().unwrap().min(node["limits"][key].as_u64().unwrap_or(0)).into();}
+                // Defaults also respect the agent's own resource limit.
+                for key in ["cpu","memoryMiB","diskMiB"] {resources[key]=resources[key].as_u64().unwrap().min(node["limits"][key].as_u64().unwrap_or(0)).min(access["maxResources"][key].as_u64().unwrap_or(u64::MAX)).into();}
                 if resources["cpu"].as_u64().unwrap()<1 || resources["memoryMiB"].as_u64().unwrap()<128 || resources["diskMiB"].as_u64().unwrap()<128 {continue;}
             }
             if node["maintenance"].is_string() {continue;}

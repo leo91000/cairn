@@ -281,6 +281,17 @@ pub async fn attempt(s: &Service, run: &Value) {
         .patch_run(text(run, "id"), json!({"backup":status}))
         .await;
     if let Err(error) = capture(s, run).await {
+        // Nothing to save yet, or an older guest image whose limitation is shown in the conversation.
+        if error.status != 409 && error.status != 412 {
+            let _ = super::alerts::raise(
+                s,
+                text(run, "id"),
+                "backup-failed",
+                "Recovery point failed",
+                &format!("A new recovery point could not be saved: {}", error.message),
+            )
+            .await;
+        }
         status["status"] = "error".into();
         status["error"] = error.message.into();
         let _ = s

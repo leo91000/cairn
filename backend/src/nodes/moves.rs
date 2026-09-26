@@ -11,7 +11,7 @@ pub fn tool() -> Value {
     json!({"name":"request_capacity","description":"Request CPU/RAM/disk for this conversation on an authorized node; call list_nodes first to see node ids, tags and available capacity. Failure leaves the current conversation running. A successful request schedules pause, full environment transfer and resume. Optional waitSeconds respects the configured limit (one hour by default); GPU is not supported.","inputSchema":{"type":"object","properties":{"cpu":{"type":"integer","minimum":1},"memoryMiB":{"type":"integer","minimum":128},"diskMiB":{"type":"integer","minimum":128},"requiredTags":{"type":"array","maxItems":32,"items":{"type":"string","maxLength":40}},"nodeId":{"type":"string","format":"uuid"},"waitSeconds":{"type":"integer","minimum":0}},"required":["cpu","memoryMiB","diskMiB"],"additionalProperties":false}})
 }
 pub fn list_tool() -> Value {
-    json!({"name":"list_nodes","description":"List the execution nodes this conversation's agent may use, with their tags and currently available CPU/RAM/disk. Use the returned ids and tags with request_capacity.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}})
+    json!({"name":"list_nodes","description":"List the execution nodes this conversation's agent may use, with their tags and currently available CPU/RAM/disk, and this agent's own resource limit if any. Use the returned ids and tags with request_capacity.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}})
 }
 /// Only authorized, non-revoked nodes; never exposes other agents or node credentials.
 pub async fn list(s: &Service, run: &Value) -> Result<Value> {
@@ -20,7 +20,8 @@ pub async fn list(s: &Service, run: &Value) -> Result<Value> {
         .get("agents", text(&run["snapshot"]["agent"], "id"))
         .await?
         .ok_or_else(|| Error::new(403, "Agent removed."))?;
-    let scope = crate::service::policy(&agent)["nodes"].clone();
+    let access = crate::service::policy(&agent);
+    let scope = access["nodes"].clone();
     let current = run["nodeId"].clone();
     let nodes = super::inventory(s)
         .await?
@@ -37,9 +38,38 @@ pub async fn list(s: &Service, run: &Value) -> Result<Value> {
             json!({"id":node["id"],"name":node["name"],"tags":tags,"status":node["status"],"acceptingWork":node["accepting"],"available":node["available"],"limits":node["limits"],"current":node["id"]==current})
         })
         .collect::<Vec<_>>();
-    Ok(json!({"nodes":nodes,"currentNodeId":current,"currentResources":run["resources"]}))
+    Ok(
+        json!({"nodes":nodes,"currentNodeId":current,"currentResources":run["resources"],"maxResources":access["maxResources"]}),
+    )
 }
+/// Owner-initiated move from the web or Android conversation controls.
 pub async fn request(s: &Service, run: &Value, args: &Value) -> Result<Value> {
+    requested(s, run, args, false).await
+}
+/// An agent's own request, bounded by the resource limit its owner configured.
+pub async fn request_by_agent(s: &Service, run: &Value, args: &Value) -> Result<Value> {
+    let agent = s
+        .store
+        .get("agents", text(&run["snapshot"]["agent"], "id"))
+        .await?
+        .ok_or_else(|| Error::new(403, "Agent removed."))?;
+    let limit = crate::service::policy(&agent)["maxResources"].clone();
+    if limit.is_object()
+        && ["cpu", "memoryMiB", "diskMiB"]
+            .iter()
+            .any(|key| args[*key].as_u64() > limit[*key].as_u64())
+    {
+        return Err(Error::new(
+            403,
+            format!(
+                "This agent may request at most {} CPU, {} MiB RAM and {} MiB disk per conversation.",
+                limit["cpu"], limit["memoryMiB"], limit["diskMiB"]
+            ),
+        ));
+    }
+    requested(s, run, args, true).await
+}
+async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Result<Value> {
     let resources: super::Resources = serde_json::from_value(
         json!({"cpu":args["cpu"],"memoryMiB":args["memoryMiB"],"diskMiB":args["diskMiB"]}),
     )
@@ -149,14 +179,26 @@ pub async fn request(s: &Service, run: &Value, args: &Value) -> Result<Value> {
         super::placement::release(s, &reservation).await?;
         return Err(error);
     }
-    s.store
-        .event(
-            run_id,
-            "status",
-            "Pausing to move the complete conversation environment",
-            None,
+    let destination = match selected["nodeId"].as_str() {
+        Some(super::LOCAL_NODE_ID) | None => "the master runner".to_owned(),
+        Some(node) => s
+            .store
+            .get("nodes", node)
+            .await?
+            .and_then(|n| n["name"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| "another node".into()),
+    };
+    let size = &selected["resources"];
+    // The owner sees in the conversation that the agent moved itself, and what it asked for.
+    let message = if by_agent {
+        format!(
+            "The agent requested {} CPU, {} MiB RAM and {} MiB disk and is moving to {destination}. Running commands are interrupted.",
+            size["cpu"], size["memoryMiB"], size["diskMiB"]
         )
-        .await?;
+    } else {
+        format!("Moving the conversation to {destination}. Running commands are interrupted.")
+    };
+    s.store.event(run_id, "status", &message, None).await?;
     Ok(json!({"status":"moving","nodeId":selected["nodeId"],"resources":selected["resources"]}))
 }
 /// Retried by the worker heartbeat until the active execution exits.
@@ -230,10 +272,12 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
             return Ok(true);
         }
         if current["pinnedNodeId"].is_string() {
+            super::alerts::raise(s, run_id, "waiting", "Conversation waiting for its node", "This conversation is fixed to a node that is unavailable. It resumes when that node returns.").await?;
             return Ok(false);
         }
         let Some(backup) = latest(s, run_id).await? else {
             s.store.patch_run(run_id,json!({"nodeState":"waiting-for-node","accountWaitReason":"Original node unavailable; no usable recovery point exists."})).await?;
+            super::alerts::raise(s, run_id, "waiting", "Conversation waiting for its node", "The node running this conversation is unavailable and no recovery point can resume it elsewhere. It resumes when the node returns.").await?;
             return Ok(false);
         };
         let mut selecting = current.clone();
@@ -243,7 +287,10 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
         let reservation = id();
         let selected = match super::placement::reserve(s, &selecting, &reservation).await {
             Ok(value) => value,
-            Err(_) => return Ok(false),
+            Err(_) => {
+                super::alerts::raise(s, run_id, "waiting", "Conversation waiting for a node", "The node running this conversation is unavailable and no other authorized node can resume it yet.").await?;
+                return Ok(false);
+            }
         };
         current["moveRequest"] = json!({"reservation":reservation,"nodeId":selected["nodeId"],"resources":selected["resources"],"backupId":backup["id"],"automatic":true});
         s.store
@@ -309,10 +356,23 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
                     None,
                 )
                 .await?;
+            if !idle {
+                super::alerts::raise(
+                    s,
+                    run_id,
+                    "move-failed",
+                    "Conversation move failed",
+                    &format!("{} The original disk is retained.", error.message),
+                )
+                .await?;
+            }
             return Ok(false);
         }
     };
     let idle = movement["idle"] == true;
+    let automatic = movement["automatic"] == true;
+    let destination = text(movement, "nodeId").to_owned();
+    let alert_run = run_id.to_owned();
     let required_tags = movement
         .get("requiredTags")
         .unwrap_or(&current["requiredTags"])
@@ -338,6 +398,15 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
         db.event(&run_id,"status","Restoring conversation from a dated recovery point; newer chat remains visible. Verify external effects before repeating actions.",Some(&json!({"capturedAt":captured_at})))?;
         Ok(())
     }).await?;
+    if automatic {
+        let name = s
+            .store
+            .get("nodes", &destination)
+            .await?
+            .and_then(|n| n["name"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| "another node".into());
+        super::alerts::raise(s, &alert_run, "resumed", "Conversation resumed on another node", &format!("Its node became unavailable, so it resumed on {name} from its latest recovery point. Recent file changes may be missing.")).await?;
+    }
     Ok(false)
 }
 pub async fn latest(s: &Service, run: &str) -> Result<Option<Value>> {

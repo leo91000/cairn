@@ -72,6 +72,7 @@ abstract class NodePlacementCases {
             var revoked = false
             var configured = false
             var granted = false
+            var cleaned = false
             server.dispatcher = object : Dispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse {
                     val path = request.path!!.substringBefore('?')
@@ -85,7 +86,8 @@ abstract class NodePlacementCases {
                         path == "/api/nodes/node" -> { configured = true; "{}" }
                         path == "/api/nodes/settings" -> "{}"
                         path == "/api/nodes/node/agents" -> { granted = true; "{}" }
-                        path == "/api/nodes" -> """[{"id":"node","name":"Serveur test","status":"${if (revoked) "revoked" else "online"}","revoked":$revoked,"accepting":true,"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536},"agents":${if (granted) """[{"id":"agent","name":"Agent test"}]""" else "[]"}}]"""
+                        path == "/api/nodes/node/stale-disks/delete" -> { cleaned = true; """{"freedMiB":2048,"failed":0}""" }
+                        path == "/api/nodes" -> """[{"id":"node","name":"Serveur test","status":"${if (revoked) "revoked" else "online"}","revoked":$revoked,"accepting":true,"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536},"agents":${if (granted) """[{"id":"agent","name":"Agent test"}]""" else "[]"},"staleDisks":{"count":${if (cleaned) 0 else 1},"diskMiB":2048}}]"""
                         path == "/api/agents" -> """[{"id":"agent","name":"Agent test"}]"""
                         path == "/api/session" -> """{"authenticated":true,"csrf":"fixture"}"""
                         path == "/api/overview" -> "{}"
@@ -118,6 +120,11 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(10000) { writes.any { it.first == "/api/nodes/node/agents" } && compose.onAllNodesWithText("Utilisée par Agent test").fetchSemanticsNodes().isNotEmpty() }
             assertEquals("agent", writes.first { it.first == "/api/nodes/node/agents" }.second["agentIds"]!!.jsonArray.single().jsonPrimitive.content)
+            compose.onNodeWithText("Anciens disques : 2 Gio (1 conversation)").assertExists()
+            compose.onNodeWithText("Libérer").performScrollTo().performClick()
+            compose.waitUntil(10000) { compose.onAllNodes(hasText("Confirmer") and isEnabled()).fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Confirmer").performClick()
+            compose.waitUntil(10000) { writes.any { it.first == "/api/nodes/node/stale-disks/delete" } && compose.onAllNodesWithText("Anciens disques", substring = true).fetchSemanticsNodes().isEmpty() }
             compose.onNodeWithText("Nom de la machine").performTextInput("Nouvelle node")
             compose.onNodeWithText("Créer un code d’inscription").performScrollTo().performClick()
             compose.waitUntil(10000) { compose.onAllNodesWithText("fixture-enrollment").fetchSemanticsNodes().isNotEmpty() }

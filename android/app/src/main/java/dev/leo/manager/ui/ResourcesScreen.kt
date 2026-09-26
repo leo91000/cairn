@@ -221,6 +221,12 @@ private fun AgentEditor(vm: LeoViewModel, state: Workspace, initial: Agent, clos
                 }
             }
         }
+        Toggle("Limiter les ressources par conversation", form.access.maxResources != null) {
+            form = form.copy(access = form.access.copy(maxResources = if (it) DEFAULT_RESOURCES else null))
+        }
+        form.access.maxResources?.let { limit ->
+            ResourceLimitFields(limit) { form = form.copy(access = form.access.copy(maxResources = it)) }
+        }
         Text("Accès de l’agent", style = MaterialTheme.typography.titleMedium)
         Choice(
             "Environnement",
@@ -472,4 +478,19 @@ private fun AgentGithubToken(vm: LeoViewModel, state: Workspace, id: String) {
                 clear = false
             }
         }
+}
+
+/** The largest conversation an agent may request, edited in Gio and stored in Mio. */
+@Composable
+private fun ResourceLimitFields(limit: NodeResources, change: (NodeResources) -> Unit) {
+    var cpu by remember { mutableStateOf(limit.cpu.toString()) }
+    var memory by remember { mutableStateOf(gib(limit.memoryMiB)) }
+    var disk by remember { mutableStateOf(gib(limit.diskMiB)) }
+    fun update() {
+        val value = cpu.toIntOrNull()?.takeIf { it > 0 }?.let { c -> mib(memory)?.takeIf { it >= 128 }?.let { m -> mib(disk)?.takeIf { it >= 128 }?.let { d -> NodeResources(c, m, d) } } }
+        if (value != null) change(value)
+    }
+    Field("CPU maximum", cpu, { cpu = it; update() }, keyboardOptions = InputKeyboards.Number)
+    Field("RAM maximum (Gio)", memory, { memory = it; update() })
+    Field("Disque maximum (Gio)", disk, { disk = it; update() })
 }

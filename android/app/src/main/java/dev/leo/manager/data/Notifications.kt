@@ -14,6 +14,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.work.*
 import dev.leo.manager.BuildConfig
@@ -25,9 +26,11 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 const val QUESTION_CHANNEL = "leo-questions"
+const val EXECUTION_CHANNEL = "leo-execution"
 private const val QUESTION_WORK = "leo-question-check"
 private val enabledKey = booleanPreferencesKey("notifications")
 private val seenKey = stringSetPreferencesKey("notified_questions")
+private val alertsKey = longPreferencesKey("notified_node_alerts_until")
 
 class NotificationPreferences(private val context: Context) {
     val enabled = context.dataStore.data.map { it[enabledKey] ?: false }
@@ -41,6 +44,13 @@ class NotificationPreferences(private val context: Context) {
 
     suspend fun setSeen(ids: Set<String>) {
         context.dataStore.edit { it[seenKey] = ids }
+    }
+
+    /** Creation time of the newest node alert already shown; null before the first check. */
+    suspend fun alertsUntil() = context.dataStore.data.first()[alertsKey]
+
+    suspend fun setAlertsUntil(value: Long) {
+        context.dataStore.edit { it[alertsKey] = value }
     }
 }
 
@@ -151,6 +161,16 @@ constructor(
                 if (notificationsAllowed(context)) manager.notify(chat, 1, notification)
             }
             prefs.setSeen(all)
+            // A master without node alerts must not delay question notifications.
+            val alerts =
+                try {
+                    api.get<List<NodeAlert>>("/nodes/alerts")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    null
+                }
+            alerts?.let { notifyAlerts(context, manager, prefs, it, origin) }
             return Result.success()
         } catch (e: CancellationException) {
             throw e
@@ -159,5 +179,45 @@ constructor(
         } catch (_: Exception) {
             return Result.retry()
         }
+    }
+}
+
+/**
+ * Node alerts (conversation waiting for its node, failover, failed recovery point) carry only a
+ * short fixed text. The first check only records the newest alert so old events are not replayed.
+ */
+private suspend fun notifyAlerts(
+    context: Context,
+    manager: NotificationManager,
+    prefs: NotificationPreferences,
+    alerts: List<NodeAlert>,
+    origin: String,
+) {
+    val newest = alerts.maxOfOrNull { it.createdAt } ?: return
+    val until = prefs.alertsUntil()
+    prefs.setAlertsUntil(maxOf(newest, until ?: 0))
+    if (until == null) return
+    manager.createNotificationChannel(
+        NotificationChannel(EXECUTION_CHANNEL, "Exécution des conversations", NotificationManager.IMPORTANCE_DEFAULT)
+    )
+    for (alert in alerts.filter { it.createdAt > until }.sortedBy { it.createdAt }.takeLast(5)) {
+        val intent =
+            Intent(context, MainActivity::class.java)
+                .setAction("dev.leo.manager.OPEN_CHAT")
+                .setData("leo-manager://chat/${segment(alert.chatId)}?origin=${segment(origin)}".toUri())
+                .putExtra("chat", alert.chatId)
+                .putExtra("origin", origin)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        val notification =
+            NotificationCompat.Builder(context, EXECUTION_CHANNEL)
+                .setSmallIcon(R.drawable.ic_leo)
+                .setContentTitle(alert.localized().first.take(120))
+                .setContentText(alert.localized().second.take(300))
+                .setStyle(NotificationCompat.BigTextStyle().bigText(alert.localized().second.take(300)))
+                .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+                .setContentIntent(PendingIntent.getActivity(context, alert.id.hashCode(), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+                .setAutoCancel(true)
+                .build()
+        if (notificationsAllowed(context)) manager.notify("node-${alert.id}", 2, notification)
     }
 }

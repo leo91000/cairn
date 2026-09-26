@@ -35,6 +35,20 @@ pub fn enqueue(db: &Db<'_>, question: &Value) -> Result<()> {
     }
     Ok(())
 }
+/// Execution alerts need no answer, so they are delivered as long as the device is subscribed.
+pub fn enqueue_alert(db: &Db<'_>, alert: &Value) -> Result<()> {
+    for (key, _) in db.keys("push-device:")? {
+        let subscription = key.trim_start_matches("push-device:");
+        db.set(
+            &format!("push-outbox:alert-{}:{subscription}", text(alert, "id")),
+            &json!({
+            "subscriptionId":subscription,"alertId":alert["id"],"chatId":alert["chatId"],"title":alert["title"],"body":alert["body"],"attempts":0,"nextAt":now(),"expiresAt":now()+3600000}
+            ),
+            None,
+        )?;
+    }
+    Ok(())
+}
 fn subscription(input: Value) -> Result<Value> {
     let endpoint = text(&input, "endpoint");
     let url =
@@ -152,14 +166,19 @@ impl Notifications {
             if delivery["nextAt"].as_i64().unwrap_or(0) > now() {
                 continue;
             }
-            let question = service
-                .store
-                .kv(&format!(
-                    "chat-question:{}:{}",
-                    text(&delivery, "chatId"),
-                    text(&delivery, "questionId")
-                ))
-                .await?;
+            let alert = delivery["alertId"].is_string();
+            let question = if alert {
+                None
+            } else {
+                service
+                    .store
+                    .kv(&format!(
+                        "chat-question:{}:{}",
+                        text(&delivery, "chatId"),
+                        text(&delivery, "questionId")
+                    ))
+                    .await?
+            };
             let subscription = service
                 .vault
                 .get(&format!(
@@ -168,7 +187,7 @@ impl Notifications {
                 ))
                 .await?;
             if subscription.is_none()
-                || question.is_none_or(|question| question["status"] != "pending")
+                || (!alert && question.is_none_or(|question| question["status"] != "pending"))
                 || delivery["expiresAt"].as_i64().unwrap_or(0) < now()
             {
                 service.store.delete(&key).await?;
@@ -225,9 +244,11 @@ async fn send(
             "mailto:notifications@example.com"
         },
     );
-    let payload = json!({
-    "title":"Your agent has a question","body":"Open the chat to answer.","chatId":delivery["chatId"],"questionId":delivery["questionId"]}
-    )
+    let payload = if delivery["alertId"].is_string() {
+        json!({"title":delivery["title"],"body":delivery["body"],"chatId":delivery["chatId"],"alertId":delivery["alertId"]})
+    } else {
+        json!({"title":"Your agent has a question","body":"Open the chat to answer.","chatId":delivery["chatId"],"questionId":delivery["questionId"]})
+    }
     .to_string();
     let mut message = WebPushMessageBuilder::new(&info);
     message.set_vapid_signature(signature.build()?);

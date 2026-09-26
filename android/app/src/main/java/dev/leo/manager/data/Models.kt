@@ -15,6 +15,8 @@ const val MAIN_AGENT_ID = "00000000-0000-4000-8000-000000000001"
 @Serializable
 data class AccessPolicy(
     val nodes: List<String>? = listOf(LOCAL_NODE_ID),
+    /** Largest resources the agent may request per conversation; null leaves only node ceilings. */
+    val maxResources: NodeResources? = null,
     val projects: List<String>? = null,
     val skills: List<String>? = null,
     val mcps: List<String>? = null,

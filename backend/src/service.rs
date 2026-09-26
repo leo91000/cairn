@@ -154,6 +154,12 @@ impl Service {
         {
             input["access"]["nodes"] = policy(existing)["nodes"].clone();
         }
+        if input["access"].is_object()
+            && input["access"].get("maxResources").is_none()
+            && let Some(existing) = &existing
+        {
+            input["access"]["maxResources"] = policy(existing)["maxResources"].clone();
+        }
         let mut agent = parse("agent", input)?;
         crate::claude::validate_agent(&agent)?;
         agent["id"] = existing_id.map(str::to_owned).unwrap_or_else(id).into();
@@ -509,7 +515,7 @@ pub fn policy(agent: &Value) -> Value {
     let mut value = json!({
     "projects":null,"skills":null,"mcps":null,"mcpTools":{
     }
-    ,"github":true,"sandbox":"yolo","nodes":[crate::nodes::LOCAL_NODE_ID]}
+    ,"github":true,"sandbox":"yolo","nodes":[crate::nodes::LOCAL_NODE_ID],"maxResources":null}
     );
     merge(&mut value, &agent["access"]);
     if agent["id"] != MAIN_AGENT_ID

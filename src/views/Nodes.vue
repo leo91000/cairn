@@ -23,6 +23,7 @@ const recovery = ref<NodeBackupSettings | null>(null)
 const recoveryBudgetGiB = ref(0)
 const revoking = ref<ExecutionNode | null>(null)
 const granting = ref<ExecutionNode | null>(null)
+const cleaning = ref<ExecutionNode | null>(null)
 const granted = ref<string[]>([])
 const showRevoked = ref(false)
 const active = computed(() => nodes.value.filter(node => !node.revoked))
@@ -103,6 +104,16 @@ function saveGrants() {
     granting.value = null
     notify('Agent access saved')
     await refresh()
+  })
+}
+function freeStaleDisks() {
+  const node = cleaning.value
+  if (!node)
+    return
+  return action(async () => {
+    const result = await api<{ freedMiB: number, failed: number }>(`/nodes/${node.id}/stale-disks/delete`, { method: 'POST', body: '{}' })
+    cleaning.value = null
+    notify(result.failed ? `Freed ${formatMiB(result.freedMiB)}; ${result.failed} disks are in use or the node is unreachable` : `Freed ${formatMiB(result.freedMiB)}`)
   })
 }
 function allNodes(agentId: string) {
@@ -186,6 +197,12 @@ function statusLabel(node: ExecutionNode) {
           </p>
           <p v-if="node.agents?.length" class="mt-2 text-sm">
             Used by {{ node.agents.map(agent => agent.allNodes ? `${agent.name} (all nodes)` : agent.name).join(', ') }}
+          </p>
+          <p v-if="node.staleDisks?.count" class="mt-2 text-sm">
+            Old disks: {{ formatMiB(node.staleDisks.diskMiB) }} kept from {{ node.staleDisks.count }} conversation{{ node.staleDisks.count > 1 ? 's' : '' }}
+            <UiButton class="ml-2" size="small" variant="default" @click="cleaning = node">
+              Free old disks
+            </UiButton>
           </p>
           <p v-if="node.maintenance" role="status" class="mt-2">
             {{ node.maintenance === 'draining' ? 'Pausing and saving conversations for an update' : 'Ready to restart for the update' }}
@@ -286,6 +303,20 @@ function statusLabel(node: ExecutionNode) {
           Save access
         </UiButton>
       </form>
+    </Modal>
+    <Modal v-if="cleaning" :title="`Free old disks on ${cleaning.name}`" @close="cleaning = null">
+      <div class="grid gap-3">
+        <p>These disks belong to conversations that now run on another machine, or are older copies set aside when a recovery point replaced a disk.</p>
+        <p>After a failover, an old disk can hold changes newer than the recovery point the conversation resumed from. Deleting it is permanent.</p>
+        <p class="text-sm text-muted">
+          The machine must be online. Disks of conversations that are running or moving are kept.
+        </p>
+        <div>
+          <UiButton variant="danger" :disabled="busy" @click="freeStaleDisks">
+            Delete {{ formatMiB(cleaning.staleDisks?.diskMiB || 0) }}
+          </UiButton>
+        </div>
+      </div>
     </Modal>
     <Modal v-if="editing" title="Configure node" @close="editing = null">
       <form class="grid gap-4" @submit.prevent="save">

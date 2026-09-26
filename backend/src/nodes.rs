@@ -1,4 +1,5 @@
 //! Trusted node identities. Enrollment and revocation are serialized with heartbeats.
+pub mod alerts;
 pub mod archive;
 pub mod backups;
 pub mod checkpoint;
@@ -19,6 +20,7 @@ use crate::{
     error::{Error, Result},
     http::{App, Input},
     service::Service,
+    validation::text,
 };
 use axum::{
     Json,
@@ -143,11 +145,57 @@ fn public(mut node: Value) -> Value {
     .into();
     node
 }
+/// Disk kept on nodes that no conversation needs there any more: the whole disk of a
+/// conversation now running elsewhere (it may hold changes newer than the recovery
+/// point used to resume it), or older copies set aside beside a current disk.
+/// Returns the volume, whether the whole disk is stale, and the stale size in MiB.
+async fn stale_disks(
+    s: &Service,
+    volumes: &[Value],
+    attempts: &[Value],
+) -> Result<Vec<(Value, bool, u64)>> {
+    let mut stale = Vec::new();
+    for volume in volumes.iter().filter(|v| v["materialized"] == true) {
+        let (run, node) = (
+            volume["runId"].as_str().unwrap_or_default(),
+            volume["nodeId"].as_str().unwrap_or_default(),
+        );
+        let record = s.store.run(run).await.ok();
+        let busy = attempts
+            .iter()
+            .any(|a| a["runId"] == run && a["nodeId"] == node && a["released"] != true)
+            || record
+                .as_ref()
+                .is_some_and(|r| r["moveRequest"].is_object() || r["moveReservation"].is_string());
+        if busy {
+            continue;
+        }
+        let checkpoint = s
+            .store
+            .kv(&format!("run-checkpoint:{run}"))
+            .await?
+            .unwrap_or_default();
+        let total = volume["diskMiB"].as_u64().unwrap_or(0);
+        let elsewhere = checkpoint["nodeId"]
+            .as_str()
+            .is_some_and(|current| current != node);
+        if record.is_none() || elsewhere {
+            stale.push((volume.clone(), true, total));
+        } else if let Some(active) = volume["activeDiskMiB"].as_u64()
+            && total > active
+        {
+            stale.push((volume.clone(), false, total - active));
+        }
+    }
+    Ok(stale)
+}
+
 /// Nodes with their reserved and available resources, and the agents allowed to use them.
 pub async fn inventory(s: &Service) -> Result<Vec<Value>> {
     let attempts = s.store.list("node-attempts").await?;
     let volumes = s.store.list("node-volumes").await?;
     let agents = s.store.list("agents").await?;
+    let stale = stale_disks(s, &volumes, &attempts).await?;
     Ok(s.store
         .list("nodes")
         .await?
@@ -175,6 +223,8 @@ pub async fn inventory(s: &Service) -> Result<Vec<Value>> {
                     .into();
             }
             let id = node["id"].as_str().unwrap_or_default().to_owned();
+            let old = stale.iter().filter(|(v, _, _)| v["nodeId"] == node["id"]);
+            node["staleDisks"] = json!({"count":old.clone().count(),"diskMiB":old.map(|(_, _, mib)| mib).sum::<u64>()});
             node["agents"] = agents
                 .iter()
                 .filter(|agent| {
@@ -218,6 +268,7 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
             moves::request(s, &s.store.run(run).await?, &input.body).await
         }
 
+        ("GET", ["nodes", "alerts"]) => alerts::recent(s).await,
         ("GET", ["nodes", "settings"]) => {
             let mut value = backups::settings(s).await?;
             value["s3Configured"] = crate::archive_storage::Storage::configured(s)
@@ -368,6 +419,38 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
                     )
                 });
             Ok(json!({"code":code,"expiresAt":expires,"installCommand":install}))
+        }
+        ("POST", ["nodes", node, "stale-disks", "delete"]) => {
+            crate::validation::uuid(node)?;
+            let attempts = s.store.list("node-attempts").await?;
+            let volumes = s
+                .store
+                .list("node-volumes")
+                .await?
+                .into_iter()
+                .filter(|v| v["nodeId"] == *node)
+                .collect::<Vec<_>>();
+            let (mut freed, mut failed) = (0u64, 0usize);
+            for (volume, whole, mib) in stale_disks(s, &volumes, &attempts).await? {
+                match crate::conversation_archive::discard_stale_disk(
+                    s,
+                    text(&volume, "runId"),
+                    node,
+                    whole,
+                )
+                .await
+                {
+                    Ok(()) => freed += mib,
+                    Err(_) => failed += 1,
+                }
+            }
+            s.store
+                .audit(
+                    "node.stale-disks.deleted",
+                    json!({"nodeId":node,"freedMiB":freed,"failed":failed}),
+                )
+                .await?;
+            Ok(json!({"freedMiB":freed,"failed":failed}))
         }
         ("PUT", ["nodes", node, "agents"]) => {
             #[derive(Deserialize)]

@@ -22,6 +22,14 @@ has not been merged, deployed or released.
 - Agent access can be granted from each node's card; a newly connected node
   asks for it right after enrollment and reports why it cannot take work.
   Conversations only show execution details once remote nodes are relevant.
+- Owner alerts when a conversation waits for its node, fails over, fails to move
+  or cannot save a recovery point: a message in the conversation, web push and
+  an Android notification, repeated at most hourly per conversation and kind.
+- Old disks left on a node (conversations now running elsewhere, or copies set
+  aside by a restore) are reported per node and freed only on explicit request,
+  since a disk abandoned by failover can hold changes newer than its recovery point.
+- Agents can have a per-conversation resource limit that bounds their own
+  `request_capacity` calls; each move is announced in the conversation.
 - Local and remote execution leases, fencing, durable movement requests, repeated
   stop attempts, full environment transfer and automatic recovery on compatible
   authorized nodes. Idle movements stay idle, explicit cancellation is preserved,

@@ -107,7 +107,7 @@ async fn disk(
         Ok(())
     }
     .await;
-    if remote && action != "delete" {
+    if remote && action != "delete" && action != "prune" {
         let _ = s
             .http
             .delete(format!("{base}/archive-transfers/{transfer}/discard"))
@@ -117,6 +117,27 @@ async fn disk(
             .await;
     }
     result
+}
+/// Frees an old disk left on a node: the whole disk of a conversation that now runs
+/// elsewhere, or only the older copies kept beside a conversation's current disk.
+pub async fn discard_stale_disk(s: &Service, run: &str, node: &str, whole: bool) -> Result<()> {
+    let action = if whole { "delete" } else { "prune" };
+    disk(s, run, action, Path::new("unused"), Some(node), None).await?;
+    if !whole {
+        let id = format!("{run}:{node}");
+        s.store
+            .transaction(move |db| {
+                if let Some(mut volume) = db.get("node-volumes", &id)?
+                    && let Some(active) = volume["activeDiskMiB"].as_u64()
+                {
+                    volume["diskMiB"] = active.into();
+                    db.put("node-volumes", &volume)?;
+                }
+                Ok(())
+            })
+            .await?;
+    }
+    Ok(())
 }
 async fn delete_disks(s: &Service, run: &str) -> Result<()> {
     let volumes = s

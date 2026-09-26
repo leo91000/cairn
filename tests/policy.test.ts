@@ -19,7 +19,7 @@ describe('agent access and task inheritance', () => {
   })
   it('creates a default main agent and allows project-free tasks', async () => {
     const main = ctx.service.store.get('agents', MAIN_AGENT_ID)!
-    expect(main.access).toEqual({ nodes: [LOCAL_NODE_ID], projects: null, skills: null, mcps: null, mcpTools: {}, github: true, sandbox: 'yolo' })
+    expect(main.access).toEqual({ nodes: [LOCAL_NODE_ID], maxResources: null, projects: null, skills: null, mcps: null, mcpTools: {}, github: true, sandbox: 'yolo' })
     expect(() => ctx.service.remove('agents', main.id)).toThrow(/cannot be removed/)
     const task = ctx.service.task({ name: 'Cross-project review', prompt: 'Review projects', agentId: main.id, worktree: false })
     expect(task.projectId).toBeNull()

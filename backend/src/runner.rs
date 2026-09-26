@@ -483,7 +483,8 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
     if let ["disks", run, action] = segments.as_slice() {
         let run = (*run).to_owned();
         let action = (*action).to_owned();
-        if request.method() != "POST" || !["export", "import", "delete"].contains(&action.as_str())
+        if request.method() != "POST"
+            || !["export", "import", "delete", "prune"].contains(&action.as_str())
         {
             return Err(Error::new(405, "Invalid workspace operation."));
         }
@@ -501,6 +502,21 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
         let _lock =
             crate::file_lock::exclusive(&directory.join("lock"), "The workspace is still in use.")?;
         let disk = directory.join("data.ext4");
+        if action == "prune" {
+            // Older copies set aside when a recovery point replaced this disk.
+            let mut entries = tokio::fs::read_dir(&directory).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                if !entry.file_name().to_string_lossy().starts_with("stale-") {
+                    continue;
+                }
+                if entry.file_type().await?.is_dir() {
+                    tokio::fs::remove_dir_all(entry.path()).await?;
+                } else {
+                    tokio::fs::remove_file(entry.path()).await?;
+                }
+            }
+            return Ok(Json(json!({"pruned":true})).into_response());
+        }
         if action == "delete" {
             match tokio::fs::remove_file(&disk).await {
                 Ok(()) => {}
@@ -1015,6 +1031,13 @@ mod tests {
                 .as_u16()
         }
         assert_eq!(request(&app, &run, "export", &transfer, "wrong").await, 401);
+        std::fs::write(directory.join("stale-older.ext4"), "older copy").unwrap();
+        assert_eq!(
+            request(&app, &run, "prune", &transfer, "synthetic-runner-secret").await,
+            200
+        );
+        assert!(!directory.join("stale-older.ext4").exists());
+        assert!(directory.join("data.ext4").exists());
         assert_eq!(
             request(&app, &run, "export", &transfer, "synthetic-runner-secret").await,
             200

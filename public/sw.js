@@ -5,7 +5,20 @@ globalThis.addEventListener('push', (event) => {
     data = event.data.json()
   }
   catch { return }
-  if (!/^[\da-f-]{36}$/.test(data.chatId) || !/^[a-f0-9]{64}$/.test(data.questionId))
+  if (!/^[\da-f-]{36}$/.test(data.chatId))
+    return
+  // Execution alerts (node unavailable, failover, backup failure) carry their own short text.
+  if (/^[\da-f-]{36}$/.test(data.alertId) && typeof data.title === 'string' && typeof data.body === 'string') {
+    event.waitUntil(globalThis.registration.showNotification(data.title.slice(0, 120), {
+      body: data.body.slice(0, 300),
+      icon: '/icons/icon-192.png',
+      badge: '/icons/icon-192.png',
+      tag: `node-${data.alertId}`,
+      data: { url: `/chats/${data.chatId}` },
+    }))
+    return
+  }
+  if (!/^[a-f0-9]{64}$/.test(data.questionId))
     return
   event.waitUntil(globalThis.registration.showNotification('Your agent has a question', {
     body: 'Open the chat to answer.',
