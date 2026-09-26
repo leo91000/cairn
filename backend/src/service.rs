@@ -70,7 +70,7 @@ impl Service {
             shutdown: CancellationToken::new(),
         });
         for mut agent in service.store.list("agents").await? {
-            if agent["access"].get("mcps").is_none() {
+            if agent["access"].get("mcps").is_none() || agent["access"].get("nodes").is_none() {
                 agent["access"] = policy(&agent);
                 service.store.put("agents", agent).await?;
             }
@@ -134,6 +134,13 @@ impl Service {
                 .as_str()
                 .into();
         }
+        // Older clients submit the other access axes without knowing about nodes.
+        if input["access"].is_object()
+            && input["access"].get("nodes").is_none()
+            && let Some(existing) = &existing
+        {
+            input["access"]["nodes"] = policy(existing)["nodes"].clone();
+        }
         let mut agent = parse("agent", input)?;
         crate::claude::validate_agent(&agent)?;
         agent["id"] = existing_id.map(str::to_owned).unwrap_or_else(id).into();
@@ -178,6 +185,19 @@ impl Service {
         let agent = self
             .store
             .transaction(move |db| {
+                // Serialize grants with revocation; a concurrent editor must never
+                // restore a grant that the revocation transaction just removed.
+                for node in access["nodes"].as_array().into_iter().flatten() {
+                    if node != crate::nodes::LOCAL_NODE_ID {
+                        let record = required(
+                            db.get("nodes", node.as_str().unwrap_or(""))?,
+                            "Node not found",
+                        )?;
+                        if record["revoked"] == true {
+                            return Err(Error::bad("A revoked node cannot be authorized."));
+                        }
+                    }
+                }
                 // Read the latest portrait inside the save transaction: editing an agent
                 // must not overwrite an upload or background generation that just finished.
                 if let Some(existing) = db.get("agents", text(&agent, "id"))?
@@ -411,6 +431,7 @@ impl Service {
         let run = self
             .snapshot(self.get("tasks", task_id).await?, trigger)
             .await?;
+        crate::nodes::require_local(&run["snapshot"]["agent"])?;
         let result = self
             .store
             .transaction(move |db| {
@@ -475,7 +496,7 @@ pub fn policy(agent: &Value) -> Value {
     let mut value = json!({
     "projects":null,"skills":null,"mcps":null,"mcpTools":{
     }
-    ,"github":true,"sandbox":"yolo"}
+    ,"github":true,"sandbox":"yolo","nodes":[crate::nodes::LOCAL_NODE_ID]}
     );
     merge(&mut value, &agent["access"]);
     if agent["id"] != MAIN_AGENT_ID

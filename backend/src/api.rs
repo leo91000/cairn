@@ -8,6 +8,9 @@ use crate::{
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
 pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
+    if input.path == "/api/nodes" || input.path.starts_with("/api/nodes/") {
+        return crate::nodes::admin(s, input).await;
+    }
     if input.path == "/api/accounts" || input.path.starts_with("/api/accounts/") {
         return crate::accounts::routes(s, input).await;
     }

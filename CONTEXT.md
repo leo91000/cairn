@@ -4,6 +4,28 @@ Leo Agent Manager permet de conduire des conversations avec des agents et de ret
 
 ## Language
 
+**Node d’exécution** :
+Machine enregistrée dans Leo pour y effectuer le travail d’un agent, selon ses capacités et les autorisations accordées. Une node peut être disponible de manière intermittente.
+_Avoid_ : agent (qui désigne l’agent chargé du travail, et non la machine)
+
+**Capacité d’une node** :
+Possibilité de travail vérifiée sur une node, distincte de la seule présence du matériel et de sa disponibilité au moment de la demande. Une capacité ne donne aucun droit supplémentaire à l’agent.
+
+**Tag de node** :
+Étiquette servant à décrire ou sélectionner une node parmi celles autorisées pour l’agent. Un tag ne constitue pas une autorisation d’accès aux projets ou aux comptes.
+
+**Réservation de ressources** :
+Part des ressources d’une node attribuée à une exécution dans les plafonds configurés. Elle est prise en compte avant d’accepter d’autres travaux sur cette node.
+
+**Déplacement d’une conversation** :
+Changement de node d’exécution d’une même conversation, avec une pause puis une reprise de sa session et de son environnement de travail. Il ne conserve pas les processus en cours ni leur mémoire.
+
+**Environnement de travail d’une conversation** :
+Ensemble des fichiers, outils installés et données locales conservés pour le travail d’une conversation. Il comprend les modifications non publiées des projets et les données nécessaires à leur reprise, au-delà du seul historique des messages.
+
+**Sauvegarde de reprise** :
+Copie datée et cohérente de la session et de l’environnement de travail d’une conversation, permettant sa reprise sur une autre node si la node d’origine est indisponible. Elle ne contient pas nécessairement le travail effectué après sa création et se distingue de l’archivage d’une conversation.
+
 **Conversation archivée** :
 Une conversation conservée hors du stockage principal pour libérer de l’espace, dont une entrée reste visible dans l’application. Elle conserve l’historique, les fichiers et le contexte de travail nécessaires à sa reprise après restauration.
 

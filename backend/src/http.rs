@@ -54,6 +54,7 @@ pub async fn router(service: Arc<Service>) -> Result<Router> {
         .route("/mcp-workspace", any(crate::mcp_server::handle))
         .route("/mcp-gateway/{id}", any(crate::mcp_server::handle))
         .route("/internal/deployment-lease", any(lease))
+        .route("/internal/nodes/{*path}", any(crate::nodes::internal))
         .route("/api/{*path}", any(api))
         .route("/oauth/{*path}", any(oauth))
         .route("/.well-known/{*path}", any(metadata))

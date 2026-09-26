@@ -207,6 +207,8 @@ fun AtelierScreen(vm: LeoViewModel, state: Workspace, navigate: (String) -> Unit
             }
         }
         SignalCard(Modifier.fillMaxWidth(), padding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)) {
+            LinkRow(LeoIcons.Gear, "Nodes et ressources") { navigate("nodes") }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             LinkRow(LeoIcons.Log, "Journal des exécutions") { navigate("runs") }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             LinkRow(LeoIcons.Shield, "Autoriser un assistant") { navigate("authorize") }

@@ -655,6 +655,7 @@ impl Worker {
         let current = s
             .get("agents", text(&run["snapshot"]["agent"], "id"))
             .await?;
+        crate::nodes::require_local(&current)?;
         if policy(&current) != policy(&run["snapshot"]["agent"]) {
             return Err(Error::new(
                 409,

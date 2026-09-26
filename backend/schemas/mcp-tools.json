@@ -58,6 +58,9 @@
         },
         "access": {
           "default": {
+            "nodes": [
+              "00000000-0000-4000-8000-000000000002"
+            ],
             "projects": null,
             "skills": null,
             "mcps": null,
@@ -67,6 +70,25 @@
           },
           "type": "object",
           "properties": {
+            "nodes": {
+              "default": [
+                "00000000-0000-4000-8000-000000000002"
+              ],
+              "anyOf": [
+                {
+                  "maxItems": 100,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "projects": {
               "default": null,
               "anyOf": [
@@ -150,6 +172,7 @@
             }
           },
           "required": [
+            "nodes",
             "projects",
             "skills",
             "mcps",
@@ -223,6 +246,22 @@
             "access": {
               "type": "object",
               "properties": {
+                "nodes": {
+                  "anyOf": [
+                    {
+                      "maxItems": 100,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "projects": {
                   "default": null,
                   "anyOf": [

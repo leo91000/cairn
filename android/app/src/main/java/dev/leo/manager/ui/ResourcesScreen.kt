@@ -137,6 +137,10 @@ fun ResourcesScreen(
 
 @Composable
 private fun AgentEditor(vm: LeoViewModel, state: Workspace, initial: Agent, close: () -> Unit) {
+    var nodes by remember { mutableStateOf<List<ExecutionNode>>(emptyList()) }
+    LaunchedEffect(initial.id) {
+        try { nodes = vm.api.get("/nodes") } catch (e: Exception) { vm.report(e) }
+    }
     var form by rememberForm(initial)
     var timeout by rememberSaveable { mutableStateOf(initial.timeoutMinutes.toString()) }
     val minutes = timeout.toIntOrNull()
@@ -204,6 +208,18 @@ private fun AgentEditor(vm: LeoViewModel, state: Workspace, initial: Agent, clos
                 { timeout = it },
                 keyboardOptions = InputKeyboards.Number,
             )
+        }
+        Toggle("Toutes les nodes, y compris futures", form.access.nodes == null) {
+            form = form.copy(access = form.access.copy(nodes = if (it) null else emptyList()))
+        }
+        if (form.access.nodes != null) {
+            val choices = listOf(LOCAL_NODE_ID to "Runner actuel") + nodes.filter { !it.local && !it.revoked }.map { it.id to it.name }
+            choices.forEach { (id, name) ->
+                Toggle(name, id in form.access.nodes.orEmpty()) { enabled ->
+                    val selected = form.access.nodes.orEmpty()
+                    form = form.copy(access = form.access.copy(nodes = if (enabled) selected + id else selected - id))
+                }
+            }
         }
         Text("Accès de l’agent", style = MaterialTheme.typography.titleMedium)
         Choice(

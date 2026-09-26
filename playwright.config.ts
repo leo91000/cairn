@@ -14,6 +14,7 @@ export default defineConfig({
   projects: [
     { name: 'journeys-agent-avatars', testMatch: 'agent-avatars.spec.ts' },
     { name: 'layout-webkit-agent-avatars', testMatch: 'agent-avatars.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
+    { name: 'journeys-nodes', testMatch: 'nodes.spec.ts' },
     { name: 'journeys-github-projects', testMatch: 'github-projects.spec.ts' },
     { name: 'layout-webkit-github-projects', testMatch: 'github-projects.spec.ts', use: { browserName: 'webkit', isMobile: true, hasTouch: true } },
     { name: 'journeys-claude', testMatch: 'claude.spec.ts' },

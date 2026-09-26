@@ -15,6 +15,7 @@ const resources = computed<Array<{ to: string, label: string, icon: IconName, co
 ])
 const workspace: Array<{ to: string, label: string, icon: IconName, detail: string }> = [
   { to: '/connections', label: 'Connections', icon: Plug, detail: 'Codex, Claude Code, GitHub and 1Password' },
+  { to: '/nodes', label: 'Nodes', icon: Activity, detail: 'Trusted machines, capabilities and resource ceilings' },
   { to: '/runs', label: 'Runs', icon: Activity, detail: 'The run journal: every run, with its log and files' },
   { to: '/settings', label: 'Settings', icon: Settings, detail: 'Notifications, access and security' },
 ]

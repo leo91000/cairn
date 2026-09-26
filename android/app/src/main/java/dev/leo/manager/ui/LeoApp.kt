@@ -271,6 +271,7 @@ fun LeoApp(
                             composable("connections") {
                                 ConnectionsScreen(vm, state) { nav.navigate("run/$it") }
                             }
+                            composable("nodes") { NodesScreen(vm, state) }
                             composable("settings") { SettingsScreen(vm, state) }
                             composable("authorize") {
                                 AuthorizeScreen(vm, state, sharedUrl, consumedShare)

@@ -80,6 +80,29 @@ async fn entry(args: Vec<String>) -> Result<i32> {
     let stop = CancellationToken::new();
     tokio::spawn(shutdown(stop.clone()));
     match mode {
+        "node-enroll" => {
+            leo_agent_manager::nodes::connector::enroll(
+                args.get(1)
+                    .ok_or_else(|| Error::bad("Missing master HTTPS origin."))?,
+                Path::new(
+                    args.get(2)
+                        .ok_or_else(|| Error::bad("Missing private node directory."))?,
+                ),
+            )
+            .await?;
+            Ok(0)
+        }
+        "node-connect" => {
+            leo_agent_manager::nodes::connector::connect(
+                Path::new(
+                    args.get(1)
+                        .ok_or_else(|| Error::bad("Missing private node directory."))?,
+                ),
+                stop,
+            )
+            .await?;
+            Ok(0)
+        }
         "guest-warm" => {
             let config = Config::load()?;
             leo_agent_manager::toolkit::environment(&config.home, std::env::vars().collect())
