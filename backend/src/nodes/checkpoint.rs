@@ -6,7 +6,6 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::{
-    os::fd::AsRawFd,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -26,27 +25,16 @@ pub async fn capture(
 ) -> Result<Value> {
     crate::validation::uuid(run)?;
     let disk = state.join("disks").join(run);
-    let capture_lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(disk.join("snapshot.lock"))?;
-    if unsafe { libc::flock(capture_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err(Error::new(409, "A snapshot is already in progress."));
-    }
+    let _capture_lock = crate::file_lock::exclusive(
+        &disk.join("snapshot.lock"),
+        "A snapshot is already in progress.",
+    )?;
     let captured_at = crate::config::now();
     let _lock = if socket.is_none() {
-        let lock = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(disk.join("lock"))?;
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(Error::new(409, "VM disk is still active."));
-        }
-        Some(lock)
+        Some(crate::file_lock::exclusive(
+            &disk.join("lock"),
+            "VM disk is still active.",
+        )?)
     } else {
         None
     };

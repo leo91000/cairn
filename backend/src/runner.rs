@@ -498,16 +498,8 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
         }
         let directory = broker.state.join("disks").join(&run);
         private_dir(&directory).await?;
-        use std::os::fd::AsRawFd;
-        let lock = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(directory.join("lock"))?;
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(Error::new(409, "The workspace is still in use."));
-        }
+        let _lock =
+            crate::file_lock::exclusive(&directory.join("lock"), "The workspace is still in use.")?;
         let disk = directory.join("data.ext4");
         if action == "delete" {
             match tokio::fs::remove_file(&disk).await {
@@ -1041,6 +1033,7 @@ mod tests {
             409
         );
         let inode = lock.metadata().unwrap().ino();
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
         drop(lock);
         assert_eq!(
             request(&app, &run, "delete", &transfer, "synthetic-runner-secret").await,

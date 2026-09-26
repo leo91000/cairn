@@ -11,7 +11,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde_json::{Value, json};
-use std::{os::fd::AsRawFd, path::Path, time::Duration};
+use std::{path::Path, time::Duration};
 pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Result<()> {
     let _operation = s.node_backup_operation.lock().await;
     let manifest = super::backups::manifest(s, backup).await?;
@@ -104,15 +104,7 @@ pub async fn controller(state: &Path, run: &str, value: Value) -> Result<Value> 
     }
     let directory = state.join("disks").join(run);
     crate::skills::private_dir(&directory).await?;
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(directory.join("lock"))?;
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err(Error::new(409, "VM disk is active."));
-    }
+    let _lock = crate::file_lock::exclusive(&directory.join("lock"), "VM disk is active.")?;
     let recovery = directory.join("recovery.json");
     if recovery.exists()
         && serde_json::from_slice::<Value>(&tokio::fs::read(&recovery).await?)?["backupId"]

@@ -14,6 +14,7 @@ pub mod connections;
 pub mod conversation_lifecycle;
 pub mod error;
 pub mod execution;
+pub mod file_lock;
 pub mod http;
 pub mod mcp_client;
 pub mod mcp_oauth;

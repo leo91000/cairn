@@ -7,33 +7,13 @@ use crate::{
 };
 use serde_json::{Value, json};
 
-pub struct StorageLock(std::fs::File);
-
-impl Drop for StorageLock {
-    fn drop(&mut self) {
-        use std::os::fd::AsRawFd;
-        // A concurrent subprocess can inherit the open file description until
-        // exec. Closing our descriptor alone would leave that child's lock held.
-        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
-    }
-}
+pub type StorageLock = crate::file_lock::Guard;
 
 pub fn storage_lock(directory: &std::path::Path) -> Result<StorageLock> {
-    use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(directory.join("conversation-storage.lock"))?;
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err(Error::new(
-            409,
-            "A conversation storage operation is in progress. Retry shortly.",
-        ));
-    }
-    Ok(StorageLock(lock))
+    crate::file_lock::exclusive(
+        &directory.join("conversation-storage.lock"),
+        "A conversation storage operation is in progress. Retry shortly.",
+    )
 }
 
 pub const DAY: i64 = 86_400_000;
