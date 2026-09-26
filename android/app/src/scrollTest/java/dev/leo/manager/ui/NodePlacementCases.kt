@@ -68,6 +68,7 @@ abstract class NodePlacementCases {
         MockWebServer().use { server ->
             val writes = CopyOnWriteArrayList<Pair<String, JsonObject>>()
             var revoked = false
+            var configured = false
             server.dispatcher = object : Dispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse {
                     val path = request.path!!.substringBefore('?')
@@ -78,13 +79,17 @@ abstract class NodePlacementCases {
                     val body = when {
                         path == "/api/nodes/enrollments" -> """{"code":"fixture-enrollment","expiresAt":4102444800000,"installCommand":"curl https://fixture.invalid/install | bash"}"""
                         path == "/api/nodes/node/revoke" -> { revoked = true; "{}" }
-                        path == "/api/nodes/node" || path == "/api/nodes/settings" -> "{}"
+                        path == "/api/nodes/node" -> { configured = true; "{}" }
+                        path == "/api/nodes/settings" -> "{}"
                         path == "/api/nodes" -> """[{"id":"node","name":"Serveur test","status":"${if (revoked) "revoked" else "online"}","revoked":$revoked,"accepting":true,"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536}}]"""
                         path == "/api/session" -> """{"authenticated":true,"csrf":"fixture"}"""
                         path == "/api/overview" -> "{}"
                         else -> "[]"
                     }
-                    return MockResponse().setBody(body)
+                    return MockResponse().setBody(body).apply {
+                        // Keep the save busy while the subsequent node refresh is in flight.
+                        if (path == "/api/nodes" && configured) setBodyDelay(1, java.util.concurrent.TimeUnit.SECONDS)
+                    }
                 }
             }
             server.start()
@@ -117,7 +122,8 @@ abstract class NodePlacementCases {
             compose.waitUntil(10000) { writes.any { it.first == "/api/nodes/node" } }
             assertEquals(3, writes.first { it.first == "/api/nodes/node" }.second["limits"]!!.jsonObject["cpu"]!!.jsonPrimitive.int)
             compose.onNodeWithText("Révoquer", substring = false).performScrollTo().performClick()
-            compose.onNodeWithText("Confirmer").performClick()
+            compose.waitUntil(10000) { compose.onAllNodes(hasText("Confirmer") and isEnabled()).fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Confirmer").assertIsEnabled().performClick()
             compose.waitUntil(10000) { compose.onAllNodesWithText("Révoquée").fetchSemanticsNodes().isNotEmpty() }
             assertTrue(writes.any { it.first == "/api/nodes/node/revoke" })
         }
