@@ -14,12 +14,14 @@ export interface ExecutionNode {
   revoked: boolean
   status: 'online' | 'offline' | 'revoked' | 'local'
   tags: string[]
+  systemTags?: string[]
   capabilities: NodeResources & { os: string, arch: string, kvm: boolean }
   limits: NodeResources
   reserved?: NodeResources
   available?: NodeResources
   executionReady?: boolean
   maintenance?: string | null
+  maintenanceError?: string | null
   imageDigest?: string | null
   updateError?: string | null
   runtimeId: string

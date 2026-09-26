@@ -69,6 +69,12 @@ jobs:
           cargo clippy --locked --workspace --all-targets -- -D warnings
           node scripts/test-backend.mjs
           cargo build --locked --bin leo
+      - name: Validate node supervisor and S3 recovery
+        run: |
+          python3 tests/node_supervisor_test.py
+          python3 -m venv .node-s3-test
+          .node-s3-test/bin/pip install 'moto[server]==5.2.3' awscli
+          PATH="$PWD/.node-s3-test/bin:$PATH" .node-s3-test/bin/python tests/node_s3_test.py
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: browser-backend

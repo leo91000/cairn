@@ -3,6 +3,7 @@ import type { Run } from '../../shared/contracts'
 import type { ExecutionNode } from '../../shared/nodes'
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { api } from '../api'
+import UiButton from './UiButton.vue'
 
 const props = defineProps<{ run: Run }>()
 const nodes = ref<ExecutionNode[]>([])
@@ -69,14 +70,14 @@ async function save(move = false) {
     <details class="mt-2">
       <summary>Execution node</summary>
       <div class="mt-2 flex flex-wrap items-center gap-2">
-        <label>Placement <select v-model="mode" :disabled="busy" class="rounded border border-line bg-panel p-1"><option value="automatic">Automatic</option><option value="preferred">Prefer a node</option><option value="fixed">Fix to a node</option></select></label>
-        <label>Node <select v-model="selection" :disabled="busy" class="rounded border border-line bg-panel p-1"><option value="" disabled>Select a node</option><option v-for="candidate in nodes" :key="candidate.id" :value="candidate.id">{{ candidate.name }}</option></select></label>
-        <button :disabled="busy || (mode !== 'automatic' && !selection)" class="rounded border border-line px-2 py-1" @click="save()">
+        <label>Placement <select v-model="mode" aria-label="Placement" :disabled="busy" class="rounded border border-line bg-surface p-1"><option value="automatic">Automatic</option><option value="preferred">Prefer a node</option><option value="fixed">Fix to a node</option></select></label>
+        <label>Node <select v-model="selection" aria-label="Node" :disabled="busy" class="rounded border border-line bg-surface p-1"><option value="" disabled>Select a node</option><option v-for="candidate in nodes" :key="candidate.id" :value="candidate.id">{{ candidate.name }}</option></select></label>
+        <UiButton size="small" :disabled="busy || (mode !== 'automatic' && !selection)" @click="save()">
           Save placement
-        </button>
-        <button :disabled="busy || !selection || run.status !== 'running' || !!run.nodeState" class="rounded border border-line px-2 py-1" @click="save(true)">
+        </UiButton>
+        <UiButton size="small" :disabled="busy || !selection || !['running', 'succeeded'].includes(run.status) || !!run.nodeState" @click="save(true)">
           Move now
-        </button>
+        </UiButton>
       </div>
       <p class="mt-1">
         A preference permits failover. A fixed node waits for that machine. Move now pauses the active conversation after reserving its destination.

@@ -92,11 +92,7 @@ pub async fn controller(state: &Path, run: &str, value: Value) -> Result<Value> 
     let manifest = &value["manifest"];
     super::snapshots::validate(manifest)?;
     let runtime = text(&manifest["runtime"], "runtimeId");
-    if runtime.is_empty()
-        || !runtime
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || c == b'-')
-    {
+    if !super::valid_runtime(runtime) {
         return Err(Error::bad("Invalid runtime identity."));
     }
     let image = state.join("images").join(runtime);

@@ -58,7 +58,10 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
                 if (node.runtimeId.isNotBlank()) Text("Runtime : ${node.runtimeId}")
                 Text("${node.limits.cpu} CPU · ${node.limits.memoryMiB} Mio RAM · ${node.limits.diskMiB} Mio disque autorisés")
                 node.available?.let { Text("Disponible : ${it.cpu} CPU · ${it.memoryMiB} Mio RAM · ${it.diskMiB} Mio disque") }
-                node.maintenance?.let { Text(it) }
+                node.maintenance?.let { Text(if (it == "draining") "Mise en pause et sauvegarde des conversations" else "Prête à redémarrer pour la mise à jour")
+                    node.maintenanceError?.let { message -> Text(message, color = MaterialTheme.colorScheme.error) }
+                }
+                if (node.systemTags.isNotEmpty()) Text("Tags détectés : ${node.systemTags.joinToString(" · ")}")
                 node.imageDigest?.let { Text("Version : $it") }
                 node.updateError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 if (node.tags.isNotEmpty()) Text(node.tags.joinToString(" · "))

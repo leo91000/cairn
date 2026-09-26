@@ -47,9 +47,25 @@ pub async fn capture(
     } else {
         None
     };
+    // A new capture supersedes abandoned transfers for this run. The per-run
+    // capture lock prevents removing a snapshot still being produced.
+    let snapshots = state.join("snapshots");
+    if snapshots.exists() {
+        let mut entries = tokio::fs::read_dir(&snapshots).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            if entry.file_type().await?.is_dir()
+                && tokio::fs::read_to_string(entry.path().join("run"))
+                    .await
+                    .is_ok_and(|owner| owner == run)
+            {
+                tokio::fs::remove_dir_all(entry.path()).await?;
+            }
+        }
+    }
     let id = crate::config::id();
     let directory = state.join("snapshots").join(&id);
     private_dir(&directory).await?;
+    atomic_write(&directory.join("run"), run.as_bytes()).await?;
     let started = tokio::time::Instant::now();
     let mut frozen = false;
     let mut paused = false;
@@ -100,20 +116,27 @@ pub async fn capture(
         return Err(error);
     }
     let pause_ms = started.elapsed().as_millis() as u64;
-    let indexed = tokio::time::Instant::now();
-    let mut manifest = super::snapshots::index(&directory.join("disk")).await?;
-    manifest["runtime"] =
-        serde_json::from_slice(&tokio::fs::read(disk.join("runtime.json")).await?)?;
-    manifest["capturedAt"] = captured_at.into();
-    manifest["pauseMs"] = pause_ms.into();
-    manifest["indexMs"] = (indexed.elapsed().as_millis() as u64).into();
-    manifest["localBytesRead"] = manifest["size"].clone();
-    atomic_write(
-        &directory.join("manifest.json"),
-        &serde_json::to_vec(&manifest)?,
-    )
-    .await?;
-    Ok(json!({"id":id,"manifest":manifest}))
+    let result = async {
+        let indexed = tokio::time::Instant::now();
+        let mut manifest = super::snapshots::index(&directory.join("disk")).await?;
+        manifest["runtime"] =
+            serde_json::from_slice(&tokio::fs::read(disk.join("runtime.json")).await?)?;
+        manifest["capturedAt"] = captured_at.into();
+        manifest["pauseMs"] = pause_ms.into();
+        manifest["indexMs"] = (indexed.elapsed().as_millis() as u64).into();
+        manifest["localBytesRead"] = manifest["size"].clone();
+        atomic_write(
+            &directory.join("manifest.json"),
+            &serde_json::to_vec(&manifest)?,
+        )
+        .await?;
+        Ok(json!({"id":id,"manifest":manifest}))
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_dir_all(&directory).await;
+    }
+    result
 }
 
 async fn guest(socket: &Path, operation: &str) -> Result<Value> {

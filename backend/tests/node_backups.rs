@@ -146,3 +146,59 @@ async fn a_lost_pause_acknowledgement_resumes_and_thaws_before_returning_error()
     controller_task.abort();
     guest_task.abort();
 }
+
+#[tokio::test]
+async fn stopped_disk_capture_reclaims_abandoned_transfers_and_failed_indexing() {
+    use leo_agent_manager::{config::id, nodes::checkpoint};
+    use serde_json::json;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+    use tokio_util::sync::CancellationToken;
+    let root = TempDir::new().unwrap();
+    let run = id();
+    let disk = root.path().join("disks").join(&run);
+    std::fs::create_dir_all(&disk).unwrap();
+    std::fs::write(disk.join("data.ext4"), b"retained environment").unwrap();
+    std::fs::write(
+        disk.join("runtime.json"),
+        json!({"runtimeId":"fixture"}).to_string(),
+    )
+    .unwrap();
+    let capture = || {
+        checkpoint::capture(
+            root.path(),
+            &run,
+            None,
+            Arc::new(Mutex::new(())),
+            CancellationToken::new(),
+            &run,
+        )
+    };
+    let first = capture().await.unwrap();
+    let second = capture().await.unwrap();
+    assert!(
+        !root
+            .path()
+            .join("snapshots")
+            .join(first["id"].as_str().unwrap())
+            .exists()
+    );
+    assert!(
+        root.path()
+            .join("snapshots")
+            .join(second["id"].as_str().unwrap())
+            .exists()
+    );
+    std::fs::remove_file(disk.join("runtime.json")).unwrap();
+    assert!(capture().await.is_err());
+    assert_eq!(
+        std::fs::read_dir(root.path().join("snapshots"))
+            .unwrap()
+            .count(),
+        0
+    );
+    assert_eq!(
+        std::fs::read(disk.join("data.ext4")).unwrap(),
+        b"retained environment"
+    );
+}

@@ -43,11 +43,7 @@ pub async fn downloads(State(app): State<App>, request: Request) -> Result<Respo
         "/internal/nodes/release" => {
             let mut value = release()?;
             let runtime = std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into());
-            if runtime.len() <= 100
-                && runtime
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || c == b'-')
-            {
+            if super::valid_runtime(&runtime) {
                 app.service
                     .store
                     .set(
@@ -180,6 +176,14 @@ async fn drain(s: &Service, node: &str) -> Result<()> {
         .filter(|a| a["nodeId"] == node && a["released"] != true && a["role"] == "execution")
     {
         let run = s.store.run(text(&attempt, "runId")).await?;
+        let checkpoint = s
+            .store
+            .kv(&format!("run-checkpoint:{}", text(&run, "id")))
+            .await?
+            .unwrap_or_default();
+        if checkpoint["nodeId"] != node || checkpoint["runnerId"] != attempt["id"] {
+            continue;
+        }
         s.store
             .patch_run(text(&run, "id"), json!({"nodeState":"updating"}))
             .await?;
@@ -191,14 +195,6 @@ async fn drain(s: &Service, node: &str) -> Result<()> {
                 None,
             )
             .await?;
-        let checkpoint = s
-            .store
-            .kv(&format!("run-checkpoint:{}", text(&run, "id")))
-            .await?
-            .unwrap_or_default();
-        if checkpoint["nodeId"] != node || checkpoint["runnerId"] != attempt["id"] {
-            continue;
-        }
         let stopped = s
             .http
             .delete(format!(

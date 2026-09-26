@@ -16,7 +16,7 @@ pub struct Storage {
     pub bucket: String,
     binary: String,
     /// S3-compatible providers (OVHcloud, Scaleway…) need an explicit endpoint.
-    endpoint: Option<String>,
+    pub(crate) endpoint: Option<String>,
     /// AWS names its cold tier GLACIER; OVHcloud Cold Archive is DEEP_ARCHIVE.
     cold_class: String,
 }

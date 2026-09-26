@@ -21,7 +21,10 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
@@ -204,17 +207,19 @@ impl Broker {
             let leased = plan["nodeLeaseRequired"] == true;
             let owner = broker.clone();
             let attempt = id.clone();
+            let lease_expired = Arc::new(AtomicBool::new(false));
+            let expired = lease_expired.clone();
             let timer = tokio::spawn(async move {
                 loop {
-                    if deadline.is_some_and(|d| now() >= d)
-                        || (leased
-                            && owner
-                                .leases
-                                .lock()
-                                .await
-                                .get(&attempt)
-                                .is_none_or(|d| *d <= crate::nodes::boot_ms()))
-                    {
+                    let lost_lease = leased
+                        && owner
+                            .leases
+                            .lock()
+                            .await
+                            .get(&attempt)
+                            .is_none_or(|d| *d <= crate::nodes::boot_ms());
+                    if deadline.is_some_and(|d| now() >= d) || lost_lease {
+                        expired.store(lost_lease, Ordering::SeqCst);
                         if leased {
                             let _guard = control.lock().await;
                             let _ = host::pause_attempt(&owner.state, &attempt).await;
@@ -243,6 +248,11 @@ impl Broker {
                     }
                     1
                 }
+            };
+            let code = if lease_expired.load(Ordering::SeqCst) {
+                CONTROLLER_INTERRUPTED
+            } else {
+                code
             };
             let _ = atomic_write(
                 &broker.state.join(format!("{id}.exit")),
@@ -420,6 +430,39 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
             crate::nodes::snapshots::block(&directory.join("disk"), &manifest, hash).await?;
         return Ok(([("content-length", bytes.len().to_string())], bytes).into_response());
     }
+    if let ["disks", run, "snapshot"] = segments.as_slice() {
+        uuid(run)?;
+        if request.method() != "POST" {
+            return Err(Error::new(405, "Method not allowed."));
+        }
+        if broker
+            .active
+            .lock()
+            .await
+            .values()
+            .any(|a| a.plan["runId"] == *run)
+        {
+            return Err(Error::new(
+                409,
+                "Use the active attempt for a running VM snapshot.",
+            ));
+        }
+        let state = broker.state.clone();
+        let run = (*run).to_owned();
+        let stop = broker.stop.child_token();
+        let task = tokio::spawn(async move {
+            crate::nodes::checkpoint::capture(
+                &state,
+                &run,
+                None,
+                Arc::new(Mutex::new(())),
+                stop,
+                &run,
+            )
+            .await
+        });
+        return Ok(Json(task.await.map_err(Error::internal)??).into_response());
+    }
     if let ["disks", run, "restore"] = segments.as_slice() {
         let run = (*run).to_owned();
         if request.method() != "POST" {
@@ -510,12 +553,7 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
             }
         } else if !disk.exists() {
             if let Some(runtime) = body["runtimeId"].as_str() {
-                if runtime.is_empty()
-                    || runtime.len() > 100
-                    || !runtime
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-                {
+                if !crate::nodes::valid_runtime(runtime) {
                     return Err(Error::bad("Invalid archived runtime."));
                 }
                 if !broker
@@ -765,6 +803,10 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         .open(state.join("controller.lock"))?;
     if unsafe { libc::flock(controller.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(Error::new(503, "Another VM controller owns this storage."));
+    }
+    // No snapshot transfer survives a controller restart; durable points live on the master/S3.
+    if state.join("snapshots").exists() {
+        tokio::fs::remove_dir_all(state.join("snapshots")).await?;
     }
     let image = host::assets(&state).await?;
     // A controller container restart fences its entire PID namespace. Mark interrupted attempts

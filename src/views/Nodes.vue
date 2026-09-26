@@ -133,7 +133,13 @@ function save() {
           Available: {{ node.available.cpu }} CPU · {{ node.available.memoryMiB }} MiB RAM · {{ node.available.diskMiB }} MiB disk
         </p>
         <p v-if="node.maintenance" role="status" class="mt-2">
-          {{ node.maintenance }}
+          {{ node.maintenance === 'draining' ? 'Pausing and saving conversations' : 'Ready to restart for the update' }}
+        </p>
+        <p v-if="node.maintenance && node.maintenanceError" role="alert" class="mt-1 text-coral">
+          {{ node.maintenanceError }}
+        </p>
+        <p v-if="node.systemTags?.length" class="mt-2 text-sm text-muted">
+          Detected tags: {{ node.systemTags.join(' · ') }}
         </p>
         <p v-if="node.tags.length" class="mt-2 text-sm">
           {{ node.tags.join(' · ') }}

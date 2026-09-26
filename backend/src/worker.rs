@@ -92,7 +92,7 @@ impl Worker {
                         db.patch_run(
                             id,
                             &json!({
-                            "status":"queued","recoveryPending":true,"finishedAt":null,"accountWaitReason":"Recovering after worker restart."}
+                            "status":"queued","recoveryPending":true,"finishedAt":null,"capacityWaitUntil":null,"accountWaitReason":"Recovering after worker restart."}
                             ),
                         )?;
                         db.event(id, "status", "Recovering after worker restart", None)?;
@@ -440,12 +440,15 @@ impl Worker {
         let _heartbeat_guard = stop_heartbeat.clone().drop_guard();
         let heartbeat = {
             let c = checkpoint.clone();
+            let service = s.clone();
             let stop = stop_heartbeat.clone();
             tokio::spawn(async move {
                 let mut timer = tokio::time::interval(Duration::from_secs(5));
                 loop {
                     tokio::select! {
                     _=stop.cancelled()=>break,_=timer.tick()=>{
+                    let _=crate::nodes::moves::pause_pending(&service,&c.id).await;
+                    let _=crate::nodes::placement::renew_local(&service,&c.id).await;
                     let _=c.save(json!({
                     }
                     )).await;
@@ -680,12 +683,20 @@ impl Worker {
             .get("agents", text(&run["snapshot"]["agent"], "id"))
             .await?;
         crate::nodes::require_node(&current)?;
-        if policy(&current) != policy(&run["snapshot"]["agent"]) {
+        let current_policy = policy(&current);
+        let mut queued_policy = policy(&run["snapshot"]["agent"]);
+        queued_policy["nodes"] = current_policy["nodes"].clone();
+        if current_policy != queued_policy {
             return Err(Error::new(
                 409,
                 "Agent access changed after this run was queued. Run the task again with the current policy.",
             ));
         }
+        // Placement follows current grants, including whether execution needs a VM.
+        run["snapshot"]["agent"]["access"]["nodes"] = current_policy["nodes"].clone();
+        s.store
+            .patch_run(&id, json!({"snapshot":run["snapshot"]}))
+            .await?;
         let saved = checkpoint.value().await;
         if existing && !saved["prepared"].is_object() {
             checkpoint
@@ -939,6 +950,8 @@ impl Worker {
                 ,"imports":mounts,"expires":checkpoint.deadline,"sandbox":policy(&run["snapshot"]["agent"])["sandbox"],"mcpEnv":mcp["env"]}
                 );
                 plan["resources"] = placement["resources"].clone();
+                plan["nodeLeaseRequired"] = true.into();
+                crate::nodes::placement::renew_local(s, &id).await?;
                 if let Some(chat) = chat {
                     plan["chat"] = chat;
                 }

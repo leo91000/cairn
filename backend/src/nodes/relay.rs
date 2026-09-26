@@ -132,7 +132,7 @@ fn route(method: &str, path: &str) -> Result<()> {
         ["disks", id, operation] => {
             method == "POST"
                 && crate::validation::uuid(id).is_ok()
-                && ["export", "import", "delete", "restore"].contains(operation)
+                && ["export", "import", "delete", "restore", "snapshot"].contains(operation)
         }
         _ => false,
     };

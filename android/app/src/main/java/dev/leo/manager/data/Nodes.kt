@@ -36,6 +36,8 @@ data class ExecutionNode(
     val updateError: String? = null,
     val runtimeId: String = "",
     val lastSeen: Long? = null,
+    val systemTags: List<String> = emptyList(),
+    val maintenanceError: String? = null,
 )
 
 @Serializable

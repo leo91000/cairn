@@ -20,6 +20,9 @@ impl Owner {
         Self::at("localhost:4310".into()).await
     }
     async fn at(host: String) -> Self {
+        Self::with_runner(host, String::new()).await
+    }
+    async fn with_runner(host: String, runner_url: String) -> Self {
         let root = TempDir::new().unwrap();
         std::fs::create_dir(root.path().join("home")).unwrap();
         let s = Service::new(Config {
@@ -36,7 +39,7 @@ impl Owner {
             concurrency: 4,
             logger: false,
             worker_enabled: false,
-            runner_url: String::new(),
+            runner_url,
         })
         .await
         .unwrap();
@@ -1247,8 +1250,590 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
     corrupt.store(false, Ordering::SeqCst);
     let second = backups::capture(&owner.service, &record).await.unwrap();
     assert_eq!(second["uploadedBytes"], 4 * 1024 * 1024);
+    let filler = owner
+        .service
+        .config
+        .data_dir
+        .join("node-backups/quota-fixture");
+    std::fs::File::create(&filler)
+        .unwrap()
+        .set_len(128 * 1024 * 1024)
+        .unwrap();
+    let settings = json!({"destination":if s3.is_some() {"s3"} else {"master"},"intervalSeconds":60,"retention":2,"budgetMiB":128});
+    owner
+        .service
+        .store
+        .set("node-backup-settings", settings, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        backups::capture(&owner.service, &record)
+            .await
+            .unwrap_err()
+            .status,
+        507
+    );
+    assert_eq!(
+        owner.service.store.run(&run).await.unwrap()["backup"]["id"],
+        second["id"]
+    );
+    std::fs::remove_file(filler).unwrap();
+    let third = backups::capture(&owner.service, &record).await.unwrap();
+    assert_eq!(third["uploadedBytes"], 0);
+    assert!(
+        owner
+            .service
+            .store
+            .get("node-backups", first["id"].as_str().unwrap())
+            .await
+            .unwrap()
+            .is_none(),
+        "Retention removes the oldest manifest while keeping shared blocks"
+    );
+    let mut damaged = owner
+        .service
+        .store
+        .get("node-backups", third["id"].as_str().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    damaged["capturedAt"] = (now() + 1000).into();
+    damaged["manifest"] = json!({"corrupt":true});
+    owner
+        .service
+        .store
+        .put("node-backups", damaged)
+        .await
+        .unwrap();
+    assert_eq!(
+        leo_agent_manager::nodes::moves::latest(&owner.service, &run)
+            .await
+            .unwrap()
+            .unwrap()["id"],
+        second["id"],
+        "Automatic recovery skips a damaged latest point"
+    );
+    backups::purge(&owner.service, &run).await.unwrap();
+    assert!(
+        owner
+            .service
+            .store
+            .list("node-backups")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !owner
+            .service
+            .config
+            .data_dir
+            .join("node-backups")
+            .join(&run)
+            .exists()
+    );
     stop.cancel();
     relay_task.await.unwrap().unwrap();
     controller_task.abort();
     master_task.abort();
+}
+
+#[tokio::test]
+async fn an_unreachable_owner_is_fenced_only_after_its_last_lease_and_cannot_renew_after_release() {
+    use leo_agent_manager::{auth, config::id, recovery};
+    for node in [id(), leo_agent_manager::nodes::LOCAL_NODE_ID.to_owned()] {
+        let owner = Owner::with_runner(
+            "127.0.0.1:1".into(),
+            if node == leo_agent_manager::nodes::LOCAL_NODE_ID {
+                "http://127.0.0.1:1".into()
+            } else {
+                String::new()
+            },
+        )
+        .await;
+        let run = id();
+        let attempt = id();
+        let token = auth::token();
+        let main = "00000000-0000-4000-8000-000000000001";
+        owner
+            .service
+            .store
+            .put("nodes", json!({"id":node,"revoked":false}))
+            .await
+            .unwrap();
+        owner
+            .service
+            .store
+            .put("agents", json!({"id":main,"access":{"nodes":[node]}}))
+            .await
+            .unwrap();
+        owner
+            .service
+            .store
+            .set(
+                &format!("node-token:{}", auth::digest(&token)),
+                json!(node),
+                None,
+            )
+            .await
+            .unwrap();
+        owner
+        .service
+        .store
+        .put(
+            "node-attempts",
+            json!({"id":attempt,"nodeId":node,"runId":run,"released":false,"leaseRequired":true}),
+        )
+        .await
+        .unwrap();
+        let record = json!({"id":run,"taskId":"fixture","createdAt":0,"status":"running","isolated":true,"snapshot":{"agent":{"id":main}}});
+        let saved = record.clone();
+        owner
+            .service
+            .store
+            .write(move |db| db.add_run(&saved, None))
+            .await
+            .unwrap();
+        owner
+        .service
+        .store
+        .set(
+            &format!("run-checkpoint:{run}"),
+            json!({"nodeId":node,"runnerId":attempt,"launched":true,"prepared":{"isolated":true}}),
+            None,
+        )
+        .await
+        .unwrap();
+        owner.service.node_lease_deadlines.lock().await.insert(
+            attempt.clone(),
+            tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+        );
+        assert_eq!(
+            recovery::fence(&owner.service, &record)
+                .await
+                .unwrap_err()
+                .status,
+            503
+        );
+        assert_eq!(
+            owner
+                .service
+                .store
+                .get("node-attempts", &attempt)
+                .await
+                .unwrap()
+                .unwrap()["released"],
+            false
+        );
+        owner.service.node_lease_deadlines.lock().await.insert(
+            attempt.clone(),
+            tokio::time::Instant::now() - std::time::Duration::from_secs(21),
+        );
+        recovery::fence(&owner.service, &record).await.unwrap();
+        let (status, heartbeat) = owner
+            .call(
+                "POST",
+                "/internal/nodes/heartbeat",
+                json!({"runtimeId":"fixture"}),
+                Some(&token),
+            )
+            .await;
+        assert_eq!(status, 200);
+        assert!(heartbeat["leases"].as_array().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn abandoned_return_to_a_node_releases_only_the_unmaterialized_disk_reservation() {
+    use leo_agent_manager::{
+        config::{id, now},
+        nodes::placement,
+    };
+    let owner = Owner::new().await;
+    let node = id();
+    let agent = id();
+    let run = id();
+    owner.service.store.put("nodes",json!({"id":node,"accepting":true,"executionReady":true,"lastSeen":now(),"capabilities":{"kvm":true},"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536}})).await.unwrap();
+    owner
+        .service
+        .store
+        .put("agents", json!({"id":agent,"access":{"nodes":[node]}}))
+        .await
+        .unwrap();
+    let original = json!({"id":run,"snapshot":{"agent":{"id":agent}}});
+    let attempt = id();
+    placement::reserve(&owner.service, &original, &attempt)
+        .await
+        .unwrap();
+    placement::materialize(&owner.service, &attempt)
+        .await
+        .unwrap();
+    placement::release(&owner.service, &attempt).await.unwrap();
+    owner
+        .service
+        .store
+        .set(
+            &format!("run-checkpoint:{run}"),
+            json!({"nodeId":id()}),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut returning = original.clone();
+    returning["placementTransition"] = true.into();
+    let pending = id();
+    placement::reserve(&owner.service, &returning, &pending)
+        .await
+        .unwrap();
+    let other = json!({"id":id(),"snapshot":{"agent":{"id":agent}}});
+    assert!(
+        placement::reserve(&owner.service, &other, &id())
+            .await
+            .is_err()
+    );
+    placement::release(&owner.service, &pending).await.unwrap();
+    placement::release(&owner.service, &pending).await.unwrap();
+    let replacement = id();
+    placement::reserve(&owner.service, &other, &replacement)
+        .await
+        .expect("Cancellation must return the unused destination space");
+    assert!(
+        placement::reserve(
+            &owner.service,
+            &json!({"id":id(),"snapshot":{"agent":{"id":agent}}}),
+            &id()
+        )
+        .await
+        .is_err(),
+        "Retained original disk must still count against the limit"
+    );
+    placement::release(&owner.service, &replacement)
+        .await
+        .unwrap();
+    let restored = id();
+    placement::reserve(&owner.service, &returning, &restored)
+        .await
+        .unwrap();
+    placement::materialize(&owner.service, &restored)
+        .await
+        .unwrap();
+    placement::release(&owner.service, &restored).await.unwrap();
+    owner
+        .service
+        .store
+        .set(
+            &format!("run-checkpoint:{run}"),
+            json!({"nodeId":node}),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut growing = original;
+    growing["requestedResources"] = json!({"cpu":2,"memoryMiB":4096,"diskMiB":49152});
+    assert!(
+        placement::reserve(&owner.service, &growing, &id())
+            .await
+            .is_err(),
+        "Growing the current disk must include retained stale disks in its budget"
+    );
+}
+
+#[tokio::test]
+async fn first_execution_fits_configured_node_ceilings_without_silently_shrinking_later_requests() {
+    use leo_agent_manager::{
+        config::{id, now},
+        nodes::placement,
+    };
+    let owner = Owner::new().await;
+    let node = id();
+    let agent = id();
+    let run = id();
+    owner.service.store.put("nodes",json!({"id":node,"accepting":true,"executionReady":true,"lastSeen":now(),"capabilities":{"kvm":true},"limits":{"cpu":1,"memoryMiB":1024,"diskMiB":8192}})).await.unwrap();
+    owner
+        .service
+        .store
+        .put("agents", json!({"id":agent,"access":{"nodes":[node]}}))
+        .await
+        .unwrap();
+    let mut record = json!({"id":run,"snapshot":{"agent":{"id":agent}}});
+    let attempt = id();
+    let selected = placement::reserve(&owner.service, &record, &attempt)
+        .await
+        .unwrap();
+    assert_eq!(
+        selected["resources"],
+        json!({"cpu":1,"memoryMiB":1024,"diskMiB":8192})
+    );
+    placement::release(&owner.service, &attempt).await.unwrap();
+    record["requestedResources"] = json!({"cpu":2,"memoryMiB":1024,"diskMiB":8192});
+    assert!(
+        placement::reserve(&owner.service, &record, &id())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_stay_idle() {
+    use axum::response::IntoResponse;
+    use leo_agent_manager::{
+        auth,
+        config::{id, now},
+        nodes::{moves, relay, restore, snapshots},
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let owner = Owner::at(address.to_string()).await;
+    let run = id();
+    let agent = id();
+    let source = id();
+    let destination = id();
+    let attempt = id();
+    let resources = json!({"cpu":1,"memoryMiB":512,"diskMiB":128});
+    owner
+        .service
+        .store
+        .put(
+            "agents",
+            json!({"id":agent,"access":{"nodes":[source,destination]}}),
+        )
+        .await
+        .unwrap();
+    let record = json!({"id":run,"taskId":"fixture","createdAt":0,"status":"succeeded","isolated":true,"sessionId":"retained-session","nodeId":source,"resources":resources,"snapshot":{"agent":{"id":agent}}});
+    let saved = record.clone();
+    owner
+        .service
+        .store
+        .write(move |db| db.add_run(&saved, None))
+        .await
+        .unwrap();
+    owner.service.store.set(&format!("run-checkpoint:{run}"),json!({"nodeId":source,"runnerId":attempt,"completed":true,"prepared":{"backend":"firecracker","isolated":true}}),None).await.unwrap();
+    let stop = tokio_util::sync::CancellationToken::new();
+    let failed = Arc::new(AtomicBool::new(false));
+    let cancel_during_capture = Arc::new(AtomicBool::new(false));
+    let mut tasks = Vec::new();
+    for node in [&source, &destination] {
+        let state = owner._root.path().join(node);
+        let image = state.join("images/fixture");
+        std::fs::create_dir_all(&image).unwrap();
+        std::fs::write(image.join("root.ext4"), b"fixture runtime").unwrap();
+        std::fs::write(image.join("vmlinux"), b"fixture kernel").unwrap();
+        if node == &source {
+            let disk = state.join("disks").join(&run);
+            std::fs::create_dir_all(&disk).unwrap();
+            std::fs::write(
+                disk.join("data.ext4"),
+                b"complete environment, untracked files and native session",
+            )
+            .unwrap();
+        }
+        let token = auth::token();
+        owner.service.store.put("nodes",json!({"id":node,"revoked":false,"accepting":true,"executionReady":true,"lastSeen":now(),"runtimeId":"fixture","runtimeIds":["fixture"],"capabilities":{"kvm":true},"limits":{"cpu":2,"memoryMiB":1024,"diskMiB":1024}})).await.unwrap();
+        owner
+            .service
+            .store
+            .set(
+                &format!("node-token:{}", auth::digest(&token)),
+                json!(node),
+                None,
+            )
+            .await
+            .unwrap();
+        let controller = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let controller_address = controller.local_addr().unwrap();
+        let (disk_state, failed_capture, run_id) = (state.clone(), failed.clone(), run.clone());
+        let cancellation = cancel_during_capture.clone();
+        let service = owner.service.clone();
+        let app = axum::Router::new().fallback(axum::routing::any(move |request:axum::extract::Request| {
+            let (state, failed, run) = (disk_state.clone(),failed_capture.clone(),run_id.clone());
+            let (cancel, service) = (cancellation.clone(), service.clone());
+            async move {
+                assert_eq!(request.headers()["authorization"],"Bearer controller-fixture");
+                let route = request.uri().path().to_owned();
+                if request.method() == "DELETE" { return axum::Json(json!({"ok":true})).into_response(); }
+                if route.ends_with("/snapshot") {
+                    assert_eq!(route, format!("/disks/{run}/snapshot"), "Idle movement must capture by disk, without destination attempt history");
+                    if cancel.load(Ordering::SeqCst) { service.store.patch_run(&run,json!({"cancelRequestedAt":now(),"status":"cancelled"})).await.unwrap(); }
+                    if failed.load(Ordering::SeqCst) { return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(); }
+                    let mut manifest = snapshots::index(&state.join("disks").join(&run).join("data.ext4")).await.unwrap();
+                    manifest["runtime"] = json!({"runtimeId":"fixture"});
+                    manifest["capturedAt"] = now().into();
+                    return axum::Json(json!({"id":id(),"manifest":manifest})).into_response();
+                }
+                if route.ends_with("/restore") {
+                    let body = to_bytes(request.into_body(), 1000000).await.unwrap();
+                    let value = serde_json::from_slice(&body).unwrap();
+                    return axum::Json(restore::controller(&state,&run,value).await.unwrap()).into_response();
+                }
+                if route.starts_with("/snapshots/") {
+                    let disk = state.join("disks").join(&run).join("data.ext4");
+                    let manifest = snapshots::index(&disk).await.unwrap();
+                    return snapshots::block(&disk,&manifest,route.rsplit('/').next().unwrap()).await.unwrap().into_response();
+                }
+                panic!("Idle movement must not launch a provider: {route}");
+            }
+        }));
+        tasks.push(tokio::spawn(async move {
+            axum::serve(controller, app).await.unwrap()
+        }));
+        let connector_stop = stop.clone();
+        tasks.push(tokio::spawn(async move {
+            relay::run(
+                format!("http://{address}").parse().unwrap(),
+                token,
+                format!("http://{controller_address}"),
+                "controller-fixture".into(),
+                connector_stop,
+            )
+            .await
+            .unwrap();
+        }));
+    }
+    let app = owner.app.clone();
+    tasks.push(tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap()
+    }));
+    for target in [&destination, &source] {
+        let current = owner.service.store.run(&run).await.unwrap();
+        let mut args = resources.clone();
+        args["nodeId"] = json!(target);
+        moves::request(&owner.service, &current, &args)
+            .await
+            .unwrap();
+        let pending = owner.service.store.run(&run).await.unwrap();
+        assert_eq!(pending["status"], "queued");
+        assert_eq!(pending["moveRequest"]["idle"], true);
+        moves::advance(&owner.service, &pending).await.unwrap();
+        let settled = owner.service.store.run(&run).await.unwrap();
+        assert_eq!(settled["status"], "succeeded");
+        assert_eq!(settled["nodeId"], *target, "{settled}");
+        assert_eq!(settled["recoveryPending"], false);
+        assert_eq!(settled["sessionId"], "retained-session");
+        assert_eq!(
+            std::fs::read(
+                owner
+                    ._root
+                    .path()
+                    .join(target)
+                    .join("disks")
+                    .join(&run)
+                    .join("data.ext4")
+            )
+            .unwrap(),
+            b"complete environment, untracked files and native session"
+        );
+        assert!(
+            owner
+                .service
+                .store
+                .list("node-attempts")
+                .await
+                .unwrap()
+                .iter()
+                .all(|a| a["released"] == true)
+        );
+    }
+    failed.store(true, Ordering::SeqCst);
+    let mut args = resources;
+    args["nodeId"] = json!(destination);
+    moves::request(
+        &owner.service,
+        &owner.service.store.run(&run).await.unwrap(),
+        &args,
+    )
+    .await
+    .unwrap();
+    moves::advance(
+        &owner.service,
+        &owner.service.store.run(&run).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    let settled = owner.service.store.run(&run).await.unwrap();
+    assert_eq!(settled["status"], "succeeded");
+    assert_eq!(settled["recoveryPending"], false);
+    assert!(settled["movementError"].is_string());
+    assert_eq!(settled["nodeId"], source);
+    cancel_during_capture.store(true, Ordering::SeqCst);
+    moves::request(&owner.service, &settled, &args)
+        .await
+        .unwrap();
+    moves::advance(
+        &owner.service,
+        &owner.service.store.run(&run).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    let cancelled = owner.service.store.run(&run).await.unwrap();
+    assert_eq!(cancelled["status"], "cancelled");
+    assert_eq!(cancelled["recoveryPending"], false);
+    stop.cancel();
+    for task in tasks {
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn pending_movement_retries_a_lost_stop_without_stopping_a_later_execution() {
+    use leo_agent_manager::{
+        config::{id, now},
+        nodes::moves,
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let app = axum::Router::new().fallback(axum::routing::delete(move || {
+        let counter = counter.clone();
+        async move {
+            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                axum::http::StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                axum::http::StatusCode::NO_CONTENT
+            }
+        }
+    }));
+    let owner = Owner::with_runner(
+        "localhost:4310".into(),
+        format!("http://{}", listener.local_addr().unwrap()),
+    )
+    .await;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let run = id();
+    let saved = json!({"id":run,"taskId":"fixture","createdAt":0,"status":"running","moveRequest":{"requestedAt":now()-3000}});
+    owner
+        .service
+        .store
+        .write(move |db| db.add_run(&saved, None))
+        .await
+        .unwrap();
+    owner
+        .service
+        .store
+        .set(
+            &format!("run-checkpoint:{run}"),
+            json!({"runnerId":id()}),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(moves::pause_pending(&owner.service, &run).await.is_err());
+    moves::pause_pending(&owner.service, &run).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    owner
+        .service
+        .store
+        .patch_run(&run, json!({"moveRequest":null}))
+        .await
+        .unwrap();
+    moves::pause_pending(&owner.service, &run).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    server.abort();
 }

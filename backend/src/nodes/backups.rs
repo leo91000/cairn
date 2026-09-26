@@ -55,9 +55,14 @@ pub async fn capture(s: &Service, run: &Value) -> Result<Value> {
     .await?;
     let base = super::transport::url(s, run_id).await?;
     let credential = crate::execution::secret(&s.config.data_dir, "runner-secret").await?;
+    let capture_path = if run["status"] == "succeeded" || run["moveRequest"]["idle"] == true {
+        format!("{base}/disks/{run_id}/snapshot")
+    } else {
+        format!("{base}/runs/{attempt}/snapshot")
+    };
     let response = s
         .http
-        .post(format!("{base}/runs/{attempt}/snapshot"))
+        .post(capture_path)
         .bearer_auth(&credential)
         .timeout(Duration::from_secs(300))
         .send()
@@ -83,33 +88,34 @@ pub async fn capture(s: &Service, run: &Value) -> Result<Value> {
                 if !response.status().is_success() {return Err(Error::new(503,"Backup block unavailable."));}
                 let bytes=super::snapshots::response_block(response).await?;
                 if bytes.len() as u64!=block["size"].as_u64().unwrap() || hex::encode(Sha256::digest(&bytes))!=hash {return Err(Error::bad("Backup block failed integrity verification."));}
-                let encrypted=s.vault.encrypt(&key(run_id,hash),&json!(STANDARD.encode(&bytes)))?;
-                let encoded=serde_json::to_vec(&encrypted)?;
+                let vault=s.vault.clone(); let scope=key(run_id,hash); let length=bytes.len() as u64;
+                let encoded=tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+                    serde_json::to_vec(&vault.encrypt(&scope,&json!(STANDARD.encode(&bytes)))?).map_err(Into::into)
+                }).await.map_err(Error::internal)??;
                 // Serialize space accounting and publication across concurrent backups.
                 let _guard=s.node_backup_lock.lock().await;
                 if occupied.saturating_add(encoded.len() as u64)>budget {return Err(Error::new(507,"Backup storage budget exhausted; previous recovery points are retained."));}
                 crate::skills::atomic_write(&file,&encoded).await?;
                 occupied+=encoded.len() as u64;
-                uploaded+=bytes.len() as u64;
+                uploaded+=length;
             }
-            let encoded:Value=serde_json::from_slice(&tokio::fs::read(&file).await?)?;
-            let plaintext=s.vault.decrypt(&key(run_id,hash),&encoded)?;
-            let verified=STANDARD.decode(plaintext.as_str().unwrap_or("")).map_err(|_|Error::bad("Backup ciphertext is invalid."))?;
+            let verified=decode_block(s,run_id,hash,tokio::fs::read(&file).await?).await?;
             if verified.len() as u64!=block["size"].as_u64().unwrap() || hex::encode(Sha256::digest(&verified))!=hash {return Err(Error::bad("Cached backup block failed integrity verification."));}
             if let Some(storage)=&storage {
-                let mark=file.with_extension(format!("s3-{}",storage.bucket));
-                if !mark.exists() {upload_verified(storage,&file,&key(run_id,hash)).await?;crate::skills::atomic_write(&mark,b"uploaded").await?;}
+                let location=json!({"destination":"s3","bucket":storage.bucket,"endpoint":storage.endpoint});
+                let mark=file.with_extension(format!("s3-{}",hex::encode(Sha256::digest(serde_json::to_vec(&location)?))));
+                if !mark.exists() {upload_verified(storage,&file,&key(run_id,hash)).await?;crate::skills::atomic_write(&mark,&serde_json::to_vec(&location)?).await?;}
             }
         }
         let backup_id=id();
-        let value=json!({"id":backup_id,"runId":run_id,"nodeId":checkpoint["nodeId"],"createdAt":now(),"capturedAt":manifest["capturedAt"],"sessionId":run["sessionId"],"destination":destination,"bucket":storage.as_ref().map(|s|s.bucket.clone()),"uploadedBytes":uploaded,"pauseMs":manifest["pauseMs"],"indexMs":manifest["indexMs"],"localBytesRead":manifest["localBytesRead"],"manifest":s.vault.encrypt(&format!("backup:{backup_id}"),manifest)?});
+        let value=json!({"id":backup_id,"runId":run_id,"nodeId":checkpoint["nodeId"],"createdAt":now(),"capturedAt":manifest["capturedAt"],"sessionId":run["sessionId"],"destination":destination,"bucket":storage.as_ref().map(|s|s.bucket.clone()),"endpoint":storage.as_ref().and_then(|s|s.endpoint.clone()),"uploadedBytes":uploaded,"pauseMs":manifest["pauseMs"],"indexMs":manifest["indexMs"],"localBytesRead":manifest["localBytesRead"],"manifest":s.vault.encrypt(&format!("backup:{backup_id}"),manifest)?});
         let path=directory.join(format!("{backup_id}.json"));
         let encoded=serde_json::to_vec(&value)?;
         if occupied.saturating_add(encoded.len() as u64)>budget {return Err(Error::new(507,"Backup storage budget exhausted; previous recovery points are retained."));}
         crate::skills::atomic_write(&path,&encoded).await?;
         if let Some(storage)=&storage {upload_verified(storage,&path,&format!("node-backups/{run_id}/{backup_id}.json")).await?;}
         s.store.put("node-backups",value.clone()).await?;
-        s.store.patch_run(run_id,json!({"backup":{"id":backup_id,"capturedAt":manifest["capturedAt"],"uploadedBytes":uploaded,"status":"ready"}})).await?;
+        s.store.patch_run(run_id,json!({"backup":{"id":backup_id,"capturedAt":manifest["capturedAt"],"uploadedBytes":uploaded,"status":"ready","error":null}})).await?;
         retain(s,run_id,settings["retention"].as_u64().unwrap_or(3) as usize).await?;
         Ok(public(value))
     }.await;
@@ -140,23 +146,47 @@ pub async fn read_block(s: &Service, backup: &Value, hash: &str) -> Result<Vec<u
     }
     let run = text(backup, "runId");
     let path = root(s, run).join("blocks").join(hash);
-    if !path.exists() {
-        let storage = storage_for(s, backup)?;
-        crate::skills::private_dir(path.parent().unwrap()).await?;
-        let temp = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
-        storage.download(&key(run, hash), temp.path()).await?;
-        temp.persist_noclobber(&path).map_err(Error::internal)?;
+    if path.exists() {
+        match decode_block(s, run, hash, tokio::fs::read(&path).await?).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(error) if backup["destination"] != "s3" => return Err(error),
+            Err(_) => {}
+        }
     }
-    let encoded: Value = serde_json::from_slice(&tokio::fs::read(path).await?)?;
-    let plaintext = s.vault.decrypt(&key(run, hash), &encoded)?;
-    let bytes = STANDARD
-        .decode(plaintext.as_str().unwrap_or(""))
-        .map_err(|_| Error::bad("Invalid backup ciphertext."))?;
-    if hex::encode(Sha256::digest(&bytes)) != hash {
-        return Err(Error::bad("Backup integrity check failed."));
+    let storage = storage_for(s, backup)?;
+    crate::skills::private_dir(path.parent().unwrap()).await?;
+    let temp = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
+    storage.download(&key(run, hash), temp.path()).await?;
+    let encoded = tokio::fs::read(temp.path()).await?;
+    let bytes = decode_block(s, run, hash, encoded.clone()).await?;
+    // Restoration remains possible when the master cache budget is full.
+    let _guard = s.node_backup_lock.lock().await;
+    let budget = settings(s).await?["budgetMiB"].as_u64().unwrap_or(102400) * 1024 * 1024;
+    if used(s).await?.saturating_add(encoded.len() as u64) <= budget {
+        crate::skills::atomic_write(&path, &encoded).await?;
     }
     Ok(bytes)
 }
+
+async fn decode_block(s: &Service, run: &str, hash: &str, encoded: Vec<u8>) -> Result<Vec<u8>> {
+    let vault = s.vault.clone();
+    let scope = key(run, hash);
+    let hash = hash.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let value: Value = serde_json::from_slice(&encoded)?;
+        let plaintext = vault.decrypt(&scope, &value)?;
+        let bytes = STANDARD
+            .decode(plaintext.as_str().unwrap_or(""))
+            .map_err(|_| Error::bad("Invalid backup ciphertext."))?;
+        if hex::encode(Sha256::digest(&bytes)) != hash {
+            return Err(Error::bad("Backup integrity check failed."));
+        }
+        Ok(bytes)
+    })
+    .await
+    .map_err(Error::internal)?
+}
+
 async fn used(s: &Service) -> Result<u64> {
     let mut total = 0u64;
     let mut pending = vec![s.config.data_dir.join("node-backups")];
@@ -188,7 +218,12 @@ async fn retain(s: &Service, run: &str, count: usize) -> Result<()> {
     points.sort_by_key(|p| std::cmp::Reverse(p["createdAt"].as_i64().unwrap_or(0)));
     let mut needed = HashSet::new();
     for point in points.iter().take(count.max(1)) {
-        for block in manifest(s, point).await?["blocks"].as_array().unwrap() {
+        // A damaged retained manifest must not prevent creating a fresh good point,
+        // nor cause dependencies we cannot identify to be deleted.
+        let Ok(manifest) = manifest(s, point).await else {
+            return Ok(());
+        };
+        for block in manifest["blocks"].as_array().unwrap() {
             if let Some(hash) = block["hash"].as_str() {
                 needed.insert(hash.to_owned());
             }
@@ -217,9 +252,9 @@ async fn retain(s: &Service, run: &str, count: usize) -> Result<()> {
                 continue;
             }
             if let Some((_, bucket)) = name.split_once(".s3-") {
-                let mut storage = crate::archive_storage::Storage::configured(s)?;
-                storage.bucket = bucket.to_owned();
-                storage.purge(&key(run, hash)).await?;
+                let location = serde_json::from_slice(&tokio::fs::read(entry.path()).await?)
+                    .unwrap_or_else(|_| json!({"destination":"s3","bucket":bucket}));
+                storage_for(s, &location)?.purge(&key(run, hash)).await?;
             }
             tokio::fs::remove_file(entry.path()).await?;
         }
@@ -276,6 +311,12 @@ fn storage_for(s: &Service, backup: &Value) -> Result<crate::archive_storage::St
         return Err(Error::new(503, "Local recovery block is missing."));
     }
     let mut storage = crate::archive_storage::Storage::configured(s)?;
+    if storage.endpoint.as_deref() != backup["endpoint"].as_str() {
+        return Err(Error::new(
+            409,
+            "This recovery point belongs to a different S3 endpoint. Restore its storage configuration before accessing it.",
+        ));
+    }
     storage.bucket = backup["bucket"]
         .as_str()
         .filter(|b| {
@@ -307,4 +348,57 @@ async fn upload_verified(
         ));
     }
     Ok(())
+}
+
+/// Explicit conversation purge removes every recovery dependency, including orphan uploads.
+pub async fn purge(s: &Service, run: &str) -> Result<()> {
+    if run.is_empty() {
+        return Ok(());
+    }
+    crate::validation::uuid(run)?;
+    let _operation = s.node_backup_operation.lock().await;
+    let points = s
+        .store
+        .list("node-backups")
+        .await?
+        .into_iter()
+        .filter(|p| p["runId"] == run)
+        .collect::<Vec<_>>();
+    let mut locations = points
+        .iter()
+        .filter(|p| p["destination"] == "s3")
+        .cloned()
+        .collect::<Vec<_>>();
+    let blocks = root(s, run).join("blocks");
+    if blocks.exists() {
+        let mut entries = tokio::fs::read_dir(&blocks).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some((_, bucket)) = name.split_once(".s3-") {
+                locations.push(
+                    serde_json::from_slice(&tokio::fs::read(entry.path()).await?)
+                        .unwrap_or_else(|_| json!({"destination":"s3","bucket":bucket})),
+                );
+            }
+        }
+    }
+    let mut deleted = HashSet::new();
+    for location in locations {
+        let storage = storage_for(s, &location)?;
+        if deleted.insert((storage.endpoint.clone(), storage.bucket.clone())) {
+            storage.purge(&format!("node-backups/{run}/")).await?;
+        }
+    }
+    let directory = root(s, run);
+    if directory.exists() {
+        tokio::fs::remove_dir_all(directory).await?;
+    }
+    s.store
+        .transaction(move |db| {
+            for point in points {
+                db.remove("node-backups", text(&point, "id"))?;
+            }
+            Ok(())
+        })
+        .await
 }

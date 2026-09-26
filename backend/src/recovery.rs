@@ -105,9 +105,10 @@ pub async fn fence(s: &Service, run: &Value) -> Result<()> {
             .is_ok_and(|response| response.status().is_success() || response.status() == 404);
         if !confirmed {
             let owned = s.store.get("node-attempts", id).await?.unwrap_or_default();
-            let remote = owned["nodeId"]
-                .as_str()
-                .is_some_and(|node| node != crate::nodes::LOCAL_NODE_ID);
+            let leased = owned["leaseRequired"] == true
+                || owned["nodeId"]
+                    .as_str()
+                    .is_some_and(|node| node != crate::nodes::LOCAL_NODE_ID);
             let deadline = s
                 .node_lease_deadlines
                 .lock()
@@ -120,10 +121,11 @@ pub async fn fence(s: &Service, run: &Value) -> Result<()> {
                             owned["leaseDurationMs"]
                                 .as_u64()
                                 .unwrap_or(60000)
-                                .min(300000),
+                                .min(300000)
+                                + 3000,
                         ),
                 );
-            if !remote || tokio::time::Instant::now() < deadline + Duration::from_secs(20) {
+            if !leased || tokio::time::Instant::now() < deadline + Duration::from_secs(20) {
                 return Err(Error::new(
                     503,
                     "Waiting for the previous VM execution lease to expire.",

@@ -206,8 +206,8 @@ def cache_runtimes(master):
         (ROOT / 'state/images').mkdir(parents=True, exist_ok=True, mode=0o700)
         command(['docker', 'pull', image], timeout=1200)
         # Extract from the approved digest, with no network or host Docker access.
-        # Publish the complete directory atomically; never replace an active runtime.
-        script = 'test "$APP_RUNTIME_ID" = "$LEO_EXPECTED_RUNTIME"; staging="/cache/$APP_RUNTIME_ID.partial"; mkdir -p "$staging"; zstd -d -f /opt/leo-vm/root.ext4.zst -o "$staging/root.ext4"; cp /opt/leo-vm/vmlinux "$staging/vmlinux"; chmod 444 "$staging/root.ext4" "$staging/vmlinux"; sync; if test ! -d "/cache/$APP_RUNTIME_ID"; then mv "$staging" "/cache/$APP_RUNTIME_ID"; else rm -rf "$staging"; fi'
+        # Publish atomically; repair missing files without replacing an existing image.
+        script = 'test "$APP_RUNTIME_ID" = "$LEO_EXPECTED_RUNTIME"; staging="/cache/$APP_RUNTIME_ID.partial"; mkdir -p "$staging"; zstd -d -f /opt/leo-vm/root.ext4.zst -o "$staging/root.ext4"; cp /opt/leo-vm/vmlinux "$staging/vmlinux"; chmod 444 "$staging/root.ext4" "$staging/vmlinux"; sync; if test ! -d "/cache/$APP_RUNTIME_ID"; then mv "$staging" "/cache/$APP_RUNTIME_ID"; else for file in root.ext4 vmlinux; do test -s "/cache/$APP_RUNTIME_ID/$file" || mv "$staging/$file" "/cache/$APP_RUNTIME_ID/$file"; done; rm -rf "$staging"; fi; sync'
         command(['docker', 'run', '--rm', '--network=none', '--read-only', '--cap-drop=ALL', '--user=0:0',
                  '-v', str(ROOT / 'state/images') + ':/cache', '-e', 'LEO_EXPECTED_RUNTIME=' + identifier,
                  '--entrypoint=/bin/sh', image, '-ec', script], timeout=1200)

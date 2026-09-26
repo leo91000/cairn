@@ -53,7 +53,7 @@ fun NodePlacement(vm: LeoViewModel, run: Run) {
         }
     }
     TextButton(enabled = !busy && (mode == "automatic" || selected.isNotEmpty()), onClick = { save(false) }) { Text("Enregistrer le placement") }
-    TextButton(enabled = !busy && selected.isNotEmpty() && run.status == "running" && run.nodeState == null, onClick = { save(true) }) { Text("Déplacer maintenant") }
+    TextButton(enabled = !busy && selected.isNotEmpty() && run.status in listOf("running", "succeeded") && run.sessionId != null && run.nodeState == null, onClick = { save(true) }) { Text("Déplacer maintenant") }
     Text("Une préférence autorise la reprise ailleurs. Une node fixe attend cette machine. Le déplacement suspend la conversation après réservation de la destination.")
     error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
 }

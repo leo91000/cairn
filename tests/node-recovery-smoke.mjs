@@ -74,7 +74,7 @@ async function main() {
   }
   async function start(port, code, leased = false) {
     const attempt = randomUUID()
-    const plan = { id: attempt, runId: run, expires: Date.now() + 240000, resources: { cpu: 1, memoryMiB: 512, diskMiB: 1024 }, nodeLeaseRequired: leased, sandbox: 'yolo', cwd: workspace, command: ['/usr/local/bin/node', '-e', `process.chdir(${JSON.stringify(workspace)});${code}`], imports: [{ source: workspace, target: workspace }, { source: home, target: '/home/node' }] }
+    const plan = { id: attempt, runId: run, expires: Date.now() + 240000, resources: { cpu: 1, memoryMiB: 1024, diskMiB: 1024 }, nodeLeaseRequired: leased, sandbox: 'yolo', cwd: workspace, command: ['/usr/local/bin/node', '-e', `process.chdir(${JSON.stringify(workspace)});${code}`], imports: [{ source: workspace, target: workspace }, { source: home, target: '/home/node' }] }
     await writeFile(path.join(data, 'runner-plans', `${attempt}.json`), JSON.stringify(plan))
     if (leased)
       await request(port, `/runs/${attempt}/lease`, 'POST', { remainingMs: 8000 })
@@ -85,8 +85,9 @@ async function main() {
     for (const directory of [workspace, home, path.join(data, 'runner-plans')]) await mkdir(directory, { recursive: true })
     await writeFile(path.join(data, 'runner-secret'), 'fixture-node-controller')
     await copyFile(path.join(assets, 'busybox.tar'), path.join(workspace, 'busybox.tar'))
+    await copyFile(new URL('./fixtures/native-sessions.mjs', import.meta.url), path.join(workspace, 'native-sessions.mjs'))
     const source = await controller('source', 44311)
-    const first = await start(44311, `const fs=require('fs'); const cp=require('child_process');fs.mkdirSync('/home/node/.local/bin',{recursive:true});fs.writeFileSync('/home/node/.local/bin/installed-tool','retained tool');fs.mkdirSync('/home/node/.codex/sessions',{recursive:true});fs.writeFileSync('/home/node/.codex/sessions/fixture.json','native session bytes');fs.writeFileSync('untracked.bin',Buffer.alloc(100000,73));cp.execFileSync('docker',['load','-i','busybox.tar'],{timeout:30000});cp.execFileSync('docker',['run','--rm','--network=none','-v','leo-recovery-fixture:/state','busybox:1.37','sh','-c','echo docker-volume-survived > /state/probe'],{timeout:120000});let counter=0;setInterval(()=>fs.writeFileSync('counter',String(++counter)),100);console.log('fixture.ready');`)
+    const first = await start(44311, `const fs=require('fs'); const cp=require('child_process');fs.mkdirSync('/home/node/.local/bin',{recursive:true});fs.writeFileSync('/home/node/.local/bin/installed-tool','retained tool');fs.mkdirSync('/home/node/.codex/sessions',{recursive:true});fs.writeFileSync('/home/node/.codex/sessions/fixture.json','native session bytes');fs.writeFileSync('untracked.bin',Buffer.alloc(100000,73));cp.execFileSync('docker',['load','-i','busybox.tar'],{timeout:30000});cp.execFileSync('docker',['run','--rm','--network=none','-v','leo-recovery-fixture:/state','busybox:1.37','sh','-c','echo docker-volume-survived > /state/probe'],{timeout:120000});cp.execFileSync('/usr/local/bin/node',['native-sessions.mjs','start','.'],{timeout:150000,stdio:'inherit'});let counter=0;setInterval(()=>fs.writeFileSync('counter',String(++counter)),100);console.log('fixture.ready');`)
     let logs = ''
     let ended = false
     const reading = (async () => {
@@ -148,14 +149,18 @@ async function main() {
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
     await controller('destination', 44312)
     await request(44312, `/disks/${run}/restore`, 'POST', { manifest: snapshot.manifest, master: `http://127.0.0.1:${server.address().port}`, grant: 'fixture-restore-grant', backupId: randomUUID() })
-    const second = await start(44312, `const fs=require('fs');const assert=require('assert/strict');const cp=require('child_process');assert.equal(fs.readFileSync('/home/node/.local/bin/installed-tool','utf8'),'retained tool');assert.equal(fs.readFileSync('/home/node/.codex/sessions/fixture.json','utf8'),'native session bytes');assert.equal(fs.readFileSync('untracked.bin').length,100000);assert.ok(Number(fs.readFileSync('counter','utf8'))>0);assert.match(cp.execFileSync('docker',['run','--rm','--network=none','-v','leo-recovery-fixture:/state','busybox:1.37','cat','/state/probe'],{encoding:'utf8',timeout:30000}),/docker-volume-survived/);console.log('restore.verified');`)
+    // A restored idle conversation has no destination attempt history yet.
+    const idle = await (await request(44312, `/disks/${run}/snapshot`, 'POST')).json()
+    assert.equal(idle.manifest.size, snapshot.manifest.size)
+    await request(44312, `/snapshots/${idle.id}/discard`, 'DELETE')
+    const second = await start(44312, `const fs=require('fs');const assert=require('assert/strict');const cp=require('child_process');assert.equal(fs.readFileSync('/home/node/.local/bin/installed-tool','utf8'),'retained tool');assert.equal(fs.readFileSync('/home/node/.codex/sessions/fixture.json','utf8'),'native session bytes');assert.equal(fs.readFileSync('untracked.bin').length,100000);assert.ok(Number(fs.readFileSync('counter','utf8'))>0);assert.match(cp.execFileSync('docker',['run','--rm','--network=none','-v','leo-recovery-fixture:/state','busybox:1.37','cat','/state/probe'],{encoding:'utf8',timeout:30000}),/docker-volume-survived/);cp.execFileSync('/usr/local/bin/node',['native-sessions.mjs','resume','.'],{timeout:150000,stdio:'inherit'});console.log('restore.verified');`)
     const restored = await (await request(44312, `/runs/${second}/wait`, 'POST')).json()
     assert.equal(restored.StatusCode, 0, JSON.stringify(restored))
     const leased = await start(44312, `setInterval(()=>console.log('leased.tick'),100)`, true)
     const fenced = await (await request(44312, `/runs/${leased}/wait`, 'POST')).json()
     assert.equal(fenced.StatusCode, 75, 'An expired lease must stop the complete VM as a recoverable interruption')
     process.stdout.write(`${JSON.stringify({ stage: 'lease-expired', exitCode: fenced.StatusCode })}\n`)
-    process.stdout.write(`${JSON.stringify({ capturePauseMs: snapshot.manifest.pauseMs, indexMs: snapshot.manifest.indexMs, transferredBlocks: blocks.size, transferredBytes: [...blocks.values()].reduce((sum, b) => sum + b.length, 0), restored: ['untracked files', 'installed tool', 'session file bytes', 'Docker volume'] })}\n`)
+    process.stdout.write(`${JSON.stringify({ capturePauseMs: snapshot.manifest.pauseMs, indexMs: snapshot.manifest.indexMs, transferredBlocks: blocks.size, transferredBytes: [...blocks.values()].reduce((sum, b) => sum + b.length, 0), restored: ['untracked files', 'installed tool', 'native Codex and Claude sessions (local model fixture)', 'Docker volume'] })}\n`)
   }
   finally {
     server?.closeAllConnections()

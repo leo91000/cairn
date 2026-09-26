@@ -108,6 +108,13 @@ impl Capabilities {
         value
     }
 }
+pub(crate) fn valid_runtime(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 100
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+}
 fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T> {
     serde_json::from_value(value).map_err(|_| Error::bad("Invalid node request."))
 }

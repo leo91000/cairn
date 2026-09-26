@@ -697,6 +697,9 @@ async fn controller_interruptions_resume_saved_threads_and_stop_after_three_reco
         });
         let app = Router::new().fallback(any(|State(state): State<Arc<Controller>>, request: Request| async move {
             let path = request.uri().path();
+            if path == "/health" { return Json(json!({"status":"ok","runtimeId":"fixture","runtimes":["fixture"],"capabilities":{"os":"linux","arch":"x86_64","kvm":true,"cpu":8,"memoryMiB":16384,"diskMiB":131072}})).into_response(); }
+            if path.ends_with("/lease") { return Json(json!({})).into_response(); }
+            if path.ends_with("/snapshot") { return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(); }
             if request.method() == "DELETE" { return Json(json!({})).into_response(); }
             let attempt = path.split('/').nth(2).unwrap();
             if path.ends_with("/logs") {
@@ -956,5 +959,35 @@ async fn unlimited_runs_can_be_cancelled_and_finite_checkpoints_still_expire() {
         .await;
     let failed = fixture.until(id, |r| r["status"] == "failed").await;
     assert!(text(&failed, "summary").contains("time limit"), "{failed}");
+    fixture.stop(false).await;
+}
+
+#[tokio::test]
+async fn queued_work_uses_current_node_grants_without_rejecting_unrelated_policy() {
+    let mut fixture = Fixture::new().await;
+    fixture.stop(false).await;
+    let s = &fixture.service;
+    let mut agent = s
+        .get("agents", leo_agent_manager::config::MAIN_AGENT_ID)
+        .await
+        .unwrap();
+    agent["access"]["nodes"] = Value::Null;
+    s.store.put("agents", agent.clone()).await.unwrap();
+    let run = fixture
+        .enqueue("Inspect the fixture after a node policy change")
+        .await;
+    agent["access"]["nodes"] = json!([leo_agent_manager::nodes::LOCAL_NODE_ID]);
+    s.store.put("agents", agent).await.unwrap();
+    fixture.start().await;
+    let completed = fixture
+        .until(text(&run, "id"), |r| {
+            ["succeeded", "failed"].contains(&text(r, "status"))
+        })
+        .await;
+    assert_eq!(completed["status"], "succeeded", "{completed}");
+    assert_eq!(
+        completed["snapshot"]["agent"]["access"]["nodes"],
+        json!([leo_agent_manager::nodes::LOCAL_NODE_ID])
+    );
     fixture.stop(false).await;
 }

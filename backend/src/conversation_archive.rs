@@ -640,6 +640,7 @@ pub async fn purge(s: &Service, chat: Value) -> Result<()> {
         storage(s, &chat).await?.purge(&prefix(&chat)).await?;
     }
     delete_disks(s, &run).await?;
+    crate::nodes::backups::purge(s, &run).await?;
     files(s, &chat, true).await?;
     s.store
         .transaction(move |db| {
