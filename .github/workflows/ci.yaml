@@ -71,6 +71,7 @@ jobs:
           cargo build --locked --bin leo
       - name: Validate node supervisor and S3 recovery
         run: |
+          python3 tests/guest_projects_test.py
           python3 tests/node_supervisor_test.py
           python3 -m venv .node-s3-test
           .node-s3-test/bin/pip install 'moto[server]==5.2.3' awscli

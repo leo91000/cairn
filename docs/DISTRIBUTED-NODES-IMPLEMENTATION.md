@@ -40,6 +40,9 @@ The repeatable checks live beside the implementation:
   The outbound idle-movement test copies an environment between two separate
   controller directories, moves it back without a destination execution history,
   and checks both failed transfer and cancellation during capture.
+- `python3 tests/guest_projects_test.py`: real mount-namespace regression for
+  atomic read-only project publication, retry and reboot restoration. An
+  unprivileged observer must never gain write access while mounts are prepared.
 - `python3 tests/node_supervisor_test.py`: four shipped-supervisor CLI scenarios
   covering update, rollback, lost acknowledgement and retained-runtime download.
   Docker and master responses are fixtures.
