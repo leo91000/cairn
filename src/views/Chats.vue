@@ -16,6 +16,7 @@ import ChatSwitcher from '../components/ChatSwitcher.vue'
 import FilColumn from '../components/FilColumn.vue'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
+import NodeExecution from '../components/NodeExecution.vue'
 import NotificationSettings from '../components/NotificationSettings.vue'
 import QueueStrip from '../components/QueueStrip.vue'
 import SkillTextarea from '../components/SkillTextarea.vue'
@@ -435,6 +436,7 @@ function key(event: KeyboardEvent) {
       <h1 v-else class="sr-only">
         Chats
       </h1>
+      <NodeExecution v-if="detail?.run" :run="detail.run" />
       <div class="flex min-h-0 flex-1 flex-col">
         <section class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden transition-opacity" :class="switching ? 'opacity-60 delay-150' : ''" :aria-busy="switching" aria-label="Chat workspace">
           <!-- A floating pill, as on Android: connection status never moves the conversation. -->

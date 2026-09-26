@@ -28,12 +28,18 @@ data class ExecutionNode(
     val tags: List<String> = emptyList(),
     val capabilities: NodeCapabilities = NodeCapabilities(),
     val limits: NodeResources = NodeResources(),
+    val available: NodeResources? = null,
+    val reserved: NodeResources? = null,
+    val executionReady: Boolean = false,
+    val maintenance: String? = null,
+    val imageDigest: String? = null,
+    val updateError: String? = null,
     val runtimeId: String = "",
     val lastSeen: Long? = null,
 )
 
 @Serializable
-data class NodeEnrollment(val code: String, val expiresAt: Long)
+data class NodeEnrollment(val code: String, val expiresAt: Long, val installCommand: String? = null)
 
 @Serializable
 data class NodeConfiguration(
@@ -42,3 +48,9 @@ data class NodeConfiguration(
     val tags: List<String>,
     val limits: NodeResources,
 )
+
+@Serializable
+data class NodeBackup(val id: String? = null, val capturedAt: Long? = null, val status: String = "", val error: String? = null, val uploadedBytes: Long? = null)
+
+@Serializable
+data class NodeBackupSettings(val destination: String = "master", val intervalSeconds: Long = 60, val retention: Int = 3, val budgetMiB: Long = 102400, val disconnectTimeoutSeconds: Long = 60, val shutdownTimeoutSeconds: Long = 300, val maxCapacityWaitSeconds: Long = 3600)

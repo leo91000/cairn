@@ -19,6 +19,7 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
     var name by remember { mutableStateOf("") }
     // Never persist enrollment secrets in saved instance state.
     var enrollment by remember { mutableStateOf<NodeEnrollment?>(null) }
+    var recovery by remember { mutableStateOf<NodeBackupSettings?>(null) }
     var editing by remember { mutableStateOf<ExecutionNode?>(null) }
     var revoking by remember { mutableStateOf<ExecutionNode?>(null) }
     suspend fun load() { nodes = vm.api.get("/nodes") }
@@ -27,7 +28,7 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
     }
     Page {
         Heading("Nodes", "Vos machines de confiance. Le GPU est différé.")
-        Text("L’inscription est disponible. L’exécution distante, la migration et les sauvegardes sont en développement ; les nodes inscrites ne lancent pas encore de conversations.")
+        Text("Les conversations CPU utilisent Firecracker. Une node doit être connectée avec un runtime compatible et des ressources disponibles.")
         Panel {
             Field("Nom de la machine", name, { name = it })
             Button(enabled = !state.busy && name.isNotBlank(), onClick = {
@@ -39,9 +40,15 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
                 Text("Code à usage unique · expire le ${Date(it.expiresAt)}")
                 Code(it.code)
                 CopyButton("Copier le code", it.code)
+                it.installCommand?.let { command ->
+                    Text("Sur la node Linux de confiance, lancez cette commande puis saisissez le code :")
+                    Code(command)
+                    CopyButton("Copier la commande", command)
+                }
                 TextButton(onClick = { enrollment = null }) { Text("Masquer") }
             }
         }
+        TextButton(onClick = { vm.perform { recovery = api.get("/nodes/settings") } }) { Text("Configurer les sauvegardes") }
         nodes.forEach { node ->
             Panel {
                 Text(node.name, style = MaterialTheme.typography.titleLarge)
@@ -50,6 +57,10 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
                 Text("Détecté : ${node.capabilities.cpu} CPU · ${node.capabilities.memoryMiB} Mio RAM · ${node.capabilities.diskMiB} Mio disque")
                 if (node.runtimeId.isNotBlank()) Text("Runtime : ${node.runtimeId}")
                 Text("${node.limits.cpu} CPU · ${node.limits.memoryMiB} Mio RAM · ${node.limits.diskMiB} Mio disque autorisés")
+                node.available?.let { Text("Disponible : ${it.cpu} CPU · ${it.memoryMiB} Mio RAM · ${it.diskMiB} Mio disque") }
+                node.maintenance?.let { Text(it) }
+                node.imageDigest?.let { Text("Version : $it") }
+                node.updateError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 if (node.tags.isNotEmpty()) Text(node.tags.joinToString(" · "))
                 Text(if (node.accepting) "Admission activée" else "Admission suspendue")
                 node.lastSeen?.let { Text("Dernier contact : ${Date(it)}") }
@@ -58,6 +69,11 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
                     if (!node.local) TextButton(onClick = { revoking = node }) { Text("Révoquer") }
                 }
             }
+        }
+    }
+    recovery?.let { settings ->
+        RecoveryEditor(settings, state, { recovery = null }) { value ->
+            vm.perform { api.request("PUT", "/nodes/settings", wireJson.encodeToJsonElement(value)); recovery = null }
         }
     }
     editing?.let { node ->
@@ -109,4 +125,33 @@ private fun NodeEditor(node: ExecutionNode, state: Workspace, dismiss: () -> Uni
         },
         dismissButton = { TextButton(onClick = dismiss) { Text("Annuler") } },
     )
+}
+
+@Composable
+private fun RecoveryEditor(settings: NodeBackupSettings, state: Workspace, dismiss: () -> Unit, save: (NodeBackupSettings) -> Unit) {
+    var destination by remember { mutableStateOf(settings.destination) }
+    var interval by remember { mutableStateOf(settings.intervalSeconds.toString()) }
+    var disconnect by remember { mutableStateOf(settings.disconnectTimeoutSeconds.toString()) }
+    var shutdown by remember { mutableStateOf(settings.shutdownTimeoutSeconds.toString()) }
+    var wait by remember { mutableStateOf(settings.maxCapacityWaitSeconds.toString()) }
+    var retention by remember { mutableStateOf(settings.retention.toString()) }
+    var budget by remember { mutableStateOf(settings.budgetMiB.toString()) }
+    AlertDialog(onDismissRequest = dismiss, title = { Text("Sauvegardes de VM") }, text = {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Les blocs modifiés sont envoyés en arrière-plan après une capture cohérente. La date réellement restaurable est visible dans le chat.")
+            Row {
+                FilterChip(selected = destination == "master", onClick = { destination = "master" }, label = { Text("Master") })
+                FilterChip(selected = destination == "s3", onClick = { destination = "s3" }, label = { Text("S3 configuré") })
+            }
+            Field("Intervalle (secondes)", interval, { interval = it })
+            Field("Suspension après déconnexion (secondes)", disconnect, { disconnect = it })
+            Field("Préparation de l’arrêt (secondes)", shutdown, { shutdown = it })
+            Field("Attente de capacité maximale (secondes)", wait, { wait = it })
+            Field("Points conservés", retention, { retention = it })
+            Field("Budget master (Mio)", budget, { budget = it })
+            Text("Une capture peut dépasser l’intervalle. Le cache des sauvegardes S3 utilise aussi ce budget.")
+        }
+    }, confirmButton = {
+        TextButton(enabled = !state.busy && disconnect.toLongOrNull() in 10L..300L && shutdown.toLongOrNull() in 30L..300L && wait.toLongOrNull() in 0L..3600L && interval.toLongOrNull() in 5L..3600L && retention.toIntOrNull() in 1..100 && budget.toLongOrNull() in 128L..1048576L, onClick = { save(NodeBackupSettings(destination, interval.toLong(), retention.toInt(), budget.toLong(), disconnect.toLong(), shutdown.toLong(), wait.toLong())) }) { Text("Enregistrer") }
+    }, dismissButton = { TextButton(onClick = dismiss) { Text("Annuler") } })
 }

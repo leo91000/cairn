@@ -69,12 +69,6 @@ pub async fn assets(state: &Path) -> Result<PathBuf> {
         tokio::fs::remove_dir_all(state.join("jails")).await?;
     }
     private_dir(&state.join("images")).await?;
-    let mut images = tokio::fs::read_dir(state.join("images")).await?;
-    while let Some(image) = images.next_entry().await? {
-        if image.file_name() != version.as_str() {
-            tokio::fs::remove_dir_all(image.path()).await?;
-        }
-    }
     let target = state.join("images").join(version);
     private_dir(&target).await?;
     let image = target.join("root.ext4");
@@ -95,6 +89,9 @@ pub async fn assets(state: &Path) -> Result<PathBuf> {
     }
     use std::os::unix::fs::PermissionsExt;
     tokio::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o444)).await?;
+    if !target.join("vmlinux").exists() {
+        tokio::fs::copy("/opt/leo-vm/vmlinux", target.join("vmlinux")).await?;
+    }
     Ok(target)
 }
 
@@ -112,7 +109,7 @@ async fn connect(socket: &Path) -> Result<BufReader<UnixStream>> {
     Ok(stream)
 }
 
-async fn request(socket: &Path, request: &Value) -> Result<Value> {
+pub async fn guest_request(socket: &Path, request: &Value) -> Result<Value> {
     let mut stream = connect(socket).await?;
     wire::write(stream.get_mut(), request).await?;
     wire::read(&mut stream)
@@ -159,7 +156,7 @@ fn console(
 }
 
 async fn import(socket: &Path, source: &Path, target: &str) -> Result<()> {
-    let binary = request(socket, &json!({"op":"status"})).await?["binaryImports"] == true;
+    let binary = guest_request(socket, &json!({"op":"status"})).await?["binaryImports"] == true;
     let mut stream = connect(socket).await?;
     let empty = tokio::fs::read_dir(source)
         .await?
@@ -181,7 +178,7 @@ pub async fn import_project(
     target: &str,
     read_only: bool,
 ) -> Result<Value> {
-    let binary = request(socket, &json!({"op":"status"})).await?["binaryImports"] == true;
+    let binary = guest_request(socket, &json!({"op":"status"})).await?["binaryImports"] == true;
     let mut stream = connect(socket).await?;
     wire::write(
         stream.get_mut(),
@@ -508,7 +505,15 @@ impl Vm {
         disk_dir: PathBuf,
         slot: usize,
         stop: &CancellationToken,
+        resources: Option<&Value>,
     ) -> Result<Self> {
+        let resources: crate::nodes::Resources = serde_json::from_value(
+            resources
+                .cloned()
+                .unwrap_or_else(|| json!(crate::nodes::placement::defaults())),
+        )
+        .map_err(|_| Error::bad("Invalid VM resources."))?;
+        resources.validate()?;
         let network = Network::new(slot)?;
         private_dir(&disk_dir).await?;
         let lock = std::fs::OpenOptions::new()
@@ -524,10 +529,40 @@ impl Vm {
             ));
         }
         let id = crate::config::id();
+        let runtime_file = disk_dir.join("runtime.json");
+        let retained_image = if runtime_file.exists() {
+            let runtime: Value = serde_json::from_slice(&tokio::fs::read(&runtime_file).await?)?;
+            let name = text(&runtime, "runtimeId");
+            if name.is_empty() || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') {
+                return Err(Error::bad("Invalid retained runtime."));
+            }
+            state.join("images").join(name)
+        } else {
+            image.to_owned()
+        };
+        if !retained_image.join("root.ext4").exists() || !retained_image.join("vmlinux").exists() {
+            return Err(Error::new(
+                409,
+                "The conversation requires an unavailable retained VM runtime.",
+            ));
+        }
+        let image = retained_image.as_path();
+        if !runtime_file.exists() {
+            crate::skills::atomic_write(
+                &runtime_file,
+                &serde_json::to_vec(
+                    &json!({"runtimeId":image.file_name().and_then(|v|v.to_str())}),
+                )?,
+            )
+            .await?;
+        }
+        if disk_dir.join("restore.pending").exists() {
+            return Err(Error::new(409, "VM restore is incomplete."));
+        }
         let disk = disk_dir.join("data.ext4");
         if !disk.exists() {
             let file = tokio::fs::File::create(disk_dir.join("data.partial")).await?;
-            file.set_len(32 * 1024 * 1024 * 1024).await?;
+            file.set_len(resources.disk_mi_b * 1024 * 1024).await?;
             drop(file);
             command(
                 "mkfs.ext4",
@@ -535,6 +570,26 @@ impl Vm {
             )
             .await?;
             tokio::fs::rename(disk_dir.join("data.partial"), &disk).await?;
+        }
+        let actual = tokio::fs::metadata(&disk).await?.len();
+        let desired = resources.disk_mi_b * 1024 * 1024;
+        if desired < actual {
+            return Err(Error::new(409, "A retained VM disk cannot be shrunk."));
+        }
+        if desired > actual {
+            tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(&disk)
+                .await?
+                .set_len(desired)
+                .await?;
+            command(
+                "resize2fs",
+                &[disk
+                    .to_str()
+                    .ok_or_else(|| Error::bad("Invalid disk path."))?],
+            )
+            .await?;
         }
         let uid = 40000 + slot as u32;
         let jail = state.join("jails/firecracker").join(&id).join("root");
@@ -561,12 +616,12 @@ impl Vm {
             std::os::unix::fs::chown(&disk, Some(uid), Some(uid))?;
             tokio::fs::hard_link(&disk, jail.join("data.ext4")).await?;
             tokio::fs::hard_link(image.join("root.ext4"), jail.join("root.ext4")).await?;
-            tokio::fs::copy("/opt/leo-vm/vmlinux", jail.join("vmlinux")).await?;
+            tokio::fs::copy(image.join("vmlinux"), jail.join("vmlinux")).await?;
             network.create(uid).await?;
             let config = json!({
                 "boot-source":{"kernel_image_path":"vmlinux","boot_args":format!("console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/sbin/leo-init ip={}::{}:255.255.255.252:leo:eth0:off",network.guest,network.gateway)},
                 "drives":[{"drive_id":"root","path_on_host":"root.ext4","is_root_device":true,"is_read_only":true},{"drive_id":"data","path_on_host":"data.ext4","is_root_device":false,"is_read_only":false}],
-                "machine-config":{"vcpu_count":2,"mem_size_mib":4096,"smt":false},
+                "machine-config":{"vcpu_count":resources.cpu,"mem_size_mib":resources.memory_mi_b,"smt":false},
                 "network-interfaces":[{"iface_id":"net","host_dev_name":network.tap,"guest_mac":network.mac}],
                 "vsock":{"guest_cid":slot+3,"uds_path":"v.sock"}
             });
@@ -621,7 +676,7 @@ impl Vm {
                 }
                 if let Ok(Ok(status)) = tokio::time::timeout(
                     Duration::from_secs(1),
-                    request(socket, &json!({"op":"status"})),
+                    guest_request(socket, &json!({"op":"status"})),
                 )
                 .await
                 {
@@ -683,7 +738,7 @@ impl Vm {
     pub async fn warm(&mut self) -> Result<()> {
         let response = tokio::time::timeout(
             Duration::from_secs(60),
-            request(&self.socket, &json!({"op":"prepare"})),
+            guest_request(&self.socket, &json!({"op":"prepare"})),
         )
         .await
         .map_err(|_| Error::new(503, "VM warmup timed out."))??;
@@ -706,7 +761,7 @@ impl Vm {
         }
         self.vm_state("Resumed").await?;
         self.paused = false;
-        let status = request(
+        let status = guest_request(
             &self.socket,
             &json!({"op":"clock","epochMs":crate::config::now()}),
         )
@@ -728,7 +783,7 @@ impl Vm {
         }
         let _ = tokio::time::timeout(
             Duration::from_secs(2),
-            request(&self.socket, &json!({"op":"shutdown"})),
+            guest_request(&self.socket, &json!({"op":"shutdown"})),
         )
         .await;
         if let Some(mut child) = self.child.take()
@@ -802,7 +857,7 @@ impl Vm {
         });
 
         let operation = async {
-            let status = request(socket, &json!({"op":"status"})).await?;
+            let status = guest_request(socket, &json!({"op":"status"})).await?;
             if status["initialized"] != true {
                 let mut imported = Vec::<(&Path, &str)>::new();
                 for mount in plan["imports"].as_array().into_iter().flatten() {
@@ -936,6 +991,33 @@ fn rename_new(source: &Path, target: &Path) -> Result<()> {
         return Err(std::io::Error::last_os_error().into());
     }
     Ok(())
+}
+
+/// Pause all guest CPUs before lease-loss teardown, including non-agent processes.
+pub async fn pause_attempt(state: &Path, attempt: &str) -> Result<()> {
+    vm_state(state, attempt, "Paused").await
+}
+pub async fn resume_attempt(state: &Path, attempt: &str) -> Result<()> {
+    vm_state(state, attempt, "Resumed").await
+}
+async fn vm_state(state: &Path, attempt: &str, status: &str) -> Result<()> {
+    let value: Value =
+        serde_json::from_slice(&tokio::fs::read(state.join(format!("{attempt}.vm.json"))).await?)?;
+    let vm = text(&value, "vmId");
+    crate::validation::uuid(vm)?;
+    let socket = state
+        .join("jails/firecracker")
+        .join(vm)
+        .join("root/api.sock");
+    tokio::time::timeout(Duration::from_secs(1),async {
+        let mut stream=UnixStream::connect(socket).await?;
+        let body=json!({"state":status}).to_string();
+        stream.write_all(format!("PATCH /vm HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).as_bytes()).await?;
+        let mut read=BufReader::new(stream);let mut line=String::new();
+        read.read_line(&mut line).await?;
+        if !line.starts_with("HTTP/1.1 204 ") {return Err(Error::new(503,"VM pause failed."));}
+        Ok(())
+    }).await.map_err(|_|Error::new(503,"VM pause timed out."))?
 }
 
 #[cfg(test)]

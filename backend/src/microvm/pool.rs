@@ -141,8 +141,15 @@ impl Pool {
             };
             if let Some((slot, prepare_stop)) = slot {
                 let disk = self.state.join("prepared").join(id());
-                let mut vm =
-                    Vm::boot(&self.state, &self.image, disk.clone(), slot, &prepare_stop).await;
+                let mut vm = Vm::boot(
+                    &self.state,
+                    &self.image,
+                    disk.clone(),
+                    slot,
+                    &prepare_stop,
+                    None,
+                )
+                .await;
                 if let Ok(prepared) = &mut vm {
                     let warm = tokio::select! { result = prepared.warm() => result, _ = prepare_stop.cancelled() => Err(Error::new(503,"VM preparation stopped.")) };
                     if let Err(error) = warm {
@@ -189,7 +196,10 @@ impl Reservation {
             return Ok(143);
         }
         let operation = async {
-            if disk.exists()
+            if (disk.exists()
+                || plan
+                    .get("resources")
+                    .is_some_and(|r| r != &json!(crate::nodes::placement::defaults())))
                 && let Some(mut vm) = self.spare.take()
             {
                 // Existing disks are authoritative; a prepared filesystem must never replace them.
@@ -210,7 +220,15 @@ impl Reservation {
                 vm.adopt(&self.pool.state, text(&plan, "runId")).await?;
             } else {
                 self.spare = Some(
-                    Vm::boot(&self.pool.state, &self.pool.image, disk, self.slot, &stop).await?,
+                    Vm::boot(
+                        &self.pool.state,
+                        &self.pool.image,
+                        disk,
+                        self.slot,
+                        &stop,
+                        plan.get("resources"),
+                    )
+                    .await?,
                 );
             }
             let vm = self.spare.as_mut().unwrap();

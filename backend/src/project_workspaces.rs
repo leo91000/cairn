@@ -110,7 +110,7 @@ impl Projects {
         // Recheck the grant after a potentially slow clone and before transferring anything.
         authorize(s, bearer).await?;
         let credential = crate::execution::secret(&s.config.data_dir, "runner-secret").await?;
-        let response = s.http.post(format!("{}/runs/{attempt}/projects/{project_id}",s.config.runner_url))
+        let response = s.http.post(format!("{}/runs/{attempt}/projects/{project_id}",crate::nodes::transport::url(s,text(&run,"id")).await?))
             .bearer_auth(credential)
             .json(&json!({"runId":run["id"],"source":entry["path"],"target":entry["path"]}))
             .timeout(Duration::from_secs(300)).send().await
@@ -151,6 +151,19 @@ impl Projects {
 }
 
 pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Result<Value> {
+    if method == "tools/call" && params["name"] == "request_capacity" {
+        let run = authorize(s, bearer).await?;
+        return Ok(
+            match crate::nodes::moves::request(s, &run, &params["arguments"]).await {
+                Ok(value) => {
+                    json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value})
+                }
+                Err(error) => {
+                    json!({"isError":true,"content":[{"type":"text","text":error.message}]})
+                }
+            },
+        );
+    }
     if method == "tools/call" && params["name"] == "onepassword" {
         return Ok(
             match crate::onepassword::call(s, bearer, &params["arguments"]).await {
@@ -206,6 +219,10 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
                 .as_array_mut()
                 .unwrap()
                 .push(crate::artifacts::tool());
+            catalog["tools"]
+                .as_array_mut()
+                .unwrap()
+                .push(crate::nodes::moves::tool());
             catalog["tools"]
                 .as_array_mut()
                 .unwrap()

@@ -9,6 +9,7 @@ services:
     ports:
       - '127.0.0.1:4310:4310'
     environment:
+      LEO_NODE_IMAGE: ${LEO_IMAGE:-}
       PUBLIC_URL: ${PUBLIC_URL:-http://localhost:4310}
       RUNNER_URL: http://runner:4311
       ARCHIVE_S3_BUCKET: ${ARCHIVE_S3_BUCKET:-}

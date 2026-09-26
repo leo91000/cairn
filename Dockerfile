@@ -127,4 +127,5 @@ COPY --from=guest-kernel /kernel/COPYING /opt/leo-vm/KERNEL-COPYING
 COPY --from=guest-kernel /kernel/LICENSES /opt/leo-vm/kernel-licenses
 COPY --from=guest-disk /root.ext4.zst /opt/leo-vm/root.ext4.zst
 COPY --chmod=755 deploy/microvm/init deploy/microvm/docker deploy/microvm/install-docker /opt/leo-vm/
+COPY --chmod=755 deploy/nodes /opt/leo-node
 USER node

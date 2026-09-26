@@ -93,6 +93,16 @@ export interface TaskOutcome {
   messageId?: string | null
 }
 export interface Run {
+  nodeId?: string | null
+  nodeState?: string | null
+  pinnedNodeId?: string | null
+  preferredNodeId?: string | null
+  resources?: import('./nodes').NodeResources
+  capacityWaitUntil?: number | null
+  restoredAt?: number | null
+  movementError?: string | null
+  backup?: { id?: string, capturedAt?: number, status: string, error?: string, uploadedBytes?: number }
+
   outcome?: TaskOutcome | null
   chatExecution?: import('./chats').ChatExecution
   recoveryPending?: boolean

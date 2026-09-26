@@ -719,6 +719,12 @@ internal fun ChatPage(
                         "${live.state?.artifacts?.size ?: 0} fichiers · ${questions.size} questions en attente"
                     )
                     chat?.run?.let {
+                        it.nodeId?.let { node -> Text("Node : $node"); NodePlacement(vm, it) }
+                        it.nodeState?.let { status -> Text(when (status) { "pausing" -> "Suspension de la VM"; "saving" -> "Sauvegarde de l’environnement"; "restoring" -> "Restauration de l’environnement"; "resuming" -> "Reprise de la conversation"; "waiting-for-node" -> "En attente d’une node compatible"; "updating" -> "Mise à jour de la node"; else -> status }) }
+                        it.backup?.capturedAt?.let { point -> Text("VM sauvegardée : ${date(point)}. Les fichiers récents peuvent manquer à la reprise.") }
+                        it.backup?.error?.let { error -> Text("Sauvegarde : $error") }
+                        it.restoredAt?.let { point -> Text("Reprise depuis ${date(point)} ; le chat plus récent reste visible.") }
+                        it.capacityWaitUntil?.let { deadline -> Text("Attente de capacité jusqu’à ${date(deadline)}") }
                         Text(
                             "Dernière activité : ${date(it.finishedAt ?: it.startedAt ?: it.createdAt)}"
                         )

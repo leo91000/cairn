@@ -78,7 +78,10 @@ pub async fn fence(s: &Service, run: &Value) -> Result<()> {
             .as_ref()
             .is_some_and(|c| c["prepared"]["isolated"] == true)
     {
-        if s.config.runner_url.is_empty() {
+        if crate::nodes::transport::url(s, text(run, "id"))
+            .await?
+            .is_empty()
+        {
             return Err(Error::new(
                 503,
                 "Waiting for the isolated runner before recovering this run.",
@@ -90,15 +93,44 @@ pub async fn fence(s: &Service, run: &Value) -> Result<()> {
             .unwrap_or_else(|| text(run, "id"));
         let response = s
             .http
-            .delete(format!("{}/runs/{id}", s.config.runner_url))
+            .delete(format!(
+                "{}/runs/{id}",
+                crate::nodes::transport::url(s, text(run, "id")).await?
+            ))
             .bearer_auth(secret(&s.config.data_dir, "runner-secret").await?)
             .timeout(Duration::from_secs(10))
             .send()
-            .await
-            .map_err(|_| Error::new(503, "Waiting for the previous VM to stop."))?;
-        if !response.status().is_success() && response.status() != 404 {
-            return Err(Error::new(503, "Waiting for the previous VM to stop."));
+            .await;
+        let confirmed = response
+            .is_ok_and(|response| response.status().is_success() || response.status() == 404);
+        if !confirmed {
+            let owned = s.store.get("node-attempts", id).await?.unwrap_or_default();
+            let remote = owned["nodeId"]
+                .as_str()
+                .is_some_and(|node| node != crate::nodes::LOCAL_NODE_ID);
+            let deadline = s
+                .node_lease_deadlines
+                .lock()
+                .await
+                .get(id)
+                .copied()
+                .unwrap_or(
+                    s.started
+                        + Duration::from_millis(
+                            owned["leaseDurationMs"]
+                                .as_u64()
+                                .unwrap_or(60000)
+                                .min(300000),
+                        ),
+                );
+            if !remote || tokio::time::Instant::now() < deadline + Duration::from_secs(20) {
+                return Err(Error::new(
+                    503,
+                    "Waiting for the previous VM execution lease to expire.",
+                ));
+            }
         }
+        crate::nodes::placement::release(s, id).await?;
     }
     if let Some(mut checkpoint) = checkpoint {
         checkpoint.as_object_mut().unwrap().remove("process");
@@ -119,7 +151,7 @@ pub async fn session(s: &Service, run: &Value, home: &Path, cwd: &Path) -> Resul
                 )
             });
     }
-    if !s.config.runner_url.is_empty() {
+    if run["isolated"] == true || !s.config.runner_url.is_empty() {
         // The authoritative session is on the retained guest disk. The guest's
         // thread/resume verifies it; asking a host Codex process cannot do so.
         if let Some(id) = run["sessionId"].as_str().filter(|id| !id.is_empty()) {

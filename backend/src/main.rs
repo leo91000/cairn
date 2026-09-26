@@ -92,6 +92,17 @@ async fn entry(args: Vec<String>) -> Result<i32> {
             .await?;
             Ok(0)
         }
+        "node-daemon" => {
+            leo_agent_manager::nodes::daemon(
+                Path::new(
+                    args.get(1)
+                        .ok_or_else(|| Error::bad("Missing node identity directory."))?,
+                ),
+                stop,
+            )
+            .await?;
+            Ok(0)
+        }
         "node-connect" => {
             leo_agent_manager::nodes::connector::connect(
                 Path::new(

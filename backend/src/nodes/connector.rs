@@ -16,7 +16,7 @@ struct Identity {
     node_id: String,
     token: String,
 }
-fn master(input: &str) -> Result<url::Url> {
+pub(crate) fn master(input: &str) -> Result<url::Url> {
     let value = url::Url::parse(input).map_err(|_| Error::bad("Invalid master URL."))?;
     let loopback = value.host_str().is_some_and(|host| {
         host == "localhost"
@@ -57,7 +57,7 @@ pub fn capabilities(path: &Path) -> Result<Value> {
         .write(true)
         .open("/dev/kvm")
         .is_ok_and(|file| unsafe { libc::ioctl(file.as_raw_fd(), 0xae00) } == 12);
-    let memory = std::fs::read_to_string("/proc/meminfo")?
+    let mut memory = std::fs::read_to_string("/proc/meminfo")?
         .lines()
         .find_map(|line| {
             line.strip_prefix("MemTotal:")
@@ -66,6 +66,16 @@ pub fn capabilities(path: &Path) -> Result<Value> {
         })
         .ok_or_else(|| Error::bad("Cannot detect node memory."))?
         / 1024;
+    for limit in [
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+    ] {
+        if let Ok(value) = std::fs::read_to_string(limit)
+            && let Ok(bytes) = value.trim().parse::<u64>()
+        {
+            memory = memory.min(bytes / 1_048_576);
+        }
+    }
     let name = std::ffi::CString::new(path.as_os_str().as_bytes())
         .map_err(|_| Error::bad("Invalid node directory."))?;
     let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
@@ -74,7 +84,7 @@ pub fn capabilities(path: &Path) -> Result<Value> {
     }
     let stat = unsafe { stat.assume_init() };
     let disk =
-        (stat.f_blocks as u128 * stat.f_frsize as u128 / 1_048_576).min(u64::MAX as u128) as u64;
+        (stat.f_bavail as u128 * stat.f_frsize as u128 / 1_048_576).min(u64::MAX as u128) as u64;
     Ok(
         json!({"os":"linux","arch":"x86_64","kvm":kvm,"cpu":std::thread::available_parallelism()?.get(),"memoryMiB":memory,"diskMiB":disk}),
     )
@@ -122,7 +132,59 @@ pub async fn connect(directory: &Path, stop: CancellationToken) -> Result<()> {
         serde_json::from_slice(&tokio::fs::read(directory.join("identity.json")).await?)?;
     let origin = master(&identity.master)?;
     let client = client()?;
+    let relay_stop = stop.child_token();
+    let relay = if let Ok(runner) = std::env::var("RUNNER_URL") {
+        let runner_token = crate::execution::secret(
+            Path::new(&std::env::var("DATA_DIR").unwrap_or_else(|_| "/data".into())),
+            "runner-secret",
+        )
+        .await?;
+        Some(tokio::spawn(super::relay::run(
+            origin.clone(),
+            identity.token.clone(),
+            runner,
+            runner_token,
+            relay_stop.clone(),
+        )))
+    } else {
+        None
+    };
+    if let Some(mut task) = relay {
+        let result = tokio::select! {
+            result=heartbeat(&client,&origin,&identity,&stop)=>result,
+            result=&mut task=>return match result {Ok(Ok(()))=>Err(Error::new(503,"Execution relay stopped.")),Ok(Err(error))=>Err(error),Err(_)=>Err(Error::new(503,"Execution relay failed."))}
+        };
+        relay_stop.cancel();
+        let _ = task.await;
+        result
+    } else {
+        heartbeat(&client, &origin, &identity, &stop).await
+    }
+}
+async fn heartbeat(
+    client: &reqwest::Client,
+    origin: &url::Url,
+    identity: &Identity,
+    stop: &CancellationToken,
+) -> Result<()> {
     loop {
+        let started = super::boot_ms();
+        let runner = std::env::var("RUNNER_URL").unwrap_or_default();
+        let health = if !runner.is_empty() {
+            match client
+                .get(format!("{}/health", runner.trim_end_matches('/')))
+                .timeout(Duration::from_secs(3))
+                .send()
+                .await
+            {
+                Ok(r) => r.json::<Value>().await.unwrap_or_default(),
+                Err(_) => Value::Null,
+            }
+        } else {
+            Value::Null
+        };
+        let ready = health["nodeProtocol"] == 2
+            && health["dataRoot"] == std::env::var("DATA_DIR").unwrap_or_else(|_| "/data".into());
         let request = client
             .post(
                 origin
@@ -130,7 +192,7 @@ pub async fn connect(directory: &Path, stop: CancellationToken) -> Result<()> {
                     .map_err(Error::internal)?,
             )
             .bearer_auth(&identity.token)
-            .json(&json!({"runtimeId":runtime()}))
+            .json(&json!({"imageDigest":std::env::var("LEO_NODE_IMAGE").ok(),"runtimeId":health["runtimeId"].as_str().map(str::to_owned).unwrap_or_else(runtime),"executionReady":ready,"dataRoot":health["dataRoot"],"runtimes":health["runtimes"]}))
             .send();
         let result =
             tokio::select! { _ = stop.cancelled() => return Ok(()), value = request => value };
@@ -141,9 +203,43 @@ pub async fn connect(directory: &Path, stop: CancellationToken) -> Result<()> {
                     "Node identity revoked. Register the node again.",
                 ));
             }
-            Ok(response) if response.status().is_success() => {}
+            Ok(response) if response.status().is_success() => {
+                let value: Value = response
+                    .json()
+                    .await
+                    .map_err(|_| Error::bad("Invalid master heartbeat."))?;
+                if ready {
+                    let credential = crate::execution::secret(
+                        Path::new(&std::env::var("DATA_DIR").unwrap_or_else(|_| "/data".into())),
+                        "runner-secret",
+                    )
+                    .await?;
+                    for lease in value["leases"].as_array().into_iter().flatten() {
+                        let elapsed = super::boot_ms().saturating_sub(started);
+                        let remaining = lease["remainingMs"]
+                            .as_u64()
+                            .unwrap_or(0)
+                            .saturating_sub(elapsed);
+                        if remaining > 0
+                            && crate::validation::uuid(crate::validation::text(lease, "id")).is_ok()
+                        {
+                            let _ = client
+                                .post(format!(
+                                    "{}/runs/{}/lease",
+                                    runner.trim_end_matches('/'),
+                                    crate::validation::text(lease, "id")
+                                ))
+                                .bearer_auth(&credential)
+                                .json(&json!({"remainingMs":remaining}))
+                                .timeout(Duration::from_secs(3))
+                                .send()
+                                .await;
+                        }
+                    }
+                }
+            }
             _ => tracing::warn!("Node heartbeat failed; retrying without starting work."),
         }
-        tokio::select! { _ = stop.cancelled() => return Ok(()), _ = tokio::time::sleep(Duration::from_secs(10)) => {} }
+        tokio::select! { _ = stop.cancelled() => return Ok(()), _ = tokio::time::sleep(Duration::from_secs(3)) => {} }
     }
 }

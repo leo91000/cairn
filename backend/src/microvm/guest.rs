@@ -17,6 +17,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tokio_vsock::{VsockAddr, VsockListener, VsockStream};
 
+static FILESYSTEM_CONTROL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static FREEZE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const INITIALIZED: &str = "/var/lib/leo/initialized";
 
 pub async fn serve(stop: CancellationToken) -> Result<()> {
@@ -69,6 +71,18 @@ async fn handle(
         .await?
         .ok_or_else(|| Error::bad("Missing guest request."))?;
     match text(&request, "op") {
+        "freeze"|"thaw"=> {
+            let _guard=FILESYSTEM_CONTROL.lock().await;
+            let freeze=request["op"]=="freeze";
+            let generation=FREEZE_GENERATION.fetch_add(1,std::sync::atomic::Ordering::SeqCst)+1;
+            let status=Command::new("fsfreeze").arg(if freeze {"--freeze"} else {"--unfreeze"}).arg("/oldroot/run/data").stdout(Stdio::null()).stderr(Stdio::null()).status().await?;
+            if freeze && status.success() {
+                // A lost host control connection must not freeze the guest indefinitely.
+                tokio::spawn(async move {tokio::time::sleep(Duration::from_secs(300)).await;let _guard=FILESYSTEM_CONTROL.lock().await;if FREEZE_GENERATION.load(std::sync::atomic::Ordering::SeqCst)!=generation {return;}let _=Command::new("fsfreeze").args(["--unfreeze","/oldroot/run/data"]).stdout(Stdio::null()).stderr(Stdio::null()).status().await;});
+            }
+            wire::write(&mut write,&json!({"ok":status.success() || !freeze})).await
+        }
+
         "artifact-export" => {
             let export=async {
                 let (snapshot,size)=crate::artifacts::file::snapshot(Path::new(text(&request,"path")),Path::new(text(&request,"root"))).await?;

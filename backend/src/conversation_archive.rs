@@ -39,27 +39,153 @@ pub(crate) async fn storage(s: &Service, chat: &Value) -> Result<Storage> {
     }
     Ok(storage)
 }
-async fn disk(s: &Service, run: &str, action: &str, staging: &Path) -> Result<()> {
-    if run.is_empty() || s.config.runner_url.is_empty() {
+async fn disk(
+    s: &Service,
+    run: &str,
+    action: &str,
+    staging: &Path,
+    destination: Option<&str>,
+    runtime: Option<&Value>,
+) -> Result<()> {
+    if run.is_empty() {
+        return Ok(());
+    }
+    let base = match destination {
+        Some(node) if node != crate::nodes::LOCAL_NODE_ID => format!(
+            "{}/internal/execution/{node}",
+            s.config.public_url.trim_end_matches('/')
+        ),
+        Some(_) => s.config.runner_url.clone(),
+        None => crate::nodes::transport::url(s, run).await?,
+    };
+    if base.is_empty() {
+        if s.store.run(run).await?["isolated"] == true {
+            return Err(Error::new(503, "The VM node is unavailable."));
+        }
         return Ok(());
     }
     let credential = crate::execution::secret(&s.config.data_dir, "runner-secret").await?;
-    // Both processes share DATA_DIR, never RUNNER_STATE_DIR. Only UUID-derived
-    // transfer paths are accepted by the authenticated runner.
-    let response = s
-        .http
-        .post(format!("{}/disks/{run}/{action}", s.config.runner_url))
-        .bearer_auth(credential)
-        .json(&json!({"transfer":staging.file_name().and_then(|v| v.to_str())}))
-        .timeout(std::time::Duration::from_secs(7200))
-        .send()
+    let checkpoint = s
+        .store
+        .kv(&format!("run-checkpoint:{run}"))
+        .await?
+        .unwrap_or_default();
+    let node = destination
+        .or(checkpoint["nodeId"].as_str())
+        .unwrap_or(crate::nodes::LOCAL_NODE_ID);
+    let remote = node != crate::nodes::LOCAL_NODE_ID;
+    let transfer = staging.file_name().and_then(|v| v.to_str()).unwrap_or("");
+    let result = async {
+        if remote && action == "import" {
+            crate::nodes::archive::transfer(s, &base, &credential, staging, true).await?;
+        }
+        let response = s
+            .http
+            .post(format!("{base}/disks/{run}/{action}"))
+            .bearer_auth(&credential)
+            .json(&json!({"transfer":transfer,"runtimeId":runtime}))
+            .timeout(std::time::Duration::from_secs(7200))
+            .send()
+            .await
+            .map_err(|_| Error::new(503, "Workspace transfer interrupted."))?;
+        if !response.status().is_success() {
+            return Err(Error::new(
+                503,
+                "Workspace transfer failed or the agent has not stopped yet.",
+            ));
+        }
+        let value: Value = response.json().await.map_err(Error::internal)?;
+        if remote && action == "export" && value["archivePresent"] == true {
+            crate::nodes::archive::transfer(s, &base, &credential, staging, false).await?;
+        }
+        if action == "delete" {
+            let id = format!("{run}:{}", node);
+            s.store
+                .write(move |db| db.remove("node-volumes", &id))
+                .await?;
+        }
+        Ok(())
+    }
+    .await;
+    if remote && action != "delete" {
+        let _ = s
+            .http
+            .delete(format!("{base}/archive-transfers/{transfer}/discard"))
+            .bearer_auth(&credential)
+            .timeout(std::time::Duration::from_secs(20))
+            .send()
+            .await;
+    }
+    result
+}
+async fn delete_disks(s: &Service, run: &str) -> Result<()> {
+    let volumes = s
+        .store
+        .list("node-volumes")
+        .await?
+        .into_iter()
+        .filter(|v| v["runId"] == run)
+        .collect::<Vec<_>>();
+    if volumes.is_empty() {
+        return disk(s, run, "delete", Path::new("unused"), None, None).await;
+    }
+    for volume in volumes {
+        disk(
+            s,
+            run,
+            "delete",
+            Path::new("unused"),
+            Some(text(&volume, "nodeId")),
+            None,
+        )
+        .await?;
+    }
+    Ok(())
+}
+async fn restore_workspace(
+    s: &Service,
+    chat: &Value,
+    metadata: &mut Value,
+    staging: &Path,
+) -> Result<()> {
+    let run_id = text(chat, "runId");
+    let checkpoint_key = format!("run-checkpoint:{run_id}");
+    let old = metadata["keys"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|entry| entry[0] == checkpoint_key)
+        .map(|v| v[1].clone())
+        .unwrap_or_default();
+    let mut selecting = metadata["run"].clone();
+    selecting["isolated"] = true.into();
+    selecting["placementTransition"] = true.into();
+    selecting["preferredNodeId"] = old["nodeId"].clone();
+    selecting["requiredRuntime"] = old["runtimeId"].clone();
+    let reservation = id();
+    let selected = crate::nodes::placement::reserve(s, &selecting, &reservation).await?;
+    let node = text(&selected, "nodeId");
+    let result = async {
+        crate::nodes::placement::materialize(s, &reservation).await?;
+        disk(
+            s,
+            run_id,
+            "import",
+            staging,
+            Some(node),
+            Some(&old["runtimeId"]),
+        )
         .await
-        .map_err(|_| Error::new(503, "Workspace transfer interrupted."))?;
-    if !response.status().is_success() {
-        return Err(Error::new(
-            503,
-            "Workspace transfer failed or the agent has not stopped yet.",
-        ));
+    }
+    .await;
+    crate::nodes::placement::release(s, &reservation).await?;
+    result?;
+    metadata["run"]["nodeId"] = node.into();
+    for entry in metadata["keys"].as_array_mut().into_iter().flatten() {
+        if entry[0] == checkpoint_key {
+            entry[1]["nodeId"] = node.into();
+            entry[1]["process"] = Value::Null;
+        }
     }
     Ok(())
 }
@@ -250,7 +376,7 @@ pub async fn archive(s: &Service, mut chat: Value) -> Result<()> {
         let result = async {
             normalize_legacy_workspace(s, &chat).await?;
             metadata(s, &chat, staging.clone()).await?;
-            disk(s, text(&chat, "runId"), "export", &staging).await?;
+            disk(s, text(&chat, "runId"), "export", &staging, None, None).await?;
             let plain = staging.join("snapshot.tar.gz");
             let mut args = vec![
                 "--sparse".into(),
@@ -330,7 +456,7 @@ pub async fn archive(s: &Service, mut chat: Value) -> Result<()> {
         remove(&staging).await?;
         chat = result?;
     }
-    disk(s, text(&chat, "runId"), "delete", Path::new("unused")).await?;
+    delete_disks(s, text(&chat, "runId")).await?;
     files(s, &chat, false).await?;
     let cid = chat_id;
     s.store.transaction(move |db| {
@@ -402,7 +528,7 @@ pub async fn restore(s: &Service, chat: Value, days: i64) -> Result<()> {
             extracted.to_string_lossy().into(),
         ])
         .await?;
-        let value: Value =
+        let mut value: Value =
             serde_json::from_slice(&tokio::fs::read(extracted.join("metadata.json")).await?)?;
         if value["version"] != 1 || value["chatId"] != chat["id"] {
             return Err(Error::bad("Incompatible archive format."));
@@ -417,7 +543,7 @@ pub async fn restore(s: &Service, chat: Value, days: i64) -> Result<()> {
                 staging.join("workspace.tar.gz"),
             )
             .await?;
-            disk(s, text(&chat, "runId"), "import", &staging).await?;
+            restore_workspace(s, &chat, &mut value, &staging).await?;
         }
         // No writers can enter while restoring. Partial local copies can be
         // replaced on retry; authoritative public artifact metadata stays live.
@@ -513,7 +639,7 @@ pub async fn purge(s: &Service, chat: Value) -> Result<()> {
     if !text(&chat, "archiveKey").is_empty() {
         storage(s, &chat).await?.purge(&prefix(&chat)).await?;
     }
-    disk(s, &run, "delete", Path::new("unused")).await?;
+    delete_disks(s, &run).await?;
     files(s, &chat, true).await?;
     s.store
         .transaction(move |db| {

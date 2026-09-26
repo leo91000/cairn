@@ -54,7 +54,31 @@ pub async fn router(service: Arc<Service>) -> Result<Router> {
         .route("/mcp-workspace", any(crate::mcp_server::handle))
         .route("/mcp-gateway/{id}", any(crate::mcp_server::handle))
         .route("/internal/deployment-lease", any(lease))
+        .route(
+            "/internal/nodes/release",
+            any(crate::nodes::maintenance::downloads),
+        )
+        .route(
+            "/internal/nodes/install.sh",
+            any(crate::nodes::maintenance::downloads),
+        )
+        .route(
+            "/internal/nodes/host.py",
+            any(crate::nodes::maintenance::downloads),
+        )
         .route("/internal/nodes/{*path}", any(crate::nodes::internal))
+        .route(
+            "/internal/node-restore/{*path}",
+            any(crate::nodes::restore::handle),
+        )
+        .route(
+            "/internal/node-workspace/{*path}",
+            any(crate::nodes::workspace::handle),
+        )
+        .route(
+            "/internal/execution/{*path}",
+            any(crate::nodes::transport::proxy),
+        )
         .route("/api/{*path}", any(api))
         .route("/oauth/{*path}", any(oauth))
         .route("/.well-known/{*path}", any(metadata))
@@ -192,8 +216,22 @@ async fn check_security(
             }
         }
         for (key, max, window) in std::iter::once((
-            "",
-            if path.starts_with("/mcp-gateway/") {
+            if path.starts_with("/internal/nodes/")
+                || path.starts_with("/internal/execution/")
+                || path.starts_with("/internal/node-restore/")
+                || path.starts_with("/internal/node-workspace/")
+            {
+                "nodes"
+            } else {
+                ""
+            },
+            if path.starts_with("/internal/nodes/")
+                || path.starts_with("/internal/execution/")
+                || path.starts_with("/internal/node-restore/")
+                || path.starts_with("/internal/node-workspace/")
+            {
+                100000
+            } else if path.starts_with("/mcp-gateway/") {
                 600
             } else {
                 300
@@ -247,7 +285,14 @@ impl Input {
         let (parts, body) = request.into_parts();
         let query = serde_urlencoded::from_str(parts.uri.query().unwrap_or(""))
             .map_err(|_| Error::bad("Invalid query parameters."))?;
-        let bytes = to_bytes(body, 150000)
+        let limit = if parts.uri.path().starts_with("/internal/node-workspace/")
+            && parts.uri.path().ends_with("/result")
+        {
+            2_000_000
+        } else {
+            150000
+        };
+        let bytes = to_bytes(body, limit)
             .await
             .map_err(|_| Error::new(413, "Request body is too large."))?;
         let body = if bytes.is_empty() {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { ExecutionNode, NodeEnrollment } from '../../shared/nodes'
+import type { ExecutionNode, NodeBackupSettings, NodeEnrollment } from '../../shared/nodes'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { api, notify } from '../api'
 import Modal from '../components/Modal.vue'
@@ -13,6 +13,7 @@ const name = ref('')
 const enrollment = ref<NodeEnrollment | null>(null)
 const error = ref('')
 const busy = ref(false)
+const recovery = ref<NodeBackupSettings | null>(null)
 const revoking = ref<ExecutionNode | null>(null)
 let timer: ReturnType<typeof setInterval> | undefined
 async function load() {
@@ -67,7 +68,7 @@ function save() {
       Trusted machines and their detected capabilities. GPU execution is not available.
     </p>
     <p class="mt-2 text-sm text-muted">
-      Node registration is available. Remote conversation execution, migration and backups are under development; registered nodes do not run conversations yet.
+      CPU conversations run in Firecracker. A node must be connected with a compatible runtime and have enough available capacity.
     </p>
     <UiAlert v-if="error" class="mt-4">
       {{ error }}
@@ -81,10 +82,39 @@ function save() {
     <div v-if="enrollment" class="mb-6 rounded-xl border border-line p-4">
       <p>Single-use code · expires {{ new Date(enrollment.expiresAt).toLocaleString() }}</p>
       <code class="my-2 block break-all select-all">{{ enrollment.code }}</code>
+      <template v-if="enrollment.installCommand">
+        <p>On the trusted Linux node, run this command and enter the code when prompted:</p>
+        <code class="my-2 block break-all select-all">{{ enrollment.installCommand }}</code>
+      </template>
+      <p v-else>
+        The master needs an immutable deployed image digest before assisted installation is available.
+      </p>
       <UiButton variant="default" @click="enrollment = null">
         Hide code
       </UiButton>
     </div>
+    <UiButton class="mb-4" variant="default" @click="action(async () => { recovery = await api<NodeBackupSettings>('/nodes/settings') })">
+      Configure recovery points
+    </UiButton>
+    <Modal v-if="recovery" title="Recovery points" @close="recovery = null">
+      <form class="grid gap-4" @submit.prevent="action(async () => { await api('/nodes/settings', { method: 'PUT', body: JSON.stringify(recovery) }); recovery = null })">
+        <p>Changed blocks upload in the background after a coherent capture. Chat streaming is separate. Actual recovery dates appear in each conversation.</p>
+        <label>Destination<select v-model="recovery.destination" class="mt-1 block"><option value="master">Master storage</option><option value="s3">Configured S3 storage</option></select></label>
+        <label>Capture interval (seconds)<input v-model.number="recovery.intervalSeconds" class="mt-1 block" type="number" min="5" max="3600" required></label>
+        <label>Pause after disconnection (seconds)<input v-model.number="recovery.disconnectTimeoutSeconds" class="mt-1 block" type="number" min="10" max="300" required></label>
+        <label>Shutdown preparation limit (seconds)<input v-model.number="recovery.shutdownTimeoutSeconds" class="mt-1 block" type="number" min="30" max="300" required></label>
+        <label>Maximum capacity wait (seconds)<input v-model.number="recovery.maxCapacityWaitSeconds" class="mt-1 block" type="number" min="0" max="3600" required></label>
+        <label>Recovery points to retain<input v-model.number="recovery.retention" class="mt-1 block" type="number" min="1" max="100" required></label>
+        <label>Master storage budget (MiB)<input v-model.number="recovery.budgetMiB" class="mt-1 block" type="number" min="128" max="1048576" required></label>
+        <p>Captures can take longer than the interval. S3 points also keep a master cache within this budget.</p>
+        <UiAlert v-if="error">
+          {{ error }}
+        </UiAlert>
+        <UiButton type="submit" :disabled="busy">
+          Save
+        </UiButton>
+      </form>
+    </Modal>
     <div class="grid gap-4">
       <article v-for="node in nodes" :key="node.id" class="rounded-xl border border-line bg-surface p-5">
         <div class="flex items-center justify-between gap-4">
@@ -99,6 +129,12 @@ function save() {
         <p class="mt-2">
           {{ node.limits.cpu }} CPU · {{ node.limits.memoryMiB }} MiB RAM · {{ node.limits.diskMiB }} MiB disk allowed
         </p>
+        <p v-if="node.available" class="mt-2 text-sm text-muted">
+          Available: {{ node.available.cpu }} CPU · {{ node.available.memoryMiB }} MiB RAM · {{ node.available.diskMiB }} MiB disk
+        </p>
+        <p v-if="node.maintenance" role="status" class="mt-2">
+          {{ node.maintenance }}
+        </p>
         <p v-if="node.tags.length" class="mt-2 text-sm">
           {{ node.tags.join(' · ') }}
         </p>
@@ -106,6 +142,12 @@ function save() {
           {{ node.accepting ? 'Admission enabled' : 'Admission paused' }}<template v-if="node.lastSeen">
             · Last contact {{ new Date(node.lastSeen).toLocaleString() }}
           </template>
+        </p>
+        <p v-if="node.imageDigest" class="mt-1 break-all text-xs text-muted">
+          Version: {{ node.imageDigest }}
+        </p>
+        <p v-if="node.updateError" role="alert" class="mt-1 text-coral">
+          {{ node.updateError }}
         </p>
         <p v-if="node.runtimeId" class="mt-1 break-all text-xs text-muted">
           Runtime: {{ node.runtimeId }}

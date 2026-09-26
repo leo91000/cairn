@@ -106,6 +106,7 @@ impl Worker {
     pub async fn start(self: &Arc<Self>, s: Arc<Service>) -> Result<()> {
         self.initialize(&s).await?;
         self.tasks.spawn(crate::chat_titles::run(s.clone()));
+        self.tasks.spawn(crate::nodes::backups::maintain(s.clone()));
         let retention = s.clone();
         self.tasks.spawn(async move {
             let mut timer = tokio::time::interval(Duration::from_secs(15));
@@ -213,7 +214,7 @@ impl Worker {
             return Ok(());
         }
         let locking_projects = |run: &Value| {
-            if s.config.runner_url.is_empty() {
+            if !execution::uses_vm(run, &s.config) {
                 run_projects(run)
             } else {
                 Vec::new()
@@ -247,6 +248,7 @@ impl Worker {
             }
             if run["recoveryPending"] == true {
                 let result = async {
+                    if !crate::nodes::moves::advance(s,&run).await? {return Ok(false);}
                     recovery::fence(s, &run).await?;
                     s.mcps.revoke_run(s, run_id).await?;
                     s.accounts.recover_run(s, &run).await?;
@@ -467,7 +469,11 @@ impl Worker {
             let saved = checkpoint.value().await;
             let recover_controller = error.status == 503
                 && saved["prepared"]["backend"] == "firecracker"
-                && saved["controllerRecoveries"].as_u64().unwrap_or(0) < 3
+                && (saved["controllerRecoveries"].as_u64().unwrap_or(0) < 3
+                    || s.store.run(&run_id).await?["moveRequest"].is_object()
+                    || saved["nodeId"]
+                        .as_str()
+                        .is_some_and(|id| id != crate::nodes::LOCAL_NODE_ID))
                 && s.store.run(&run_id).await?["sessionId"].is_string()
                 && checkpoint.deadline.is_none_or(|deadline| now() < deadline)
                 && !cancel.is_cancelled()
@@ -589,6 +595,24 @@ impl Worker {
                 .await?;
         }
         s.mcps.revoke_run(s, &run_id).await?;
+        let pending = s.store.run(&run_id).await?;
+        if pending["moveRequest"].is_object() && pending["cancelRequestedAt"].is_null() {
+            checkpoint
+                .save(json!({"completed":false,"settled":null}))
+                .await?;
+            s.store
+                .patch_run(
+                    &run_id,
+                    json!({"status":"queued","recoveryPending":true,"finishedAt":null}),
+                )
+                .await?;
+        }
+        if fenced
+            && saved["prepared"]["backend"] == "firecracker"
+            && s.store.run(&run_id).await?["status"] == "succeeded"
+        {
+            crate::nodes::backups::attempt(s, &s.store.run(&run_id).await?).await;
+        }
         if fenced {
             for provider in Provider::ALL {
                 let _ = provider.driver().recover(s, &run_id).await;
@@ -655,7 +679,7 @@ impl Worker {
         let current = s
             .get("agents", text(&run["snapshot"]["agent"], "id"))
             .await?;
-        crate::nodes::require_local(&current)?;
+        crate::nodes::require_node(&current)?;
         if policy(&current) != policy(&run["snapshot"]["agent"]) {
             return Err(Error::new(
                 409,
@@ -814,6 +838,25 @@ impl Worker {
             } else {
                 run_output::prompt(run, false)
             };
+            if resume.is_some()
+                && let Some(restored) = run["restoredAt"].as_i64()
+            {
+                prompt.push_str(&format!("\nThe VM files and native provider session were restored from recovery point at Unix time {restored} ms. Master chat may contain more recent messages and actions than this workspace. Review the master conversation history with Leo tools, reconcile file state, and verify external effects (commits, messages, deployments) before repeating them. Do not assume later chat messages prove those changes exist on this disk."));
+            }
+            if resume.is_some()
+                && let Some(restored) = run["restoredAt"].as_i64()
+            {
+                let run_id = id.clone();
+                let (events, _) = s
+                    .store
+                    .read(move |db| db.events_before(&run_id, i64::MAX))
+                    .await?;
+                let newer=events.into_iter().filter_map(|event|serde_json::to_value(event).ok()).filter(|event|event["createdAt"].as_i64().is_some_and(|at|at>restored)).map(|event|json!({"at":event["createdAt"],"type":event["type"],"text":event["text"]})).collect::<Vec<_>>();
+                if !newer.is_empty() {
+                    prompt.push_str("\nRecent master history after this recovery point (messages are history, not proof that disk changes survived):\n");
+                    prompt.extend(serde_json::to_string(&newer)?.chars().take(16000));
+                }
+            }
             let mut binary = s.config.codex_bin.clone();
             let mut args = mcp["args"]
                 .as_array()
@@ -870,9 +913,12 @@ impl Worker {
             };
             if prepared["isolated"] == true {
                 let runner = id::new();
+                let placement =
+                    crate::nodes::placement::reserve(s, &s.store.run(&id).await?, &runner).await?;
+                crate::nodes::placement::materialize(s, &runner).await?;
                 checkpoint
                     .save(json!({
-                    "runnerId":runner}
+                    "runnerId":runner,"nodeId":placement["nodeId"],"runtimeId":placement["runtimeId"]}
                     ))
                     .await?;
                 let plans = s.config.data_dir.join("runner-plans");
@@ -892,6 +938,7 @@ impl Worker {
                 run_output::prompt(&context,false)}
                 ,"imports":mounts,"expires":checkpoint.deadline,"sandbox":policy(&run["snapshot"]["agent"])["sandbox"],"mcpEnv":mcp["env"]}
                 );
+                plan["resources"] = placement["resources"].clone();
                 if let Some(chat) = chat {
                     plan["chat"] = chat;
                 }
@@ -900,7 +947,40 @@ impl Worker {
                     &serde_json::to_vec(&plan)?,
                 )
                 .await?;
-                env.insert("RUNNER_URL".into(), s.config.runner_url.clone());
+                let runner_url = crate::nodes::transport::url(s, &id).await?;
+                if placement["nodeId"] != crate::nodes::LOCAL_NODE_ID {
+                    let prepared = s
+                        .http
+                        .post(format!("{runner_url}/prepare/{runner}"))
+                        .bearer_auth(execution::secret(&s.config.data_dir, "runner-secret").await?)
+                        .timeout(Duration::from_secs(300))
+                        .send()
+                        .await
+                        .map_err(|_| {
+                            Error::new(503, "Remote workspace preparation interrupted.")
+                        })?;
+                    if !prepared.status().is_success() {
+                        return Err(Error::new(
+                            503,
+                            "Remote workspace preparation failed; source files are preserved.",
+                        ));
+                    }
+                    s.store
+                        .event(
+                            &id,
+                            "status",
+                            &format!("Executing on node {}", text(&placement, "nodeId")),
+                            None,
+                        )
+                        .await?;
+                }
+                s.store
+                    .patch_run(
+                        &id,
+                        json!({"nodeId":placement["nodeId"],"resources":placement["resources"],"nodeState":null,"movementError":null}),
+                    )
+                    .await?;
+                env.insert("RUNNER_URL".into(), runner_url);
                 env.insert(
                     "RUNNER_TOKEN".into(),
                     execution::secret(&s.config.data_dir, "runner-secret").await?,
