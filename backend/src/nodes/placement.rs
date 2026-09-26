@@ -46,6 +46,7 @@ pub async fn reserve(s: &Service, run: &Value, attempt: &str) -> Result<Value> {
         let mut nodes=db.list("nodes")?;
         // Existing development execution stays available without a controller.
         if !configured && nodes.iter().all(|n|n["id"]!=LOCAL_NODE_ID) { nodes.push(json!({"id":LOCAL_NODE_ID,"local":true,"accepting":true,"limits":{"cpu":4096,"memoryMiB":1073741824u64,"diskMiB":1099511627776u64},"capabilities":{"kvm":configured},"runtimeId":"local"})); }
+        // Ties keep the preferred node, then the current runner.
         nodes.sort_by_key(|node| (node["id"]!=run["preferredNodeId"],node["id"]!=LOCAL_NODE_ID));
         let attempts=db.list("node-attempts")?;
         let volumes=db.list("node-volumes")?;
@@ -61,6 +62,7 @@ pub async fn reserve(s: &Service, run: &Value, attempt: &str) -> Result<Value> {
             return Ok(json!({"nodeId":held["nodeId"],"resources":held["resources"],"runtimeId":held["runtimeId"]}));
         }
 
+        let mut best:Option<(bool,f64,Value,Value)>=None;
         for node in nodes {
             let id=text(&node,"id");
             let mut resources=resources.clone();
@@ -75,12 +77,23 @@ pub async fn reserve(s: &Service, run: &Value, attempt: &str) -> Result<Value> {
             if required.is_some_and(|runtime|!node["runtimes"].as_array().into_iter().flatten().any(|r|r==runtime)) {continue;}
             if target.is_some_and(|target|target!=id) || !allowed(&access["nodes"],id) || pinned.is_some_and(|p|p!=id) || existing.is_some_and(|p|p!=id) || node["revoked"]==true || node["accepting"]!=true {continue;}
             if (node["local"]!=true || configured) && (node["capabilities"]["kvm"]!=true || node["executionReady"]!=true || node["lastSeen"].as_i64().is_none_or(|v|now()-v>=30000)) {continue;}
+            let mut headroom=f64::MAX;
             let fits=["cpu","memoryMiB","diskMiB"].iter().all(|key| {
                 let used=if *key=="diskMiB" {volumes.iter().filter(|v|v["nodeId"]==id && v["runId"]!=run["id"]).map(|v|v["diskMiB"].as_u64().unwrap_or(0)).sum::<u64>()} else {attempts.iter().filter(|a|a["nodeId"]==id && a["released"]!=true && !(moving && a["runId"]==run["id"])).map(|a|a["resources"][key].as_u64().unwrap_or(0)).sum::<u64>()};
                 let current=if *key=="diskMiB" {volumes.iter().filter(|v|v["nodeId"]==id && v["runId"]==run["id"]).map(|v|v["diskMiB"].as_u64().unwrap_or(0)).max().unwrap_or(0)} else if moving {attempts.iter().filter(|a|a["nodeId"]==id && a["runId"]==run["id"] && a["released"]!=true).map(|a|a["resources"][key].as_u64().unwrap_or(0)).max().unwrap_or(0)} else {0};
-                used.checked_add(if *key=="diskMiB" {disk_total(volumes.iter().find(|v|v["nodeId"]==id && v["runId"]==run["id"]).unwrap_or(&Value::Null),resources[key].as_u64().unwrap_or(u64::MAX),moving && checkpoint["nodeId"]!=id)} else {current.max(resources[key].as_u64().unwrap_or(u64::MAX))}).is_some_and(|total|total<=node["limits"][key].as_u64().unwrap_or(0))
+                used.checked_add(if *key=="diskMiB" {disk_total(volumes.iter().find(|v|v["nodeId"]==id && v["runId"]==run["id"]).unwrap_or(&Value::Null),resources[key].as_u64().unwrap_or(u64::MAX),moving && checkpoint["nodeId"]!=id)} else {current.max(resources[key].as_u64().unwrap_or(u64::MAX))}).is_some_and(|total| {
+                    let limit=node["limits"][key].as_u64().unwrap_or(0);
+                    if *key!="diskMiB" && limit>0 {headroom=headroom.min((limit.saturating_sub(total)) as f64/limit as f64);}
+                    total<=limit
+                })
             });
             if !fits {continue;}
+            // Automatic placement spreads work: a preferred node wins, otherwise the most CPU/RAM headroom.
+            let preferred=node["id"]==run["preferredNodeId"];
+            if best.as_ref().is_none_or(|(p,h,_,_):&(bool,f64,Value,Value)|preferred && !*p || preferred==*p && headroom>*h) {best=Some((preferred,headroom,node,resources));}
+        }
+        if let Some((_,_,node,resources))=best {
+            let id=text(&node,"id");
             if attempts.iter().any(|a|a["runId"]==run["id"] && a["released"]!=true && (!moving || a["role"]=="destination")) {return Err(Error::new(409,"Previous execution still owns this conversation."));}
             let mut record=json!({"id":attempt,"role":if moving {"destination"} else {"execution"},"runId":run["id"],"nodeId":id,"resources":resources,"runtimeId":required.unwrap_or_else(||text(&node,"runtimeId")),"createdAt":now(),"leaseExpiresAt":now()+60000,"released":false});
             let volume_id=format!("{}:{id}",text(&run,"id"));

@@ -151,6 +151,17 @@ impl Projects {
 }
 
 pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Result<Value> {
+    if method == "tools/call" && params["name"] == "list_nodes" {
+        let run = authorize(s, bearer).await?;
+        return Ok(match crate::nodes::moves::list(s, &run).await {
+            Ok(value) => {
+                json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value})
+            }
+            Err(error) => {
+                json!({"isError":true,"content":[{"type":"text","text":error.message}]})
+            }
+        });
+    }
     if method == "tools/call" && params["name"] == "request_capacity" {
         let run = authorize(s, bearer).await?;
         return Ok(
@@ -219,6 +230,10 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
                 .as_array_mut()
                 .unwrap()
                 .push(crate::artifacts::tool());
+            catalog["tools"]
+                .as_array_mut()
+                .unwrap()
+                .push(crate::nodes::moves::list_tool());
             catalog["tools"]
                 .as_array_mut()
                 .unwrap()

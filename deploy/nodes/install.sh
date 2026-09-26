@@ -38,4 +38,4 @@ WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
 systemctl enable --now leo-node.service
-echo 'Node installed. Configure its resource ceilings and agent access in Leo → Nodes.'
+echo 'Node installed. Open Leo → Nodes to choose which agents may use it and to adjust its resource ceilings.'

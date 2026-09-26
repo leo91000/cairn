@@ -143,6 +143,54 @@ fn public(mut node: Value) -> Value {
     .into();
     node
 }
+/// Nodes with their reserved and available resources, and the agents allowed to use them.
+pub async fn inventory(s: &Service) -> Result<Vec<Value>> {
+    let attempts = s.store.list("node-attempts").await?;
+    let volumes = s.store.list("node-volumes").await?;
+    let agents = s.store.list("agents").await?;
+    Ok(s.store
+        .list("nodes")
+        .await?
+        .into_iter()
+        .map(|mut node| {
+            for key in ["cpu", "memoryMiB", "diskMiB"] {
+                let used = if key == "diskMiB" {
+                    volumes
+                        .iter()
+                        .filter(|v| v["nodeId"] == node["id"])
+                        .map(|v| v["diskMiB"].as_u64().unwrap_or(0))
+                        .sum::<u64>()
+                } else {
+                    attempts
+                        .iter()
+                        .filter(|a| a["nodeId"] == node["id"] && a["released"] != true)
+                        .map(|a| a["resources"][key].as_u64().unwrap_or(0))
+                        .sum::<u64>()
+                };
+                node["reserved"][key] = used.into();
+                node["available"][key] = node["limits"][key]
+                    .as_u64()
+                    .unwrap_or(0)
+                    .saturating_sub(used)
+                    .into();
+            }
+            let id = node["id"].as_str().unwrap_or_default().to_owned();
+            node["agents"] = agents
+                .iter()
+                .filter(|agent| {
+                    node["revoked"] != true
+                        && crate::service::allowed(&crate::service::policy(agent)["nodes"], &id)
+                })
+                .map(|agent| {
+                    json!({"id":agent["id"],"name":agent["name"],"allNodes":crate::service::policy(agent)["nodes"].is_null()})
+                })
+                .collect::<Vec<_>>()
+                .into();
+            public(node)
+        })
+        .collect())
+}
+
 pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
     let segments = input
         .path
@@ -170,7 +218,13 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
             moves::request(s, &s.store.run(run).await?, &input.body).await
         }
 
-        ("GET", ["nodes", "settings"]) => backups::settings(s).await,
+        ("GET", ["nodes", "settings"]) => {
+            let mut value = backups::settings(s).await?;
+            value["s3Configured"] = crate::archive_storage::Storage::configured(s)
+                .is_ok()
+                .into();
+            Ok(value)
+        }
         ("PUT", ["nodes", "settings"]) => {
             #[derive(Deserialize, serde::Serialize)]
             #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -185,6 +239,10 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
                 shutdown_timeout_seconds: Option<u64>,
                 #[serde(default)]
                 max_capacity_wait_seconds: Option<u64>,
+                // Read-only status echoed back by clients; never stored.
+                #[serde(default, skip_serializing)]
+                #[allow(dead_code)]
+                s3_configured: Option<bool>,
             }
             let settings: Settings = decode(input.body.clone())?;
             if !["master", "s3"].contains(&settings.destination.as_str())
@@ -232,40 +290,7 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
                 .into())
         }
 
-        ("GET", ["nodes"]) => {
-            let attempts = s.store.list("node-attempts").await?;
-            let volumes = s.store.list("node-volumes").await?;
-            Ok(s.store
-                .list("nodes")
-                .await?
-                .into_iter()
-                .map(|mut node| {
-                    for key in ["cpu", "memoryMiB", "diskMiB"] {
-                        let used = if key == "diskMiB" {
-                            volumes
-                                .iter()
-                                .filter(|v| v["nodeId"] == node["id"])
-                                .map(|v| v["diskMiB"].as_u64().unwrap_or(0))
-                                .sum::<u64>()
-                        } else {
-                            attempts
-                                .iter()
-                                .filter(|a| a["nodeId"] == node["id"] && a["released"] != true)
-                                .map(|a| a["resources"][key].as_u64().unwrap_or(0))
-                                .sum::<u64>()
-                        };
-                        node["reserved"][key] = used.into();
-                        node["available"][key] = node["limits"][key]
-                            .as_u64()
-                            .unwrap_or(0)
-                            .saturating_sub(used)
-                            .into();
-                    }
-                    public(node)
-                })
-                .collect::<Vec<_>>()
-                .into())
-        }
+        ("GET", ["nodes"]) => Ok(inventory(s).await?.into()),
         ("PUT", ["nodes", node]) => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
@@ -343,6 +368,55 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
                     )
                 });
             Ok(json!({"code":code,"expiresAt":expires,"installCommand":install}))
+        }
+        ("PUT", ["nodes", node, "agents"]) => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+            struct Grants {
+                agent_ids: Vec<String>,
+            }
+            let request: Grants = decode(input.body.clone())?;
+            for agent in &request.agent_ids {
+                crate::validation::uuid(agent)?;
+            }
+            let node = (*node).to_owned();
+            s.store
+                .transaction(move |db| {
+                    let record = db
+                        .get("nodes", &node)?
+                        .ok_or_else(|| Error::new(404, "Node not found."))?;
+                    if record["revoked"] == true {
+                        return Err(Error::new(409, "This node is revoked."));
+                    }
+                    // Agents allowed on every node keep that broader grant.
+                    for mut agent in db.list("agents")? {
+                        let granted = request.agent_ids.iter().any(|id| agent["id"] == *id);
+                        let mut nodes = match crate::service::policy(&agent)["nodes"].as_array() {
+                            Some(nodes) => nodes.clone(),
+                            None => continue,
+                        };
+                        let present = nodes.iter().any(|id| id == &node);
+                        if granted == present {
+                            continue;
+                        }
+                        if granted {
+                            nodes.push(node.clone().into());
+                        } else {
+                            nodes.retain(|id| id != &node);
+                        }
+                        if !agent["access"].is_object() {
+                            agent["access"] = json!({});
+                        }
+                        agent["access"]["nodes"] = nodes.into();
+                        db.put("agents", &agent)?;
+                    }
+                    db.audit(
+                        "node.agents.configured",
+                        &json!({"nodeId":node,"agentIds":request.agent_ids}),
+                    )?;
+                    Ok(json!({"nodeId":node}))
+                })
+                .await
         }
         ("POST", ["nodes", node, "revoke"]) => {
             let node = (*node).to_owned();

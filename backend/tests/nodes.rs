@@ -735,7 +735,12 @@ async fn recovery_settings_validate_and_preserve_the_last_good_configuration() {
             .call("GET", "/api/nodes/settings", Value::Null, None)
             .await
             .1,
-        settings
+        {
+            // The S3 status is reported alongside the settings but never stored.
+            let mut expected = settings;
+            expected["s3Configured"] = false.into();
+            expected
+        }
     );
 }
 
@@ -1839,4 +1844,98 @@ async fn pending_movement_retries_a_lost_stop_without_stopping_a_later_execution
     moves::pause_pending(&owner.service, &run).await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     server.abort();
+}
+
+#[tokio::test]
+async fn automatic_placement_spreads_work_unless_a_node_is_preferred() {
+    use leo_agent_manager::{
+        config::{id, now},
+        nodes::placement,
+    };
+    let owner = Owner::new().await;
+    let small = id();
+    let large = id();
+    let agent = id();
+    for (node, cpu, memory) in [(&small, 4, 8192), (&large, 16, 65536)] {
+        owner.service.store.put("nodes",json!({"id":node,"accepting":true,"executionReady":true,"lastSeen":now(),"capabilities":{"kvm":true},"limits":{"cpu":cpu,"memoryMiB":memory,"diskMiB":262144}})).await.unwrap();
+    }
+    owner
+        .service
+        .store
+        .put(
+            "agents",
+            json!({"id":agent,"access":{"nodes":[small,large]}}),
+        )
+        .await
+        .unwrap();
+    let run = |preferred: Value| json!({"id":id(),"snapshot":{"agent":{"id":agent}},"preferredNodeId":preferred});
+    assert_eq!(
+        placement::reserve(&owner.service, &run(Value::Null), &id())
+            .await
+            .unwrap()["nodeId"],
+        large
+    );
+    assert_eq!(
+        placement::reserve(&owner.service, &run(json!(small)), &id())
+            .await
+            .unwrap()["nodeId"],
+        small
+    );
+}
+
+#[tokio::test]
+async fn node_agent_grants_are_edited_from_the_node_without_narrowing_all_node_agents() {
+    use leo_agent_manager::config::{id, now};
+    let owner = Owner::new().await;
+    let node = id();
+    let (explicit, everywhere) = (id(), id());
+    owner.service.store.put("nodes",json!({"id":node,"name":"Desktop","local":false,"revoked":false,"accepting":true,"tags":[],"lastSeen":now(),"capabilities":{"kvm":true},"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536}})).await.unwrap();
+    for (agent, nodes) in [(&explicit, json!([])), (&everywhere, Value::Null)] {
+        owner
+            .service
+            .store
+            .put(
+                "agents",
+                json!({"id":agent,"name":agent,"access":{"nodes":nodes}}),
+            )
+            .await
+            .unwrap();
+    }
+    let granted = |nodes: &Value| {
+        nodes
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == node)
+            .unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let (_, nodes) = owner.call("GET", "/api/nodes", Value::Null, None).await;
+    assert_eq!(granted(&nodes), vec![everywhere.clone()]);
+    let path = format!("/api/nodes/{node}/agents");
+    let (status, body) = owner
+        .call("PUT", &path, json!({"agentIds":[explicit]}), None)
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let (_, nodes) = owner.call("GET", "/api/nodes", Value::Null, None).await;
+    let mut agents = granted(&nodes);
+    agents.sort();
+    let mut expected = vec![explicit.clone(), everywhere.clone()];
+    expected.sort();
+    assert_eq!(agents, expected);
+    owner.call("PUT", &path, json!({"agentIds":[]}), None).await;
+    let (_, nodes) = owner.call("GET", "/api/nodes", Value::Null, None).await;
+    assert_eq!(granted(&nodes), vec![everywhere.clone()]);
+    let agent = owner
+        .service
+        .store
+        .get("agents", &everywhere)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(agent["access"]["nodes"].is_null());
 }

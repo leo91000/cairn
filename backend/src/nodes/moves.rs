@@ -8,7 +8,36 @@ use crate::{
 use serde_json::{Value, json};
 use std::time::Duration;
 pub fn tool() -> Value {
-    json!({"name":"request_capacity","description":"Request CPU/RAM/disk for this conversation on an authorized node. Failure leaves the current conversation running. A successful request schedules pause, full environment transfer and resume. Optional waitSeconds respects the configured limit (one hour by default); GPU is not supported.","inputSchema":{"type":"object","properties":{"cpu":{"type":"integer","minimum":1},"memoryMiB":{"type":"integer","minimum":128},"diskMiB":{"type":"integer","minimum":128},"requiredTags":{"type":"array","maxItems":32,"items":{"type":"string","maxLength":40}},"nodeId":{"type":"string","format":"uuid"},"waitSeconds":{"type":"integer","minimum":0}},"required":["cpu","memoryMiB","diskMiB"],"additionalProperties":false}})
+    json!({"name":"request_capacity","description":"Request CPU/RAM/disk for this conversation on an authorized node; call list_nodes first to see node ids, tags and available capacity. Failure leaves the current conversation running. A successful request schedules pause, full environment transfer and resume. Optional waitSeconds respects the configured limit (one hour by default); GPU is not supported.","inputSchema":{"type":"object","properties":{"cpu":{"type":"integer","minimum":1},"memoryMiB":{"type":"integer","minimum":128},"diskMiB":{"type":"integer","minimum":128},"requiredTags":{"type":"array","maxItems":32,"items":{"type":"string","maxLength":40}},"nodeId":{"type":"string","format":"uuid"},"waitSeconds":{"type":"integer","minimum":0}},"required":["cpu","memoryMiB","diskMiB"],"additionalProperties":false}})
+}
+pub fn list_tool() -> Value {
+    json!({"name":"list_nodes","description":"List the execution nodes this conversation's agent may use, with their tags and currently available CPU/RAM/disk. Use the returned ids and tags with request_capacity.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}})
+}
+/// Only authorized, non-revoked nodes; never exposes other agents or node credentials.
+pub async fn list(s: &Service, run: &Value) -> Result<Value> {
+    let agent = s
+        .store
+        .get("agents", text(&run["snapshot"]["agent"], "id"))
+        .await?
+        .ok_or_else(|| Error::new(403, "Agent removed."))?;
+    let scope = crate::service::policy(&agent)["nodes"].clone();
+    let current = run["nodeId"].clone();
+    let nodes = super::inventory(s)
+        .await?
+        .into_iter()
+        .filter(|node| node["revoked"] != true && crate::service::allowed(&scope, text(node, "id")))
+        .map(|node| {
+            let tags = node["tags"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .chain(node["systemTags"].as_array().into_iter().flatten())
+                .cloned()
+                .collect::<Vec<_>>();
+            json!({"id":node["id"],"name":node["name"],"tags":tags,"status":node["status"],"acceptingWork":node["accepting"],"available":node["available"],"limits":node["limits"],"current":node["id"]==current})
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({"nodes":nodes,"currentNodeId":current,"currentResources":run["resources"]}))
 }
 pub async fn request(s: &Service, run: &Value, args: &Value) -> Result<Value> {
     let resources: super::Resources = serde_json::from_value(

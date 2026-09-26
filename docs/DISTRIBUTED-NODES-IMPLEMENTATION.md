@@ -15,6 +15,13 @@ has not been merged, deployed or released.
 - CPU/RAM admission, persistent-disk accounting including retained stale disks,
   resource requests, preferred/strict placement, bounded capacity waits and
   immediate request failure without ending the conversation.
+  Automatic placement picks the authorized node with the most free CPU/RAM
+  (a preferred node wins, ties keep the master runner). Agents discover their
+  authorized nodes, tags and free capacity with `list_nodes` before calling
+  `request_capacity`.
+- Agent access can be granted from each node's card; a newly connected node
+  asks for it right after enrollment and reports why it cannot take work.
+  Conversations only show execution details once remote nodes are relevant.
 - Local and remote execution leases, fencing, durable movement requests, repeated
   stop attempts, full environment transfer and automatic recovery on compatible
   authorized nodes. Idle movements stay idle, explicit cancellation is preserved,
