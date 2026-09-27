@@ -570,6 +570,215 @@ async fn workspace_transfer_preserves_files_and_links_without_following_them() {
 }
 
 #[tokio::test]
+async fn binary_node_responses_are_scoped_and_never_hide_truncation() {
+    use leo_agent_manager::{auth, config::id};
+    let owner = Owner::new().await;
+    let (node, token, stranger, stranger_token) = (id(), auth::token(), id(), auth::token());
+    for (node, token) in [(&node, &token), (&stranger, &stranger_token)] {
+        owner
+            .service
+            .store
+            .put("nodes", json!({"id":node,"revoked":false}))
+            .await
+            .unwrap();
+        owner
+            .service
+            .store
+            .set(
+                &format!("node-token:{}", auth::digest(token)),
+                json!(node),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    for (broken, unknown_length) in [(false, false), (true, false), (true, true)] {
+        let (hub, target) = (owner.service.node_transport.clone(), node.clone());
+        let waiting = tokio::spawn(async move {
+            let response = hub
+                .request(&target, "GET", "/health", vec![])
+                .await
+                .unwrap();
+            to_bytes(response.into_body(), 1024 * 1024).await
+        });
+        let command = owner.service.node_transport.poll(&node).await.unwrap();
+        assert_eq!(
+            command["streamBody"], true,
+            "Master must advertise continuous body support"
+        );
+        let call = command["id"].as_str().unwrap();
+        assert_eq!(
+            owner
+                .call(
+                    "POST",
+                    "/internal/nodes/reply",
+                    json!({"id":call,"sequence":0,"status":200,"length":if unknown_length {Value::Null}else{json!(262144)}}),
+                    Some(&token)
+                )
+                .await
+                .0,
+            200
+        );
+        let request = |token: &str, body: Body| {
+            Request::builder()
+                .method("POST")
+                .uri(format!("/internal/nodes/stream/{call}"))
+                .header("host", &owner.host)
+                .header("authorization", format!("Bearer {token}"))
+                .body(body)
+                .unwrap()
+        };
+        // Even another valid node identity cannot write this response.
+        assert_eq!(
+            owner
+                .app
+                .clone()
+                .oneshot(request(&stranger_token, Body::empty()))
+                .await
+                .unwrap()
+                .status(),
+            409
+        );
+        let bytes = vec![53u8; if broken { 1024 } else { 262144 }];
+        let body = if unknown_length {
+            Body::from_stream(futures_util::stream::iter([
+                Ok(bytes::Bytes::copy_from_slice(&bytes)),
+                Err(std::io::Error::other("fixture connection lost")),
+            ]))
+        } else {
+            Body::from(bytes.clone())
+        };
+        let response = owner
+            .app
+            .clone()
+            .oneshot(request(&token, body))
+            .await
+            .unwrap();
+        assert_eq!(response.status().is_success(), !broken);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        if broken {
+            assert!(result.is_err(), "Truncation must fail the manager reader");
+        } else {
+            assert_eq!(result.unwrap(), bytes);
+        }
+        assert_eq!(
+            owner
+                .app
+                .clone()
+                .oneshot(request(&token, Body::empty()))
+                .await
+                .unwrap()
+                .status(),
+            409
+        );
+    }
+}
+
+#[tokio::test]
+async fn bulk_stream_backpressure_and_reader_cancellation_bound_the_upload() {
+    use leo_agent_manager::{auth, config::id};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let owner = Owner::new().await;
+    let (node, token) = (id(), auth::token());
+    owner
+        .service
+        .store
+        .put("nodes", json!({"id":node}))
+        .await
+        .unwrap();
+    owner
+        .service
+        .store
+        .set(
+            &format!("node-token:{}", auth::digest(&token)),
+            json!(node),
+            None,
+        )
+        .await
+        .unwrap();
+    let (hub, target) = (owner.service.node_transport.clone(), node.clone());
+    let waiting = tokio::spawn(async move {
+        hub.request(&target, "GET", "/health", vec![])
+            .await
+            .unwrap()
+    });
+    let call = owner.service.node_transport.poll(&node).await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        owner
+            .call(
+                "POST",
+                "/internal/nodes/reply",
+                json!({"id":call,"sequence":0,"status":200}),
+                Some(&token)
+            )
+            .await
+            .0,
+        200
+    );
+    let response = waiting.await.unwrap();
+    let produced = Arc::new(AtomicUsize::new(0));
+    let counter = produced.clone();
+    let data = bytes::Bytes::from(vec![17u8; 65536]);
+    let stream = futures_util::stream::unfold(0, move |count| {
+        let (counter, data) = (counter.clone(), data.clone());
+        async move {
+            if count == 512 {
+                return None;
+            }
+            counter.fetch_add(1, Ordering::SeqCst);
+            Some((Ok::<_, std::io::Error>(data), count + 1))
+        }
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/internal/nodes/stream/{call}"))
+        .header("host", &owner.host)
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from_stream(stream))
+        .unwrap();
+    let app = owner.app.clone();
+    let upload = tokio::spawn(async move { app.oneshot(request).await.unwrap() });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while produced.load(Ordering::SeqCst) < 9 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        produced.load(Ordering::SeqCst),
+        9,
+        "Only eight queued frames plus the pending frame may be read"
+    );
+    drop(response);
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), upload)
+            .await
+            .unwrap()
+            .unwrap()
+            .status(),
+        409
+    );
+    assert!(
+        owner
+            .service
+            .node_transport
+            .reply(&node, json!({"id":call,"sequence":1,"done":true}))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn concurrent_admission_reserves_capacity_once_and_preserves_agent_grants() {
     use leo_agent_manager::{
         config::{id, now},
@@ -1324,7 +1533,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         second["id"]
     );
     std::fs::remove_file(filler).unwrap();
-    let third = backups::capture(&owner.service, &record).await.unwrap();
+    let mut third = backups::capture(&owner.service, &record).await.unwrap();
     assert_eq!(third["uploadedBytes"], 0);
     assert!(
         owner
@@ -1336,6 +1545,62 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             .is_none(),
         "Retention removes the oldest manifest while keeping shared blocks"
     );
+    let mut fallback = second.clone();
+    if s3.is_some() {
+        let storage =
+            leo_agent_manager::archive_storage::Storage::configured(&owner.service).unwrap();
+        let directory = owner
+            .service
+            .config
+            .data_dir
+            .join("node-backups")
+            .join(&run)
+            .join("blocks");
+        let cached = std::fs::read(directory.join(block)).unwrap();
+        storage
+            .purge(&format!("node-backups/{run}/blocks/{block}"))
+            .await
+            .unwrap();
+        let audit_key = format!("node-backup-audit:{run}");
+        owner
+            .service
+            .store
+            .set(&audit_key, json!({"checkedAt":0}), None)
+            .await
+            .unwrap();
+        backups::audit_due(&owner.service).await.unwrap();
+        assert!(
+            owner.service.store.kv(&audit_key).await.unwrap().unwrap()["error"].is_string(),
+            "A healthy local cache must not hide a missing S3 object"
+        );
+        assert_eq!(
+            std::fs::read(directory.join(block)).unwrap(),
+            cached,
+            "Remote failure must preserve the healthy local copy"
+        );
+        fallback = third.clone();
+        third = backups::capture(
+            &owner.service,
+            &owner.service.store.run(&run).await.unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            third["uploadedBytes"], 0,
+            "Repair S3 from the verified local cache"
+        );
+        owner
+            .service
+            .store
+            .set(&audit_key, json!({"checkedAt":0}), None)
+            .await
+            .unwrap();
+        backups::audit_due(&owner.service).await.unwrap();
+        assert!(
+            owner.service.store.kv(&audit_key).await.unwrap().unwrap()["error"].is_null(),
+            "The next publication must repair the missing S3 object"
+        );
+    }
     let mut damaged = owner
         .service
         .store
@@ -1356,7 +1621,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             .await
             .unwrap()
             .unwrap()["id"],
-        second["id"],
+        fallback["id"],
         "Automatic recovery skips a damaged latest point"
     );
     backups::purge(&owner.service, &run).await.unwrap();
@@ -2276,9 +2541,35 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
         .unwrap();
     let first = snapshots_served.lock().unwrap()[0].clone();
     assert_eq!(current().await["backup"]["snapshotId"], first);
+    // Observe real content reads, not metadata lookups or an implementation counter.
+    // An unchanged increment must reuse the immutable encrypted block without reading it.
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let watch = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+    assert!(watch >= 0);
+    let watch = unsafe { OwnedFd::from_raw_fd(watch) };
+    let hash = manifest["blocks"][0]["hash"].as_str().unwrap();
+    let block = owner
+        .service
+        .config
+        .data_dir
+        .join("node-backups")
+        .join(&run)
+        .join("blocks")
+        .join(hash);
+    let path = std::ffi::CString::new(block.as_os_str().as_encoded_bytes()).unwrap();
+    assert!(
+        unsafe { libc::inotify_add_watch(watch.as_raw_fd(), path.as_ptr(), libc::IN_ACCESS) } >= 0
+    );
     backups::capture(&owner.service, &current().await)
         .await
         .unwrap();
+    let mut events = [0u8; 4096];
+    let read = unsafe { libc::read(watch.as_raw_fd(), events.as_mut_ptr().cast(), events.len()) };
+    assert_eq!(read, -1, "An unchanged backup reread the cached block");
+    assert_eq!(
+        std::io::Error::last_os_error().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
     assert!(bodies.lock().unwrap()[0]["baseline"].is_null());
     assert_eq!(bodies.lock().unwrap()[1]["baseline"], first);
 
@@ -2298,4 +2589,63 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
         "{:?}",
         bodies.lock().unwrap()
     );
+
+    // A latent disk corruption is caught on restore regardless of audit age.
+    let backup = owner
+        .service
+        .get(
+            "node-backups",
+            current().await["backup"]["id"].as_str().unwrap(),
+        )
+        .await
+        .unwrap();
+    std::fs::write(&block, b"damaged ciphertext").unwrap();
+    assert!(
+        backups::read_block(&owner.service, &backup, hash)
+            .await
+            .is_err()
+    );
+    // An idle conversation is audited too, without waiting for another capture.
+    owner
+        .service
+        .store
+        .patch_run(&run, json!({"status":"succeeded"}))
+        .await
+        .unwrap();
+    let key = format!("node-backup-audit:{run}");
+    owner
+        .service
+        .store
+        .set(&key, json!({"checkedAt":0}), None)
+        .await
+        .unwrap();
+    backups::audit_due(&owner.service).await.unwrap();
+    assert!(owner.service.store.kv(&key).await.unwrap().unwrap()["error"].is_string());
+    assert!(current().await["backup"]["snapshotId"].is_null());
+    assert!(!block.exists(), "Known bad ciphertext must not be reused");
+    backups::capture(&owner.service, &current().await)
+        .await
+        .unwrap();
+    let backup = owner
+        .service
+        .get(
+            "node-backups",
+            current().await["backup"]["id"].as_str().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        backups::read_block(&owner.service, &backup, hash)
+            .await
+            .unwrap(),
+        b"workspace blocks"
+    );
+    owner
+        .service
+        .store
+        .set(&key, json!({"checkedAt":0}), None)
+        .await
+        .unwrap();
+    backups::audit_due(&owner.service).await.unwrap();
+    assert!(owner.service.store.kv(&key).await.unwrap().unwrap()["error"].is_null());
 }

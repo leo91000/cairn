@@ -37,6 +37,23 @@ has not been merged, deployed or released.
 - Coherent guest filesystem capture, content-addressed 4 MiB disk blocks,
   encrypted master/S3 recovery points, dependency retention, quota checks,
   periodic/final captures, authenticated restoration and archive purge.
+  Incremental publication reuses immutable blocks authenticated by retained
+  manifests without rereading their payload. New blocks and unpublished cache
+  entries are verified before publication; restoration always verifies again.
+  The maintenance loop audits retained points, including idle conversations,
+  once due after 24 hours (hourly retry on error). Local ciphertext and each S3
+  destination are checked independently, with a 120-second remote download limit
+  per block. A failed remote check clears only its upload receipt and preserves
+  healthy cached bytes. Bad local ciphertext is removed. The node baseline is
+  invalidated; the next capture repairs dependencies it needs, while damage to
+  historical-only blocks remains detectable until repaired or expired by retention.
+  Full audits still read all retained unique blocks (and download S3 copies).
+  The existing global operation lock still serializes publication, audits and restoration.
+- Bulk snapshot/archive responses use a negotiated continuous binary HTTP upload,
+  with eight buffered 64 KiB frames, cancellation and explicit completion. Old
+  nodes/masters continue using acknowledged JSON frames. Control and log messages
+  retain that protocol. Each bulk upload is bounded to 120 seconds; stalled input
+  and readers fail explicitly, including responses without a declared length.
 - Recovery settings, visible capture age/errors and dated restoration on web and
   Android. Chat remains current even when restoring an older disk state.
 - Assisted Linux installation, a root-owned systemd supervisor, immutable master
@@ -55,6 +72,19 @@ The repeatable checks live beside the implementation:
   The outbound idle-movement test copies an environment between two separate
   controller directories, moves it back without a destination execution history,
   and checks both failed transfer and cancellation during capture.
+  An inotify regression verifies that unchanged publication does not read cached
+  blocks. Corruption is detected by restoration and periodic auditing. Transport
+  tests cover ownership, truncation with/without a length, bounded backpressure,
+  consumer cancellation and legacy JSON responses.
+- `backend/tests/node_performance.rs`: opt-in benchmarks for initial, unchanged
+  and 4 MiB delta publication; separate periodic audit; real outbound relay with
+  0/50 ms injected request latency. Build with `CARGO_PROFILE_RELEASE_LTO=false
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo test --locked --release --test
+  node_performance --no-run`, then run the emitted executable alone with
+  `--ignored --nocapture --test-threads=1`. Fixtures use tmpfs and loopback: results
+  measure CPU/logical I/O/protocol overhead, not a physical disk or real WAN.
+  Archives retain a sequential 256 KiB outer protocol, so their gains differ from
+  the 4 MiB snapshot fixture.
 - `python3 tests/guest_projects_test.py`: real mount-namespace regression for
   atomic read-only project publication, retry and reboot restoration. An
   unprivileged observer must never gain write access while mounts are prepared.

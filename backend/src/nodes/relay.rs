@@ -227,6 +227,39 @@ async fn forward(
     };
     let head = json!({"id":id,"sequence":0,"status":response.status().as_u16(),"length":response.content_length(),"contentType":response.headers().get("content-type").and_then(|v|v.to_str().ok()).unwrap_or("")});
     send(client, master, token, &head).await?;
+    // Bulk data uses one continuous, backpressured request. Keep control/log
+    // frames and old masters on the existing protocol (including /wait's result).
+    if command["streamBody"] == true
+        && method == "GET"
+        && (path.starts_with("/snapshots/") || path.starts_with("/archive-transfers/"))
+    {
+        use futures_util::StreamExt;
+        let chunks =
+            futures_util::stream::try_unfold(response.bytes_stream(), |mut stream| async move {
+                match tokio::time::timeout(Duration::from_secs(60), stream.next()).await {
+                    Ok(Some(Ok(bytes))) => Ok(Some((bytes, stream))),
+                    Ok(None) => Ok(None),
+                    _ => Err(std::io::Error::other("VM response interrupted")),
+                }
+            });
+        let uploaded = client
+            .post(
+                master
+                    .join(&format!("internal/nodes/stream/{id}"))
+                    .map_err(Error::internal)?,
+            )
+            .bearer_auth(token)
+            .header("content-type", "application/octet-stream")
+            .timeout(Duration::from_secs(120))
+            .body(reqwest::Body::wrap_stream(chunks))
+            .send()
+            .await
+            .map_err(|_| Error::new(503, "Master upload interrupted."))?;
+        if !uploaded.status().is_success() {
+            return Err(Error::new(409, "Execution stream rejected."));
+        }
+        return Ok(());
+    }
     let mut sequence = 1u64;
     while let Some(bytes) = response
         .chunk()

@@ -11,6 +11,7 @@ use axum::{
     response::Response,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, VecDeque},
@@ -20,12 +21,18 @@ use std::{
 use tokio::sync::{Notify, mpsc, oneshot};
 
 type Head = (u16, Option<u64>, String);
+struct Frame {
+    bytes: Bytes,
+    done: bool,
+}
 struct Call {
     node: String,
     command: Value,
     head: Option<oneshot::Sender<Head>>,
-    body: mpsc::Sender<Bytes>,
+    body: mpsc::Sender<Frame>,
     sequence: u64,
+    streaming: bool,
+    length: Option<u64>,
 }
 #[derive(Default)]
 struct StateData {
@@ -67,7 +74,7 @@ impl Transport {
             if state.calls.values().filter(|c| c.node == node).count() >= 64 {
                 return Err(Error::new(503, "Node transport is busy."));
             }
-            state.calls.insert(id.clone(),Call { node:node.into(),command:json!({"id":id,"method":method,"path":path,"body":STANDARD.encode(body)}),head:Some(head_tx),body:body_tx,sequence:0 });
+            state.calls.insert(id.clone(),Call { node:node.into(),command:json!({"id":id,"method":method,"path":path,"body":STANDARD.encode(body),"streamBody":true}),head:Some(head_tx),body:body_tx,sequence:0,streaming:false,length:None });
             state
                 .pending
                 .entry(node.into())
@@ -97,17 +104,27 @@ impl Transport {
         .await
         .map_err(|_| Error::new(503, "Node did not acknowledge execution."))?
         .map_err(|_| Error::new(503, "Node disconnected."))?;
-        let stream =
-            futures_util::stream::try_unfold((body_rx, pending), |(mut rx, guard)| async move {
+        let stream = futures_util::stream::try_unfold(
+            (body_rx, pending, false),
+            |(mut rx, guard, done)| async move {
+                if done {
+                    return Ok(None);
+                }
                 match tokio::time::timeout(Duration::from_secs(60), rx.recv()).await {
-                    Ok(Some(bytes)) => Ok(Some((bytes, (rx, guard)))),
-                    Ok(None) => Ok(None),
+                    Ok(Some(frame)) => Ok(Some((frame.bytes, (rx, guard, frame.done)))),
+                    // Only an explicit end frame completes a response. A dropped upload
+                    // must fail even when the response has no Content-Length.
+                    Ok(None) => Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "Node response incomplete",
+                    )),
                     Err(_) => Err(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
                         "Node output interrupted",
                     )),
                 }
-            });
+            },
+        );
         let mut response = Response::builder().status(status);
         if let Some(length) = length {
             response = response.header("content-length", length);
@@ -154,7 +171,7 @@ impl Transport {
             let call = state
                 .calls
                 .get(id)
-                .filter(|c| c.node == node)
+                .filter(|c| c.node == node && !c.streaming)
                 .ok_or_else(|| Error::new(409, "Execution request no longer exists."))?;
             if sequence < call.sequence {
                 return Ok(json!({"ack":sequence}));
@@ -174,7 +191,7 @@ impl Transport {
         let call = state
             .calls
             .get_mut(id)
-            .filter(|c| c.node == node)
+            .filter(|c| c.node == node && !c.streaming)
             .ok_or_else(|| Error::new(409, "Execution request no longer exists."))?;
         if sequence < call.sequence {
             return Ok(json!({"ack":sequence}));
@@ -197,9 +214,14 @@ impl Transport {
                 .take()
                 .unwrap()
                 .send((status, value["length"].as_u64(), kind));
+            call.length = value["length"].as_u64();
         }
-        if !bytes.is_empty() {
-            permit.send(Bytes::from(bytes));
+        let done = value["done"] == true;
+        if !bytes.is_empty() || done {
+            permit.send(Frame {
+                bytes: Bytes::from(bytes),
+                done,
+            });
         }
         call.sequence += 1;
         if value["done"] == true {
@@ -207,6 +229,93 @@ impl Transport {
         }
         Ok(json!({"ack":sequence}))
     }
+
+    /// One authenticated HTTP upload per bulk response, with bounded backpressure.
+    /// Legacy JSON frames remain usable by nodes that ignore streamBody.
+    async fn stream(self: &Arc<Self>, node: &str, id: &str, body: Body) -> Result<()> {
+        let (sender, length) = {
+            let mut state = self.state.lock().unwrap();
+            let call = state
+                .calls
+                .get_mut(id)
+                .filter(|call| {
+                    call.node == node
+                        && !call.streaming
+                        && call.sequence == 1
+                        && call.head.is_none()
+                })
+                .ok_or_else(|| Error::new(409, "Execution stream no longer available."))?;
+            call.streaming = true;
+            (call.body.clone(), call.length)
+        };
+        // Disconnects, cancellation and errors remove the call; the reader then
+        // sees an incomplete response unless we sent the explicit final frame.
+        let _pending = Pending {
+            hub: self.clone(),
+            id: id.to_owned(),
+        };
+        let mut body = body.into_data_stream();
+        let mut received = 0u64;
+        loop {
+            let next = tokio::select! {
+                _=sender.closed()=>return Err(Error::new(409,"Execution reader closed.")),
+                next=tokio::time::timeout(Duration::from_secs(60),body.next())=>
+                    next.map_err(|_|Error::new(503,"Node upload stalled."))?,
+            };
+            let Some(bytes) = next else { break };
+            let bytes = bytes.map_err(|_| Error::new(503, "Node upload interrupted."))?;
+            received = received
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(|| Error::bad("Response too large."))?;
+            if length.is_some_and(|length| received > length) {
+                return Err(Error::bad("Node response exceeds its declared length."));
+            }
+            for chunk in bytes.chunks(65536) {
+                tokio::time::timeout(
+                    Duration::from_secs(20),
+                    sender.send(Frame {
+                        bytes: Bytes::copy_from_slice(chunk),
+                        done: false,
+                    }),
+                )
+                .await
+                .map_err(|_| Error::new(503, "Execution reader is stalled."))?
+                .map_err(|_| Error::new(409, "Execution reader closed."))?;
+            }
+        }
+        if length.is_some_and(|length| received != length) {
+            return Err(Error::bad("Node response was truncated."));
+        }
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            sender.send(Frame {
+                bytes: Bytes::new(),
+                done: true,
+            }),
+        )
+        .await
+        .map_err(|_| Error::new(503, "Execution reader is stalled."))?
+        .map_err(|_| Error::new(409, "Execution reader closed."))?;
+        Ok(())
+    }
+}
+
+pub async fn stream(State(app): State<App>, request: Request) -> Result<axum::Json<Value>> {
+    if request.method() != "POST" {
+        return Err(Error::new(405, "Method not allowed."));
+    }
+    let node = authenticate(&app.service, request.headers()).await?;
+    let id = request
+        .uri()
+        .path()
+        .trim_start_matches("/internal/nodes/stream/")
+        .to_owned();
+    crate::validation::uuid(&id)?;
+    app.service
+        .node_transport
+        .stream(&node, &id, request.into_body())
+        .await?;
+    Ok(axum::Json(json!({"complete":true})))
 }
 pub async fn authenticate(s: &Service, headers: &axum::http::HeaderMap) -> Result<String> {
     let credential = headers
