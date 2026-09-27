@@ -106,10 +106,26 @@ impl LazyDisk {
     }
     /// Call only after the master has durably published every dependency and
     /// authorized reads of the new base. Completion drains readers of the old base.
-    pub fn commit_published(&self, generation: i64) -> io::Result<()> {
+    pub fn commit_published(&self, generation: i64, backup_id: &str) -> io::Result<()> {
         let _publication = self.publication.write().map_err(failure)?;
         let mut db = self.db.lock().map_err(failure)?;
         let tx = db.transaction().map_err(failure)?;
+        use rusqlite::OptionalExtension;
+        let previous: Option<String> = tx
+            .query_row(
+                "SELECT value FROM settings WHERE key='published'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(failure)?;
+        let receipt = serde_json::json!({"generation":generation,"backupId":backup_id});
+        if previous
+            .as_ref()
+            .is_some_and(|p| serde_json::from_str::<Value>(p).is_ok_and(|p| p == receipt))
+        {
+            return Ok(());
+        }
         let manifest: String = tx
             .query_row(
                 "SELECT manifest FROM sealed WHERE generation=?1",
@@ -126,6 +142,7 @@ impl LazyDisk {
             .map_err(failure)?;
         tx.execute("DELETE FROM sealed WHERE generation<=?1", [generation])
             .map_err(failure)?;
+        tx.execute("INSERT INTO settings(key,value) VALUES ('published',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[receipt.to_string()]).map_err(failure)?;
         tx.commit().map_err(failure)?;
         db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
             .map_err(failure)?;

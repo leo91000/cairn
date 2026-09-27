@@ -41,7 +41,23 @@ impl LazyDisk {
         let generation: i64 = db
             .query_row("SELECT generation FROM state WHERE id=1", [], |r| r.get(0))
             .map_err(failure)?;
-        Ok(serde_json::json!({"dirtyBytes":dirty,"dirtySince":since,"generation":generation}))
+        use rusqlite::OptionalExtension;
+        let published: Option<String> = db
+            .query_row(
+                "SELECT value FROM settings WHERE key='published'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(failure)?;
+        let published = published
+            .map(|v| serde_json::from_str::<Value>(&v))
+            .transpose()
+            .map_err(failure)?
+            .unwrap_or(Value::Null);
+        Ok(
+            serde_json::json!({"dirtyBytes":dirty,"dirtySince":since,"generation":generation,"published":published}),
+        )
     }
 }
 pub(super) fn now() -> i64 {

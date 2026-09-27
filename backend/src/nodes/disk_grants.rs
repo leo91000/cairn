@@ -5,6 +5,16 @@ use crate::{
     validation::text,
 };
 use serde_json::{Value, json};
+pub async fn new_disk(s: &Service, run: &Value, node: &str) -> Result<String> {
+    let token = crate::auth::token();
+    s.store
+        .put(
+            "node-disk-grants",
+            json!({"id":crate::auth::digest(&token),"runId":run["id"],"nodeId":node,"backups":[]}),
+        )
+        .await?;
+    Ok(token)
+}
 pub async fn issue(s: &Service, run: &Value, node: &str, backup: &Value) -> Result<String> {
     if backup["destination"] != "s3" {
         return Err(Error::new(
@@ -31,7 +41,8 @@ pub async fn authorize(s: &Service, credential: &str) -> Result<Option<Value>> {
         .get("agents", text(&run["snapshot"]["agent"], "id"))
         .await?;
     if s.get("nodes", node).await?["revoked"] == true
-        || (run["nodeId"] != node && run["moveRequest"]["nodeId"] != node)
+        || (run["nodeId"].as_str().unwrap_or(super::LOCAL_NODE_ID) != node
+            && run["moveRequest"]["nodeId"] != node)
         || (run["status"] == "running" && !run["cancelRequestedAt"].is_null())
         || !crate::service::allowed(&crate::service::policy(&agent)["nodes"], node)
     {
@@ -39,35 +50,41 @@ pub async fn authorize(s: &Service, credential: &str) -> Result<Option<Value>> {
     }
     Ok(Some(grant))
 }
-pub async fn extend(s: &Service, run: &str, node: &str, backup: &str) -> Result<()> {
-    let (run, node, backup) = (run.to_owned(), node.to_owned(), backup.to_owned());
-    s.store
-        .transaction(move |db| {
-            for mut grant in db.list("node-disk-grants")? {
-                if grant["runId"] == run && grant["nodeId"] == node {
-                    let ids = grant["backups"]
-                        .as_array_mut()
-                        .ok_or_else(|| Error::bad("Invalid disk grant."))?;
-                    if !ids.iter().any(|v| v == &backup) {
-                        ids.push(backup.clone().into());
-                    }
-                    db.put("node-disk-grants", &grant)?;
-                }
-            }
-            Ok(())
-        })
-        .await
+/// Before committing the local journal, authorize the candidate beside its old base.
+pub async fn extend(s: &Service, grant_id: &str, backup: &Value) -> Result<()> {
+    update(s, grant_id, backup, false).await
 }
-pub async fn acknowledged(s: &Service, run: &str, node: &str, backup: &str) -> Result<()> {
-    let (run, node, backup) = (run.to_owned(), node.to_owned(), backup.to_owned());
+/// Retire only this disk instance's old base; stale disks retain their own pins.
+pub async fn acknowledged(s: &Service, grant_id: &str, backup: &Value) -> Result<()> {
+    update(s, grant_id, backup, true).await
+}
+async fn update(s: &Service, grant_id: &str, backup: &Value, acknowledged: bool) -> Result<()> {
+    let (grant_id, backup) = (grant_id.to_owned(), backup.clone());
     s.store
         .transaction(move |db| {
-            for mut grant in db.list("node-disk-grants")? {
-                if grant["runId"] == run && grant["nodeId"] == node {
-                    grant["backups"] = json!([backup]);
-                    db.put("node-disk-grants", &grant)?;
+            let mut grant = db
+                .get("node-disk-grants", &grant_id)?
+                .ok_or_else(|| Error::new(403, "Disk read grant missing."))?;
+            if grant["runId"] != backup["runId"]
+                || grant["nodeId"].as_str().unwrap_or(super::LOCAL_NODE_ID)
+                    != backup["nodeId"].as_str().unwrap_or(super::LOCAL_NODE_ID)
+            {
+                return Err(Error::new(
+                    403,
+                    "Publication belongs to another disk owner.",
+                ));
+            }
+            if acknowledged {
+                grant["backups"] = json!([backup["id"]]);
+            } else {
+                let ids = grant["backups"]
+                    .as_array_mut()
+                    .ok_or_else(|| Error::bad("Invalid disk grant."))?;
+                if !ids.contains(&backup["id"]) {
+                    ids.push(backup["id"].clone());
                 }
             }
+            db.put("node-disk-grants", &grant)?;
             Ok(())
         })
         .await

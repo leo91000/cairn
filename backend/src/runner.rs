@@ -526,8 +526,13 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
         let generation = value["generation"]
             .as_i64()
             .ok_or_else(|| Error::bad("Missing generation."))?;
+        if value["grantId"] != volume.source.grant_id() {
+            return Err(Error::new(409, "Publication belongs to a replaced disk."));
+        }
+        let backup_id = text(&value, "backupId").to_owned();
+        uuid(&backup_id)?;
         let disk = volume.disk.clone();
-        tokio::task::spawn_blocking(move || disk.commit_published(generation))
+        tokio::task::spawn_blocking(move || disk.commit_published(generation, &backup_id))
             .await
             .map_err(Error::internal)??;
         return Ok(Json(json!({"committed":true})).into_response());
