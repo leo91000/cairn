@@ -102,7 +102,7 @@ export interface TaskOutcome {
 }
 export interface Run {
   nodeId?: string | null
-  storage?: { mode: string, waitingFor?: string | null, dirtyBytes?: number, dirtySince?: number | null, freeBytes?: number, reserveBytes?: number }
+  storage?: { mode: string, waitingFor?: string | null, dirtyBytes?: number, localBytes?: number, dirtySince?: number | null, freeBytes?: number, reserveBytes?: number }
   nodeState?: string | null
   pinnedNodeId?: string | null
   preferredNodeId?: string | null

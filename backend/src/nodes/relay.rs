@@ -140,8 +140,10 @@ fn route(method: &str, path: &str) -> Result<()> {
                     "prune",
                     "restore",
                     "snapshot",
+                    "migration-snapshot",
                     "published",
                     "storage-status",
+                    "migrate",
                 ]
                 .contains(operation)
         }
@@ -191,7 +193,7 @@ async fn forward(
             .decode(text(&command, "body"))
             .map_err(|_| Error::bad("Invalid execution payload."))?;
         if bytes.len()
-            > if path.ends_with("/restore") {
+            > if path.ends_with("/restore") || path.ends_with("/migrate") {
                 super::snapshots::MAX_MANIFEST_BYTES
             } else {
                 2_000_000
@@ -216,10 +218,13 @@ async fn forward(
     };
     let response = tokio::time::timeout(
         Duration::from_secs(
-            if path.ends_with("/restore") || path.ends_with("/export") || path.ends_with("/import")
+            if path.ends_with("/restore")
+                || path.ends_with("/migrate")
+                || path.ends_with("/export")
+                || path.ends_with("/import")
             {
                 7200
-            } else if path.ends_with("/snapshot") {
+            } else if path.ends_with("snapshot") {
                 300
             } else {
                 25

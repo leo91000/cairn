@@ -202,6 +202,14 @@ fn eligible(
         return Ok(false);
     }
     let run = db.run(text(chat, "runId"))?.unwrap_or_default();
+    let node = run["nodeId"]
+        .as_str()
+        .unwrap_or(crate::nodes::LOCAL_NODE_ID);
+    if db.get("nodes", node)?.is_some_and(|node| {
+        node["storage"]["enabled"] == true && node["storage"]["automaticArchiving"] != true
+    }) {
+        return Ok(false);
+    }
     if ["queued", "running"].contains(&text(&run, "status")) {
         return Ok(false);
     }

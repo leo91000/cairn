@@ -44,10 +44,6 @@ pub async fn capture(
     } else {
         None
     };
-    if crate::storage::runtime::exists(&disk) {
-        return crate::storage::checkpoint::capture(state, run, socket, control, stop, attempt)
-            .await;
-    }
     // A new capture supersedes abandoned transfers for this run. The per-run
     // capture lock prevents removing a snapshot still being produced.
     let snapshots = state.join("snapshots");
@@ -62,6 +58,10 @@ pub async fn capture(
                 tokio::fs::remove_dir_all(entry.path()).await?;
             }
         }
+    }
+    if crate::storage::runtime::exists(&disk) {
+        return crate::storage::checkpoint::capture(state, run, socket, control, stop, attempt)
+            .await;
     }
     let id = crate::config::id();
     let directory = state.join("snapshots").join(&id);

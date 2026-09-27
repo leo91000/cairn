@@ -127,9 +127,16 @@ impl Pool {
             if self.stop.is_cancelled() {
                 break;
             }
+            let on_demand = std::fs::read(self.state.join("storage-policy.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .is_some_and(|policy| policy["enabled"] == true);
+            if on_demand {
+                self.retire_spare().await;
+            }
             let slot = {
                 let mut slots = self.slots.lock().await;
-                if slots.spare.is_some() || tokio::time::Instant::now() < retry_at {
+                if on_demand || slots.spare.is_some() || tokio::time::Instant::now() < retry_at {
                     None
                 } else {
                     slots.reserve(self.capacity).map(|slot| {
@@ -173,6 +180,9 @@ impl Pool {
             }
             tokio::select! { _ = self.stop.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(1)) => {} }
         }
+        self.retire_spare().await;
+    }
+    async fn retire_spare(&self) {
         let spare = self.slots.lock().await.spare.take();
         if let Some((slot, mut vm)) = spare {
             vm.shutdown().await;
@@ -196,7 +206,8 @@ impl Reservation {
             return Ok(143);
         }
         let operation = async {
-            if (disk.exists()
+            if (plan["storage"].is_object()
+                || disk.exists()
                 || plan
                     .get("resources")
                     .is_some_and(|r| r != &json!(crate::nodes::placement::defaults())))
@@ -205,6 +216,10 @@ impl Reservation {
                 // Existing disks are authoritative; a prepared filesystem must never replace them.
                 vm.shutdown().await;
                 vm.discard_prepared().await;
+            }
+            if plan["storage"].is_object() {
+                let size = plan["resources"]["diskMiB"].as_u64().unwrap_or(32768) * 1024 * 1024;
+                crate::storage::bootstrap::prepare(&disk, size, &plan["storage"]).await?;
             }
             // The spare is only a cache. A dead VMM must not fail a new conversation.
             // Retry is safe here: no account was bound and no user command was sent.

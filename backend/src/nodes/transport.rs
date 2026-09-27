@@ -89,11 +89,12 @@ impl Transport {
         let (status, length, kind) = tokio::time::timeout(
             Duration::from_secs(
                 if path.ends_with("/restore")
+                    || path.ends_with("/migrate")
                     || path.ends_with("/export")
                     || path.ends_with("/import")
                 {
                     7200
-                } else if path.starts_with("/prepare/") || path.ends_with("/snapshot") {
+                } else if path.starts_with("/prepare/") || path.ends_with("snapshot") {
                     300
                 } else {
                     30
@@ -364,7 +365,7 @@ pub async fn proxy(State(app): State<App>, request: Request) -> Result<Response>
         format!("/{path}"),
         request.method().as_str().to_owned(),
     );
-    let limit = if path.ends_with("/restore") {
+    let limit = if path.ends_with("/restore") || path.ends_with("/migrate") {
         super::snapshots::MAX_MANIFEST_BYTES
     } else {
         2_000_000

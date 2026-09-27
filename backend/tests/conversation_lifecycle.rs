@@ -727,3 +727,28 @@ async fn s3_compatible_provider_archives_to_its_cold_class_through_its_endpoint(
         );
     }
 }
+
+#[tokio::test]
+async fn transparent_storage_keeps_idle_conversations_active_unless_auto_archive_is_explicit() {
+    let app = App::new().await;
+    let (_, mut chat) = app.request("POST", "/api/chats", json!({})).await;
+    chat["updatedAt"] = (leo_agent_manager::config::now() - 40 * 86_400_000_i64).into();
+    app.service.store.put("chats", chat).await.unwrap();
+    let (_, before) = app
+        .request("GET", "/api/conversation-retention", Value::Null)
+        .await;
+    assert_eq!(before["eligible"], 1);
+    let node = json!({"id":leo_agent_manager::nodes::LOCAL_NODE_ID,"storage":{"enabled":true,"automaticArchiving":false}});
+    app.service.store.put("nodes", node.clone()).await.unwrap();
+    let (_, cached) = app
+        .request("GET", "/api/conversation-retention", Value::Null)
+        .await;
+    assert_eq!(cached["eligible"], 0);
+    let mut node = node;
+    node["storage"]["automaticArchiving"] = true.into();
+    app.service.store.put("nodes", node).await.unwrap();
+    let (_, explicit) = app
+        .request("GET", "/api/conversation-retention", Value::Null)
+        .await;
+    assert_eq!(explicit["eligible"], 1);
+}

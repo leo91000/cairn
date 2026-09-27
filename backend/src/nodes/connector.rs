@@ -86,7 +86,7 @@ pub fn capabilities(path: &Path) -> Result<Value> {
     let disk =
         (stat.f_bavail as u128 * stat.f_frsize as u128 / 1_048_576).min(u64::MAX as u128) as u64;
     Ok(
-        json!({"os":"linux","arch":"x86_64","kvm":kvm,"fuse":std::fs::OpenOptions::new().read(true).write(true).open("/dev/fuse").is_ok(),"cpu":std::thread::available_parallelism()?.get(),"memoryMiB":memory,"diskMiB":disk}),
+        json!({"os":"linux","arch":"x86_64","kvm":kvm,"fuse":std::fs::OpenOptions::new().read(true).write(true).open("/dev/fuse").is_ok(),"cpu":std::thread::available_parallelism()?.get(),"memoryMiB":memory,"diskMiB":disk,"diskTotalMiB":(stat.f_blocks as u128 * stat.f_frsize as u128 / 1_048_576).min(u64::MAX as u128) as u64}),
     )
 }
 pub async fn enroll(origin: &str, directory: &Path) -> Result<()> {
@@ -192,7 +192,7 @@ async fn heartbeat(
                     .map_err(Error::internal)?,
             )
             .bearer_auth(&identity.token)
-            .json(&json!({"imageDigest":std::env::var("LEO_NODE_IMAGE").ok(),"runtimeId":health["runtimeId"].as_str().map(str::to_owned).unwrap_or_else(runtime),"executionReady":ready,"dataRoot":health["dataRoot"],"runtimes":health["runtimes"]}))
+            .json(&json!({"imageDigest":std::env::var("LEO_NODE_IMAGE").ok(),"runtimeId":health["runtimeId"].as_str().map(str::to_owned).unwrap_or_else(runtime),"executionReady":ready,"dataRoot":health["dataRoot"],"capabilities":health["capabilities"],"runtimes":health["runtimes"]}))
             .send();
         let result =
             tokio::select! { _ = stop.cancelled() => return Ok(()), value = request => value };

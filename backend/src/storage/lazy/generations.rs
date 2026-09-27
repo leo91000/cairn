@@ -133,7 +133,9 @@ impl LazyDisk {
                 |r| r.get(0),
             )
             .map_err(failure)?;
-        validate(&serde_json::from_str(&manifest).map_err(failure)?)?;
+        let next_base = Arc::new(serde_json::from_str::<Value>(&manifest).map_err(failure)?);
+        validate(&next_base)?;
+        let mut base = self.base.lock().map_err(failure)?;
         tx.execute("UPDATE state SET manifest=?1 WHERE id=1", [manifest])
             .map_err(failure)?;
         tx.execute("DELETE FROM epochs WHERE generation<=?1", [generation])
@@ -144,6 +146,7 @@ impl LazyDisk {
             .map_err(failure)?;
         tx.execute("INSERT INTO settings(key,value) VALUES ('published',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[receipt.to_string()]).map_err(failure)?;
         tx.commit().map_err(failure)?;
+        *base = next_base;
         db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
             .map_err(failure)?;
         File::open(&self.directory)?.sync_all()

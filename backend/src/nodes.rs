@@ -13,6 +13,7 @@ pub mod placement;
 pub mod relay;
 pub mod restore;
 pub mod snapshots;
+pub mod storage;
 pub mod tracking;
 pub mod transport;
 pub mod workspace;
@@ -77,6 +78,8 @@ struct Capabilities {
     cpu: u32,
     memory_mi_b: u64,
     disk_mi_b: u64,
+    #[serde(default)]
+    disk_total_mi_b: u64,
 }
 impl Capabilities {
     fn validate(&self) -> Result<()> {
@@ -112,6 +115,7 @@ impl Capabilities {
         value["arch"] = self.arch.clone().into();
         value["kvm"] = self.kvm.into();
         value["fuse"] = self.fuse.into();
+        value["diskTotalMiB"] = self.disk_total_mi_b.into();
         value
     }
 }
@@ -647,6 +651,13 @@ pub async fn internal(State(app): State<App>, request: Request) -> Result<Json<V
                 .filter(|token| token.len() == 43)
                 .ok_or_else(|| Error::new(401, "Invalid node identity."))?;
             let key = format!("node-token:{}", digest(credential));
+            let capabilities = if input.body["capabilities"].is_object() {
+                let value: Capabilities = decode(input.body["capabilities"].clone())?;
+                value.validate()?;
+                Some(value.value())
+            } else {
+                None
+            };
             let expected_data = s.config.data_dir.to_string_lossy().into_owned();
             let expected_image = maintenance::release().ok().map(|r| r["image"].clone());
             let lease_ms = backups::settings(s).await?["disconnectTimeoutSeconds"]
@@ -661,6 +672,7 @@ pub async fn internal(State(app): State<App>, request: Request) -> Result<Json<V
                 }
                 node["runtimes"]=input.body["runtimes"].clone();
                 node["lastSeen"] = now().into();
+                if let Some(capabilities)=capabilities {node["capabilities"]=capabilities;}
                 node["imageDigest"]=input.body["imageDigest"].clone();
                 node["executionReady"]=(input.body["executionReady"]==true && input.body["dataRoot"]==expected_data && expected_image.as_ref().is_none_or(|image|node["imageDigest"]==*image || node["updateError"].is_string())).into();
                 db.put("nodes", &node)?;

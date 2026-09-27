@@ -249,6 +249,57 @@ impl Storage {
         .await?;
         Ok(())
     }
+    pub async fn upload_bytes(&self, bytes: &[u8], key: &str) -> Result<()> {
+        use std::{
+            io::Write,
+            os::fd::{AsRawFd, FromRawFd},
+        };
+        let descriptor =
+            unsafe { libc::memfd_create(c"leo-s3-upload".as_ptr(), libc::MFD_CLOEXEC) };
+        if descriptor < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let mut file = unsafe { std::fs::File::from_raw_fd(descriptor) };
+        file.write_all(bytes)?;
+        let path = std::path::PathBuf::from(format!(
+            "/proc/{}/fd/{}",
+            std::process::id(),
+            file.as_raw_fd()
+        ));
+        self.upload(&path, key).await?;
+        let remote = self.download_bytes(key, bytes.len() as u64).await?;
+        if remote != bytes {
+            return Err(Error::bad("Remote backup checksum mismatch."));
+        }
+        Ok(())
+    }
+    /// Bounded hot-block transfers need no temporary disk space, including during
+    /// reserve pressure. The AWS subprocess opens the parent's anonymous memory file.
+    pub async fn download_bytes(&self, key: &str, limit: u64) -> Result<Vec<u8>> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let descriptor = unsafe { libc::memfd_create(c"leo-s3-block".as_ptr(), libc::MFD_CLOEXEC) };
+        if descriptor < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let file = unsafe { std::fs::File::from_raw_fd(descriptor) };
+        let path = format!("/proc/{}/fd/{}", std::process::id(), file.as_raw_fd());
+        self.call(vec![
+            "s3api".into(),
+            "get-object".into(),
+            "--bucket".into(),
+            self.bucket.clone(),
+            "--key".into(),
+            key.into(),
+            "--range".into(),
+            format!("bytes=0-{limit}"),
+            path.clone(),
+        ])
+        .await?;
+        if file.metadata()?.len() > limit {
+            return Err(Error::bad("Remote block exceeds the transfer limit."));
+        }
+        Ok(tokio::fs::read(path).await?)
+    }
     pub async fn cold(&self, key: &str) -> Result<()> {
         let head = self
             .call(vec![

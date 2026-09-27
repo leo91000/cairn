@@ -5,7 +5,7 @@
 - `cargo test --locked --lib storage::` : réussi.
 - Parcours HTTP export/import existant avec verrou conservé : réussi.
 - Typage, lint, `cargo check --locked --workspace --all-targets` et clippy : réussis.
-- CI GitHub : https://github.com/leo91000/leo-agent-manager/pull/5 (statut final à vérifier).
+- CI GitHub : https://github.com/leo91000/leo-agent-manager/pull/5 (contrôles réussis).
 
 ## Adapter expérimental — deuxième PR
 
@@ -48,10 +48,8 @@ tests/lazy-disk-smoke.sh /chemin/vers/vmlinux
 ```
 
 Ces mesures ne constituent ni un temps de reprise de conversation complète ni un
-benchmark S3. Restent à valider dans les PR suivantes : publication distante,
-limites globales par node, états d'attente et annulation, droits et conservation des
-objets, déplacement, migration, archives et fonctionnement avec le vrai stockage S3.
-L'adapter n'est pas encore activable dans le contrôleur de production.
+benchmark S3. Les sections suivantes décrivent les vérifications complémentaires. Les temps
+de transfert vers un fournisseur S3 réel ne sont pas mesurés ici.
 
 ## Publication et pression disque (troisième PR)
 
@@ -76,3 +74,31 @@ synchronisation FUSE avec l'identité du contrôleur. Sur les installations Comp
 configurations existantes qui l'exposent le conservent. Le superviseur des nodes
 expose ce périphérique lorsqu'il est présent sur l'hôte. Les nodes sans FUSE
 continuent à prendre en charge les disques historiques.
+
+
+## Migration et cycle de vie (quatrième PR)
+
+- Une capture de migration garde le disque arrêté sous verrou et lit un lien
+  physique vers l'original. Elle ne crée pas une seconde image. Une capture
+  abandonnée expire après cinq minutes sans demande de bloc ; ce délai libère le
+  verrou de transfert, sans supprimer le disque original.
+- L'installation compare de nouveau le disque au manifeste publié. Une écriture
+  entre publication et installation fait reporter la migration. Une répétition
+  après bascule conserve le journal et ses nouvelles écritures.
+- Les nouveaux environnements sont formatés puis journalisés avant la première
+  commande utilisateur. Un redémarrage au milieu de cette préparation conserve
+  une source récupérable.
+- L'agrandissement exceptionnel matérialise explicitement une image pour les
+  outils ext4 existants, après vérification de l'espace nécessaire. Il peut donc
+  être long et demander davantage de disque ; il ne suit pas le démarrage à la
+  demande. L'ancien journal reste en copie de secours jusqu'au nettoyage explicite.
+- Les blocs S3 sont téléchargés dans un fichier mémoire anonyme borné, sans
+  temporaire disque. La publication peut utiliser au plus quelques blocs sous la
+  réserve normale pour sortir d'une pression disque ; elle exige encore 32 Mio
+  libres plus trois fois le bloc chiffré en cours.
+
+Vérifications déjà effectuées : 260 tests frontend dans 37 fichiers ; suite S3
+chiffrée contre Moto 5.2.3 (envoi, vérification, relais sortant, réparation d'objet
+manquant, rétention et purge) ; interface du journal, pression disque annulable,
+migration sans téléchargement et politiques d'archivage. Les derniers résultats
+backend, FUSE et CI sont consignés après la revue de la stack.

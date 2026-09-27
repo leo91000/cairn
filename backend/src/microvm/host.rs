@@ -562,19 +562,23 @@ impl Vm {
         if disk_dir.join("restore.pending").exists() {
             return Err(Error::new(409, "VM restore is incomplete."));
         }
-        let volume = if crate::storage::runtime::exists(&disk_dir) {
-            Some(crate::storage::runtime::open(&disk_dir)?)
+        let mut volume = if crate::storage::runtime::exists(&disk_dir) {
+            Some(crate::storage::runtime::load(&disk_dir).await?)
         } else {
             None
         };
-        let disk = if let Some(volume) = &volume {
+        if let Some(mounted) = &volume {
             use crate::storage::Disk;
-            if resources.disk_mi_b * 1024 * 1024 > volume.disk.size() {
-                return Err(Error::new(
-                    409,
-                    "Resize requires materializing this on-demand disk first.",
-                ));
+            let desired = resources.disk_mi_b * 1024 * 1024;
+            if desired < mounted.disk.size() {
+                return Err(Error::new(409, "A retained VM disk cannot be shrunk."));
             }
+            if desired > mounted.disk.size() {
+                drop(volume.take());
+                crate::storage::runtime::materialize(&disk_dir, stop).await?;
+            }
+        }
+        let disk = if volume.is_some() {
             disk_dir.join("data.ext4")
         } else {
             crate::storage::prepare(&disk_dir, resources.disk_mi_b * 1024 * 1024).await?

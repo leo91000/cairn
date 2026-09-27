@@ -107,6 +107,8 @@ impl Worker {
         self.initialize(&s).await?;
         self.tasks.spawn(crate::chat_titles::run(s.clone()));
         self.tasks.spawn(crate::nodes::backups::maintain(s.clone()));
+        self.tasks.spawn(crate::nodes::storage::monitor(s.clone()));
+        self.tasks.spawn(crate::nodes::storage::migrate(s.clone()));
         let retention = s.clone();
         self.tasks.spawn(async move {
             let mut timer = tokio::time::interval(Duration::from_secs(15));
@@ -951,6 +953,21 @@ impl Worker {
                 );
                 plan["resources"] = placement["resources"].clone();
                 plan["nodeLeaseRequired"] = true.into();
+                let storage_node = crate::validation::text(&placement, "nodeId");
+                let storage_policy = s
+                    .store
+                    .get("nodes", storage_node)
+                    .await?
+                    .unwrap_or_default()["storage"]
+                    .clone();
+                if storage_policy["enabled"] == true {
+                    let grant = crate::nodes::disk_grants::new_disk(s, run, storage_node).await?;
+                    plan["storage"] =
+                        json!({"master":s.config.public_url,"grant":grant,"policy":storage_policy});
+                    s.store
+                        .patch_run(&id, json!({"storage":{"mode":"on-demand"}}))
+                        .await?;
+                }
                 crate::nodes::placement::renew_local(s, &id).await?;
                 if let Some(chat) = chat {
                     plan["chat"] = chat;

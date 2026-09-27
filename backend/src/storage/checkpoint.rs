@@ -21,12 +21,15 @@ pub async fn capture(
     attempt: &str,
 ) -> Result<Value> {
     let directory = state.join("disks").join(run);
-    let volume = super::runtime::open(&directory)?;
+    let volume = super::runtime::load(&directory).await?;
+    let _stopped_reads = socket.is_none().then(|| volume.stop.clone().drop_guard());
     let guard = control.lock().await;
     if stop.is_cancelled() {
         return Err(Error::new(409, "VM stopped during capture."));
     }
-    let waiting = volume.status()?["waitingFor"].as_str().map(str::to_owned);
+    let waiting = volume.inspect().await?["waitingFor"]
+        .as_str()
+        .map(str::to_owned);
     if waiting.as_deref() == Some("storage-unavailable") {
         return Err(Error::new(
             503,
@@ -60,11 +63,21 @@ pub async fn capture(
             }
             return Err(error);
         }
+        volume.set_paused(true);
     }
+    let captured_at = crate::config::now();
     let generation = volume.disk.seal();
     if socket.is_some() && !stop.is_cancelled() && !emergency {
-        host::resume_attempt(state, attempt).await?;
+        if let Err(error) = host::resume_attempt(state, attempt).await {
+            // The controller tears down an attempt whose CPUs cannot be resumed.
+            stop.cancel();
+            return Err(error);
+        }
+        volume.set_paused(false);
     }
+    // Guest thaw can itself wait on remote I/O. Leave lease enforcement and
+    // storage pause/resume free to operate while the ordered thaw is pending.
+    drop(guard);
     if frozen {
         if emergency {
             let socket = socket.as_ref().unwrap().clone();
@@ -76,15 +89,15 @@ pub async fn capture(
             thaw(socket.as_ref().unwrap(), &stop).await?;
         }
     }
-    drop(guard);
     let generation = generation?;
     let disk = volume.disk.clone();
-    let mut manifest = tokio::task::spawn_blocking(move || disk.capture(generation))
-        .await
-        .map_err(Error::internal)??;
+    let mut manifest = tokio::select! {
+        _ = stop.cancelled() => return Err(Error::new(409, "Disk capture stopped.")),
+        result = tokio::task::spawn_blocking(move || disk.capture(generation)) => result.map_err(Error::internal)??,
+    };
     manifest["runtime"] =
         serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
-    manifest["capturedAt"] = crate::config::now().into();
+    manifest["capturedAt"] = captured_at.into();
     manifest["consistency"] = if emergency { "crash" } else { "filesystem" }.into();
     manifest["generation"] = generation.into();
     manifest["onDemand"] = true.into();

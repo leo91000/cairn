@@ -1634,7 +1634,6 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             }),
             "A missing remote copy must lose its upload receipt"
         );
-        fallback = third.clone();
         third = backups::capture(
             &owner.service,
             &owner.service.store.run(&run).await.unwrap(),
@@ -1667,6 +1666,58 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             owner.service.store.run(&run).await.unwrap()["backup"]["snapshotId"],
             third["snapshotId"],
             "A successful remote recovery keeps the incremental baseline"
+        );
+        // A local enabled node has one clean disk cache (the controller). Even
+        // below its normal reserve, verified publication uses bounded memory.
+        let local = leo_agent_manager::nodes::LOCAL_NODE_ID;
+        let mut node = owner
+            .service
+            .store
+            .get("nodes", local)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| json!({"id":local}));
+        node["storage"] = json!(leo_agent_manager::storage::policy::Policy {
+            enabled: true,
+            reserve_mi_b: 16777216,
+            ..Default::default()
+        });
+        owner.service.store.put("nodes", node).await.unwrap();
+        backups::maintain_local_cache(&owner.service).await.unwrap();
+        assert!(
+            !directory.join(block).exists(),
+            "duplicate S3 cache is reclaimed"
+        );
+        original[4 * 1024 * 1024] = 3;
+        std::fs::write(&source, &original).unwrap();
+        let mut memory = snapshots::index(&source).await.unwrap();
+        memory["capturedAt"] = now().into();
+        memory["runtime"] = json!({"runtimeId":"fixture"});
+        let changed = memory["blocks"][1]["hash"].as_str().unwrap().to_owned();
+        *state.lock().await = memory;
+        fallback = third;
+        third = backups::capture(&owner.service, &record).await.unwrap();
+        assert_eq!(third["uploadedBytes"], 128);
+        assert!(
+            !directory.join(&changed).exists(),
+            "memory publication retains no second cache"
+        );
+        let published = owner
+            .service
+            .store
+            .get("node-backups", third["id"].as_str().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            backups::read_block(&owner.service, &published, &changed)
+                .await
+                .unwrap(),
+            original[4 * 1024 * 1024..]
+        );
+        assert!(
+            !directory.join(changed).exists(),
+            "reads also avoid duplicate cache"
         );
     }
     let mut damaged = owner
@@ -2734,12 +2785,12 @@ async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
         .unwrap();
     let mut points = Vec::new();
     let mut hashes = Vec::new();
-    for byte in [7u8, 9u8] {
+    for byte in [7u8, 9u8, 11u8] {
         let data = vec![byte; 4096];
         let hash = hex::encode(Sha256::digest(&data));
         let point = id();
         let manifest = json!({"version":1,"size":4096,"blockSize":snapshots::BLOCK,"blocks":[{"offset":0,"size":4096,"hash":hash}]});
-        let backup = json!({"id":point,"runId":run,"nodeId":node,"destination":"s3","bucket":"fixture","manifest":owner.service.vault.encrypt(&format!("backup:{point}"),&manifest).unwrap()});
+        let backup = json!({"id":point,"runId":run,"nodeId":node,"destination":"s3","diskGeneration":points.len()+1,"bucket":"fixture","manifest":owner.service.vault.encrypt(&format!("backup:{point}"),&manifest).unwrap()});
         owner
             .service
             .store
@@ -2835,6 +2886,86 @@ async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
             .unwrap()
             .len(),
         2
+    );
+    assert_eq!(
+        owner
+            .call(
+                "GET",
+                &format!("/internal/node-restore/{}", hashes[0]),
+                Value::Null,
+                Some(&credential)
+            )
+            .await
+            .0,
+        403
+    );
+    // Reconciliation of a lost acknowledgement must retain an in-flight successor.
+    let racing = disk_grants::issue(&owner.service, &record, &node, &points[0])
+        .await
+        .unwrap();
+    let racing_id = leo_agent_manager::auth::digest(&racing);
+    disk_grants::extend(&owner.service, &racing_id, &points[1])
+        .await
+        .unwrap();
+    disk_grants::extend(&owner.service, &racing_id, &points[2])
+        .await
+        .unwrap();
+    disk_grants::acknowledged(&owner.service, &racing_id, &points[1])
+        .await
+        .unwrap();
+    assert_eq!(
+        owner
+            .call(
+                "GET",
+                &format!("/internal/node-restore/{}", hashes[2]),
+                Value::Null,
+                Some(&racing)
+            )
+            .await
+            .0,
+        200
+    );
+    disk_grants::acknowledged(&owner.service, &racing_id, &points[2])
+        .await
+        .unwrap();
+    assert_eq!(
+        owner
+            .call(
+                "GET",
+                &format!("/internal/node-restore/{}", hashes[1]),
+                Value::Null,
+                Some(&racing)
+            )
+            .await
+            .0,
+        403
+    );
+    // A delayed monitor receipt must not roll authorization back behind publication.
+    disk_grants::acknowledged(
+        &owner.service,
+        &leo_agent_manager::auth::digest(&credential),
+        &points[0],
+    )
+    .await
+    .unwrap();
+    disk_grants::extend(
+        &owner.service,
+        &leo_agent_manager::auth::digest(&credential),
+        &points[0],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        owner
+            .call(
+                "GET",
+                &format!("/internal/node-restore/{}", hashes[1]),
+                Value::Null,
+                Some(&credential)
+            )
+            .await
+            .0,
+        200
     );
     assert_eq!(
         owner

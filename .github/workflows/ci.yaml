@@ -166,6 +166,8 @@ jobs:
       - name: Prepare KVM build host
         run: |
           test -e /dev/kvm
+          sudo modprobe fuse
+          test -c /dev/fuse
           # A working L0 device alone does not guarantee nested KVM for our guest.
           if grep -qw vmx /proc/cpuinfo; then
             grep -Eq '^(Y|1)$' /sys/module/kvm_intel/parameters/nested

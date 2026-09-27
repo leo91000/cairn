@@ -15,6 +15,9 @@ pub fn defaults() -> Resources {
     }
 }
 fn disk_total(volume: &Value, requested: u64, replacing: bool) -> u64 {
+    if volume["storageMode"] == "on-demand" && !replacing {
+        return volume["diskMiB"].as_u64().unwrap_or(128);
+    }
     let total = volume["diskMiB"].as_u64().unwrap_or(0);
     let current = volume["activeDiskMiB"].as_u64().unwrap_or(total);
     total.saturating_add(if replacing {
@@ -68,7 +71,7 @@ pub async fn reserve(s: &Service, run: &Value, attempt: &str) -> Result<Value> {
             let mut resources=resources.clone();
             if requested.is_none() {
                 // Defaults also respect the agent's own resource limit.
-                for key in ["cpu","memoryMiB","diskMiB"] {resources[key]=resources[key].as_u64().unwrap().min(node["limits"][key].as_u64().unwrap_or(0)).min(access["maxResources"][key].as_u64().unwrap_or(u64::MAX)).into();}
+                for key in ["cpu","memoryMiB","diskMiB"] {resources[key]=resources[key].as_u64().unwrap().min(if key=="diskMiB" && node["storage"]["enabled"]==true {u64::MAX}else{node["limits"][key].as_u64().unwrap_or(0)}).min(access["maxResources"][key].as_u64().unwrap_or(u64::MAX)).into();}
                 if resources["cpu"].as_u64().unwrap()<1 || resources["memoryMiB"].as_u64().unwrap()<128 || resources["diskMiB"].as_u64().unwrap()<128 {continue;}
             }
             if node["maintenance"].is_string() {continue;}
@@ -80,6 +83,13 @@ pub async fn reserve(s: &Service, run: &Value, attempt: &str) -> Result<Value> {
             if (node["local"]!=true || configured) && (node["capabilities"]["kvm"]!=true || node["executionReady"]!=true || node["lastSeen"].as_i64().is_none_or(|v|now()-v>=30000)) {continue;}
             let mut headroom=f64::MAX;
             let fits=["cpu","memoryMiB","diskMiB"].iter().all(|key| {
+                if *key=="diskMiB" && node["storage"]["enabled"]==true {
+                    let policy=serde_json::from_value::<crate::storage::policy::Policy>(node["storage"].clone()).unwrap_or_default();
+                    let free=node["capabilities"]["diskMiB"].as_u64().unwrap_or(0);
+                    let total=node["capabilities"]["diskTotalMiB"].as_u64().unwrap_or(free);
+                    let pending=attempts.iter().filter(|a|a["nodeId"]==id && a["released"]!=true).count() as u64;
+                    return free>policy.reserve(total.saturating_mul(1048576))/1048576 + (pending+1)*128;
+                }
                 let used=if *key=="diskMiB" {volumes.iter().filter(|v|v["nodeId"]==id && v["runId"]!=run["id"]).map(|v|v["diskMiB"].as_u64().unwrap_or(0)).sum::<u64>()} else {attempts.iter().filter(|a|a["nodeId"]==id && a["released"]!=true && !(moving && a["runId"]==run["id"])).map(|a|a["resources"][key].as_u64().unwrap_or(0)).sum::<u64>()};
                 let current=if *key=="diskMiB" {volumes.iter().filter(|v|v["nodeId"]==id && v["runId"]==run["id"]).map(|v|v["diskMiB"].as_u64().unwrap_or(0)).max().unwrap_or(0)} else if moving {attempts.iter().filter(|a|a["nodeId"]==id && a["runId"]==run["id"] && a["released"]!=true).map(|a|a["resources"][key].as_u64().unwrap_or(0)).max().unwrap_or(0)} else {0};
                 used.checked_add(if *key=="diskMiB" {disk_total(volumes.iter().find(|v|v["nodeId"]==id && v["runId"]==run["id"]).unwrap_or(&Value::Null),resources[key].as_u64().unwrap_or(u64::MAX),moving && checkpoint["nodeId"]!=id)} else {current.max(resources[key].as_u64().unwrap_or(u64::MAX))}).is_some_and(|total| {
@@ -99,6 +109,7 @@ pub async fn reserve(s: &Service, run: &Value, attempt: &str) -> Result<Value> {
             let mut record=json!({"id":attempt,"role":if moving {"destination"} else {"execution"},"runId":run["id"],"nodeId":id,"resources":resources,"runtimeId":required.unwrap_or_else(||text(&node,"runtimeId")),"createdAt":now(),"leaseExpiresAt":now()+60000,"released":false});
             let volume_id=format!("{}:{id}",text(&run,"id"));
             let mut volume=db.get("node-volumes",&volume_id)?.unwrap_or_else(||json!({"id":volume_id,"nodeId":id,"runId":run["id"],"materialized":false}));
+            if node["storage"]["enabled"]==true && volume["materialized"]!=true {volume["storageMode"]="on-demand".into();}
             let previous=volume["diskMiB"].as_u64().unwrap_or(0);let requested=resources["diskMiB"].as_u64().unwrap_or(0);
             volume["diskMiB"]=disk_total(&volume,requested,moving && checkpoint["nodeId"]!=id).into();
             record["additionalDiskMiB"]=volume["diskMiB"].as_u64().unwrap().saturating_sub(previous).into();

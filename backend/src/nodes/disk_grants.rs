@@ -74,8 +74,34 @@ async fn update(s: &Service, grant_id: &str, backup: &Value, acknowledged: bool)
                     "Publication belongs to another disk owner.",
                 ));
             }
+            let generation = backup["diskGeneration"]
+                .as_i64()
+                .filter(|g| *g > 0)
+                .ok_or_else(|| Error::bad("Missing journal publication generation."))?;
+            let current = grant["generation"].as_i64().unwrap_or(0);
+            if generation < current {
+                return Ok(());
+            }
+            if generation == current {
+                if grant["published"] == backup["id"] {
+                    return Ok(());
+                }
+                return Err(Error::new(
+                    409,
+                    "Conflicting journal publication generation.",
+                ));
+            }
+            let mut pending = grant["pending"].as_array().cloned().unwrap_or_default();
             if acknowledged {
-                grant["backups"] = json!([backup["id"]]);
+                // A delayed receipt must preserve newer candidates whose blocks
+                // the controller may begin reading before their own ack arrives.
+                pending
+                    .retain(|point| point["generation"].as_i64().is_some_and(|g| g > generation));
+                let mut ids = vec![backup["id"].clone()];
+                ids.extend(pending.iter().map(|point| point["id"].clone()));
+                grant["generation"] = generation.into();
+                grant["published"] = backup["id"].clone();
+                grant["backups"] = json!(ids);
             } else {
                 let ids = grant["backups"]
                     .as_array_mut()
@@ -83,7 +109,11 @@ async fn update(s: &Service, grant_id: &str, backup: &Value, acknowledged: bool)
                 if !ids.contains(&backup["id"]) {
                     ids.push(backup["id"].clone());
                 }
+                if !pending.iter().any(|point| point["id"] == backup["id"]) {
+                    pending.push(json!({"id":backup["id"],"generation":generation}));
+                }
             }
+            grant["pending"] = json!(pending);
             db.put("node-disk-grants", &grant)?;
             Ok(())
         })

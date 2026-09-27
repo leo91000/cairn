@@ -138,7 +138,14 @@ pub async fn served(directory: &Path, hash: &str) -> Result<Vec<u8>> {
             .parent()
             .and_then(Path::parent)
             .ok_or_else(|| Error::bad("Invalid snapshot directory."))?;
-        let volume = crate::storage::runtime::open(&state.join("disks").join(run))?;
+        let disk = state.join("disks").join(run);
+        let stopped = match crate::file_lock::exclusive(&disk.join("lock"), "Disk active.") {
+            Ok(lock) => Some(lock),
+            Err(error) if error.status == 409 => None,
+            Err(error) => return Err(error),
+        };
+        let volume = crate::storage::runtime::load(&disk).await?;
+        let _cancel_stopped_reads = stopped.as_ref().map(|_| volume.stop.clone().drop_guard());
         let generation = manifest["generation"]
             .as_i64()
             .ok_or_else(|| Error::bad("Invalid generation."))?;

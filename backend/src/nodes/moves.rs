@@ -306,7 +306,11 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
             s.store
                 .patch_run(run_id, json!({"nodeState":"saving"}))
                 .await?;
-            let point = super::backups::capture(s, &current).await?;
+            let mut capturing = current.clone();
+            if s.get("nodes", text(movement, "nodeId")).await?["storage"]["enabled"] == true {
+                capturing["storageRequested"] = true.into();
+            }
+            let point = super::backups::capture(s, &capturing).await?;
             s.get("node-backups", text(&point, "id")).await?
         };
         s.store
@@ -369,6 +373,12 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
             return Ok(false);
         }
     };
+    let destination_storage =
+        if s.get("nodes", text(movement, "nodeId")).await?["storage"]["enabled"] == true {
+            json!({"mode":"on-demand","migrated":true})
+        } else {
+            json!({"mode":"local"})
+        };
     let idle = movement["idle"] == true;
     let automatic = movement["automatic"] == true;
     let destination = text(movement, "nodeId").to_owned();
@@ -394,7 +404,7 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
         if !current["cancelRequestedAt"].is_null() {return Err(Error::new(409,"Conversation cancelled during restore."));}
         checkpoint["nodeId"]=node.clone();checkpoint["process"]=Value::Null;checkpoint["settled"]=Value::Null;checkpoint["controllerRecoveries"]=0.into();
         db.set(&key,&checkpoint,None)?;
-        db.patch_run(&run_id,&json!({"movementError":null,"accountWaitReason":null,"nodeId":node,"nodeState":if idle {Value::Null}else{json!("resuming")},"requestedResources":resources,"resources":resources,"requiredTags":required_tags,"moveRequest":null,"moveReservation":if idle {Value::Null}else{reservation},"sessionId":session,"restoredAt":captured_at,"recoveryPending":!idle,"status":if idle {"succeeded"}else{"queued"}}))?;
+        db.patch_run(&run_id,&json!({"storage":destination_storage,"movementError":null,"accountWaitReason":null,"nodeId":node,"nodeState":if idle {Value::Null}else{json!("resuming")},"requestedResources":resources,"resources":resources,"requiredTags":required_tags,"moveRequest":null,"moveReservation":if idle {Value::Null}else{reservation},"sessionId":session,"restoredAt":captured_at,"recoveryPending":!idle,"status":if idle {"succeeded"}else{"queued"}}))?;
         db.event(&run_id,"status","Restoring conversation from a dated recovery point; newer chat remains visible. Verify external effects before repeating actions.",Some(&json!({"capturedAt":captured_at})))?;
         Ok(())
     }).await?;
@@ -416,12 +426,23 @@ pub async fn latest(s: &Service, run: &str) -> Result<Option<Value>> {
         .list("node-backups")
         .await?
         .into_iter()
-        .filter(|b| b["runId"] == run)
+        .filter(|b| b["runId"] == run && b["sessionId"].is_string())
         .collect::<Vec<_>>();
     points.sort_by_key(|b| std::cmp::Reverse(b["capturedAt"].as_i64().unwrap_or(0)));
+    let demand = s.store.run(run).await?["storage"]["mode"] == "on-demand";
+    let audit = s
+        .store
+        .kv(&format!("node-backup-audit:{run}"))
+        .await?
+        .unwrap_or_default();
     for point in points {
         let usable = async {
             let manifest = super::backups::manifest(s, &point).await?;
+            if demand && point["destination"] == "s3" && !audit["error"].is_string() {
+                // Publication already verified every immutable dependency. Each
+                // demand read verifies it again; do not hydrate the whole disk here.
+                return Ok(());
+            }
             let mut checked = std::collections::HashSet::new();
             for block in manifest["blocks"].as_array().unwrap() {
                 if let Some(hash) = block["hash"].as_str()

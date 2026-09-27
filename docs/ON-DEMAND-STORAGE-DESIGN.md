@@ -3,7 +3,7 @@
 Statut : conception validée le 27 septembre 2026 à la question Q9 de l'entretien
 `grill-with-docs`. L'utilisateur a confirmé les décisions Q1–Q8, la synthèse
 technique, les interfaces de test et le découpage en quatre PR sur la PR des nodes.
-Implémentation en cours ; la validation réelle FUSE/Firecracker reste requise.
+Implémentation en stack de PR ; résultats et limites dans [la validation](ON-DEMAND-STORAGE-VALIDATION.md).
 
 ## Base de travail
 
@@ -132,8 +132,8 @@ Chaque PR dépend de la précédente ; la première cible la branche de la PR #3
 L'ancien adapter reste disponible pour les nodes non activées et les disques non
 migrés. Son retrait global n'est pas requis pour livrer cette stack.
 
-Le découpage exact pourra évoluer pour que chaque PR ait un comportement vérifiable
-et des garanties cohérentes. Aucune de ces PR n’est encore implémentée.
+Le découpage a conservé quatre PR. La quatrième intègre également la création de
+nouveaux disques journalisés et le raccordement final au cycle de vie.
 
 ## Synthèse technique proposée pour confirmation finale
 

@@ -26,6 +26,7 @@ pub struct LazyDisk {
     directory: PathBuf,
     size: u64,
     db: Mutex<Connection>,
+    base: Mutex<Arc<Value>>,
     source: Arc<dyn BlockSource>,
     cache: Mutex<()>,
     memory: Mutex<std::collections::VecDeque<(String, Arc<Vec<u8>>)>>,
@@ -165,6 +166,7 @@ impl LazyDisk {
             directory: directory.to_owned(),
             size,
             db: Mutex::new(db),
+            base: Mutex::new(Arc::new(manifest)),
             source,
             cache: Mutex::new(()),
             memory: Mutex::new(Default::default()),
@@ -209,11 +211,38 @@ impl LazyDisk {
         }
         super::device::range(self.size, offset, length)
     }
+    fn cached(&self, key: &str) -> io::Result<Option<Arc<Vec<u8>>>> {
+        let mut memory = self.memory.lock().map_err(failure)?;
+        Ok(memory
+            .iter()
+            .position(|(stored, _)| stored == key)
+            .map(|index| {
+                let entry = memory.remove(index).unwrap();
+                let bytes = entry.1.clone();
+                memory.push_back(entry);
+                bytes
+            }))
+    }
+    fn cached_record(&self, row: &rusqlite::Row<'_>) -> io::Result<(u64, Arc<Vec<u8>>)> {
+        let start: i64 = row.get(0).map_err(failure)?;
+        let key = format!(
+            "write:{}:{}:{start}:{}:{}",
+            row.get::<_, i64>(3).map_err(failure)?,
+            row.get::<_, i64>(4).map_err(failure)?,
+            row.get::<_, i64>(5).map_err(failure)?,
+            row.get::<_, String>(2).map_err(failure)?
+        );
+        if let Some(bytes) = self.cached(&key)? {
+            return Ok((start as u64, bytes));
+        }
+        let (offset, bytes) = Self::record(row, self.size)?;
+        Ok((offset, self.remember(&key, bytes)?))
+    }
     fn remember(&self, hash: &str, bytes: Vec<u8>) -> io::Result<Arc<Vec<u8>>> {
         let bytes = Arc::new(bytes);
         let mut memory = self.memory.lock().map_err(failure)?;
         memory.retain(|(key, _)| key != hash);
-        while memory.len() >= 8 {
+        while memory.iter().map(|(_, v)| v.len()).sum::<usize>() + bytes.len() > 32 * 1024 * 1024 {
             memory.pop_front();
         }
         memory.push_back((hash.to_owned(), bytes.clone()));
@@ -226,14 +255,8 @@ impl LazyDisk {
         let Some(hash) = block["hash"].as_str() else {
             return Ok(Arc::new(vec![0; length]));
         };
-        {
-            let mut memory = self.memory.lock().map_err(failure)?;
-            if let Some(index) = memory.iter().position(|(key, _)| key == hash) {
-                let entry = memory.remove(index).unwrap();
-                let bytes = entry.1.clone();
-                memory.push_back(entry);
-                return Ok(bytes);
-            }
+        if let Some(bytes) = self.cached(hash)? {
+            return Ok(bytes);
         }
         let directory = self.directory.join("cache");
         let target = directory.join(hash);
@@ -327,13 +350,9 @@ impl LazyDisk {
         self.check(offset, bytes.len())?;
         let mut covered = vec![false; bytes.len()];
         let mut missing = bytes.len();
-        let manifest: Value = {
+        let manifest = self.base.lock().map_err(failure)?.clone();
+        {
             let db = self.db.lock().map_err(failure)?;
-            let manifest: String = db
-                .query_row("SELECT manifest FROM state WHERE id=1", [], |row| {
-                    row.get(0)
-                })
-                .map_err(failure)?;
             let mut statement = db.prepare("SELECT start, data, checksum, seq, generation, end FROM writes WHERE start < ?1 AND end > ?2 AND generation <= ?3 ORDER BY seq DESC").map_err(failure)?;
             let mut rows = statement
                 .query(params![
@@ -343,7 +362,7 @@ impl LazyDisk {
                 ])
                 .map_err(failure)?;
             while let Some(row) = rows.next().map_err(failure)? {
-                let (start, data) = Self::record(row, self.size)?;
+                let (start, data) = self.cached_record(row)?;
                 let begin = start.max(offset);
                 let end = (start + data.len() as u64).min(offset + bytes.len() as u64);
                 for position in begin..end {
@@ -358,8 +377,7 @@ impl LazyDisk {
                     break;
                 }
             }
-            serde_json::from_str(&manifest).map_err(failure)?
-        };
+        }
         // Never hold the journal lock across remote I/O. This read observes a
         // consistent journal prefix; later writes are independent of cache arrival.
         if missing == 0 {

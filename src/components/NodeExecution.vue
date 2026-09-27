@@ -80,6 +80,8 @@ function move() {
     <span v-if="run.backup?.status === 'saving'"> · Saving changes…</span>
     <p v-if="run.storage?.mode === 'on-demand'" class="mt-1">
       Files load on demand. {{ run.storage.waitingFor ? storageLabels[run.storage.waitingFor] || run.storage.waitingFor : 'Storage ready' }}.
+      <span v-if="run.storage.localBytes !== undefined">Local disk: {{ formatMiB(run.storage.localBytes / 1048576) }}.</span>
+      <span v-if="run.storage.dirtyBytes">Unsaved: {{ formatMiB(run.storage.dirtyBytes / 1048576) }}.</span>
       <span v-if="run.storage.dirtySince">Unsaved changes since {{ relativeAge(run.storage.dirtySince, now) }}.</span>
     </p>
     <span v-if="run.pinnedNodeId"> · Fixed node; automatic failover disabled</span>

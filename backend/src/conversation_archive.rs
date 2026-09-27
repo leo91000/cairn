@@ -95,6 +95,30 @@ async fn disk(
             ));
         }
         let value: Value = response.json().await.map_err(Error::internal)?;
+        if action == "delete" || action == "prune" {
+            let (run, node, all, retired) = (
+                run.to_owned(),
+                node.to_owned(),
+                action == "delete",
+                value["retiredGrants"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+            s.store
+                .transaction(move |db| {
+                    for grant in db.list("node-disk-grants")? {
+                        if grant["runId"] == run
+                            && grant["nodeId"] == node
+                            && (all || retired.contains(&grant["id"]))
+                        {
+                            db.remove("node-disk-grants", text(&grant, "id"))?;
+                        }
+                    }
+                    Ok(())
+                })
+                .await?;
+        }
         if remote && action == "export" && value["archivePresent"] == true {
             crate::nodes::archive::transfer(s, &base, &credential, staging, false).await?;
         }

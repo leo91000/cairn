@@ -51,6 +51,7 @@ struct Broker {
     active: Arc<Mutex<HashMap<String, Attempt>>>,
     stop: CancellationToken,
     leases: Arc<Mutex<HashMap<String, u64>>>,
+    migrations: Arc<Mutex<HashMap<String, crate::storage::migration::Capture>>>,
 }
 
 fn normalized(path: &Path) -> bool {
@@ -211,7 +212,6 @@ impl Broker {
             let expired = lease_expired.clone();
             let disk_directory = broker.state.join("disks").join(text(&plan, "runId"));
             let timer = tokio::spawn(async move {
-                let mut storage_paused = false;
                 loop {
                     let lost_lease = leased
                         && owner
@@ -222,36 +222,41 @@ impl Broker {
                             .is_none_or(|d| *d <= crate::nodes::boot_ms());
                     if deadline.is_some_and(|d| now() >= d) || lost_lease {
                         expired.store(lost_lease, Ordering::SeqCst);
+                        // Cancellation releases an in-flight guest thaw before waiting
+                        // for its control lock. The timer never waits unboundedly.
+                        expiry.cancel();
+                        if let Some(volume) = crate::storage::runtime::live(&disk_directory) {
+                            volume.stop.cancel();
+                        }
                         if leased {
-                            let _guard = control.lock().await;
+                            let _guard =
+                                tokio::time::timeout(Duration::from_secs(2), control.lock()).await;
                             let _ = host::pause_attempt(&owner.state, &attempt).await;
-                            expiry.cancel();
-                        } else {
-                            expiry.cancel();
                         }
                         break;
                     }
-                    if let Some(volume) = crate::storage::runtime::live(&disk_directory) {
-                        let blocked = volume
-                            .status()
-                            .map(|v| !v["waitingFor"].is_null())
-                            .unwrap_or(true);
-                        if blocked != storage_paused {
-                            let _guard = control.lock().await;
-                            if expiry.is_cancelled() {
-                                break;
-                            }
+                    if let Some(volume) = crate::storage::runtime::live(&disk_directory)
+                        && let Ok(_guard) = control.try_lock()
+                    {
+                        if expiry.is_cancelled() {
+                            break;
+                        }
+                        let blocked = tokio::select! {
+                            _ = expiry.cancelled() => break,
+                            value = tokio::time::timeout(Duration::from_secs(1), volume.needs_pause()) => value.ok().and_then(std::result::Result::ok).unwrap_or(true),
+                        };
+                        if blocked != volume.paused() {
                             let result = if blocked {
                                 host::pause_attempt(&owner.state, &attempt).await
                             } else {
                                 host::resume_attempt(&owner.state, &attempt).await
                             };
                             if result.is_ok() {
-                                storage_paused = blocked;
+                                volume.set_paused(blocked);
                             }
                         }
                     }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                 }
             });
             let result = reservation.execute(plan, socket, stop).await;
@@ -461,8 +466,14 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
     if let ["snapshots", snapshot, hash] = segments.as_slice() {
         uuid(snapshot)?;
         let directory = broker.state.join("snapshots").join(snapshot);
+        let mut migrations = broker.migrations.lock().await;
+        if let Some(capture) = migrations.get_mut(*snapshot) {
+            capture.touched = tokio::time::Instant::now();
+        }
         if request.method() == "DELETE" && *hash == "discard" {
-            tokio::fs::remove_dir_all(directory).await?;
+            if migrations.remove(*snapshot).is_none() {
+                tokio::fs::remove_dir_all(directory).await?;
+            }
             return Ok(Json(json!({"ok":true})).into_response());
         }
         if request.method() != "GET" {
@@ -471,11 +482,17 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
         let bytes = crate::nodes::snapshots::served(&directory, hash).await?;
         return Ok(([("content-length", bytes.len().to_string())], bytes).into_response());
     }
-    if let ["disks", run, "snapshot"] = segments.as_slice() {
+    if let [
+        "disks",
+        run,
+        operation @ ("snapshot" | "migration-snapshot"),
+    ] = segments.as_slice()
+    {
         uuid(run)?;
         if request.method() != "POST" {
             return Err(Error::new(405, "Method not allowed."));
         }
+        let migration = *operation == "migration-snapshot";
         let run = (*run).to_owned();
         let baseline = snapshot_baseline(request).await?;
         if broker
@@ -489,6 +506,16 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
                 409,
                 "Use the active attempt for a running VM snapshot.",
             ));
+        }
+        if migration {
+            let mut migrations = broker.migrations.lock().await;
+            // A new request supersedes an abandoned transfer for this stopped run.
+            migrations.retain(|_, capture| capture.value["runId"] != run);
+            let mut capture = crate::storage::migration::capture(&broker.state, &run).await?;
+            capture.value["runId"] = run.into();
+            let value = capture.value.clone();
+            migrations.insert(text(&value, "id").into(), capture);
+            return Ok(Json(value).into_response());
         }
         let state = broker.state.clone();
         let stop = broker.stop.child_token();
@@ -515,9 +542,9 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
         if !crate::storage::runtime::exists(&directory) {
             return Ok(Json(json!({"mode":"local"})).into_response());
         }
-        let volume = crate::storage::runtime::open(&directory)?;
+        let volume = crate::storage::runtime::load(&directory).await?;
         if *operation == "storage-status" {
-            return Ok(Json(volume.status()?).into_response());
+            return Ok(Json(volume.inspect().await?).into_response());
         }
         let bytes = axum::body::to_bytes(request.into_body(), 16384)
             .await
@@ -536,6 +563,23 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
             .await
             .map_err(Error::internal)??;
         return Ok(Json(json!({"committed":true})).into_response());
+    }
+    if let ["disks", run, "migrate"] = segments.as_slice() {
+        uuid(run)?;
+        if request.method() != "POST" {
+            return Err(Error::new(405, "Method not allowed."));
+        }
+        let directory = broker.state.join("disks").join(run);
+        let bytes = axum::body::to_bytes(
+            request.into_body(),
+            crate::nodes::snapshots::MAX_MANIFEST_BYTES,
+        )
+        .await
+        .map_err(|_| Error::bad("Migration request too large."))?;
+        let value = serde_json::from_slice(&bytes)?;
+        return Ok(
+            Json(crate::storage::migration::install(&directory, value).await?).into_response(),
+        );
     }
     if let ["disks", run, "restore"] = segments.as_slice() {
         let run = (*run).to_owned();
@@ -577,6 +621,7 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
             crate::file_lock::exclusive(&directory.join("lock"), "The workspace is still in use.")?;
         let disk = directory.join("data.ext4");
         if action == "prune" {
+            let mut retired_grants = Vec::new();
             // Older copies set aside when a recovery point replaced this disk.
             let mut entries = tokio::fs::read_dir(&directory).await?;
             while let Some(entry) = entries.next_entry().await? {
@@ -584,12 +629,16 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
                     continue;
                 }
                 if entry.file_type().await?.is_dir() {
+                    if entry.path().join("journal.sqlite").exists() {
+                        let context = crate::storage::LazyDisk::context(&entry.path())?;
+                        retired_grants.push(crate::auth::digest(text(&context, "grant")));
+                    }
                     tokio::fs::remove_dir_all(entry.path()).await?;
                 } else {
                     tokio::fs::remove_file(entry.path()).await?;
                 }
             }
-            return Ok(Json(json!({"pruned":true})).into_response());
+            return Ok(Json(json!({"pruned":true,"retiredGrants":retired_grants})).into_response());
         }
         if action == "delete" {
             match tokio::fs::remove_file(&disk).await {
@@ -622,7 +671,7 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
         }
         if action == "export" {
             let mounted = if crate::storage::runtime::exists(&directory) {
-                Some(crate::storage::runtime::mount_export(&directory)?)
+                Some(crate::storage::runtime::mount_export(&directory).await?)
             } else {
                 None
             };
@@ -933,8 +982,21 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         pool,
         active: Default::default(),
         leases: Default::default(),
+        migrations: Default::default(),
         stop: stop.clone(),
     };
+    let captures = broker.migrations.clone();
+    let captures_stop = stop.clone();
+    let capture_cleanup = tokio::spawn(async move {
+        loop {
+            tokio::select! { _ = captures_stop.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(30)) => {} }
+            captures
+                .lock()
+                .await
+                .retain(|_, capture| capture.touched.elapsed() < Duration::from_secs(300));
+        }
+        captures.lock().await.clear();
+    });
     let draining = broker.clone();
     let address = std::env::var("RUNNER_BIND").unwrap_or_else(|_| "0.0.0.0:4311".into());
     let listener = tokio::net::TcpListener::bind(address).await?;
@@ -954,6 +1016,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     for id in attempts {
         draining.stop(&id).await?;
     }
+    let _ = capture_cleanup.await;
     let _ = preparation.await;
     draining.pool.drain().await;
     drop(controller);
@@ -1094,6 +1157,7 @@ mod tests {
             pool,
             active: Default::default(),
             leases: Default::default(),
+            migrations: Default::default(),
             stop,
         };
         let app = Router::new().fallback(any(handler)).with_state(broker);

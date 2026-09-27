@@ -25,6 +25,7 @@ pub struct Volume {
     policy: Policy,
     pressure: AtomicBool,
     fault: AtomicBool,
+    paused: AtomicBool,
 }
 impl Drop for Volume {
     fn drop(&mut self) {
@@ -35,7 +36,7 @@ pub fn exists(directory: &Path) -> bool {
     directory.join("lazy/journal.sqlite").exists()
 }
 pub fn live(directory: &Path) -> Option<Arc<Volume>> {
-    registry().lock().ok()?.get(directory)?.upgrade()
+    registry().try_lock().ok()?.get(directory)?.upgrade()
 }
 pub fn open(directory: &Path) -> Result<Arc<Volume>> {
     let mut registry = registry().lock().map_err(Error::internal)?;
@@ -61,11 +62,42 @@ pub fn open(directory: &Path) -> Result<Arc<Volume>> {
         policy,
         pressure: AtomicBool::new(false),
         fault: AtomicBool::new(false),
+        paused: AtomicBool::new(false),
     });
     registry.insert(directory.to_owned(), Arc::downgrade(&volume));
     Ok(volume)
 }
+async fn blocking<T: Send + 'static>(
+    operation: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    static IO: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
+    let permit = IO.acquire().await.map_err(Error::internal)?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        operation()
+    })
+    .await
+    .map_err(Error::internal)?
+}
+pub async fn load(directory: &Path) -> Result<Arc<Volume>> {
+    let directory = directory.to_owned();
+    blocking(move || open(&directory)).await
+}
 impl Volume {
+    pub fn paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
+    }
+    pub fn set_paused(&self, value: bool) {
+        self.paused.store(value, Ordering::SeqCst);
+    }
+    pub async fn inspect(self: &Arc<Self>) -> Result<Value> {
+        let volume = self.clone();
+        blocking(move || volume.status()).await
+    }
+    pub async fn needs_pause(self: &Arc<Self>) -> Result<bool> {
+        let volume = self.clone();
+        blocking(move || Ok(!volume.health()?["waitingFor"].is_null())).await
+    }
     fn policy(&self) -> io::Result<Policy> {
         let state = self
             .directory
@@ -83,6 +115,12 @@ impl Volume {
         }
     }
     pub fn status(&self) -> Result<Value> {
+        let mut status = self.health()?;
+        status["localBytes"] = allocated(&self.directory)?.into();
+        status["activeLocalBytes"] = allocated(&self.directory.join("lazy"))?.into();
+        Ok(status)
+    }
+    fn health(&self) -> Result<Value> {
         let mut status = self.disk.accounting()?;
         let state = self
             .directory
@@ -111,8 +149,6 @@ impl Volume {
         status["grantId"] = self.source.grant_id().into();
         status["waitingFor"] = json!(reason);
         status["freeBytes"] = free.into();
-        status["localBytes"] = allocated(&self.directory)?.into();
-        status["activeLocalBytes"] = allocated(&self.directory.join("lazy"))?.into();
         status["reserveBytes"] = policy.reserve(total).into();
         status["backupSeconds"] = policy.backup_seconds.into();
         Ok(status)
@@ -180,6 +216,49 @@ fn allocated(directory: &Path) -> io::Result<u64> {
     Ok(total)
 }
 
+/// Exceptional local materialization for existing ext4 resizing tools. The caller
+/// holds the conversation disk lock. Failure leaves the journal authoritative.
+pub async fn materialize(directory: &Path, stop: &CancellationToken) -> Result<()> {
+    let volume = load(directory).await?;
+    let cancel_reads = volume.stop.clone().drop_guard();
+    let (total, free) = super::policy::space(directory)?;
+    let required = volume
+        .disk
+        .size()
+        .saturating_add(volume.policy()?.reserve(total));
+    if free < required {
+        return Err(Error::new(
+            507,
+            format!(
+                "Disk resize needs {} additional local bytes for materialization.",
+                required - free
+            ),
+        ));
+    }
+    let staging = tempfile::Builder::new()
+        .prefix("materialize-")
+        .tempdir_in(directory)?;
+    let target = staging.path().join("data.ext4");
+    let copy = target.clone();
+    let disk = volume.disk.clone();
+    let writer = tokio::task::spawn_blocking(move || super::export(disk.as_ref(), &copy));
+    tokio::select! {
+        _ = stop.cancelled() => { return Err(Error::new(409, "Disk materialization cancelled.")); },
+        result = writer => result.map_err(Error::internal)??,
+    }
+    tokio::fs::rename(target, directory.join("data.ext4")).await?;
+    std::fs::File::open(directory)?.sync_all()?;
+    drop(cancel_reads);
+    drop(volume);
+    tokio::fs::rename(
+        directory.join("lazy"),
+        directory.join(format!("stale-lazy-{}", crate::config::id())),
+    )
+    .await?;
+    std::fs::File::open(directory)?.sync_all()?;
+    Ok(())
+}
+
 /// A cold archive streams the mounted view without another full raw disk copy.
 pub struct ExportMount {
     pub path: PathBuf,
@@ -212,8 +291,8 @@ impl Drop for ExportMount {
         }
     }
 }
-pub fn mount_export(directory: &Path) -> Result<ExportMount> {
-    let volume = open(directory)?;
+pub async fn mount_export(directory: &Path) -> Result<ExportMount> {
+    let volume = load(directory).await?;
     let path = directory.join(format!("export-{}", crate::config::id()));
     std::fs::create_dir(&path)?;
     let mounted = super::fuse::mount_disk(volume.disk.clone(), &path, unsafe { libc::geteuid() })?;
