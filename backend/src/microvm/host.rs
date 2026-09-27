@@ -559,41 +559,7 @@ impl Vm {
         if disk_dir.join("restore.pending").exists() {
             return Err(Error::new(409, "VM restore is incomplete."));
         }
-        let disk = disk_dir.join("data.ext4");
-        if !disk.exists() {
-            crate::nodes::tracking::invalidate(&disk_dir).await?;
-            let file = tokio::fs::File::create(disk_dir.join("data.partial")).await?;
-            file.set_len(resources.disk_mi_b * 1024 * 1024).await?;
-            drop(file);
-            command(
-                "mkfs.ext4",
-                &["-q", "-F", disk_dir.join("data.partial").to_str().unwrap()],
-            )
-            .await?;
-            tokio::fs::rename(disk_dir.join("data.partial"), &disk).await?;
-        }
-        let actual = tokio::fs::metadata(&disk).await?.len();
-        let desired = resources.disk_mi_b * 1024 * 1024;
-        if desired < actual {
-            return Err(Error::new(409, "A retained VM disk cannot be shrunk."));
-        }
-        if desired > actual {
-            // resize2fs writes outside the guest's write tracking.
-            crate::nodes::tracking::invalidate(&disk_dir).await?;
-            tokio::fs::OpenOptions::new()
-                .write(true)
-                .open(&disk)
-                .await?
-                .set_len(desired)
-                .await?;
-            command(
-                "resize2fs",
-                &[disk
-                    .to_str()
-                    .ok_or_else(|| Error::bad("Invalid disk path."))?],
-            )
-            .await?;
-        }
+        let disk = crate::storage::prepare(&disk_dir, resources.disk_mi_b * 1024 * 1024).await?;
         let uid = 40000 + slot as u32;
         let jail = state.join("jails/firecracker").join(&id).join("root");
         let socket = jail.join("v.sock");
