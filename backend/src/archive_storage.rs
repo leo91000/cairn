@@ -17,6 +17,7 @@ use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 type PendingRead = OnceCell<Result<bytes::Bytes>>;
 type ReadKey = (String, String, u64, Option<String>, String);
+pub(crate) const HOT_WRITE_CONCURRENCY: usize = 4;
 
 #[derive(PartialEq, Eq)]
 struct ClientKey {
@@ -40,7 +41,7 @@ impl HotS3 {
         Self {
             client: Mutex::new(None),
             reads: Semaphore::new(8),
-            writes: Semaphore::new(4),
+            writes: Semaphore::new(HOT_WRITE_CONCURRENCY),
             pending: Mutex::new(HashMap::new()),
         }
     }

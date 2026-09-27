@@ -127,6 +127,7 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
         let mut seen=HashSet::new();let mut uploaded=0u64;let mut occupied=used(s).await?;
         let budget=settings["budgetMiB"].as_u64().unwrap_or(102400)*1024*1024;
         let memory_only=storage.is_some() && local_demand(s).await?;
+        let mut uploads = tokio::task::JoinSet::<Result<()>>::new();
         for block in manifest["blocks"].as_array().unwrap() {
             let Some(hash)=block["hash"].as_str() else {continue};
             if !seen.insert(hash.to_owned()) {continue;}
@@ -149,11 +150,18 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
                     Ok(encoded)
                 }).await.map_err(Error::internal)??;
                 if memory_only {
-                    let storage=storage.as_ref().unwrap();
-                    storage.upload_bytes(encoded,&key(run_id,hash)).await?;
+                    let storage=storage.as_ref().unwrap().clone();
                     let location=json!({"destination":"s3","bucket":storage.bucket,"endpoint":storage.endpoint});
                     let mark=receipt(&file,&location)?;
-                    crate::skills::atomic_write(&mark,&serde_json::to_vec(&location)?).await?;
+                    let receipt_bytes=serde_json::to_vec(&location)?;
+                    let remote_key=key(run_id,hash);
+                    uploads.spawn(async move {
+                        storage.upload_bytes(encoded,&remote_key).await?;
+                        crate::skills::atomic_write(&mark,&receipt_bytes).await
+                    });
+                    if uploads.len() >= crate::archive_storage::HOT_WRITE_CONCURRENCY {
+                        uploads.join_next().await.unwrap().map_err(Error::internal)??;
+                    }
                     uploaded+=length;
                     continue;
                 }
@@ -176,11 +184,24 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
                 let mark=receipt(&file,&location)?;
                 if !mark.exists() {
                     // Verify before copying an existing block to a new destination.
-                    if !verified {decode_block(s,run_id,hash,tokio::fs::read(&file).await?).await?;}
-                    upload_verified(storage,&file,&key(run_id,hash)).await?;crate::skills::atomic_write(&mark,&serde_json::to_vec(&location)?).await?;
+                    let encoded=tokio::fs::read(&file).await?;
+                    if !verified {decode_block(s,run_id,hash,encoded.clone()).await?;}
+                    let receipt_bytes=serde_json::to_vec(&location)?;
+                    let remote_key=key(run_id,hash);
+                    let storage=storage.clone();
+                    uploads.spawn(async move {
+                        storage.upload_bytes(encoded,&remote_key).await?;
+                        crate::skills::atomic_write(&mark,&receipt_bytes).await
+                    });
+                    if uploads.len() >= crate::archive_storage::HOT_WRITE_CONCURRENCY {
+                        uploads.join_next().await.unwrap().map_err(Error::internal)??;
+                    }
                 }
 
             }
+        }
+        while let Some(upload) = uploads.join_next().await {
+            upload.map_err(Error::internal)??;
         }
         let backup_id=id();
         let value=json!({"id":backup_id,"snapshotId":snapshot_id,"runId":run_id,"nodeId":checkpoint["nodeId"],"createdAt":now(),"capturedAt":manifest["capturedAt"],"diskGeneration":manifest["generation"],"sessionId":run["sessionId"],"destination":destination,"bucket":storage.as_ref().map(|s|s.bucket.clone()),"endpoint":storage.as_ref().and_then(|s|s.endpoint.clone()),"uploadedBytes":uploaded,"pauseMs":manifest["pauseMs"],"indexMs":manifest["indexMs"],"localBytesRead":manifest["localBytesRead"],"incremental":manifest["incremental"],"manifest":s.vault.encrypt(&format!("backup:{backup_id}"),manifest)?});
