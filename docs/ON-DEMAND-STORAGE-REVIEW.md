@@ -30,5 +30,9 @@ Aucun écart matériel restant identifié dans les contre-revues ciblées.
 - L'expiration du droit d'exécution annule les opérations avant toute attente
   bornée du verrou. Le dégel ne conserve plus ce verrou pendant une lecture bloquée.
 
+- Une reprise préempte la capture et la vérification de migration ; une bascule
+  déjà engagée termine avant le démarrage. La déconnexion HTTP ne coupe pas cette
+  bascule. La contre-revue ciblée n'identifie plus de course sur le verrou du disque.
+
 Bilan : **Standards 0 constat restant ; Spec 0 écart restant identifié**.
 La revue ne remplace pas les tests et mesures consignés dans le document de validation.

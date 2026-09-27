@@ -8,7 +8,24 @@ import path from 'node:path'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
 
-export async function storageSmoke({ root, docker, name, api, until }) {
+export async function storageSmoke({ root, docker, name, api, until, legacyRunId }) {
+  // A ready migration still holds the original disk. Execution must cancel it
+  // before boot, without requiring a duplicate image or discarding user files.
+  const migration = await (await api(`/disks/${legacyRunId}/migration-snapshot`, 'POST', {})).json()
+  const legacyAttempt = randomUUID()
+  const legacyWorkspace = `/data/runs/${legacyRunId}/workspace`
+  const legacyPlan = { id: legacyAttempt, runId: legacyRunId, expires: null, sandbox: 'yolo', cwd: legacyWorkspace, imports: [{ source: legacyWorkspace, target: legacyWorkspace }], command: ['/usr/local/bin/node', '-e', `require('node:assert/strict').equal(require('node:fs').readFileSync(${JSON.stringify(`${legacyWorkspace}/preserved`)},'utf8'),'uncommitted work');console.log('migration.preempted');setInterval(()=>{},1000)`] }
+  await writeFile(path.join(root, 'data/runner-plans', `${legacyAttempt}.json`), JSON.stringify(legacyPlan))
+  await api(`/runs/${legacyAttempt}`, 'POST')
+  await until(async () => {
+    try {
+      return (await readFile(path.join(root, 'state', `${legacyAttempt}.log`), 'utf8')).split('\n').filter(Boolean).some(line => Buffer.from(JSON.parse(line).data || '', 'base64').toString().includes('migration.preempted'))
+    }
+    catch { return false }
+  })
+  docker('exec', name, 'test', '!', '-d', `/runner-state/snapshots/${migration.id}`)
+  await api(`/runs/${legacyAttempt}`, 'DELETE')
+  await until(async () => (await (await api('/health')).json()).activeRuns === 0)
   const runId = randomUUID()
   const workspace = `/data/runs/${runId}/workspace`
   await mkdir(path.join(root, 'data/runs', runId, 'workspace'), { recursive: true })

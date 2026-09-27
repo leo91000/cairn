@@ -410,7 +410,7 @@ console.log('probe.done');
       return health.activeRuns === 0 && health.pool.ready === 1 && health.pool.occupied === 1
     })
     process.stdout.write(`${JSON.stringify({ mode: 'pool-capacity-cancel-refill', capacity: 5, status: 'passed' })}\n`)
-    await storageSmoke({ root, docker, name, api, until })
+    await storageSmoke({ root, docker, name, api, until, legacyRunId: runId })
   }
   catch (error) {
     console.error(error)

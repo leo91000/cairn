@@ -104,12 +104,6 @@ pub async fn monitor(s: Arc<Service>) {
     }
 }
 pub async fn migrate_one(s: &Service) -> Result<bool> {
-    // Archives and migrations cannot erase or replace each other's disk state.
-    let _storage = match crate::conversation_lifecycle::storage_lock(&s.config.data_dir) {
-        Ok(lock) => lock,
-        Err(e) if e.status == 409 => return Ok(false),
-        Err(e) => return Err(e),
-    };
     let nodes = s.store.list("nodes").await?;
     for chat in s.store.list("chats").await? {
         if crate::conversation_lifecycle::state(&chat) != "active" {
@@ -165,6 +159,14 @@ pub async fn migrate_one(s: &Service) -> Result<bool> {
             let point=super::backups::capture(s,&run).await?;
             let point=s.get("node-backups",text(&point,"id")).await?;
             let manifest=super::backups::manifest(s,&point).await?;
+            // Only the installation shares the archive lock. Long S3 transfers
+            // must not prevent unrelated conversations from being archived.
+            let _storage=crate::conversation_lifecycle::storage_lock(&s.config.data_dir)?;
+            let current_chat=s.get("chats",text(&chat,"id")).await?;
+            let current_run=s.store.run(run_id).await?;
+            if crate::conversation_lifecycle::state(&current_chat)!="active" || ["queued","running"].contains(&text(&current_run,"status")) {
+                return Err(Error::new(409,"Migration deferred after conversation activity."));
+            }
             let grant=super::disk_grants::issue(s,&run,node,&point).await?;
             controller(s,run_id,"migrate",&json!({"manifest":manifest,"master":s.config.public_url,"grant":grant,"backupId":point["id"],"policy":record["storage"]})).await
         }.await;

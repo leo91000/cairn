@@ -35,6 +35,8 @@ use tokio_util::sync::CancellationToken;
 
 pub const CONTROLLER_INTERRUPTED: i32 = 75;
 
+type PendingMigrations = HashMap<String, (CancellationToken, watch::Receiver<bool>)>;
+
 struct Attempt {
     stop: CancellationToken,
     done: watch::Receiver<bool>,
@@ -52,6 +54,7 @@ struct Broker {
     stop: CancellationToken,
     leases: Arc<Mutex<HashMap<String, u64>>>,
     migrations: Arc<Mutex<HashMap<String, crate::storage::migration::Capture>>>,
+    migration_pending: Arc<Mutex<PendingMigrations>>,
 }
 
 fn normalized(path: &Path) -> bool {
@@ -107,6 +110,24 @@ fn validate(plan: &Value, id: &str, data: &Path) -> Result<()> {
     Ok(())
 }
 impl Broker {
+    async fn begin_migration(&self, run: &str) -> Result<(CancellationToken, watch::Sender<bool>)> {
+        let active = self.active.lock().await;
+        if active.values().any(|attempt| attempt.plan["runId"] == run) {
+            return Err(Error::new(409, "Conversation resumed before migration."));
+        }
+        let mut pending = self.migration_pending.lock().await;
+        if pending
+            .get(run)
+            .is_some_and(|(_, done)| done.has_changed().is_ok())
+        {
+            return Err(Error::new(409, "Migration already in progress."));
+        }
+        let cancel = self.stop.child_token();
+        let (finished, receiver) = watch::channel(false);
+        pending.insert(run.into(), (cancel.clone(), receiver));
+        Ok((cancel, finished))
+    }
+
     async fn start(&self, id: &str) -> Result<()> {
         if self.active.lock().await.contains_key(id) {
             return Ok(());
@@ -179,6 +200,22 @@ impl Broker {
                 "This workspace already has an active attempt.",
             ));
         }
+        // User work preempts background migration. The active lock prevents a
+        // new migration registration until this attempt has claimed the run.
+        let pending_migration = self
+            .migration_pending
+            .lock()
+            .await
+            .get(text(&plan, "runId"))
+            .cloned();
+        if let Some((cancel, mut finished)) = pending_migration {
+            cancel.cancel();
+            let _ = finished.changed().await;
+        }
+        self.migrations
+            .lock()
+            .await
+            .retain(|_, capture| capture.value["runId"] != plan["runId"]);
         let socket = Arc::new(tokio::sync::OnceCell::new());
         let control = Arc::new(Mutex::new(()));
         let stop = self.stop.child_token();
@@ -479,7 +516,12 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
         if request.method() != "GET" {
             return Err(Error::new(405, "Method not allowed."));
         }
-        let bytes = crate::nodes::snapshots::served(&directory, hash).await?;
+        let bytes = if migrations.contains_key(*snapshot) {
+            crate::nodes::snapshots::served(&directory, hash).await?
+        } else {
+            drop(migrations);
+            crate::nodes::snapshots::served(&directory, hash).await?
+        };
         return Ok(([("content-length", bytes.len().to_string())], bytes).into_response());
     }
     if let [
@@ -508,14 +550,32 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
             ));
         }
         if migration {
-            let mut migrations = broker.migrations.lock().await;
-            // A new request supersedes an abandoned transfer for this stopped run.
-            migrations.retain(|_, capture| capture.value["runId"] != run);
-            let mut capture = crate::storage::migration::capture(&broker.state, &run).await?;
-            capture.value["runId"] = run.into();
-            let value = capture.value.clone();
-            migrations.insert(text(&value, "id").into(), capture);
-            return Ok(Json(value).into_response());
+            let (cancel, finished) = broker.begin_migration(&run).await?;
+            broker
+                .migrations
+                .lock()
+                .await
+                .retain(|_, capture| capture.value["runId"] != run);
+            let result = tokio::select! {
+                _ = cancel.cancelled() => Err(Error::new(409, "Migration deferred for conversation execution.")),
+                result = crate::storage::migration::capture(&broker.state, &run) => result,
+            };
+            let result = match result {
+                Ok(mut capture) => {
+                    capture.value["runId"] = run.clone().into();
+                    let value = capture.value.clone();
+                    broker
+                        .migrations
+                        .lock()
+                        .await
+                        .insert(text(&value, "id").into(), capture);
+                    Ok(value)
+                }
+                Err(error) => Err(error),
+            };
+            broker.migration_pending.lock().await.remove(&run);
+            drop(finished); // all original-disk locks have either moved or been released
+            return Ok(Json(result?).into_response());
         }
         let state = broker.state.clone();
         let stop = broker.stop.child_token();
@@ -569,7 +629,8 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
         if request.method() != "POST" {
             return Err(Error::new(405, "Method not allowed."));
         }
-        let directory = broker.state.join("disks").join(run);
+        let run = (*run).to_owned();
+        let directory = broker.state.join("disks").join(&run);
         let bytes = axum::body::to_bytes(
             request.into_body(),
             crate::nodes::snapshots::MAX_MANIFEST_BYTES,
@@ -577,9 +638,16 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
         .await
         .map_err(|_| Error::bad("Migration request too large."))?;
         let value = serde_json::from_slice(&bytes)?;
-        return Ok(
-            Json(crate::storage::migration::install(&directory, value).await?).into_response(),
-        );
+        let (cancel, finished) = broker.begin_migration(&run).await?;
+        // An HTTP disconnect must not interrupt the durable switch after verification.
+        // Foreground execution cancels verification and waits for all disk locks.
+        let task = tokio::spawn(async move {
+            let result = crate::storage::migration::install(&directory, value, cancel).await;
+            broker.migration_pending.lock().await.remove(&run);
+            drop(finished);
+            result
+        });
+        return Ok(Json(task.await.map_err(Error::internal)??).into_response());
     }
     if let ["disks", run, "restore"] = segments.as_slice() {
         let run = (*run).to_owned();
@@ -983,6 +1051,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         active: Default::default(),
         leases: Default::default(),
         migrations: Default::default(),
+        migration_pending: Default::default(),
         stop: stop.clone(),
     };
     let captures = broker.migrations.clone();
@@ -1158,6 +1227,7 @@ mod tests {
             active: Default::default(),
             leases: Default::default(),
             migrations: Default::default(),
+            migration_pending: Default::default(),
             stop,
         };
         let app = Router::new().fallback(any(handler)).with_state(broker);

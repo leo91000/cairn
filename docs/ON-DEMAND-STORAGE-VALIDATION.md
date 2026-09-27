@@ -84,7 +84,10 @@ continuent à prendre en charge les disques historiques.
   verrou de transfert, sans supprimer le disque original.
 - L'installation compare de nouveau le disque au manifeste publié. Une écriture
   entre publication et installation fait reporter la migration. Une répétition
-  après bascule conserve le journal et ses nouvelles écritures.
+  après bascule conserve le journal et ses nouvelles écritures. Une reprise
+  préempte la capture ou la vérification ; si la bascule est déjà engagée, elle
+  attend sa fin. Le test d'interface annule une indexation commencée et vérifie
+  que l'original et son verrou sont immédiatement réutilisables.
 - Les nouveaux environnements sont formatés puis journalisés avant la première
   commande utilisateur. Un redémarrage au milieu de cette préparation conserve
   une source récupérable.
@@ -115,7 +118,8 @@ Vérifications effectuées :
   [le compte rendu](ON-DEMAND-STORAGE-REVIEW.md).
 
 La CI de la dernière PR exécute aussi `tests/runner-storage-smoke.mjs` avec le vrai
-contrôleur et une vraie VM : nouveau disque journalisé, capture/publication,
+contrôleur et une vraie VM : reprise préemptant une capture de migration,
+nouveau disque journalisé, capture/publication,
 restauration dans un répertoire vide, lecture distante en panne puis annulée,
 reprise sans lire les données inutilisées, pause effective des CPU sous pression,
 publication d'urgence puis reprise automatique. Son origine de blocs est HTTP en

@@ -2,7 +2,13 @@
 use crate::error::{Error, Result};
 use serde_json::Value;
 use std::path::Path;
-pub async fn install(directory: &Path, value: Value) -> Result<Value> {
+/// Callers must keep this future alive once the atomic installation starts.
+/// Cancellation interrupts verification; the durable switch always finishes.
+pub async fn install(
+    directory: &Path,
+    value: Value,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<Value> {
     use super::{Disk, LazyDisk, remote::RemoteSource};
     use serde_json::json;
     let _lock = crate::file_lock::exclusive(&directory.join("lock"), "VM disk is active.")?;
@@ -21,7 +27,11 @@ pub async fn install(directory: &Path, value: Value) -> Result<Value> {
     let manifest = &value["manifest"];
     crate::nodes::snapshots::validate(manifest)?;
     let original = directory.join("data.ext4");
-    let current = crate::nodes::snapshots::index(&original).await?;
+    let current = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(Error::new(409, "Migration deferred for conversation execution.")),
+        current = crate::nodes::snapshots::index(&original) => current?,
+    };
     if current["size"] != manifest["size"] || current["blocks"] != manifest["blocks"] {
         return Err(Error::new(
             409,
@@ -150,14 +160,28 @@ mod tests {
         let manifest = crate::nodes::snapshots::index(&raw).await.unwrap();
         let request = json!({"manifest":manifest,"backupId":"published-fixture","master":"http://127.0.0.1:1/","grant":"fixture","policy":super::super::policy::Policy::default()});
         std::fs::write(&raw, vec![9; 4096]).unwrap();
-        assert!(install(&directory, request.clone()).await.is_err());
+        assert!(
+            install(&directory, request.clone(), Default::default())
+                .await
+                .is_err()
+        );
         assert_eq!(std::fs::read(&raw).unwrap(), vec![9; 4096]);
         assert!(!super::super::runtime::exists(&directory));
         std::fs::write(&raw, vec![7; 4096]).unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let interrupted = install(&directory, request.clone(), cancel.clone());
+        tokio::pin!(interrupted);
+        // Start the real asynchronous index, then let foreground work preempt it.
+        assert!(futures_util::poll!(&mut interrupted).is_pending());
+        cancel.cancel();
+        assert!(interrupted.await.is_err());
+        assert_eq!(std::fs::read(&raw).unwrap(), vec![7; 4096]);
+        assert!(!super::super::runtime::exists(&directory));
+        assert!(crate::file_lock::exclusive(&directory.join("lock"), "busy").is_ok());
         // The origin is deliberately offline: installation needs only verified metadata.
         let installed = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            install(&directory, request.clone()),
+            install(&directory, request.clone(), Default::default()),
         )
         .await
         .unwrap()
@@ -167,7 +191,9 @@ mod tests {
         let volume = super::super::runtime::open(&directory).unwrap();
         super::super::Disk::write_at(volume.disk.as_ref(), 3, b"new work").unwrap();
         drop(volume);
-        install(&directory, request).await.unwrap();
+        install(&directory, request, Default::default())
+            .await
+            .unwrap();
         let volume = super::super::runtime::open(&directory).unwrap();
         let mut bytes = [0; 8];
         super::super::Disk::read_at(volume.disk.as_ref(), 3, &mut bytes).unwrap();
