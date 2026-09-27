@@ -9,28 +9,58 @@ use std::{future::Future, path::Path};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
 pub const BLOCK: u64 = 4 * 1024 * 1024;
-pub async fn index(path: &Path) -> Result<Value> {
-    let mut file = tokio::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-        .await?;
-    let size = file.metadata().await?.len();
-    let mut blocks = Vec::new();
-    let mut offset = 0;
-    let mut buffer = vec![0; BLOCK as usize];
-    while offset < size {
-        let length = (size - offset).min(BLOCK) as usize;
-        file.read_exact(&mut buffer[..length]).await?;
-        let hash = if buffer[..length].iter().all(|b| *b == 0) {
-            Value::Null
-        } else {
-            hex::encode(Sha256::digest(&buffer[..length])).into()
-        };
-        blocks.push(json!({"offset":offset,"size":length,"hash":hash}));
-        offset += length as u64;
+/// Next offset at or after `offset` that may hold data. Holes read as zeros, so blocks
+/// entirely inside one need neither reading nor hashing.
+fn next_data(file: &std::fs::File, offset: u64) -> std::io::Result<u64> {
+    use std::os::fd::AsRawFd;
+    let position = unsafe { libc::lseek(file.as_raw_fd(), offset as libc::off_t, libc::SEEK_DATA) };
+    if position >= 0 {
+        return Ok(position as u64);
     }
-    Ok(json!({"version":1,"size":size,"blockSize":BLOCK,"blocks":blocks}))
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        // Only a hole remains after this offset.
+        Some(libc::ENXIO) => Ok(u64::MAX),
+        // A filesystem without hole reporting: treat everything as data.
+        Some(libc::EINVAL) => Ok(offset),
+        _ => Err(error),
+    }
+}
+pub async fn index(path: &Path) -> Result<Value> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || -> Result<Value> {
+        use std::os::unix::fs::{FileExt, OpenOptionsExt};
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)?;
+        let size = file.metadata()?.len();
+        let mut blocks = Vec::new();
+        let mut buffer = vec![0; BLOCK as usize];
+        let (mut offset, mut read, mut data) = (0, 0u64, next_data(&file, 0)?);
+        while offset < size {
+            let length = (size - offset).min(BLOCK) as usize;
+            if data < offset {
+                data = next_data(&file, offset)?;
+            }
+            let hash = if data >= offset + length as u64 {
+                Value::Null
+            } else {
+                file.read_exact_at(&mut buffer[..length], offset)?;
+                read += length as u64;
+                if buffer[..length].iter().all(|b| *b == 0) {
+                    Value::Null
+                } else {
+                    hex::encode(Sha256::digest(&buffer[..length])).into()
+                }
+            };
+            blocks.push(json!({"offset":offset,"size":length,"hash":hash}));
+            offset += length as u64;
+        }
+        Ok(json!({"version":1,"size":size,"blockSize":BLOCK,"blocks":blocks,"localBytesRead":read}))
+    })
+    .await
+    .map_err(Error::internal)?
 }
 pub fn validate(manifest: &Value) -> Result<()> {
     let blocks = manifest["blocks"]

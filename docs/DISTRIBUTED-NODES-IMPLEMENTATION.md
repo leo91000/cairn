@@ -84,7 +84,12 @@ The latest local KVM measurement used a 1 GiB writable disk: 71,303,168 bytes fo
 its base, 25,165,824 bytes for its next increment, a 341 ms second capture pause
 and 17,584 ms of local indexing. This is a small fixture under shared test load,
 not a throughput or recovery-lag guarantee for a full workstation. Local indexing
-still reads the entire disk; only changed nonzero blocks cross the network.
+skips holes with `SEEK_DATA` but still reads every allocated block; only changed
+nonzero blocks cross the network. Continuous and end-of-turn recovery points are
+taken only for conversations on remote nodes: the master runner fails together
+with the master, so its conversations are captured when they move. Tracking the
+written blocks themselves is explored in
+[INCREMENTAL-VM-BACKUP-WRITE-TRACKING.md](INCREMENTAL-VM-BACKUP-WRITE-TRACKING.md).
 
 The VM fixture used published image layers with verified digests and this
 branch's guest binary. It was not a production deployment or two physical hosts.
