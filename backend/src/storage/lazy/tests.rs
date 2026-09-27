@@ -194,3 +194,62 @@ fn partial_write_is_durable_without_fetching_its_remote_base() {
         "a verified clean block should be reused"
     );
 }
+
+#[test]
+#[ignore = "explicit storage interface performance run"]
+fn journal_io_performance() {
+    use std::time::Instant;
+    let root = tempfile::tempdir().unwrap();
+    let size = 4 * 1024 * 1024;
+    let manifest = serde_json::json!({"version":1,"size":size,"blockSize":size,"blocks":[{"offset":0,"size":size,"hash":null}]});
+    let disk = LazyDisk::create(
+        root.path(),
+        &manifest,
+        Arc::new(Source {
+            reads: AtomicUsize::new(0),
+        }),
+    )
+    .unwrap();
+    let started = Instant::now();
+    for index in 0..128 {
+        disk.write_at(index * 4096, &[7; 4096]).unwrap();
+    }
+    let write_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let mut bytes = vec![0; size as usize];
+    let started = Instant::now();
+    for _ in 0..5 {
+        disk.read_at(0, &mut bytes).unwrap();
+    }
+    let read_ms = started.elapsed().as_secs_f64() * 1000.0 / 5.0;
+    assert_eq!(bytes[0], 7);
+    assert_eq!(bytes[128 * 4096], 0);
+    let started = Instant::now();
+    for _ in 0..10 {
+        disk.sync().unwrap();
+    }
+    let sync_ms = started.elapsed().as_secs_f64() * 1000.0 / 10.0;
+    println!(
+        "STORAGE_PERF {}",
+        serde_json::json!({"write128x4kMs":write_ms,"read4MiBMs":read_ms,"syncMs":sync_ms})
+    );
+}
+
+#[test]
+fn overlapping_journal_writes_preserve_latest_bytes_and_zero_gaps() {
+    let root = tempfile::tempdir().unwrap();
+    let manifest = serde_json::json!({"version":1,"size":4096,"blockSize":4194304,"blocks":[{"offset":0,"size":4096,"hash":null}]});
+    let disk = LazyDisk::create(
+        root.path(),
+        &manifest,
+        Arc::new(Source {
+            reads: AtomicUsize::new(0),
+        }),
+    )
+    .unwrap();
+    disk.write_at(4, b"aaaaaaaa").unwrap();
+    disk.write_at(8, b"bbbbbbbb").unwrap();
+    disk.write_at(10, b"cc").unwrap();
+    let mut bytes = [0; 20];
+    disk.read_at(0, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"\0\0\0\0aaaabbccbbbb\0\0\0\0");
+}

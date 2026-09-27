@@ -348,8 +348,12 @@ impl LazyDisk {
 impl LazyDisk {
     fn read_generation(&self, generation: i64, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
         self.check(offset, bytes.len())?;
-        let mut covered = vec![false; bytes.len()];
-        let mut missing = bytes.len();
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        // Newer writes win. Track only the ranges still needing data, so a
+        // multi-megabyte read does not visit every byte once per journal row.
+        let mut missing = vec![(0, bytes.len())];
         let manifest = self.base.lock().map_err(failure)?.clone();
         {
             let db = self.db.lock().map_err(failure)?;
@@ -363,24 +367,37 @@ impl LazyDisk {
                 .map_err(failure)?;
             while let Some(row) = rows.next().map_err(failure)? {
                 let (start, data) = self.cached_record(row)?;
-                let begin = start.max(offset);
-                let end = (start + data.len() as u64).min(offset + bytes.len() as u64);
-                for position in begin..end {
-                    let dest = (position - offset) as usize;
-                    if !covered[dest] {
-                        bytes[dest] = data[(position - start) as usize];
-                        covered[dest] = true;
-                        missing -= 1;
+                let begin = (start.max(offset) - offset) as usize;
+                let end = ((start + data.len() as u64).min(offset + bytes.len() as u64) - offset)
+                    as usize;
+                let mut next = Vec::with_capacity(missing.len() + 1);
+                for (gap_start, gap_end) in missing {
+                    let from = gap_start.max(begin);
+                    let to = gap_end.min(end);
+                    if from < to {
+                        bytes[from..to].copy_from_slice(
+                            &data[(offset + from as u64 - start) as usize
+                                ..(offset + to as u64 - start) as usize],
+                        );
+                        if gap_start < from {
+                            next.push((gap_start, from));
+                        }
+                        if to < gap_end {
+                            next.push((to, gap_end));
+                        }
+                    } else {
+                        next.push((gap_start, gap_end));
                     }
                 }
-                if missing == 0 {
+                missing = next;
+                if missing.is_empty() {
                     break;
                 }
             }
         }
         // Never hold the journal lock across remote I/O. This read observes a
         // consistent journal prefix; later writes are independent of cache arrival.
-        if missing == 0 {
+        if missing.is_empty() {
             return Ok(());
         }
         let end = offset + bytes.len() as u64;
@@ -390,11 +407,18 @@ impl LazyDisk {
             let limit = ((index + 1) * BLOCK).min(end);
             let start = (position - offset) as usize;
             let finish = (limit - offset) as usize;
-            if covered[start..finish].iter().any(|v| !*v) {
+            if missing
+                .iter()
+                .any(|&(from, to)| from < finish && to > start)
+            {
                 let block = self.base_block(&manifest["blocks"][index as usize])?;
-                for dest in start..finish {
-                    if !covered[dest] {
-                        bytes[dest] = block[(offset + dest as u64 - index * BLOCK) as usize];
+                for &(from, to) in &missing {
+                    let from = from.max(start);
+                    let to = to.min(finish);
+                    if from < to {
+                        let block_start = (offset + from as u64 - index * BLOCK) as usize;
+                        bytes[from..to]
+                            .copy_from_slice(&block[block_start..block_start + to - from]);
                     }
                 }
             }
