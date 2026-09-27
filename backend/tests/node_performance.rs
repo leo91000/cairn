@@ -254,21 +254,5 @@ async fn master_reuses_unchanged_blocks() {
     .await
     .unwrap();
     assert_eq!(std::fs::read(root.path().join("restored")).unwrap(), bytes);
-    // New periodic work, measured separately from the capture hot path.
-    let audit_key = format!("node-backup-audit:{run}");
-    s.store
-        .set(&audit_key, json!({"checkedAt":0}), None)
-        .await
-        .unwrap();
-    let before = usage();
-    let started = Instant::now();
-    backups::audit_due(&s).await.unwrap();
-    report(
-        "audit",
-        started.elapsed(),
-        before,
-        json!({"retainedPoints":3,"uniqueBlockBytes":72 * 1024 * 1024}),
-    );
-    assert!(s.store.kv(&audit_key).await.unwrap().unwrap()["error"].is_null());
     task.abort();
 }
