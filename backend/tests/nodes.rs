@@ -2156,3 +2156,33 @@ async fn stale_node_disks_are_reported_and_freed_on_request() {
         .clone();
     assert_eq!(local["staleDisks"], json!({"count":0,"diskMiB":0}));
 }
+
+#[tokio::test]
+async fn only_conversations_on_remote_nodes_take_continuous_recovery_points() {
+    use leo_agent_manager::{
+        config::id,
+        nodes::{LOCAL_NODE_ID, backups},
+    };
+    let owner = Owner::new().await;
+    let mut states = Vec::new();
+    for node in [LOCAL_NODE_ID.to_owned(), id()] {
+        let run = id();
+        let record = json!({"id":run,"taskId":run,"createdAt":0,"status":"running","isolated":true,"sessionId":"session","nodeId":node});
+        owner
+            .service
+            .store
+            .write(move |db| db.add_run(&record, None))
+            .await
+            .unwrap();
+        backups::attempt(
+            &owner.service,
+            &owner.service.store.run(&run).await.unwrap(),
+        )
+        .await;
+        states.push(owner.service.store.run(&run).await.unwrap()["backup"].clone());
+    }
+    // The master runner fails with the master itself; its conversations capture only when they move.
+    assert!(states[0].is_null(), "{}", states[0]);
+    // A remote node can disappear, so its conversation tries to save (and reports why it could not).
+    assert_eq!(states[1]["status"], "error", "{}", states[1]);
+}

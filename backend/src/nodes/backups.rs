@@ -269,7 +269,17 @@ async fn retain(s: &Service, run: &str, count: usize) -> Result<()> {
     Ok(())
 }
 
+/// Continuous recovery points guard against losing a remote node. The master runner fails
+/// together with the master, so its conversations are captured only when they move.
+pub fn protected(run: &Value) -> bool {
+    run["nodeId"]
+        .as_str()
+        .is_some_and(|node| node != super::LOCAL_NODE_ID)
+}
 pub async fn attempt(s: &Service, run: &Value) {
+    if !protected(run) {
+        return;
+    }
     let mut status = run["backup"]
         .as_object()
         .cloned()
@@ -310,6 +320,7 @@ pub async fn maintain(s: std::sync::Arc<Service>) {
             for run in runs {
                 let id = text(&run, "id");
                 if run["status"] != "running"
+                    || !protected(&run)
                     || run["isolated"] != true
                     || !run["sessionId"].is_string()
                     || run["moveRequest"].is_object()

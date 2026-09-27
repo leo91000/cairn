@@ -119,7 +119,6 @@ pub async fn capture(
         manifest["capturedAt"] = captured_at.into();
         manifest["pauseMs"] = pause_ms.into();
         manifest["indexMs"] = (indexed.elapsed().as_millis() as u64).into();
-        manifest["localBytesRead"] = manifest["size"].clone();
         atomic_write(
             &directory.join("manifest.json"),
             &serde_json::to_vec(&manifest)?,

@@ -37,6 +37,50 @@ async fn incremental_snapshots_reuse_unchanged_blocks_and_restore_exact_bytes() 
 }
 
 #[tokio::test]
+async fn holes_are_indexed_as_zero_blocks_without_reading_them() {
+    use std::io::{Seek, SeekFrom, Write};
+    const MIB: u64 = 1024 * 1024;
+    let root = TempDir::new().unwrap();
+    let disk = root.path().join("disk");
+    // A 1 GiB sparse disk with data in two places, like a mostly empty VM disk.
+    let mut file = std::fs::File::create(&disk).unwrap();
+    file.set_len(1024 * MIB).unwrap();
+    file.seek(SeekFrom::Start(3 * MIB)).unwrap();
+    file.write_all(b"workspace").unwrap();
+    file.seek(SeekFrom::Start(700 * MIB)).unwrap();
+    file.write_all(&[7; 4096]).unwrap();
+    file.sync_all().unwrap();
+    let manifest = snapshots::index(&disk).await.unwrap();
+    snapshots::validate(&manifest).unwrap();
+    let hashed = manifest["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|b| b["hash"].is_string())
+        .map(|b| b["offset"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(hashed, vec![0, 700 * MIB / (4 * MIB) * 4 * MIB]);
+    // Only allocated extents are read, not the whole logical size.
+    assert!(
+        manifest["localBytesRead"].as_u64().unwrap() <= 16 * MIB,
+        "{}",
+        manifest["localBytesRead"]
+    );
+    let restored = root.path().join("restored");
+    snapshots::restore(&restored, &manifest, |hash| {
+        let disk = disk.clone();
+        let manifest = manifest.clone();
+        async move { snapshots::block(&disk, &manifest, &hash).await }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read(&restored).unwrap(),
+        std::fs::read(&disk).unwrap()
+    );
+}
+
+#[tokio::test]
 async fn a_lost_pause_acknowledgement_resumes_and_thaws_before_returning_error() {
     use leo_agent_manager::{config::id, nodes::checkpoint};
     use serde_json::json;
