@@ -74,6 +74,7 @@ image = { version = "0.25", default-features = false, features = [
   "webp"
 ] }
 async-trait = "0.1.92"
+fuser = { version = "=0.18.0", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
