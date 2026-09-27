@@ -40,15 +40,20 @@ impl Vault {
         })
     }
     pub fn encrypt(&self, id: &str, value: &Value) -> Result<Value> {
+        Ok(STANDARD
+            .encode(self.encrypt_bytes(id, &serde_json::to_vec(value)?)?)
+            .into())
+    }
+    /// Authenticated binary record: nonce, tag, ciphertext. The id binds its owner/purpose.
+    pub fn encrypt_bytes(&self, id: &str, bytes: &[u8]) -> Result<Vec<u8>> {
         let mut iv = [0; 12];
         rand::rng().fill_bytes(&mut iv);
         let cipher = Aes256Gcm::new_from_slice(self.key.as_ref()).unwrap();
-        let encoded = serde_json::to_vec(value)?;
         let mut encrypted = cipher
             .encrypt(
                 Nonce::from_slice(&iv),
                 Payload {
-                    msg: &encoded,
+                    msg: bytes,
                     aad: id.as_bytes(),
                 },
             )
@@ -57,12 +62,15 @@ impl Vault {
         let mut result = iv.to_vec();
         result.extend(tag);
         result.extend(encrypted);
-        Ok(STANDARD.encode(result).into())
+        Ok(result)
     }
     pub fn decrypt(&self, id: &str, value: &Value) -> Result<Value> {
         let bytes = STANDARD
             .decode(value.as_str().unwrap_or(""))
             .map_err(|_| Error::internal("Invalid encrypted record"))?;
+        Ok(serde_json::from_slice(&self.decrypt_bytes(id, &bytes)?)?)
+    }
+    pub fn decrypt_bytes(&self, id: &str, bytes: &[u8]) -> Result<Vec<u8>> {
         if bytes.len() < 28 {
             return Err(Error::internal("Invalid encrypted record"));
         }
@@ -78,7 +86,7 @@ impl Vault {
                 },
             )
             .map_err(|_| Error::internal("Unable to decrypt credential"))?;
-        Ok(serde_json::from_slice(&plain)?)
+        Ok(plain)
     }
     pub async fn get(&self, id: &str) -> Result<Option<Value>> {
         self.store

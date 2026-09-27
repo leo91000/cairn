@@ -230,6 +230,22 @@ async fn master_reuses_unchanged_blocks() {
                 before,
                 json!({"sample":sample,"uploadedBytes":result["uploadedBytes"]}),
             );
+            if kind == "base" {
+                let blocks = s
+                    .config
+                    .data_dir
+                    .join("node-backups")
+                    .join(&run)
+                    .join("blocks");
+                let stored_bytes: u64 = std::fs::read_dir(blocks)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().metadata().unwrap().len())
+                    .sum();
+                println!(
+                    "NODE_STORAGE {}",
+                    json!({"plaintextBytes":bytes.len(),"storedBlockBytes":stored_bytes})
+                );
+            }
             assert_eq!(
                 result["uploadedBytes"],
                 match kind {

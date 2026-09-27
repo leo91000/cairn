@@ -1480,6 +1480,43 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             .windows(27)
             .any(|v| v == b"private-untracked-contents!")
     );
+    assert!(
+        encrypted.len() <= 4 * 1024 * 1024 + 64,
+        "A 4 MiB backup block occupies {} bytes",
+        encrypted.len()
+    );
+    // A retained point can contain legacy blocks next to new binary blocks.
+    // In S3 mode force the legacy read through remote storage too.
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let block_file = owner
+        .service
+        .config
+        .data_dir
+        .join("node-backups")
+        .join(&run)
+        .join("blocks")
+        .join(block);
+    let key = format!("node-backups/{run}/blocks/{block}");
+    let legacy = owner
+        .service
+        .vault
+        .encrypt(&key, &json!(STANDARD.encode(&original[..4 * 1024 * 1024])))
+        .unwrap();
+    std::fs::write(&block_file, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    if s3.is_some() {
+        leo_agent_manager::archive_storage::Storage::configured(&owner.service)
+            .unwrap()
+            .upload(&block_file, &key)
+            .await
+            .unwrap();
+        std::fs::remove_file(&block_file).unwrap();
+    }
+    assert_eq!(
+        backups::read_block(&owner.service, &retained, block)
+            .await
+            .unwrap(),
+        original[..4 * 1024 * 1024],
+    );
     original[4 * 1024 * 1024] = 2;
     std::fs::write(&source, &original).unwrap();
     let mut second = snapshots::index(&source).await.unwrap();
@@ -2633,7 +2670,9 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
         .await
         .unwrap()
         .unwrap();
-    std::fs::write(&block, b"damaged ciphertext").unwrap();
+    let mut damaged = std::fs::read(&block).unwrap();
+    *damaged.last_mut().unwrap() ^= 1;
+    std::fs::write(&block, damaged).unwrap();
     assert!(
         backups::read_block(&owner.service, &backup, hash)
             .await
