@@ -1,4 +1,13 @@
-# Leo Android 0.39.2 — Historique en défilement infini
+# Leo Android 0.40.0 — Conversation web comme sur Android
+
+- Dans l’application web, le contenu d’une conversation reprend celui de l’application Android : vos messages dans une bulle, les réponses de l’agent en texte sous son nom, et une courte conversation collée au-dessus du champ de saisie.
+- Les actions de l’agent entre deux messages se résument en une phrase, avec le nombre d’étapes et les échecs ; dépliées, elles forment une frise où les lectures consécutives sont regroupées, et chaque étape s’ouvre sur sa commande, sa sortie et ses détails techniques.
+- Les fichiers publiés s’affichent en rail compact sous la réponse. La file d’attente ouvre le champ de saisie, avec « Now » pour le prochain message et ses actions dans une fiche. Le bouton rond du champ envoie, met en file, intervient ou arrête selon le moment, et l’état de connexion flotte au-dessus de la conversation.
+- Changer de conversation sur le web ne fait plus clignoter la page : la liste, l’en-tête et le champ de saisie restent en place.
+- Android : le geste retour quitte de nouveau une exécution ouverte depuis la fiche d’une mission.
+- Aucune modification du serveur n’est nécessaire pour l’application Android.
+
+## Leo Android 0.39.2 — Historique en défilement infini
 
 - Remonter dans une conversation charge l’historique plus ancien automatiquement, plusieurs écrans à l’avance : plus de bouton « Messages précédents ». Les pages qui ne contiennent presque que des actions de l’agent s’enchaînent jusqu’à ce qu’il y ait assez de texte au-dessus.
 - Le texte affiché ne bouge plus quand une page arrive, même pendant un défilement ou un geste rapide. Le groupe d’actions le plus ancien garde sa place quand la page suivante le complète, et une courte conversation reste collée au-dessus du champ de saisie.
