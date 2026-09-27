@@ -21,13 +21,19 @@ Part des ressources d’une node attribuée à une exécution dans les plafonds 
 Changement de node d’exécution d’une même conversation, avec une pause puis une reprise de sa session et de son environnement de travail. Il ne conserve pas les processus en cours ni leur mémoire.
 
 **Environnement de travail d’une conversation** :
-Ensemble des fichiers, outils installés et données locales conservés pour le travail d’une conversation. Il comprend les modifications non publiées des projets et les données nécessaires à leur reprise, au-delà du seul historique des messages.
+Ensemble des fichiers, outils installés et données conservés pour le travail d’une conversation. Il comprend les modifications non publiées des projets et les données nécessaires à leur reprise, au-delà du seul historique des messages.
+
+**Reprise à la demande** :
+Remise en activité d’une conversation dont l’environnement de travail devient accessible progressivement, au fil des besoins de l’agent. Elle permet de reprendre le travail avant que l’ensemble de cet environnement soit disponible sur la node d’exécution.
+
+**Travail non sauvegardé** :
+Part du travail d’une conversation encore conservée uniquement sur sa node d’exécution, après la dernière sauvegarde de reprise disponible. Sa récupération dépend de la conservation de cette node et de ses données.
 
 **Sauvegarde de reprise** :
 Copie datée et cohérente de la session et de l’environnement de travail d’une conversation, permettant sa reprise sur une autre node si la node d’origine est indisponible. Elle ne contient pas nécessairement le travail effectué après sa création et se distingue de l’archivage d’une conversation.
 
 **Conversation archivée** :
-Une conversation conservée hors du stockage principal pour libérer de l’espace, dont une entrée reste visible dans l’application. Elle conserve l’historique, les fichiers et le contexte de travail nécessaires à sa reprise après restauration.
+Une conversation conservée à part des conversations actives, dont une entrée reste visible dans l’application. Elle conserve l’historique, les fichiers et le contexte de travail nécessaires à sa reprise après restauration, éventuellement depuis un stockage froid. La libération de sa copie locale ne suffit pas à archiver une conversation : celle-ci peut rester active et reprenable à la demande.
 
 **Inactivité d’une conversation** :
 Période écoulée depuis le dernier échange ou travail de l’agent ; une simple consultation ne la réinitialise pas. Une conversation avec un travail en cours, une réponse attendue ou des messages à exécuter, même en pause, n’est pas éligible à l’archivage automatique.

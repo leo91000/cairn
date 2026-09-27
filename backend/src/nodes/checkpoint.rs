@@ -91,7 +91,7 @@ pub async fn capture(
             plan = Plan::from_seal(&disk, known.as_ref()).await;
         }
         if let Some(blocks) = &plan.written {
-            read = copy_blocks(&disk.join("data.ext4"), &directory.join("disk"), blocks).await?;
+            read = crate::storage::copy_blocks(&disk.join("data.ext4"), &directory.join("disk"), blocks).await?;
             let present = blocks.iter().map(|block| block * BLOCK).collect::<Vec<_>>();
             atomic_write(&directory.join("present.json"), &serde_json::to_vec(&present)?).await?;
             return Ok(());
@@ -220,32 +220,6 @@ impl Plan {
             written,
         }
     }
-}
-/// Copies the listed blocks of the paused disk to a sparse file of the same size.
-async fn copy_blocks(source: &Path, target: &Path, blocks: &[u64]) -> Result<u64> {
-    let (source, target, blocks) = (source.to_owned(), target.to_owned(), blocks.to_owned());
-    tokio::task::spawn_blocking(move || -> Result<u64> {
-        use std::os::unix::fs::FileExt;
-        let input = std::fs::File::open(&source)?;
-        let size = input.metadata()?.len();
-        let output = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&target)?;
-        output.set_len(size)?;
-        let (mut buffer, mut read) = (vec![0; BLOCK as usize], 0);
-        for block in blocks {
-            let offset = block * BLOCK;
-            let length = size.saturating_sub(offset).min(BLOCK) as usize;
-            input.read_exact_at(&mut buffer[..length], offset)?;
-            output.write_all_at(&buffer[..length], offset)?;
-            read += length as u64;
-        }
-        output.sync_all()?;
-        Ok(read)
-    })
-    .await
-    .map_err(Error::internal)?
 }
 async fn guest(socket: &Path, request: Value) -> Result<Value> {
     tokio::time::timeout(

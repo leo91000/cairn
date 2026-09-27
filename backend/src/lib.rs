@@ -57,3 +57,5 @@ pub mod github_projects;
 
 pub mod archive_storage;
 pub mod conversation_archive;
+
+pub mod storage;
