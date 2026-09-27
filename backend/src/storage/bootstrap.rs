@@ -62,6 +62,7 @@ pub async fn prepare(directory: &Path, size: u64, context: &Value) -> Result<()>
             }
             let offset = block["offset"].as_u64().unwrap();
             let mut bytes = vec![0; block["size"].as_u64().unwrap() as usize];
+            let _admission = super::cache::admission()?;
             let (total, free) = super::policy::space(raw.parent().unwrap())?;
             if free <= policy.reserve(total) + bytes.len() as u64 * 4 + 1048576 {
                 return Err(Error::new(

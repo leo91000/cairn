@@ -14,14 +14,16 @@ pub(crate) fn reserve(
     policy: &Policy,
     incoming: u64,
 ) -> io::Result<Option<MutexGuard<'static, ()>>> {
-    let guard = EVICTION
-        .lock()
-        .map_err(|e| io::Error::other(e.to_string()))?;
+    let guard = admission()?;
     if evict(state, policy, incoming)? {
         Ok(Some(guard))
     } else {
         Ok(None)
     }
+}
+/// Shared admission for clean fills and durable writes on this controller.
+pub(crate) fn admission() -> io::Result<MutexGuard<'static, ()>> {
+    EVICTION.lock().map_err(|e| io::Error::other(e.to_string()))
 }
 fn evict(state: &Path, policy: &Policy, incoming: u64) -> io::Result<bool> {
     let (total, free) = space(state)?;

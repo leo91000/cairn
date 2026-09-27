@@ -173,14 +173,11 @@ impl Disk for Volume {
     fn write_at(&self, offset: u64, bytes: &[u8]) -> io::Result<()> {
         // Serialized admission across the node closes the free-space race between
         // concurrent writers. Space for SQLite WAL/pages is reserved conservatively.
-        static WRITERS: Mutex<()> = Mutex::new(());
         loop {
             if self.stop.is_cancelled() {
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "Disk stopped"));
             }
-            let guard = WRITERS
-                .lock()
-                .map_err(|e| io::Error::other(e.to_string()))?;
+            let guard = super::cache::admission()?;
             let (total, free) = super::policy::space(&self.directory)?;
             if free
                 > self

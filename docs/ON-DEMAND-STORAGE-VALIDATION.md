@@ -28,7 +28,7 @@ et synchronisation.
 Résultat :
 
 ```json
-{ "coldFetchedBytes": 16777216, "guestReadyMs": 15594, "guestSyncSurvivedKill": true, "remoteNonzeroBytes": 71303168, "virtualDiskBytes": 268435456 }
+{ "coldFetchedBytes": 16777216, "guestReadyMs": 5761, "guestSyncSurvivedKill": true, "remoteNonzeroBytes": 71303168, "virtualDiskBytes": 268435456 }
 ```
 
 Le marqueur de disponibilité est émis après lecture, modification et synchronisation
@@ -97,8 +97,33 @@ continuent à prendre en charge les disques historiques.
   réserve normale pour sortir d'une pression disque ; elle exige encore 32 Mio
   libres plus trois fois le bloc chiffré en cours.
 
-Vérifications déjà effectuées : 260 tests frontend dans 37 fichiers ; suite S3
-chiffrée contre Moto 5.2.3 (envoi, vérification, relais sortant, réparation d'objet
-manquant, rétention et purge) ; interface du journal, pression disque annulable,
-migration sans téléchargement et politiques d'archivage. Les derniers résultats
-backend, FUSE et CI sont consignés après la revue de la stack.
+Vérifications effectuées :
+
+- Suite backend complète : **248 réussites**, quatre tests optionnels ignorés.
+- Frontend : **260 réussites** dans 37 fichiers ; vérification TypeScript réussie.
+- Suite S3 chiffrée contre Moto **5.2.3** : envoi, vérification, relais sortant,
+  réparation d'objet manquant, rétention et purge. Le scénario supplémentaire
+  impose une réserve impossible à satisfaire : la publication et la lecture par
+  mémoire réussissent sans conserver un second cache sur le master local.
+- Test HTTP des droits : ancien propriétaire refusé, deux instances séparées,
+  reçu ancien ignoré et publication suivante conservée pendant la réconciliation
+  d'un acquittement perdu.
+- Interface du journal : durabilité, générations concurrentes, panne et annulation,
+  corruption, réserve disque et reprise, migration sans téléchargement.
+- Vrai Firecracker/jailer : résultat ci-dessus, refait sur le code final.
+- Revue Standards et Spec : aucun constat restant après corrections ; voir
+  [le compte rendu](ON-DEMAND-STORAGE-REVIEW.md).
+
+La CI de la dernière PR exécute aussi `tests/runner-storage-smoke.mjs` avec le vrai
+contrôleur et une vraie VM : nouveau disque journalisé, capture/publication,
+restauration dans un répertoire vide, lecture distante en panne puis annulée,
+reprise sans lire les données inutilisées, pause effective des CPU sous pression,
+publication d'urgence puis reprise automatique. Son origine de blocs est HTTP en
+boucle locale. Le résultat de ce parcours et les contrôles de l'image sont visibles
+sur la PR ; ce document ne revendique pas un benchmark avec un fournisseur S3.
+
+Sur les nodes locales activées, le master transfère les blocs en mémoire et nettoie
+ses anciennes copies S3 évictables ; le seul cache propre persistant est celui du
+contrôleur. Les anciennes sauvegardes dont le master est la seule copie restent
+protégées. Les remplissages du cache et les écritures du journal partagent le même
+verrou d'admission d'espace sur le contrôleur.
