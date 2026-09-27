@@ -209,7 +209,9 @@ impl Broker {
             let attempt = id.clone();
             let lease_expired = Arc::new(AtomicBool::new(false));
             let expired = lease_expired.clone();
+            let disk_directory = broker.state.join("disks").join(text(&plan, "runId"));
             let timer = tokio::spawn(async move {
+                let mut storage_paused = false;
                 loop {
                     let lost_lease = leased
                         && owner
@@ -228,6 +230,26 @@ impl Broker {
                             expiry.cancel();
                         }
                         break;
+                    }
+                    if let Some(volume) = crate::storage::runtime::live(&disk_directory) {
+                        let blocked = volume
+                            .status()
+                            .map(|v| !v["waitingFor"].is_null())
+                            .unwrap_or(true);
+                        if blocked != storage_paused {
+                            let _guard = control.lock().await;
+                            if expiry.is_cancelled() {
+                                break;
+                            }
+                            let result = if blocked {
+                                host::pause_attempt(&owner.state, &attempt).await
+                            } else {
+                                host::resume_attempt(&owner.state, &attempt).await
+                            };
+                            if result.is_ok() {
+                                storage_paused = blocked;
+                            }
+                        }
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
@@ -411,6 +433,28 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
         .trim_start_matches('/')
         .split('/')
         .collect::<Vec<_>>();
+    if segments.as_slice() == ["storage-policy"] {
+        if request.method() != "POST" {
+            return Err(Error::new(405, "Method not allowed."));
+        }
+        let bytes = axum::body::to_bytes(request.into_body(), 16384)
+            .await
+            .map_err(|_| Error::bad("Invalid storage policy."))?;
+        let policy: crate::storage::policy::Policy = serde_json::from_slice(&bytes)?;
+        policy.validate()?;
+        if policy.enabled {
+            let state = broker.state.clone();
+            tokio::task::spawn_blocking(move || crate::storage::fuse::probe(&state))
+                .await
+                .map_err(Error::internal)??;
+        }
+        atomic_write(
+            &broker.state.join("storage-policy.json"),
+            &serde_json::to_vec(&policy)?,
+        )
+        .await?;
+        return Ok(Json(json!({"ready":true})).into_response());
+    }
     if segments.first() == Some(&"archive-transfers") {
         return crate::nodes::archive::controller(&broker.data, request).await;
     }
@@ -461,6 +505,32 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
             .await
         });
         return Ok(Json(task.await.map_err(Error::internal)??).into_response());
+    }
+    if let ["disks", run, operation @ ("storage-status" | "published")] = segments.as_slice() {
+        uuid(run)?;
+        if request.method() != "POST" {
+            return Err(Error::new(405, "Method not allowed."));
+        }
+        let directory = broker.state.join("disks").join(run);
+        if !crate::storage::runtime::exists(&directory) {
+            return Ok(Json(json!({"mode":"local"})).into_response());
+        }
+        let volume = crate::storage::runtime::open(&directory)?;
+        if *operation == "storage-status" {
+            return Ok(Json(volume.status()?).into_response());
+        }
+        let bytes = axum::body::to_bytes(request.into_body(), 16384)
+            .await
+            .map_err(|_| Error::bad("Invalid publication receipt."))?;
+        let value: Value = serde_json::from_slice(&bytes)?;
+        let generation = value["generation"]
+            .as_i64()
+            .ok_or_else(|| Error::bad("Missing generation."))?;
+        let disk = volume.disk.clone();
+        tokio::task::spawn_blocking(move || disk.commit_published(generation))
+            .await
+            .map_err(Error::internal)??;
+        return Ok(Json(json!({"committed":true})).into_response());
     }
     if let ["disks", run, "restore"] = segments.as_slice() {
         let run = (*run).to_owned();
@@ -546,17 +616,29 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
             return Err(Error::bad("Invalid workspace transfer directory."));
         }
         if action == "export" {
-            if disk.exists() {
+            let mounted = if crate::storage::runtime::exists(&directory) {
+                Some(crate::storage::runtime::mount_export(&directory)?)
+            } else {
+                None
+            };
+            let source = mounted
+                .as_ref()
+                .map(|mount| mount.path.as_path())
+                .unwrap_or(&directory);
+            if source.join("data.ext4").exists() {
                 crate::archive_storage::tar(vec![
                     "--sparse".into(),
                     "-czf".into(),
                     staging.join("workspace.tar.gz").to_string_lossy().into(),
                     "-C".into(),
-                    directory.to_string_lossy().into(),
+                    source.to_string_lossy().into(),
                     "data.ext4".into(),
                 ])
                 .await?;
                 std::fs::File::open(staging.join("workspace.tar.gz"))?.sync_all()?;
+            }
+            if let Some(mounted) = mounted {
+                mounted.close().await?;
             }
         } else if !disk.exists() {
             if let Some(runtime) = body["runtimeId"].as_str() {

@@ -27,8 +27,10 @@ const timer = setInterval(() => {
 onUnmounted(() => clearInterval(timer))
 // With only the master runner there is nothing to choose, so stay out of the way unless something happens.
 const relevant = computed(() => (!!props.run.nodeId && props.run.nodeId !== LOCAL_NODE_ID)
+  || props.run.storage?.mode === 'on-demand'
   || nodes.value.some(candidate => !candidate.local)
   || !!(props.run.nodeState || props.run.movementError || props.run.restoredAt || props.run.capacityWaitUntil || props.run.backup?.error))
+const storageLabels: Record<string, string> = { 'storage-unavailable': 'Waiting for storage; resumes automatically', 'disk-space': 'Paused until disk space is available', 'backup-lag': 'Paused while changes are saved', 'integrity': 'Paused: disk integrity needs attention' }
 const destinations = computed(() => nodes.value.filter(candidate => candidate.id !== props.run.nodeId))
 const minimumDiskGiB = computed(() => (props.run.resources?.diskMiB ?? 128) / 1024)
 const canMove = computed(() => !busy.value && !!destination.value && destination.value !== props.run.nodeId && ['running', 'succeeded'].includes(props.run.status) && !props.run.nodeState)
@@ -76,6 +78,10 @@ function move() {
     <span v-if="run.resources"> · {{ run.resources.cpu }} CPU · {{ formatMiB(run.resources.memoryMiB) }} RAM</span>
     <span v-if="run.backup?.capturedAt" :title="`${new Date(run.backup.capturedAt).toLocaleString()}. Newer chat and file changes may not be in this recovery point.`"> · Recoverable VM state: {{ relativeAge(run.backup.capturedAt, now) }}</span>
     <span v-if="run.backup?.status === 'saving'"> · Saving changes…</span>
+    <p v-if="run.storage?.mode === 'on-demand'" class="mt-1">
+      Files load on demand. {{ run.storage.waitingFor ? storageLabels[run.storage.waitingFor] || run.storage.waitingFor : 'Storage ready' }}.
+      <span v-if="run.storage.dirtySince">Unsaved changes since {{ relativeAge(run.storage.dirtySince, now) }}.</span>
+    </p>
     <span v-if="run.pinnedNodeId"> · Fixed node; automatic failover disabled</span>
     <p v-if="run.nodeState" class="mt-1">
       {{ labels[run.nodeState] || run.nodeState }}

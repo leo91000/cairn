@@ -7,7 +7,7 @@ use std::{
     fs::File,
     io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
 };
 
 const BLOCK: u64 = 4 * 1024 * 1024;
@@ -28,6 +28,8 @@ pub struct LazyDisk {
     db: Mutex<Connection>,
     source: Arc<dyn BlockSource>,
     cache: Mutex<()>,
+    memory: Mutex<std::collections::VecDeque<(String, Arc<Vec<u8>>)>>,
+    publication: RwLock<()>,
     _lock: File,
 }
 
@@ -103,7 +105,7 @@ impl LazyDisk {
         }
         let db = Connection::open(&path).map_err(failure)?;
         db.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA auto_vacuum=INCREMENTAL;",
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA auto_vacuum=FULL;",
         )
         .map_err(failure)?;
         if let Some(manifest) = initial {
@@ -119,6 +121,13 @@ impl LazyDisk {
             .map_err(failure)?;
             File::open(directory)?.sync_all()?;
         }
+        db.execute_batch(
+            "CREATE TABLE IF NOT EXISTS sealed (generation INTEGER PRIMARY KEY, manifest TEXT);
+            CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS epochs (generation INTEGER PRIMARY KEY, written_at INTEGER NOT NULL);
+            INSERT OR IGNORE INTO epochs SELECT DISTINCT generation,0 FROM writes;",
+        )
+        .map_err(failure)?;
         let manifest: String = db
             .query_row("SELECT manifest FROM state WHERE id=1", [], |row| {
                 row.get(0)
@@ -158,6 +167,8 @@ impl LazyDisk {
             db: Mutex::new(db),
             source,
             cache: Mutex::new(()),
+            memory: Mutex::new(Default::default()),
+            publication: RwLock::new(()),
             _lock: lock,
         })
     }
@@ -198,13 +209,32 @@ impl LazyDisk {
         }
         super::device::range(self.size, offset, length)
     }
-    fn base_block(&self, block: &Value) -> io::Result<Vec<u8>> {
+    fn remember(&self, hash: &str, bytes: Vec<u8>) -> io::Result<Arc<Vec<u8>>> {
+        let bytes = Arc::new(bytes);
+        let mut memory = self.memory.lock().map_err(failure)?;
+        memory.retain(|(key, _)| key != hash);
+        while memory.len() >= 8 {
+            memory.pop_front();
+        }
+        memory.push_back((hash.to_owned(), bytes.clone()));
+        Ok(bytes)
+    }
+    fn base_block(&self, block: &Value) -> io::Result<Arc<Vec<u8>>> {
         let length = block["size"]
             .as_u64()
             .ok_or_else(|| failure("Invalid extent"))? as usize;
         let Some(hash) = block["hash"].as_str() else {
-            return Ok(vec![0; length]);
+            return Ok(Arc::new(vec![0; length]));
         };
+        {
+            let mut memory = self.memory.lock().map_err(failure)?;
+            if let Some(index) = memory.iter().position(|(key, _)| key == hash) {
+                let entry = memory.remove(index).unwrap();
+                let bytes = entry.1.clone();
+                memory.push_back(entry);
+                return Ok(bytes);
+            }
+        }
         let directory = self.directory.join("cache");
         let target = directory.join(hash);
         if let Ok(file) = File::open(&target) {
@@ -213,7 +243,7 @@ impl LazyDisk {
             (&file).take(BLOCK + 1).read_to_end(&mut bytes)?;
             if bytes.len() == length && hex::encode(Sha256::digest(&bytes)) == hash {
                 let _ = file.set_modified(std::time::SystemTime::now());
-                return Ok(bytes);
+                return self.remember(hash, bytes);
             }
             let _ = std::fs::remove_file(&target);
         }
@@ -226,6 +256,35 @@ impl LazyDisk {
         let _ = (|| -> io::Result<()> {
             use std::io::Write;
             let _cache = self.cache.lock().map_err(failure)?;
+            let _node_reservation = if self
+                .directory
+                .file_name()
+                .is_some_and(|name| name == "lazy")
+            {
+                if let Some(state) = self
+                    .directory
+                    .parent()
+                    .and_then(std::path::Path::parent)
+                    .and_then(std::path::Path::parent)
+                {
+                    let policy = std::fs::read(state.join("storage-policy.json"))
+                        .ok()
+                        .and_then(|bytes| {
+                            serde_json::from_slice::<super::policy::Policy>(&bytes).ok()
+                        })
+                        .unwrap_or_default();
+                    let Some(reservation) =
+                        super::cache::reserve(state, &policy, bytes.len() as u64)?
+                    else {
+                        return Ok(());
+                    };
+                    Some(reservation)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             std::fs::create_dir_all(&directory)?;
             let mut entries = std::fs::read_dir(&directory)?
                 .filter_map(|entry| entry.ok())
@@ -241,10 +300,15 @@ impl LazyDisk {
                 .collect::<Vec<_>>();
             entries.sort_by_key(|entry| entry.2);
             let mut used = entries.iter().map(|entry| entry.1).sum::<u64>();
-            // Experimental per-disk ceiling. Node-wide accounting is an additional
-            // prerequisite for enabling this adapter in the controller.
+            // Standalone disks retain a small fallback cache; controller volumes
+            // share the node budget and can use its available working set.
+            let ceiling = if _node_reservation.is_some() {
+                u64::MAX
+            } else {
+                32 * 1024 * 1024
+            };
             for (path, size, _) in entries {
-                if used + bytes.len() as u64 <= 32 * 1024 * 1024 {
+                if used.saturating_add(bytes.len() as u64) <= ceiling {
                     break;
                 }
                 std::fs::remove_file(path)?;
@@ -255,14 +319,11 @@ impl LazyDisk {
             file.persist_noclobber(&target).map_err(failure)?;
             Ok(())
         })();
-        Ok(bytes)
+        self.remember(hash, bytes)
     }
 }
-impl Disk for LazyDisk {
-    fn size(&self) -> u64 {
-        self.size
-    }
-    fn read_at(&self, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
+impl LazyDisk {
+    fn read_generation(&self, generation: i64, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
         self.check(offset, bytes.len())?;
         let mut covered = vec![false; bytes.len()];
         let mut missing = bytes.len();
@@ -273,9 +334,13 @@ impl Disk for LazyDisk {
                     row.get(0)
                 })
                 .map_err(failure)?;
-            let mut statement = db.prepare("SELECT start, data, checksum, seq, generation, end FROM writes WHERE start < ?1 AND end > ?2 ORDER BY seq DESC").map_err(failure)?;
+            let mut statement = db.prepare("SELECT start, data, checksum, seq, generation, end FROM writes WHERE start < ?1 AND end > ?2 AND generation <= ?3 ORDER BY seq DESC").map_err(failure)?;
             let mut rows = statement
-                .query(params![(offset + bytes.len() as u64) as i64, offset as i64])
+                .query(params![
+                    (offset + bytes.len() as u64) as i64,
+                    offset as i64,
+                    generation
+                ])
                 .map_err(failure)?;
             while let Some(row) = rows.next().map_err(failure)? {
                 let (start, data) = Self::record(row, self.size)?;
@@ -319,6 +384,17 @@ impl Disk for LazyDisk {
         }
         Ok(())
     }
+}
+mod generations;
+mod state;
+impl Disk for LazyDisk {
+    fn size(&self) -> u64 {
+        self.size
+    }
+    fn read_at(&self, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
+        let _publication = self.publication.read().map_err(failure)?;
+        self.read_generation(i64::MAX, offset, bytes)
+    }
     fn write_at(&self, offset: u64, bytes: &[u8]) -> io::Result<()> {
         self.check(offset, bytes.len())?;
         if bytes.is_empty() {
@@ -348,6 +424,11 @@ impl Disk for LazyDisk {
             ],
         )
         .map_err(failure)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO epochs VALUES (?1,?2)",
+            params![generation, state::now()],
+        )
+        .map_err(failure)?;
         tx.execute("UPDATE state SET next_sequence=?1 WHERE id=1", [next])
             .map_err(failure)?;
         tx.commit().map_err(failure)
@@ -360,163 +441,4 @@ impl Disk for LazyDisk {
     }
 }
 #[cfg(test)]
-mod tests {
-    use super::Disk;
-    use super::*;
-    use sha2::{Digest, Sha256};
-    use std::{
-        io,
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
-    };
-    struct Source {
-        reads: AtomicUsize,
-    }
-    impl BlockSource for Source {
-        fn fetch(&self, _hash: &str) -> io::Result<Vec<u8>> {
-            self.reads.fetch_add(1, Ordering::SeqCst);
-            Ok(vec![7; 4 * 1024 * 1024])
-        }
-    }
-    #[test]
-    fn acknowledged_write_survives_killing_the_storage_process() {
-        use std::io::BufRead;
-        let root = tempfile::tempdir().unwrap();
-        let manifest = serde_json::json!({"version":1,"size":4096,"blockSize":4194304,"blocks":[{"offset":0,"size":4096,"hash":null}]});
-        drop(
-            LazyDisk::create(
-                root.path(),
-                &manifest,
-                Arc::new(Source {
-                    reads: AtomicUsize::new(0),
-                }),
-            )
-            .unwrap(),
-        );
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["crash_writer", "--nocapture"])
-            .env("LEO_STORAGE_CRASH_TEST_DIR", root.path())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let output = std::io::BufReader::new(child.stdout.take().unwrap());
-        let mut acknowledged = false;
-        for line in output.lines() {
-            if line.unwrap().contains("WRITE_ACKNOWLEDGED") {
-                acknowledged = true;
-                break;
-            }
-        }
-        child.kill().unwrap();
-        child.wait().unwrap();
-        assert!(acknowledged);
-        let disk = LazyDisk::open(
-            root.path(),
-            Arc::new(Source {
-                reads: AtomicUsize::new(0),
-            }),
-        )
-        .unwrap();
-        let mut bytes = [0; 8];
-        disk.read_at(3, &mut bytes).unwrap();
-        assert_eq!(&bytes, b"survives");
-    }
-    #[test]
-    fn crash_writer() {
-        let Some(root) = std::env::var_os("LEO_STORAGE_CRASH_TEST_DIR") else {
-            return;
-        };
-        let disk = LazyDisk::open(
-            std::path::Path::new(&root),
-            Arc::new(Source {
-                reads: AtomicUsize::new(0),
-            }),
-        )
-        .unwrap();
-        disk.write_at(3, b"survives").unwrap();
-        println!("WRITE_ACKNOWLEDGED");
-        std::io::Write::flush(&mut std::io::stdout()).unwrap();
-        loop {
-            std::thread::park();
-        }
-    }
-    #[test]
-    fn journal_integrity_covers_the_write_location() {
-        let root = tempfile::tempdir().unwrap();
-        let source = Arc::new(Source {
-            reads: AtomicUsize::new(0),
-        });
-        let manifest = serde_json::json!({"version":1,"size":4096,"blockSize":4194304,"blocks":[{"offset":0,"size":4096,"hash":null}]});
-        let disk = LazyDisk::create(root.path(), &manifest, source.clone()).unwrap();
-        disk.write_at(3, b"retained").unwrap();
-        drop(disk);
-        let corruptor = rusqlite::Connection::open(root.path().join("journal.sqlite")).unwrap();
-        corruptor
-            .execute("UPDATE writes SET start=4, end=12", [])
-            .unwrap();
-        drop(corruptor);
-        assert!(
-            LazyDisk::open(root.path(), source).is_err(),
-            "corrupt journal metadata must be rejected before any read"
-        );
-    }
-    #[test]
-    fn unavailable_or_corrupt_base_never_becomes_a_zero_block() {
-        struct Missing;
-        impl BlockSource for Missing {
-            fn fetch(&self, _: &str) -> io::Result<Vec<u8>> {
-                Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "Storage temporarily unavailable",
-                ))
-            }
-        }
-        let root = tempfile::tempdir().unwrap();
-        let hash = hex::encode(Sha256::digest(vec![8; 4 * 1024 * 1024]));
-        let manifest = serde_json::json!({"version":1,"size":4194304,"blockSize":4194304,"blocks":[{"offset":0,"size":4194304,"hash":hash}]});
-        let disk = LazyDisk::create(root.path(), &manifest, Arc::new(Missing)).unwrap();
-        assert_eq!(
-            disk.read_at(0, &mut [0; 8]).unwrap_err().kind(),
-            io::ErrorKind::WouldBlock
-        );
-        drop(disk);
-        let disk = LazyDisk::open(
-            root.path(),
-            Arc::new(Source {
-                reads: AtomicUsize::new(0),
-            }),
-        )
-        .unwrap();
-        assert!(disk.read_at(0, &mut [0; 8]).is_err());
-    }
-    #[test]
-    fn partial_write_is_durable_without_fetching_its_remote_base() {
-        let root = tempfile::tempdir().unwrap();
-        let source = Arc::new(Source {
-            reads: AtomicUsize::new(0),
-        });
-        let hash = hex::encode(Sha256::digest(vec![7; 4 * 1024 * 1024]));
-        let manifest = serde_json::json!({"version":1,"size":4194304,"blockSize":4194304,"blocks":[{"offset":0,"size":4194304,"hash":hash}]});
-        let disk = LazyDisk::create(root.path(), &manifest, source.clone()).unwrap();
-        disk.write_at(123, b"retained").unwrap();
-        assert_eq!(source.reads.load(Ordering::SeqCst), 0);
-        drop(disk);
-        let disk = LazyDisk::open(root.path(), source.clone()).unwrap();
-        let mut bytes = [0; 8];
-        disk.read_at(123, &mut bytes).unwrap();
-        assert_eq!(&bytes, b"retained");
-        assert_eq!(source.reads.load(Ordering::SeqCst), 0);
-        let mut bytes = [0; 10];
-        disk.read_at(122, &mut bytes).unwrap();
-        assert_eq!(&bytes, b"\x07retained\x07");
-        assert_eq!(source.reads.load(Ordering::SeqCst), 1);
-        disk.read_at(122, &mut bytes).unwrap();
-        assert_eq!(
-            source.reads.load(Ordering::SeqCst),
-            1,
-            "a verified clean block should be reused"
-        );
-    }
-}
+mod tests;

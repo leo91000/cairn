@@ -4,6 +4,7 @@ pub mod archive;
 pub mod backups;
 pub mod checkpoint;
 pub mod connector;
+pub mod disk_grants;
 pub mod executor;
 pub mod files;
 pub mod maintenance;
@@ -71,6 +72,8 @@ struct Capabilities {
     os: String,
     arch: String,
     kvm: bool,
+    #[serde(default)]
+    fuse: bool,
     cpu: u32,
     memory_mi_b: u64,
     disk_mi_b: u64,
@@ -108,6 +111,7 @@ impl Capabilities {
         value["os"] = self.os.clone().into();
         value["arch"] = self.arch.clone().into();
         value["kvm"] = self.kvm.into();
+        value["fuse"] = self.fuse.into();
         value
     }
 }
@@ -342,6 +346,49 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
                 .into())
         }
 
+        ("PUT", ["nodes", node, "storage"]) => {
+            crate::validation::uuid(node)?;
+            let policy: crate::storage::policy::Policy = decode(input.body.clone())?;
+            policy.validate()?;
+            let record = s.get("nodes", node).await?;
+            if record["revoked"] == true {
+                return Err(Error::new(409, "Node revoked."));
+            }
+            if policy.enabled {
+                crate::archive_storage::Storage::configured(s)?
+                    .validate()
+                    .await?;
+            }
+            let base = if *node == LOCAL_NODE_ID {
+                s.config.runner_url.clone()
+            } else {
+                format!("{}/internal/execution/{node}", s.config.public_url)
+            };
+            let response = s
+                .http
+                .post(format!("{base}/storage-policy"))
+                .bearer_auth(crate::execution::secret(&s.config.data_dir, "runner-secret").await?)
+                .json(&policy)
+                .timeout(std::time::Duration::from_secs(30))
+                .send()
+                .await
+                .map_err(|_| Error::new(503, "Node storage probe unavailable."))?;
+            if !response.status().is_success() {
+                return Err(Error::new(409, "Node did not pass its FUSE storage probe."));
+            }
+            let node = (*node).to_owned();
+            let value = s
+                .store
+                .transaction(move |db| {
+                    let mut record = db
+                        .get("nodes", &node)?
+                        .ok_or_else(|| Error::new(404, "Node missing."))?;
+                    record["storage"] = json!(policy);
+                    db.put("nodes", &record)
+                })
+                .await?;
+            Ok(public(value))
+        }
         ("GET", ["nodes"]) => Ok(inventory(s).await?.into()),
         ("PUT", ["nodes", node]) => {
             #[derive(Deserialize)]

@@ -131,6 +131,23 @@ pub async fn block(path: &Path, manifest: &Value, hash: &str) -> Result<Vec<u8>>
 pub async fn served(directory: &Path, hash: &str) -> Result<Vec<u8>> {
     let manifest: Value =
         serde_json::from_slice(&tokio::fs::read(directory.join("manifest.json")).await?)?;
+    if manifest["onDemand"] == true {
+        let run = tokio::fs::read_to_string(directory.join("run")).await?;
+        crate::validation::uuid(&run)?;
+        let state = directory
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| Error::bad("Invalid snapshot directory."))?;
+        let volume = crate::storage::runtime::open(&state.join("disks").join(run))?;
+        let generation = manifest["generation"]
+            .as_i64()
+            .ok_or_else(|| Error::bad("Invalid generation."))?;
+        let hash = hash.to_owned();
+        return tokio::task::spawn_blocking(move || volume.disk.captured_block(generation, &hash))
+            .await
+            .map_err(Error::internal)?
+            .map_err(Into::into);
+    }
     let present = match tokio::fs::read(directory.join("present.json")).await {
         Ok(bytes) => Some(serde_json::from_slice::<std::collections::HashSet<u64>>(
             &bytes,

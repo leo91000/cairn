@@ -7,3 +7,13 @@ pub use device::{Disk, LocalDisk, export};
 mod lazy;
 pub use lazy::{BlockSource, LazyDisk};
 pub mod fuse;
+
+pub mod remote;
+
+pub mod policy;
+
+pub mod runtime;
+
+pub mod checkpoint;
+
+pub mod cache;

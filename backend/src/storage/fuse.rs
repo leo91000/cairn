@@ -179,6 +179,34 @@ pub fn mount_disk(disk: Arc<dyn Disk>, target: &Path, uid: u32) -> io::Result<Mo
     fuser::spawn_mount(DiskFilesystem { disk, uid }, target, &config)
         .map(|session| MountedDisk(Some(session)))
 }
+/// Activation probe runs with the same controller identity and mount namespace.
+pub fn probe(state: &Path) -> io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    let root = tempfile::tempdir_in(state)?;
+    let backing = root.path().join("backing");
+    let file = std::fs::File::create(&backing)?;
+    file.set_len(4096)?;
+    drop(file);
+    let disk = Arc::new(super::LocalDisk::open(&backing, true)?);
+    let mount = root.path().join("mount");
+    std::fs::create_dir(&mount)?;
+    let session = mount_disk(disk, &mount, unsafe { libc::geteuid() })?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(mount.join("data.ext4"))?;
+    file.write_all_at(b"probe", 0)?;
+    file.sync_all()?;
+    drop(file);
+    session.close()?;
+    let mut bytes = [0; 5];
+    std::fs::File::open(backing)?.read_exact_at(&mut bytes, 0)?;
+    if &bytes != b"probe" {
+        return Err(io::Error::other("FUSE durability probe failed"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

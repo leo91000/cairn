@@ -86,7 +86,7 @@ pub fn capabilities(path: &Path) -> Result<Value> {
     let disk =
         (stat.f_bavail as u128 * stat.f_frsize as u128 / 1_048_576).min(u64::MAX as u128) as u64;
     Ok(
-        json!({"os":"linux","arch":"x86_64","kvm":kvm,"cpu":std::thread::available_parallelism()?.get(),"memoryMiB":memory,"diskMiB":disk}),
+        json!({"os":"linux","arch":"x86_64","kvm":kvm,"fuse":std::fs::OpenOptions::new().read(true).write(true).open("/dev/fuse").is_ok(),"cpu":std::thread::available_parallelism()?.get(),"memoryMiB":memory,"diskMiB":disk}),
     )
 }
 pub async fn enroll(origin: &str, directory: &Path) -> Result<()> {
