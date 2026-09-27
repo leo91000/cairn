@@ -169,12 +169,11 @@ mod tests {
         assert!(!super::super::runtime::exists(&directory));
         std::fs::write(&raw, vec![7; 4096]).unwrap();
         let cancel = tokio_util::sync::CancellationToken::new();
-        let interrupted = install(&directory, request.clone(), cancel.clone());
-        tokio::pin!(interrupted);
-        // Start the real asynchronous index, then let foreground work preempt it.
-        assert!(futures_util::poll!(&mut interrupted).is_pending());
+        // A pending future may already have entered the atomic switch: cancellation
+        // there must finish installation. Cancel before verification for a deterministic
+        // assertion that foreground execution leaves the original available.
         cancel.cancel();
-        assert!(interrupted.await.is_err());
+        assert!(install(&directory, request.clone(), cancel).await.is_err());
         assert_eq!(std::fs::read(&raw).unwrap(), vec![7; 4096]);
         assert!(!super::super::runtime::exists(&directory));
         assert!(crate::file_lock::exclusive(&directory.join("lock"), "busy").is_ok());
