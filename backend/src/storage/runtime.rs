@@ -304,6 +304,77 @@ pub async fn mount_export(directory: &Path) -> Result<ExportMount> {
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn missing_remote_block_requires_resolution_and_preserves_local_work() {
+        use axum::{Router, http::StatusCode, routing::get};
+        use std::{sync::atomic::AtomicUsize, time::Duration};
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        let server = Router::new().route(
+            "/internal/node-restore/{hash}",
+            get(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+                async { StatusCode::CONFLICT }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}/", listener.local_addr().unwrap());
+        let serving = tokio::spawn(async { axum::serve(listener, server).await.unwrap() });
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("disks/conversation");
+        let policy = Policy {
+            reserve_mi_b: 64,
+            reserve_percent: 1,
+            ..Default::default()
+        };
+        let context = json!({"master":origin,"grant":"fixture","policy":policy});
+        let source = Arc::new(
+            RemoteSource::new(
+                &context,
+                tokio::runtime::Handle::current(),
+                CancellationToken::new(),
+            )
+            .unwrap(),
+        );
+        let disk = LazyDisk::create(
+            &directory.join("lazy"),
+            &json!({"version":1,"size":4096,"blockSize":4194304,
+                "blocks":[{"offset":0,"size":4096,"hash":"a".repeat(64)}]}),
+            source,
+        )
+        .unwrap();
+        disk.set_context(&context).unwrap();
+        disk.write_at(0, b"unsaved work").unwrap();
+        drop(disk);
+        let volume = open(&directory).unwrap();
+        let reading = volume.clone();
+        let mut read = tokio::task::spawn_blocking(move || reading.read_at(1024, &mut [0; 8]));
+        let result = tokio::time::timeout(Duration::from_secs(2), &mut read).await;
+        // A regression must fail promptly instead of retaining a blocked test thread.
+        if result.is_err() {
+            volume.stop.cancel();
+            let _ = read.await;
+        }
+        assert_eq!(
+            result.unwrap().unwrap().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert!(!volume.source.waiting());
+        assert_eq!(volume.status().unwrap()["waitingFor"], "integrity");
+        assert!(volume.needs_pause().await.unwrap());
+        let mut saved = [0; 12];
+        volume.read_at(0, &mut saved).unwrap();
+        assert_eq!(&saved, b"unsaved work");
+        // A subsequent successful local read must not silently clear the fault.
+        assert_eq!(volume.status().unwrap()["waitingFor"], "integrity");
+        drop(volume);
+        let reopened = open(&directory).unwrap();
+        reopened.read_at(0, &mut saved).unwrap();
+        assert_eq!(&saved, b"unsaved work");
+        serving.abort();
+    }
+
+    #[tokio::test]
     async fn disk_pressure_waits_without_acknowledging_or_losing_writes_and_resumes() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("disks/conversation");

@@ -45,3 +45,22 @@ Aucun écart matériel restant identifié dans les contre-revues ciblées.
 
 Bilan : **Standards 0 constat restant ; Spec 0 écart restant identifié**.
 La revue ne remplace pas les tests et mesures consignés dans le document de validation.
+
+## Contre-revue externe de `a12ac0e`
+
+- **Bloc S3 absent** : constat valide sur cette version, corrigé par le client
+  persistant (`d8ef37a`). Des assertions supplémentaires couvrent le code 409
+  depuis S3 et la pause d'intégrité sans attente réseau infinie sur le volume,
+  avec conservation des écritures locales.
+- **Mesures incomplètes** : constat retenu. Le parcours VM compare maintenant le
+  même disque local et à la demande, avec disponibilité, octets, premières
+  lectures et débit. Voir le protocole et les limites dans le document de
+  validation ; l'origine reste HTTP locale avec délai optionnel, pas un S3 réel.
+- **Duplication d'éviction** : observation de maintenabilité examinée ; pas
+  d'extraction commune. La node conserve un jeu de blocs propres et sérialise
+  l'admission avec les écritures ; le master protège ses copies uniques, exige
+  une copie distante vérifiée, retire toutes ses copies S3 redondantes lorsque la
+  node locale est activée et autorise une réserve d'urgence pour la publication.
+  Mutualiser les suppressions masquerait ces règles ; extraire la seule
+  arithmétique créerait une interface presque aussi complexe que son calcul.
+  Ces différences sont maintenant explicites près des deux implémentations.

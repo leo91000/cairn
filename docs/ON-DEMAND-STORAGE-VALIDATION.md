@@ -156,3 +156,55 @@ restauration de métadonnées en **21 ms**, reprise du programme invité en **1 
 **4 blocs lus sur 13 blocs distants**, annulation en panne et reprise après pression
 disque réussies. Origine HTTP locale, pas un benchmark S3. La CI des branches
 réactualisées fournit la validation finale de l'intégration.
+
+## Contre-revue de la PR #8 après le client S3 persistant
+
+La revue externe portait sur `a12ac0e`. Depuis `d8ef37a`, `NoSuchKey` ou HTTP 404
+renvoie **409** depuis le master ; une panne de transport renvoie **503**. Le
+contrôleur termine la lecture sur 409 et conserve son état `integrity` jusqu'à
+résolution explicite, tandis que 503 reste une attente annulable avec reprise.
+
+La couverture vérifie maintenant explicitement :
+
+- contre Moto, l'absence distante sans cache donne 409, retire le reçu de copie et
+  invalide la base incrémentale ; une nouvelle capture répare la copie ;
+- à l'interface du volume, une réponse 409 produit une seule requête, un échec de
+  lecture et un état `integrity` qui demande la pause ; une lecture locale réussie
+  n'efface pas cet état ; le travail journalisé survit à la réouverture ;
+- le test existant d'indisponibilité 503 attend, récupère quand l'origine revient
+  et reste annulable ; une panne S3 transitoire conserve reçu et base incrémentale.
+
+### Protocole comparatif de performances
+
+`node tests/runner-smoke.mjs <image>` exécute désormais, avec le vrai contrôleur,
+Firecracker et jailer, trois modes sur **le même manifeste et les mêmes données** :
+
+1. `local-full` : restauration complète avant démarrage, disque local historique ;
+2. `demand-http` : restauration des métadonnées, cache vide, blocs lus à la demande ;
+3. `demand-http-delayed` : identique, avec 50 ms supplémentaires par requête de bloc.
+
+Chaque mode est répété trois fois, en alternant l'ordre. Chaque échantillon utilise
+un répertoire de disque vide et une nouvelle exécution ; le cache de pages de
+l'hôte n'est pas purgé. Les images de runtime sont déjà installées. Le cache propre
+à la demande est limité à 8 Mio ; le cache mémoire du contrôleur et la relecture
+anticipée de l'invité restent ceux du code livré.
+
+Les lignes JSON `benchmark: conversation-disk` rapportent :
+
+- `restoreMs`, puis `bootMs`, et leur somme `availableMs` jusqu'au marqueur invité
+  après lecture correcte du fichier sauvegardé (observation à 100 ms près) ;
+- `bytesAtReady` et `bytesAfterReads` : octets des blocs servis, **en comptant les
+  répétitions**, restauration comprise ; en mode à la demande, la disponibilité
+  doit précéder le téléchargement complet ;
+- `savedReadMs` : lecture du petit fichier de reprise dans l'invité ;
+- `firstReadsMs` : trois premières lectures de 4 Kio aux offsets 0, 8 et 16 Mio
+  du fichier de 32 Mio inutilisé pendant le démarrage ;
+- `sequentialMs` et `mibPerSecond` : lecture complète de ces 32 Mio après les trois
+  sondes. Cette phase est donc partiellement chaude, dans tous les modes. Son
+  SHA-256 est vérifié après la fenêtre mesurée.
+
+Le contrôleur donne le signal de mesure à l'invité seulement après relevé des
+compteurs de démarrage. Les horloges de chaque durée restent sur la même machine.
+L'origine HTTP est en boucle locale : le délai injecté ne simule ni une limite de
+bande passante ni un réseau WAN complet. Ces chiffres comparent les parcours disque,
+**pas la latence d'un fournisseur S3 ni les limites maximales de l'architecture**.

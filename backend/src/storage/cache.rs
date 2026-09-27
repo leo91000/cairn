@@ -1,4 +1,7 @@
 //! Eviction visits only immutable clean cache files, never journals or raw disks.
+//! Unlike the master's backup cache, this retains a working set up to the budget
+//! and holds admission through a fill/write. Backup eviction instead protects
+//! master-only recovery points and retires all duplicate S3 payloads on local nodes.
 use super::policy::{Policy, space};
 use std::{
     io,

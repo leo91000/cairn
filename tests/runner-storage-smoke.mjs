@@ -40,24 +40,47 @@ export async function storageSmoke({ root, docker, name, api, until, legacyRunId
       if(fs.existsSync(root+'/offline')){res.writeHead(503).end();return;}
       const hash=req.url.split('/').at(-1);
       if(!/^[a-f0-9]{64}$/.test(hash)||!fs.existsSync(root+'/'+hash)){res.writeHead(404).end();return;}
-      const bytes=fs.readFileSync(root+'/'+hash);
-      fs.appendFileSync(root+'/reads',hash+'\\n'); res.end(bytes);
+      const delay=Number(fs.existsSync(root+'/latency')?fs.readFileSync(root+'/latency','utf8'):0);
+      setTimeout(()=>{const bytes=fs.readFileSync(root+'/'+hash);
+        fs.appendFileSync(root+'/reads',hash+'\\n'); res.end(bytes);},delay);
     }).listen(4313,'127.0.0.1');
   `)
   docker('exec', '-d', name, '/usr/local/bin/node', '/data/storage-fixture/server.mjs')
   const policy = { enabled: true, cacheMiB: 8, reserveMiB: 64, reservePercent: 1, backupSeconds: 60, maxDirtySeconds: 300, automaticArchiving: false }
   const storage = { master: 'http://127.0.0.1:4313/', grant: 'fixture-storage-grant', policy }
   await api('/storage-policy', 'POST', policy)
-  async function start(first) {
+  const inbox = path.join(root, 'data/runs', runId, 'chat-input')
+  await mkdir(inbox)
+  async function start(first, { benchmark = false, local = false } = {}) {
     const id = randomUUID()
     const code = `
       const fs=require('node:fs'),assert=require('node:assert/strict'),cp=require('node:child_process');
       const file=${JSON.stringify(`${workspace}/saved`)};
-      if(${first}) {fs.writeFileSync(file,'journal survives'); fs.writeFileSync(${JSON.stringify(`${workspace}/unused`)},require('node:crypto').randomBytes(32*1024*1024)); cp.execFileSync('sync');}
+      const unused=${JSON.stringify(`${workspace}/unused`)};
+      const hash=bytes=>require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+      if(${first}) {fs.writeFileSync(file,'journal survives'); fs.writeFileSync(${JSON.stringify(`${workspace}/unused`)},require('node:crypto').randomBytes(32*1024*1024)); fs.writeFileSync(unused+'.sha256',hash(fs.readFileSync(unused))); cp.execFileSync('sync');}
+      const started=performance.now();
       assert.equal(fs.readFileSync(file,'utf8'),'journal survives');
+      const savedReadMs=performance.now()-started;
       console.log('storage.ready'); setInterval(()=>console.log('storage.tick'),1000);
+      if(${benchmark}) {
+        const control=setInterval(()=>{
+          if(!fs.readFileSync('/run/leo-chat/messages.json','utf8').includes('measure'))return;
+          clearInterval(control);
+          const fd=fs.openSync(unused,'r'), buffer=Buffer.alloc(4096), firstReadsMs=[];
+          for(const offset of [0,8*1024*1024,16*1024*1024]) {
+            const at=performance.now(); assert.equal(fs.readSync(fd,buffer,0,buffer.length,offset),4096);
+            firstReadsMs.push(performance.now()-at);
+          }
+          fs.closeSync(fd);
+          const at=performance.now(), bytes=fs.readFileSync(unused), elapsedMs=performance.now()-at;
+          assert.equal(bytes.length,32*1024*1024);
+          assert.equal(hash(bytes),fs.readFileSync(unused+'.sha256','utf8'));
+          console.log('storage.metrics '+JSON.stringify({savedReadMs,firstReadsMs,sequentialMs:elapsedMs,mibPerSecond:32/(elapsedMs/1000)}));
+        },50);
+      }
     `
-    const plan = { id, runId, expires: null, sandbox: 'yolo', cwd: workspace, command: ['/usr/local/bin/node', '-e', code], resources: { cpu: 1, memoryMiB: 512, diskMiB: 512 }, storage, imports: [{ source: workspace, target: workspace }] }
+    const plan = { id, runId, expires: null, sandbox: 'yolo', cwd: workspace, command: ['/usr/local/bin/node', '-e', code], resources: { cpu: 1, memoryMiB: 512, diskMiB: 512 }, ...(local ? {} : { storage }), imports: [{ source: workspace, target: workspace }, ...(benchmark ? [{ source: `/data/runs/${runId}/chat-input`, target: '/run/leo-chat', readOnly: true }] : [])] }
     await writeFile(path.join(root, 'data/runner-plans', `${id}.json`), JSON.stringify(plan))
     await api(`/runs/${id}`, 'POST')
     return id
@@ -127,5 +150,47 @@ export async function storageSmoke({ root, docker, name, api, until, legacyRunId
   await api('/storage-policy', 'POST', policy)
   await until(async () => (await logs(resumed)).split('storage.tick').length > ticks)
   await stop(resumed)
+  // Identical snapshot, guest command and read workload; each sample gets a new
+  // VM and empty disk directory. The host page cache is intentionally not flushed.
+  const sizes = new Map(point.manifest.blocks.filter(block => block.hash).map(block => [block.hash, block.size]))
+  async function downloaded() {
+    const reads = (await readFile(path.join(origin, 'reads'), 'utf8')).trim().split('\n').filter(Boolean)
+    return reads.reduce((bytes, hash) => bytes + sizes.get(hash), 0)
+  }
+  const modes = [
+    { mode: 'local-full', local: true, latencyMs: 0 },
+    { mode: 'demand-http', local: false, latencyMs: 0 },
+    { mode: 'demand-http-delayed', local: false, latencyMs: 50 },
+  ]
+  for (let sample = 0; sample < 3; sample++) {
+    // Rotate order to reduce systematic warm-host effects.
+    for (let index = 0; index < modes.length; index++) {
+      const mode = modes[(index + sample) % modes.length]
+      await api('/storage-policy', 'POST', { ...policy, enabled: !mode.local })
+      docker('exec', name, 'mv', `/runner-state/disks/${runId}`, `/runner-state/disks/previous-${randomUUID()}`)
+      await writeFile(path.join(inbox, 'messages.json'), '[]')
+      await writeFile(path.join(origin, 'latency'), String(mode.latencyMs))
+      await writeFile(path.join(origin, 'reads'), '')
+      const at = performance.now()
+      await api(`/disks/${runId}/restore`, 'POST', { ...storage, onDemand: !mode.local, manifest: point.manifest, backupId })
+      const restoreMs = performance.now() - at
+      const id = await start(false, { benchmark: true, local: mode.local })
+      await ready(id)
+      const availableMs = performance.now() - at
+      const bytesAtReady = await downloaded()
+      assert.equal((await status()).mode, mode.local ? 'local' : 'on-demand')
+      if (!mode.local)
+        assert.ok(bytesAtReady < [...sizes.values()].reduce((a, b) => a + b, 0), 'ready before full download')
+      await writeFile(path.join(inbox, 'messages.json'), '[{"text":"measure"}]')
+      const metrics = await until(async () => {
+        const match = (await logs(id)).match(/storage.metrics (\{[^\n]+\})/)
+        return match && JSON.parse(match[1])
+      })
+      const bytesAfterReads = await downloaded()
+      assert.ok(Number.isFinite(metrics.mibPerSecond) && metrics.mibPerSecond > 0)
+      process.stdout.write(`${JSON.stringify({ benchmark: 'conversation-disk', sample, ...mode, restoreMs, availableMs, bootMs: availableMs - restoreMs, bytesAtReady, bytesAfterReads, ...metrics, source: 'loopback HTTP with optional per-request delay; not S3/WAN' })}\n`)
+      await stop(id)
+    }
+  }
   process.stdout.write(`${JSON.stringify({ mode: 'on-demand-controller', metadataRestoreMs, resumedMs, fetchedBlocks: fetched.size, remoteBlocks: hashes.size, cancellableOutage: true, pressureResume: true, status: 'passed', source: 'loopback immutable origin, not S3 benchmark' })}\n`)
 }

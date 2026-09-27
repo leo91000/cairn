@@ -1703,10 +1703,13 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         );
         assert_eq!(std::fs::read(directory.join(block)).unwrap(), cached);
         std::fs::remove_file(directory.join(block)).unwrap();
-        assert!(
+        assert_eq!(
             backups::read_block(&owner.service, &point, block)
                 .await
-                .is_err()
+                .unwrap_err()
+                .status,
+            409,
+            "A missing S3 object is terminal, unlike a retryable storage outage"
         );
         assert!(
             owner.service.store.run(&run).await.unwrap()["backup"]["snapshotId"].is_null(),

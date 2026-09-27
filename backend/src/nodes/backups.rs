@@ -385,6 +385,10 @@ pub async fn maintain_local_cache(s: &Service) -> Result<()> {
     Ok(())
 }
 async fn make_room(s: &Service, mut occupied: u64, incoming: u64, budget: u64) -> Result<u64> {
+    // Keep this admission policy separate from storage::cache: candidates require
+    // remote verification and master-only points are protected. Enabled local
+    // nodes retire every duplicate; publication may use the emergency reserve
+    // below the normal floor so a dirty journal can make progress.
     let policy = s
         .store
         .get("nodes", super::LOCAL_NODE_ID)
