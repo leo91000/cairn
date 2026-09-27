@@ -66,6 +66,10 @@ pub async fn router(service: Arc<Service>) -> Result<Router> {
             "/internal/nodes/host.py",
             any(crate::nodes::maintenance::downloads),
         )
+        .route(
+            "/internal/nodes/stream/{id}",
+            any(crate::nodes::transport::stream),
+        )
         .route("/internal/nodes/{*path}", any(crate::nodes::internal))
         .route(
             "/internal/node-restore/{*path}",

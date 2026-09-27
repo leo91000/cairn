@@ -9,7 +9,11 @@ use crate::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{collections::HashSet, path::PathBuf, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    time::Duration,
+};
 pub async fn settings(s: &Service) -> Result<Value> {
     let mut value = json!({"destination":"master","intervalSeconds":60,"retention":3,"budgetMiB":102400,"disconnectTimeoutSeconds":60,"shutdownTimeoutSeconds":300,"maxCapacityWaitSeconds":3600});
     if let Some(saved) = s.store.kv("node-backup-settings").await? {
@@ -103,12 +107,14 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
     let result=async {
         let manifest=&snapshot["manifest"];snapshots::validate(manifest)?;
         let directory=root(s,run_id);crate::skills::private_dir(&directory.join("blocks")).await?;
+        let published=published_blocks(s,run_id).await?;
         let mut seen=HashSet::new();let mut uploaded=0u64;let mut occupied=used(s).await?;
         let budget=settings["budgetMiB"].as_u64().unwrap_or(102400)*1024*1024;
         for block in manifest["blocks"].as_array().unwrap() {
             let Some(hash)=block["hash"].as_str() else {continue};
             if !seen.insert(hash.to_owned()) {continue;}
             let file=directory.join("blocks").join(hash);
+            let mut verified=false;
             if !file.exists() {
                 let response=s.http.get(format!("{base}/snapshots/{snapshot_id}/{hash}")).bearer_auth(&credential).timeout(Duration::from_secs(120)).send().await.map_err(|_|Error::new(503,"Backup block transfer interrupted."))?;
                 if !response.status().is_success() {return Err(Error::new(503,"Backup block unavailable."));}
@@ -124,13 +130,22 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
                 crate::skills::atomic_write(&file,&encoded).await?;
                 occupied+=encoded.len() as u64;
                 uploaded+=length;
+                verified=true;
+            } else if published.get(hash).copied()!=block["size"].as_u64() {
+                // Orphan files from interrupted publication have no retained proof.
+                // Published blocks are immutable and already validated at receipt.
+                let bytes=decode_block(s,run_id,hash,tokio::fs::read(&file).await?).await?;
+                if bytes.len() as u64!=block["size"].as_u64().unwrap() {return Err(Error::bad("Cached backup block has the wrong size."));}
+                verified=true;
             }
-            let verified=decode_block(s,run_id,hash,tokio::fs::read(&file).await?).await?;
-            if verified.len() as u64!=block["size"].as_u64().unwrap() || hex::encode(Sha256::digest(&verified))!=hash {return Err(Error::bad("Cached backup block failed integrity verification."));}
             if let Some(storage)=&storage {
                 let location=json!({"destination":"s3","bucket":storage.bucket,"endpoint":storage.endpoint});
-                let mark=file.with_extension(format!("s3-{}",hex::encode(Sha256::digest(serde_json::to_vec(&location)?))));
-                if !mark.exists() {upload_verified(storage,&file,&key(run_id,hash)).await?;crate::skills::atomic_write(&mark,&serde_json::to_vec(&location)?).await?;}
+                let mark=receipt(&file,&location)?;
+                if !mark.exists() {
+                    // Verify before copying an existing block to a new destination.
+                    if !verified {decode_block(s,run_id,hash,tokio::fs::read(&file).await?).await?;}
+                    upload_verified(storage,&file,&key(run_id,hash)).await?;crate::skills::atomic_write(&mark,&serde_json::to_vec(&location)?).await?;
+                }
             }
         }
         let backup_id=id();
@@ -143,6 +158,9 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
         s.store.put("node-backups",value.clone()).await?;
         s.store.patch_run(run_id,json!({"backup":{"id":backup_id,"snapshotId":snapshot_id,"capturedAt":manifest["capturedAt"],"uploadedBytes":uploaded,"status":"ready","error":null}})).await?;
         retain(s,run_id,settings["retention"].as_u64().unwrap_or(3) as usize).await?;
+        if published.is_empty() && s.store.kv(&audit_key(run_id)).await?.is_none() {
+            s.store.set(&audit_key(run_id),json!({"checkedAt":now(),"error":null}),None).await?;
+        }
         Ok(public(value))
     }.await;
     let _ = s
@@ -154,6 +172,170 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
         .await;
     result
 }
+
+/// A retained, authenticated manifest proves these immutable blocks were validated
+/// before publication. Read manifests, not payloads, on the incremental path.
+async fn published_blocks(s: &Service, run: &str) -> Result<HashMap<String, u64>> {
+    let mut blocks = HashMap::new();
+    for point in s
+        .store
+        .list("node-backups")
+        .await?
+        .into_iter()
+        .filter(|p| p["runId"] == run)
+    {
+        if let Ok(manifest) = manifest(s, &point).await {
+            for block in manifest["blocks"].as_array().unwrap() {
+                if let Some(hash) = block["hash"].as_str() {
+                    blocks.insert(hash.to_owned(), block["size"].as_u64().unwrap());
+                }
+            }
+        }
+    }
+    Ok(blocks)
+}
+
+const AUDIT_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000;
+fn audit_key(run: &str) -> String {
+    format!("node-backup-audit:{run}")
+}
+
+/// Audit one due conversation, including all retained points and idle conversations.
+/// A failed audit retries hourly and invalidates the incremental baseline. Normal
+/// restoration always verifies independently, even between periodic audits.
+pub async fn audit_due(s: &Service) -> Result<()> {
+    let Ok(_operation) = s.node_backup_operation.try_lock() else {
+        return Ok(());
+    };
+    let points = s.store.list("node-backups").await?;
+    let mut runs = HashSet::new();
+    for point in &points {
+        let run = text(point, "runId");
+        if !runs.insert(run) {
+            continue;
+        }
+        let previous = s.store.kv(&audit_key(run)).await?.unwrap_or_default();
+        let interval = if previous["error"].is_string() {
+            3_600_000
+        } else {
+            AUDIT_INTERVAL_MS
+        };
+        if previous["checkedAt"]
+            .as_i64()
+            .is_some_and(|at| now() - at < interval)
+        {
+            continue;
+        }
+        let result = audit_points(s, run, &points).await;
+        s.store
+            .set(
+                &audit_key(run),
+                json!({"checkedAt":now(),"error":result.as_ref().err().map(|e|&e.message)}),
+                None,
+            )
+            .await?;
+        if let Err(error) = result {
+            forget_baseline(s, run).await?;
+            let mut backup = s.store.run(run).await?["backup"].clone();
+            if backup.is_object() {
+                backup["status"] = "error".into();
+                backup["error"] = error.message.clone().into();
+                s.store.patch_run(run, json!({"backup":backup})).await?;
+            }
+            super::alerts::raise(
+                s,
+                run,
+                "backup-integrity",
+                "Recovery point integrity check failed",
+                &error.message,
+            )
+            .await?;
+        }
+        return Ok(());
+    }
+    Ok(())
+}
+fn receipt(file: &std::path::Path, location: &Value) -> Result<PathBuf> {
+    let location =
+        json!({"destination":"s3","bucket":location["bucket"],"endpoint":location["endpoint"]});
+    Ok(file.with_extension(format!(
+        "s3-{}",
+        hex::encode(Sha256::digest(serde_json::to_vec(&location)?))
+    )))
+}
+
+async fn audit_points(s: &Service, run: &str, points: &[Value]) -> Result<()> {
+    let mut local = HashSet::new();
+    let mut remote = HashSet::new();
+    let mut failed = false;
+    let directory = root(s, run).join("blocks");
+    crate::skills::private_dir(&directory).await?;
+    for point in points.iter().filter(|p| p["runId"] == run) {
+        let manifest = manifest(s, point).await?;
+        for block in manifest["blocks"].as_array().unwrap() {
+            let Some(hash) = block["hash"].as_str() else {
+                continue;
+            };
+            let size = block["size"].as_u64().unwrap();
+            let file = directory.join(hash);
+            if local.insert(hash.to_owned()) && file.exists() {
+                // Only discard ciphertext after a failed integrity check. An I/O
+                // failure must not delete a potentially healthy local copy.
+                let encoded = tokio::fs::read(&file).await?;
+                if !decode_block(s, run, hash, encoded)
+                    .await
+                    .is_ok_and(|b| b.len() as u64 == size)
+                {
+                    tokio::fs::remove_file(&file).await?;
+                    failed = true;
+                }
+            }
+            if point["destination"] != "s3" {
+                failed |= !file.exists();
+                continue;
+            }
+            let storage = storage_for(s, point)?;
+            if !remote.insert((
+                storage.endpoint.clone(),
+                storage.bucket.clone(),
+                hash.to_owned(),
+            )) {
+                continue;
+            }
+            // Audit each destination independently: the local cache must never
+            // mask a lost remote object, nor be evicted on a remote failure.
+            let temp = tempfile::NamedTempFile::new_in(&directory)?;
+            let result = async {
+                tokio::time::timeout(
+                    Duration::from_secs(120),
+                    storage.download(&key(run, hash), temp.path()),
+                )
+                .await
+                .map_err(|_| Error::new(503, "Remote backup audit timed out."))??;
+                let bytes = decode_block(s, run, hash, tokio::fs::read(temp.path()).await?).await?;
+                if bytes.len() as u64 != size {
+                    return Err(Error::bad("Remote backup block has the wrong size."));
+                }
+                Ok::<_, Error>(())
+            }
+            .await;
+            if result.is_err() {
+                let mark = receipt(&file, point)?;
+                if mark.exists() {
+                    tokio::fs::remove_file(mark).await?;
+                }
+                failed = true;
+            }
+        }
+    }
+    if failed {
+        return Err(Error::bad(
+            "Recovery point integrity check failed; affected copies need repair.",
+        ));
+    }
+    Ok(())
+}
+
 pub fn public(mut value: Value) -> Value {
     value.as_object_mut().unwrap().remove("manifest");
     value
@@ -352,6 +534,7 @@ pub async fn maintain(s: std::sync::Arc<Service>) {
                 tokio::select! {_=s.shutdown.cancelled()=>return,_=attempt(&s,&run)=>{}}
             }
         }
+        tokio::select! {_=s.shutdown.cancelled()=>return,_=audit_due(&s)=>{}}
     }
 }
 
@@ -442,6 +625,7 @@ pub async fn purge(s: &Service, run: &str) -> Result<()> {
     if directory.exists() {
         tokio::fs::remove_dir_all(directory).await?;
     }
+    s.store.delete(&audit_key(run)).await?;
     s.store
         .transaction(move |db| {
             for point in points {
