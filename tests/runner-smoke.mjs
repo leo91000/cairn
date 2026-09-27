@@ -212,8 +212,18 @@ console.log('probe.done');
                 assert.ok(block, 'Active capture must contain durable guest data')
                 const bytes = Buffer.from(await (await api(`/snapshots/${point.id}/${block.hash}`)).arrayBuffer())
                 assert.equal(createHash('sha256').update(bytes).digest('hex'), block.hash)
-                await api(`/snapshots/${point.id}/discard`, 'DELETE')
-                process.stdout.write(`${JSON.stringify({ mode: 'active-capture', pauseMs: point.manifest.pauseMs, indexMs: point.manifest.indexMs, status: 'passed' })}\n`)
+                // The guest tracks written blocks: continuing from this point copies only those.
+                const next = await (await api(`/runs/${id}/snapshot`, 'POST', { baseline: point.id })).json()
+                assert.equal(next.manifest.incremental, true, 'The built guest image must track written blocks')
+                assert.ok(next.manifest.localBytesRead < point.manifest.localBytesRead, 'An incremental capture reads less than a full one')
+                assert.equal(next.manifest.blocks.length, point.manifest.blocks.length)
+                const changed = next.manifest.blocks.find((block, index) => block.hash && block.hash !== point.manifest.blocks[index].hash)
+                if (changed) {
+                  const written = Buffer.from(await (await api(`/snapshots/${next.id}/${changed.hash}`)).arrayBuffer())
+                  assert.equal(createHash('sha256').update(written).digest('hex'), changed.hash)
+                }
+                await api(`/snapshots/${next.id}/discard`, 'DELETE')
+                process.stdout.write(`${JSON.stringify({ mode: 'active-capture', pauseMs: point.manifest.pauseMs, indexMs: point.manifest.indexMs, incrementalBytesRead: next.manifest.localBytesRead, fullBytesRead: point.manifest.localBytesRead, status: 'passed' })}\n`)
                 await api(`/runs/${id}`, 'DELETE')
               }
               if (text.includes('probe.pause') && mode === 'crash') {

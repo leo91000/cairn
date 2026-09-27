@@ -24,6 +24,23 @@ fn key(run: &str, hash: &str) -> String {
     format!("node-backups/{run}/blocks/{hash}")
 }
 pub async fn capture(s: &Service, run: &Value) -> Result<Value> {
+    let result = publish(s, run).await;
+    // A capture continuing from a baseline may rely on blocks the master no longer
+    // holds: forget the baseline so the next capture copies the whole disk.
+    if result.is_err() && run["backup"]["snapshotId"].is_string() {
+        let _ = forget_baseline(s, text(run, "id")).await;
+    }
+    result
+}
+async fn forget_baseline(s: &Service, run_id: &str) -> Result<()> {
+    let mut backup = s.store.run(run_id).await?["backup"].clone();
+    if backup.is_object() {
+        backup["snapshotId"] = Value::Null;
+        s.store.patch_run(run_id, json!({"backup":backup})).await?;
+    }
+    Ok(())
+}
+async fn publish(s: &Service, run: &Value) -> Result<Value> {
     let _operation = s.node_backup_operation.lock().await;
     let run_id = text(run, "id");
     crate::validation::uuid(run_id)?;
@@ -64,6 +81,8 @@ pub async fn capture(s: &Service, run: &Value) -> Result<Value> {
         .http
         .post(capture_path)
         .bearer_auth(&credential)
+        // The node copies only blocks written since this published point if it still tracks it.
+        .json(&json!({"baseline":run["backup"]["snapshotId"]}))
         .timeout(Duration::from_secs(300))
         .send()
         .await
@@ -115,14 +134,14 @@ pub async fn capture(s: &Service, run: &Value) -> Result<Value> {
             }
         }
         let backup_id=id();
-        let value=json!({"id":backup_id,"runId":run_id,"nodeId":checkpoint["nodeId"],"createdAt":now(),"capturedAt":manifest["capturedAt"],"sessionId":run["sessionId"],"destination":destination,"bucket":storage.as_ref().map(|s|s.bucket.clone()),"endpoint":storage.as_ref().and_then(|s|s.endpoint.clone()),"uploadedBytes":uploaded,"pauseMs":manifest["pauseMs"],"indexMs":manifest["indexMs"],"localBytesRead":manifest["localBytesRead"],"manifest":s.vault.encrypt(&format!("backup:{backup_id}"),manifest)?});
+        let value=json!({"id":backup_id,"snapshotId":snapshot_id,"runId":run_id,"nodeId":checkpoint["nodeId"],"createdAt":now(),"capturedAt":manifest["capturedAt"],"sessionId":run["sessionId"],"destination":destination,"bucket":storage.as_ref().map(|s|s.bucket.clone()),"endpoint":storage.as_ref().and_then(|s|s.endpoint.clone()),"uploadedBytes":uploaded,"pauseMs":manifest["pauseMs"],"indexMs":manifest["indexMs"],"localBytesRead":manifest["localBytesRead"],"incremental":manifest["incremental"],"manifest":s.vault.encrypt(&format!("backup:{backup_id}"),manifest)?});
         let path=directory.join(format!("{backup_id}.json"));
         let encoded=serde_json::to_vec(&value)?;
         if occupied.saturating_add(encoded.len() as u64)>budget {return Err(Error::new(507,"Backup storage budget exhausted; previous recovery points are retained."));}
         crate::skills::atomic_write(&path,&encoded).await?;
         if let Some(storage)=&storage {upload_verified(storage,&path,&format!("node-backups/{run_id}/{backup_id}.json")).await?;}
         s.store.put("node-backups",value.clone()).await?;
-        s.store.patch_run(run_id,json!({"backup":{"id":backup_id,"capturedAt":manifest["capturedAt"],"uploadedBytes":uploaded,"status":"ready","error":null}})).await?;
+        s.store.patch_run(run_id,json!({"backup":{"id":backup_id,"snapshotId":snapshot_id,"capturedAt":manifest["capturedAt"],"uploadedBytes":uploaded,"status":"ready","error":null}})).await?;
         retain(s,run_id,settings["retention"].as_u64().unwrap_or(3) as usize).await?;
         Ok(public(value))
     }.await;
@@ -304,6 +323,7 @@ pub async fn attempt(s: &Service, run: &Value) {
         }
         status["status"] = "error".into();
         status["error"] = error.message.into();
+        status["snapshotId"] = Value::Null;
         let _ = s
             .store
             .patch_run(text(run, "id"), json!({"backup":status}))

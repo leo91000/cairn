@@ -12,7 +12,15 @@ if [ -c /dev/kvm ]; then
 fi
 mount -t tmpfs tmpfs /run
 mkdir -p /run/data /run/root
-mount -t ext4 -o noatime /dev/vdb /run/data
+# With a write-tracking metadata disk, record every written 4 MiB block with dm-era so
+# backups copy only those. Without it, or if it fails, mount the data disk directly.
+data=/dev/vdb
+if [ -b /dev/vdc ] && command -v dmsetup >/dev/null 2>&1 \
+  && dmsetup create --noudevsync data --table "0 $(blockdev --getsz /dev/vdb) era /dev/vdc /dev/vdb 8192" \
+  && dmsetup mknodes data; then
+  data=/dev/mapper/data
+fi
+mount -t ext4 -o noatime "$data" /run/data
 mkdir -p /run/data/upper /run/data/work
 mount -t overlay overlay -o lowerdir=/,upperdir=/run/data/upper,workdir=/run/data/work /run/root
 mkdir -p /run/root/oldroot

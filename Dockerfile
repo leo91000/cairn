@@ -44,6 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     zip unzip xz-utils zstd bzip2 rsync file less tree sqlite3 postgresql-client \
     dnsutils iproute2 iputils-ping netcat-openbsd procps lsof strace patch diffutils \
     pkg-config libssl-dev libffi-dev ninja-build poppler-utils imagemagick ffmpeg \
+    dmsetup thin-provisioning-tools \
     && rm -rf /var/lib/apt/lists/*
 RUN arch="${TARGETARCH:-amd64}" \
     && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${arch}.tar.gz" -o /tmp/gh.tar.gz \
@@ -93,10 +94,10 @@ COPY deploy/microvm/kernel.config /tmp/leo.config
 RUN make x86_64_defconfig && scripts/kconfig/merge_config.sh -m .config /tmp/leo.config \
     && scripts/config --disable USB --disable DRM --disable FB --disable SOUND --disable MEDIA_SUPPORT \
         --disable WLAN --disable WIRELESS --disable BT --disable HID --disable INPUT \
-        --disable SCSI --disable ATA --disable MD --disable MMC --disable FIREWIRE \
+        --disable SCSI --disable ATA --disable BLK_DEV_MD --disable MMC --disable FIREWIRE \
         --disable MODULES --disable DEBUG_INFO --disable DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT \
     && make olddefconfig \
-    && for option in KVM KVM_INTEL KVM_AMD; do grep -qx "CONFIG_${option}=y" .config || exit 1; done \
+    && for option in KVM KVM_INTEL KVM_AMD BLK_DEV_DM DM_ERA; do grep -qx "CONFIG_${option}=y" .config || exit 1; done \
     && make -j8 vmlinux && strip --strip-debug vmlinux \
     && mv vmlinux /tmp/leo-vmlinux && make clean && mv /tmp/leo-vmlinux vmlinux
 
