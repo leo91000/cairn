@@ -319,6 +319,106 @@ async fn call(s: &Arc<Service>, bearer: &str, name: &str, args: Value) -> Result
         }
     })
 }
+// Leave ample headroom below the gateway's 8 MiB ceiling: MCP serializes the
+// result both as structured data and as escaped text for older clients.
+const RUN_PAGE_BYTES: usize = 256 * 1024;
+
+fn run_record_preview(record: Value, fields: &[&str]) -> Result<(Value, usize)> {
+    let bytes = serde_json::to_vec(&record)?.len();
+    if bytes <= RUN_PAGE_BYTES {
+        return Ok((record, bytes));
+    }
+    let mut preview = json!({"truncated":true,"totalBytes":bytes});
+    let mut bytes = serde_json::to_vec(&preview)?.len();
+    for field in fields {
+        if let Some(value) = record.get(*field) {
+            let size = serde_json::to_vec(value)?.len() + field.len() + 4;
+            if bytes + size <= RUN_PAGE_BYTES {
+                preview[*field] = value.clone();
+                bytes += size;
+            }
+        }
+    }
+    Ok((preview, bytes))
+}
+
+fn run_history(db: &crate::store::Db<'_>, id: &str, after: i64) -> Result<Value> {
+    let run = crate::error::required(db.run(id)?, "Run not found")?;
+    let (run, _) = run_record_preview(
+        run,
+        &[
+            "id",
+            "taskId",
+            "projectId",
+            "status",
+            "trigger",
+            "createdAt",
+            "startedAt",
+            "finishedAt",
+        ],
+    )?;
+    let mut events = Vec::new();
+    let mut bytes = 0;
+    let mut next = after;
+    for event in db.event_batch(id, after, 100, RUN_PAGE_BYTES)? {
+        let event_id = event.id;
+        let (event, size) = run_record_preview(
+            serde_json::to_value(event)?,
+            &["id", "runId", "createdAt", "type", "text"],
+        )?;
+        if !events.is_empty() && bytes + size > RUN_PAGE_BYTES {
+            break;
+        }
+        bytes += size;
+        events.push(event);
+        next = event_id;
+    }
+    let more: bool = db.0.query_row(
+        "SELECT EXISTS(SELECT 1 FROM events WHERE run_id=? AND id>?)",
+        rusqlite::params![id, next],
+        |row| row.get(0),
+    )?;
+    Ok(json!({"run":run,"events":events,"nextAfter":next,"hasMore":more}))
+}
+
+fn read_run_content(db: &crate::store::Db<'_>, args: &Value) -> Result<Value> {
+    let id = text(args, "runId");
+    let data = if let Some(event_id) = args["eventId"].as_i64() {
+        db.require_run(id)?;
+        let event = db
+            .event_batch(id, event_id - 1, 1, RUN_PAGE_BYTES)?
+            .into_iter()
+            .find(|event| event.id == event_id);
+        // Keep the stored payload as RawValue: reading every chunk must not rebuild
+        // a potentially huge nested JSON object just to serialize it again.
+        serde_json::to_string(&crate::error::required(
+            event,
+            "Event not found in this run",
+        )?)?
+    } else {
+        crate::error::required(db.run(id)?, "Run not found")?.to_string()
+    };
+    let digest = crate::auth::hex_digest(&data);
+    let offset = args["offset"].as_u64().unwrap() as usize;
+    if (offset > 0 || args["sha256"].is_string()) && text(args, "sha256") != digest {
+        return Err(Error::new(
+            409,
+            "Content changed or checksum missing. Restart at offset 0 and pass the returned sha256 with each subsequent chunk.",
+        ));
+    }
+    if offset > data.len() || !data.is_char_boundary(offset) {
+        return Err(Error::bad(
+            "Offset must be a UTF-8 byte boundary within the content. Use nextOffset from the previous response.",
+        ));
+    }
+    let end = data.floor_char_boundary((offset + RUN_PAGE_BYTES).min(data.len()));
+    Ok(json!({
+        "runId":id,"eventId":args["eventId"],"encoding":"utf-8","format":"json",
+        "offset":offset,"totalBytes":data.len(),"sha256":digest,
+        "data":&data[offset..end],"nextOffset":if end < data.len() { Some(end) } else { None },
+    }))
+}
+
 async fn invoke(s: &Arc<Service>, name: &str, args: Value) -> Result<Value> {
     match name {
         "list_agents" => Ok(s.store.list("agents").await?.into()),
@@ -359,13 +459,10 @@ async fn invoke(s: &Arc<Service>, name: &str, args: Value) -> Result<Value> {
         "get_run" => {
             let id = text(&args, "runId").to_owned();
             s.store
-                .read(move |db| {
-                    Ok(json!({
-                    "run":crate::error::required(db.run(&id)?,"Run not found")?,"events":db.events(&id,args["after"].as_i64().unwrap(),100)?}
-                    ))
-                })
+                .read(move |db| run_history(db, &id, args["after"].as_i64().unwrap()))
                 .await
         }
+        "read_run_content" => s.store.read(move |db| read_run_content(db, &args)).await,
         "list_skills" | "save_skill" => {
             let project = if let Some(id) = args["projectId"].as_str() {
                 Some(std::path::PathBuf::from(text(

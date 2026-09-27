@@ -19,6 +19,230 @@ fn config(root: &TempDir) -> Config {
         runner_url: String::new(),
     }
 }
+
+#[tokio::test]
+async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let mut settings = config(&root);
+    settings.public_url = origin.clone();
+    let s = Service::new(settings).await.unwrap();
+    let router = leo_agent_manager::http::router(s.clone()).await.unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let token = s
+        .auth
+        .personal("History reader", vec!["read"])
+        .await
+        .unwrap();
+    let task = s.task(json!({"name":"History","agentId":leo_agent_manager::config::MAIN_AGENT_ID,"prompt":"Read history","worktree":false}),None).await.unwrap();
+    let run = s
+        .enqueue(task["id"].as_str().unwrap(), "manual", None)
+        .await
+        .unwrap();
+    let run_id = run["id"].as_str().unwrap();
+    let output = "x".repeat(128 * 1024);
+    for index in 0..40 {
+        s.store.event(run_id, "item.completed", "tool output", Some(json!({"item":{"id":index,"type":"command_execution","aggregated_output":output}}))).await.unwrap();
+    }
+    let http = reqwest::Client::new();
+    let request = |name: &str, arguments: serde_json::Value| {
+        http.post(format!("{origin}/mcp"))
+        .bearer_auth(token["token"].as_str().unwrap())
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}}))
+    };
+    let mut after = 0;
+    let mut seen = Vec::new();
+    loop {
+        let bytes = request("get_run", json!({"runId":run_id,"after":after}))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert!(
+            bytes.len() < 8 * 1024 * 1024,
+            "MCP response exceeds 8 MB: {} bytes",
+            bytes.len()
+        );
+        let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_ne!(response["result"]["isError"], true);
+        let page = &response["result"]["structuredContent"]["result"];
+        for event in page["events"].as_array().unwrap() {
+            if event["type"] == "item.completed" {
+                assert_eq!(event["payload"]["item"]["aggregated_output"], output);
+                seen.push(event["payload"]["item"]["id"].as_i64().unwrap());
+            }
+        }
+        let next = page["nextAfter"].as_i64().unwrap();
+        assert!(next > after, "pagination must make progress");
+        after = next;
+        if page["hasMore"] == false {
+            break;
+        }
+        assert!(seen.len() <= 40, "pagination repeated events");
+    }
+    assert_eq!(seen, (0..40).collect::<Vec<_>>());
+
+    // One event can exceed the transport ceiling on its own. Its original content
+    // must remain available, including escaped characters and multi-byte Unicode.
+    let large = "\0\"\\🦊é".repeat(250_000);
+    let payload = json!({"item":{"type":"agent_message","text":large}});
+    s.store
+        .event(
+            run_id,
+            "item.completed",
+            "Large answer",
+            Some(payload.clone()),
+        )
+        .await
+        .unwrap();
+    s.store
+        .event(run_id, "turn.completed", "Done", None)
+        .await
+        .unwrap();
+    let bytes = request("get_run", json!({"runId":run_id,"after":after}))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert!(
+        bytes.len() < 8 * 1024 * 1024,
+        "single event exceeds transport: {} bytes",
+        bytes.len()
+    );
+    let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let page = &response["result"]["structuredContent"]["result"];
+    let event = &page["events"][0];
+    assert_eq!(event["truncated"], true);
+    let event_id = event["id"].as_i64().unwrap();
+    let mut offset = 0;
+    let mut digest = serde_json::Value::Null;
+    let mut original = String::new();
+    loop {
+        let mut arguments = json!({"runId":run_id,"eventId":event_id,"offset":offset});
+        if !digest.is_null() {
+            arguments["sha256"] = digest.clone();
+        }
+        let bytes = request("read_run_content", arguments)
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert!(bytes.len() < 8 * 1024 * 1024);
+        let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_ne!(response["result"]["isError"], true, "{response}");
+        let chunk = &response["result"]["structuredContent"]["result"];
+        digest = chunk["sha256"].clone();
+        original.push_str(chunk["data"].as_str().unwrap());
+        if chunk["nextOffset"].is_null() {
+            break;
+        }
+        let next = chunk["nextOffset"].as_u64().unwrap();
+        assert!(next > offset);
+        offset = next;
+    }
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&original).unwrap()["payload"],
+        payload
+    );
+    let response: serde_json::Value = request("read_run_content", json!({"runId":run_id,"eventId":event_id,"offset":original.find('🦊').unwrap()+1,"sha256":digest}))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(
+        response["result"]["isError"], true,
+        "offset inside UTF-8 must be rejected"
+    );
+    let response: serde_json::Value =
+        request("get_run", json!({"runId":run_id,"after":page["nextAfter"]}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    let page = &response["result"]["structuredContent"]["result"];
+    assert_eq!(page["events"][0]["type"], "turn.completed");
+    assert_eq!(page["hasMore"], false);
+
+    let other_task = s.task(json!({"name":"Other history","agentId":leo_agent_manager::config::MAIN_AGENT_ID,"prompt":"Other run","worktree":false}),None).await.unwrap();
+    let other_run = s
+        .enqueue(other_task["id"].as_str().unwrap(), "manual", None)
+        .await
+        .unwrap();
+    let response: serde_json::Value = request(
+        "read_run_content",
+        json!({"runId":other_run["id"],"eventId":event_id,"offset":0}),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(
+        response["result"]["isError"], true,
+        "events must belong to the requested run"
+    );
+
+    // Run metadata (for example a snapshot of many skills) needs the same escape
+    // hatch. A changing run must never silently mix two versions across chunks.
+    s.store
+        .patch_run(run_id, json!({"summary":"\0".repeat(800_000)}))
+        .await
+        .unwrap();
+    let bytes = request("get_run", json!({"runId":run_id,"after":page["nextAfter"]}))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert!(bytes.len() < 8 * 1024 * 1024);
+    let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let empty = &response["result"]["structuredContent"]["result"];
+    assert_eq!(empty["events"], json!([]));
+    assert_eq!(empty["nextAfter"], page["nextAfter"]);
+    assert_eq!(empty["hasMore"], false);
+    assert_eq!(
+        response["result"]["structuredContent"]["result"]["run"]["truncated"],
+        true
+    );
+    let response: serde_json::Value =
+        request("read_run_content", json!({"runId":run_id,"offset":0}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    let chunk = &response["result"]["structuredContent"]["result"];
+    assert!(chunk["nextOffset"].as_u64().unwrap() > 0);
+    s.store
+        .patch_run(run_id, json!({"summary":"Updated result"}))
+        .await
+        .unwrap();
+    let response: serde_json::Value = request(
+        "read_run_content",
+        json!({"runId":run_id,"offset":chunk["nextOffset"],"sha256":chunk["sha256"]}),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(
+        response["result"]["isError"], true,
+        "changed metadata must require a fresh read"
+    );
+    server.abort();
+}
 #[tokio::test]
 async fn stdio_discovers_and_calls_the_official_sdk_fixture() {
     let root = TempDir::new().unwrap();

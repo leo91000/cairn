@@ -77,7 +77,7 @@ jobs:
           profile: pixel_6
           disable-animations: false
           script: |
-            cd android && ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=dev.leo.manager.ui.HistoryFollowDeviceTest,dev.leo.manager.ui.ModelPickerDeviceTest,dev.leo.manager.ui.AccountsDeviceTest,dev.leo.manager.ui.ModelCatalogDeviceTest,dev.leo.manager.ui.ChatProviderDeviceTest,dev.leo.manager.ui.SkillMentionDeviceTest,dev.leo.manager.ui.ConversationLifecycleDeviceTest,dev.leo.manager.ui.ImagePasteDeviceTest,dev.leo.manager.ui.QueueStripDeviceTest,dev.leo.manager.ui.NodePlacementDeviceTest --no-daemon
+            cd android && ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=dev.leo.manager.ui.HistoryFollowDeviceTest,dev.leo.manager.ui.ModelPickerDeviceTest,dev.leo.manager.ui.AccountsDeviceTest,dev.leo.manager.ui.ModelCatalogDeviceTest,dev.leo.manager.ui.ChatProviderDeviceTest,dev.leo.manager.ui.SkillMentionDeviceTest,dev.leo.manager.ui.ConversationLifecycleDeviceTest,dev.leo.manager.ui.ImagePasteDeviceTest,dev.leo.manager.ui.QueueStripDeviceTest,dev.leo.manager.ui.NodePlacementDeviceTest,dev.leo.manager.ui.MissionBackDeviceTest --no-daemon
             adb install -r android/app/build/outputs/apk/debug/app-debug.apk
             adb install -r -t android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
             # Gradle uninstalls the test app, so regenerate the captures after reinstalling.

@@ -56,7 +56,7 @@ hour, and refresh tokens after 30 days. Browser sessions are separate credential
 
 | Scope | Tools |
 | --- | --- |
-| `read` | `list_agents`, `list_projects`, `list_tasks`, `list_runs`, `get_run`, `list_skills`, `list_mcps` |
+| `read` | `list_agents`, `list_projects`, `list_tasks`, `list_runs`, `get_run`, `read_run_content`, `list_skills`, `list_mcps` |
 | `manage` | `save_agent`, `update_agent`, `save_project`, `create_task`, `update_task`, `save_skill`, `create_mcp`, `update_mcp`, `test_mcp`, `disconnect_mcp`, `delete_mcp` |
 | `run` | `run_task`, `cancel_run` |
 
@@ -67,9 +67,25 @@ replaces the complete policy. MCP connection tools share the UI's validation,
 encrypted credential storage and run-grant enforcement. See
 [connection management](MCP-CONNECTIONS.md#managing-connections-through-mcp)
 for configuration, OAuth sign-in and agent assignments.
-`list_runs` is paginated and omits full instructions/results; `get_run` returns the
-original snapshot, full summary, and an incremental event page. Calls return text
-and a structured `{ result }` object. Tool metadata includes OAuth scopes and
+`list_runs` is paginated and omits full instructions/results. `get_run` returns
+the run record and an incremental event page, bounded by serialized bytes as well
+as the 100-event maximum. Start with `after: 0`, then pass `nextAfter` while
+`hasMore` is true. A short page does **not** mean the history is exhausted.
+
+A run or event too large for a page is returned as a preview with `truncated: true`
+and `totalBytes`. The stored content is unchanged. Use `read_run_content` with
+`runId` and `offset: 0` to read the full run record; also pass `eventId` to read one
+event. Concatenate the returned `data` strings as JSON text. Continue with
+`nextOffset` and the first response's `sha256` until `nextOffset` is null. Offsets
+count UTF-8 bytes, and chunks never split a Unicode character. A checksum mismatch
+means the record changed; discard the accumulated chunks and restart at zero.
+This also lets clients read an individual event larger than the gateway's 8 MiB
+response ceiling without discarding its payload. Existing connections that select
+individual tools must enable `read_run_content` to use this fallback.
+
+Calls return text and a structured `{ result }` object for compatibility with both
+older and newer clients; the page budget allows for both copies and JSON escaping.
+Tool metadata includes OAuth scopes and
 read/write annotations; denied tool calls carry an OAuth challenge for clients
 that support relinking with additional scopes.
 

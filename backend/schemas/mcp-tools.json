@@ -1159,7 +1159,7 @@
   },
   {
     "name": "get_run",
-    "description": "Get a run summary and an incremental page of its event log.",
+    "description": "Get a run and a byte-bounded page of its event log. Continue with nextAfter while hasMore is true, even when a page has fewer than 100 events. A run or event marked truncated remains available in full through read_run_content.",
     "scope": "read",
     "destructive": false,
     "inputSchema": {
@@ -1181,6 +1181,46 @@
       "required": [
         "runId",
         "after"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "read_run_content",
+    "description": "Read full run metadata or one event as bounded chunks of JSON text, including records marked truncated by get_run. Start at offset 0; concatenate data and pass nextOffset plus sha256 until nextOffset is null. Restart from 0 if the content changes. Offsets count UTF-8 bytes.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "runId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "eventId": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991,
+          "description": "Event ID from get_run. Omit to read the full run record."
+        },
+        "offset": {
+          "default": 0,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "UTF-8 byte offset. Start at 0, then use nextOffset."
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Checksum returned by the first chunk. Required after offset 0 to detect changes."
+        }
+      },
+      "required": [
+        "runId",
+        "offset"
       ],
       "additionalProperties": false
     }

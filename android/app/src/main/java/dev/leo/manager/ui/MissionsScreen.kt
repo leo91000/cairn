@@ -24,6 +24,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.currentStateAsState
 import dev.leo.manager.data.*
 import kotlinx.serialization.json.encodeToJsonElement
 
@@ -94,6 +97,7 @@ fun MissionsScreen(vm: LeoViewModel, state: Workspace, openRun: (String) -> Unit
             latest,
         )
     val selected = state.tasks.find { it.id == selectedId }
+    val lifecycle by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
     fun launch(task: Task) {
         vm.perform {
             val started = api.send<Run>("POST", "/tasks/${segment(task.id)}/run")
@@ -201,7 +205,10 @@ fun MissionsScreen(vm: LeoViewModel, state: Workspace, openRun: (String) -> Unit
                 }
             }
         }
-        if (!wide && selected != null)
+        // The sheet is its own window, above every screen. Composed while a back gesture previews
+        // Missions under a run opened from it, it took the gesture and the run stayed open, so it
+        // only shows once Missions is the settled destination.
+        if (!wide && selected != null && lifecycle.isAtLeast(Lifecycle.State.RESUMED))
             ModalBottomSheet(
                 onDismissRequest = { selectedId = null },
                 sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
