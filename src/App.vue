@@ -285,7 +285,8 @@ async function login() {
           {{ item.label }}
         </RouterLink>
       </nav>
-      <RouterView :key="route.path" />
+      <!-- Chats stays mounted between conversations so switching swaps content in place. -->
+      <RouterView :key="route.path.startsWith('/chats/') ? '/chats' : route.path" />
     </main>
     <nav v-if="!reading" class="dock fixed bottom-[max(14px,env(safe-area-inset-bottom))] left-1/2 z-30 hidden -translate-x-1/2 items-center gap-1 rounded-full border border-line bg-surface/90 p-1.5 shadow-lift backdrop-blur-md phone:flex" aria-label="Quick navigation">
       <span v-if="place >= 0" class="dock-pill absolute left-1.5 top-1.5 h-13 w-19 rounded-full bg-hover" :style="{ transform: `translateX(${place * 80}px)` }" />

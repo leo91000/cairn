@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import type { Chat, ChatAttachment, ChatDetail, ChatMessage, ChatView } from '../../shared/chats'
+import type { Chat, ChatAttachment, ChatDetail, ChatMessage } from '../../shared/chats'
 import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { latestArtifacts } from '../../shared/artifacts'
 import { MAIN_AGENT_ID } from '../../shared/constants'
 import { api, state } from '../api'
 import { chatDelivery, chatWaitNotice } from '../chat-delivery'
-import { publishChats } from '../chat-list'
+import { chatList as chats, publishChats } from '../chat-list'
 import ActivityFeed from '../components/ActivityFeed.vue'
 import AgentAvatar from '../components/AgentAvatar.vue'
 import AssistantPicker from '../components/AssistantPicker.vue'
@@ -30,11 +30,14 @@ import { workspaceActionsKey } from '../workspace-actions'
 
 const router = useRouter()
 const route = useRoute()
-const chats = ref<ChatView[]>([])
 const detail = ref<(ChatDetail & { error?: string }) | null>(null)
 const inactive = computed(() => !!detail.value?.lifecycle && detail.value.lifecycle !== 'active')
-const live = useLiveRun(() => route.params.id ? `/chats/${route.params.id}/stream` : '/chats/stream')
+const chatId = computed(() => typeof route.params.id === 'string' ? route.params.id : undefined)
+const streamPath = computed(() => chatId.value ? `/chats/${chatId.value}/stream` : '/chats/stream')
+const live = useLiveRun(() => streamPath.value, { hold: 1000 })
 const { events, connectionNotice, catchingUp } = live
+// The previous conversation stays visible until the selected one is ready.
+const switching = computed(() => live.shown.value !== streamPath.value)
 const deliverables = computed(() => live.snapshot.value?.artifacts ?? [])
 const draft = ref('')
 const model = ref('')
@@ -152,8 +155,12 @@ const inheritAgentModel = computed(() => chosenProvider.value === (selectedAgent
 const skills = computed(() => chatSkills(state.skills, selectedAgent.value, detail.value ? detail.value.projectId : projectId.value))
 const skillNames = computed(() => skills.value.map(skill => skill.name))
 const projects = computed(() => [{ value: '', label: 'No project', description: 'Use the agent’s available workspaces', icon: FolderGit2 }, ...state.projects.filter(project => selectedAgent.value?.access.projects === null || selectedAgent.value?.access.projects.includes(project.id)).map(project => ({ value: project.id, label: project.name, icon: FolderGit2 }))])
-const draftKey = `leo-chat-draft:${route.params.id || `new:${agentId.value}:${projectId.value}`}`
-draft.value = sessionStorage.getItem(draftKey) ?? (typeof route.query.draft === 'string' ? route.query.draft : '')
+let draftKey = ''
+function loadDraft() {
+  draftKey = `leo-chat-draft:${chatId.value || `new:${agentId.value}:${projectId.value}`}`
+  draft.value = sessionStorage.getItem(draftKey) ?? (typeof route.query.draft === 'string' ? route.query.draft : '')
+}
+loadDraft()
 watch(draft, value => sessionStorage.setItem(draftKey, value))
 watch(agentId, () => {
   if (!projects.value.some(project => project.value === projectId.value))
@@ -161,7 +168,6 @@ watch(agentId, () => {
 })
 watch(live.snapshot, (value) => {
   detail.value = value?.chat ?? null
-  chats.value = value?.chats ?? []
   if (value?.chats)
     publishChats(value.chats)
 })
@@ -193,6 +199,7 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
   if (!canSend.value || busy.value)
     return
   submitting.value = true
+  const origin = chatId.value
   const direct = !editing.value && ((mode === 'steer' && !detail.value?.paused) || (!responding.value && !detail.value?.paused && !pending.value.length))
   busy.value = true
   error.value = ''
@@ -216,6 +223,11 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
     if (direct)
       outgoing.value = { ...submission, chatId: chat.id, status: 'queued', createdAt: Date.now(), attachments: [...attachments.value] }
     await api(`/chats/${chat.id}/messages${editing.value ? `/${editing.value}` : ''}`, { method: editing.value ? 'PUT' : 'POST', body: JSON.stringify(submission) })
+    // Another conversation was opened meanwhile; its composer is not this message's.
+    if (chatId.value !== origin) {
+      submission = undefined
+      return
+    }
     if (draft.value === originalDraft)
       draft.value = ''
     editing.value = null
@@ -270,6 +282,28 @@ function edit(message: ChatMessage) {
   reasoning.value = message.reasoning || ''
   textarea.value?.focus()
 }
+// The view stays mounted across conversations: reset what belongs to the previous one.
+watch(chatId, (id) => {
+  history.value = false
+  detailsOpen.value = false
+  newSession.value = false
+  editing.value = null
+  error.value = ''
+  clearAttachments()
+  provider.value = ''
+  model.value = ''
+  reasoning.value = ''
+  submission = undefined
+  createdChat = undefined
+  // A first message keeps its optimistic bubble while the new chat opens.
+  if (outgoing.value?.chatId !== id)
+    outgoing.value = null
+  if (!id) {
+    agentId.value = typeof route.query.agent === 'string' ? route.query.agent : MAIN_AGENT_ID
+    projectId.value = typeof route.query.project === 'string' ? route.query.project : ''
+  }
+  loadDraft()
+})
 function key(event: KeyboardEvent) {
   if (event.key !== 'Enter' || event.shiftKey || event.isComposing)
     return
@@ -349,10 +383,10 @@ function key(event: KeyboardEvent) {
   </Modal>
   <div class="flex h-full min-h-0">
     <aside class="w-88 shrink-0 border-r border-line bg-inset tablet:hidden" aria-label="Fil">
-      <FilColumn :chats="chats" :selected="detail?.id" compact />
+      <FilColumn :chats="chats" :selected="chatId" compact />
     </aside>
     <div class="chat-page flex h-full min-h-0 min-w-0 flex-1 flex-col gap-3 px-6 pb-4 pt-3 phone:gap-0 phone:px-3 phone:pb-2 phone:pt-[env(safe-area-inset-top)]">
-      <ChatSwitcher v-if="history" :chats="chats" :selected="detail?.id" :anchor="historyButton" @close="history = false" @create="newConversation" />
+      <ChatSwitcher v-if="history" :chats="chats" :selected="chatId" :anchor="historyButton" @close="history = false" @create="newConversation" />
       <header class="chat-header flex shrink-0 items-center justify-between gap-2 border-b border-line/70 pb-3 phone:h-15 phone:pb-0">
         <h1 v-if="detail" class="sr-only hidden phone:block">
           {{ detail.title }}
@@ -401,7 +435,7 @@ function key(event: KeyboardEvent) {
         Chats
       </h1>
       <div class="flex min-h-0 flex-1 flex-col">
-        <section class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" aria-label="Chat workspace">
+        <section class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden transition-opacity" :class="switching ? 'opacity-60 delay-150' : ''" :aria-busy="switching" aria-label="Chat workspace">
           <div v-if="route.params.id && !detail" role="status" class="flex flex-1 items-center justify-center text-sm text-muted">
             Loading conversation…
           </div>
@@ -433,7 +467,7 @@ function key(event: KeyboardEvent) {
               </button>
             </div>
           </div>
-          <ActivityFeed v-else ref="activity" :key="String(route.params.id)" :cache-key="`/chats/${route.params.id}/stream`" :position="live.position.value" :deliverables="deliverables" :outcome="detail?.run?.status === 'succeeded' ? detail.run.outcome : null" :sending="delivery.sending" :events="events" :active="detail?.run?.status === 'running'" :agent-id="detail?.agentId || selectedAgent?.id" :agent="detail?.agentName || selectedAgent?.name || 'Main agent'" :task="detail?.title || 'New conversation'" :more="live.hasOlder.value" :loading-older="live.loadingOlder.value" :older-error="live.olderError.value" :loading="catchingUp" :trimmed="0" :skills="skillNames" chat @load="live.loadOlder" @position="live.savePosition" />
+          <ActivityFeed v-else ref="activity" :key="live.shown.value" :cache-key="live.shown.value" :position="live.position.value" :deliverables="deliverables" :outcome="detail?.run?.status === 'succeeded' ? detail.run.outcome : null" :sending="delivery.sending" :events="events" :active="detail?.run?.status === 'running'" :agent-id="detail?.agentId || selectedAgent?.id" :agent="detail?.agentName || selectedAgent?.name || 'Main agent'" :task="detail?.title || 'New conversation'" :more="live.hasOlder.value" :loading-older="live.loadingOlder.value" :older-error="live.olderError.value" :loading="catchingUp" :trimmed="0" :skills="skillNames" chat @load="live.loadOlder" @position="live.savePosition" />
           <div v-if="!inactive" class="mx-auto w-full max-w-205 shrink-0 px-5 pb-1 pt-3 phone:px-0 phone:pt-2">
             <ChatQuestions v-if="detail" :questions="detail.questions || []" :active="active" :highlighted="typeof route.query.question === 'string' ? route.query.question : undefined" />
             <p v-if="connectionNotice" role="status" class="px-4 py-2 text-xs text-muted">

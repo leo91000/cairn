@@ -8,8 +8,12 @@ import { cacheScope, clearHistoryCache, readHistory, removeHistory, writeHistory
 import { liveConnection } from './live-connection'
 import { LiveEvents } from './live-events'
 
-export function useLiveRun(path: () => string) {
+// `hold` keeps the previous stream's data on screen for up to that many milliseconds after the
+// path changes, so switching views swaps content directly instead of flashing a loading state.
+// `shown` is the path whose data is currently displayed.
+export function useLiveRun(path: () => string, options: { hold?: number } = {}) {
   const snapshot = ref<LiveState>()
+  const shown = ref(path())
   const events = ref<RunEvent[]>([])
   const status = ref<LiveStatus>('connecting')
   const catchingUp = ref(true)
@@ -26,6 +30,7 @@ export function useLiveRun(path: () => string) {
   let generation = 0
   let persist: (() => void) | undefined
   let saveTimer: ReturnType<typeof setTimeout> | undefined
+  let holdTimer: ReturnType<typeof setTimeout> | undefined
   function scheduleSave() {
     if (saveTimer !== undefined)
       return
@@ -40,7 +45,12 @@ export function useLiveRun(path: () => string) {
     position.value = value
     scheduleSave()
   }
-  watch([path, () => state.authenticated && !state.signingOut, () => state.csrf], async ([value, enabled, csrf]) => {
+  function show(value: string) {
+    clearTimeout(holdTimer)
+    holdTimer = undefined
+    shown.value = value
+  }
+  watch([path, () => state.authenticated && !state.signingOut, () => state.csrf], async ([value, enabled, csrf], previous) => {
     persist?.()
     const current = ++generation
     connection?.close()
@@ -48,14 +58,22 @@ export function useLiveRun(path: () => string) {
     saveTimer = undefined
     persist = undefined
     fetchOlder = undefined
-    hasOlder.value = false
     loadingOlder.value = false
     olderError.value = ''
-    snapshot.value = undefined
-    events.value = []
     position.value = undefined
-    catchingUp.value = true
     synced.value = false
+    const clear = () => {
+      show(value)
+      hasOlder.value = false
+      snapshot.value = undefined
+      events.value = []
+      catchingUp.value = true
+    }
+    clearTimeout(holdTimer)
+    if (options.hold && enabled && snapshot.value && previous?.[0] !== value && previous?.[1])
+      holdTimer = setTimeout(clear, options.hold)
+    else
+      clear()
     status.value = 'connecting'
     error.value = ''
     if (!enabled) {
@@ -72,12 +90,15 @@ export function useLiveRun(path: () => string) {
     let cursor = cached?.cursor ?? 0
     let history = cached?.history
     let oldest = cached?.oldest ?? 0
-    hasOlder.value = cached?.hasOlder ?? false
+    // Applied with the complete snapshot, so a held view keeps its own pagination meanwhile.
+    let older = cached?.hasOlder ?? false
     let complete = !!cached
     let storedPosition = cached?.position
     position.value = storedPosition
     accumulator.restore(rows, cursor)
     if (cached) {
+      show(value)
+      hasOlder.value = older
       snapshot.value = cached.state
       events.value = cached.events
       catchingUp.value = false
@@ -108,7 +129,8 @@ export function useLiveRun(path: () => string) {
         accumulator = candidate
         rows = next
         oldest = page.oldest
-        hasOlder.value = page.hasOlder
+        older = page.hasOlder
+        hasOlder.value = older
         events.value = rows.slice()
         scheduleSave()
       }
@@ -155,10 +177,12 @@ export function useLiveRun(path: () => string) {
       history = batch.history
       if (batch.oldest !== undefined) {
         oldest = batch.oldest
-        hasOlder.value = batch.hasOlder ?? false
+        older = batch.hasOlder ?? false
       }
       complete = !batch.more
       if (complete) {
+        show(value)
+        hasOlder.value = older
         snapshot.value = detail
         events.value = rows.slice()
         catchingUp.value = false
@@ -177,6 +201,7 @@ export function useLiveRun(path: () => string) {
           clearTimeout(saveTimer)
           error.value = e.message
           connection?.close()
+          show(value)
           snapshot.value = undefined
           events.value = []
           if (scope)
@@ -191,12 +216,14 @@ export function useLiveRun(path: () => string) {
     window.removeEventListener('pagehide', leaving)
     persist?.()
     clearTimeout(saveTimer)
+    clearTimeout(holdTimer)
     disposed = true
     generation++
     connection?.close()
   })
   return {
     snapshot,
+    shown,
     hasOlder,
     loadingOlder,
     olderError,
@@ -207,7 +234,7 @@ export function useLiveRun(path: () => string) {
     error,
     position,
     savePosition,
-    connectionNotice: computed(() => error.value ? '' : status.value === 'offline' ? (snapshot.value ? 'Offline · showing saved conversation' : 'Offline') : status.value === 'reconnecting' ? 'Reconnecting…' : status.value === 'connecting' && snapshot.value ? 'Updating…' : ''),
+    connectionNotice: computed(() => error.value || shown.value !== path() ? '' : status.value === 'offline' ? (snapshot.value ? 'Offline · showing saved conversation' : 'Offline') : status.value === 'reconnecting' ? 'Reconnecting…' : status.value === 'connecting' && snapshot.value ? 'Updating…' : ''),
     reconnect: () => connection?.reconnect(),
   }
 }
