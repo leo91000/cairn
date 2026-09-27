@@ -207,6 +207,38 @@ pub fn probe(state: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Called only while holding the exclusive controller lock, before deleting old
+/// jails. A dead FUSE connection must be detached before walking its directory.
+pub fn cleanup_stale(state: &Path) -> io::Result<()> {
+    for line in std::fs::read_to_string("/proc/self/mountinfo")?.lines() {
+        let Some((mount, kind)) = line.split_once(" - ") else {
+            continue;
+        };
+        let fields = kind.split_whitespace().collect::<Vec<_>>();
+        if fields.get(1) != Some(&"leo-disk") {
+            continue;
+        }
+        let Some(path) = mount.split_whitespace().nth(4) else {
+            continue;
+        };
+        let path = path
+            .replace("\\040", " ")
+            .replace("\\011", "\t")
+            .replace("\\012", "\n")
+            .replace("\\134", "\\");
+        let path = Path::new(&path);
+        if !path.starts_with(state.join("jails")) && !path.starts_with(state.join("disks")) {
+            continue;
+        }
+        use std::os::unix::ffi::OsStrExt;
+        let encoded = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+        if unsafe { libc::umount2(encoded.as_ptr(), libc::MNT_DETACH) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

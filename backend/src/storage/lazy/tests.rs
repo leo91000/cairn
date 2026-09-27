@@ -153,9 +153,11 @@ fn sealed_generation_excludes_later_writes_and_publication_preserves_them() {
     let bytes = disk.captured_block(generation, hash).unwrap();
     assert_eq!(&bytes[7..13], b"before");
     source.0.lock().unwrap().insert(hash.to_owned(), bytes);
-    disk.commit_published(generation).unwrap();
+    disk.commit_published(generation, "point-one").unwrap();
+    disk.commit_published(generation, "point-one").unwrap();
     assert!(
-        disk.commit_published(generation).is_err(),
+        disk.commit_published(generation, "different-point")
+            .is_err(),
         "a stale publication cannot advance the disk twice"
     );
     drop(disk);

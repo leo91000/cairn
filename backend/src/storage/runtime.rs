@@ -107,8 +107,12 @@ impl Volume {
             )
         };
         status["mode"] = "on-demand".into();
+        status["migrated"] = true.into();
+        status["grantId"] = self.source.grant_id().into();
         status["waitingFor"] = json!(reason);
         status["freeBytes"] = free.into();
+        status["localBytes"] = allocated(&self.directory)?.into();
+        status["activeLocalBytes"] = allocated(&self.directory.join("lazy"))?.into();
         status["reserveBytes"] = policy.reserve(total).into();
         status["backupSeconds"] = policy.backup_seconds.into();
         Ok(status)
@@ -159,6 +163,21 @@ impl Disk for Volume {
     fn sync(&self) -> io::Result<()> {
         self.disk.sync()
     }
+}
+
+fn allocated(directory: &Path) -> io::Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+    let mut total = 0u64;
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        if entry.file_type()?.is_dir() {
+            total = total.saturating_add(allocated(&entry.path())?);
+        } else {
+            total = total.saturating_add(metadata.blocks().saturating_mul(512));
+        }
+    }
+    Ok(total)
 }
 
 /// A cold archive streams the mounted view without another full raw disk copy.

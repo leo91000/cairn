@@ -33,7 +33,7 @@ pub async fn capture(
             "Waiting for storage before capturing the disk.",
         ));
     }
-    let emergency = waiting.is_some();
+    let mut emergency = waiting.is_some();
     let mut frozen = false;
     if let Some(socket) = &socket {
         if !emergency {
@@ -44,23 +44,37 @@ pub async fn capture(
             .await;
             frozen = true;
             if !matches!(&reply,Ok(Ok(value)) if value["ok"]==true) {
-                // The request may complete after its connection times out. Keep
-                // retrying thaw before any following capture can take control.
-                thaw(socket, &stop).await?;
-                return Err(Error::new(
-                    503,
-                    "Filesystem freeze interrupted; retrying the recovery point.",
-                ));
+                // A freeze can itself wait on a disk write blocked by reserve.
+                // Seal a crash-consistent prefix so publication can free the
+                // journal, then the ordered guest thaw can complete afterwards.
+                emergency = true;
             }
         }
-        host::pause_attempt(state, attempt).await?;
+        if let Err(error) = host::pause_attempt(state, attempt).await {
+            if frozen {
+                let socket = socket.clone();
+                let stop = stop.clone();
+                tokio::spawn(async move {
+                    let _ = thaw(&socket, &stop).await;
+                });
+            }
+            return Err(error);
+        }
     }
     let generation = volume.disk.seal();
     if socket.is_some() && !stop.is_cancelled() && !emergency {
         host::resume_attempt(state, attempt).await?;
     }
     if frozen {
-        thaw(socket.as_ref().unwrap(), &stop).await?;
+        if emergency {
+            let socket = socket.as_ref().unwrap().clone();
+            let stop = stop.clone();
+            tokio::spawn(async move {
+                let _ = thaw(&socket, &stop).await;
+            });
+        } else {
+            thaw(socket.as_ref().unwrap(), &stop).await?;
+        }
     }
     drop(guard);
     let generation = generation?;
@@ -83,7 +97,7 @@ pub async fn capture(
         &serde_json::to_vec(&manifest)?,
     )
     .await?;
-    Ok(json!({"id":id,"manifest":manifest}))
+    Ok(json!({"id":id,"manifest":manifest,"grantId":volume.source.grant_id()}))
 }
 async fn thaw(socket: &Path, stop: &CancellationToken) -> Result<()> {
     let request = json!({"op":"thaw"});

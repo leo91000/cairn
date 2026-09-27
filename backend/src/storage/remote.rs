@@ -46,6 +46,9 @@ impl RemoteSource {
             waiting: AtomicUsize::new(0),
         })
     }
+    pub fn grant_id(&self) -> String {
+        crate::auth::digest(&self.credential)
+    }
     pub fn waiting(&self) -> bool {
         self.waiting.load(Ordering::SeqCst) > 0
     }

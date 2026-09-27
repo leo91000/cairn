@@ -139,7 +139,7 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
                 }).await.map_err(Error::internal)??;
                 // Serialize space accounting and publication across concurrent backups.
                 let _guard=s.node_backup_lock.lock().await;
-                if occupied.saturating_add(encoded.len() as u64)>budget {return Err(Error::new(507,"Backup storage budget exhausted; previous recovery points are retained."));}
+                occupied=make_room(s,occupied,encoded.len() as u64,budget).await?;
                 crate::skills::atomic_write(&file,&encoded).await?;
                 occupied+=encoded.len() as u64;
                 uploaded+=length;
@@ -159,9 +159,7 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
                     if !verified {decode_block(s,run_id,hash,tokio::fs::read(&file).await?).await?;}
                     upload_verified(storage,&file,&key(run_id,hash)).await?;crate::skills::atomic_write(&mark,&serde_json::to_vec(&location)?).await?;
                 }
-                // Keep receipts, not every verified payload, on the master. This
-                // permits migrations larger than the local cache budget.
-                if file.exists() {let size=tokio::fs::metadata(&file).await?.len();tokio::fs::remove_file(&file).await?;occupied=occupied.saturating_sub(size);}
+
             }
         }
         let backup_id=id();
@@ -179,10 +177,10 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
             db.put("node-backups",&point)?;db.patch_run(&owner_run,&patch)?;Ok(())
         }).await?;
         if manifest["onDemand"]==true {
-            super::disk_grants::extend(s,run_id,text(&checkpoint,"nodeId"),&backup_id).await?;
-            let response=s.http.post(format!("{base}/disks/{run_id}/published")).bearer_auth(&credential).json(&json!({"generation":manifest["generation"],"backupId":backup_id})).timeout(Duration::from_secs(120)).send().await.map_err(|_|Error::new(503,"Disk publication acknowledgement interrupted."))?;
+            super::disk_grants::extend(s,text(&snapshot,"grantId"),&value).await?;
+            let response=s.http.post(format!("{base}/disks/{run_id}/published")).bearer_auth(&credential).json(&json!({"generation":manifest["generation"],"backupId":backup_id,"grantId":snapshot["grantId"]})).timeout(Duration::from_secs(120)).send().await.map_err(|_|Error::new(503,"Disk publication acknowledgement interrupted."))?;
             if !response.status().is_success(){return Err(Error::new(503,"Node could not acknowledge the published disk."));}
-            super::disk_grants::acknowledged(s,run_id,text(&checkpoint,"nodeId"),&backup_id).await?;
+            super::disk_grants::acknowledged(s,text(&snapshot,"grantId"),&value).await?;
         }
         retain(s,run_id,settings["retention"].as_u64().unwrap_or(3) as usize).await?;
         Ok(public(value))
@@ -310,6 +308,103 @@ async fn decode_block(s: &Service, run: &str, hash: &str, encoded: Vec<u8>) -> R
     })
     .await
     .map_err(Error::internal)?
+}
+
+async fn make_room(s: &Service, mut occupied: u64, incoming: u64, budget: u64) -> Result<u64> {
+    let policy = s
+        .store
+        .get("nodes", super::LOCAL_NODE_ID)
+        .await?
+        .and_then(|v| {
+            serde_json::from_value::<crate::storage::policy::Policy>(v["storage"].clone()).ok()
+        })
+        .unwrap_or_default();
+    let reserve = if policy.enabled {
+        let (total, _) = crate::storage::policy::space(&s.config.data_dir)?;
+        policy.reserve(total)
+    } else {
+        0
+    };
+    let required = occupied
+        .saturating_add(incoming)
+        .saturating_sub(budget)
+        .max(
+            reserve
+                .saturating_add(incoming.saturating_mul(3))
+                .saturating_sub(crate::storage::policy::space(&s.config.data_dir)?.1),
+        );
+    if required == 0 {
+        return Ok(occupied);
+    }
+    let mut protected = HashSet::new();
+    for point in s
+        .store
+        .list("node-backups")
+        .await?
+        .into_iter()
+        .filter(|p| p["destination"] != "s3")
+    {
+        let manifest = manifest(s, &point).await?;
+        for block in manifest["blocks"].as_array().unwrap() {
+            if let Some(hash) = block["hash"].as_str() {
+                protected.insert((text(&point, "runId").to_owned(), hash.to_owned()));
+            }
+        }
+    }
+    let mut candidates = Vec::new();
+    let root = s.config.data_dir.join("node-backups");
+    if root.exists() {
+        let mut runs = tokio::fs::read_dir(root).await?;
+        while let Some(run) = runs.next_entry().await? {
+            if !run.file_type().await?.is_dir() {
+                continue;
+            }
+            let blocks = run.path().join("blocks");
+            if !blocks.exists() {
+                continue;
+            }
+            let run_id = run.file_name().to_string_lossy().into_owned();
+            let mut entries = tokio::fs::read_dir(&blocks).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let Some((hash, _)) = name.split_once(".s3-") else {
+                    continue;
+                };
+                if !snapshots::valid_hash(hash)
+                    || protected.contains(&(run_id.clone(), hash.to_owned()))
+                {
+                    continue;
+                }
+                let file = blocks.join(hash);
+                if let Ok(meta) = tokio::fs::metadata(&file).await {
+                    candidates.push((
+                        file,
+                        meta.len(),
+                        meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+                    ));
+                }
+            }
+        }
+    }
+    candidates.sort_by_key(|v| v.2);
+    let mut removed = 0;
+    for (file, size, _) in candidates {
+        if removed >= required {
+            break;
+        }
+        if tokio::fs::try_exists(&file).await? {
+            tokio::fs::remove_file(file).await?;
+            removed += size;
+            occupied = occupied.saturating_sub(size);
+        }
+    }
+    if removed < required {
+        return Err(Error::new(
+            507,
+            "Backup cache and free-space reserve are exhausted; unsaved work is retained.",
+        ));
+    }
+    Ok(occupied)
 }
 
 async fn used(s: &Service) -> Result<u64> {

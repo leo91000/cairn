@@ -2699,3 +2699,183 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
         b"workspace blocks"
     );
 }
+
+#[tokio::test]
+async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use leo_agent_manager::{
+        config::id,
+        nodes::{disk_grants, snapshots},
+    };
+    use sha2::{Digest, Sha256};
+    let owner = Owner::new().await;
+    let (run, node, next, agent) = (id(), id(), id(), id());
+    for node in [&node, &next] {
+        owner
+            .service
+            .store
+            .put("nodes", json!({"id":node,"revoked":false}))
+            .await
+            .unwrap();
+    }
+    owner
+        .service
+        .store
+        .put("agents", json!({"id":agent,"access":{"nodes":[node,next]}}))
+        .await
+        .unwrap();
+    let record = json!({"id":run,"taskId":"fixture","createdAt":0,"status":"succeeded","nodeId":node,"snapshot":{"agent":{"id":agent}}});
+    let record_copy = record.clone();
+    owner
+        .service
+        .store
+        .write(move |db| db.add_run(&record_copy, None))
+        .await
+        .unwrap();
+    let mut points = Vec::new();
+    let mut hashes = Vec::new();
+    for byte in [7u8, 9u8] {
+        let data = vec![byte; 4096];
+        let hash = hex::encode(Sha256::digest(&data));
+        let point = id();
+        let manifest = json!({"version":1,"size":4096,"blockSize":snapshots::BLOCK,"blocks":[{"offset":0,"size":4096,"hash":hash}]});
+        let backup = json!({"id":point,"runId":run,"nodeId":node,"destination":"s3","bucket":"fixture","manifest":owner.service.vault.encrypt(&format!("backup:{point}"),&manifest).unwrap()});
+        owner
+            .service
+            .store
+            .put("node-backups", backup.clone())
+            .await
+            .unwrap();
+        let directory = owner
+            .service
+            .config
+            .data_dir
+            .join("node-backups")
+            .join(&run)
+            .join("blocks");
+        std::fs::create_dir_all(&directory).unwrap();
+        let encoded = owner
+            .service
+            .vault
+            .encrypt(
+                &format!("node-backups/{run}/blocks/{hash}"),
+                &json!(STANDARD.encode(&data)),
+            )
+            .unwrap();
+        std::fs::write(directory.join(&hash), encoded.to_string()).unwrap();
+        points.push(backup);
+        hashes.push(hash);
+    }
+    let credential = disk_grants::issue(&owner.service, &record, &node, &points[0])
+        .await
+        .unwrap();
+    assert_eq!(
+        owner
+            .call(
+                "GET",
+                &format!("/internal/node-restore/{}", hashes[0]),
+                Value::Null,
+                Some(&credential)
+            )
+            .await
+            .0,
+        200
+    );
+    assert_eq!(
+        owner
+            .call(
+                "GET",
+                &format!("/internal/node-restore/{}", hashes[1]),
+                Value::Null,
+                Some(&credential)
+            )
+            .await
+            .0,
+        403
+    );
+    let _stale = disk_grants::issue(&owner.service, &record, &node, &points[0])
+        .await
+        .unwrap();
+    disk_grants::extend(
+        &owner.service,
+        &leo_agent_manager::auth::digest(&credential),
+        &points[1],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        disk_grants::pinned(&owner.service, &run)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        owner
+            .call(
+                "GET",
+                &format!("/internal/node-restore/{}", hashes[1]),
+                Value::Null,
+                Some(&credential)
+            )
+            .await
+            .0,
+        200
+    );
+    disk_grants::acknowledged(
+        &owner.service,
+        &leo_agent_manager::auth::digest(&credential),
+        &points[1],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        disk_grants::pinned(&owner.service, &run)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        owner
+            .call(
+                "GET",
+                &format!("/internal/node-restore/{}", hashes[0]),
+                Value::Null,
+                Some(&credential)
+            )
+            .await
+            .0,
+        403
+    );
+    owner
+        .service
+        .store
+        .patch_run(&run, json!({"nodeId":next}))
+        .await
+        .unwrap();
+    assert_eq!(
+        owner
+            .call(
+                "GET",
+                &format!("/internal/node-restore/{}", hashes[1]),
+                Value::Null,
+                Some(&credential)
+            )
+            .await
+            .0,
+        403
+    );
+    assert_eq!(
+        owner
+            .call(
+                "POST",
+                "/internal/node-restore/renew",
+                json!({}),
+                Some(&credential)
+            )
+            .await
+            .0,
+        403
+    );
+}

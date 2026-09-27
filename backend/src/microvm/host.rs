@@ -63,6 +63,7 @@ pub async fn assets(state: &Path) -> Result<PathBuf> {
     {
         return Err(Error::bad("Invalid VM image version."));
     }
+    crate::storage::fuse::cleanup_stale(state)?;
     // The exclusive controller lock is already held and its previous container's
     // PID namespace is gone. Remove stale jail hard links before old image caches.
     if state.join("jails").exists() {
@@ -920,7 +921,9 @@ impl Vm {
                 }
             }
             let mut stream = connect(socket).await?;
-            wire::write(stream.get_mut(), &json!({"op":"run","plan":plan})).await?;
+            let mut guest_plan = plan.clone();
+            guest_plan.as_object_mut().unwrap().remove("storage");
+            wire::write(stream.get_mut(), &json!({"op":"run","plan":guest_plan})).await?;
             let mut timer = tokio::time::interval(Duration::from_millis(500));
             let inbox = plan["imports"]
                 .as_array()
