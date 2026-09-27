@@ -349,13 +349,16 @@ async fn active_captures_read_only_the_blocks_the_guest_reports_as_written() {
         json!({"vmId":vm}).to_string(),
     )
     .unwrap();
-    // Firecracker's API: pause and resume always succeed.
+    // Firecracker's API: pause and resume always succeed, and a paused VM cannot answer.
     let api = root.path().join("jails/firecracker").join(&vm).join("root");
     std::fs::create_dir_all(&api).unwrap();
     let controller = UnixListener::bind(api.join("api.sock")).unwrap();
+    let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let vcpus = paused.clone();
     let controller_task = tokio::spawn(async move {
         loop {
             let (socket, _) = controller.accept().await.unwrap();
+            let vcpus = vcpus.clone();
             tokio::spawn(async move {
                 let mut socket = BufReader::new(socket);
                 let (mut line, mut size) = (String::new(), 0);
@@ -371,6 +374,11 @@ async fn active_captures_read_only_the_blocks_the_guest_reports_as_written() {
                 }
                 let mut body = vec![0; size];
                 socket.read_exact(&mut body).await.unwrap();
+                let state: Value = serde_json::from_slice(&body).unwrap();
+                vcpus.store(
+                    state["state"] == "Paused",
+                    std::sync::atomic::Ordering::SeqCst,
+                );
                 let _ = socket
                     .get_mut()
                     .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
@@ -383,10 +391,14 @@ async fn active_captures_read_only_the_blocks_the_guest_reports_as_written() {
     let asked = Arc::new(Mutex::new(Vec::<Value>::new()));
     let guest_path = root.path().join("guest.sock");
     let guest = UnixListener::bind(&guest_path).unwrap();
-    let (answer, record) = (reply.clone(), asked.clone());
+    let (answer, record, stopped) = (reply.clone(), asked.clone(), paused.clone());
     let guest_task = tokio::spawn(async move {
         loop {
             let (socket, _) = guest.accept().await.unwrap();
+            // A guest whose vCPUs are paused never answers.
+            if stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                continue;
+            }
             let mut socket = BufReader::new(socket);
             let mut line = String::new();
             socket.read_line(&mut line).await.unwrap();

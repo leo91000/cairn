@@ -116,7 +116,7 @@ Décision : [ADR 0005](adr/0005-guest-dm-era-write-tracking.md). Code : [trackin
 
 **Captures.**
 - Le master envoie l'identifiant d'instantané de son dernier point publié. Si la node en connaît la référence, seuls les blocs écrits depuis sont copiés, et le manifeste repart de celui de la référence.
-- Capture active : l'invité gelé répond à `written` (`checkpoint`, `take_metadata_snap`, `era_invalidate`).
+- Capture active : l'invité gelé répond à `written` (`checkpoint`, `take_metadata_snap`, `era_invalidate`) **avant** la pause des vCPU. Une VM en pause ne peut pas répondre, et le FS gelé garde la liste exacte jusqu'à la fin de la copie.
 - Disque arrêté : un arrêt propre a gelé le FS et archivé l'ère. L'hôte lit alors les métadonnées inactives avec `era_invalidate`, sans démarrer la VM.
 
 **Invariant.** Toute écriture sur `data.ext4` passe par la cible dm-era de l'invité. Les cas suivants appellent `tracking::invalidate` avant d'agir, et la capture suivante est alors complète :

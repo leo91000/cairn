@@ -214,6 +214,8 @@ console.log('probe.done');
                 assert.equal(createHash('sha256').update(bytes).digest('hex'), block.hash)
                 // The guest tracks written blocks: continuing from this point copies only those.
                 const next = await (await api(`/runs/${id}/snapshot`, 'POST', { baseline: point.id })).json()
+                if (next.manifest.incremental !== true)
+                  console.error(docker('exec', name, 'sh', '-c', 'tail -80 /runner-state/*.boot.log'))
                 assert.equal(next.manifest.incremental, true, 'The built guest image must track written blocks')
                 assert.ok(next.manifest.localBytesRead < point.manifest.localBytesRead, 'An incremental capture reads less than a full one')
                 assert.equal(next.manifest.blocks.length, point.manifest.blocks.length)
