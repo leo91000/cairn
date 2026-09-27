@@ -49,7 +49,7 @@ test('reviews the open workspace layout and compact chat controls across themes 
     await page.setViewportSize(viewport)
     await page.emulateMedia({ colorScheme: 'dark' })
     await expectSingleScroll(page)
-    await expect(page.getByRole('button', { name: 'Steer now' })).toBeInViewport()
+    await expect(page.getByRole('button', { name: 'Stop response' })).toBeInViewport()
     await page.screenshot({ animations: 'disabled', path: testInfo.outputPath(`chat-conversation-dark-${viewport.width}.png`) })
   }
   await page.setViewportSize({ width: 1440, height: 1000 })

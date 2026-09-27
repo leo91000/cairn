@@ -15,8 +15,10 @@ import { mentionSegments } from '../skill-mentions'
 import { iconButton } from '../ui'
 import ActivityArtifactCard from './ActivityArtifactCard.vue'
 import ActivityContent from './ActivityContent.vue'
+import AgentActions from './AgentActions.vue'
 import AgentAvatar from './AgentAvatar.vue'
 import ArtifactGallery from './ArtifactGallery.vue'
+import ArtifactRail from './ArtifactRail.vue'
 import ArtifactViewer from './ArtifactViewer.vue'
 import ChatAttachments from './ChatAttachments.vue'
 import ChatNotice from './ChatNotice.vue'
@@ -210,11 +212,12 @@ defineExpose({
         <p v-if="olderError" class="px-5 text-sm text-danger">
           {{ olderError }}
         </p>
-        <div ref="scroller" class="activity-scroll flex-1 min-h-0 overflow-auto overscroll-contain [scrollbar-width:thin] [scrollbar-color:var(--color-control)_transparent] focus-visible:outline-2 focus-visible:outline-offset-[-3px] focus-visible:outline-accent" tabindex="0" role="region" aria-label="Activity output" @scroll="scrolled">
+        <div ref="scroller" :class="chat ? 'flex flex-col' : ''" class="activity-scroll flex-1 min-h-0 overflow-auto overscroll-contain [scrollbar-width:thin] [scrollbar-color:var(--color-control)_transparent] focus-visible:outline-2 focus-visible:outline-offset-[-3px] focus-visible:outline-accent" tabindex="0" role="region" aria-label="Activity output" @scroll="scrolled">
           <UiButton v-if="more" class="activity-load my-3 flex text-xs mx-auto" :disabled="loadingOlder" @click="loadOlder">
             {{ loadingOlder ? 'Loading history…' : 'Earlier messages' }}
           </UiButton>
-          <div class="activity-conversation max-w-205 pt-5 pb-7 px-9 mx-auto my-0 phone:px-4 phone:py-6">
+          <!-- As on Android, a short conversation sits just above the composer. -->
+          <div :class="chat ? 'mt-auto w-full' : ''" class="activity-conversation max-w-205 pt-5 pb-7 px-9 mx-auto my-0 phone:px-4 phone:py-6">
             <div v-if="!chat" class="activity-intro flex items-center gap-3 mb-7 phone:gap-2.5">
               <AgentAvatar :name="agent" :identity="agentId" :size="39" /><div><strong>{{ agent }}</strong></div>
             </div>
@@ -222,9 +225,31 @@ defineExpose({
               Showing the latest {{ events.length.toLocaleString() }} events. {{ trimmed.toLocaleString() }} earlier events are outside this view.
             </p>
             <template v-for="entry in entries" :key="entry.id">
-              <div v-if="entry.kind === 'deliverables'" class="my-5">
-                <ArtifactGallery :items="entry.files" @open="artifactViewer = $event.id" />
+              <div v-if="entry.kind === 'deliverables'" :class="chat ? 'my-3' : 'my-5'">
+                <ArtifactRail v-if="chat" :items="entry.files" @open="artifactViewer = $event.id" />
+                <ArtifactGallery v-else :items="entry.files" @open="artifactViewer = $event.id" />
               </div>
+              <!-- Chat messages follow the Android reader: a tonal bubble for you, plain text for the agent. -->
+              <article v-else-if="entry.kind === 'message' && chat && entry.role === 'user'" class="activity-message chat-message ml-auto! my-3 w-fit max-w-[90%] rounded-2xl rounded-br-sm bg-variant px-4 py-3">
+                <span class="sr-only">You</span>
+                <p class="whitespace-pre-wrap text-lg leading-normal">
+                  <template v-for="(segment, index) in mentionSegments(entry.text, skillNames)" :key="index">
+                    <span v-if="segment.skill" class="rounded bg-accent/12 px-0.5 font-medium text-accent" :title="`Skill ${segment.skill}`" v-text="segment.text" /><span v-else v-text="segment.text" />
+                  </template>
+                </p>
+                <ChatAttachments v-if="entry.attachments?.length" :attachments="entry.attachments" class="mt-3!" />
+                <p class="mt-1.5! mb-0! flex justify-end gap-2 text-2xs text-muted">
+                  <span v-if="entry.delivery" role="status">{{ entry.delivery }}</span>
+                  <time :datetime="new Date(entry.time).toISOString()" :title="new Date(entry.time).toLocaleString()">{{ new Date(entry.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</time>
+                </p>
+              </article>
+              <article v-else-if="entry.kind === 'message' && chat" class="activity-message chat-message my-3 py-2" :class="visibleOutcome && entry.id === outcomeEntryId ? 'mb-1!' : ''">
+                <p class="mb-1.5! flex justify-between gap-3 text-2xs text-muted">
+                  <span class="truncate">{{ agent }}</span>
+                  <time :datetime="new Date(entry.time).toISOString()" :title="new Date(entry.time).toLocaleString()">{{ new Date(entry.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</time>
+                </p>
+                <ActivityContent :content="entry.text" />
+              </article>
               <article v-else-if="entry.kind === 'message'" class="activity-message mt-6.5 mb-7.5 mx-0" :class="[entry.role === 'user' ? 'ml-auto! max-w-[85%] rounded-2xl rounded-br-md bg-hover px-5 py-3' : '', visibleOutcome && entry.id === outcomeEntryId ? 'mb-1!' : '']">
                 <header><span class="message-dot w-[5px] h-[5px] bg-[light-dark(#4f4c73,_var(--dark-accent-surface))] rounded-full" /><strong>{{ entry.role === 'user' ? 'You' : agent }}</strong><time :datetime="new Date(entry.time).toISOString()" :title="new Date(entry.time).toLocaleString()">{{ new Date(entry.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</time></header>
                 <p v-if="entry.role === 'user'" class="whitespace-pre-wrap text-sm leading-relaxed">
@@ -239,6 +264,7 @@ defineExpose({
                 <ChatAttachments v-if="entry.attachments?.length" :attachments="entry.attachments" class="mt-3!" />
               </article>
               <ChatNotice v-else-if="entry.kind === 'notice'" :notice="entry.artifact" />
+              <AgentActions v-else-if="chat" :artifacts="entry.artifacts" :active="active" />
               <section v-else class="activity-group border-line/70 border rounded-xl bg-transparent overflow-hidden mx-0 my-4.5" :class="{ 'expanded': opened.has(entry.id), 'notice-only': entry.artifacts.every(item => item.kind === 'notice') }">
                 <button class="activity-group-toggle bg-transparent flex items-center gap-[11px] w-full text-left border-0 text-ink cursor-pointer phone:gap-[9px] px-[17px] py-[15px] phone:px-3 phone:py-[13px]" :aria-expanded="opened.has(entry.id)" :aria-controls="`activity-${entry.id}`" @click="toggle(opened, entry.id)">
                   <span class="activity-group-icon w-8 h-8 grid place-items-center bg-transparent rounded-lg shrink-0"><Icon v-if="active && entry.artifacts.some(item => item.status === 'running')" :name="LoaderCircle" class="activity-spinning [animation:activity-spin_1.5s_linear_infinite] [@media(prefers-reduced-motion:_reduce)]:[animation:none]" :size="17" /><Icon v-else :name="Layers" :size="17" /></span>
@@ -254,7 +280,7 @@ defineExpose({
 
             <ChatOutcome v-if="visibleOutcome && !outcomeEntryId" :key="`${visibleOutcome.messageId}:${visibleOutcome.reportedAt}`" :outcome="visibleOutcome" :agent="agent" />
 
-            <div v-if="active && !sending?.length && events.length" class="activity-working mt-7.5 mb-0.5 rounded-2xl border border-line bg-surface px-4 py-3">
+            <div v-if="active && !sending?.length && events.length" class="activity-working mb-0.5" :class="chat ? 'mt-4' : 'mt-7.5 rounded-2xl border border-line bg-surface px-4 py-3'">
               <WorkingIndicator :step="working" />
             </div>
             <div v-else-if="active && !sending?.length" class="activity-working flex items-center justify-center gap-3 text-muted text-3xs mt-7.5 mb-0.5 mx-0">

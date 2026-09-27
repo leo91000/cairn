@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { WorkingStep } from '../signal'
 import { onBeforeUnmount, ref } from 'vue'
-import { Navigation } from '../icons'
+import { Zap } from '../icons'
 import { liveElapsed } from '../signal'
 import Icon from './Icon.vue'
 
@@ -17,7 +17,7 @@ onBeforeUnmount(() => clearInterval(timer))
   <div class="agent-working flex min-w-0 items-center gap-3" role="status" aria-live="polite" :aria-label="[step.title, step.detail].filter(Boolean).join(': ')">
     <span class="souffle-halo size-9 shrink-0">
       <span class="souffle-core grid size-5 place-items-center rounded-full bg-accent text-surface">
-        <Icon :name="Navigation" :size="10" class="rotate-45" />
+        <Icon :name="Zap" :size="10" />
       </span>
     </span>
     <span class="min-w-0 flex-1" aria-hidden="true">

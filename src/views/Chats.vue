@@ -17,12 +17,13 @@ import FilColumn from '../components/FilColumn.vue'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
 import NotificationSettings from '../components/NotificationSettings.vue'
+import QueueStrip from '../components/QueueStrip.vue'
 import SkillTextarea from '../components/SkillTextarea.vue'
 import ThemeControl from '../components/ThemeControl.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
 import VirtualSelect from '../components/VirtualSelect.vue'
-import { ArrowDown, Bell, Bot, ChevronDown, ChevronLeft, Clock, FileText, FolderGit2, Maximize2, Menu, MessageCircle, MoreHorizontal, Paperclip, Pause, Pencil, Play, Plus, Search, Send, Square, Trash2, X, Zap } from '../icons'
+import { ArrowDown, ArrowUp, Bell, Bot, Check, ChevronDown, ChevronLeft, FileText, FolderGit2, LoaderCircle, Maximize2, Menu, MessageCircle, MoreHorizontal, Paperclip, Plus, Search, X, Zap } from '../icons'
 import { chatSkills } from '../skill-mentions'
 import { iconButton } from '../ui'
 import { useLiveRun } from '../use-live-run'
@@ -58,7 +59,6 @@ async function detailAction(action: () => void) {
 }
 const historyButton = ref<HTMLButtonElement>()
 
-const queueOpen = ref(true)
 const error = ref('')
 const dismissedError = ref(false)
 const visibleError = computed(() => error.value || detail.value?.error || (detail.value?.run?.status === 'failed' ? detail.value.run.error || 'The response stopped before finishing. Resume the conversation to continue.' : ''))
@@ -78,6 +78,7 @@ const files = new Map<string, File>()
 const uploaded = new Set<string>()
 const dragging = ref(0)
 const uploadProgress = ref('')
+const hasDraft = computed(() => !!draft.value.trim() || attachments.value.length > 0)
 const canSend = computed(() => !inactive.value && (!route.params.id || detail.value?.id === route.params.id) && !live.error.value && (!!draft.value.trim() || attachments.value.length > 0))
 function removeAttachment(id: string) {
   if (previews.value[id])
@@ -435,7 +436,11 @@ function key(event: KeyboardEvent) {
         Chats
       </h1>
       <div class="flex min-h-0 flex-1 flex-col">
-        <section class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden transition-opacity" :class="switching ? 'opacity-60 delay-150' : ''" :aria-busy="switching" aria-label="Chat workspace">
+        <section class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden transition-opacity" :class="switching ? 'opacity-60 delay-150' : ''" :aria-busy="switching" aria-label="Chat workspace">
+          <!-- A floating pill, as on Android: connection status never moves the conversation. -->
+          <p v-if="connectionNotice" role="status" class="pointer-events-none absolute top-3 left-1/2 z-10 m-0! -translate-x-1/2 rounded-full border border-line bg-surface/95 px-3 py-1.5 text-xs whitespace-nowrap text-muted shadow-[0_4px_16px_#0000000f] backdrop-blur-sm">
+            {{ connectionNotice }}
+          </p>
           <div v-if="route.params.id && !detail" role="status" class="flex flex-1 items-center justify-center text-sm text-muted">
             Loading conversation…
           </div>
@@ -470,9 +475,6 @@ function key(event: KeyboardEvent) {
           <ActivityFeed v-else ref="activity" :key="live.shown.value" :cache-key="live.shown.value" :position="live.position.value" :deliverables="deliverables" :outcome="detail?.run?.status === 'succeeded' ? detail.run.outcome : null" :sending="delivery.sending" :events="events" :active="detail?.run?.status === 'running'" :agent-id="detail?.agentId || selectedAgent?.id" :agent="detail?.agentName || selectedAgent?.name || 'Main agent'" :task="detail?.title || 'New conversation'" :more="live.hasOlder.value" :loading-older="live.loadingOlder.value" :older-error="live.olderError.value" :loading="catchingUp" :trimmed="0" :skills="skillNames" chat @load="live.loadOlder" @position="live.savePosition" />
           <div v-if="!inactive" class="mx-auto w-full max-w-205 shrink-0 px-5 pb-1 pt-3 phone:px-0 phone:pt-2">
             <ChatQuestions v-if="detail" :questions="detail.questions || []" :active="active" :highlighted="typeof route.query.question === 'string' ? route.query.question : undefined" />
-            <p v-if="connectionNotice" role="status" class="px-4 py-2 text-xs text-muted">
-              {{ connectionNotice }}
-            </p>
             <UiAlert v-if="visibleError && !dismissedError" class="mb-3 flex items-start gap-2">
               <span class="min-w-0 flex-1">{{ visibleError }}</span><button :class="iconButton" class="shrink-0" aria-label="Dismiss error" @click="dismissedError = true">
                 <Icon :name="X" :size="14" />
@@ -486,33 +488,6 @@ function key(event: KeyboardEvent) {
               <RouterLink v-if="waitNotice.account" to="/connections" class="mt-2 inline-flex font-semibold text-accent underline">
                 Open Connections
               </RouterLink>
-            </div>
-            <div v-if="pending.length || detail?.paused" class="mb-3 overflow-hidden rounded-xl border border-line bg-soft">
-              <div class="flex items-center gap-2 px-3 py-2">
-                <button class="flex min-w-0 flex-1 items-center gap-2 text-left text-[11px] font-semibold" :aria-expanded="queueOpen" @click="queueOpen = !queueOpen">
-                  <Icon :name="Clock" :size="14" /><span v-if="detail?.paused">Queue paused · </span>{{ pending.length }} queued<Icon :name="ChevronDown" :size="13" :class="queueOpen ? 'rotate-180' : ''" />
-                </button>
-                <button class="flex items-center gap-1 text-[11px] text-accent" :disabled="busy" @click="action('pause', { paused: !detail?.paused })">
-                  <Icon :name="detail?.paused ? Play : Pause" :size="13" />{{ detail?.paused ? 'Resume' : 'Pause queue' }}
-                </button>
-              </div>
-              <ul v-if="queueOpen" class="max-h-32 overflow-auto border-t border-line px-3 py-1">
-                <li v-for="message in pending" :key="message.id" class="flex items-center gap-1.5 py-1.5 text-xs">
-                  <span class="min-w-0 flex-1 truncate" :title="message.text">{{ message.text || message.attachments?.[0]?.name }}<span v-if="message.attachments?.length" class="ml-2 text-muted">· {{ message.attachments.length }} attached</span></span>
-                  <template v-if="message.status === 'queued'">
-                    <button v-if="active && message.mode !== 'steer'" :class="iconButton" aria-label="Steer with this message" title="Steer now" @click="update(message, 'steer')">
-                      <Icon :name="Zap" :size="14" />
-                    </button>
-                    <button v-if="!message.questionId" :class="iconButton" aria-label="Edit queued message" @click="edit(message)">
-                      <Icon :name="Pencil" :size="14" />
-                    </button>
-                    <button :class="iconButton" aria-label="Remove queued message" @click="update(message)">
-                      <Icon :name="Trash2" :size="14" />
-                    </button>
-                  </template>
-                  <span v-else class="text-[10px] text-muted">{{ detail?.paused ? 'Waiting to resume' : 'Waiting for the agent' }}</span>
-                </li>
-              </ul>
             </div>
             <div v-if="detail?.restoredAt && ['failed', 'interrupted'].includes(detail.run?.status ?? '') && !detail.sessionRestartRequested" class="mb-3 rounded-lg border border-line p-3 text-sm">
               <p>If the restored native session is incompatible, start a fresh session using the preserved history and files.</p>
@@ -537,42 +512,51 @@ function key(event: KeyboardEvent) {
                 </button>
               </div>
             </details>
-            <form class="chat-composer relative rounded-2xl border border-line/60 bg-raised p-4 shadow-[0_4px_24px_#00000006] focus-within:border-accent/50 phone:p-3" @submit.prevent="send()" @dragenter.prevent="dragging++" @dragover.prevent @dragleave.prevent="dragging = Math.max(0, dragging - 1)" @drop.prevent="dropFiles" @paste="pasteFiles">
-              <div v-if="dragging" class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-xl border-2 border-dashed border-accent bg-surface/95 text-sm font-semibold text-accent">
-                <Icon :name="Paperclip" :size="20" />Drop files here
-              </div>
-              <div v-if="!detail" class="mb-3 flex max-w-100 items-center gap-1 phone:mb-2">
-                <VirtualSelect v-model="agentId" :options="agents" label="Chat agent" hide-label compact variant="ghost" />
-                <VirtualSelect v-model="projectId" :options="projects" label="Chat project" hide-label compact variant="ghost" />
-              </div>
-              <div v-if="editing" class="mb-2 flex items-center justify-between text-[11px] text-accent">
-                Editing queued message<button type="button" :class="iconButton" aria-label="Cancel edit" @click="editing = null; draft = ''; clearAttachments()">
-                  <Icon :name="X" :size="14" />
-                </button>
-              </div>
-              <ChatAttachments v-if="attachments.length" :attachments="attachments" :previews="previews" removable :disabled="busy" class="mb-3!" @remove="removeAttachment" />
-              <div v-if="uploadProgress" class="mb-2 text-xs text-accent" role="status">
-                {{ uploadProgress }}
-              </div>
-              <SkillTextarea ref="textarea" v-model="draft" :skills="skills" aria-label="Message" :placeholder="responding ? 'Add a follow-up…' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'" rows="2" maxlength="50000" @keydown="key" />
-              <div class="flex items-center justify-between gap-2 pt-2">
-                <div class="flex min-w-0 flex-1 items-center gap-1">
-                  <input ref="fileInput" type="file" multiple class="hidden" aria-label="Attach files" :disabled="busy" @change="pickFiles">
-                  <button type="button" :class="iconButton" aria-label="Add images or files" title="Add images or files · up to 8 files, 10 MB each" :disabled="busy || attachments.length >= 8" @click="fileInput?.click()">
-                    <Icon :name="Paperclip" :size="18" />
-                  </button>
-                  <AssistantPicker v-model:provider="chosenProvider" v-model:model="model" v-model:reasoning="reasoning" :inherit="inheritAgentModel" :default-model="inheritAgentModel ? selectedAgent?.model : ''" :default-reasoning="inheritAgentModel ? selectedAgent?.reasoning : ''" :switching="switchingProvider" :disabled="busy" />
+            <form class="chat-composer relative rounded-[26px] border border-line bg-surface p-1 focus-within:border-accent/50" @submit.prevent="send()" @dragenter.prevent="dragging++" @dragover.prevent @dragleave.prevent="dragging = Math.max(0, dragging - 1)" @drop.prevent="dropFiles" @paste="pasteFiles">
+              <!-- Queued follow-ups open the composer itself, sharing its border and corners, as on Android. -->
+              <template v-if="pending.length || detail?.paused">
+                <QueueStrip :pending="pending" :paused="!!detail?.paused" :working="active" :busy="busy" @steer="update($event, 'steer')" @edit="edit" @remove="update" @toggle-pause="action('pause', { paused: !detail?.paused })" />
+                <hr class="mx-3 border-line">
+              </template>
+              <div class="px-3 pt-2 pb-2">
+                <div v-if="dragging" class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-xl border-2 border-dashed border-accent bg-surface/95 text-sm font-semibold text-accent">
+                  <Icon :name="Paperclip" :size="20" />Drop files here
                 </div>
-                <div class="flex shrink-0 items-center gap-2">
-                  <button v-if="active && !editing" type="button" :class="iconButton" aria-label="Stop response" title="Stop response and pause queue" :disabled="busy" @click="action('stop')">
-                    <Icon :name="Square" :size="14" />
+                <div v-if="!detail" class="mb-3 flex max-w-100 items-center gap-1 phone:mb-2">
+                  <VirtualSelect v-model="agentId" :options="agents" label="Chat agent" hide-label compact variant="ghost" />
+                  <VirtualSelect v-model="projectId" :options="projects" label="Chat project" hide-label compact variant="ghost" />
+                </div>
+                <div v-if="editing" class="mb-2 flex items-center justify-between text-[11px] text-accent">
+                  Editing queued message<button type="button" :class="iconButton" aria-label="Cancel edit" @click="editing = null; draft = ''; clearAttachments()">
+                    <Icon :name="X" :size="14" />
                   </button>
-                  <UiButton v-if="active && !editing" type="button" size="small" :disabled="busy || !canSend || switchingProvider" aria-label="Steer now" title="Send into the current turn (Alt + Enter)" @click="send('steer')">
-                    <Icon :name="Zap" :size="14" /><span class="phone:hidden">Steer now</span><span class="hidden phone:inline">Steer</span>
-                  </UiButton>
-                  <UiButton type="submit" variant="primary" size="small" :disabled="busy || !canSend">
-                    <Icon :name="editing ? Pencil : responding ? Plus : Send" :size="16" />{{ submitting ? 'Sending…' : editing ? 'Save' : responding || detail?.paused ? 'Queue' : 'Send' }}
-                  </UiButton>
+                </div>
+                <ChatAttachments v-if="attachments.length" :attachments="attachments" :previews="previews" removable :disabled="busy" class="mb-3!" @remove="removeAttachment" />
+                <div v-if="uploadProgress" class="mb-2 text-xs text-accent" role="status">
+                  {{ uploadProgress }}
+                </div>
+                <SkillTextarea ref="textarea" v-model="draft" :skills="skills" aria-label="Message" :placeholder="responding ? 'Add a follow-up…' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'" rows="2" maxlength="50000" @keydown="key" />
+                <div class="flex items-center justify-between gap-2 pt-2">
+                  <div class="flex min-w-0 flex-1 items-center gap-1">
+                    <input ref="fileInput" type="file" multiple class="hidden" aria-label="Attach files" :disabled="busy" @change="pickFiles">
+                    <button type="button" :class="iconButton" aria-label="Add images or files" title="Add images or files · up to 8 files, 10 MB each" :disabled="busy || attachments.length >= 8" @click="fileInput?.click()">
+                      <Icon :name="Paperclip" :size="18" />
+                    </button>
+                    <AssistantPicker v-model:provider="chosenProvider" v-model:model="model" v-model:reasoning="reasoning" :inherit="inheritAgentModel" :default-model="inheritAgentModel ? selectedAgent?.model : ''" :default-reasoning="inheritAgentModel ? selectedAgent?.reasoning : ''" :switching="switchingProvider" :disabled="busy" />
+                  </div>
+                  <!-- As on Android: steer while typing during a reply, stop when the field is empty, otherwise send. -->
+                  <div class="flex shrink-0 items-center gap-1">
+                    <button v-if="active && !editing && hasDraft" type="button" class="round-action bg-soft text-accent" aria-label="Steer now" title="Send into the current turn (Alt + Enter)" :disabled="busy || !canSend || switchingProvider" @click="send('steer')">
+                      <Icon :name="Zap" :size="16" />
+                    </button>
+                    <button v-if="active && !editing && !hasDraft" type="button" class="round-action border border-line text-coral" aria-label="Stop response" title="Stop response and pause queue" :disabled="busy" @click="action('stop')">
+                      <span class="size-3 rounded-[3px] bg-current" />
+                    </button>
+                    <button v-else type="submit" class="round-action" :class="canSend && !busy ? 'bg-accent text-surface' : 'bg-ink/10 text-ink/40'" :aria-label="submitting ? 'Sending…' : editing ? 'Save' : responding || detail?.paused ? 'Queue' : 'Send'" :title="editing ? 'Save' : responding || detail?.paused ? 'Add to the queue' : 'Send'" :disabled="busy || !canSend">
+                      <Icon v-if="submitting" :name="LoaderCircle" :size="18" class="animate-spin" />
+                      <Icon v-else :name="editing ? Check : responding || detail?.paused ? Plus : ArrowUp" :size="18" />
+                    </button>
+                  </div>
                 </div>
               </div>
             </form>
@@ -596,4 +580,14 @@ function key(event: KeyboardEvent) {
 }
 .chat-detail-action:hover { color: var(--color-accent); }
 .chat-detail-action:disabled { opacity: .5; cursor: default; }
+.round-action {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  place-items: center;
+  border-radius: 9999px;
+  transition: background-color .15s, color .15s, opacity .15s;
+}
+.round-action:disabled { opacity: .5; cursor: default; }
 </style>

@@ -52,6 +52,8 @@
   --color-raised: light-dark(#fff, var(--dark-raised));
   --color-inset: light-dark(#f9f8f4, var(--dark-inset));
   --color-hover: light-dark(#efece4, var(--dark-hover));
+  /* Android's surfaceVariant: resting tonal containers such as the agent's action summary. */
+  --color-variant: light-dark(#ece9e1, #22222b);
   --color-control: light-dark(#cfc9bb, var(--dark-control-border));
   --color-subtle: light-dark(#8a8694, var(--dark-subtle));
   --color-brand: #4545ef;
