@@ -7,6 +7,7 @@ use leo_agent_manager::{
     http::router,
     nodes::{LOCAL_NODE_ID, backups, relay, snapshots},
     service::Service,
+    store::Store,
 };
 use serde_json::{Value, json};
 use std::{
@@ -36,6 +37,56 @@ async fn service(root: &TempDir, origin: String, runner: String) -> Arc<Service>
     })
     .await
     .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "explicit scale benchmark for backup lookup"]
+async fn backup_lookup_with_many_conversations() {
+    let root = TempDir::new().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    store
+        .transaction(|db| {
+            for index in 0..20_000 {
+                db.put(
+                    "node-backups",
+                    &json!({"id":format!("other-{index}"),"runId":format!("run-{index}")}),
+                )?;
+            }
+            db.put("node-backups", &json!({"id":"wanted","runId":"wanted-run"}))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    for sample in 0..3 {
+        let started = Instant::now();
+        let found = store.node_backups_for_run("wanted-run").await.unwrap();
+        assert_eq!(found.len(), 1);
+        println!(
+            "NODE_LOOKUP_PERF {}",
+            json!({"sample":sample,"records":20_001,"wallMs":started.elapsed().as_secs_f64()*1000.0})
+        );
+    }
+}
+
+#[tokio::test]
+async fn backup_lookup_is_scoped_to_one_conversation() {
+    let root = TempDir::new().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    store
+        .put("node-backups", json!({"id":"a","runId":"one"}))
+        .await
+        .unwrap();
+    store
+        .put("node-backups", json!({"id":"b","runId":"two"}))
+        .await
+        .unwrap();
+    store
+        .put("other-kind", json!({"id":"c","runId":"one"}))
+        .await
+        .unwrap();
+    let found = store.node_backups_for_run("one").await.unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0]["id"], "a");
 }
 
 fn usage() -> (f64, u64) {

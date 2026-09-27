@@ -178,13 +178,7 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
 /// before publication. Read manifests, not payloads, on the incremental path.
 async fn published_blocks(s: &Service, run: &str) -> Result<HashMap<String, u64>> {
     let mut blocks = HashMap::new();
-    for point in s
-        .store
-        .list("node-backups")
-        .await?
-        .into_iter()
-        .filter(|p| p["runId"] == run)
-    {
+    for point in s.store.node_backups_for_run(run).await? {
         if let Ok(manifest) = manifest(s, &point).await {
             for block in manifest["blocks"].as_array().unwrap() {
                 if let Some(hash) = block["hash"].as_str() {
@@ -316,13 +310,7 @@ async fn used(s: &Service) -> Result<u64> {
 }
 async fn retain(s: &Service, run: &str, count: usize) -> Result<()> {
     let _guard = s.node_backup_lock.lock().await;
-    let mut points = s
-        .store
-        .list("node-backups")
-        .await?
-        .into_iter()
-        .filter(|p| p["runId"] == run)
-        .collect::<Vec<_>>();
+    let mut points = s.store.node_backups_for_run(run).await?;
     points.sort_by_key(|p| std::cmp::Reverse(p["createdAt"].as_i64().unwrap_or(0)));
     let mut needed = HashSet::new();
     for point in points.iter().take(count.max(1)) {
@@ -488,13 +476,7 @@ pub async fn purge(s: &Service, run: &str) -> Result<()> {
     }
     crate::validation::uuid(run)?;
     let _operation = s.node_backup_operation.lock().await;
-    let points = s
-        .store
-        .list("node-backups")
-        .await?
-        .into_iter()
-        .filter(|p| p["runId"] == run)
-        .collect::<Vec<_>>();
+    let points = s.store.node_backups_for_run(run).await?;
     let mut locations = points
         .iter()
         .filter(|p| p["destination"] == "s3")

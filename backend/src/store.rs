@@ -63,6 +63,7 @@ impl Store {
             "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL,data TEXT NOT NULL,updated_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS records_kind ON records(kind,updated_at DESC);
+CREATE INDEX IF NOT EXISTS records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,project_id TEXT NOT NULL,status TEXT NOT NULL,created_at INTEGER NOT NULL,data TEXT NOT NULL,dedupe TEXT UNIQUE);
 CREATE INDEX IF NOT EXISTS runs_status ON runs(status,created_at);
 CREATE INDEX IF NOT EXISTS runs_task ON runs(task_id,created_at DESC);
@@ -164,6 +165,10 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         let kind = kind.to_owned();
         self.read(move |db| db.list(&kind)).await
     }
+    pub async fn node_backups_for_run(&self, run: &str) -> Result<Vec<Value>> {
+        let run = run.to_owned();
+        self.read(move |db| db.node_backups_for_run(&run)).await
+    }
     pub async fn kv(&self, key: &str) -> Result<Option<Value>> {
         let key = key.to_owned();
         self.read(move |db| db.kv(&key)).await
@@ -230,6 +235,12 @@ impl Db<'_> {
         self.json_rows(
             "SELECT data FROM records WHERE kind=? ORDER BY updated_at DESC",
             [kind],
+        )
+    }
+    pub fn node_backups_for_run(&self, run: &str) -> Result<Vec<Value>> {
+        self.json_rows(
+            "SELECT data FROM records WHERE kind='node-backups' AND json_extract(data,'$.runId')=?",
+            [run],
         )
     }
     pub fn get(&self, kind: &str, id: &str) -> Result<Option<Value>> {
