@@ -796,33 +796,56 @@ impl Vm {
             .map_err(|_| Error::new(503, "Guest resume timed out."))?
     }
     pub async fn shutdown(&mut self) {
-        if self.paused {
-            let _ = self.vm_state("Resumed").await;
-            self.paused = false;
+        let blocked = self
+            .volume
+            .as_ref()
+            .is_some_and(|volume| volume.source.waiting() || volume.paused());
+        let mut acknowledged = false;
+        if !blocked {
+            if self.paused {
+                let _ = self.vm_state("Resumed").await;
+                self.paused = false;
+            }
+            // Healthy guests get a bounded graceful stop and the legacy era seal.
+            if let Ok(Ok(reply)) = tokio::time::timeout(
+                Duration::from_secs(10),
+                guest_request(&self.socket, &json!({"op":"shutdown"})),
+            )
+            .await
+            {
+                acknowledged = reply["ok"] == true;
+                if let Some(era) = reply["sealed"].as_u64() {
+                    let _ = crate::nodes::tracking::seal(&self.disk_dir, era).await;
+                }
+            }
         }
-        // Freezing and sealing the last era can flush a lot of dirty data first.
-        if let Ok(Ok(reply)) = tokio::time::timeout(
-            Duration::from_secs(10),
-            guest_request(&self.socket, &json!({"op":"shutdown"})),
-        )
-        .await
-            && let Some(era) = reply["sealed"].as_u64()
-        {
-            let _ = crate::nodes::tracking::seal(&self.disk_dir, era).await;
-        }
-        if let Some(mut child) = self.child.take()
-            && tokio::time::timeout(Duration::from_secs(8), child.wait())
+        // A VMM blocked in FUSE may not exit even after SIGKILL until its read
+        // returns. Release remote reads and reserve waits before awaiting it.
+        // All previously acknowledged disk writes remain in the durable journal.
+        let volume = self.volume.take();
+        let cancel_reads = || {
+            if let Some(volume) = &volume {
+                volume.stop.cancel();
+            }
+        };
+        if let Some(mut child) = self.child.take() {
+            if !acknowledged {
+                cancel_reads();
+                let _ = child.start_kill();
+            }
+            if tokio::time::timeout(Duration::from_secs(8), child.wait())
                 .await
                 .is_err()
-        {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            {
+                cancel_reads();
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+            }
         }
+        cancel_reads();
+        drop(volume);
         for console in self.consoles.drain(..) {
             let _ = console.await;
-        }
-        if let Some(volume) = self.volume.take() {
-            volume.stop.cancel();
         }
         if let Some(mounted) = self.mounted.take() {
             let _ = tokio::task::spawn_blocking(move || mounted.close()).await;

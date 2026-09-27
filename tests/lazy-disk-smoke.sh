@@ -43,3 +43,4 @@ truncate -s 256M "$fixture/data.ext4"
 mkfs.ext4 -q -F -d "$fixture/datafs" "$fixture/data.ext4"
 cargo build --locked --example lazy_disk_smoke
 sudo -n target/debug/examples/lazy_disk_smoke "$fixture"
+sudo -n target/debug/examples/lazy_disk_smoke "$fixture" --cancel

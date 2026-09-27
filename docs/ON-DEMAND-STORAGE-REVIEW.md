@@ -34,5 +34,9 @@ Aucun écart matériel restant identifié dans les contre-revues ciblées.
   déjà engagée termine avant le démarrage. La déconnexion HTTP ne coupe pas cette
   bascule. La contre-revue ciblée n'identifie plus de course sur le verrou du disque.
 
+- L'arrêt forcé annule les lectures FUSE avant d'attendre le VMM. Un invité
+  disponible conserve son arrêt gracieux et ses écritures jusqu'à sa sortie.
+  La contre-revue ciblée n'identifie pas d'écart de durabilité ou d'ordre d'arrêt.
+
 Bilan : **Standards 0 constat restant ; Spec 0 écart restant identifié**.
 La revue ne remplace pas les tests et mesures consignés dans le document de validation.

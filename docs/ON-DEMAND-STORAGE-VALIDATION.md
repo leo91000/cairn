@@ -47,6 +47,17 @@ Firecracker/jailer installés aux emplacements du projet) :
 tests/lazy-disk-smoke.sh /chemin/vers/vmlinux
 ```
 
+### Annulation pendant une lecture distante bloquée
+
+Le parcours CI complet a révélé un ordre d'arrêt incorrect : le contrôleur
+attendait la sortie du VMM avant d'annuler ses lectures FUSE. Le scénario réduit
+`lazy_disk_smoke --cancel` appelle le vrai `Vm::boot` et bloque son premier accès
+à une origine indisponible. Avant correction : dépassement du délai de 12 secondes.
+Après correction : **89 ms** pour annuler et libérer le VMM, le montage et le verrou.
+Le script de reproduction ci-dessus exécute également ce scénario.
+Les invités disponibles conservent l'arrêt gracieux ; les E/S sont annulées avant
+un arrêt forcé, avec conservation du journal durable.
+
 Ces mesures ne constituent ni un temps de reprise de conversation complète ni un
 benchmark S3. Les sections suivantes décrivent les vérifications complémentaires. Les temps
 de transfert vers un fournisseur S3 réel ne sont pas mesurés ici.

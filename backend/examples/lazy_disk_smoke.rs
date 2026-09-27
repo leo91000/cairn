@@ -49,6 +49,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .ok_or("Missing disposable fixture assets")?;
     let assets = Path::new(&assets).canonicalize()?;
+    if std::env::args().any(|arg| arg == "--cancel") {
+        return cancelled_boot(&assets).await;
+    }
     let root = tempfile::tempdir_in(&assets)?;
     let manifest = snapshots::index(&assets.join("data.ext4")).await?;
     let mut blocks = HashMap::new();
@@ -163,6 +166,90 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "{}",
         json!({"guestReadyMs":ready_ms,"coldFetchedBytes":fetched,"remoteNonzeroBytes":remote_bytes,"virtualDiskBytes":disk.size(),"guestSyncSurvivedKill":true,"source":"local immutable block fixture, not S3"})
+    );
+    Ok(())
+}
+
+// Exercise the production VM lifecycle while its first disk read is unavailable.
+async fn cancelled_boot(assets: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    use leo_agent_manager::microvm::host::Vm;
+    use tokio_util::sync::CancellationToken;
+    let root = tempfile::tempdir_in(assets)?;
+    let state = root.path().join("state");
+    let image = state.join("images/fixture");
+    let directory = state.join("disks/fixture");
+    std::fs::create_dir_all(&image)?;
+    std::fs::create_dir_all(&directory)?;
+    std::fs::copy(assets.join("root.ext4"), image.join("root.ext4"))?;
+    std::fs::hard_link(assets.join("vmlinux"), image.join("vmlinux"))?;
+    for instruction in ["mkdir /sbin", "symlink /sbin/leo-init /init"] {
+        let result = Command::new("debugfs")
+            .args(["-w", "-R", instruction])
+            .arg(image.join("root.ext4"))
+            .output()?;
+        if !result.status.success() {
+            return Err("Fixture initialization failed".into());
+        }
+    }
+    let manifest = snapshots::index(&assets.join("data.ext4")).await?;
+    let context = json!({"master":"http://127.0.0.1:1/","grant":"unavailable-fixture","policy":{"enabled":true,"cacheMiB":8,"reserveMiB":64,"reservePercent":1,"backupSeconds":60,"maxDirtySeconds":300}});
+    let source = Arc::new(storage::remote::RemoteSource::new(
+        &context,
+        tokio::runtime::Handle::current(),
+        CancellationToken::new(),
+    )?);
+    let disk = LazyDisk::create(&directory.join("lazy"), &manifest, source)?;
+    disk.set_context(&context)?;
+    drop(disk);
+    let volume = storage::runtime::load(&directory).await?;
+    let cancel = CancellationToken::new();
+    let stopping = cancel.clone();
+    let mut boot = tokio::spawn(async move {
+        Vm::boot(
+            &state,
+            &image,
+            directory,
+            41,
+            &stopping,
+            Some(&json!({"cpu":1,"memoryMiB":128,"diskMiB":256})),
+        )
+        .await
+    });
+    let ready = tokio::time::timeout(Duration::from_secs(30), async {
+        while !volume.source.waiting() && !boot.is_finished() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    if ready.is_err() || !volume.source.waiting() {
+        cancel.cancel();
+        volume.stop.cancel();
+        if let Ok(Ok(mut vm)) = boot.await {
+            vm.shutdown().await;
+        }
+        return Err("Fixture did not reach the remote disk read".into());
+    }
+    let started = Instant::now();
+    cancel.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(12), &mut boot).await;
+    // Always release the fixture, including on the pre-fix failure path.
+    volume.stop.cancel();
+    match result {
+        Ok(Ok(Err(error))) if error.message.contains("VM preparation stopped") => {}
+        Ok(Ok(Ok(mut vm))) => {
+            vm.shutdown().await;
+            return Err("Cancelled boot unexpectedly completed".into());
+        }
+        Ok(Ok(Err(error))) => return Err(error.message.into()),
+        Ok(Err(error)) => return Err(error.into()),
+        Err(_) => {
+            let _ = boot.await;
+            return Err("Cancelled boot retained a blocked disk beyond 12 seconds".into());
+        }
+    }
+    println!(
+        "{}",
+        json!({"mode":"cancel-blocked-boot","cancelledMs":started.elapsed().as_millis(),"status":"passed"})
     );
     Ok(())
 }
