@@ -248,6 +248,34 @@ async fn vault_accepts_node_ciphertext_and_authentication_rejects_tampering() {
     );
 }
 #[tokio::test]
+async fn binary_vault_records_preserve_bytes_and_reject_wrong_scope_or_damage() {
+    let root = TempDir::new().unwrap();
+    let vault = Vault::new(Store::open(root.path()).unwrap(), root.path()).unwrap();
+    for plain in [Vec::new(), (0..=255).collect::<Vec<u8>>()] {
+        let encrypted = vault.encrypt_bytes("backup-block", &plain).unwrap();
+        assert_eq!(encrypted.len(), plain.len() + 28);
+        assert_eq!(
+            vault.decrypt_bytes("backup-block", &encrypted).unwrap(),
+            plain
+        );
+        assert!(vault.decrypt_bytes("other-block", &encrypted).is_err());
+        assert_ne!(
+            vault.encrypt_bytes("backup-block", &plain).unwrap(),
+            encrypted
+        );
+        for length in [0, 12, 27, encrypted.len() - 1] {
+            assert!(
+                vault
+                    .decrypt_bytes("backup-block", &encrypted[..length])
+                    .is_err()
+            );
+        }
+        let mut damaged = encrypted;
+        *damaged.last_mut().unwrap() ^= 1;
+        assert!(vault.decrypt_bytes("backup-block", &damaged).is_err());
+    }
+}
+#[tokio::test]
 async fn passwords_and_sessions_remain_compatible_with_node() {
     let root = TempDir::new().unwrap();
     let store = Store::open(root.path()).unwrap();

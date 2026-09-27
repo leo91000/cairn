@@ -14,6 +14,8 @@ use std::{
     path::PathBuf,
     time::Duration,
 };
+// Versioned binary blocks avoid both JSON/base64 layers used by legacy records.
+const BINARY_BLOCK_HEADER: &[u8] = b"LEOBLK\x01\0";
 pub async fn settings(s: &Service) -> Result<Value> {
     let mut value = json!({"destination":"master","intervalSeconds":60,"retention":3,"budgetMiB":102400,"disconnectTimeoutSeconds":60,"shutdownTimeoutSeconds":300,"maxCapacityWaitSeconds":3600});
     if let Some(saved) = s.store.kv("node-backup-settings").await? {
@@ -122,7 +124,9 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
                 if bytes.len() as u64!=block["size"].as_u64().unwrap() || hex::encode(Sha256::digest(&bytes))!=hash {return Err(Error::bad("Backup block failed integrity verification."));}
                 let vault=s.vault.clone(); let scope=key(run_id,hash); let length=bytes.len() as u64;
                 let encoded=tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
-                    serde_json::to_vec(&vault.encrypt(&scope,&json!(STANDARD.encode(&bytes)))?).map_err(Into::into)
+                    let mut encoded = BINARY_BLOCK_HEADER.to_vec();
+                    encoded.extend(vault.encrypt_bytes(&scope, &bytes)?);
+                    Ok(encoded)
                 }).await.map_err(Error::internal)??;
                 // Serialize space accounting and publication across concurrent backups.
                 let _guard=s.node_backup_lock.lock().await;
@@ -272,11 +276,16 @@ async fn decode_block(s: &Service, run: &str, hash: &str, encoded: Vec<u8>) -> R
     let scope = key(run, hash);
     let hash = hash.to_owned();
     tokio::task::spawn_blocking(move || {
-        let value: Value = serde_json::from_slice(&encoded)?;
-        let plaintext = vault.decrypt(&scope, &value)?;
-        let bytes = STANDARD
-            .decode(plaintext.as_str().unwrap_or(""))
-            .map_err(|_| Error::bad("Invalid backup ciphertext."))?;
+        let bytes = if let Some(ciphertext) = encoded.strip_prefix(BINARY_BLOCK_HEADER) {
+            vault.decrypt_bytes(&scope, ciphertext)?
+        } else {
+            // Existing recovery points remain readable without a bulk migration.
+            let value: Value = serde_json::from_slice(&encoded)?;
+            let plaintext = vault.decrypt(&scope, &value)?;
+            STANDARD
+                .decode(plaintext.as_str().unwrap_or(""))
+                .map_err(|_| Error::bad("Invalid backup ciphertext."))?
+        };
         if hex::encode(Sha256::digest(&bytes)) != hash {
             return Err(Error::bad("Backup integrity check failed."));
         }

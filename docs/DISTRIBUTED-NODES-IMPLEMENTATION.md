@@ -48,11 +48,16 @@ has not been merged, deployed or released.
   remain undetected until a restore needs the block. The existing global
   operation lock still serializes publication, restoration, moves and purge
   across conversations.
-  The node's separate dm-era tracking expires a baseline after 24 hours, forcing
-  a full disk copy and index. Copying can keep the VM paused when the filesystem
-  cannot reflink. Stored ciphertext uses two base64 layers (about 1.78× the raw
-  size for distinct nonzero data); S3 keeps a second copy and verifies each new
-  upload by downloading it once. These costs remain after removing the audit.
+  The node's separate dm-era tracking survives reboots but expires a baseline
+  after 24 hours, forcing a full local disk copy and index. Previously received
+  blocks are still reused by the master, so this does not resend the whole disk.
+  Copying can keep the VM paused when the filesystem cannot reflink. A failed
+  capture also clears the master's baseline; an offline node is not guaranteed
+  an incremental local copy on its next capture.
+  New blocks use a versioned binary AES-GCM format: 8 header bytes, a 12-byte
+  nonce and a 16-byte tag, with no base64. Legacy double-base64 blocks remain
+  readable and reusable without a forced scan or rewrite of existing backups.
+  S3 keeps a second copy and verifies each new upload by downloading it once.
 - Bulk snapshot/archive responses use a negotiated continuous binary HTTP upload,
   with eight buffered 64 KiB frames, cancellation and explicit completion. Old
   nodes/masters continue using acknowledged JSON frames. Control and log messages
@@ -78,7 +83,11 @@ The repeatable checks live beside the implementation:
   and checks both failed transfer and cancellation during capture.
   An inotify regression verifies that unchanged publication does not read cached
   blocks. Restoration detects corruption and prepares the next capture to repair
-  it. Transport tests cover ownership, truncation with/without a length, bounded backpressure,
+  it. The backup fixture checks the stored size and restores mixed legacy/binary
+  blocks, including after removing the master cache in the S3 fixture. Binary
+  vault tests reject tampering, truncation and a different owner/purpose; the
+  existing Node-generated credential fixture remains compatible.
+  Transport tests cover ownership, truncation with/without a length, bounded backpressure,
   consumer cancellation and legacy JSON responses.
 - `backend/tests/node_performance.rs`: opt-in benchmarks for initial, unchanged
   and 4 MiB delta publication; real outbound relay with
@@ -87,8 +96,10 @@ The repeatable checks live beside the implementation:
   node_performance --no-run`, then run the emitted executable alone with
   `--ignored --nocapture --test-threads=1`. Fixtures use tmpfs and loopback: results
   measure CPU/logical I/O/protocol overhead, not a physical disk or real WAN.
-  Archives retain a sequential 256 KiB outer protocol, so their gains differ from
-  the 4 MiB snapshot fixture.
+  `NODE_STORAGE` reports the actual encrypted block bytes after initial capture.
+  Conversation archival and restoration retain a sequential 256 KiB outer
+  protocol, so their gains differ from the 4 MiB snapshot fixture. Normal node
+  movements use recovery-point blocks, not this archive transfer loop.
 - `python3 tests/guest_projects_test.py`: real mount-namespace regression for
   atomic read-only project publication, retry and reboot restoration. An
   unprivileged observer must never gain write access while mounts are prepared.
