@@ -75,9 +75,10 @@ pub async fn prepare_boot(disk: &Path, owner: u32) -> Result<PathBuf> {
             .await?
             .set_len(METADATA_BYTES)
             .await?;
-        std::os::unix::fs::chown(&partial, Some(owner), Some(owner))?;
         tokio::fs::rename(&partial, &file).await?;
     }
+    // Like data.ext4, the disk may boot under another VM user than last time.
+    std::os::unix::fs::chown(&file, Some(owner), Some(owner))?;
     Ok(file)
 }
 

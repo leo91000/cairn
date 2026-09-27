@@ -79,12 +79,14 @@ pub async fn capture(
             let result=guest(socket,json!({"op":"freeze"})).await?;
             if result["ok"]!=true {return Err(Error::new(503,"Guest filesystem freeze failed."));}
             frozen=true;
-            let _guard=control.lock().await;
-            if stop.is_cancelled() {return Err(Error::new(409,"VM stopped during capture."));}
-            paused=true;host::pause_attempt(state,attempt).await?;
+            // Ask before pausing: paused vCPUs cannot answer, and the frozen filesystem
+            // already keeps the list exact until the copy ends.
             if status["writeTracking"] == true {
                 plan = Plan::from_guest(socket, known.as_ref()).await;
             }
+            let _guard=control.lock().await;
+            if stop.is_cancelled() {return Err(Error::new(409,"VM stopped during capture."));}
+            paused=true;host::pause_attempt(state,attempt).await?;
         } else {
             plan = Plan::from_seal(&disk, known.as_ref()).await;
         }

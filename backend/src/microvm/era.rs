@@ -39,12 +39,20 @@ pub fn ranges(xml: &str) -> Option<Vec<[u64; 2]>> {
     Some(found)
 }
 
-async fn dmsetup(args: &[&str]) -> Result<String> {
-    let output = Command::new("dmsetup").args(args).output().await?;
+/// Runs a device-mapper tool; its error output only reaches the guest console log.
+async fn tool(program: &str, args: &[&str]) -> Result<String> {
+    let output = Command::new(program).args(args).output().await?;
     if !output.status.success() {
-        return Err(Error::new(503, "Write tracking is unavailable."));
+        let detail = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::new(
+            503,
+            format!("{program} {} failed: {}", args.join(" "), detail.trim()),
+        ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+async fn dmsetup(args: &[&str]) -> Result<String> {
+    tool("dmsetup", args).await
 }
 
 /// Whether the data disk is mounted through the era target.
@@ -96,20 +104,13 @@ pub async fn written(since: Option<u64>) -> Result<Value> {
         let blocks = match since {
             None => Vec::new(),
             Some(since) => {
-                let output = Command::new("era_invalidate")
-                    .args([
-                        "--metadata-snapshot",
-                        "--written-since",
-                        &since.to_string(),
-                        METADATA,
-                    ])
-                    .output()
-                    .await?;
-                if !output.status.success() {
-                    return Err(Error::new(503, "Unable to list written blocks."));
-                }
-                ranges(&String::from_utf8_lossy(&output.stdout))
-                    .ok_or_else(|| Error::new(503, "Unreadable written block list."))?
+                let since = since.to_string();
+                let output = tool(
+                    "era_invalidate",
+                    &["--metadata-snapshot", "--written-since", &since, METADATA],
+                )
+                .await?;
+                ranges(&output).ok_or_else(|| Error::new(503, "Unreadable written block list."))?
             }
         };
         Ok(json!({"ok":true,"era":era,"blockSize":sectors * 512,"blocks":blocks}))

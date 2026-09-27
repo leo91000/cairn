@@ -89,7 +89,10 @@ async fn handle(
         "written" => {
             // Called by the host between freeze and thaw; any failure means a full copy.
             let _guard=FILESYSTEM_CONTROL.lock().await;
-            let reply=super::era::written(request["since"].as_u64()).await.unwrap_or_else(|_| json!({"ok":false}));
+            let reply=match super::era::written(request["since"].as_u64()).await {
+                Ok(reply)=>reply,
+                Err(error)=>{tracing::warn!(message=%error.message,"Write tracking query failed");json!({"ok":false})}
+            };
             wire::write(&mut write,&reply).await
         }
         "artifact-export" => {
@@ -350,7 +353,10 @@ async fn handle(
             // host can list this boot's writes without booting the disk again.
             let sealed = if super::era::active().await {
                 let _guard = FILESYSTEM_CONTROL.lock().await;
-                super::era::seal().await.ok()
+                super::era::seal()
+                    .await
+                    .inspect_err(|error| tracing::warn!(message = %error.message, "Sealing write tracking failed"))
+                    .ok()
             } else {
                 None
             };
