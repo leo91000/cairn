@@ -142,3 +142,17 @@ ses anciennes copies S3 évictables ; le seul cache propre persistant est celui 
 contrôleur. Les anciennes sauvegardes dont le master est la seule copie restent
 protégées. Les remplissages du cache et les écritures du journal partagent le même
 verrou d'admission d'espace sur le contrôleur.
+
+## Intégration de la base des nodes actualisée
+
+La stack est remise sur `635cfd12676676d7415c928289bdb967996105ab` : nouveaux blocs
+chiffrés binaires, anciens blocs toujours lisibles, audits planifiés supprimés.
+Le test de sélection du point de reprise reproduit une erreur d'audit historique
+qui empêchait la reprise à la demande ; cette métadonnée retirée n'influence plus
+la sélection. L'invalidation après un échec de lecture reste en place.
+
+Le parcours contrôleur/VM complet est passé avant cette remise à jour :
+restauration de métadonnées en **21 ms**, reprise du programme invité en **1 711 ms**,
+**4 blocs lus sur 13 blocs distants**, annulation en panne et reprise après pression
+disque réussies. Origine HTTP locale, pas un benchmark S3. La CI des branches
+réactualisées fournit la validation finale de l'intégration.

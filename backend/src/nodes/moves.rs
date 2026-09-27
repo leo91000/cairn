@@ -430,15 +430,10 @@ pub async fn latest(s: &Service, run: &str) -> Result<Option<Value>> {
         .collect::<Vec<_>>();
     points.sort_by_key(|b| std::cmp::Reverse(b["capturedAt"].as_i64().unwrap_or(0)));
     let demand = s.store.run(run).await?["storage"]["mode"] == "on-demand";
-    let audit = s
-        .store
-        .kv(&format!("node-backup-audit:{run}"))
-        .await?
-        .unwrap_or_default();
     for point in points {
         let usable = async {
             let manifest = super::backups::manifest(s, &point).await?;
-            if demand && point["destination"] == "s3" && !audit["error"].is_string() {
+            if demand && point["destination"] == "s3" {
                 // Publication already verified every immutable dependency. Each
                 // demand read verifies it again; do not hydrate the whole disk here.
                 return Ok(());

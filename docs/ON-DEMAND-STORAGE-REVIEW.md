@@ -1,6 +1,6 @@
 # Revue de la stack de stockage
 
-Base : PR des nodes #3, `360e714297e61242fb359284bedf22a648fcb99e`.
+Base : PR des nodes #3, `635cfd12676676d7415c928289bdb967996105ab`.
 Spécification : `ON-DEMAND-STORAGE-DESIGN.md`, confirmée à Q9.
 Deux revues indépendantes ont examiné les conventions et la conformité.
 
@@ -37,6 +37,11 @@ Aucun écart matériel restant identifié dans les contre-revues ciblées.
 - L'arrêt forcé annule les lectures FUSE avant d'attendre le VMM. Un invité
   disponible conserve son arrêt gracieux et ses écritures jusqu'à sa sortie.
   La contre-revue ciblée n'identifie pas d'écart de durabilité ou d'ordre d'arrêt.
+
+- La stack intègre les blocs chiffrés binaires de la nouvelle base des nodes,
+  avec lecture compatible des anciens blocs. La suppression des audits périodiques
+  est conservée ; leurs anciennes erreurs ne forcent plus une restauration complète.
+  Les échecs de lecture continuent à invalider les reçus et la base incrémentale.
 
 Bilan : **Standards 0 constat restant ; Spec 0 écart restant identifié**.
 La revue ne remplace pas les tests et mesures consignés dans le document de validation.

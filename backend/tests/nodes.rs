@@ -1298,6 +1298,52 @@ async fn archives_transfer_between_distinct_node_and_master_directories() {
 }
 
 #[tokio::test]
+async fn retired_audit_errors_do_not_force_full_download_before_demand_resume() {
+    use leo_agent_manager::{
+        config::id,
+        nodes::{backups, moves, snapshots},
+    };
+    let owner = Owner::new().await;
+    let run = id();
+    let point = id();
+    let record = json!({"id":run,"taskId":"fixture","createdAt":0,"status":"queued","storage":{"mode":"on-demand"}});
+    owner
+        .service
+        .store
+        .write(move |db| db.add_run(&record, None))
+        .await
+        .unwrap();
+    owner
+        .service
+        .store
+        .set(
+            &format!("node-backup-audit:{run}"),
+            json!({"error":"historical audit failure"}),
+            None,
+        )
+        .await
+        .unwrap();
+    let manifest = json!({"version":1,"size":4096,"blockSize":snapshots::BLOCK,"blocks":[{"offset":0,"size":4096,"hash":"a".repeat(64)}]});
+    let encrypted = owner
+        .service
+        .vault
+        .encrypt(&format!("backup:{point}"), &manifest)
+        .unwrap();
+    owner.service.store.put("node-backups", json!({"id":point,"runId":run,"sessionId":"saved-session","capturedAt":1,"destination":"s3","manifest":encrypted})).await.unwrap();
+    // No S3 credentials or local payload: selecting verified metadata cannot
+    // download the disk. Reads will validate the remote blocks when requested.
+    let selected = moves::latest(&owner.service, &run)
+        .await
+        .unwrap()
+        .expect("published metadata remains eligible");
+    assert_eq!(selected["id"], point);
+    assert_eq!(
+        backups::manifest(&owner.service, &selected).await.unwrap()["size"],
+        4096
+    );
+}
+
+#[tokio::test]
 async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplete_publication() {
     use axum::response::IntoResponse;
     use leo_agent_manager::{
