@@ -129,11 +129,21 @@ fn route(method: &str, path: &str) -> Result<()> {
                 && crate::validation::uuid(id).is_ok()
                 && crate::validation::uuid(project).is_ok()
         }
+        ["storage-policy"] => method == "POST",
         ["disks", id, operation] => {
             method == "POST"
                 && crate::validation::uuid(id).is_ok()
-                && ["export", "import", "delete", "prune", "restore", "snapshot"]
-                    .contains(operation)
+                && [
+                    "export",
+                    "import",
+                    "delete",
+                    "prune",
+                    "restore",
+                    "snapshot",
+                    "published",
+                    "storage-status",
+                ]
+                .contains(operation)
         }
         _ => false,
     };

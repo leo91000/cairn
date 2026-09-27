@@ -496,6 +496,8 @@ pub struct Vm {
     consoles: Vec<tokio::task::JoinHandle<()>>,
     network: Network,
     paused: bool,
+    mounted: Option<crate::storage::fuse::MountedDisk>,
+    volume: Option<std::sync::Arc<crate::storage::runtime::Volume>>,
     uid: u32,
 }
 impl Vm {
@@ -559,7 +561,23 @@ impl Vm {
         if disk_dir.join("restore.pending").exists() {
             return Err(Error::new(409, "VM restore is incomplete."));
         }
-        let disk = crate::storage::prepare(&disk_dir, resources.disk_mi_b * 1024 * 1024).await?;
+        let volume = if crate::storage::runtime::exists(&disk_dir) {
+            Some(crate::storage::runtime::open(&disk_dir)?)
+        } else {
+            None
+        };
+        let disk = if let Some(volume) = &volume {
+            use crate::storage::Disk;
+            if resources.disk_mi_b * 1024 * 1024 > volume.disk.size() {
+                return Err(Error::new(
+                    409,
+                    "Resize requires materializing this on-demand disk first.",
+                ));
+            }
+            disk_dir.join("data.ext4")
+        } else {
+            crate::storage::prepare(&disk_dir, resources.disk_mi_b * 1024 * 1024).await?
+        };
         let uid = 40000 + slot as u32;
         let jail = state.join("jails/firecracker").join(&id).join("root");
         let socket = jail.join("v.sock");
@@ -573,6 +591,8 @@ impl Vm {
             consoles: Vec::new(),
             network,
             paused: false,
+            mounted: None,
+            volume,
             uid,
         };
         let jail = &vm.jail;
@@ -581,22 +601,40 @@ impl Vm {
         let network = &vm.network;
         let child = &mut vm.child;
         let consoles = &mut vm.consoles;
+        let mounted = &mut vm.mounted;
+        let volume = &vm.volume;
         let operation = async {
             private_dir(jail).await?;
-            std::os::unix::fs::chown(&disk, Some(uid), Some(uid))?;
-            tokio::fs::hard_link(&disk, jail.join("data.ext4")).await?;
-            let era = crate::nodes::tracking::prepare_boot(disk_dir, uid).await?;
-            tokio::fs::hard_link(&era, jail.join("era.meta")).await?;
+            if let Some(volume) = volume {
+                let target = jail.join("disk");
+                private_dir(&target).await?;
+                *mounted = Some(crate::storage::fuse::mount_disk(
+                    volume.clone(),
+                    &target,
+                    uid,
+                )?);
+            } else {
+                std::os::unix::fs::chown(&disk, Some(uid), Some(uid))?;
+                tokio::fs::hard_link(&disk, jail.join("data.ext4")).await?;
+                let era = crate::nodes::tracking::prepare_boot(disk_dir, uid).await?;
+                tokio::fs::hard_link(&era, jail.join("era.meta")).await?;
+            }
             tokio::fs::hard_link(image.join("root.ext4"), jail.join("root.ext4")).await?;
             tokio::fs::copy(image.join("vmlinux"), jail.join("vmlinux")).await?;
             network.create(uid).await?;
-            let config = json!({
+            let mut config = json!({
                 "boot-source":{"kernel_image_path":"vmlinux","boot_args":format!("console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/sbin/leo-init ip={}::{}:255.255.255.252:leo:eth0:off",network.guest,network.gateway)},
                 "drives":[{"drive_id":"root","path_on_host":"root.ext4","is_root_device":true,"is_read_only":true},{"drive_id":"data","path_on_host":"data.ext4","is_root_device":false,"is_read_only":false},{"drive_id":"era","path_on_host":"era.meta","is_root_device":false,"is_read_only":false}],
                 "machine-config":{"vcpu_count":resources.cpu,"mem_size_mib":resources.memory_mi_b,"smt":false},
                 "network-interfaces":[{"iface_id":"net","host_dev_name":network.tap,"guest_mac":network.mac}],
                 "vsock":{"guest_cid":slot+3,"uds_path":"v.sock"}
             });
+            if volume.is_some() {
+                config["drives"] = json!([
+                    {"drive_id":"root","path_on_host":"root.ext4","is_root_device":true,"is_read_only":true},
+                    {"drive_id":"data","path_on_host":"disk/data.ext4","is_root_device":false,"is_read_only":false,"cache_type":"Writeback"}
+                ]);
+            }
             atomic_write(&jail.join("config.json"), &serde_json::to_vec(&config)?).await?;
             std::os::unix::fs::chown(jail.join("config.json"), Some(uid), Some(uid))?;
             *child = Some(
@@ -638,7 +676,7 @@ impl Vm {
                 child.as_mut().unwrap().stderr.take().unwrap(),
                 state.join(format!("{id}.vmm.log")),
             ));
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+            let mut deadline = tokio::time::Instant::now() + Duration::from_secs(60);
             let status = loop {
                 if child.as_mut().unwrap().try_wait()?.is_some() {
                     return Err(Error::new(
@@ -653,6 +691,9 @@ impl Vm {
                 .await
                 {
                     break status;
+                }
+                if volume.as_ref().is_some_and(|v| v.source.waiting()) {
+                    deadline = tokio::time::Instant::now() + Duration::from_secs(60);
                 }
                 if tokio::time::Instant::now() > deadline {
                     return Err(Error::new(503, "Guest startup timed out."));
@@ -774,6 +815,12 @@ impl Vm {
         }
         for console in self.consoles.drain(..) {
             let _ = console.await;
+        }
+        if let Some(volume) = self.volume.take() {
+            volume.stop.cancel();
+        }
+        if let Some(mounted) = self.mounted.take() {
+            let _ = tokio::task::spawn_blocking(move || mounted.close()).await;
         }
         self.network.remove().await;
         let _ = tokio::fs::remove_dir_all(self.jail.parent().unwrap()).await;

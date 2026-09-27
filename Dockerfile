@@ -115,7 +115,7 @@ RUN --mount=from=guest,target=/rootfs,ro truncate -s 8G /root.ext4 && mkfs.ext4 
 
 FROM runtime AS final
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends iptables e2fsprogs util-linux \
+RUN apt-get update && apt-get install -y --no-install-recommends iptables e2fsprogs util-linux fuse3 \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://github.com/firecracker-microvm/firecracker/releases/download/v1.17.0/firecracker-v1.17.0-x86_64.tgz -o /tmp/firecracker.tgz \
     && echo '06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558  /tmp/firecracker.tgz' | sha256sum -c - \

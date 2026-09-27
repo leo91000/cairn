@@ -27,6 +27,8 @@ export interface ExecutionNode {
   maintenanceError?: string | null
   imageDigest?: string | null
   updateError?: string | null
+  storage?: NodeStoragePolicy
+  storageMigration?: { runId?: string, error?: string | null }
   runtimeId: string
   lastSeen: number | null
   agents?: NodeAgent[]
@@ -99,4 +101,14 @@ export function nodeDiagnostics(node: ExecutionNode, now = Date.now()) {
   if (!node.agents?.length)
     reasons.push('No agent can use this machine yet.')
   return reasons
+}
+
+export interface NodeStoragePolicy {
+  enabled: boolean
+  cacheMiB: number
+  reserveMiB: number
+  reservePercent: number
+  backupSeconds: number
+  maxDirtySeconds: number
+  automaticArchiving: boolean
 }

@@ -52,3 +52,27 @@ benchmark S3. Restent à valider dans les PR suivantes : publication distante,
 limites globales par node, états d'attente et annulation, droits et conservation des
 objets, déplacement, migration, archives et fonctionnement avec le vrai stockage S3.
 L'adapter n'est pas encore activable dans le contrôleur de production.
+
+## Publication et pression disque (troisième PR)
+
+Les générations du journal séparent le point envoyé des écritures reçues pendant son
+transfert. La publication conserve les anciens blocs accessibles jusqu'à ce que le
+contrôleur ait drainé les lectures et confirmé le nouveau manifeste. La rétention
+respecte ces références, y compris après un transfert interrompu.
+
+Une capture normale gèle le système de fichiers, scelle la génération et reprend
+l'invité avant de reconstruire les blocs. Si l'exécution est déjà bloquée par la
+réserve disque ou le retard de sauvegarde, la capture d'urgence est explicitement
+marquée `crash` : elle capture le préfixe durable du journal avec les CPU en pause.
+Elle demande la relecture du journal ext4 à la reprise. Attendre `fsfreeze` dans ce
+cas pourrait attendre une écriture elle-même bloquée par le manque d'espace et
+empêcher la sauvegarde de libérer cet espace. Ce point n'offre pas de cohérence
+applicative supplémentaire. Une panne de lecture distante reporte la capture.
+
+L'activation vérifie la configuration S3 existante (notamment l'absence de règle de
+cycle de vie indépendante) et réalise un montage, une écriture et une
+synchronisation FUSE avec l'identité du contrôleur. Sur les installations Compose,
+`LEO_NODE_FUSE=1` lors de la génération du déploiement expose `/dev/fuse` ; les
+configurations existantes qui l'exposent le conservent. Le superviseur des nodes
+expose ce périphérique lorsqu'il est présent sur l'hôte. Les nodes sans FUSE
+continuent à prendre en charge les disques historiques.

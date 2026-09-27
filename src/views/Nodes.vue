@@ -4,6 +4,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { formatMiB, formatResources, nodeDiagnostics } from '../../shared/nodes'
 import { api, notify, refresh, state } from '../api'
 import Modal from '../components/Modal.vue'
+import NodeStorage from '../components/NodeStorage.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
 
@@ -240,6 +241,7 @@ function statusLabel(node: ExecutionNode) {
             <UiButton variant="default" @click="edit(node)">
               Configure
             </UiButton>
+            <NodeStorage :node="node" @saved="load" />
             <UiButton v-if="!node.local" variant="default" @click="revoking = node">
               Revoke
             </UiButton>
