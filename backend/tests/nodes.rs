@@ -2145,3 +2145,116 @@ async fn only_conversations_on_remote_nodes_take_continuous_recovery_points() {
     // A remote node can disappear, so its conversation tries to save (and reports why it could not).
     assert_eq!(states[1]["status"], "error", "{}", states[1]);
 }
+
+#[tokio::test]
+async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
+    use axum::response::IntoResponse;
+    use leo_agent_manager::{
+        config::{id, now},
+        nodes::{LOCAL_NODE_ID, backups, snapshots},
+    };
+    use std::sync::{Arc, Mutex};
+    let root = TempDir::new().unwrap();
+    let disk = root.path().join("disk");
+    std::fs::write(&disk, b"workspace blocks").unwrap();
+    let mut manifest = snapshots::index(&disk).await.unwrap();
+    manifest["capturedAt"] = now().into();
+    manifest["runtime"] = json!({"runtimeId":"fixture"});
+    // The controller records each capture request body and can be told to fail.
+    let bodies = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let failing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let snapshots_served = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (recorded, fail, served, source, data) = (
+        bodies.clone(),
+        failing.clone(),
+        snapshots_served.clone(),
+        disk.clone(),
+        manifest.clone(),
+    );
+    let runner = axum::Router::new().fallback(move |request: axum::extract::Request| {
+        let (recorded, fail, served, source, data) = (
+            recorded.clone(),
+            fail.clone(),
+            served.clone(),
+            source.clone(),
+            data.clone(),
+        );
+        async move {
+            let path = request.uri().path().to_owned();
+            if request.method() == "DELETE" {
+                return axum::Json(json!({"ok":true})).into_response();
+            }
+            if path.ends_with("/snapshot") {
+                let body = axum::body::to_bytes(request.into_body(), 4096)
+                    .await
+                    .unwrap();
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::from_slice(&body).unwrap_or(Value::Null));
+                if fail.load(std::sync::atomic::Ordering::SeqCst) {
+                    return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "down").into_response();
+                }
+                let snapshot = id();
+                served.lock().unwrap().push(snapshot.clone());
+                return axum::Json(json!({"id":snapshot,"manifest":data})).into_response();
+            }
+            let hash = path.rsplit('/').next().unwrap();
+            snapshots::block(&source, &data, hash)
+                .await
+                .unwrap()
+                .into_response()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, runner).await.unwrap() });
+    let owner = Owner::with_runner("localhost:4310".into(), url).await;
+    let (run, attempt) = (id(), id());
+    let record = json!({"id":run,"taskId":run,"createdAt":0,"status":"running","sessionId":"session","nodeId":LOCAL_NODE_ID});
+    owner
+        .service
+        .store
+        .write(move |db| db.add_run(&record, None))
+        .await
+        .unwrap();
+    owner
+        .service
+        .store
+        .set(
+            &format!("run-checkpoint:{run}"),
+            json!({"nodeId":LOCAL_NODE_ID,"runnerId":attempt}),
+            None,
+        )
+        .await
+        .unwrap();
+    let current = || async { owner.service.store.run(&run).await.unwrap() };
+
+    backups::capture(&owner.service, &current().await)
+        .await
+        .unwrap();
+    let first = snapshots_served.lock().unwrap()[0].clone();
+    assert_eq!(current().await["backup"]["snapshotId"], first);
+    backups::capture(&owner.service, &current().await)
+        .await
+        .unwrap();
+    assert!(bodies.lock().unwrap()[0]["baseline"].is_null());
+    assert_eq!(bodies.lock().unwrap()[1]["baseline"], first);
+
+    // After a failed capture, the next one asks for a full copy.
+    failing.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        backups::capture(&owner.service, &current().await)
+            .await
+            .is_err()
+    );
+    failing.store(false, std::sync::atomic::Ordering::SeqCst);
+    backups::capture(&owner.service, &current().await)
+        .await
+        .unwrap();
+    assert!(
+        bodies.lock().unwrap()[3]["baseline"].is_null(),
+        "{:?}",
+        bodies.lock().unwrap()
+    );
+}

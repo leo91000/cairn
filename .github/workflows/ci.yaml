@@ -45,8 +45,11 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_INCREMENTAL: '0'
+      # Recovery point tests read real dm-era metadata with era_invalidate.
+      LEO_REQUIRE_ERA_TOOLS: '1'
     steps:
       - uses: actions/checkout@v7.0.1
+      - run: sudo apt-get update -q && sudo apt-get install -y -q thin-provisioning-tools
       - uses: pnpm/setup@v2.1.0
         with:
           runtime: node@24

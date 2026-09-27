@@ -76,14 +76,21 @@ async fn handle(
             let _guard=FILESYSTEM_CONTROL.lock().await;
             let freeze=request["op"]=="freeze";
             let generation=FREEZE_GENERATION.fetch_add(1,std::sync::atomic::Ordering::SeqCst)+1;
-            let status=Command::new("fsfreeze").arg(if freeze {"--freeze"} else {"--unfreeze"}).arg("/oldroot/run/data").stdout(Stdio::null()).stderr(Stdio::null()).status().await?;
+            let status=Command::new("fsfreeze").arg(if freeze {"--freeze"} else {"--unfreeze"}).arg(super::era::DATA_MOUNT).stdout(Stdio::null()).stderr(Stdio::null()).status().await?;
             if freeze && status.success() {
                 // A lost host control connection must not freeze the guest indefinitely.
-                tokio::spawn(async move {tokio::time::sleep(Duration::from_secs(300)).await;let _guard=FILESYSTEM_CONTROL.lock().await;if FREEZE_GENERATION.load(std::sync::atomic::Ordering::SeqCst)!=generation {return;}let _=Command::new("fsfreeze").args(["--unfreeze","/oldroot/run/data"]).stdout(Stdio::null()).stderr(Stdio::null()).status().await;});
+                tokio::spawn(async move {tokio::time::sleep(Duration::from_secs(300)).await;let _guard=FILESYSTEM_CONTROL.lock().await;if FREEZE_GENERATION.load(std::sync::atomic::Ordering::SeqCst)!=generation {return;}let _=Command::new("fsfreeze").args(["--unfreeze",super::era::DATA_MOUNT]).stdout(Stdio::null()).stderr(Stdio::null()).status().await;});
             }
             wire::write(&mut write,&json!({"ok":status.success() || !freeze})).await
         }
 
+
+        "written" => {
+            // Called by the host between freeze and thaw; any failure means a full copy.
+            let _guard=FILESYSTEM_CONTROL.lock().await;
+            let reply=super::era::written(request["since"].as_u64()).await.unwrap_or_else(|_| json!({"ok":false}));
+            wire::write(&mut write,&reply).await
+        }
         "artifact-export" => {
             let export=async {
                 let (snapshot,size)=crate::artifacts::file::snapshot(Path::new(text(&request,"path")),Path::new(text(&request,"root"))).await?;
@@ -122,7 +129,7 @@ async fn handle(
         "status" => {
             wire::write(
                 &mut write,
-                &json!({"version":1,"binaryImports":true,"filesystemSnapshots":true,"initialized":Path::new(INITIALIZED).exists()}),
+                &json!({"version":1,"binaryImports":true,"filesystemSnapshots":true,"writeTracking":super::era::active().await,"initialized":Path::new(INITIALIZED).exists()}),
             )
             .await
         }
@@ -338,7 +345,15 @@ async fn handle(
             tokio::select! { result = result => result, _ = stop.cancelled() => Ok(()) }
         }
         "shutdown" => {
-            wire::write(&mut write, &json!({"ok":true})).await?;
+            // A clean stop freezes the data filesystem and archives the last era, so the
+            // host can list this boot's writes without booting the disk again.
+            let sealed = if super::era::active().await {
+                let _guard = FILESYSTEM_CONTROL.lock().await;
+                super::era::seal().await.ok()
+            } else {
+                None
+            };
+            wire::write(&mut write, &json!({"ok":true,"sealed":sealed})).await?;
             stop.cancel();
             Ok(())
         }

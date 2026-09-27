@@ -116,6 +116,8 @@ pub async fn controller(state: &Path, run: &str, value: Value) -> Result<Value> 
     }
     let origin = super::connector::master(text(&value, "master"))?;
     crate::skills::atomic_write(&directory.join("restore.pending"), b"restoring").await?;
+    // The restored disk replaces everything the guest's write tracking described.
+    super::tracking::invalidate(&directory).await?;
     if directory.join("data.ext4").exists() {
         let stale = crate::config::id();
         for name in ["runtime.json", "recovery.json"] {

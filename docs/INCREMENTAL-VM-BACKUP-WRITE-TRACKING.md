@@ -1,10 +1,10 @@
 # Sauvegarde incrémentale : suivre les blocs écrits de `data.ext4`
 
-Recherche du 26 septembre 2026, sur sources primaires uniquement (docs officielles, code source à des tags figés). Aucun essai n'a été lancé. Complète [INCREMENTAL-VM-BACKUP-RESEARCH.md](INCREMENTAL-VM-BACKUP-RESEARCH.md). **(non vérifié)** marque ce qui n'a pas pu être confirmé par une source primaire ; « déduction » marque un raisonnement non documenté tel quel.
+Recherche du 26 septembre 2026, sur sources primaires uniquement (docs officielles, code source à des tags figés). Les mesures et l'implémentation retenue figurent en fin de document. Complète [INCREMENTAL-VM-BACKUP-RESEARCH.md](INCREMENTAL-VM-BACKUP-RESEARCH.md). **(non vérifié)** marque ce qui n'a pas pu être confirmé par une source primaire ; « déduction » marque un raisonnement non documenté tel quel.
 
 ## Point de départ
 
-Toutes les 60 s, Leo gèle le FS invité, met la VM en pause, puis lance `cp --reflink=auto --sparse=always` ([checkpoint.rs](../backend/src/nodes/checkpoint.rs)). Il relit ensuite **toute** la copie par blocs de 4 Mio pour calculer un SHA-256, trous compris ([snapshots.rs](../backend/src/nodes/snapshots.rs)). Les disques sont configurés sans `io_engine` ni `cache_type`, donc `Sync` et `Unsafe` par défaut, et sans `discard`. Ils sont liés en dur dans le chroot du jailer ([host.rs](../backend/src/microvm/host.rs)). Le noyau invité n'active ni device-mapper ni btrfs ([kernel.config](../deploy/microvm/kernel.config)).
+Toutes les 60 s, Leo gèle le FS invité, met la VM en pause, puis lance `cp --reflink=auto --sparse=always` ([checkpoint.rs](../backend/src/nodes/checkpoint.rs)). Il relisait ensuite **toute** la copie par blocs de 4 Mio pour calculer un SHA-256, trous compris ; l'indexation saute désormais les trous avec `SEEK_DATA` ([snapshots.rs](../backend/src/nodes/snapshots.rs)). Les disques sont configurés sans `io_engine` ni `cache_type`, donc `Sync` et `Unsafe` par défaut, et sans `discard`. Ils sont liés en dur dans le chroot du jailer ([host.rs](../backend/src/microvm/host.rs)). Le noyau invité n'active ni device-mapper ni btrfs ([kernel.config](../deploy/microvm/kernel.config)).
 
 ## 1. Firecracker 1.17.0 lui-même
 
@@ -104,3 +104,42 @@ Sur un hôte ext4, la copie sans reflink rend la pause proportionnelle aux donn�
 - Pièges rencontrés : l'invité n'a pas udev, donc il faut `dmsetup create --noudevsync` puis `dmsetup mknodes`. `era_invalidate` écrit `<range begin="110" end = "115"/>` avec des espaces autour de `=` et une fin exclusive. Un analyseur trop strict fait croire à des blocs manqués.
 
 Scripts du prototype (hors dépôt) : init invité, harnais à deux démarrages, comparaison SHA-256 et banc d'indexation.
+
+## Implémentation (27 septembre 2026)
+
+Décision : [ADR 0005](adr/0005-guest-dm-era-write-tracking.md). Code : [tracking.rs](../backend/src/nodes/tracking.rs) (état côté node), [checkpoint.rs](../backend/src/nodes/checkpoint.rs) (capture), [era.rs](../backend/src/microvm/era.rs) (invité), [init](../deploy/microvm/init).
+
+**État conservé à côté de `data.ext4`.**
+- `era.meta` : les métadonnées dm-era. L'invité les recharge à chaque démarrage, ce qui récupère aussi les écritures d'une VM arrêtée brutalement.
+- `tracking/<instantané>.json` : l'ère et le manifeste des trois dernières captures.
+- `sealed.json` : l'ère archivée par un arrêt propre.
+
+**Captures.**
+- Le master envoie l'identifiant d'instantané de son dernier point publié. Si la node en connaît la référence, seuls les blocs écrits depuis sont copiés, et le manifeste repart de celui de la référence.
+- Capture active : l'invité gelé répond à `written` (`checkpoint`, `take_metadata_snap`, `era_invalidate`).
+- Disque arrêté : un arrêt propre a gelé le FS et archivé l'ère. L'hôte lit alors les métadonnées inactives avec `era_invalidate`, sans démarrer la VM.
+
+**Invariant.** Toute écriture sur `data.ext4` passe par la cible dm-era de l'invité. Les cas suivants appellent `tracking::invalidate` avant d'agir, et la capture suivante est alors complète :
+- création du disque ;
+- `resize2fs` ;
+- import d'une archive ;
+- restauration d'un point de reprise ;
+- un démarrage où l'invité signale l'absence de suivi (anciennes images, cible en échec).
+
+**Garde-fous.**
+- Une copie complète au moins toutes les 24 h.
+- Copie complète aussi en cas de liste invalide, de taille de disque changée ou de référence inconnue.
+- Une capture ratée efface la référence côté master.
+- Un démarrage efface le scellé, qui ne décrit alors plus le disque.
+
+**Validation.**
+- De bout en bout, avec le vrai script de démarrage et le vrai `leo guest` dans Firecracker 1.17 piloté par vsock, sur un même disque :
+  - premier démarrage : écritures puis arrêt propre (ère scellée, VM arrêtée en 0,1 s). Lecture hors ligne par l'hôte : **9 blocs modifiés, 9 signalés** ;
+  - deuxième démarrage tué par `SIGKILL` ;
+  - troisième démarrage : la liste depuis l'ère scellée contient les écritures du démarrage tué, **5 sur 5**.
+- Aucun bloc manqué dans aucune passe.
+- La CI installe `thin-provisioning-tools` et teste la lecture hors ligne sur une vraie fixture de métadonnées. Le smoke test KVM vérifie une capture incrémentale sur l'image construite.
+
+**Correction d'une conclusion précédente.** Après un arrêt brutal, lire directement les métadonnées sans recharger la cible ne montre pas l'ensemble d'écritures de l'ère en cours (0 bloc sur 9). En rechargeant la cible (`take_metadata_snap` puis `era_invalidate`), les 9 blocs sont retrouvés : le noyau récupère `current_writeset` depuis le superbloc depuis « dm era: Recover committed writeset after crash » (2021). C'est pourquoi un disque arrêté n'est lu hors ligne qu'après un arrêt scellé ; sinon, c'est le démarrage suivant qui récupère ses écritures.
+
+**Pistes ouvertes.** Si les pauses liées à de gros tours posent problème, lire les blocs modifiés après le dégel, depuis un instantané `dm-snapshot` temporaire placé sous dm-era.

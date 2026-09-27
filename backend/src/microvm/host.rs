@@ -561,6 +561,7 @@ impl Vm {
         }
         let disk = disk_dir.join("data.ext4");
         if !disk.exists() {
+            crate::nodes::tracking::invalidate(&disk_dir).await?;
             let file = tokio::fs::File::create(disk_dir.join("data.partial")).await?;
             file.set_len(resources.disk_mi_b * 1024 * 1024).await?;
             drop(file);
@@ -577,6 +578,8 @@ impl Vm {
             return Err(Error::new(409, "A retained VM disk cannot be shrunk."));
         }
         if desired > actual {
+            // resize2fs writes outside the guest's write tracking.
+            crate::nodes::tracking::invalidate(&disk_dir).await?;
             tokio::fs::OpenOptions::new()
                 .write(true)
                 .open(&disk)
@@ -607,6 +610,7 @@ impl Vm {
             uid,
         };
         let jail = &vm.jail;
+        let disk_dir = &vm.disk_dir;
         let socket = &vm.socket;
         let network = &vm.network;
         let child = &mut vm.child;
@@ -615,12 +619,14 @@ impl Vm {
             private_dir(jail).await?;
             std::os::unix::fs::chown(&disk, Some(uid), Some(uid))?;
             tokio::fs::hard_link(&disk, jail.join("data.ext4")).await?;
+            let era = crate::nodes::tracking::prepare_boot(disk_dir, uid).await?;
+            tokio::fs::hard_link(&era, jail.join("era.meta")).await?;
             tokio::fs::hard_link(image.join("root.ext4"), jail.join("root.ext4")).await?;
             tokio::fs::copy(image.join("vmlinux"), jail.join("vmlinux")).await?;
             network.create(uid).await?;
             let config = json!({
                 "boot-source":{"kernel_image_path":"vmlinux","boot_args":format!("console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/sbin/leo-init ip={}::{}:255.255.255.252:leo:eth0:off",network.guest,network.gateway)},
-                "drives":[{"drive_id":"root","path_on_host":"root.ext4","is_root_device":true,"is_read_only":true},{"drive_id":"data","path_on_host":"data.ext4","is_root_device":false,"is_read_only":false}],
+                "drives":[{"drive_id":"root","path_on_host":"root.ext4","is_root_device":true,"is_read_only":true},{"drive_id":"data","path_on_host":"data.ext4","is_root_device":false,"is_read_only":false},{"drive_id":"era","path_on_host":"era.meta","is_root_device":false,"is_read_only":false}],
                 "machine-config":{"vcpu_count":resources.cpu,"mem_size_mib":resources.memory_mi_b,"smt":false},
                 "network-interfaces":[{"iface_id":"net","host_dev_name":network.tap,"guest_mac":network.mac}],
                 "vsock":{"guest_cid":slot+3,"uds_path":"v.sock"}
@@ -690,6 +696,7 @@ impl Vm {
             if status["version"] != 1 {
                 return Err(Error::new(503, "Unsupported guest protocol."));
             }
+            crate::nodes::tracking::booted(disk_dir, status["writeTracking"] == true).await?;
 
             Ok(())
         };
@@ -781,11 +788,16 @@ impl Vm {
             let _ = self.vm_state("Resumed").await;
             self.paused = false;
         }
-        let _ = tokio::time::timeout(
-            Duration::from_secs(2),
+        // Freezing and sealing the last era can flush a lot of dirty data first.
+        if let Ok(Ok(reply)) = tokio::time::timeout(
+            Duration::from_secs(10),
             guest_request(&self.socket, &json!({"op":"shutdown"})),
         )
-        .await;
+        .await
+            && let Some(era) = reply["sealed"].as_u64()
+        {
+            let _ = crate::nodes::tracking::seal(&self.disk_dir, era).await;
+        }
         if let Some(mut child) = self.child.take()
             && tokio::time::timeout(Duration::from_secs(8), child.wait())
                 .await

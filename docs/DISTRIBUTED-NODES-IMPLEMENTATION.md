@@ -87,9 +87,11 @@ not a throughput or recovery-lag guarantee for a full workstation. Local indexin
 skips holes with `SEEK_DATA` but still reads every allocated block; only changed
 nonzero blocks cross the network. Continuous and end-of-turn recovery points are
 taken only for conversations on remote nodes: the master runner fails together
-with the master, so its conversations are captured when they move. Tracking the
-written blocks themselves is explored in
-[INCREMENTAL-VM-BACKUP-WRITE-TRACKING.md](INCREMENTAL-VM-BACKUP-WRITE-TRACKING.md).
+with the master, so its conversations are captured when they move. The guest's
+dm-era target records written 4 MiB blocks, so captures that continue from the last
+published point copy only those blocks; any doubt falls back to a full copy (see
+[ADR 0005](adr/0005-guest-dm-era-write-tracking.md) and
+[INCREMENTAL-VM-BACKUP-WRITE-TRACKING.md](INCREMENTAL-VM-BACKUP-WRITE-TRACKING.md)).
 
 The VM fixture used published image layers with verified digests and this
 branch's guest binary. It was not a production deployment or two physical hosts.

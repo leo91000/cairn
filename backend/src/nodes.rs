@@ -12,6 +12,7 @@ pub mod placement;
 pub mod relay;
 pub mod restore;
 pub mod snapshots;
+pub mod tracking;
 pub mod transport;
 pub mod workspace;
 use crate::{

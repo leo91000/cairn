@@ -424,10 +424,7 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
         if request.method() != "GET" {
             return Err(Error::new(405, "Method not allowed."));
         }
-        let manifest: Value =
-            serde_json::from_slice(&tokio::fs::read(directory.join("manifest.json")).await?)?;
-        let bytes =
-            crate::nodes::snapshots::block(&directory.join("disk"), &manifest, hash).await?;
+        let bytes = crate::nodes::snapshots::served(&directory, hash).await?;
         return Ok(([("content-length", bytes.len().to_string())], bytes).into_response());
     }
     if let ["disks", run, "snapshot"] = segments.as_slice() {
@@ -435,6 +432,8 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
         if request.method() != "POST" {
             return Err(Error::new(405, "Method not allowed."));
         }
+        let run = (*run).to_owned();
+        let baseline = snapshot_baseline(request).await?;
         if broker
             .active
             .lock()
@@ -448,7 +447,6 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
             ));
         }
         let state = broker.state.clone();
-        let run = (*run).to_owned();
         let stop = broker.stop.child_token();
         let task = tokio::spawn(async move {
             crate::nodes::checkpoint::capture(
@@ -458,6 +456,7 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
                 Arc::new(Mutex::new(())),
                 stop,
                 &run,
+                baseline.as_deref(),
             )
             .await
         });
@@ -599,6 +598,8 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
                 return Err(Error::bad("Invalid restored workspace."));
             }
             std::fs::File::open(&restored)?.sync_all()?;
+            // The imported disk replaces everything the guest's write tracking described.
+            crate::nodes::tracking::invalidate(&directory).await?;
             tokio::fs::rename(restored, &disk).await?;
             std::fs::File::open(&directory)?.sync_all()?;
             tokio::fs::remove_dir_all(target).await?;
@@ -616,6 +617,7 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
         match (request.method().as_str(), segments.as_slice()) {
             ("POST", ["runs", id, "snapshot"]) => {
                 let id = (*id).to_owned();
+                let baseline = snapshot_baseline(request).await?;
                 let (run, socket, control, stop) = {
                     let active = broker.active.lock().await;
                     if let Some(attempt) = active.get(&id) {
@@ -637,8 +639,16 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
                 };
                 let state = broker.state.clone();
                 let task = tokio::spawn(async move {
-                    crate::nodes::checkpoint::capture(&state, &run, socket, control, stop, &id)
-                        .await
+                    crate::nodes::checkpoint::capture(
+                        &state,
+                        &run,
+                        socket,
+                        control,
+                        stop,
+                        &id,
+                        baseline.as_deref(),
+                    )
+                    .await
                 });
                 Ok(Json(task.await.map_err(Error::internal)??).into_response())
             }
@@ -956,6 +966,16 @@ pub async fn client(id: &str, stop: CancellationToken) -> Result<i32> {
         Ok(143) if !stop.is_cancelled() => Ok(CONTROLLER_INTERRUPTED),
         result => result,
     }
+}
+
+/// The latest recovery point the master published, which a capture may continue from.
+async fn snapshot_baseline(request: axum::extract::Request) -> Result<Option<String>> {
+    let bytes = axum::body::to_bytes(request.into_body(), 1024)
+        .await
+        .map_err(|_| Error::bad("Invalid snapshot request."))?;
+    Ok(serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|body| body["baseline"].as_str().map(str::to_owned)))
 }
 
 #[cfg(test)]
