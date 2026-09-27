@@ -50,13 +50,14 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Automatique").performClick()
             compose.onNodeWithText("Préférer une node").performClick()
             compose.onNodeWithText("Enregistrer la préférence").performScrollTo().performClick()
-            compose.waitUntil(10000) {saved.size==1}
+            // Receipt by the server precedes the response and its UI confirmation.
+            compose.waitUntil(10000) {saved.size==1 && compose.onAllNodesWithText("Préférence enregistrée",substring=true).fetchSemanticsNodes().isNotEmpty()}
             assertEquals("node",saved[0]["preferredNodeId"]?.jsonPrimitive?.content)
             assertEquals(JsonNull,saved[0]["pinnedNodeId"])
             compose.onNodeWithText("Préférer une node").performScrollTo().performClick()
             compose.onNodeWithText("Fixer à une node").performClick()
             compose.onNodeWithText("Enregistrer la préférence").performScrollTo().performClick()
-            compose.waitUntil(10000) {saved.size==2}
+            compose.waitUntil(10000) {saved.size==2 && compose.onAllNodesWithText("Préférence enregistrée",substring=true).fetchSemanticsNodes().isNotEmpty()}
             assertEquals("node",saved[1]["pinnedNodeId"]?.jsonPrimitive?.content)
             assertEquals(JsonNull,saved[1]["preferredNodeId"])
             compose.onNodeWithText("Dernier état restaurable",substring=true).assertExists()
