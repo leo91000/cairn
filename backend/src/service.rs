@@ -37,6 +37,7 @@ pub struct Service {
     pub vault: Vault,
     pub skills: Skills,
     pub http: reqwest::Client,
+    pub hot_s3: Arc<crate::archive_storage::HotS3>,
     pub shutdown: CancellationToken,
 }
 impl Service {
@@ -79,6 +80,7 @@ impl Service {
                 .timeout(std::time::Duration::from_secs(20))
                 .build()
                 .map_err(Error::internal)?,
+            hot_s3: Arc::new(crate::archive_storage::HotS3::new()),
             config,
             store,
             vault,

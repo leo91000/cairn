@@ -150,7 +150,7 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
                 }).await.map_err(Error::internal)??;
                 if memory_only {
                     let storage=storage.as_ref().unwrap();
-                    storage.upload_bytes(&encoded,&key(run_id,hash)).await?;
+                    storage.upload_bytes(encoded,&key(run_id,hash)).await?;
                     let location=json!({"destination":"s3","bucket":storage.bucket,"endpoint":storage.endpoint});
                     let mark=receipt(&file,&location)?;
                     crate::skills::atomic_write(&mark,&serde_json::to_vec(&location)?).await?;
@@ -288,12 +288,14 @@ pub async fn read_block(s: &Service, backup: &Value, hash: &str) -> Result<Vec<u
     let (encoded, bytes) = match recovered {
         Ok(recovered) => recovered,
         Err(error) => {
-            // The remote receipt is no longer proof that this point can restore.
-            let mark = receipt(&path, backup)?;
-            if mark.exists() {
-                tokio::fs::remove_file(mark).await?;
+            // An outage says nothing about the integrity of a verified copy.
+            if error.status != 503 {
+                let mark = receipt(&path, backup)?;
+                if mark.exists() {
+                    tokio::fs::remove_file(mark).await?;
+                }
+                forget_baseline(s, run).await?;
             }
-            forget_baseline(s, run).await?;
             return Err(error);
         }
     };
@@ -640,18 +642,7 @@ async fn upload_verified(
     path: &std::path::Path,
     key: &str,
 ) -> Result<()> {
-    storage.upload(path, key).await?;
-    let verification = storage
-        .download_bytes(key, tokio::fs::metadata(path).await?.len())
-        .await?;
-    if crate::archive_storage::hash(path.to_owned()).await?
-        != hex::encode(Sha256::digest(&verification))
-    {
-        return Err(Error::bad(
-            "Remote backup checksum mismatch; the previous point remains available.",
-        ));
-    }
-    Ok(())
+    storage.upload_file_verified(path, key).await
 }
 
 /// Explicit conversation purge removes every recovery dependency, including orphan uploads.

@@ -25,6 +25,13 @@ def main():
         env = {key: value for key, value in os.environ.items()
                if not key.startswith(('AWS_', 'ARCHIVE_S3_'))}
         env['LEO_NODE_TEST_S3_ENDPOINT'] = endpoint
+        env['AWS_ENDPOINT_URL_S3'] = endpoint
+        env['AWS_ACCESS_KEY_ID'] = 'node-fixture'
+        env['AWS_SECRET_ACCESS_KEY'] = 'node-fixture-secret'
+        env['AWS_REGION'] = 'us-east-1'
+        env['AWS_EC2_METADATA_DISABLED'] = 'true'
+        env['AWS_CONFIG_FILE'] = '/dev/null'
+        env['AWS_SHARED_CREDENTIALS_FILE'] = '/dev/null'
         subprocess.run(['pnpm', 'test:backend', '--test', 'nodes', 'encrypted_recovery_points'],
                        cwd=Path(__file__).resolve().parents[1], env=env, check=True)
         remaining = client.list_objects_v2(Bucket='leo-node-test')

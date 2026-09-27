@@ -1,15 +1,99 @@
-//! S3 operations stay server-side. The AWS CLI supplies signing and multipart transfer.
+//! S3 operations stay server-side. Recovery blocks use a shared SDK client;
+//! infrequent cold archive operations still use the AWS CLI.
 use crate::{
     error::{Error, Result},
     service::Service,
 };
 use serde_json::{Value, json};
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::{Arc, Weak},
     time::Duration,
 };
 use tokio::process::Command;
+use tokio::sync::{Mutex, OnceCell, Semaphore};
+
+type PendingRead = OnceCell<Result<bytes::Bytes>>;
+type ReadKey = (String, String, u64, Option<String>, String);
+
+#[derive(PartialEq, Eq)]
+struct ClientKey {
+    endpoint: Option<String>,
+    region: String,
+    environment_endpoint: Option<String>,
+    profile: Option<String>,
+}
+
+/// One connection and identity cache per server configuration, shared by all
+/// recovery operations. A changed endpoint or region replaces the cached client.
+pub struct HotS3 {
+    client: Mutex<Option<(ClientKey, aws_sdk_s3::Client)>>,
+    reads: Semaphore,
+    writes: Semaphore,
+    pending: Mutex<HashMap<ReadKey, Weak<PendingRead>>>,
+}
+
+impl HotS3 {
+    pub fn new() -> Self {
+        Self {
+            client: Mutex::new(None),
+            reads: Semaphore::new(8),
+            writes: Semaphore::new(4),
+            pending: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn client(&self, endpoint: Option<&str>, region: &str) -> aws_sdk_s3::Client {
+        let identity = ClientKey {
+            endpoint: endpoint.map(str::to_owned),
+            region: region.to_owned(),
+            environment_endpoint: std::env::var("AWS_ENDPOINT_URL_S3").ok(),
+            profile: std::env::var("AWS_PROFILE").ok(),
+        };
+        let mut cached = self.client.lock().await;
+        if let Some((key, client)) = &*cached
+            && key == &identity
+        {
+            return client.clone();
+        }
+        let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
+        if !region.is_empty() {
+            loader = loader.region(aws_config::Region::new(region.to_owned()));
+        }
+        let config = loader
+            .timeout_config(
+                aws_config::timeout::TimeoutConfig::builder()
+                    .operation_attempt_timeout(Duration::from_secs(40))
+                    .operation_timeout(Duration::from_secs(120))
+                    .build(),
+            )
+            .load()
+            .await;
+        let mut builder = aws_sdk_s3::config::Builder::from(&config);
+        // Read-back verification already checks the stored bytes. Avoid optional
+        // checksum headers that some S3-compatible providers do not implement.
+        builder = builder.request_checksum_calculation(
+            aws_sdk_s3::config::RequestChecksumCalculation::WhenRequired,
+        );
+        if let Some(endpoint) = endpoint {
+            builder = builder.endpoint_url(endpoint);
+        }
+        if endpoint.is_some() || std::env::var_os("AWS_ENDPOINT_URL_S3").is_some() {
+            builder = builder.force_path_style(true);
+        }
+        let client = aws_sdk_s3::Client::from_conf(builder.build());
+        *cached = Some((identity, client.clone()));
+        client
+    }
+}
+
+impl Default for HotS3 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[derive(Clone)]
 pub struct Storage {
@@ -17,6 +101,8 @@ pub struct Storage {
     binary: String,
     /// S3-compatible providers (OVHcloud, Scaleway…) need an explicit endpoint.
     pub(crate) endpoint: Option<String>,
+    region: String,
+    hot: Arc<HotS3>,
     /// AWS names its cold tier GLACIER; OVHcloud Cold Archive is DEEP_ARCHIVE.
     cold_class: String,
 }
@@ -67,6 +153,23 @@ impl Storage {
             bucket,
             binary: config["awsBinary"].as_str().unwrap_or("aws").into(),
             endpoint: Some(endpoint).filter(|e| !e.is_empty()),
+            region: {
+                let configured = setting(&config, "ARCHIVE_S3_REGION", "region");
+                if configured.is_empty() {
+                    std::env::var("AWS_REGION")
+                        .ok()
+                        .filter(|value| !value.is_empty())
+                        .or_else(|| {
+                            std::env::var("AWS_DEFAULT_REGION")
+                                .ok()
+                                .filter(|value| !value.is_empty())
+                        })
+                        .unwrap_or_default()
+                } else {
+                    configured
+                }
+            },
+            hot: s.hot_s3.clone(),
             cold_class: cold_class.into(),
         })
     }
@@ -249,56 +352,130 @@ impl Storage {
         .await?;
         Ok(())
     }
-    pub async fn upload_bytes(&self, bytes: &[u8], key: &str) -> Result<()> {
-        use std::{
-            io::Write,
-            os::fd::{AsRawFd, FromRawFd},
-        };
-        let descriptor =
-            unsafe { libc::memfd_create(c"leo-s3-upload".as_ptr(), libc::MFD_CLOEXEC) };
-        if descriptor < 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        let mut file = unsafe { std::fs::File::from_raw_fd(descriptor) };
-        file.write_all(bytes)?;
-        let path = std::path::PathBuf::from(format!(
-            "/proc/{}/fd/{}",
-            std::process::id(),
-            file.as_raw_fd()
-        ));
-        self.upload(&path, key).await?;
+    pub async fn upload_bytes(&self, bytes: Vec<u8>, key: &str) -> Result<()> {
+        let _permit = self.hot.writes.acquire().await.map_err(Error::internal)?;
+        let client = self
+            .hot
+            .client(self.endpoint.as_deref(), &self.region)
+            .await;
+        let bytes = bytes::Bytes::from(bytes);
+        client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .server_side_encryption(aws_sdk_s3::types::ServerSideEncryption::Aes256)
+            .body(aws_sdk_s3::primitives::ByteStream::from(bytes.clone()))
+            .send()
+            .await
+            .map_err(|_| {
+                Error::new(503, "Recovery block upload failed; local data is retained.")
+            })?;
+        self.verify_bytes(key, &bytes).await
+    }
+    async fn verify_bytes(&self, key: &str, bytes: &[u8]) -> Result<()> {
         let remote = self.download_bytes(key, bytes.len() as u64).await?;
         if remote != bytes {
             return Err(Error::bad("Remote backup checksum mismatch."));
         }
         Ok(())
     }
-    /// Bounded hot-block transfers need no temporary disk space, including during
-    /// reserve pressure. The AWS subprocess opens the parent's anonymous memory file.
+    /// Verify a cached block or manifest before publishing its recovery point.
+    pub async fn upload_file_verified(&self, path: &Path, key: &str) -> Result<()> {
+        let bytes = tokio::fs::read(path).await?;
+        self.upload_bytes(bytes, key).await
+    }
+    /// The response body is bounded even if a provider ignores Content-Length or Range.
     pub async fn download_bytes(&self, key: &str, limit: u64) -> Result<Vec<u8>> {
-        use std::os::fd::{AsRawFd, FromRawFd};
-        let descriptor = unsafe { libc::memfd_create(c"leo-s3-block".as_ptr(), libc::MFD_CLOEXEC) };
-        if descriptor < 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        let file = unsafe { std::fs::File::from_raw_fd(descriptor) };
-        let path = format!("/proc/{}/fd/{}", std::process::id(), file.as_raw_fd());
-        self.call(vec![
-            "s3api".into(),
-            "get-object".into(),
-            "--bucket".into(),
+        let request = (
             self.bucket.clone(),
-            "--key".into(),
-            key.into(),
-            "--range".into(),
-            format!("bytes=0-{limit}"),
-            path.clone(),
-        ])
-        .await?;
-        if file.metadata()?.len() > limit {
-            return Err(Error::bad("Remote block exceeds the transfer limit."));
+            key.to_owned(),
+            limit,
+            self.endpoint.clone(),
+            self.region.clone(),
+        );
+        let pending = {
+            let mut reads = self.hot.pending.lock().await;
+            if reads.len() >= 1024 {
+                reads.retain(|_, pending| pending.strong_count() > 0);
+            }
+            reads
+                .get(&request)
+                .and_then(Weak::upgrade)
+                .unwrap_or_else(|| {
+                    let pending = Arc::new(PendingRead::new());
+                    reads.insert(request.clone(), Arc::downgrade(&pending));
+                    pending
+                })
+        };
+        let result = pending
+            .get_or_init(|| async { self.fetch_bytes(key, limit).await.map(bytes::Bytes::from) })
+            .await
+            .clone();
+        let mut reads = self.hot.pending.lock().await;
+        if reads
+            .get(&request)
+            .is_some_and(|entry| entry.ptr_eq(&Arc::downgrade(&pending)))
+        {
+            reads.remove(&request);
         }
-        Ok(tokio::fs::read(path).await?)
+        result.map(|bytes| bytes.to_vec())
+    }
+
+    async fn fetch_bytes(&self, key: &str, limit: u64) -> Result<Vec<u8>> {
+        let _permit = self.hot.reads.acquire().await.map_err(Error::internal)?;
+        let client = self
+            .hot
+            .client(self.endpoint.as_deref(), &self.region)
+            .await;
+        tokio::time::timeout(Duration::from_secs(60), async {
+            let output = client
+                .get_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .send()
+                .await
+                .map_err(|error| {
+                    if error
+                        .as_service_error()
+                        .is_some_and(|error| error.is_no_such_key())
+                        || error
+                            .raw_response()
+                            .is_some_and(|response| response.status().as_u16() == 404)
+                    {
+                        Error::new(409, "Remote recovery block is missing.")
+                    } else {
+                        Error::new(503, "Recovery storage unavailable; the read will retry.")
+                    }
+                })?;
+            if output
+                .content_length()
+                .is_some_and(|length| length < 0 || length as u64 > limit)
+            {
+                return Err(Error::bad("Remote block exceeds the transfer limit."));
+            }
+            let capacity = output.content_length().unwrap_or(0).max(0) as u64;
+            let mut bytes = Vec::with_capacity(capacity.min(limit) as usize);
+            let mut body = output.body;
+            while let Some(chunk) = body.try_next().await.map_err(|_| {
+                Error::new(
+                    503,
+                    "Recovery block transfer interrupted; the read will retry.",
+                )
+            })? {
+                if chunk.len() as u64 > limit.saturating_sub(bytes.len() as u64) {
+                    return Err(Error::bad("Remote block exceeds the transfer limit."));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(bytes)
+        })
+        .await
+        .map_err(|_| {
+            Error::new(
+                503,
+                "Recovery block transfer timed out; the read will retry.",
+            )
+        })?
     }
     pub async fn cold(&self, key: &str) -> Result<()> {
         let head = self

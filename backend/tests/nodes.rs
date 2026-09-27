@@ -1351,6 +1351,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         config::{id, now},
         nodes::{backups, relay, snapshots},
     };
+    use sha2::{Digest, Sha256};
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -1500,6 +1501,48 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
                 .join("blocks"),
         )
         .unwrap();
+        let hash = first_manifest["blocks"][0]["hash"].as_str().unwrap();
+        let config_path = owner.service.config.data_dir.join("archive-s3.json");
+        let original_config = std::fs::read(&config_path).unwrap();
+        let mut disconnected_config: serde_json::Value =
+            serde_json::from_slice(&original_config).unwrap();
+        disconnected_config["endpoint"] = json!("https://127.0.0.1:1");
+        std::fs::write(&config_path, disconnected_config.to_string()).unwrap();
+        let mut disconnected_point = retained.clone();
+        disconnected_point["endpoint"] = json!("https://127.0.0.1:1");
+        let location =
+            json!({"destination":"s3","bucket":"leo-node-test","endpoint":"https://127.0.0.1:1"});
+        let receipt = owner
+            .service
+            .config
+            .data_dir
+            .join("node-backups")
+            .join(&run)
+            .join("blocks")
+            .join(format!(
+                "{hash}.s3-{}",
+                hex::encode(Sha256::digest(serde_json::to_vec(&location).unwrap()))
+            ));
+        std::fs::create_dir_all(receipt.parent().unwrap()).unwrap();
+        std::fs::write(&receipt, b"verified before outage").unwrap();
+        assert_eq!(
+            backups::read_block(&owner.service, &disconnected_point, hash)
+                .await
+                .unwrap_err()
+                .status,
+            503
+        );
+        assert!(
+            receipt.exists(),
+            "a transient outage retains the upload receipt"
+        );
+        assert_eq!(
+            owner.service.store.run(&run).await.unwrap()["backup"]["snapshotId"],
+            first["snapshotId"],
+            "a transient outage keeps the incremental baseline"
+        );
+        std::fs::remove_file(receipt).unwrap();
+        std::fs::write(&config_path, original_config).unwrap();
     }
     let restored = owner._root.path().join("restored-disk");
     snapshots::restore(&restored, &first_manifest, |hash| {
