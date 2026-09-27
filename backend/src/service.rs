@@ -12,7 +12,6 @@ use std::{path::Path, sync::Arc};
 use tokio_util::sync::CancellationToken;
 #[derive(Clone)]
 pub struct Service {
-    pub avatars: Arc<crate::agent_avatars::AgentAvatars>,
     pub node_maintenance_tasks: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
     pub node_lease_deadlines:
         Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::time::Instant>>>,
@@ -20,6 +19,7 @@ pub struct Service {
     pub node_backup_operation: Arc<tokio::sync::Mutex<()>>,
     pub node_backup_lock: Arc<tokio::sync::Mutex<()>>,
     pub node_transport: Arc<crate::nodes::transport::Transport>,
+    pub avatars: Arc<crate::agent_avatars::AgentAvatars>,
     pub artifacts: Arc<crate::artifacts::Artifacts>,
     pub worker: Arc<crate::worker::Worker>,
     pub mcps: Arc<crate::mcps::Mcps>,
@@ -51,13 +51,13 @@ impl Service {
         let store = Store::open(&config.data_dir)?;
         let vault = Vault::new(store.clone(), &config.data_dir)?;
         let service = Arc::new(Self {
-            avatars: Default::default(),
             node_maintenance_tasks: Default::default(),
             node_lease_deadlines: Default::default(),
             started: tokio::time::Instant::now(),
             node_backup_operation: Default::default(),
             node_backup_lock: Default::default(),
             node_transport: Default::default(),
+            avatars: Default::default(),
             artifacts: Default::default(),
             worker: Default::default(),
             mcps: Default::default(),

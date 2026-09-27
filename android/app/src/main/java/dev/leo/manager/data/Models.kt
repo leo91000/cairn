@@ -100,15 +100,6 @@ data class Snapshot(
 
 @Serializable
 data class Run(
-    val nodeId: String? = null,
-    val nodeState: String? = null,
-    val resources: NodeResources? = null,
-    val pinnedNodeId: String? = null,
-    val preferredNodeId: String? = null,
-    val capacityWaitUntil: Long? = null,
-    val restoredAt: Long? = null,
-    val movementError: String? = null,
-    val backup: NodeBackup? = null,
     val id: String,
     val taskId: String = "",
     val projectId: String? = null,
@@ -137,6 +128,15 @@ data class Run(
     val outcome: TaskOutcome? = null,
     val chatExecution: ChatExecution? = null,
     val error: String? = null,
+    val nodeId: String? = null,
+    val nodeState: String? = null,
+    val resources: NodeResources? = null,
+    val pinnedNodeId: String? = null,
+    val preferredNodeId: String? = null,
+    val capacityWaitUntil: Long? = null,
+    val restoredAt: Long? = null,
+    val movementError: String? = null,
+    val backup: NodeBackup? = null,
 ) {
     val active
         get() = status == "running" || status == "queued"

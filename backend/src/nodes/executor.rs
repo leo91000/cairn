@@ -99,7 +99,7 @@ impl Executor {
             .lock()
             .await
             .insert(attempt.into(), stop.clone());
-        let provider = if plan["chat"]["claudeManagedAuth"] == true {
+        let provider = if plan["chat"]["provider"] == "claude" {
             ".claude"
         } else {
             ".codex"
@@ -113,7 +113,6 @@ impl Executor {
             token.into(),
             attempt.into(),
             stop.clone(),
-            provider == ".claude",
         );
         tokio::spawn(auth);
         let (client, master, token, attempt) = (

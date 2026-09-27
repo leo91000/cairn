@@ -136,13 +136,13 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
             )))
         }
         "auth" => {
-            let provider = if plan["chat"]["claudeManagedAuth"] == true {
+            let provider = if plan["chat"]["provider"] == "claude" {
                 ".claude"
             } else {
                 ".codex"
             };
             let socket = root.join("home").join(provider).join("leo-auth.sock");
-            let value = relay_auth(&socket, &input.body, provider == ".claude").await?;
+            let value = relay_auth(&socket, &input.body).await?;
             Ok(Json(value).into_response())
         }
         "result" => {
@@ -156,15 +156,13 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
         _ => Err(Error::new(404, "Unknown workspace operation.")),
     }
 }
-async fn relay_auth(path: &Path, value: &Value, unsolicited: bool) -> Result<Value> {
+async fn relay_auth(path: &Path, value: &Value) -> Result<Value> {
     if serde_json::to_vec(value)?.len() > 32768 {
         return Err(Error::bad("Invalid authentication request."));
     }
     tokio::time::timeout(Duration::from_secs(45), async {
         let mut stream = BufReader::new(tokio::net::UnixStream::connect(path).await?);
-        if !unsolicited {
-            crate::microvm::wire::write(stream.get_mut(), value).await?;
-        }
+        crate::microvm::wire::write(stream.get_mut(), value).await?;
         crate::microvm::wire::read(&mut stream)
             .await?
             .ok_or_else(|| Error::new(503, "Authentication unavailable."))
@@ -233,7 +231,6 @@ pub async fn auth_listener(
     token: String,
     attempt: String,
     stop: tokio_util::sync::CancellationToken,
-    unsolicited: bool,
 ) -> Result<()> {
     if path.exists() {
         tokio::fs::remove_file(&path).await?;
@@ -246,13 +243,9 @@ pub async fn auth_listener(
         let Ok((socket, _)) = accepted else { break };
         let operation = async {
             let mut stream = BufReader::new(socket);
-            let request = if unsolicited {
-                json!({})
-            } else {
-                crate::microvm::wire::read(&mut stream)
-                    .await?
-                    .ok_or_else(|| Error::bad("Empty authentication request."))?
-            };
+            let request = crate::microvm::wire::read(&mut stream)
+                .await?
+                .ok_or_else(|| Error::bad("Empty authentication request."))?;
             let value: Value = fetch(&client, &master, &token, &attempt, "auth", &request)
                 .await?
                 .json()

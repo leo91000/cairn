@@ -72,6 +72,7 @@ async fn handle(
         .await?
         .ok_or_else(|| Error::bad("Missing guest request."))?;
     match text(&request, "op") {
+
         "freeze"|"thaw"=> {
             let _guard=FILESYSTEM_CONTROL.lock().await;
             let freeze=request["op"]=="freeze";

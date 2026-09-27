@@ -969,6 +969,7 @@ impl Vm {
                                 .await?;
                             std::os::unix::fs::chown(output, Some(1000), Some(1000))?;
                         }
+
                         return Ok(code as i32);
                     }
                     _ => return Err(Error::bad("Unknown guest event.")),
