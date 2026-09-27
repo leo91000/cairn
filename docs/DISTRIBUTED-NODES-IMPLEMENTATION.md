@@ -40,15 +40,19 @@ has not been merged, deployed or released.
   Incremental publication reuses immutable blocks authenticated by retained
   manifests without rereading their payload. New blocks and unpublished cache
   entries are verified before publication; restoration always verifies again.
-  The maintenance loop audits retained points, including idle conversations,
-  once due after 24 hours (hourly retry on error). Local ciphertext and each S3
-  destination are checked independently, with a 120-second remote download limit
-  per block. A failed remote check clears only its upload receipt and preserves
-  healthy cached bytes. Bad local ciphertext is removed. The node baseline is
-  invalidated; the next capture repairs dependencies it needs, while damage to
-  historical-only blocks remains detectable until repaired or expired by retention.
-  Full audits still read all retained unique blocks (and download S3 copies).
-  The existing global operation lock still serializes publication, audits and restoration.
+  There is no scheduled full-content audit. If restoration discovers damaged
+  cached ciphertext, it removes that block. If no valid copy can be read, it
+  invalidates the incremental baseline so the next full capture can repair
+  current blocks.
+  An unavailable or corrupt S3 copy also loses its upload receipt. Damage can
+  remain undetected until a restore needs the block. The existing global
+  operation lock still serializes publication, restoration, moves and purge
+  across conversations.
+  The node's separate dm-era tracking expires a baseline after 24 hours, forcing
+  a full disk copy and index. Copying can keep the VM paused when the filesystem
+  cannot reflink. Stored ciphertext uses two base64 layers (about 1.78× the raw
+  size for distinct nonzero data); S3 keeps a second copy and verifies each new
+  upload by downloading it once. These costs remain after removing the audit.
 - Bulk snapshot/archive responses use a negotiated continuous binary HTTP upload,
   with eight buffered 64 KiB frames, cancellation and explicit completion. Old
   nodes/masters continue using acknowledged JSON frames. Control and log messages
@@ -73,11 +77,11 @@ The repeatable checks live beside the implementation:
   controller directories, moves it back without a destination execution history,
   and checks both failed transfer and cancellation during capture.
   An inotify regression verifies that unchanged publication does not read cached
-  blocks. Corruption is detected by restoration and periodic auditing. Transport
-  tests cover ownership, truncation with/without a length, bounded backpressure,
+  blocks. Restoration detects corruption and prepares the next capture to repair
+  it. Transport tests cover ownership, truncation with/without a length, bounded backpressure,
   consumer cancellation and legacy JSON responses.
 - `backend/tests/node_performance.rs`: opt-in benchmarks for initial, unchanged
-  and 4 MiB delta publication; separate periodic audit; real outbound relay with
+  and 4 MiB delta publication; real outbound relay with
   0/50 ms injected request latency. Build with `CARGO_PROFILE_RELEASE_LTO=false
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo test --locked --release --test
   node_performance --no-run`, then run the emitted executable alone with

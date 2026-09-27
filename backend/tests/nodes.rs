@@ -1515,27 +1515,46 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             .join("node-backups")
             .join(&run)
             .join("blocks");
+        let point = owner
+            .service
+            .store
+            .get("node-backups", third["id"].as_str().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
         let cached = std::fs::read(directory.join(block)).unwrap();
         storage
             .purge(&format!("node-backups/{run}/blocks/{block}"))
             .await
             .unwrap();
-        let audit_key = format!("node-backup-audit:{run}");
-        owner
-            .service
-            .store
-            .set(&audit_key, json!({"checkedAt":0}), None)
-            .await
-            .unwrap();
-        backups::audit_due(&owner.service).await.unwrap();
-        assert!(
-            owner.service.store.kv(&audit_key).await.unwrap().unwrap()["error"].is_string(),
-            "A healthy local cache must not hide a missing S3 object"
-        );
         assert_eq!(
-            std::fs::read(directory.join(block)).unwrap(),
-            cached,
-            "Remote failure must preserve the healthy local copy"
+            backups::read_block(&owner.service, &point, block)
+                .await
+                .unwrap(),
+            &original[..4 * 1024 * 1024],
+            "A healthy local cache still serves restores when S3 disappears"
+        );
+        assert_eq!(std::fs::read(directory.join(block)).unwrap(), cached);
+        std::fs::remove_file(directory.join(block)).unwrap();
+        assert!(
+            backups::read_block(&owner.service, &point, block)
+                .await
+                .is_err()
+        );
+        assert!(
+            owner.service.store.run(&run).await.unwrap()["backup"]["snapshotId"].is_null(),
+            "A failed restore must request a full next capture"
+        );
+        let mut entries = std::fs::read_dir(&directory).unwrap();
+        assert!(
+            !entries.any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("{block}.s3-"))
+            }),
+            "A missing remote copy must lose its upload receipt"
         );
         fallback = third.clone();
         third = backups::capture(
@@ -1544,20 +1563,32 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         )
         .await
         .unwrap();
-        assert_eq!(
-            third["uploadedBytes"], 0,
-            "Repair S3 from the verified local cache"
-        );
-        owner
+        assert_eq!(third["uploadedBytes"], 4 * 1024 * 1024);
+        let repaired = owner
             .service
             .store
-            .set(&audit_key, json!({"checkedAt":0}), None)
+            .get("node-backups", third["id"].as_str().unwrap())
             .await
+            .unwrap()
             .unwrap();
-        backups::audit_due(&owner.service).await.unwrap();
-        assert!(
-            owner.service.store.kv(&audit_key).await.unwrap().unwrap()["error"].is_null(),
-            "The next publication must repair the missing S3 object"
+        assert_eq!(
+            backups::read_block(&owner.service, &repaired, block)
+                .await
+                .unwrap(),
+            &original[..4 * 1024 * 1024]
+        );
+        std::fs::write(directory.join(block), b"damaged ciphertext").unwrap();
+        assert_eq!(
+            backups::read_block(&owner.service, &repaired, block)
+                .await
+                .unwrap(),
+            &original[..4 * 1024 * 1024],
+            "A valid S3 copy repairs damaged local ciphertext on restore"
+        );
+        assert_eq!(
+            owner.service.store.run(&run).await.unwrap()["backup"]["snapshotId"],
+            third["snapshotId"],
+            "A successful remote recovery keeps the incremental baseline"
         );
     }
     let mut damaged = owner
@@ -2549,14 +2580,17 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
         bodies.lock().unwrap()
     );
 
-    // A latent disk corruption is caught on restore regardless of audit age.
+    // A failed restore evicts bad ciphertext and forces the next capture to
+    // repopulate it, without scanning every retained block in the background.
     let backup = owner
         .service
+        .store
         .get(
             "node-backups",
             current().await["backup"]["id"].as_str().unwrap(),
         )
         .await
+        .unwrap()
         .unwrap();
     std::fs::write(&block, b"damaged ciphertext").unwrap();
     assert!(
@@ -2564,27 +2598,12 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
             .await
             .is_err()
     );
-    // An idle conversation is audited too, without waiting for another capture.
-    owner
-        .service
-        .store
-        .patch_run(&run, json!({"status":"succeeded"}))
-        .await
-        .unwrap();
-    let key = format!("node-backup-audit:{run}");
-    owner
-        .service
-        .store
-        .set(&key, json!({"checkedAt":0}), None)
-        .await
-        .unwrap();
-    backups::audit_due(&owner.service).await.unwrap();
-    assert!(owner.service.store.kv(&key).await.unwrap().unwrap()["error"].is_string());
     assert!(current().await["backup"]["snapshotId"].is_null());
     assert!(!block.exists(), "Known bad ciphertext must not be reused");
     backups::capture(&owner.service, &current().await)
         .await
         .unwrap();
+    assert!(bodies.lock().unwrap()[4]["baseline"].is_null());
     let backup = owner
         .service
         .get(
@@ -2599,12 +2618,4 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
             .unwrap(),
         b"workspace blocks"
     );
-    owner
-        .service
-        .store
-        .set(&key, json!({"checkedAt":0}), None)
-        .await
-        .unwrap();
-    backups::audit_due(&owner.service).await.unwrap();
-    assert!(owner.service.store.kv(&key).await.unwrap().unwrap()["error"].is_null());
 }
