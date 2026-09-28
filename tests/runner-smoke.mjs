@@ -227,6 +227,9 @@ console.log('probe.done');
                 // New writes enter the next journal generation; the sealed one stays readable.
                 await writeFile(path.join(source, 'chat-input/messages.json'), '[{"text":"capture-update"}]')
                 await until(() => docker('exec', name, 'cat', `/runner-state/${id}.log`).split('\n').filter(Boolean).some(line => Buffer.from(JSON.parse(line).data || '', 'base64').toString().includes('probe.updated')))
+                const original = Buffer.from(await (await api(`/snapshots/${point.id}/${block.hash}`)).arrayBuffer())
+                assert.deepEqual(original, bytes, 'The sealed capture stays immutable while the guest writes')
+                // Starting the next capture retires the previous capture handle.
                 const nextStarted = Date.now()
                 const next = await (await api(`/runs/${id}/snapshot`, 'POST')).json()
                 const nextCaptureMs = Date.now() - nextStarted
@@ -237,11 +240,8 @@ console.log('probe.done');
                 assert.ok(changed, 'The next generation includes guest writes')
                 const written = Buffer.from(await (await api(`/snapshots/${next.id}/${changed.hash}`)).arrayBuffer())
                 assert.equal(createHash('sha256').update(written).digest('hex'), changed.hash)
-                const original = Buffer.from(await (await api(`/snapshots/${point.id}/${block.hash}`)).arrayBuffer())
-                assert.deepEqual(original, bytes, 'The earlier capture stays immutable after guest writes')
                 docker('exec', name, 'test', '!', '-e', `/runner-state/disks/${runId}/data.ext4`)
                 await api(`/snapshots/${next.id}/discard`, 'DELETE')
-                await api(`/snapshots/${point.id}/discard`, 'DELETE')
                 process.stdout.write(`${JSON.stringify({ mode: 'active-capture', firstCaptureMs, nextCaptureMs, generation: next.manifest.generation, status: 'passed' })}\n`)
                 await api(`/runs/${id}`, 'DELETE')
               }
