@@ -12,7 +12,11 @@ use std::{
     },
 };
 use tokio_util::sync::CancellationToken;
-type Registry = Mutex<HashMap<PathBuf, Weak<Volume>>>;
+enum Entry {
+    Open(Weak<Volume>),
+    Replacing,
+}
+type Registry = Mutex<HashMap<PathBuf, Entry>>;
 fn registry() -> &'static Registry {
     static REGISTRY: OnceLock<Registry> = OnceLock::new();
     REGISTRY.get_or_init(Default::default)
@@ -36,12 +40,22 @@ pub fn exists(directory: &Path) -> bool {
     directory.join("lazy/journal.sqlite").exists()
 }
 pub fn live(directory: &Path) -> Option<Arc<Volume>> {
-    registry().try_lock().ok()?.get(directory)?.upgrade()
+    let registry = registry().try_lock().ok()?;
+    match registry.get(directory)? {
+        Entry::Open(volume) => volume.upgrade(),
+        Entry::Replacing => None,
+    }
 }
 pub fn open(directory: &Path) -> Result<Arc<Volume>> {
     let mut registry = registry().lock().map_err(Error::internal)?;
-    if let Some(volume) = registry.get(directory).and_then(Weak::upgrade) {
-        return Ok(volume);
+    match registry.get(directory) {
+        Some(Entry::Open(volume)) => {
+            if let Some(volume) = volume.upgrade() {
+                return Ok(volume);
+            }
+        }
+        Some(Entry::Replacing) => return Err(Error::new(409, "Disk replacement is in progress.")),
+        None => {}
     }
     let root = directory.join("lazy");
     let context = LazyDisk::context(&root)?;
@@ -64,8 +78,39 @@ pub fn open(directory: &Path) -> Result<Arc<Volume>> {
         fault: AtomicBool::new(false),
         paused: AtomicBool::new(false),
     });
-    registry.insert(directory.to_owned(), Arc::downgrade(&volume));
+    registry.insert(directory.to_owned(), Entry::Open(Arc::downgrade(&volume)));
     Ok(volume)
+}
+
+/// The caller also holds the conversation disk lock. Existing inspections must
+/// finish before replacement; subsequent opens are rejected until the durable switch.
+pub struct Replacement {
+    directory: PathBuf,
+}
+impl Drop for Replacement {
+    fn drop(&mut self) {
+        if let Ok(mut registry) = registry().lock() {
+            registry.remove(&self.directory);
+        }
+    }
+}
+pub async fn replacement(directory: &Path) -> Result<Replacement> {
+    let directory = directory.to_owned();
+    blocking(move || {
+        let mut registry = registry().lock().map_err(Error::internal)?;
+        match registry.get(&directory) {
+            Some(Entry::Replacing) => {
+                return Err(Error::new(409, "Disk replacement is in progress."));
+            }
+            Some(Entry::Open(volume)) if volume.strong_count() > 0 => {
+                return Err(Error::new(409, "Disk is still in use; retry restoration."));
+            }
+            _ => {}
+        }
+        registry.insert(directory.clone(), Entry::Replacing);
+        Ok(Replacement { directory })
+    })
+    .await
 }
 async fn blocking<T: Send + 'static>(
     operation: impl FnOnce() -> Result<T> + Send + 'static,
@@ -83,12 +128,36 @@ pub async fn load(directory: &Path) -> Result<Arc<Volume>> {
     let directory = directory.to_owned();
     blocking(move || open(&directory)).await
 }
+/// Initialize and synchronize a journal on the same bounded pool as journal opens.
+pub(crate) async fn create(
+    directory: &Path,
+    manifest: &Value,
+    context: &Value,
+) -> Result<Arc<LazyDisk>> {
+    let (directory, manifest, context) = (directory.to_owned(), manifest.clone(), context.clone());
+    blocking(move || {
+        let source = Arc::new(RemoteSource::new(
+            &context,
+            tokio::runtime::Handle::current(),
+            CancellationToken::new(),
+        )?);
+        let disk = Arc::new(LazyDisk::create(&directory, &manifest, source)?);
+        disk.set_context(&context)?;
+        disk.sync()?;
+        Ok(disk)
+    })
+    .await
+}
 impl Volume {
     pub fn paused(&self) -> bool {
         self.paused.load(Ordering::SeqCst)
     }
     pub fn set_paused(&self, value: bool) {
         self.paused.store(value, Ordering::SeqCst);
+    }
+    pub async fn seal(self: &Arc<Self>) -> Result<i64> {
+        let disk = self.disk.clone();
+        blocking(move || Ok(disk.seal()?)).await
     }
     pub async fn inspect(self: &Arc<Self>) -> Result<Value> {
         let volume = self.clone();
@@ -243,16 +312,17 @@ pub async fn materialize(directory: &Path, stop: &CancellationToken) -> Result<(
         _ = stop.cancelled() => { return Err(Error::new(409, "Disk materialization cancelled.")); },
         result = writer => result.map_err(Error::internal)??,
     }
-    tokio::fs::rename(target, directory.join("data.ext4")).await?;
-    std::fs::File::open(directory)?.sync_all()?;
     drop(cancel_reads);
     drop(volume);
+    let _replacement = replacement(directory).await?;
+    tokio::fs::rename(target, directory.join("data.ext4")).await?;
+    tokio::fs::File::open(directory).await?.sync_all().await?;
     tokio::fs::rename(
         directory.join("lazy"),
         directory.join(format!("stale-lazy-{}", crate::config::id())),
     )
     .await?;
-    std::fs::File::open(directory)?.sync_all()?;
+    tokio::fs::File::open(directory).await?.sync_all().await?;
     Ok(())
 }
 
@@ -305,7 +375,17 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn missing_remote_block_requires_resolution_and_preserves_local_work() {
-        use axum::{Router, http::StatusCode, routing::get};
+        permanent_remote_failure_preserves_local_work(axum::http::StatusCode::CONFLICT).await;
+    }
+
+    #[tokio::test]
+    async fn refused_remote_read_requires_resolution_and_preserves_local_work() {
+        permanent_remote_failure_preserves_local_work(axum::http::StatusCode::FAILED_DEPENDENCY)
+            .await;
+    }
+
+    async fn permanent_remote_failure_preserves_local_work(status: axum::http::StatusCode) {
+        use axum::{Router, routing::get};
         use std::{sync::atomic::AtomicUsize, time::Duration};
         let requests = Arc::new(AtomicUsize::new(0));
         let count = requests.clone();
@@ -313,7 +393,7 @@ mod tests {
             "/internal/node-restore/{hash}",
             get(move || {
                 count.fetch_add(1, Ordering::SeqCst);
-                async { StatusCode::CONFLICT }
+                async move { status }
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -372,6 +452,33 @@ mod tests {
         reopened.read_at(0, &mut saved).unwrap();
         assert_eq!(&saved, b"unsaved work");
         serving.abort();
+    }
+
+    #[tokio::test]
+    async fn replacement_excludes_openers_and_releases_the_disk_after_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("disks/conversation");
+        let manifest = json!({"version":1,"size":4096,"blockSize":4194304,
+            "blocks":[{"offset":0,"size":4096,"hash":null}]});
+        let context = json!({"master":"http://127.0.0.1:1/","grant":"fixture",
+            "policy":Policy::default()});
+        drop(
+            create(&directory.join("lazy"), &manifest, &context)
+                .await
+                .unwrap(),
+        );
+        let volume = load(&directory).await.unwrap();
+        assert_eq!(replacement(&directory).await.err().unwrap().status, 409);
+        drop(volume);
+        let guard = replacement(&directory).await.unwrap();
+        assert_eq!(load(&directory).await.err().unwrap().status, 409);
+        assert_eq!(replacement(&directory).await.err().unwrap().status, 409);
+        // Returning an error during restoration drops the same guard.
+        drop(guard);
+        let reopened = load(&directory).await.unwrap();
+        let mut bytes = [1; 3];
+        reopened.read_at(0, &mut bytes).unwrap();
+        assert_eq!(bytes, [0; 3]);
     }
 
     #[tokio::test]

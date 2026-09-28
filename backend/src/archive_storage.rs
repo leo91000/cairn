@@ -436,6 +436,9 @@ impl Storage {
                 .send()
                 .await
                 .map_err(|error| {
+                    use aws_sdk_s3::error::ProvideErrorMetadata;
+                    let status = error.raw_response().map(|response| response.status().as_u16());
+                    let code = error.as_service_error().and_then(|error| error.code());
                     if error
                         .as_service_error()
                         .is_some_and(|error| error.is_no_such_key())
@@ -444,6 +447,10 @@ impl Storage {
                             .is_some_and(|response| response.status().as_u16() == 404)
                     {
                         Error::new(409, "Remote recovery block is missing.")
+                    } else if status.is_some_and(|status| (400..500).contains(&status) && !matches!(status, 408 | 429))
+                        && !matches!(code, Some("RequestTimeout" | "RequestTimeoutException" | "SlowDown" | "Throttling"))
+                    {
+                        Error::new(424, "Recovery storage rejected the read; check its access and configuration.")
                     } else {
                         Error::new(503, "Recovery storage unavailable; the read will retry.")
                     }
@@ -741,4 +748,69 @@ pub async fn tar(args: Vec<String>) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn recovery_reads_distinguish_permanent_refusals_from_temporary_outages() {
+        use aws_sdk_s3::config::{Credentials, Region, retry::RetryConfig};
+        use axum::{Router, http::StatusCode, routing::get};
+        for (status, code, expected) in [
+            (403, "AccessDenied", 424),
+            (400, "InvalidObjectState", 424),
+            (400, "RequestTimeout", 503),
+            (404, "NoSuchKey", 409),
+            (429, "SlowDown", 503),
+            (503, "SlowDown", 503),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let app = Router::new().fallback(get(move || async move {
+                (
+                    StatusCode::from_u16(status).unwrap(),
+                    [("content-type", "application/xml")],
+                    format!("<Error><Code>{code}</Code><Message>fixture</Message></Error>"),
+                )
+            }));
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let sdk = aws_sdk_s3::Client::from_conf(
+                aws_sdk_s3::config::Builder::new()
+                    .behavior_version_latest()
+                    .region(Region::new("us-east-1"))
+                    .credentials_provider(Credentials::new(
+                        "fixture", "fixture", None, None, "fixture",
+                    ))
+                    .endpoint_url(&endpoint)
+                    .force_path_style(true)
+                    .retry_config(RetryConfig::standard().with_max_attempts(1))
+                    .build(),
+            );
+            let hot = Arc::new(HotS3::new());
+            *hot.client.lock().await = Some((
+                ClientKey {
+                    endpoint: Some(endpoint.clone()),
+                    region: "us-east-1".into(),
+                    environment_endpoint: std::env::var("AWS_ENDPOINT_URL_S3").ok(),
+                    profile: std::env::var("AWS_PROFILE").ok(),
+                },
+                sdk,
+            ));
+            let storage = Storage {
+                bucket: "fixture".into(),
+                binary: "unused".into(),
+                endpoint: Some(endpoint),
+                region: "us-east-1".into(),
+                hot,
+                cold_class: "GLACIER".into(),
+            };
+            let error = storage.download_bytes("block", 4096).await.unwrap_err();
+            server.abort();
+            assert_eq!(
+                error.status, expected,
+                "unexpected classification for {code}"
+            );
+        }
+    }
 }

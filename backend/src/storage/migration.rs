@@ -9,7 +9,6 @@ pub async fn install(
     value: Value,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<Value> {
-    use super::{Disk, LazyDisk, remote::RemoteSource};
     use serde_json::json;
     let _lock = crate::file_lock::exclusive(&directory.join("lock"), "VM disk is active.")?;
     let marker = directory.join("migration.json");
@@ -18,7 +17,7 @@ pub async fn install(
         let volume = super::runtime::load(directory).await?;
         if marker.exists() && directory.join("data.ext4").exists() {
             tokio::fs::remove_file(directory.join("data.ext4")).await?;
-            std::fs::File::open(directory)?.sync_all()?;
+            tokio::fs::File::open(directory).await?.sync_all().await?;
         }
         let mut status = volume.inspect().await?;
         status["ready"] = true.into();
@@ -39,30 +38,22 @@ pub async fn install(
         ));
     }
     let context = json!({"master":value["master"],"grant":value["grant"],"policy":value["policy"]});
-    let source = std::sync::Arc::new(RemoteSource::new(
-        &context,
-        tokio::runtime::Handle::current(),
-        tokio_util::sync::CancellationToken::new(),
-    )?);
     let staging = tempfile::Builder::new()
         .prefix("migration-")
         .tempdir_in(directory)?;
     let pending = staging.path().to_owned();
-    let disk = LazyDisk::create(&pending, manifest, source)?;
-    disk.set_context(&context)?;
-    disk.sync()?;
-    drop(disk);
+    drop(super::runtime::create(&pending, manifest, &context).await?);
     crate::skills::atomic_write(
         &marker,
         &serde_json::to_vec(&json!({"backupId":value["backupId"]}))?,
     )
     .await?;
     tokio::fs::rename(&pending, directory.join("lazy")).await?;
-    std::fs::File::open(directory)?.sync_all()?;
+    tokio::fs::File::open(directory).await?.sync_all().await?;
     // Only this verified original is reclaimed. Unknown stale copies are preserved.
     tokio::fs::remove_file(&original).await?;
     crate::nodes::tracking::invalidate(directory).await?;
-    std::fs::File::open(directory)?.sync_all()?;
+    tokio::fs::File::open(directory).await?.sync_all().await?;
     let volume = super::runtime::load(directory).await?;
     let mut status = volume.inspect().await?;
     status["ready"] = true.into();

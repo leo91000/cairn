@@ -150,18 +150,7 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
                     Ok(encoded)
                 }).await.map_err(Error::internal)??;
                 if memory_only {
-                    let storage=storage.as_ref().unwrap().clone();
-                    let location=json!({"destination":"s3","bucket":storage.bucket,"endpoint":storage.endpoint});
-                    let mark=receipt(&file,&location)?;
-                    let receipt_bytes=serde_json::to_vec(&location)?;
-                    let remote_key=key(run_id,hash);
-                    uploads.spawn(async move {
-                        storage.upload_bytes(encoded,&remote_key).await?;
-                        crate::skills::atomic_write(&mark,&receipt_bytes).await
-                    });
-                    if uploads.len() >= crate::archive_storage::HOT_WRITE_CONCURRENCY {
-                        uploads.join_next().await.unwrap().map_err(Error::internal)??;
-                    }
+                    enqueue_verified_block(&mut uploads, storage.as_ref().unwrap(), &file, key(run_id,hash), encoded).await?;
                     uploaded+=length;
                     continue;
                 }
@@ -186,16 +175,7 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
                     // Verify before copying an existing block to a new destination.
                     let encoded=tokio::fs::read(&file).await?;
                     if !verified {decode_block(s,run_id,hash,encoded.clone()).await?;}
-                    let receipt_bytes=serde_json::to_vec(&location)?;
-                    let remote_key=key(run_id,hash);
-                    let storage=storage.clone();
-                    uploads.spawn(async move {
-                        storage.upload_bytes(encoded,&remote_key).await?;
-                        crate::skills::atomic_write(&mark,&receipt_bytes).await
-                    });
-                    if uploads.len() >= crate::archive_storage::HOT_WRITE_CONCURRENCY {
-                        uploads.join_next().await.unwrap().map_err(Error::internal)??;
-                    }
+                    enqueue_verified_block(&mut uploads, storage, &file, key(run_id,hash), encoded).await?;
                 }
 
             }
@@ -234,6 +214,32 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
         .send()
         .await;
     result
+}
+
+/// Every upload path publishes its receipt only after remote read-back verification.
+async fn enqueue_verified_block(
+    uploads: &mut tokio::task::JoinSet<Result<()>>,
+    storage: &crate::archive_storage::Storage,
+    file: &std::path::Path,
+    key: String,
+    encoded: Vec<u8>,
+) -> Result<()> {
+    let location = json!({"destination":"s3","bucket":storage.bucket,"endpoint":storage.endpoint});
+    let mark = receipt(file, &location)?;
+    let receipt_bytes = serde_json::to_vec(&location)?;
+    let storage = storage.clone();
+    uploads.spawn(async move {
+        storage.upload_bytes(encoded, &key).await?;
+        crate::skills::atomic_write(&mark, &receipt_bytes).await
+    });
+    if uploads.len() >= crate::archive_storage::HOT_WRITE_CONCURRENCY {
+        uploads
+            .join_next()
+            .await
+            .unwrap()
+            .map_err(Error::internal)??;
+    }
+    Ok(())
 }
 
 /// A retained, authenticated manifest proves these immutable blocks were validated
@@ -309,8 +315,8 @@ pub async fn read_block(s: &Service, backup: &Value, hash: &str) -> Result<Vec<u
     let (encoded, bytes) = match recovered {
         Ok(recovered) => recovered,
         Err(error) => {
-            // An outage says nothing about the integrity of a verified copy.
-            if error.status != 503 {
+            // An outage or access refusal says nothing about the integrity of a verified copy.
+            if matches!(error.status, 400 | 409) {
                 let mark = receipt(&path, backup)?;
                 if mark.exists() {
                     tokio::fs::remove_file(mark).await?;
@@ -362,6 +368,9 @@ async fn decode_block(s: &Service, run: &str, hash: &str, encoded: Vec<u8>) -> R
     })
     .await
     .map_err(Error::internal)?
+    // Decoding has no network or filesystem effects. Invalid envelopes,
+    // authentication failures and digest mismatches all require repair.
+    .map_err(|_| Error::new(409, "Recovery block integrity check failed."))
 }
 
 async fn local_demand(s: &Service) -> Result<bool> {

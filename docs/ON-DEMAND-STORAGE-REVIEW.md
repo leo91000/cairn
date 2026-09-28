@@ -64,3 +64,48 @@ La revue ne remplace pas les tests et mesures consignés dans le document de val
   Mutualiser les suppressions masquerait ces règles ; extraire la seule
   arithmétique créerait une interface presque aussi complexe que son calcul.
   Ces différences sont maintenant explicites près des deux implémentations.
+
+## Revue indépendante via Leo Agent Manager — 28 septembre 2026
+
+Révisions examinées : nodes `43b9140`, stockage `ab6cf20`, base `c1e402f`.
+Le run indépendant `f4908bd7-bd5a-4db7-af0d-562346390f4c` a reproduit quatre
+défauts de fonctionnement. Les conclusions antérieures ci-dessus portaient sur
+leurs périmètres respectifs ; cette revue étend les scénarios de concurrence
+et d'erreurs couverts.
+
+### Standards
+
+- **STD-01** : les synchronisations durables du disque historique utilisent
+  maintenant les E/S Tokio. La création et le scellement du journal SQLite
+  passent par le pool bloquant borné des journaux. Les barrières de durabilité
+  et leur ordre sont conservés lors de la restauration, migration, préparation
+  et matérialisation.
+- **STD-02**, observation de maintenabilité : les publications avec ou sans
+  cache local partagent désormais l'envoi, la vérification distante, le reçu
+  et la limite de concurrence. Les conditions d'admission restent distinctes.
+
+### Spec
+
+- **SPEC-A1** : le remplacement prend une réservation dans le même registre
+  que les ouvertures. Il refuse avant toute mutation si un volume est encore
+  détenu, et refuse les nouvelles ouvertures pendant la bascule. Une inspection
+  ne peut donc plus faire réutiliser l'ancien journal après restauration.
+- **SPEC-R1** : une réponse de pause perdue laisse l'état CPU indéterminé.
+  Une capture normale reprend et dégèle la VM ; une capture d'urgence ou une
+  reprise impossible annule l'exécution afin de la faire arrêter.
+- **SPEC-R2** : une enveloppe chiffrée invalide, une authentification échouée
+  ou un digest incorrect renvoient 409, invalidant la base de sauvegarde et
+  déclenchant une attente de résolution explicite sur la node.
+- **SPEC-R3** : les refus S3 permanents (accès/configuration) renvoient 424,
+  sans invalider une copie dont l'intégrité n'est pas mise en cause. Les erreurs
+  temporaires, notamment timeout et throttling, restent réessayables. La node
+  conserve les écritures locales et demande une résolution pour un refus permanent.
+
+Les régressions des quatre défauts ont été observées avant correction. Les tests
+exercent les interfaces de capture, restauration, lecture de bloc, stockage S3
+et volume. Un test sans FUSE couvre aussi l'exclusion des ouvertures pendant
+remplacement et la libération de la réservation en cas d'échec.
+
+La contre-revue doit examiner les commits publiés, y compris les nouveaux chemins
+de concurrence. La validation avec deux hôtes physiques et un vrai S3 reste une
+limite opérationnelle distincte ; elle n'est pas revendiquée par ces fixtures.

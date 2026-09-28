@@ -53,20 +53,38 @@ pub async fn capture(
                 emergency = true;
             }
         }
+        // A failed response does not establish that the pause was rejected.
+        // Keep the monitor aware of the possible pause until resume succeeds.
+        volume.set_paused(true);
         if let Err(error) = host::pause_attempt(state, attempt).await {
+            if !emergency && !stop.is_cancelled() {
+                if host::resume_attempt(state, attempt).await.is_ok() {
+                    volume.set_paused(false);
+                } else {
+                    stop.cancel();
+                }
+            } else {
+                // Under pressure, running is unsafe and a lost response leaves
+                // the actual CPU state unknown. Tear down the attempt instead.
+                stop.cancel();
+            }
+            drop(guard);
             if frozen {
-                let socket = socket.clone();
-                let stop = stop.clone();
-                tokio::spawn(async move {
-                    let _ = thaw(&socket, &stop).await;
-                });
+                if emergency {
+                    let socket = socket.clone();
+                    let stop = stop.clone();
+                    tokio::spawn(async move {
+                        let _ = thaw(&socket, &stop).await;
+                    });
+                } else {
+                    let _ = thaw(socket, &stop).await;
+                }
             }
             return Err(error);
         }
-        volume.set_paused(true);
     }
     let captured_at = crate::config::now();
-    let generation = volume.disk.seal();
+    let generation = volume.seal().await;
     if socket.is_some() && !stop.is_cancelled() && !emergency {
         if let Err(error) = host::resume_attempt(state, attempt).await {
             // The controller tears down an attempt whose CPUs cannot be resumed.

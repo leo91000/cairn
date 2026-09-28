@@ -3102,3 +3102,41 @@ async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
         403
     );
 }
+
+#[tokio::test]
+async fn corrupted_recovery_ciphertext_is_terminal_and_invalidates_the_baseline() {
+    use leo_agent_manager::{config::id, nodes::backups};
+    use sha2::{Digest, Sha256};
+    let owner = Owner::new().await;
+    let run = id();
+    let record = json!({"id":run,"taskId":"fixture","createdAt":0,"status":"succeeded",
+        "backup":{"snapshotId":"previous"}});
+    owner
+        .service
+        .store
+        .write(move |db| db.add_run(&record, None))
+        .await
+        .unwrap();
+    let data = b"durable conversation work";
+    let hash = hex::encode(Sha256::digest(data));
+    let key = format!("node-backups/{run}/blocks/{hash}");
+    let mut encoded = b"LEOBLK\x01\0".to_vec();
+    encoded.extend(owner.service.vault.encrypt_bytes(&key, data).unwrap());
+    *encoded.last_mut().unwrap() ^= 1;
+    let path = owner.service.config.data_dir.join(&key);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, encoded).unwrap();
+    let error = backups::read_block(
+        &owner.service,
+        &json!({"runId":run,"destination":"master"}),
+        &hash,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.status, 409,
+        "corrupt ciphertext must not trigger an endless 5xx retry"
+    );
+    assert!(!path.exists());
+    assert!(owner.service.store.run(&run).await.unwrap()["backup"]["snapshotId"].is_null());
+}

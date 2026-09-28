@@ -82,6 +82,20 @@ async fn holes_are_indexed_as_zero_blocks_without_reading_them() {
 
 #[tokio::test]
 async fn a_lost_pause_acknowledgement_resumes_and_thaws_before_returning_error() {
+    lost_pause_acknowledgement(false, false).await;
+}
+
+#[tokio::test]
+async fn an_on_demand_lost_pause_acknowledgement_resumes_and_thaws_before_returning_error() {
+    lost_pause_acknowledgement(true, false).await;
+}
+
+#[tokio::test]
+async fn an_emergency_capture_with_unknown_pause_state_stops_the_attempt() {
+    lost_pause_acknowledgement(true, true).await;
+}
+
+async fn lost_pause_acknowledgement(on_demand: bool, emergency: bool) {
     use leo_agent_manager::{config::id, nodes::checkpoint};
     use serde_json::json;
     use std::sync::{
@@ -104,6 +118,29 @@ async fn a_lost_pause_acknowledgement_resumes_and_thaws_before_returning_error()
         json!({"vmId":vm}).to_string(),
     )
     .unwrap();
+    if on_demand {
+        use leo_agent_manager::storage::{LazyDisk, policy::Policy, remote::RemoteSource};
+        let context = json!({
+            "master":"http://127.0.0.1:1/", "grant":"fixture",
+            "policy":Policy { reserve_mi_b:if emergency { 16 * 1024 * 1024 } else { 64 }, reserve_percent:1, ..Default::default() }
+        });
+        let source = Arc::new(
+            RemoteSource::new(
+                &context,
+                tokio::runtime::Handle::current(),
+                Default::default(),
+            )
+            .unwrap(),
+        );
+        let journal = LazyDisk::create(
+            &disk.join("lazy"),
+            &json!({"version":1,"size":4096,"blockSize":4194304,
+                "blocks":[{"offset":0,"size":4096,"hash":null}]}),
+            source,
+        )
+        .unwrap();
+        journal.set_context(&context).unwrap();
+    }
     let api = root.path().join("jails/firecracker").join(vm).join("root");
     std::fs::create_dir_all(&api).unwrap();
     let controller = UnixListener::bind(api.join("api.sock")).unwrap();
@@ -185,9 +222,17 @@ async fn a_lost_pause_acknowledgement_resumes_and_thaws_before_returning_error()
     .await
     .unwrap();
     assert!(result.is_err());
-    assert!(!paused.load(Ordering::SeqCst));
-    assert!(thawed.load(Ordering::SeqCst));
-    assert!(!stop.is_cancelled());
+    if emergency {
+        assert!(
+            stop.is_cancelled(),
+            "an unconfirmed emergency pause must stop execution"
+        );
+        assert!(!thawed.load(Ordering::SeqCst));
+    } else {
+        assert!(!paused.load(Ordering::SeqCst));
+        assert!(thawed.load(Ordering::SeqCst));
+        assert!(!stop.is_cancelled());
+    }
     controller_task.abort();
     guest_task.abort();
 }
@@ -597,4 +642,64 @@ async fn a_sealed_stopped_disk_copies_only_blocks_its_metadata_lists() {
         .unwrap();
     let full = capture(Some(next["id"].as_str().unwrap().to_owned())).await;
     assert_eq!(full["manifest"]["incremental"], false);
+}
+
+#[tokio::test]
+async fn restore_does_not_replace_a_journal_still_in_use() {
+    use leo_agent_manager::{
+        config::id,
+        nodes::restore,
+        storage::{Disk, LazyDisk, policy::Policy, remote::RemoteSource, runtime},
+    };
+    use serde_json::json;
+    use std::sync::Arc;
+    if !std::path::Path::new("/dev/fuse").exists() {
+        eprintln!("skipping on-demand controller restore: /dev/fuse is unavailable");
+        return;
+    }
+    let root = TempDir::new().unwrap();
+    let run = id();
+    let directory = root.path().join("disks").join(&run);
+    std::fs::create_dir_all(&directory).unwrap();
+    let image = root.path().join("images/fixture");
+    std::fs::create_dir_all(&image).unwrap();
+    std::fs::write(image.join("root.ext4"), []).unwrap();
+    std::fs::write(image.join("vmlinux"), []).unwrap();
+    let manifest = json!({"version":1,"size":4096,"blockSize":4194304,"runtime":{"runtimeId":"fixture"},
+        "blocks":[{"offset":0,"size":4096,"hash":null}]});
+    let context = json!({"master":"http://127.0.0.1:1/","grant":"old-grant","policy":Policy {reserve_mi_b:64,reserve_percent:1,..Default::default()}});
+    let source = Arc::new(
+        RemoteSource::new(
+            &context,
+            tokio::runtime::Handle::current(),
+            Default::default(),
+        )
+        .unwrap(),
+    );
+    let disk = LazyDisk::create(&directory.join("lazy"), &manifest, source).unwrap();
+    disk.set_context(&context).unwrap();
+    disk.write_at(0, b"OLD").unwrap();
+    drop(disk);
+    let old = runtime::load(&directory).await.unwrap();
+    let replacement = json!({"onDemand":true,"manifest":manifest,"backupId":id(),
+        "master":context["master"],"grant":"new-grant","policy":context["policy"]});
+    let error = restore::controller(root.path(), &run, replacement.clone())
+        .await
+        .expect_err("an open journal must not be replaced");
+    assert_eq!(error.status, 409);
+    assert!(!directory.join("restore.pending").exists());
+    let mut bytes = [0; 3];
+    old.read_at(0, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"OLD");
+    drop(old);
+    restore::controller(root.path(), &run, replacement)
+        .await
+        .unwrap();
+    let restored = runtime::load(&directory).await.unwrap();
+    restored.read_at(0, &mut bytes).unwrap();
+    assert_eq!(bytes, [0; 3]);
+    assert_eq!(
+        restored.source.grant_id(),
+        leo_agent_manager::auth::digest("new-grant")
+    );
 }

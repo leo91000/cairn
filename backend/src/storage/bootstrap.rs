@@ -1,12 +1,11 @@
 //! New empty ext4 images become journal-backed before any user command runs.
-use super::{Disk, LazyDisk, remote::RemoteSource};
+use super::Disk;
 use crate::{
     error::{Error, Result},
     validation::text,
 };
 use serde_json::Value;
-use std::{path::Path, sync::Arc};
-use tokio_util::sync::CancellationToken;
+use std::path::Path;
 pub async fn prepare(directory: &Path, size: u64, context: &Value) -> Result<()> {
     crate::skills::private_dir(directory).await?;
     let _lock = crate::file_lock::exclusive(&directory.join("lock"), "VM disk is active.")?;
@@ -19,7 +18,7 @@ pub async fn prepare(directory: &Path, size: u64, context: &Value) -> Result<()>
                 tokio::fs::remove_file(directory.join("data.ext4")).await?;
             }
             tokio::fs::remove_file(&marker).await?;
-            std::fs::File::open(directory)?.sync_all()?;
+            tokio::fs::File::open(directory).await?.sync_all().await?;
         }
         return Ok(());
     }
@@ -42,17 +41,11 @@ pub async fn prepare(directory: &Path, size: u64, context: &Value) -> Result<()>
         .prefix("bootstrap-")
         .tempdir_in(directory)?;
     let root = staging.path().to_owned();
-    let source = Arc::new(RemoteSource::new(
-        context,
-        tokio::runtime::Handle::current(),
-        CancellationToken::new(),
-    )?);
     let mut empty = manifest.clone();
     for block in empty["blocks"].as_array_mut().unwrap() {
         block["hash"] = Value::Null;
     }
-    let disk = Arc::new(LazyDisk::create(&root, &empty, source)?);
-    disk.set_context(context)?;
+    let disk = super::runtime::create(&root, &empty, context).await?;
     let writer = disk.clone();
     tokio::task::spawn_blocking(move || -> Result<()> {
         let input = super::LocalDisk::open(&raw, false)?;
@@ -78,14 +71,13 @@ pub async fn prepare(directory: &Path, size: u64, context: &Value) -> Result<()>
     })
     .await
     .map_err(Error::internal)??;
-    disk.sync()?;
     drop(disk);
     tokio::fs::rename(&root, directory.join("lazy")).await?;
-    std::fs::File::open(directory)?.sync_all()?;
+    tokio::fs::File::open(directory).await?.sync_all().await?;
     // This raw image contained only freshly formatted filesystem metadata. Its
     // complete nonzero contents are now in the durable, non-evictable journal.
     tokio::fs::remove_file(directory.join("data.ext4")).await?;
     tokio::fs::remove_file(marker).await?;
-    std::fs::File::open(directory)?.sync_all()?;
+    tokio::fs::File::open(directory).await?.sync_all().await?;
     Ok(())
 }

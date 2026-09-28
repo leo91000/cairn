@@ -168,6 +168,7 @@ pub async fn controller(state: &Path, run: &str, value: Value) -> Result<Value> 
         return Ok(json!({"ready":true}));
     }
     let origin = super::connector::master(text(&value, "master"))?;
+    let _replacement = crate::storage::runtime::replacement(&directory).await?;
     crate::skills::atomic_write(&directory.join("restore.pending"), b"restoring").await?;
     // The restored disk replaces everything the guest's write tracking described.
     super::tracking::invalidate(&directory).await?;
@@ -202,14 +203,7 @@ pub async fn controller(state: &Path, run: &str, value: Value) -> Result<Value> 
         let context =
             json!({"master":value["master"],"grant":value["grant"],"policy":value["policy"]});
         let root = directory.join("lazy");
-        let source = std::sync::Arc::new(crate::storage::remote::RemoteSource::new(
-            &context,
-            tokio::runtime::Handle::current(),
-            tokio_util::sync::CancellationToken::new(),
-        )?);
-        let disk = crate::storage::LazyDisk::create(&root, manifest, source)?;
-        disk.set_context(&context)?;
-        crate::storage::Disk::sync(&disk)?;
+        drop(crate::storage::runtime::create(&root, manifest, &context).await?);
     } else {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
