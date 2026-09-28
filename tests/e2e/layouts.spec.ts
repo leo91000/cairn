@@ -105,6 +105,8 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     // The agent's actions collapse into a sentence, expand into a timeline and open one step in a sheet.
     const sheet = page.getByTestId('agent-step-sheet')
     async function openStep(scope: Locator, text: string) {
+      // The history arrives after navigation: wait for it before expanding every summary.
+      await expect(scope.getByTestId('agent-actions').first()).toBeVisible()
       const collapsed = scope.getByTestId('agent-actions').locator(':scope > button[aria-expanded="false"]')
       while (await collapsed.count())
         await collapsed.first().click()
@@ -290,6 +292,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
   await page.goto(`/runs/${run.id}`)
   const sheet = page.getByTestId('agent-step-sheet')
   async function openStep(text: string) {
+    await expect(page.getByTestId('agent-actions').first()).toBeVisible()
     const collapsed = page.getByTestId('agent-actions').locator(':scope > button[aria-expanded="false"]')
     while (await collapsed.count())
       await collapsed.first().click()
