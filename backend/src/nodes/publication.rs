@@ -605,13 +605,9 @@ async fn collect_unused(s: &Service, run: &str) -> Result<()> {
     Ok(())
 }
 
-/// Synchronize mounted journals on either kind of execution node. The remote
-/// node fallback also covers records created before their first status report.
+/// Every isolated conversation uses the same continuous S3 publication path.
 pub fn protected(run: &Value) -> bool {
-    run["storage"]["mode"] == "on-demand"
-        || run["nodeId"]
-            .as_str()
-            .is_some_and(|node| node != super::LOCAL_NODE_ID)
+    run["isolated"] == true
 }
 pub async fn attempt(s: &Service, run: &Value) {
     if !protected(run) {

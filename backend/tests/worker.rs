@@ -697,7 +697,7 @@ async fn controller_interruptions_resume_saved_threads_and_stop_after_three_reco
         });
         let app = Router::new().fallback(any(|State(state): State<Arc<Controller>>, request: Request| async move {
             let path = request.uri().path();
-            if path == "/health" { return Json(json!({"status":"ok","runtimeId":"fixture","runtimes":["fixture"],"capabilities":{"os":"linux","arch":"x86_64","kvm":true,"cpu":8,"memoryMiB":16384,"diskMiB":131072}})).into_response(); }
+            if path == "/health" { return Json(json!({"status":"ok","runtimeId":"fixture","runtimes":["fixture"],"capabilities":{"os":"linux","arch":"x86_64","kvm":true,"fuse":true,"cpu":8,"memoryMiB":16384,"diskMiB":131072}})).into_response(); }
             if path.ends_with("/lease") { return Json(json!({})).into_response(); }
             if path.ends_with("/snapshot") { return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(); }
             if request.method() == "DELETE" { return Json(json!({})).into_response(); }
@@ -731,6 +731,12 @@ async fn controller_interruptions_resume_saved_threads_and_stop_after_three_reco
         tokio::fs::write(home.join("auth.json"), "{}")
             .await
             .unwrap();
+        tokio::fs::write(
+            fixture.service.config.data_dir.join("storage-s3.json"),
+            json!({"bucket":"fixture-storage","endpoint":"https://127.0.0.1:1"}).to_string(),
+        )
+        .await
+        .unwrap();
         fixture.start().await;
         let run = fixture.enqueue("Inspect the VM fixture").await;
         let run_id = text(&run, "id");

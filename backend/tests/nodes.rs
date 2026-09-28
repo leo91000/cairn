@@ -2646,7 +2646,7 @@ async fn stale_node_disks_are_reported_and_freed_on_request() {
 }
 
 #[tokio::test]
-async fn only_conversations_on_remote_nodes_take_continuous_recovery_points() {
+async fn isolated_conversations_synchronize_on_local_and_remote_nodes() {
     use leo_agent_manager::{
         config::id,
         nodes::{LOCAL_NODE_ID, publication},
@@ -2669,10 +2669,11 @@ async fn only_conversations_on_remote_nodes_take_continuous_recovery_points() {
         .await;
         states.push(owner.service.store.run(&run).await.unwrap()["backup"].clone());
     }
-    // The master runner fails with the master itself; its conversations capture only when they move.
-    assert!(states[0].is_null(), "{}", states[0]);
-    // A remote node can disappear, so its conversation tries to save (and reports why it could not).
-    assert_eq!(states[1]["status"], "error", "{}", states[1]);
+    // Both nodes try to publish, even before their first storage status report.
+    // This fixture lacks a controller checkpoint, so both report the failure.
+    for state in states {
+        assert_eq!(state["status"], "error", "{state}");
+    }
 }
 
 #[tokio::test]
