@@ -12,6 +12,14 @@ use std::{path::Path, sync::Arc};
 use tokio_util::sync::CancellationToken;
 #[derive(Clone)]
 pub struct Service {
+    pub node_maintenance_tasks: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+    pub node_lease_deadlines:
+        Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::time::Instant>>>,
+    pub started: tokio::time::Instant,
+    pub node_backup_operation: Arc<tokio::sync::Mutex<()>>,
+    pub node_disk_reads: Arc<tokio::sync::RwLock<()>>,
+    pub node_backup_lock: Arc<tokio::sync::Mutex<()>>,
+    pub node_transport: Arc<crate::nodes::transport::Transport>,
     pub avatars: Arc<crate::agent_avatars::AgentAvatars>,
     pub artifacts: Arc<crate::artifacts::Artifacts>,
     pub worker: Arc<crate::worker::Worker>,
@@ -21,7 +29,7 @@ pub struct Service {
     pub models: Arc<crate::models::Models>,
     pub connections: Arc<crate::connections::Connections>,
     pub notifications: crate::notifications::Notifications,
-    pub retention_lock: Arc<tokio::sync::Mutex<()>>,
+    pub conversation_storage_lock: Arc<tokio::sync::Mutex<()>>,
     pub attachment_upload: Arc<tokio::sync::Mutex<()>>,
     pub config: Config,
     pub store: Store,
@@ -29,6 +37,7 @@ pub struct Service {
     pub vault: Vault,
     pub skills: Skills,
     pub http: reqwest::Client,
+    pub hot_s3: Arc<crate::object_storage::HotS3>,
     pub shutdown: CancellationToken,
 }
 impl Service {
@@ -44,6 +53,13 @@ impl Service {
         let store = Store::open(&config.data_dir)?;
         let vault = Vault::new(store.clone(), &config.data_dir)?;
         let service = Arc::new(Self {
+            node_maintenance_tasks: Default::default(),
+            node_lease_deadlines: Default::default(),
+            started: tokio::time::Instant::now(),
+            node_backup_operation: Default::default(),
+            node_backup_lock: Default::default(),
+            node_disk_reads: Default::default(),
+            node_transport: Default::default(),
             avatars: Default::default(),
             artifacts: Default::default(),
             worker: Default::default(),
@@ -53,7 +69,7 @@ impl Service {
             models: Default::default(),
             connections: Default::default(),
             notifications: Default::default(),
-            retention_lock: Default::default(),
+            conversation_storage_lock: Default::default(),
             attachment_upload: Default::default(),
             auth: Auth::new(store.clone(), config.public_url.clone()),
             skills: Skills {
@@ -64,13 +80,14 @@ impl Service {
                 .timeout(std::time::Duration::from_secs(20))
                 .build()
                 .map_err(Error::internal)?,
+            hot_s3: Arc::new(crate::object_storage::HotS3::new()),
             config,
             store,
             vault,
             shutdown: CancellationToken::new(),
         });
         for mut agent in service.store.list("agents").await? {
-            if agent["access"].get("mcps").is_none() {
+            if agent["access"].get("mcps").is_none() || agent["access"].get("nodes").is_none() {
                 agent["access"] = policy(&agent);
                 service.store.put("agents", agent).await?;
             }
@@ -134,6 +151,19 @@ impl Service {
                 .as_str()
                 .into();
         }
+        // Older clients submit the other access axes without knowing about nodes.
+        if input["access"].is_object()
+            && input["access"].get("nodes").is_none()
+            && let Some(existing) = &existing
+        {
+            input["access"]["nodes"] = policy(existing)["nodes"].clone();
+        }
+        if input["access"].is_object()
+            && input["access"].get("maxResources").is_none()
+            && let Some(existing) = &existing
+        {
+            input["access"]["maxResources"] = policy(existing)["maxResources"].clone();
+        }
         let mut agent = parse("agent", input)?;
         crate::claude::validate_agent(&agent)?;
         agent["id"] = existing_id.map(str::to_owned).unwrap_or_else(id).into();
@@ -178,6 +208,19 @@ impl Service {
         let agent = self
             .store
             .transaction(move |db| {
+                // Serialize grants with revocation; a concurrent editor must never
+                // restore a grant that the revocation transaction just removed.
+                for node in access["nodes"].as_array().into_iter().flatten() {
+                    if node != crate::nodes::LOCAL_NODE_ID {
+                        let record = required(
+                            db.get("nodes", node.as_str().unwrap_or(""))?,
+                            "Node not found",
+                        )?;
+                        if record["revoked"] == true {
+                            return Err(Error::bad("A revoked node cannot be authorized."));
+                        }
+                    }
+                }
                 // Read the latest portrait inside the save transaction: editing an agent
                 // must not overwrite an upload or background generation that just finished.
                 if let Some(existing) = db.get("agents", text(&agent, "id"))?
@@ -411,6 +454,7 @@ impl Service {
         let run = self
             .snapshot(self.get("tasks", task_id).await?, trigger)
             .await?;
+        crate::nodes::require_node(&run["snapshot"]["agent"])?;
         let result = self
             .store
             .transaction(move |db| {
@@ -475,7 +519,7 @@ pub fn policy(agent: &Value) -> Value {
     let mut value = json!({
     "projects":null,"skills":null,"mcps":null,"mcpTools":{
     }
-    ,"github":true,"sandbox":"yolo"}
+    ,"github":true,"sandbox":"yolo","nodes":[crate::nodes::LOCAL_NODE_ID],"maxResources":null}
     );
     merge(&mut value, &agent["access"]);
     if agent["id"] != MAIN_AGENT_ID

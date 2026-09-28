@@ -16,6 +16,7 @@ import ChatSwitcher from '../components/ChatSwitcher.vue'
 import FilColumn from '../components/FilColumn.vue'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
+import NodeExecution from '../components/NodeExecution.vue'
 import NotificationSettings from '../components/NotificationSettings.vue'
 import QueueStrip from '../components/QueueStrip.vue'
 import SkillTextarea from '../components/SkillTextarea.vue'
@@ -435,6 +436,7 @@ function key(event: KeyboardEvent) {
       <h1 v-else class="sr-only">
         Chats
       </h1>
+      <NodeExecution v-if="detail?.run" :run="detail.run" />
       <div class="flex min-h-0 flex-1 flex-col">
         <section class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden transition-opacity" :class="switching ? 'opacity-60 delay-150' : ''" :aria-busy="switching" aria-label="Chat workspace">
           <!-- A floating pill, as on Android: connection status never moves the conversation. -->
@@ -446,19 +448,19 @@ function key(event: KeyboardEvent) {
           </div>
           <div v-else-if="inactive" class="m-auto w-full max-w-xl px-6 py-12 text-center">
             <h2 class="mb-3 text-xl">
-              {{ detail?.lifecycle === 'purging' ? 'Permanently deleting conversation…' : detail?.lifecycle === 'trash' ? 'This conversation is in the trash.' : detail?.lifecycle === 'restoring' ? 'Restoring conversation…' : detail?.lifecycle === 'archiving' ? 'Archiving conversation…' : 'This conversation is archived.' }}
+              {{ detail?.lifecycle === 'purging' ? 'Permanently deleting conversation…' : 'This conversation is in the trash.' }}
             </h2>
             <p v-if="detail?.purgeAt" class="mb-5 text-sm text-muted">
               Permanently deleted on {{ new Date(detail.purgeAt).toLocaleDateString() }}.
             </p>
             <p v-else class="mb-5 text-sm text-muted">
-              {{ detail?.storageClass === 'GLACIER' ? 'Restoration from cold storage can take a few hours.' : 'Restore this conversation to access its history and working files.' }}
+              Restore this conversation to access its history and working files.
             </p>
             <UiAlert v-if="error || detail?.lifecycleError" class="mb-4">
               {{ error || detail?.lifecycleError }}
             </UiAlert>
-            <UiButton v-if="detail?.lifecycle === 'trash' || detail?.lifecycle === 'archived' || (detail?.lifecycle === 'restoring' && detail.lifecycleError)" :disabled="busy" variant="primary" @click="action('restore')">
-              {{ detail?.lifecycle === 'restoring' ? 'Retry restoration' : 'Restore conversation' }}
+            <UiButton v-if="detail?.lifecycle === 'trash'" :disabled="busy" variant="primary" @click="action('restore')">
+              Restore conversation
             </UiButton>
           </div>
           <div v-else-if="!detail?.run && !delivery.sending.length" class="flex min-h-0 flex-1 flex-col items-center justify-center overflow-auto px-6 pb-[8vh] pt-8 text-center phone:px-2 phone:py-5">

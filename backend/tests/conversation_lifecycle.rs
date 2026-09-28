@@ -94,7 +94,6 @@ async fn deleting_a_conversation_moves_it_to_trash_and_recovery_preserves_it() {
         .await;
     assert_eq!(status, 200, "{restored}");
     assert_eq!(restored["lifecycle"], "active");
-    assert!(restored["archiveNotBefore"].as_i64().unwrap() > leo_agent_manager::config::now());
     let (_, active) = app.request("GET", "/api/chats", Value::Null).await;
     assert_eq!(active[0]["id"], chat["id"]);
 }
@@ -155,62 +154,6 @@ async fn trash_requires_confirmation_for_pending_work_and_never_replays_cancelle
 }
 
 #[tokio::test]
-async fn retention_policy_previews_old_conversations_but_protects_pending_work() {
-    let app = App::new().await;
-    for pending in [false, true] {
-        let (_, mut chat) = app.request("POST", "/api/chats", json!({})).await;
-        if pending {
-            let path = format!("/api/chats/{}/messages", chat["id"].as_str().unwrap());
-            app.request(
-                "POST",
-                &path,
-                json!({"id":leo_agent_manager::config::id(),"text":"Still waiting"}),
-            )
-            .await;
-        }
-        chat["updatedAt"] = (leo_agent_manager::config::now() - 40 * 86_400_000_i64).into();
-        let pause = format!("/api/chats/{}/pause", chat["id"].as_str().unwrap());
-        app.service.store.put("chats", chat).await.unwrap();
-        assert_eq!(
-            app.request("POST", &pause, json!({"paused":true})).await.0,
-            200
-        );
-    }
-    let (status, preview) = app
-        .request("GET", "/api/conversation-retention", Value::Null)
-        .await;
-    assert_eq!(status, 200, "{preview}");
-    assert_eq!(preview["eligible"], 1);
-    assert_eq!(preview["enabled"], false);
-    assert_eq!(preview["inactivityDays"], 30);
-    assert_eq!(preview["coldAfterDays"], 90);
-    assert_eq!(
-        app.request(
-            "PUT",
-            "/api/conversation-retention",
-            json!({"enabled":false,"inactivityDays":0,"coldAfterDays":90})
-        )
-        .await
-        .0,
-        400
-    );
-    assert_eq!(
-        app.request(
-            "PUT",
-            "/api/conversation-retention",
-            json!({"enabled":false,"inactivityDays":60,"coldAfterDays":180})
-        )
-        .await
-        .0,
-        200
-    );
-    let (_, preview) = app
-        .request("GET", "/api/conversation-retention", Value::Null)
-        .await;
-    assert_eq!(preview["eligible"], 0);
-}
-
-#[tokio::test]
 async fn trash_denies_direct_run_history_and_artifact_access() {
     let app = App::new().await;
     let (_, mut chat) = app.request("POST", "/api/chats", json!({})).await;
@@ -231,105 +174,6 @@ async fn trash_denies_direct_run_history_and_artifact_access() {
             .await;
         assert_eq!(status, 409, "run{suffix} must be inaccessible in trash");
     }
-}
-
-#[tokio::test]
-async fn complete_archive_round_trip_preserves_history_and_files_and_requires_explicit_restore() {
-    let app = App::new().await;
-    configure_archive(&app);
-    let (_, mut chat) = app.request("POST", "/api/chats", json!({})).await;
-    chat["updatedAt"] = (leo_agent_manager::config::now() - 40 * 86_400_000_i64).into();
-    let path = format!("/api/chats/{}", chat["id"].as_str().unwrap());
-    let run = leo_agent_manager::config::id();
-    let owned = run.clone();
-    app.service.store.transaction(move |db| {
-        db.0.execute("INSERT INTO runs(id,task_id,project_id,status,created_at,data) VALUES(?1,?1,'','succeeded',0,?2)",rusqlite::params![owned,json!({"id":owned,"status":"succeeded","summary":"Saved result","sessionId":"native-session"}).to_string()])?;
-        db.event(&owned,"chat.user","Original conversation",None)?;
-        Ok(())
-    }).await.unwrap();
-    chat["runId"] = run.clone().into();
-    let workspace = app
-        .service
-        .config
-        .data_dir
-        .join("runs")
-        .join(&run)
-        .join("workspace");
-    std::fs::create_dir_all(&workspace).unwrap();
-    std::fs::write(workspace.join("unpublished.txt"), "Unsaved agent work").unwrap();
-    app.service.store.put("chats", chat.clone()).await.unwrap();
-    let (status, response) = app
-        .request(
-            "PUT",
-            "/api/conversation-retention",
-            json!({"enabled":true,"inactivityDays":30,"coldAfterDays":90,"confirmExisting":true}),
-        )
-        .await;
-    assert_eq!(status, 200, "{response}");
-    app.service.retention_tick().await.unwrap();
-    let (_, archived) = app.request("GET", &path, Value::Null).await;
-    assert_eq!(archived["lifecycle"], "archived", "{archived}");
-    assert!(!workspace.exists());
-    let (_, archives) = app
-        .request("GET", "/api/chats?view=archives", Value::Null)
-        .await;
-    assert_eq!(archives[0]["id"], chat["id"]);
-    assert_eq!(
-        app.request(
-            "POST",
-            &format!("{path}/messages"),
-            json!({"id":leo_agent_manager::config::id(),"text":"No implicit restore"})
-        )
-        .await
-        .0,
-        409
-    );
-    assert_eq!(
-        app.request("POST", &format!("{path}/restore"), json!({}))
-            .await
-            .0,
-        200
-    );
-    app.service.retention_tick().await.unwrap();
-    let (_, restored) = app.request("GET", &path, Value::Null).await;
-    assert_eq!(restored["lifecycle"], "active", "{restored}");
-    assert_eq!(
-        std::fs::read_to_string(workspace.join("unpublished.txt")).unwrap(),
-        "Unsaved agent work"
-    );
-    let (_, events) = app
-        .request("GET", &format!("/api/runs/{run}/events"), Value::Null)
-        .await;
-    assert!(events.to_string().contains("Original conversation"));
-    assert_eq!(restored["run"]["sessionId"], "native-session");
-    assert!(restored["archiveNotBefore"].as_i64().unwrap() > leo_agent_manager::config::now());
-    // Remote cleanup can still be pending immediately after a successful restore.
-    // Trash recovery must nevertheless return to the already-restored active state.
-    assert_eq!(app.request("DELETE", &path, json!({})).await.0, 200);
-    let (_, recovered) = app
-        .request("POST", &format!("{path}/restore"), json!({}))
-        .await;
-    assert_eq!(recovered["lifecycle"], "active");
-}
-
-#[tokio::test]
-async fn expired_trash_is_purged_but_unexpired_trash_can_be_recovered() {
-    let app = App::new().await;
-    let (_, chat) = app.request("POST", "/api/chats", json!({})).await;
-    let path = format!("/api/chats/{}", chat["id"].as_str().unwrap());
-    let (_, mut trash) = app.request("DELETE", &path, json!({})).await;
-    app.service.retention_tick().await.unwrap();
-    assert_eq!(app.request("GET", &path, Value::Null).await.0, 200);
-    trash["purgeAt"] = 1.into();
-    app.service.store.put("chats", trash).await.unwrap();
-    assert_eq!(
-        app.request("POST", &format!("{path}/restore"), json!({}))
-            .await
-            .0,
-        410
-    );
-    app.service.retention_tick().await.unwrap();
-    assert_eq!(app.request("GET", &path, Value::Null).await.0, 404);
 }
 
 #[tokio::test]
@@ -368,362 +212,72 @@ async fn incompatible_restored_session_requires_consent_and_never_restarts_on_it
     assert!(run["sessionId"].is_null());
 }
 
-fn configure_archive(app: &App) -> std::path::PathBuf {
-    configure_archive_with(app, json!({}))
-}
-
-fn configure_archive_with(app: &App, settings: Value) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let binary = app._root.path().join("aws-fixture");
-    let objects = app._root.path().join("objects");
-    std::fs::create_dir_all(&objects).unwrap();
-    let script = r#"#!/usr/bin/env python3
-import sys,json,pathlib,shutil
-args=sys.argv[1:]
-root=pathlib.Path(ARCHIVE_ROOT)
-compatible=(root/'compatible').exists()
-if compatible:
- with open(root/'calls','a') as log: log.write(json.dumps(args)+'\n')
- if '--endpoint-url' in args: i=args.index('--endpoint-url'); args=args[:i]+args[i+2:]
-def obj(uri): return root / uri.split('/',3)[3]
-def unsupported(op): sys.stderr.write(f'An error occurred (NotImplemented) when calling the {op} operation: Not implemented.'); sys.exit(254)
-if args[:2]==['s3api','get-public-access-block']:
- if compatible: unsupported('GetPublicAccessBlock')
- print(json.dumps({'PublicAccessBlockConfiguration':dict.fromkeys(['BlockPublicAcls','IgnorePublicAcls','BlockPublicPolicy','RestrictPublicBuckets'],True)}))
-elif args[:2]==['s3api','get-bucket-acl']:
- grants=[{'Grantee':{'Type':'CanonicalUser'},'Permission':'FULL_CONTROL'}]
- if (root/'public-acl').exists(): grants.append({'Grantee':{'Type':'Group','URI':'http://acs.amazonaws.com/groups/global/AllUsers'},'Permission':'READ'})
- print(json.dumps({'Grants':grants}))
-elif args[:2]==['s3api','get-bucket-policy']: unsupported('GetBucketPolicy')
-elif args[:2]==['s3','cp']:
- src,dst=args[2:4]; src=obj(src) if src.startswith('s3://') else pathlib.Path(src); dst=obj(dst) if dst.startswith('s3://') else pathlib.Path(dst)
- dst.parent.mkdir(parents=True,exist_ok=True)
- if src != dst: shutil.copyfile(src,dst)
- if args[3].startswith('s3://') and (root/'corrupt-upload').exists(): dst.write_bytes(b'corrupt')
- if '--storage-class' in args: (root/'cold').write_text(args[args.index('--storage-class')+1])
-elif args[:2]==['s3api','head-object']:
- value={}
- if (root/'cold').exists():
-  value['StorageClass']=(root/'cold').read_text() or 'GLACIER'
-  if (root/'ready').exists(): value['Restore']='ongoing-request="false"'
-  elif (root/'requested').exists(): value['Restore']='ongoing-request="true"'
- print(json.dumps(value))
-elif args[:2]==['s3api','restore-object']: (root/'requested').touch()
-elif args[:2] in [['s3api','list-object-versions'],['s3api','list-multipart-uploads']]: print('{}')
-elif args[:2]==['s3','rm']: shutil.rmtree(obj(args[2]),ignore_errors=True)
-"#.replace("ARCHIVE_ROOT", &serde_json::to_string(objects.to_str().unwrap()).unwrap());
-    std::fs::write(&binary, script).unwrap();
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-    std::fs::write(app.service.config.data_dir.join("archive-s3.json"), {
-        let mut config = json!({"bucket":"fixture-bucket","awsBinary":binary});
-        config
-            .as_object_mut()
-            .unwrap()
-            .extend(settings.as_object().unwrap().clone());
-        config.to_string()
-    })
-    .unwrap();
-    objects
-}
-
 #[tokio::test]
-async fn corrupt_transfer_preserves_local_data_and_retries_after_restart() {
+async fn inactivity_never_archives_even_with_an_old_enabled_policy() {
     let app = App::new().await;
-    let objects = configure_archive(&app);
-    std::fs::write(objects.join("corrupt-upload"), "").unwrap();
     let (_, mut chat) = app.request("POST", "/api/chats", json!({})).await;
-    let cid = chat["id"].as_str().unwrap().to_owned();
     chat["updatedAt"] = 1.into();
+    let cid = chat["id"].as_str().unwrap().to_owned();
     app.service.store.put("chats", chat).await.unwrap();
-    let attachment = app
-        .service
-        .config
-        .data_dir
-        .join("chat-attachments")
-        .join(&cid);
-    std::fs::create_dir_all(&attachment).unwrap();
-    std::fs::write(
-        attachment.join("saved.txt"),
-        "Must survive failed verification",
-    )
-    .unwrap();
-    assert_eq!(
-        app.request(
-            "PUT",
-            "/api/conversation-retention",
-            json!({"enabled":true,"inactivityDays":30,"coldAfterDays":90,"confirmExisting":true})
+    app.service
+        .store
+        .set(
+            "conversation-retention",
+            json!({"enabled":true,"inactivityDays":1,"coldAfterDays":1}),
+            None,
         )
         .await
-        .0,
-        200
-    );
-    app.service.retention_tick().await.unwrap();
-    let (_, failed) = app
+        .unwrap();
+    app.service.cleanup_conversations().await.unwrap();
+    let (_, chat) = app
         .request("GET", &format!("/api/chats/{cid}"), Value::Null)
         .await;
-    assert_eq!(failed["lifecycle"], "archiving");
-    assert!(
-        failed["lifecycleError"]
-            .as_str()
-            .unwrap()
-            .contains("verification")
-    );
-    assert_eq!(
-        std::fs::read_to_string(attachment.join("saved.txt")).unwrap(),
-        "Must survive failed verification"
-    );
-    std::fs::remove_file(objects.join("corrupt-upload")).unwrap();
-    let mut persisted = app.service.get("chats", &cid).await.unwrap();
-    persisted["retryAfter"] = 0.into();
-    app.service.store.put("chats", persisted).await.unwrap();
-    let restarted = Service::new(app.service.config.clone()).await.unwrap();
-    restarted.retention_tick().await.unwrap();
-    let (_, archived) = app
-        .request("GET", &format!("/api/chats/{cid}"), Value::Null)
-        .await;
-    assert_eq!(archived["lifecycle"], "archived", "{archived}");
-    assert!(!attachment.exists());
-}
-
-#[tokio::test]
-async fn cold_restore_waits_and_trash_recovery_does_not_request_glacier_retrieval() {
-    let app = App::new().await;
-    let objects = configure_archive(&app);
-    let (_, mut chat) = app.request("POST", "/api/chats", json!({})).await;
-    let cid = chat["id"].as_str().unwrap().to_owned();
-    let path = format!("/api/chats/{cid}");
-    chat["updatedAt"] = 1.into();
-    app.service.store.put("chats", chat).await.unwrap();
-    assert_eq!(
-        app.request(
-            "PUT",
-            "/api/conversation-retention",
-            json!({"enabled":true,"inactivityDays":30,"coldAfterDays":90,"confirmExisting":true})
-        )
-        .await
-        .0,
-        200
-    );
-    app.service.retention_tick().await.unwrap();
-    let mut archived = app.service.get("chats", &cid).await.unwrap();
-    assert_eq!(archived["lifecycle"], "archived", "{archived}");
-    archived["archivedAt"] = 1.into();
-    app.service.store.put("chats", archived).await.unwrap();
-    app.service.retention_tick().await.unwrap();
-    assert!(objects.join("cold").exists());
-    assert_eq!(app.request("DELETE", &path, json!({})).await.0, 200);
-    assert_eq!(
-        app.request("POST", &format!("{path}/restore"), json!({}))
-            .await
-            .0,
-        200
-    );
-    let (_, recovered) = app.request("GET", &path, Value::Null).await;
-    assert_eq!(recovered["lifecycle"], "archived");
-    assert!(!objects.join("requested").exists());
-    assert_eq!(
-        app.request("POST", &format!("{path}/restore"), json!({}))
-            .await
-            .0,
-        200
-    );
-    app.service.retention_tick().await.unwrap();
-    assert!(objects.join("requested").exists());
-    let (_, waiting) = app.request("GET", &path, Value::Null).await;
-    assert_eq!(waiting["lifecycle"], "restoring");
-    // A cold retrieval must not monopolize the scheduler while AWS prepares it.
-    let (_, mut other) = app.request("POST", "/api/chats", json!({})).await;
-    other["updatedAt"] = 1.into();
-    app.service.store.put("chats", other.clone()).await.unwrap();
-    app.service.retention_tick().await.unwrap();
-    assert_eq!(
-        app.request(
-            "GET",
-            &format!("/api/chats/{}", other["id"].as_str().unwrap()),
-            Value::Null
-        )
-        .await
-        .1["lifecycle"],
-        "archived"
-    );
-    // Deletion takes precedence over a pending retrieval, even after recovery.
-    assert_eq!(app.request("DELETE", &path, json!({})).await.0, 200);
-    std::fs::write(objects.join("ready"), "").unwrap();
-    app.service.retention_tick().await.unwrap();
-    assert_eq!(
-        app.request("GET", &path, Value::Null).await.1["lifecycle"],
-        "trash"
-    );
-    assert_eq!(
-        app.request("POST", &format!("{path}/restore"), json!({}))
-            .await
-            .1["lifecycle"],
-        "archived"
-    );
-    assert_eq!(
-        app.request("POST", &format!("{path}/restore"), json!({}))
-            .await
-            .0,
-        200
-    );
-    app.service.retention_tick().await.unwrap();
-    assert_eq!(
-        app.request("GET", &path, Value::Null).await.1["lifecycle"],
-        "active"
-    );
-}
-
-#[tokio::test]
-async fn public_deliverable_stays_warm_when_archived_and_trash_revocation_is_permanent() {
-    let app = App::new().await;
-    configure_archive(&app);
-    let (_, mut chat) = app.request("POST", "/api/chats", json!({})).await;
-    let run = leo_agent_manager::config::id();
-    let artifact = leo_agent_manager::config::id();
-    chat["runId"] = run.clone().into();
-    chat["updatedAt"] = 1.into();
-    app.service.store.put("chats", chat.clone()).await.unwrap();
-    let owned = run.clone();
-    let aid = artifact.clone();
-    app.service.store.transaction(move |db| {
-        db.0.execute("INSERT INTO runs(id,task_id,project_id,status,created_at,data) VALUES(?1,?1,'','succeeded',0,?2)",rusqlite::params![owned,json!({"id":owned,"status":"succeeded"}).to_string()])?;
-        db.set(&format!("artifact:{owned}:{aid}"),&json!({"id":aid,"runId":owned,"name":"result.txt","mediaType":"text/plain","size":13,"visibility":"private"}),None)?;
-        Ok(())
-    }).await.unwrap();
-    std::fs::create_dir_all(app.service.config.data_dir.join("artifacts")).unwrap();
-    std::fs::write(
-        app.service
-            .config
-            .data_dir
-            .join("artifacts")
-            .join(&artifact),
-        "Public result",
-    )
-    .unwrap();
-    let visibility = format!("/api/runs/{run}/artifacts/{artifact}/visibility");
-    let (status, shared) = app
-        .request("PUT", &visibility, json!({"visibility":"public"}))
-        .await;
-    assert_eq!(status, 200);
-    let public_path = format!(
-        "/api/public/artifacts/{}",
-        shared["publicToken"].as_str().unwrap()
-    );
-    async fn public_status(app: &App, path: &str) -> u16 {
-        app.router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(path)
-                    .header("host", "localhost:4310")
-                    .body(Body::empty())
-                    .unwrap(),
+    assert_eq!(chat["lifecycle"], "active");
+    assert!(chat["archiveKey"].is_null());
+    for method in ["GET", "PUT"] {
+        assert_eq!(
+            app.request(
+                method,
+                "/api/conversation-retention",
+                json!({"enabled":true})
             )
             .await
-            .unwrap()
-            .status()
-            .as_u16()
+            .0,
+            404
+        );
     }
-    assert_eq!(public_status(&app, &public_path).await, 200);
     assert_eq!(
-        app.request(
-            "PUT",
-            "/api/conversation-retention",
-            json!({"enabled":true,"inactivityDays":30,"coldAfterDays":90,"confirmExisting":true})
-        )
-        .await
-        .0,
-        200
-    );
-    app.service.retention_tick().await.unwrap();
-    assert_eq!(public_status(&app, &public_path).await, 200);
-    let path = format!("/api/chats/{}", chat["id"].as_str().unwrap());
-    assert_eq!(app.request("DELETE", &path, json!({})).await.0, 200);
-    assert_eq!(public_status(&app, &public_path).await, 404);
-    assert_eq!(
-        app.request("PUT", &visibility, json!({"visibility":"public"}))
-            .await
-            .0,
-        409
-    );
-    assert_eq!(
-        app.request("POST", &format!("{path}/restore"), json!({}))
-            .await
-            .0,
-        200
-    );
-    assert_eq!(
-        app.request("POST", &format!("{path}/restore"), json!({}))
-            .await
-            .0,
-        200
-    );
-    app.service.retention_tick().await.unwrap();
-    assert_eq!(public_status(&app, &public_path).await, 404);
-}
-
-#[tokio::test]
-async fn s3_compatible_provider_archives_to_its_cold_class_through_its_endpoint() {
-    let app = App::new().await;
-    let settings = json!({"endpoint":"https://s3.eu-west-par.io.cloud.ovh.net","coldStorageClass":"DEEP_ARCHIVE"});
-    let objects = configure_archive_with(&app, settings);
-    // OVHcloud implements neither public access blocks nor bucket policies.
-    std::fs::write(objects.join("compatible"), "").unwrap();
-    let retention =
-        json!({"enabled":true,"inactivityDays":30,"coldAfterDays":90,"confirmExisting":true});
-    std::fs::write(objects.join("public-acl"), "").unwrap();
-    assert_eq!(
-        app.request("PUT", "/api/conversation-retention", retention.clone())
+        app.request("GET", "/api/chats?view=archives", Value::Null)
             .await
             .0,
         400
     );
-    std::fs::remove_file(objects.join("public-acl")).unwrap();
-    assert_eq!(
-        app.request("PUT", "/api/conversation-retention", retention)
-            .await
-            .0,
-        200
-    );
-    let (_, mut chat) = app.request("POST", "/api/chats", json!({})).await;
-    let cid = chat["id"].as_str().unwrap().to_owned();
+}
+
+#[tokio::test]
+async fn expired_trash_removes_files_and_records_without_archival() {
+    let app = App::new().await;
+    let (_, chat) = app.request("POST", "/api/chats", json!({})).await;
+    let cid = chat["id"].as_str().unwrap();
+    let directory = app
+        .service
+        .config
+        .data_dir
+        .join("chat-attachments")
+        .join(cid);
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("private.txt"), "private content").unwrap();
     let path = format!("/api/chats/{cid}");
-    chat["updatedAt"] = 1.into();
-    app.service.store.put("chats", chat).await.unwrap();
-    app.service.retention_tick().await.unwrap();
-    let mut archived = app.service.get("chats", &cid).await.unwrap();
-    assert_eq!(archived["lifecycle"], "archived", "{archived}");
-    archived["archivedAt"] = 1.into();
-    app.service.store.put("chats", archived).await.unwrap();
-    app.service.retention_tick().await.unwrap();
-    assert_eq!(
-        std::fs::read_to_string(objects.join("cold")).unwrap(),
-        "DEEP_ARCHIVE"
-    );
+    let (_, mut deleted) = app.request("DELETE", &path, json!({})).await;
+    deleted["purgeAt"] = 1.into();
+    app.service.store.put("chats", deleted).await.unwrap();
     assert_eq!(
         app.request("POST", &format!("{path}/restore"), json!({}))
             .await
             .0,
-        200
+        410
     );
-    app.service.retention_tick().await.unwrap();
-    assert!(objects.join("requested").exists());
-    std::fs::write(objects.join("ready"), "").unwrap();
-    // Retrieval is polled once a minute.
-    let mut waiting = app.service.get("chats", &cid).await.unwrap();
-    waiting["retryAfter"] = 0.into();
-    app.service.store.put("chats", waiting).await.unwrap();
-    app.service.retention_tick().await.unwrap();
-    assert_eq!(
-        app.request("GET", &path, Value::Null).await.1["lifecycle"],
-        "active"
-    );
-    let calls = std::fs::read_to_string(objects.join("calls")).unwrap();
-    assert!(calls.lines().count() > 5);
-    for call in calls.lines() {
-        assert!(
-            call.contains(r#""--endpoint-url", "https://s3.eu-west-par.io.cloud.ovh.net""#),
-            "{call}"
-        );
-    }
+    app.service.cleanup_conversations().await.unwrap();
+    assert_eq!(app.request("GET", &path, Value::Null).await.0, 404);
+    assert!(!directory.exists());
 }

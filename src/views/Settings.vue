@@ -2,7 +2,6 @@
 import { twMerge } from 'tailwind-merge'
 import { onMounted, ref } from 'vue'
 import { api, date, notify } from '../api'
-import ConversationRetention from '../components/ConversationRetention.vue'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
 import NotificationSettings from '../components/NotificationSettings.vue'
@@ -90,7 +89,6 @@ async function copy(value: string) {
     <section class="panel border-b border-line settings-section mb-5.5 px-0 py-7 phone:py-5">
       <NotificationSettings />
     </section>
-    <ConversationRetention />
     <section class="panel border-b border-line overflow-hidden settings-section mb-5.5 px-0 py-7 phone:py-5">
       <div class="section-intro flex gap-[17px] items-center mb-6 phone:items-start phone:gap-[13px]">
         <span class="resource-avatar w-11.5 h-11.5 bg-soft text-accent grid place-items-center rounded-xl border border-line"><Icon :name="ExternalLink" :size="22" /></span>

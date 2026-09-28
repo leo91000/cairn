@@ -17,6 +17,9 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tokio_vsock::{VsockAddr, VsockListener, VsockStream};
 
+static PROJECT_IMPORT_CONTROL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static FILESYSTEM_CONTROL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static FREEZE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const INITIALIZED: &str = "/var/lib/leo/initialized";
 
 pub async fn serve(stop: CancellationToken) -> Result<()> {
@@ -69,6 +72,20 @@ async fn handle(
         .await?
         .ok_or_else(|| Error::bad("Missing guest request."))?;
     match text(&request, "op") {
+
+        "freeze"|"thaw"=> {
+            let _guard=FILESYSTEM_CONTROL.lock().await;
+            let freeze=request["op"]=="freeze";
+            let generation=FREEZE_GENERATION.fetch_add(1,std::sync::atomic::Ordering::SeqCst)+1;
+            let status=Command::new("fsfreeze").arg(if freeze {"--freeze"} else {"--unfreeze"}).arg("/oldroot/run/data").stdout(Stdio::null()).stderr(Stdio::null()).status().await?;
+            if freeze && status.success() {
+                // A lost host control connection must not freeze the guest indefinitely.
+                tokio::spawn(async move {tokio::time::sleep(Duration::from_secs(300)).await;let _guard=FILESYSTEM_CONTROL.lock().await;if FREEZE_GENERATION.load(std::sync::atomic::Ordering::SeqCst)!=generation {return;}let _=Command::new("fsfreeze").args(["--unfreeze","/oldroot/run/data"]).stdout(Stdio::null()).stderr(Stdio::null()).status().await;});
+            }
+            wire::write(&mut write,&json!({"ok":status.success() || !freeze})).await
+        }
+
+
         "artifact-export" => {
             let export=async {
                 let (snapshot,size)=crate::artifacts::file::snapshot(Path::new(text(&request,"path")),Path::new(text(&request,"root"))).await?;
@@ -81,23 +98,6 @@ async fn handle(
                 _=>wire::write(&mut write,&json!({"ok":false})).await,
             }
         }
-        "prepare" => {
-            let _guard = running.try_lock().map_err(|_| Error::new(409,"Guest already running."))?;
-            if Path::new(INITIALIZED).exists() || Path::new("/home/node/.codex/auth.json").exists() {
-                return Err(Error::bad("Only a virgin VM may be prepared."));
-            }
-            let mut command = Command::new("/usr/local/bin/leo");
-            command.arg("guest-warm").env("HOME","/home/node").env("CODEX_HOME","/home/node/.codex")
-                .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true);
-            unsafe { command.pre_exec(|| {
-                if libc::setgroups(0,std::ptr::null()) != 0 || libc::setgid(1000) != 0 || libc::setuid(1000) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            }); }
-            let status = command.status().await?;
-            wire::write(&mut write,&json!({"ok":status.success()})).await
-        }
         "clock" => {
             let epoch = request["epochMs"].as_i64().filter(|v| *v > 0).ok_or_else(|| Error::bad("Invalid guest clock."))?;
             let time = libc::timespec { tv_sec: epoch / 1000, tv_nsec: (epoch % 1000) * 1_000_000 };
@@ -107,12 +107,13 @@ async fn handle(
         "status" => {
             wire::write(
                 &mut write,
-                &json!({"version":1,"binaryImports":true,"initialized":Path::new(INITIALIZED).exists()}),
+                &json!({"version":1,"binaryImports":true,"filesystemSnapshots":true,"initialized":Path::new(INITIALIZED).exists()}),
             )
             .await
         }
         "import" | "project-import" => {
             let project = request["op"] == "project-import";
+            let _project_guard = if project { Some(PROJECT_IMPORT_CONTROL.lock().await) } else { None };
             let target = Path::new(text(&request, "target"));
             if !target.is_absolute()
                 || target
@@ -121,8 +122,7 @@ async fn handle(
             {
                 return Err(Error::bad("Invalid guest import."));
             }
-            if project && tokio::fs::symlink_metadata(target).await.is_ok() {
-                remember_project(target, request["readOnly"] == true).await?;
+            if project && super::projects::reopen(target, request["readOnly"] == true).await? {
                 return wire::write(&mut write, &json!({"ok":true})).await;
             }
             let destination = target.to_owned();
@@ -134,9 +134,13 @@ async fn handle(
                 if staging.exists() {
                     tokio::fs::remove_dir_all(&staging).await?;
                 }
+                use std::os::unix::fs::DirBuilderExt;
+                std::fs::create_dir_all(staging.parent().unwrap())?;
+                std::fs::DirBuilder::new().mode(0o700).create(&staging)?;
                 wire::write(&mut write, &json!({"ready":true})).await?;
             }
-            let target = if project { staging.as_path() } else { target };
+            let content = staging.join("content");
+            let target = if project { content.as_path() } else { target };
             if request["replace"] == true && target.exists() {
                 tokio::fs::remove_dir_all(target).await?;
             }
@@ -201,9 +205,9 @@ async fn handle(
                     .await?;
             }
             if project {
-                // Only publish a complete extraction; interrupted transfers cannot overwrite work.
-                tokio::fs::rename(target, &destination).await?;
-                remember_project(&destination, request["readOnly"] == true).await?;
+                // Publish only complete data with its access policy already applied.
+                super::projects::publish(target, &destination, request["readOnly"] == true).await?;
+                if request["readOnly"] != true { tokio::fs::remove_dir(&staging).await?; }
                 Command::new("sync").status().await?;
             }
             wire::write(&mut write, &json!({"ok":true})).await
@@ -236,15 +240,9 @@ async fn handle(
                     }
                 }
             }
-            if Path::new("/var/lib/leo/projects").exists() {
-                let mut entries = tokio::fs::read_dir("/var/lib/leo/projects").await?;
-                while let Some(entry) = entries.next_entry().await? {
-                    let value: Value =
-                        serde_json::from_slice(&tokio::fs::read(entry.path()).await?)?;
-                    if value["readOnly"] == true {
-                        read_only(Path::new(text(&value, "path"))).await?;
-                    }
-                }
+            {
+                let _guard = PROJECT_IMPORT_CONTROL.lock().await;
+                super::projects::restore().await?;
             }
             let invocation = plan["command"]
                 .as_array()
@@ -331,46 +329,4 @@ async fn handle(
         }
         _ => Err(Error::bad("Unknown guest operation.")),
     }
-}
-
-async fn read_only(target: &Path) -> Result<()> {
-    let mounted = Command::new("mountpoint")
-        .arg("-q")
-        .arg(target)
-        .status()
-        .await?;
-    if !mounted.success()
-        && !Command::new("mount")
-            .arg("--bind")
-            .arg(target)
-            .arg(target)
-            .status()
-            .await?
-            .success()
-    {
-        return Err(Error::bad("Could not bind guest project."));
-    }
-    if !Command::new("mount")
-        .args(["-o", "remount,bind,ro"])
-        .arg(target)
-        .status()
-        .await?
-        .success()
-    {
-        return Err(Error::bad("Could not apply project read-only policy."));
-    }
-    Ok(())
-}
-async fn remember_project(target: &Path, restricted: bool) -> Result<()> {
-    let directory = Path::new("/var/lib/leo/projects");
-    tokio::fs::create_dir_all(directory).await?;
-    atomic_write(
-        &directory.join(crate::auth::hex_digest(&target.to_string_lossy())),
-        &serde_json::to_vec(&json!({"path":target,"readOnly":restricted}))?,
-    )
-    .await?;
-    if restricted {
-        read_only(target).await?;
-    }
-    Ok(())
 }

@@ -1,11 +1,20 @@
 import { z } from 'zod'
+import { LOCAL_NODE_ID } from './nodes'
 
 export const name = z.string().trim().min(1).max(100)
 export const id = z.string().uuid()
 // Codex exposes effort names as strings, so new catalog levels need no app release.
 export const reasoningEffort = z.string().max(40).regex(/^(?:[a-z][a-z0-9_-]*)?$/)
 export { MAIN_AGENT_ID } from './constants'
+export const resourceLimit = z.object({
+  cpu: z.number().int().min(1).max(4096),
+  memoryMiB: z.number().int().min(128).max(1073741824),
+  diskMiB: z.number().int().min(128).max(1099511627776),
+})
 export const accessPolicy = z.object({
+  nodes: z.array(id).max(100).nullable().default(() => [LOCAL_NODE_ID]),
+  // Largest resources the agent may request for one conversation; null means only node ceilings apply.
+  maxResources: resourceLimit.nullable().default(null),
   projects: z.array(id).max(100).nullable().default(null),
   skills: z.array(z.string().max(160)).max(100).nullable().default(null),
   mcps: z.array(id).max(100).nullable().default(null),
@@ -32,7 +41,11 @@ export const agentUpdate = z.object({
   reasoning: agentInput.shape.reasoning.removeDefault().optional(),
   instructions: agentInput.shape.instructions.removeDefault().optional(),
   timeoutMinutes: agentInput.shape.timeoutMinutes.removeDefault().optional(),
-  access: agentInput.shape.access.removeDefault().optional(),
+  access: accessPolicy.extend({
+    // A partial update from an older client must not restore local-runner access.
+    nodes: accessPolicy.shape.nodes.removeDefault().optional(),
+    maxResources: accessPolicy.shape.maxResources.removeDefault().optional(),
+  }).optional(),
 })
 export const projectInput = z.object({
   name,
@@ -88,6 +101,17 @@ export interface TaskOutcome {
   messageId?: string | null
 }
 export interface Run {
+  nodeId?: string | null
+  storage?: { mode: string, waitingFor?: string | null, dirtyBytes?: number, localBytes?: number, dirtySince?: number | null, freeBytes?: number, reserveBytes?: number }
+  nodeState?: string | null
+  pinnedNodeId?: string | null
+  preferredNodeId?: string | null
+  resources?: import('./nodes').NodeResources
+  capacityWaitUntil?: number | null
+  restoredAt?: number | null
+  movementError?: string | null
+  backup?: { id?: string, capturedAt?: number, status: string, error?: string, uploadedBytes?: number }
+
   outcome?: TaskOutcome | null
   chatExecution?: import('./chats').ChatExecution
   recoveryPending?: boolean

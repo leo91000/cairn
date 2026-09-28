@@ -26,15 +26,13 @@ export interface ChatAttachment {
   mediaType: string
   kind: 'image' | 'file'
 }
-export type ConversationLifecycle = 'active' | 'archiving' | 'archived' | 'restoring' | 'trash' | 'purging'
+export type ConversationLifecycle = 'active' | 'trash' | 'purging'
 export interface Chat {
   lifecycle?: ConversationLifecycle
   trashedAt?: number | null
   purgeAt?: number | null
   restoredAt?: number
   sessionRestartRequested?: boolean
-  archiveNotBefore?: number
-  storageClass?: 'STANDARD' | 'GLACIER'
   lifecycleError?: string | null
   pendingMessages?: number
   id: string

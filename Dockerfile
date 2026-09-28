@@ -24,6 +24,7 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     mkdir -p backend/src && printf 'fn main() {}\n' > backend/src/main.rs \
     && printf '' > backend/src/lib.rs && cargo build --locked --release --bin leo
 COPY backend ./backend
+COPY deploy/nodes ./deploy/nodes
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     touch backend/src/main.rs backend/src/lib.rs && \
     cargo build --locked --release --bin leo && cp target/release/leo /usr/local/bin/leo
@@ -92,7 +93,7 @@ COPY deploy/microvm/kernel.config /tmp/leo.config
 RUN make x86_64_defconfig && scripts/kconfig/merge_config.sh -m .config /tmp/leo.config \
     && scripts/config --disable USB --disable DRM --disable FB --disable SOUND --disable MEDIA_SUPPORT \
         --disable WLAN --disable WIRELESS --disable BT --disable HID --disable INPUT \
-        --disable SCSI --disable ATA --disable MD --disable MMC --disable FIREWIRE \
+        --disable SCSI --disable ATA --disable BLK_DEV_MD --disable MMC --disable FIREWIRE \
         --disable MODULES --disable DEBUG_INFO --disable DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT \
     && make olddefconfig \
     && for option in KVM KVM_INTEL KVM_AMD; do grep -qx "CONFIG_${option}=y" .config || exit 1; done \
@@ -113,7 +114,7 @@ RUN --mount=from=guest,target=/rootfs,ro truncate -s 8G /root.ext4 && mkfs.ext4 
 
 FROM runtime AS final
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends iptables e2fsprogs util-linux \
+RUN apt-get update && apt-get install -y --no-install-recommends iptables e2fsprogs util-linux fuse3 \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://github.com/firecracker-microvm/firecracker/releases/download/v1.17.0/firecracker-v1.17.0-x86_64.tgz -o /tmp/firecracker.tgz \
     && echo '06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558  /tmp/firecracker.tgz' | sha256sum -c - \
@@ -127,4 +128,5 @@ COPY --from=guest-kernel /kernel/COPYING /opt/leo-vm/KERNEL-COPYING
 COPY --from=guest-kernel /kernel/LICENSES /opt/leo-vm/kernel-licenses
 COPY --from=guest-disk /root.ext4.zst /opt/leo-vm/root.ext4.zst
 COPY --chmod=755 deploy/microvm/init deploy/microvm/docker deploy/microvm/install-docker /opt/leo-vm/
+COPY --chmod=755 deploy/nodes /opt/leo-node
 USER node

@@ -72,7 +72,6 @@ data class Chat(
     val restoredAt: Long? = null,
     val sessionRestartRequested: Boolean = false,
     val lifecycleError: String? = null,
-    val storageClass: String? = null,
 )
 
 @Serializable

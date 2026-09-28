@@ -2,4 +2,5 @@
 pub mod guest;
 pub mod host;
 pub mod pool;
+pub mod projects;
 pub mod wire;

@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import type { GithubRepository } from '../../shared/contracts'
+import type { ExecutionNode } from '../../shared/nodes'
 import { computed, ref } from 'vue'
 import { MAIN_AGENT_ID } from '../../shared/constants'
+import { DEFAULT_RESOURCES, LOCAL_NODE_ID } from '../../shared/nodes'
 import { api, notify, refresh, state } from '../api'
 import AgentAvatar from '../components/AgentAvatar.vue'
 import AgentPortraitEditor from '../components/AgentPortraitEditor.vue'
@@ -19,6 +21,7 @@ import { iconButton } from '../ui'
 const props = defineProps<{
   kind: 'agents' | 'projects'
 }>()
+const nodes = ref<ExecutionNode[]>([])
 const isAgent = computed(() => props.kind === 'agents')
 const items = computed(() => [...state[props.kind]].sort((a, b) => Number(b.id === MAIN_AGENT_ID) - Number(a.id === MAIN_AGENT_ID)))
 const taskCounts = computed(() => {
@@ -46,6 +49,29 @@ const deleting = ref<any>(null)
 const busy = ref(false)
 const error = ref('')
 const form = ref<any>({})
+const allNodes = computed({
+  get: () => form.value.access?.nodes === null,
+  set: (value: boolean) => {
+    form.value.access.nodes = value ? null : []
+  },
+})
+// The per-conversation limit is edited in GiB and stored in MiB.
+const limited = computed({
+  get: () => !!form.value.access?.maxResources,
+  set: (value: boolean) => {
+    form.value.access.maxResources = value ? { ...DEFAULT_RESOURCES } : null
+  },
+})
+function limitGiB(key: 'memoryMiB' | 'diskMiB') {
+  return computed({
+    get: () => form.value.access.maxResources[key] / 1024,
+    set: (value: number) => {
+      form.value.access.maxResources[key] = Math.round(value * 1024)
+    },
+  })
+}
+const limitMemoryGiB = limitGiB('memoryMiB')
+const limitDiskGiB = limitGiB('diskMiB')
 const projectMode = ref('local')
 const repository = ref('')
 function selectRepository(repo: GithubRepository) {
@@ -103,11 +129,20 @@ async function edit(item?: any) {
           reasoning: '',
           instructions: '',
           timeoutMinutes: 0,
-          access: { projects: null, skills: null, mcps: null, mcpTools: {}, github: true, sandbox: 'yolo' },
+          access: { nodes: [LOCAL_NODE_ID], maxResources: null, projects: null, skills: null, mcps: null, mcpTools: {}, github: true, sandbox: 'yolo' },
         }
       : { name: '', description: '', path: '', baseBranch: 'main', sourceMode: 'remote' }
-  if (isAgent.value)
+  if (isAgent.value) {
     form.value.provider ??= 'codex'
+    form.value.access.nodes ??= form.value.access.nodes === null ? null : [LOCAL_NODE_ID]
+    try {
+      nodes.value = await api<ExecutionNode[]>('/nodes')
+    }
+    catch (e) {
+      error.value = (e as Error).message
+      return
+    }
+  }
   if (!isAgent.value)
     form.value.sourceMode ??= 'remote'
   error.value = ''
@@ -289,6 +324,19 @@ async function remove() {
             <p v-else>
               The main agent has access to all registered projects, skills, and shared connections.
             </p>
+            <label class="checkbox"><input v-model="allNodes" type="checkbox">All nodes, including future nodes</label>
+            <fieldset v-if="!allNodes" class="access-choices">
+              <legend>Allowed nodes</legend>
+              <label class="checkbox"><input v-model="form.access.nodes" type="checkbox" :value="LOCAL_NODE_ID">Current runner</label>
+              <label v-for="node in nodes.filter(n => !n.local && !n.revoked)" :key="node.id" class="checkbox"><input v-model="form.access.nodes" type="checkbox" :value="node.id">{{ node.name }}</label>
+            </fieldset>
+            <label class="checkbox"><input v-model="limited" type="checkbox">Limit the resources this agent can request per conversation</label>
+            <fieldset v-if="limited" class="access-choices">
+              <legend>Largest conversation</legend>
+              <label>CPU<input v-model.number="form.access.maxResources.cpu" type="number" min="1" required></label>
+              <label>RAM (GiB)<input v-model.number="limitMemoryGiB" type="number" min="0.125" step="any" required></label>
+              <label>Disk (GiB)<input v-model.number="limitDiskGiB" type="number" min="0.125" step="any" required></label>
+            </fieldset>
             <VirtualSelect v-model="form.access.sandbox" label="Execution mode" :options="sandboxOptions" :icon="ShieldCheck" />
             <p class="muted text-muted">
               YOLO is the default. Every agent runs in a private VM. Sandboxed runs never bypass denied operations or wait for unattended approvals.

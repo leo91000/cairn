@@ -142,7 +142,7 @@ jobs:
           profile: pixel_6
           disable-animations: false
           script: |
-            cd android && ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=dev.leo.manager.ui.ModelPickerDeviceTest,dev.leo.manager.ui.AccountsDeviceTest,dev.leo.manager.ui.ModelCatalogDeviceTest,dev.leo.manager.ui.ChatProviderDeviceTest,dev.leo.manager.ui.SkillMentionDeviceTest,dev.leo.manager.ui.ConversationLifecycleDeviceTest,dev.leo.manager.ui.ImagePasteDeviceTest,dev.leo.manager.ui.QueueStripDeviceTest,dev.leo.manager.ui.MissionBackDeviceTest --no-daemon
+            cd android && ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=dev.leo.manager.ui.ModelPickerDeviceTest,dev.leo.manager.ui.AccountsDeviceTest,dev.leo.manager.ui.ModelCatalogDeviceTest,dev.leo.manager.ui.ChatProviderDeviceTest,dev.leo.manager.ui.SkillMentionDeviceTest,dev.leo.manager.ui.ConversationLifecycleDeviceTest,dev.leo.manager.ui.ImagePasteDeviceTest,dev.leo.manager.ui.QueueStripDeviceTest,dev.leo.manager.ui.NodePlacementDeviceTest,dev.leo.manager.ui.MissionBackDeviceTest --no-daemon
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:

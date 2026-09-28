@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import { execFileSync } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
+import { prepareStorageOrigin, storageSmoke } from './runner-storage-smoke.mjs'
 
 async function main() {
   const image = process.argv[2] || 'leo-firecracker:dev'
@@ -106,6 +107,13 @@ if(mode==='cancel'||mode==='crash') {
   fs.writeFileSync(root+'/workspace/interrupted','saved before interruption');
   execFileSync('sync');
   console.log('probe.pause');
+  if(mode==='cancel') {
+    const deadline=Date.now()+30000;
+    while(!fs.readFileSync('/run/leo-chat/messages.json','utf8').includes('capture-update')){assert.ok(Date.now()<deadline,'capture update request');await new Promise(r=>setTimeout(r,100));}
+    fs.writeFileSync(root+'/workspace/capture-update',Buffer.alloc(4*1024*1024,91));
+    execFileSync('sync');
+    console.log('probe.updated');
+  }
   await new Promise(()=>{setInterval(()=>{},1000)});
 }
 if(mode==='recover')assert.equal(fs.readFileSync(root+'/workspace/interrupted','utf8'),'saved before interruption');
@@ -123,7 +131,7 @@ console.log('probe.done');
     await new Promise(resolve => auth.listen(path.join(source, 'home/.codex/leo-auth.sock'), resolve))
     claudeAuth = createServer(socket => socket.once('data', () => socket.end(`${JSON.stringify({ claudeAiOauth: { accessToken: 'fixture-claude-access', expiresAt: Date.now() + 3600000 } })}\n`)))
     await new Promise(resolve => claudeAuth.listen(path.join(source, 'home/.claude/leo-auth.sock'), resolve))
-    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'].flatMap(cap => ['--cap-add', cap]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '6g', '--cpus', '3', '-e', 'CONCURRENCY=5', '--entrypoint', '/usr/local/bin/leo', image, 'runner-broker')
+    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'].flatMap(cap => ['--cap-add', cap]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '6g', '--cpus', '3', '-e', 'CONCURRENCY=5', '--entrypoint', '/usr/local/bin/leo', image, 'runner-broker')
     docker('network', 'connect', '--ip', '203.0.113.2', networkName, name)
     // First prove every listener is reachable outside the guest firewall.
     process.stdout.write(docker('exec', name, '/usr/local/bin/node', `${runRoot}/workspace/network-probe.mjs`, 'control', publicPeer, privatePeer))
@@ -136,14 +144,15 @@ console.log('probe.done');
       }
     }, 10000)}`
     await until(() => fetch(`${url}/health`).then(r => r.ok).catch(() => false))
-    await until(async () => (await (await api('/health')).json()).pool.ready === 1)
-    // The prepared VM is really suspended long enough to expose guest clock drift.
-    await setTimeout(31000)
+    const storageFixture = await prepareStorageOrigin({ root, docker, name, api })
+    const { storage } = storageFixture
     for (const mode of ['first', 'resume', 'cancel', 'crash', 'recover', 'managed-claude', 'codex-return']) {
       const id = randomUUID()
       const plan = {
         id,
         runId,
+        storage,
+        resources: { cpu: 2, memoryMiB: 4096, diskMiB: 1024 },
         expires: Date.now() + 300000,
         sandbox: 'yolo',
         cwd: `${runRoot}/workspace`,
@@ -205,11 +214,42 @@ console.log('probe.done');
                 assert.deepEqual(opened, { ok: true, reused: true })
                 await writeFile(path.join(source, 'chat-input/messages.json'), '[{"text":"reopened"}]')
               }
-              if (text.includes('probe.pause') && mode === 'cancel')
+              if (data.includes('probe.pause') && mode === 'cancel') {
+                const captureStarted = Date.now()
+                const point = await (await api(`/runs/${id}/snapshot`, 'POST')).json()
+                const firstCaptureMs = Date.now() - captureStarted
+                assert.ok(point.manifest.size > 0)
+                assert.equal(point.manifest.onDemand, true)
+                const block = point.manifest.blocks.find(block => block.hash)
+                assert.ok(block, 'Active capture must contain durable guest data')
+                const bytes = Buffer.from(await (await api(`/snapshots/${point.id}/${block.hash}`)).arrayBuffer())
+                assert.equal(createHash('sha256').update(bytes).digest('hex'), block.hash)
+                // New writes enter the next journal generation; the sealed one stays readable.
+                await writeFile(path.join(source, 'chat-input/messages.json'), '[{"text":"capture-update"}]')
+                await until(() => docker('exec', name, 'cat', `/runner-state/${id}.log`).split('\n').filter(Boolean).some(line => Buffer.from(JSON.parse(line).data || '', 'base64').toString().includes('probe.updated')))
+                const original = Buffer.from(await (await api(`/snapshots/${point.id}/${block.hash}`)).arrayBuffer())
+                assert.deepEqual(original, bytes, 'The sealed capture stays immutable while the guest writes')
+                // Starting the next capture retires the previous capture handle.
+                const nextStarted = Date.now()
+                const next = await (await api(`/runs/${id}/snapshot`, 'POST')).json()
+                const nextCaptureMs = Date.now() - nextStarted
+                assert.equal(next.manifest.onDemand, true)
+                assert.ok(next.manifest.generation > point.manifest.generation, 'New writes advance the journal generation')
+                assert.equal(next.manifest.blocks.length, point.manifest.blocks.length)
+                const changed = next.manifest.blocks.find((block, index) => block.hash && block.hash !== point.manifest.blocks[index].hash)
+                assert.ok(changed, 'The next generation includes guest writes')
+                const written = Buffer.from(await (await api(`/snapshots/${next.id}/${changed.hash}`)).arrayBuffer())
+                assert.equal(createHash('sha256').update(written).digest('hex'), changed.hash)
+                docker('exec', name, 'test', '!', '-e', `/runner-state/disks/${runId}/data.ext4`)
+                await api(`/snapshots/${next.id}/discard`, 'DELETE')
+                process.stdout.write(`${JSON.stringify({ mode: 'active-capture', firstCaptureMs, nextCaptureMs, generation: next.manifest.generation, status: 'passed' })}\n`)
                 await api(`/runs/${id}`, 'DELETE')
+              }
               if (text.includes('probe.pause') && mode === 'crash') {
                 docker('kill', '--signal', 'KILL', name)
                 docker('start', name)
+                // The test origin is an exec process, so container restart killed it too.
+                docker('exec', '-d', name, '/usr/local/bin/node', '/data/storage-fixture/server.mjs')
                 url = `http://${await until(() => {
                   try {
                     return docker('port', name, '4311/tcp')
@@ -230,12 +270,15 @@ console.log('probe.done');
         return text
       })()
       const waiting = async () => (await api(`/runs/${id}/wait`, 'POST')).json()
-      let status = await waiting().catch((error) => {
-        if (mode !== 'crash')
-          throw error
-        return { StatusCode: 143 }
-      })
-      const text = await output
+      const [initialStatus, text] = await Promise.all([
+        waiting().catch((error) => {
+          if (mode !== 'crash')
+            throw error
+          return { StatusCode: 143 }
+        }),
+        output,
+      ])
+      let status = initialStatus
       if (mode === 'crash')
         status = await waiting()
       assert.equal(status.StatusCode, ['cancel', 'crash'].includes(mode) ? 143 : 0, text)
@@ -249,19 +292,6 @@ console.log('probe.done');
       }
       assert.equal(await readFile(path.join(source, 'workspace/preserved'), 'utf8').catch(() => null), null, 'guest edits must not affect host checkout')
       await api(`/runs/${id}`, 'DELETE')
-      if (mode === 'first') {
-        const transfer = randomUUID()
-        const staging = path.join(root, 'data/archive-transfers', transfer)
-        await mkdir(staging, { recursive: true, mode: 0o700 })
-        await api(`/disks/${runId}/export`, 'POST', { transfer })
-        assert.ok((await stat(path.join(staging, 'workspace.tar.gz'))).size > 0)
-        await api(`/disks/${runId}/delete`, 'POST', {})
-        docker('exec', name, 'test', '!', '-e', `/runner-state/disks/${runId}/data.ext4`)
-        await api(`/disks/${runId}/import`, 'POST', { transfer })
-        docker('exec', name, 'test', '-s', `/runner-state/disks/${runId}/data.ext4`)
-        await rm(staging, { recursive: true })
-        // The next real guest must find dirty files, session state and cached Docker images.
-      }
       process.stdout.write(`${JSON.stringify({ mode, durationMs: Date.now() - start, status: 'passed' })}\n`)
     }
     // Independent disks must run concurrently and enforce each guest policy.
@@ -296,7 +326,7 @@ console.log('probe.done');
         },100);
 
       `
-      const plan = { id, runId, expires: Date.now() + 60000, sandbox, cwd: workspace, command: ['/usr/local/bin/node', '-e', code], imports: [{ source: workspace, target: workspace, readOnly: sandbox === 'read-only' }] }
+      const plan = { id, runId, storage, resources: { cpu: 1, memoryMiB: 512, diskMiB: 512 }, expires: Date.now() + 60000, sandbox, cwd: workspace, command: ['/usr/local/bin/node', '-e', code], imports: [{ source: workspace, target: workspace, readOnly: sandbox === 'read-only' }] }
       await writeFile(path.join(root, 'data/runner-plans', `${id}.json`), JSON.stringify(plan))
       await api(`/runs/${id}`, 'POST')
       probes.push({ id, runId, sandbox, directory, lazyId, lazy })
@@ -342,14 +372,8 @@ console.log('probe.done');
     const status = await (await api(`/runs/${resumedId}/wait`, 'POST')).json()
     assert.equal(status.StatusCode, 0, 'lazy read-only policy survives VM restart')
     process.stdout.write(`${JSON.stringify({ mode: 'read-only-resume', status: 'passed' })}\n`)
-    // Prepared VMs share the configured five slots with active work. A sixth run cannot enter.
-    await until(async () => {
-      const health = await (await api('/health')).json()
-      return health.activeRuns === 0 && health.pool.ready === 1
-    })
-    // Kill only this disposable controller's anonymous spare. Admission must fall
-    // back before executing the user command, without leaking the occupied slot.
-    docker('exec', name, 'pkill', '-KILL', '-x', 'firecracker')
+    // Five running VMs occupy the configured slots. A sixth cannot enter.
+    await until(async () => (await (await api('/health')).json()).activeRuns === 0)
     const held = []
     for (let index = 0; index < 6; index++) {
       const id = randomUUID()
@@ -357,7 +381,7 @@ console.log('probe.done');
       const cwd = `/data/runs/${runId}/workspace`
       const directory = path.join(root, 'data/runs', runId, 'workspace')
       await mkdir(directory, { recursive: true })
-      const plan = { id, runId, expires: Date.now() + 60000, sandbox: 'yolo', cwd, command: ['/usr/local/bin/node', '-e', 'console.log("slot.ready");setInterval(()=>{},1000)'], imports: [{ source: cwd, target: cwd }] }
+      const plan = { id, runId, storage, resources: { cpu: 1, memoryMiB: 512, diskMiB: 512 }, expires: Date.now() + 60000, sandbox: 'yolo', cwd, command: ['/usr/local/bin/node', '-e', 'console.log("slot.ready");setInterval(()=>{},1000)'], imports: [{ source: cwd, target: cwd }] }
       await writeFile(path.join(root, 'data/runner-plans', `${id}.json`), JSON.stringify(plan))
       const response = await fetch(`${url}/runs/${id}`, { method: 'POST', headers })
       assert.equal(response.status, index < 5 ? 200 : 503)
@@ -385,15 +409,16 @@ console.log('probe.done');
     await Promise.all(held.map(id => api(`/runs/${id}`, 'DELETE')))
     await until(async () => {
       const health = await (await api('/health')).json()
-      return health.activeRuns === 0 && health.pool.ready === 1 && health.pool.occupied === 1
+      return health.activeRuns === 0 && health.pool.ready === 0 && health.pool.occupied === 0
     })
     process.stdout.write(`${JSON.stringify({ mode: 'pool-capacity-cancel-refill', capacity: 5, status: 'passed' })}\n`)
+    await storageSmoke({ root, docker, name, api, until, storageFixture })
   }
   catch (error) {
     console.error(error)
     try {
       console.error(docker('logs', name))
-      console.error(docker('exec', name, 'sh', '-c', 'tail -60 /runner-state/*.boot.log'))
+      console.error(docker('exec', name, 'sh', '-c', 'tail -n 60 /runner-state/*.boot.log'))
     }
     catch {
     }

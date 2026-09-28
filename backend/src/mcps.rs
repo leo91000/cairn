@@ -352,7 +352,7 @@ impl Mcps {
         let workspace = !s.config.runner_url.is_empty();
         if workspace {
             claude_mcps["mcpServers"]["leo_workspace"] = json!({"type":"http","url":format!("{}/mcp-workspace",s.config.public_url),"headers":{"Authorization":format!("Bearer {token}")}});
-            args.extend(["-c".into(),format!("mcp_servers.leo_workspace={}",toml(&json!({"url":format!("{}/mcp-workspace",s.config.public_url),"bearer_token_env_var":"LEO_MCP_RUN_TOKEN","tool_timeout_sec":600}))) ]);
+            args.extend(["-c".into(),format!("mcp_servers.leo_workspace={}",toml(&json!({"url":format!("{}/mcp-workspace",s.config.public_url),"bearer_token_env_var":"LEO_MCP_RUN_TOKEN","tool_timeout_sec":3660}))) ]);
         }
         let mut env = json!({});
         if workspace || !servers.as_object().unwrap().is_empty() {

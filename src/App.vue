@@ -32,7 +32,7 @@ provide(workspaceActionsKey, {
 })
 
 // The three places of « Signal »: the Fil (home and conversations), Missions and the Atelier.
-const atelierPaths = ['/atelier', '/agents', '/projects', '/skills', '/mcps', '/connections', '/settings', '/runs']
+const atelierPaths = ['/atelier', '/agents', '/projects', '/skills', '/mcps', '/connections', '/nodes', '/settings', '/runs']
 const atelierSections = [
   { to: '/agents', label: 'Agents' },
   { to: '/projects', label: 'Projects' },
@@ -40,6 +40,7 @@ const atelierSections = [
   { to: '/mcps', label: 'MCPs' },
   { to: '/connections', label: 'Connections' },
   { to: '/runs', label: 'Runs' },
+  { to: '/nodes', label: 'Nodes' },
   { to: '/settings', label: 'Settings' },
 ]
 const atelierSection = computed(() => atelierSections.find(item => route.path === item.to))

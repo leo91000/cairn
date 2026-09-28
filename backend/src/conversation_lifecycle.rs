@@ -1,4 +1,4 @@
-//! Conversation retention is independent from execution status and task archival.
+//! Conversation deletion is independent from execution status and task archival.
 use crate::{
     config::now,
     error::{Error, Result, required},
@@ -7,33 +7,13 @@ use crate::{
 };
 use serde_json::{Value, json};
 
-pub struct StorageLock(std::fs::File);
-
-impl Drop for StorageLock {
-    fn drop(&mut self) {
-        use std::os::fd::AsRawFd;
-        // A concurrent subprocess can inherit the open file description until
-        // exec. Closing our descriptor alone would leave that child's lock held.
-        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
-    }
-}
+pub type StorageLock = crate::file_lock::Guard;
 
 pub fn storage_lock(directory: &std::path::Path) -> Result<StorageLock> {
-    use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(directory.join("conversation-storage.lock"))?;
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err(Error::new(
-            409,
-            "A conversation storage operation is in progress. Retry shortly.",
-        ));
-    }
-    Ok(StorageLock(lock))
+    crate::file_lock::exclusive(
+        &directory.join("conversation-storage.lock"),
+        "A conversation storage operation is in progress. Retry shortly.",
+    )
 }
 
 pub const DAY: i64 = 86_400_000;
@@ -65,7 +45,6 @@ pub fn require_active_run(db: &crate::store::Db<'_>, run: &str) -> Result<()> {
 pub fn in_view(chat: &Value, view: &str) -> bool {
     match view {
         "active" => state(chat) == "active",
-        "archives" => matches!(state(chat), "archiving" | "archived" | "restoring"),
         "trash" => matches!(state(chat), "trash" | "purging"),
         _ => false,
     }
@@ -73,8 +52,8 @@ pub fn in_view(chat: &Value, view: &str) -> bool {
 
 impl Service {
     pub async fn chat_list_view(&self, view: &str) -> Result<Vec<Value>> {
-        if !["active", "archives", "trash"].contains(&view) {
-            return Err(Error::bad("Choose active, archives or trash."));
+        if !["active", "trash"].contains(&view) {
+            return Err(Error::bad("Choose active or trash."));
         }
         let view = view.to_owned();
         self.store
@@ -155,19 +134,13 @@ impl Service {
         let _process_lock = storage_lock(&self.config.data_dir)?;
         crate::validation::uuid(id)?;
         let _guard = self
-            .retention_lock
+            .conversation_storage_lock
             .try_lock()
             .map_err(|_| Error::new(409, "A storage operation is in progress. Retry shortly."))?;
         let id = id.to_owned();
         self.store
             .transaction(move |db| {
                 let mut chat = required(db.get("chats", &id)?, "Chat not found")?;
-                if ["archived", "restoring"].contains(&state(&chat)) {
-                    chat["lifecycle"] = "restoring".into();
-                    chat["lifecycleError"] = Value::Null;
-                    chat["retryAfter"] = Value::Null;
-                    return db.put("chats", &chat);
-                }
                 if state(&chat) != "trash" {
                     return Err(Error::new(409, "This conversation is not in the trash."));
                 }
@@ -180,19 +153,7 @@ impl Service {
                 {
                     return Err(Error::new(409, "Wait for the agent to finish stopping."));
                 }
-                chat["lifecycle"] = if text(&chat, "previousLifecycle") == "archived"
-                    || (matches!(text(&chat, "previousLifecycle"), "archiving" | "restoring")
-                        && chat["archivePhase"] == "verified")
-                {
-                    "archived"
-                } else {
-                    "active"
-                }
-                .into();
-                if state(&chat) == "active" {
-                    chat["archiveNotBefore"] =
-                        (now() + policy(db)?["inactivityDays"].as_i64().unwrap_or(30) * DAY).into();
-                }
+                chat["lifecycle"] = "active".into();
                 chat["trashedAt"] = Value::Null;
                 chat["purgeAt"] = Value::Null;
                 chat["previousLifecycle"] = Value::Null;
@@ -205,140 +166,16 @@ impl Service {
     }
 }
 
-fn policy(db: &crate::store::Db<'_>) -> Result<Value> {
-    Ok(db
-        .kv("conversation-retention")?
-        .unwrap_or_else(|| json!({"enabled":false,"inactivityDays":30,"coldAfterDays":90})))
-}
-
-fn eligible(
-    db: &crate::store::Db<'_>,
-    chat: &Value,
-    days: i64,
-    at: i64,
-    runner: bool,
-) -> Result<bool> {
-    if state(chat) != "active" || chat["archiveNotBefore"].as_i64().unwrap_or(0) > at {
-        return Ok(false);
-    }
-    let run = db.run(text(chat, "runId"))?.unwrap_or_default();
-    if ["queued", "running"].contains(&text(&run, "status")) {
-        return Ok(false);
-    }
-    if !runner
-        && run["workspaces"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|w| ["direct", "worktree"].contains(&text(w, "kind")))
-    {
-        return Ok(false);
-    }
-    let last = chat["lastActivityAt"]
-        .as_i64()
-        .or_else(|| chat["updatedAt"].as_i64())
-        .unwrap_or(at)
-        .max(run["finishedAt"].as_i64().unwrap_or(0));
-    if last > at - days * DAY {
-        return Ok(false);
-    }
-    if db
-        .messages(text(chat, "id"))?
-        .iter()
-        .any(|m| ["queued", "sending"].contains(&text(m, "status")))
-    {
-        return Ok(false);
-    }
-    Ok(!db
-        .keys(&format!("chat-question:{}:", text(chat, "id")))?
-        .iter()
-        .any(|(_, q)| ["pending", "answering"].contains(&text(q, "status"))))
-}
-
 impl Service {
-    pub async fn retention_policy(&self) -> Result<Value> {
-        self.retention_preview(None).await
-    }
-    pub async fn retention_preview(&self, days: Option<i64>) -> Result<Value> {
-        let configured = crate::archive_storage::Storage::configured(self).is_ok();
-        let runner = !self.config.runner_url.is_empty();
-        self.store
-            .read(move |db| {
-                let mut value = policy(db)?;
-                if let Some(days) = days {
-                    value["inactivityDays"] = days.into();
-                }
-                let mut count = 0;
-                for chat in db.list("chats")? {
-                    if eligible(
-                        db,
-                        &chat,
-                        value["inactivityDays"].as_i64().unwrap_or(30),
-                        now(),
-                        runner,
-                    )? {
-                        count += 1;
-                    }
-                }
-                value["eligible"] = count.into();
-                value["configured"] = configured.into();
-                Ok(value)
-            })
-            .await
-    }
-    pub async fn retention_save(&self, input: Value) -> Result<Value> {
-        let enabled = input["enabled"]
-            .as_bool()
-            .ok_or_else(|| Error::bad("enabled must be a boolean."))?;
-        let days = input["inactivityDays"]
-            .as_i64()
-            .filter(|n| (1..=3650).contains(n))
-            .ok_or_else(|| Error::bad("Inactivity must be between 1 and 3650 days."))?;
-        let cold = input["coldAfterDays"]
-            .as_i64()
-            .filter(|n| (1..=3650).contains(n))
-            .ok_or_else(|| Error::bad("S3 retention must be between 1 and 3650 days."))?;
-        if enabled {
-            crate::archive_storage::Storage::configured(self)?
-                .validate()
-                .await?;
-        }
-        if enabled && input["confirmExisting"] != true {
-            return Err(Error::new(
-                409,
-                "Review the eligible conversation count and confirm activation.",
-            ));
-        }
-        self.store
-            .set(
-                "conversation-retention",
-                json!({"enabled":enabled,"inactivityDays":days,"coldAfterDays":cold}),
-                None,
-            )
-            .await?;
-        self.retention_policy().await
-    }
-}
-
-impl Service {
-    pub async fn retention_tick(&self) -> Result<()> {
+    pub async fn cleanup_conversations(&self) -> Result<()> {
         let _process_lock = match storage_lock(&self.config.data_dir) {
             Ok(lock) => lock,
             Err(error) if error.status == 409 => return Ok(()),
             Err(error) => return Err(error),
         };
-        let Ok(_guard) = self.retention_lock.try_lock() else {
+        let Ok(_guard) = self.conversation_storage_lock.try_lock() else {
             return Ok(());
         };
-        let settings = self.retention_policy().await?;
-        let days = settings["inactivityDays"].as_i64().unwrap_or(30);
-        let runner = !self.config.runner_url.is_empty();
-        let cold = settings["coldAfterDays"].as_i64().unwrap_or(90);
-        // Clean abandoned transfer directories before retrying durable jobs.
-        let transfers = self.config.data_dir.join("archive-transfers");
-        if transfers.exists() {
-            tokio::fs::remove_dir_all(&transfers).await?;
-        }
         let mut chats = self.store.list("chats").await?;
         chats.sort_by_key(|chat| chat["retryAfter"].as_i64().unwrap_or(0));
         for chat in chats {
@@ -367,75 +204,7 @@ impl Service {
                         })
                         .await?;
                     if let Some(chat) = purging {
-                        crate::conversation_archive::purge(self, chat).await
-                    } else {
-                        continue;
-                    }
-                }
-                "restoring" => crate::conversation_archive::restore(self, chat, days).await,
-                "archiving" => crate::conversation_archive::archive(self, chat).await,
-                "archived"
-                    if chat["storageClass"] != "GLACIER"
-                        && chat["archivedAt"].as_i64().unwrap_or(now()) + cold * DAY <= now()
-                        && settings["enabled"] == true =>
-                {
-                    let result = async {
-                        let storage = crate::conversation_archive::storage(self, &chat).await?;
-                        storage.cold(text(&chat, "archiveKey")).await
-                    }
-                    .await;
-                    if result.is_ok() {
-                        let cid = id.clone();
-                        self.store
-                            .transaction(move |db| {
-                                let mut current =
-                                    required(db.get("chats", &cid)?, "Chat not found")?;
-                                current["storageClass"] = "GLACIER".into();
-                                db.put("chats", &current)?;
-                                Ok(())
-                            })
-                            .await?;
-                    }
-                    result
-                }
-                "active" if !text(&chat, "archiveKey").is_empty() => {
-                    crate::conversation_archive::retire(self, chat).await
-                }
-                "active" if settings["enabled"] == true => {
-                    let cid = id.clone();
-                    let bucket = crate::archive_storage::Storage::configured(self)?.bucket;
-                    let selected = self
-                        .store
-                        .transaction(move |db| {
-                            let mut current = required(db.get("chats", &cid)?, "Chat not found")?;
-                            if !eligible(db, &current, days, now(), runner)? {
-                                return Ok(None);
-                            }
-                            db.set(
-                                "conversation-cache-revision",
-                                &crate::config::id().into(),
-                                None,
-                            )?;
-                            current["agentName"] = db
-                                .get("agents", text(&current, "agentId"))?
-                                .map(|a| a["name"].clone())
-                                .unwrap_or("Deleted agent".into());
-                            current["projectName"] = db
-                                .get("projects", text(&current, "projectId"))?
-                                .map(|p| p["name"].clone())
-                                .unwrap_or(Value::Null);
-                            current["lifecycle"] = "archiving".into();
-                            current["archiveKey"] =
-                                format!("leo-conversations/{cid}/{}.enc", crate::config::id())
-                                    .into();
-                            current["archiveBucket"] = bucket.into();
-                            current["archivePhase"] = "upload".into();
-                            db.put("chats", &current)?;
-                            Ok(Some(current))
-                        })
-                        .await?;
-                    if let Some(chat) = selected {
-                        crate::conversation_archive::archive(self, chat).await
+                        crate::conversation_deletion::purge(self, chat).await
                     } else {
                         continue;
                     }

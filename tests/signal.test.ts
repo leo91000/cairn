@@ -34,7 +34,7 @@ describe('the Fil', () => {
       chat('failed', { status: 'failed', updatedAt: 4 }),
       chat('paused', { status: 'running', paused: true, updatedAt: 6 }),
       chat('queued', { status: 'queued', updatedAt: 7 }),
-      chat('archived', { status: 'failed', lifecycle: 'archived' }),
+      chat('deleted', { status: 'failed', lifecycle: 'trash' }),
     ], [], [])
     expect(fil.forYou.map(item => [item.title, item.kind])).toEqual([['failed', 'failed'], ['question', 'question']])
     expect(fil.live.map(item => [item.title, item.kind])).toEqual([['queued', 'queued'], ['working', 'running']])

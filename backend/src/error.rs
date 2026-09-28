@@ -4,7 +4,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde_json::json;
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Error {
     pub status: u16,
     pub message: String,

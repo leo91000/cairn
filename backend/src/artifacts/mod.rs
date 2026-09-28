@@ -65,7 +65,10 @@ impl Artifacts {
         let credential = crate::execution::secret(&s.config.data_dir, "runner-secret").await?;
         let response = s
             .http
-            .post(format!("{}/runs/{attempt}/artifact", s.config.runner_url))
+            .post(format!(
+                "{}/runs/{attempt}/artifact",
+                crate::nodes::transport::url(s, text(&run, "id")).await?
+            ))
             .bearer_auth(credential)
             .json(&json!({"runId":run_id,"path":path}))
             .timeout(Duration::from_secs(300))

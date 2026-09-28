@@ -297,6 +297,7 @@ fn send(
         db.get("agents", text(&chat, "agentId"))?,
         "This agent is no longer available.",
     )?;
+    crate::nodes::require_node(&agent)?;
     task_projects(&agent, &chat, &db.list("projects")?)?;
     if db
         .run(text(&chat, "runId"))?

@@ -14,6 +14,9 @@ const val MAIN_AGENT_ID = "00000000-0000-4000-8000-000000000001"
 
 @Serializable
 data class AccessPolicy(
+    val nodes: List<String>? = listOf(LOCAL_NODE_ID),
+    /** Largest resources the agent may request per conversation; null leaves only node ceilings. */
+    val maxResources: NodeResources? = null,
     val projects: List<String>? = null,
     val skills: List<String>? = null,
     val mcps: List<String>? = null,
@@ -125,6 +128,15 @@ data class Run(
     val outcome: TaskOutcome? = null,
     val chatExecution: ChatExecution? = null,
     val error: String? = null,
+    val nodeId: String? = null,
+    val nodeState: String? = null,
+    val resources: NodeResources? = null,
+    val pinnedNodeId: String? = null,
+    val preferredNodeId: String? = null,
+    val capacityWaitUntil: Long? = null,
+    val restoredAt: Long? = null,
+    val movementError: String? = null,
+    val backup: NodeBackup? = null,
 ) {
     val active
         get() = status == "running" || status == "queued"

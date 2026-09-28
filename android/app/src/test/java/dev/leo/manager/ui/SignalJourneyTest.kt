@@ -264,6 +264,6 @@ class SignalJourneyTest {
         capture("atelier-light")
         compose.onNodeWithText("Journal des exécutions").performScrollTo().performClick()
         waitText("Journal")
-        assertTrue(calls.any { it.second.startsWith("/api/runs?limit=30") })
+        waitCall("GET", "/api/runs?limit=30")
     }
 }

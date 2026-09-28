@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { MAIN_AGENT_ID } from '../shared/contracts.ts'
+import { LOCAL_NODE_ID } from '../shared/nodes.ts'
 import { fixture } from './helpers.ts'
 import { prepareExecution } from './legacy/server/execution.ts'
 import { isolated } from './legacy/server/policy.ts'
@@ -18,7 +19,7 @@ describe('agent access and task inheritance', () => {
   })
   it('creates a default main agent and allows project-free tasks', async () => {
     const main = ctx.service.store.get('agents', MAIN_AGENT_ID)!
-    expect(main.access).toEqual({ projects: null, skills: null, mcps: null, mcpTools: {}, github: true, sandbox: 'yolo' })
+    expect(main.access).toEqual({ nodes: [LOCAL_NODE_ID], maxResources: null, projects: null, skills: null, mcps: null, mcpTools: {}, github: true, sandbox: 'yolo' })
     expect(() => ctx.service.remove('agents', main.id)).toThrow(/cannot be removed/)
     const task = ctx.service.task({ name: 'Cross-project review', prompt: 'Review projects', agentId: main.id, worktree: false })
     expect(task.projectId).toBeNull()

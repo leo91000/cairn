@@ -12,7 +12,7 @@ const props = defineProps<{ chats: ChatView[], selected?: string, anchor?: HTMLE
 const emit = defineEmits<{ close: [], create: [] }>()
 const dialog = ref<HTMLDialogElement>()
 const query = ref('')
-const view = ref<'active' | 'archives' | 'trash'>('active')
+const view = ref<'active' | 'trash'>('active')
 const other = ref<ChatView[]>([])
 const loading = ref(false)
 const error = ref('')
@@ -121,9 +121,6 @@ function time(timestamp: number) {
           <select v-model="view" aria-label="Conversation view" class="w-auto! border-0! bg-transparent! py-1! text-xs! text-muted">
             <option value="active">
               Active conversations
-            </option>
-            <option value="archives">
-              Archives
             </option>
             <option value="trash">
               Trash

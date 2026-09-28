@@ -14,6 +14,7 @@ pub mod connections;
 pub mod conversation_lifecycle;
 pub mod error;
 pub mod execution;
+pub mod file_lock;
 pub mod http;
 pub mod mcp_client;
 pub mod mcp_oauth;
@@ -22,6 +23,7 @@ pub mod mcps;
 pub mod microvm;
 pub mod models;
 pub mod network;
+pub mod nodes;
 pub mod notifications;
 pub mod process;
 pub mod provider;
@@ -53,5 +55,7 @@ pub mod claude_process;
 
 pub mod github_projects;
 
-pub mod archive_storage;
-pub mod conversation_archive;
+pub mod conversation_deletion;
+pub mod object_storage;
+
+pub mod storage;

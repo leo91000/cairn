@@ -12,6 +12,15 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+/// Explicit access to remote nodes uses private VMs even on a control-only master.
+pub fn uses_vm(run: &Value, config: &Config) -> bool {
+    let access = policy(&run["snapshot"]["agent"]);
+    !config.runner_url.is_empty()
+        || access["nodes"].is_null()
+        || access["nodes"]
+            .as_array()
+            .is_some_and(|nodes| nodes.iter().any(|node| node != crate::nodes::LOCAL_NODE_ID))
+}
 pub async fn secret(directory: &Path, name: &str) -> Result<String> {
     use tokio::io::AsyncWriteExt;
     let file = directory.join(name);
@@ -206,7 +215,7 @@ async fn prepare_project(
     single: bool,
     generation: Option<&str>,
 ) -> Result<Value> {
-    let microvm = !config.runner_url.is_empty();
+    let microvm = uses_vm(run, config);
     let is_isolated = microvm || isolated(&run["snapshot"]["agent"]);
     let source = workspace(Path::new(text(project, "path")), &config.workspace_roots).await?;
     if path(&source)? != text(project, "path") {
@@ -322,10 +331,10 @@ pub async fn prepare(
     generation: Option<&str>,
 ) -> Result<Value> {
     let directory = config.data_dir.join("runs").join(text(run, "id"));
-    let microvm = !config.runner_url.is_empty();
+    let microvm = uses_vm(run, config);
     let is_isolated = microvm || isolated(&run["snapshot"]["agent"]);
     let access = policy(&run["snapshot"]["agent"]);
-    if is_isolated && config.runner_url.is_empty() {
+    if is_isolated && !microvm {
         return Err(Error::new(
             503,
             "Isolated runner is not configured. This agent will not fall back to shared execution.",
@@ -493,7 +502,7 @@ pub async fn restore(
     config: &Config,
     github: Option<&str>,
 ) -> Result<Value> {
-    if !config.runner_url.is_empty() && prepared["backend"] != "firecracker" {
+    if uses_vm(run, config) && prepared["backend"] != "firecracker" {
         // One-time migration of saved container/shared conversations. Keep the old
         // checkout intact and seed the new private disk with its uncommitted files.
         let directory = config.data_dir.join("runs").join(text(run, "id"));
@@ -651,15 +660,13 @@ pub async fn restore(
             prepared["mounts"].as_array_mut().unwrap().push(json!({"source":entry["path"],"target":entry["path"],"readOnly":policy(&run["snapshot"]["agent"])["sandbox"]=="read-only"}));
         }
     }
-    if prepared["isolated"]
-        != (!config.runner_url.is_empty() || isolated(&run["snapshot"]["agent"]))
-    {
+    if prepared["isolated"] != (uses_vm(run, config) || isolated(&run["snapshot"]["agent"])) {
         return Err(Error::new(
             409,
             "Execution isolation changed; this run cannot be resumed.",
         ));
     }
-    if prepared["isolated"] == true && config.runner_url.is_empty() {
+    if prepared["isolated"] == true && !uses_vm(run, config) {
         return Err(Error::new(503, "The isolated runner is not configured."));
     }
     let projects = run_projects(run);

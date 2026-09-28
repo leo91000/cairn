@@ -69,6 +69,13 @@ jobs:
           cargo clippy --locked --workspace --all-targets -- -D warnings
           node scripts/test-backend.mjs
           cargo build --locked --bin leo
+      - name: Validate node supervisor and S3 recovery
+        run: |
+          python3 tests/guest_projects_test.py
+          python3 tests/node_supervisor_test.py
+          python3 -m venv .node-s3-test
+          .node-s3-test/bin/pip install 'moto[server]==5.2.3' awscli
+          PATH="$PWD/.node-s3-test/bin:$PATH" .node-s3-test/bin/python tests/node_s3_test.py
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: browser-backend
@@ -156,6 +163,8 @@ jobs:
       - name: Prepare KVM build host
         run: |
           test -e /dev/kvm
+          sudo modprobe fuse
+          test -c /dev/fuse
           # A working L0 device alone does not guarantee nested KVM for our guest.
           if grep -qw vmx /proc/cpuinfo; then
             grep -Eq '^(Y|1)$' /sys/module/kvm_intel/parameters/nested
