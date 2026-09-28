@@ -1,4 +1,12 @@
-# Leo Android 0.40.0 — Conversation web comme sur Android
+# Leo Android 0.41.0 — Missions web comme sur Android
+
+- Dans l’application web, Missions reprend l’écran Android : une carte par mission avec l’agent, le projet, la planification en clair, la prochaine date, les dernières exécutions et un bouton pour lancer ; les filtres affichent leur nombre de missions.
+- La fiche d’une mission s’ouvre à côté de la liste sur grand écran et en feuille sur téléphone : heure planifiée et prochaines dates, mission dépliable, historique avec le taux de réussite, puis Modifier, Mettre en pause et Lancer maintenant. Lancer ouvre l’exécution, comme sur Android.
+- La conversation d’une exécution se lit comme un chat : actions résumées en une phrase, frise des étapes et détail de chaque étape dans une fiche. Une exécution s’ouvre sur sa conversation.
+- Les réponses de l’agent s’affichent à la taille du texte Android.
+- Aucune modification de l’application Android ni du serveur n’est nécessaire.
+
+## Leo Android 0.40.0 — Conversation web comme sur Android
 
 - Dans l’application web, le contenu d’une conversation reprend celui de l’application Android : vos messages dans une bulle, les réponses de l’agent en texte sous son nom, et une courte conversation collée au-dessus du champ de saisie.
 - Les actions de l’agent entre deux messages se résument en une phrase, avec le nombre d’étapes et les échecs ; dépliées, elles forment une frise où les lectures consécutives sont regroupées, et chaque étape s’ouvre sur sa commande, sa sortie et ses détails techniques.
