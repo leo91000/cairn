@@ -15,6 +15,9 @@ const MAX_IO: usize = 8 * 1024 * 1024;
 fn failure(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
 }
+fn block_digest(bytes: &[u8]) -> String {
+    hex::encode(aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, bytes).as_ref())
+}
 
 /// Immutable plaintext blocks. Implementations must bound transfers and propagate
 /// unavailable data as an error; the mount/controller owns retry and cancellation.
@@ -280,9 +283,9 @@ impl LazyDisk {
         let length = block["size"]
             .as_u64()
             .ok_or_else(|| failure("Invalid extent"))? as usize;
-        let Some(hash) = block["hash"].as_str() else {
-            return Ok(Arc::new(vec![0; length]));
-        };
+        let hash = block["hash"]
+            .as_str()
+            .ok_or_else(|| failure("Missing base block hash"))?;
         if let Some(bytes) = self.cached(hash)? {
             return Ok(bytes);
         }
@@ -292,7 +295,7 @@ impl LazyDisk {
             use std::io::Read;
             let mut bytes = Vec::new();
             (&file).take(BLOCK + 1).read_to_end(&mut bytes)?;
-            if bytes.len() == length && hex::encode(Sha256::digest(&bytes)) == hash {
+            if bytes.len() == length && block_digest(&bytes) == hash {
                 let now = std::time::SystemTime::now();
                 if file.set_modified(now).is_ok()
                     && let Some(state) = self.node_state()
@@ -304,7 +307,7 @@ impl LazyDisk {
             let _ = std::fs::remove_file(&target);
         }
         let bytes = self.source.fetch(hash)?;
-        if bytes.len() != length || hex::encode(Sha256::digest(&bytes)) != hash {
+        if bytes.len() != length || block_digest(&bytes) != hash {
             return Err(failure("Remote block integrity check failed"));
         }
         // Cache persistence is optional: it never determines whether an acknowledged
@@ -374,13 +377,15 @@ impl LazyDisk {
         let manifest = self.base.lock().map_err(failure)?.clone();
         {
             let db = self.db.lock().map_err(failure)?;
-            let mut statement = db.prepare("SELECT start, data, checksum, seq, generation, end FROM writes WHERE start < ?1 AND end > ?2 AND generation <= ?3 ORDER BY seq DESC").map_err(failure)?;
+            let end = (offset + bytes.len() as u64) as i64;
+            let start = offset as i64;
+            // An overlapping write ends before the read end plus MAX_IO,
+            // because no journal write can exceed MAX_IO bytes. Bound both
+            // ends of the indexed range instead of scanning the whole journal
+            // in sequence order for every small read.
+            let mut statement = db.prepare_cached("SELECT start, data, checksum, seq, generation, end FROM writes INDEXED BY write_ranges WHERE end > ?1 AND end < ?2 AND start < ?3 AND generation <= ?4 ORDER BY seq DESC").map_err(failure)?;
             let mut rows = statement
-                .query(params![
-                    (offset + bytes.len() as u64) as i64,
-                    offset as i64,
-                    generation
-                ])
+                .query(params![start, end + MAX_IO as i64, end, generation])
                 .map_err(failure)?;
             while let Some(row) = rows.next().map_err(failure)? {
                 let (start, data) = self.cached_record(row)?;
@@ -428,14 +433,23 @@ impl LazyDisk {
                 .iter()
                 .any(|&(from, to)| from < finish && to > start)
             {
-                let block = self.base_block(&manifest["blocks"][index as usize])?;
+                let extent = &manifest["blocks"][index as usize];
+                let block = if extent["hash"].is_null() {
+                    None
+                } else {
+                    Some(self.base_block(extent)?)
+                };
                 for &(from, to) in &missing {
                     let from = from.max(start);
                     let to = to.min(finish);
                     if from < to {
-                        let block_start = (offset + from as u64 - index * BLOCK) as usize;
-                        bytes[from..to]
-                            .copy_from_slice(&block[block_start..block_start + to - from]);
+                        if let Some(block) = &block {
+                            let block_start = (offset + from as u64 - index * BLOCK) as usize;
+                            bytes[from..to]
+                                .copy_from_slice(&block[block_start..block_start + to - from]);
+                        } else {
+                            bytes[from..to].fill(0);
+                        }
                     }
                 }
             }

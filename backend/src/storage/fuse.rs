@@ -1,4 +1,6 @@
-//! One raw disk file per mount, with the kernel page cache bypassed.
+//! One raw disk file per mount. Cached reads allow kernel readahead; writes
+//! stay in FUSE's default write-through mode and reach the durable journal
+//! before acknowledgment.
 use super::Disk;
 use fuser::*;
 use std::{
@@ -63,7 +65,7 @@ impl Filesystem for DiskFilesystem {
             reply.error(Errno::ENOENT);
             return;
         }
-        reply.opened(FileHandle(0), FopenFlags::FOPEN_DIRECT_IO);
+        reply.opened(FileHandle(0), FopenFlags::empty());
     }
     fn read(
         &self,
@@ -260,10 +262,10 @@ mod tests {
             .open(mountpoint.join("data.ext4"))
             .unwrap();
         file.write_all_at(b"guest-fsync", 17).unwrap();
-        file.sync_all().unwrap();
         let mut bytes = [0; 11];
         disk.read_at(17, &mut bytes).unwrap();
-        assert_eq!(&bytes, b"guest-fsync");
+        assert_eq!(&bytes, b"guest-fsync", "write must reach disk before ack");
+        file.sync_all().unwrap();
         drop(file);
         drop(mounted);
     }

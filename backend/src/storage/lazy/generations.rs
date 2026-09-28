@@ -58,7 +58,7 @@ impl LazyDisk {
             manifest["blocks"][index as usize]["hash"] = if bytes.iter().all(|b| *b == 0) {
                 Value::Null
             } else {
-                hex::encode(Sha256::digest(&bytes)).into()
+                block_digest(&bytes).into()
             };
         }
         self.db
@@ -99,7 +99,7 @@ impl LazyDisk {
             .ok_or_else(|| failure("Invalid extent"))?;
         let mut bytes = vec![0; length as usize];
         self.read_generation(generation, offset, &mut bytes)?;
-        if hex::encode(Sha256::digest(&bytes)) != hash {
+        if block_digest(&bytes) != hash {
             return Err(failure("Captured generation changed"));
         }
         Ok(bytes)

@@ -299,3 +299,32 @@ fn overlapping_journal_writes_preserve_latest_bytes_and_zero_gaps() {
     disk.read_at(0, &mut bytes).unwrap();
     assert_eq!(&bytes, b"\0\0\0\0aaaabbccbbbb\0\0\0\0");
 }
+
+#[test]
+fn read_includes_the_end_of_a_maximum_size_journal_write() {
+    let root = tempfile::tempdir().unwrap();
+    let manifest = serde_json::json!({
+        "version": 1,
+        "size": MAX_IO + 1,
+        "blockSize": BLOCK,
+        "blocks": [
+            {"offset": 0, "size": BLOCK, "hash": null},
+            {"offset": BLOCK, "size": BLOCK, "hash": null},
+            {"offset": 2 * BLOCK, "size": 1, "hash": null}
+        ]
+    });
+    let disk = LazyDisk::create(
+        root.path(),
+        &manifest,
+        Arc::new(Source {
+            reads: AtomicUsize::new(0),
+        }),
+    )
+    .unwrap();
+    let mut write = vec![0; MAX_IO];
+    write[MAX_IO - 1] = 42;
+    disk.write_at(0, &write).unwrap();
+    let mut read = [0; 2];
+    disk.read_at(MAX_IO as u64 - 1, &mut read).unwrap();
+    assert_eq!(read, [42, 0]);
+}

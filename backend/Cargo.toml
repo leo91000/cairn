@@ -49,6 +49,10 @@ uuid = { version = "1", features = [
 ] }
 rand = "0.9"
 sha2 = "0.10"
+aws-lc-rs = { version = "1.18.1", default-features = false, features = [
+  "non-fips",
+  "alloc"
+] }
 scrypt = "0.11"
 subtle = "2"
 base64 = "0.22"
