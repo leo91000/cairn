@@ -117,6 +117,18 @@ describe('coolify deployment over HTTP', () => {
     Object.assign(document.services.runner, { mem_limit: '4g', cpus: 2, pids_limit: 128 })
     const result = parse(firecrackerRunnerCompose(stringify(document)))
     expect(result.services.runner).toMatchObject({ mem_limit: '20g', cpus: 8, pids_limit: 256 })
+    expect(result.services.runner.devices).toContain('/dev/fuse:/dev/fuse')
+  })
+
+  it('adds FUSE to an existing VM runner before deploying the S3-backed image', async () => {
+    const document = parse(compose)
+    document.services.runner.devices = document.services.runner.devices.filter(device => !device.startsWith('/dev/fuse:'))
+    compose = stringify(document)
+    await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
+    const patched = requests.find(request => request.method === 'PATCH' && request.path === '/api/v1/services/leo-service')
+    expect(patched).toBeDefined()
+    expect(parse(compose).services.runner.devices).toContain('/dev/fuse:/dev/fuse')
+    expect(requests.some(request => request.path.endsWith('/restart'))).toBe(true)
   })
 
   it('fails if a healthy service keeps serving the previous commit', async () => {

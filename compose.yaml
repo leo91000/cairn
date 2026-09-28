@@ -45,6 +45,7 @@ services:
     security_opt: [apparmor:unconfined, seccomp:unconfined]
     devices:
       - /dev/kvm:/dev/kvm
+      - /dev/fuse:/dev/fuse
       - /dev/net/tun:/dev/net/tun
     sysctls:
       net.ipv4.ip_forward: '1'
