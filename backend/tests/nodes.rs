@@ -2785,7 +2785,7 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
     tokio::spawn(async move { axum::serve(listener, runner).await.unwrap() });
     let owner = Owner::with_runner("localhost:4310".into(), url).await;
     let (run, attempt) = (id(), id());
-    let record = json!({"id":run,"taskId":run,"createdAt":0,"status":"running","sessionId":"session","nodeId":LOCAL_NODE_ID});
+    let record = json!({"id":run,"taskId":run,"createdAt":0,"status":"running","isolated":true,"sessionId":"session","nodeId":LOCAL_NODE_ID});
     owner
         .service
         .store
