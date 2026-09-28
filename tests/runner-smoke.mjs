@@ -107,6 +107,13 @@ if(mode==='cancel'||mode==='crash') {
   fs.writeFileSync(root+'/workspace/interrupted','saved before interruption');
   execFileSync('sync');
   console.log('probe.pause');
+  if(mode==='cancel') {
+    const deadline=Date.now()+30000;
+    while(!fs.readFileSync('/run/leo-chat/messages.json','utf8').includes('capture-update')){assert.ok(Date.now()<deadline,'capture update request');await new Promise(r=>setTimeout(r,100));}
+    fs.writeFileSync(root+'/workspace/capture-update',Buffer.alloc(4*1024*1024,91));
+    execFileSync('sync');
+    console.log('probe.updated');
+  }
   await new Promise(()=>{setInterval(()=>{},1000)});
 }
 if(mode==='recover')assert.equal(fs.readFileSync(root+'/workspace/interrupted','utf8'),'saved before interruption');
@@ -207,27 +214,35 @@ console.log('probe.done');
                 assert.deepEqual(opened, { ok: true, reused: true })
                 await writeFile(path.join(source, 'chat-input/messages.json'), '[{"text":"reopened"}]')
               }
-              if (text.includes('probe.pause') && mode === 'cancel') {
+              if (data.includes('probe.pause') && mode === 'cancel') {
+                const captureStarted = Date.now()
                 const point = await (await api(`/runs/${id}/snapshot`, 'POST')).json()
+                const firstCaptureMs = Date.now() - captureStarted
                 assert.ok(point.manifest.size > 0)
+                assert.equal(point.manifest.onDemand, true)
                 const block = point.manifest.blocks.find(block => block.hash)
                 assert.ok(block, 'Active capture must contain durable guest data')
                 const bytes = Buffer.from(await (await api(`/snapshots/${point.id}/${block.hash}`)).arrayBuffer())
                 assert.equal(createHash('sha256').update(bytes).digest('hex'), block.hash)
-                // The guest tracks written blocks: continuing from this point copies only those.
-                const next = await (await api(`/runs/${id}/snapshot`, 'POST', { baseline: point.id })).json()
-                if (next.manifest.incremental !== true)
-                  console.error(docker('exec', name, 'sh', '-c', 'tail -80 /runner-state/*.boot.log'))
-                assert.equal(next.manifest.incremental, true, 'The built guest image must track written blocks')
-                assert.ok(next.manifest.localBytesRead < point.manifest.localBytesRead, 'An incremental capture reads less than a full one')
+                // New writes enter the next journal generation; the sealed one stays readable.
+                await writeFile(path.join(source, 'chat-input/messages.json'), '[{"text":"capture-update"}]')
+                await until(() => docker('exec', name, 'cat', `/runner-state/${id}.log`).split('\n').filter(Boolean).some(line => Buffer.from(JSON.parse(line).data || '', 'base64').toString().includes('probe.updated')))
+                const nextStarted = Date.now()
+                const next = await (await api(`/runs/${id}/snapshot`, 'POST')).json()
+                const nextCaptureMs = Date.now() - nextStarted
+                assert.equal(next.manifest.onDemand, true)
+                assert.ok(next.manifest.generation > point.manifest.generation, 'New writes advance the journal generation')
                 assert.equal(next.manifest.blocks.length, point.manifest.blocks.length)
                 const changed = next.manifest.blocks.find((block, index) => block.hash && block.hash !== point.manifest.blocks[index].hash)
-                if (changed) {
-                  const written = Buffer.from(await (await api(`/snapshots/${next.id}/${changed.hash}`)).arrayBuffer())
-                  assert.equal(createHash('sha256').update(written).digest('hex'), changed.hash)
-                }
+                assert.ok(changed, 'The next generation includes guest writes')
+                const written = Buffer.from(await (await api(`/snapshots/${next.id}/${changed.hash}`)).arrayBuffer())
+                assert.equal(createHash('sha256').update(written).digest('hex'), changed.hash)
+                const original = Buffer.from(await (await api(`/snapshots/${point.id}/${block.hash}`)).arrayBuffer())
+                assert.deepEqual(original, bytes, 'The earlier capture stays immutable after guest writes')
+                docker('exec', name, 'test', '!', '-e', `/runner-state/disks/${runId}/data.ext4`)
                 await api(`/snapshots/${next.id}/discard`, 'DELETE')
-                process.stdout.write(`${JSON.stringify({ mode: 'active-capture', pauseMs: point.manifest.pauseMs, indexMs: point.manifest.indexMs, incrementalBytesRead: next.manifest.localBytesRead, fullBytesRead: point.manifest.localBytesRead, status: 'passed' })}\n`)
+                await api(`/snapshots/${point.id}/discard`, 'DELETE')
+                process.stdout.write(`${JSON.stringify({ mode: 'active-capture', firstCaptureMs, nextCaptureMs, generation: next.manifest.generation, status: 'passed' })}\n`)
                 await api(`/runs/${id}`, 'DELETE')
               }
               if (text.includes('probe.pause') && mode === 'crash') {
@@ -253,12 +268,15 @@ console.log('probe.done');
         return text
       })()
       const waiting = async () => (await api(`/runs/${id}/wait`, 'POST')).json()
-      let status = await waiting().catch((error) => {
-        if (mode !== 'crash')
-          throw error
-        return { StatusCode: 143 }
-      })
-      const text = await output
+      const [initialStatus, text] = await Promise.all([
+        waiting().catch((error) => {
+          if (mode !== 'crash')
+            throw error
+          return { StatusCode: 143 }
+        }),
+        output,
+      ])
+      let status = initialStatus
       if (mode === 'crash')
         status = await waiting()
       assert.equal(status.StatusCode, ['cancel', 'crash'].includes(mode) ? 143 : 0, text)
@@ -398,7 +416,7 @@ console.log('probe.done');
     console.error(error)
     try {
       console.error(docker('logs', name))
-      console.error(docker('exec', name, 'sh', '-c', 'tail -60 /runner-state/*.boot.log'))
+      console.error(docker('exec', name, 'sh', '-c', 'tail -n 60 /runner-state/*.boot.log'))
     }
     catch {
     }
