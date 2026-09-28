@@ -279,7 +279,7 @@ test('task outcomes stay with the reply and expose evidence without crowding the
   await expect(panel.getByText('Task completed', { exact: true })).toBeVisible()
   expect(await panel.evaluate(element => !!element.closest('.activity-scroll'))).toBe(true)
   expect(await panel.evaluate(element => element.previousElementSibling?.classList.contains('activity-message'))).toBe(true)
-  await expect(page.getByRole('button', { name: /Session updates/ })).toHaveCount(0)
+  await expect(page.getByTestId('agent-actions').filter({ hasText: 'Followed the run' })).toHaveCount(0)
   expect(await panel.evaluate(element => element.parentElement?.lastElementChild === element)).toBe(true)
   const toggle = panel.getByRole('button', { name: 'View evidence', exact: true })
   await expect(toggle).toHaveAttribute('aria-expanded', 'false')
@@ -352,7 +352,7 @@ test('failed replies show the current error instead of an old answer and can be 
   await page.getByRole('button', { name: 'Sign in', exact: true }).click()
   await expect(page.getByRole('note').filter({ hasText: 'Validation needs attention.' })).toBeVisible()
   await expect(page.getByRole('note').filter({ hasText: 'Interrupted' })).toBeVisible()
-  await expect(page.getByRole('button', { name: /Session updates/ })).toHaveCount(0)
+  await expect(page.getByTestId('agent-actions').filter({ hasText: 'Followed the run' })).toHaveCount(0)
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 844 })
     await expectSingleScroll(page)
@@ -360,8 +360,8 @@ test('failed replies show the current error instead of an old answer and can be 
   }
   // Diagnostic run activity still has the complete lifecycle records.
   await page.goto(`/runs/${firstRun.id}`)
-  await page.getByRole('button', { name: /^Activity/ }).click()
-  await expect(page.getByRole('button', { name: /Session updates/ }).first()).toBeVisible()
+  await page.getByTestId('agent-actions').filter({ hasText: '1 failure' }).locator(':scope > button').click()
+  await expect(page.getByTestId('agent-step').filter({ hasText: 'Validation needs attention.' })).toHaveCount(1)
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:disconnect' })
   await expect.poll(() => workspace.service.chats.detail(chat.id).run?.status).toBe('failed')
   await page.goto(`/chats/${chat.id}`)
@@ -401,7 +401,7 @@ test('starts project chats, steers, edits the queue and preserves a compact mobi
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   await expect(page).toHaveURL(/\/chats\/[a-f0-9-]+$/)
   await expect(page.getByText('Working', { exact: true }).first()).toBeVisible()
-  await expect(page.getByRole('button', { name: /Session updates/ })).toHaveCount(0)
+  await expect(page.getByTestId('agent-actions').filter({ hasText: 'Followed the run' })).toHaveCount(0)
   await expect(page.locator('.activity-message').filter({ hasText: 'Review our component architecture' })).toBeVisible()
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Add a regression test for the composer')
   await page.getByRole('button', { name: 'Queue', exact: true }).click()

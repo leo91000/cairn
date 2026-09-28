@@ -6,7 +6,8 @@ import { iconButton } from '../ui'
 import Icon from './Icon.vue'
 
 // `drawer` opens a panel along the right edge, and a bottom sheet on phones like `sheet`.
-const props = defineProps<{ title: string, wide?: boolean, sheet?: boolean, drawer?: boolean, returnFocus?: HTMLElement }>()
+// `headless` names the dialog without a title bar; the content draws its own heading.
+const props = defineProps<{ title: string, wide?: boolean, sheet?: boolean, drawer?: boolean, headless?: boolean, returnFocus?: HTMLElement }>()
 const emit = defineEmits<{ close: [] }>()
 const dialog = ref<HTMLDialogElement>()
 const titleId = useId()
@@ -27,7 +28,8 @@ onBeforeUnmount(() => {
     <dialog
       ref="dialog"
       class="modal m-auto border border-line rounded-[15px] max-w-[min(560px,_calc(100vw_-_28px))] w-full max-h-[calc(100dvh_-_32px_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))] bg-raised text-ink [box-shadow:0_25px_90px_light-dark(#12112335,_#00000035)] p-0"
-      :aria-labelledby="titleId"
+      :aria-labelledby="headless ? undefined : titleId"
+      :aria-label="headless ? title : undefined"
       :class="{ wide, drawer, 'mobile-sheet': sheet || drawer }"
       @cancel.prevent="emit('close')"
       @click="
@@ -37,7 +39,7 @@ onBeforeUnmount(() => {
       "
     >
       <div class="modal-inner max-h-[calc(100dvh_-_34px_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))] overflow-auto overscroll-contain">
-        <header class="modal-head flex items-center justify-between border-b border-line sticky top-0 bg-raised z-2 px-6.5 py-5.5 phone:p-[19px]">
+        <header v-if="!headless" class="modal-head flex items-center justify-between border-b border-line sticky top-0 bg-raised z-2 px-6.5 py-5.5 phone:p-[19px]">
           <h2 :id="titleId" class="min-w-0">
             <slot name="heading">
               {{ title }}
@@ -92,6 +94,8 @@ onBeforeUnmount(() => {
     max-height: calc(100dvh - env(safe-area-inset-top) - 16px);
     border-radius: 22px 22px 0 0;
   }
+  /* A wide sheet still spans the phone; `.modal.wide` would cap it and pin it to the left. */
+  .mobile-sheet.wide { max-width: none; }
   .mobile-sheet .modal-inner {
     max-height: calc(100dvh - env(safe-area-inset-top) - 18px);
     padding-bottom: env(safe-area-inset-bottom);

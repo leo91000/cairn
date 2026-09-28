@@ -1,18 +1,26 @@
-# Task workspace
+# Missions
 
-The Tasks view uses a compact inbox beside the selected task on desktop. Search,
-creation and filters live in the inbox rather than above the conversation. On
-narrow screens, the labelled **Tasks** button opens the list; selecting a task
-returns to its workspace. Selection remains in the URL across reloads.
+Missions follow the Android app. The list shows one card per mission: its agent and
+project, its name, the schedule in words (for example *Every Monday · 09:00*, or *Paused ·*
+before it) with the next date, and a strip of its last twelve runs in order (green
+succeeded, coral failed, accent running). A mission needing review says why: **Failed**,
+**Interrupted**, **Blocked** or **Your input needed**. The round button runs the mission;
+while it runs, the button shows the elapsed time instead. Running missions come first, then
+those needing review, then the next scheduled ones, then the rest by name.
 
-The selected task has a single title, execution status and next scheduled time.
-**Details** opens the task brief, project, agent, account and schedule controls.
-**Execution details** preserves the run's original instructions, outcome, model,
-workspace, skills and cleanup controls. These details do not consume permanent
-space above the output.
+The title summarises how many missions are active and when the next one runs. **Search
+missions** filters by name and tags; the chips filter **All**, **Scheduled**, **One-off**,
+**Paused** and **Archived**, each with its count. **New mission** opens the editor.
 
-**Conversation**, **Result** and **Files** switch the main content. Follow output
-and fullscreen controls sit beside these tabs. Fullscreen retains its own controls
-and restores focus on exit. Live notices, errors and resume/stop actions remain
-visible. On phones, **Run now** and **Open run** are in the task actions menu.
-The standalone run page keeps its existing Activity / Result / Task brief views.
+Selecting a card opens the mission: beside the list on wide screens, in a bottom sheet on
+screens up to 900 px. It shows the agent and project, the name and tags, the schedule with
+its time, cron expression, timezone and next two dates, the brief (three lines, expandable),
+and the last ten runs with their success rate. Each run opens its own page. The detail ends with
+**Edit mission**, **Pause schedule** / **Resume schedule** and **Run now**; the actions menu
+duplicates or archives the mission (both paused), opens the latest run, or deletes it. The
+selected mission stays in the URL across reloads.
+
+**Run now** opens the new run, as on Android. A run page opens on its **Conversation**, then
+offers **Result**, **Files** and **Mission brief**. The conversation reads like a chat: the
+agent's actions between messages collapse into one sentence, expand into a timeline and
+open each step's command, output and details in a sheet; see [chats](chats.md).

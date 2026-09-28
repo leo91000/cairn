@@ -93,9 +93,8 @@ test('set up, author skills, schedule work, inspect results, and sign out', asyn
   await expect(
     page.getByRole('heading', { name: 'Weekly dependency review' }),
   ).toBeVisible()
+  // As on Android, running a mission opens its run.
   await page.getByRole('button', { name: 'Run now', exact: true }).click()
-  await expect(page.locator('.task-focus-detail .run-title-meta')).toBeVisible()
-  await page.getByRole('link', { name: 'Open run', exact: true }).click()
   await expect(page).toHaveURL(/\/runs\//)
   await expect(page.locator('.run-title-meta .status')).toContainText(
     'Execution finished',
@@ -103,13 +102,13 @@ test('set up, author skills, schedule work, inspect results, and sign out', asyn
   await page.getByRole('button', { name: 'Result', exact: true }).click()
   await expect(page.getByText('The fixture task passed.')).toBeVisible()
   await page.reload()
+  await page.getByRole('button', { name: 'Result', exact: true }).click()
   await expect(page.getByText('The fixture task passed.')).toBeVisible()
   await page.getByRole('link', { name: 'Missions', exact: true }).click()
-  await page.locator('.task-action-menu > summary').click()
   await page
     .getByRole('button', { name: 'Pause schedule', exact: true })
     .click()
-  await expect(page.getByText('Paused', { exact: true }).last()).toBeVisible()
+  await expect(page.locator('.mission-card').filter({ hasText: 'Weekly dependency review' })).toContainText('Paused · ')
   await page.getByRole('link', { name: 'Missions', exact: true }).click()
   await page.setViewportSize({ width: 1440, height: 1000 })
   await page.mouse.move(0, 0)
@@ -168,10 +167,7 @@ test('edits supporting files, cancels work, and archives without losing history'
   ).toBeVisible()
   await page.keyboard.press('Escape')
   await page.getByRole('link', { name: 'Missions', exact: true }).click()
-  await page.locator('.task-action-menu > summary').click()
-  await page
-    .getByRole('button', { name: 'Edit Weekly dependency review', exact: true })
-    .click()
+  await page.getByRole('button', { name: 'Edit mission', exact: true }).click()
   await page.getByLabel('What should happen?').fill('fixture:hang')
   await page.getByRole('button', { name: 'Save changes' }).click()
   await expect(page.getByRole('dialog')).toHaveCount(0)
@@ -184,25 +180,21 @@ test('edits supporting files, cancels work, and archives without losing history'
     .click()
   await expect(page.locator('.run-title-meta .status')).toHaveText('cancelled')
   await page.getByRole('link', { name: 'Missions', exact: true }).click()
-  await page.locator('.task-action-menu > summary').click()
-  await page
-    .getByRole('button', { name: 'Archive Weekly dependency review' })
-    .click()
+  await page.getByRole('button', { name: 'Mission actions', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Archive', exact: true }).click()
   await expect(
     page.getByRole('heading', { name: 'Weekly dependency review' }),
   ).toHaveCount(0)
-  await page.getByRole('button', { name: 'Archived', exact: true }).click()
+  await page.getByRole('group', { name: 'Filter missions' }).getByRole('button', { name: /^Archived/ }).click()
   await expect(
     page.getByRole('heading', { name: 'Weekly dependency review' }),
   ).toBeVisible()
   await expect(
     page.getByRole('button', { name: 'Run now', exact: true }),
   ).toBeDisabled()
-  await page.locator('.task-action-menu > summary').click()
-  await page
-    .getByRole('button', { name: 'Restore Weekly dependency review' })
-    .click()
-  await page.getByRole('button', { name: /^All missions/ }).click()
+  await page.getByRole('button', { name: 'Mission actions', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Restore (paused)', exact: true }).click()
+  await page.getByRole('group', { name: 'Filter missions' }).getByRole('button', { name: /^All/ }).click()
   await expect(
     page.getByRole('heading', { name: 'Weekly dependency review' }),
   ).toBeVisible()

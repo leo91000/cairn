@@ -143,7 +143,7 @@ test('persistent deliverables have a gallery, revisions, mobile viewer, and play
   const download = await page.request.get(`/api/runs/${runId}/artifacts/${second.id}?download=1`)
   expect(download.headers()['content-disposition']).toContain('attachment;')
   await page.goto(`/runs/${runId}`)
-  await page.getByRole('button', { name: /^Activity \d+/ }).click()
+  await page.getByRole('button', { name: /^Conversation/ }).click()
   await page.getByRole('link', { name: 'Read the report', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Mobile review', exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Close viewer', exact: true }).click()

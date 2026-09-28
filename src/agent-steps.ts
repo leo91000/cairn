@@ -36,11 +36,13 @@ export function agentSteps(artifacts: ActivityArtifact[]): AgentStep[] {
       index = end + 1
       continue
     }
+    const firstLine = () => artifact.blocks.map(block => block.code).join('\n').split('\n').find(line => line.trim()) ?? ''
     const detail = artifact.kind === 'files'
       ? artifact.files.map(file => fileName(file.path)).join(' · ') || artifact.subtitle
       : artifact.kind === 'thinking'
-        ? artifact.blocks.map(block => block.code).join('\n').split('\n').find(line => line.trim()) ?? ''
-        : artifact.kind === 'notice' ? artifact.subtitle : artifact.command || artifact.subtitle
+        ? firstLine()
+        // A session notice without a subtitle carries its message in its text, as in ChatNotice.
+        : artifact.kind === 'notice' ? artifact.subtitle || firstLine() : artifact.command || artifact.subtitle
     steps.push(step([artifact], artifact.title, detail))
     index++
   }

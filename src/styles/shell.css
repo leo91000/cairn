@@ -432,9 +432,3 @@ html:has(.shell), body:has(.shell) {
   outline: 2px solid var(--color-accent);
   outline-offset: -3px;
 }
-
-@media (max-height: 650px) {
-  .activity-feed .activity-intro {
-    display: none;
-  }
-}

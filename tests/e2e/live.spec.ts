@@ -157,7 +157,7 @@ test('a cached run restores the reading offset while its stream is still connect
   await page.goto(`${workspace.url}/runs/${run.id}`)
   await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
   await page.getByRole('button', { name: 'Sign in', exact: true }).click()
-  await page.getByRole('button', { name: /^Activity/ }).click()
+  await page.getByRole('button', { name: /^Conversation/ }).click()
   await expect(page.locator('.activity-message').filter({ hasText: 'Saved reading position 39.' })).toBeVisible()
   await page.getByLabel('Follow output').uncheck()
   const scroller = page.getByRole('region', { name: 'Activity output' })
@@ -214,8 +214,8 @@ test('a cached run restores the reading offset while its stream is still connect
   })
   try {
     await page.goto(`${workspace.url}/runs/${run.id}`)
-    await expect(page.getByRole('button', { name: 'Result', exact: true })).toHaveAttribute('aria-pressed', 'true')
-    await page.getByRole('button', { name: /^Activity/ }).click()
+    // A run opens on its conversation, restoring the cached reading offset before the stream connects.
+    await expect(page.getByRole('button', { name: /^Conversation/ })).toHaveAttribute('aria-pressed', 'true')
     await expect.poll(() => scroller.evaluate(element => element.scrollTop)).toBe(300)
     await expect(page.getByLabel('Follow output')).not.toBeChecked()
   }
@@ -224,7 +224,7 @@ test('a cached run restores the reading offset while its stream is still connect
     await page.unrouteAll({ behavior: 'wait' })
   }
   await expect(page.getByRole('status').filter({ hasText: 'Updating…' })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: /^Activity/ })).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByRole('button', { name: /^Conversation/ })).toHaveAttribute('aria-pressed', 'true')
 })
 
 test('recent history loads older pages without moving the reader and survives a blocked reconnect', async ({ page, workspace }) => {
@@ -236,7 +236,7 @@ test('recent history loads older pages without moving the reader and survives a 
   await page.goto(`${workspace.url}/runs/${run.id}`)
   await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
   await page.getByRole('button', { name: 'Sign in', exact: true }).click()
-  await page.getByRole('button', { name: /^Activity/ }).click()
+  await page.getByRole('button', { name: /^Conversation/ }).click()
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 349' })).toBeVisible()
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 249' })).toHaveCount(0)
   await page.getByLabel('Follow output').uncheck()
@@ -274,6 +274,6 @@ test('recent history loads older pages without moving the reader and survives a 
   }))).toBe(200)
   await page.route(`**/api/runs/${run.id}/stream?**`, route => route.abort())
   await page.reload()
-  await page.getByRole('button', { name: /^Activity/ }).click()
+  await page.getByRole('button', { name: /^Conversation/ }).click()
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 349' })).toBeVisible()
 })

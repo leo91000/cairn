@@ -1,4 +1,4 @@
-import type { Page, TestInfo } from '@playwright/test'
+import type { Locator, Page, TestInfo } from '@playwright/test'
 import type { RunEvent } from '../../shared/contracts'
 import type { Workspace } from './fixtures'
 import { expect, expectSingleScroll, test } from './fixtures'
@@ -55,7 +55,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     await page.evaluate(() => document.fonts.ready)
     await fits()
     if (colorScheme === 'dark') {
-      const brightSurfaces = await page.locator('.run-facts, .settings-section, .resource-card, .task-card, .skill-card, .connection-card, dialog[open], .vs-popup:popover-open').evaluateAll(elements => elements.filter((el) => {
+      const brightSurfaces = await page.locator('.run-facts, .settings-section, .resource-card, .mission-card, .skill-card, .connection-card, dialog[open], .vs-popup:popover-open').evaluateAll(elements => elements.filter((el) => {
         const color = getComputedStyle(el).backgroundColor.match(/[\d.]+/g)?.map(Number)
         return color && color.length >= 3 && (color[3] ?? 1) > 0.5 && Math.min(...color.slice(0, 3)) > 180
       }).map(el => el.className))
@@ -66,7 +66,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
   }
   const screens = [
     ['overview', '/', '.fil'],
-    ['tasks', '/tasks', '.task-card'],
+    ['tasks', '/tasks', '.mission-card'],
     ['runs', '/runs', 'tbody tr'],
     ['agents', '/agents', '.resource-card'],
     ['projects', '/projects', '.resource-card'],
@@ -93,8 +93,8 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
         expect(geometry).toEqual({ aligned: true, separated: true })
       }
     }
-    await page.getByRole('button', { name: /^Activity/ }).click()
-    await expect(page.locator('.activity-group').first()).toBeAttached()
+    await page.getByRole('button', { name: /^Conversation/ }).click()
+    await expect(page.getByTestId('agent-actions').first()).toBeAttached()
     expect((await page.locator('.activity-scroll').boundingBox())!.height).toBeGreaterThan(65)
     const head = await page.locator('.run-panel-head').boundingBox()
     const actions = await page.locator('.activity-toolbar').boundingBox()
@@ -102,13 +102,23 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     await page.getByLabel('Follow output').uncheck()
     await expect(page.getByLabel('Follow output')).not.toBeChecked()
     await screenshot(`${viewport.width}-activity`)
-    const work = page.locator('.activity-group').filter({ hasText: 'Files · Terminal · Tools' })
-    await work.locator('.activity-group-toggle').click()
-    await work.getByRole('button', { name: /File changes/ }).click()
-    await expect(work.locator('.hljs-addition').first()).toBeVisible()
-    await work.getByRole('button', { name: /Run command/ }).click()
-    await expect(work.getByText('TypeScript: no errors found.', { exact: false })).toBeVisible()
+    // The agent's actions collapse into a sentence, expand into a timeline and open one step in a sheet.
+    const sheet = page.getByTestId('agent-step-sheet')
+    async function openStep(scope: Locator, text: string) {
+      const collapsed = scope.getByTestId('agent-actions').locator(':scope > button[aria-expanded="false"]')
+      while (await collapsed.count())
+        await collapsed.first().click()
+      await scope.getByTestId('agent-step').filter({ hasText: text }).first().click()
+      await expect(sheet).toBeVisible()
+    }
+    await openStep(page.locator('body'), 'File changes')
+    await expect(sheet.locator('.hljs-addition').first()).toBeVisible()
+    await page.keyboard.press('Escape')
+    await openStep(page.locator('body'), 'Run command')
+    await expect(sheet.getByText('TypeScript: no errors found.', { exact: false })).toBeVisible()
     await screenshot(`${viewport.width}-activity-details`)
+    await page.keyboard.press('Escape')
+    await expect(sheet).toHaveCount(0)
     await page.getByRole('button', { name: 'Open activity fullscreen' }).click()
     const viewer = page.getByRole('dialog', { name: 'Fullscreen activity' })
     await expect(viewer).toBeVisible()
@@ -117,24 +127,24 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     expect(fullBox!.height).toBe(viewport.height)
     expect(fullBox!.width).toBe(viewport.width)
     await screenshot(`${viewport.width}-activity-fullscreen`)
-    const research = viewer.locator('.activity-group').filter({ hasText: 'Plan · Research · Reading · Workspace · Terminal' })
-    await research.locator('.activity-group-toggle').click()
-    const read = research.locator('[data-kind="read"]').filter({ hasText: 'Read functions.ts' })
-    await read.locator('.artifact-toggle').click()
+    await openStep(viewer, 'functions.ts')
+    const read = sheet.getByRole('region', { name: 'Read functions.ts' })
     await expect(read.locator('.hljs-keyword').first()).toBeVisible()
     await read.getByRole('button', { name: 'Show command' }).click()
     await expect(read.getByRole('button', { name: 'Copy Command' })).toBeVisible()
-    const skillRead = research.locator('[data-kind="read"]').filter({ hasText: 'Read SKILL.md' })
-    await skillRead.locator('.artifact-toggle').click()
+    await page.keyboard.press('Escape')
+    await openStep(viewer, 'SKILL.md')
+    const skillRead = sheet.getByRole('region', { name: 'Read SKILL.md' })
     await expect(skillRead.getByRole('heading', { name: 'CSS Baseline update and release' })).toBeVisible()
     await screenshot(`${viewport.width}-file-read-preview`)
     await skillRead.getByRole('button', { name: 'View source' }).click()
     await expect(skillRead.getByRole('button', { name: 'Copy File content' })).toBeVisible()
-    const failed = research.locator('[data-status="error"]')
-    await expect(failed.getByText('Failed', { exact: true })).toBeVisible()
-    await expect(failed.getByText('Exit 1', { exact: true })).toBeVisible()
-    await failed.scrollIntoViewIfNeeded()
+    await page.keyboard.press('Escape')
+    await openStep(viewer, 'Exit 1')
+    await expect(sheet).toContainText('Failed · Exit 1')
     await screenshot(`${viewport.width}-operation-cards`)
+    await page.keyboard.press('Escape')
+    await expect(sheet).toHaveCount(0)
     const checks = viewer.getByRole('region', { name: 'Workflow checks', exact: true })
     await checks.scrollIntoViewIfNeeded()
     await expect(checks.getByText('11 passed', { exact: true })).toBeVisible()
@@ -156,7 +166,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     await page.keyboard.press('Escape')
     await expect(viewer).not.toBeVisible()
     await expect(page.getByRole('button', { name: 'Open activity fullscreen' })).toBeFocused()
-    await expect(work.getByText('TypeScript: no errors found.', { exact: false })).toBeVisible()
+    await expect(page.getByTestId('agent-step').first()).toBeVisible()
     await page.getByRole('button', { name: 'Mission brief', exact: true }).click()
     await screenshot(`${viewport.width}-brief`)
 
@@ -224,7 +234,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
   await dock.getByRole('link', { name: 'Missions', exact: true }).focus()
   await page.keyboard.press('Enter')
   await expect(dock.getByRole('link', { name: 'Missions', exact: true })).toHaveAttribute('aria-current', 'page')
-  await expect(page.locator('.task-card').first()).toBeVisible()
+  await expect(page.locator('.mission-card').first()).toBeVisible()
   const manyAgents = Array.from({ length: 10000 }, (_, index) => ({
     id: `virtual-${index}`,
     name: index === 4999 ? 'Équipe sécurité' : `Agent ${index.toString().padStart(5, '0')}`,
@@ -278,25 +288,29 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     { id: 6, runId: run.id, createdAt: 3500, type: 'item.completed', text: 'implementation-pr {"files":["src/activity.ts"' },
   ])
   await page.goto(`/runs/${run.id}`)
-  await page.getByRole('button', { name: /^Activity/ }).click()
-  await page.locator('.activity-group-toggle').click()
-  const historical = page.locator('.operation-card').first()
-  await expect(historical.getByText('Recorded output', { exact: true })).toBeVisible()
-  await expect(historical.getByText('Recorded', { exact: true })).toBeVisible()
-  await historical.locator('.artifact-toggle').click()
-  await expect(historical.getByText(/Its command and exit code weren’t recorded/)).toBeVisible()
+  const sheet = page.getByTestId('agent-step-sheet')
+  async function openStep(text: string) {
+    const collapsed = page.getByTestId('agent-actions').locator(':scope > button[aria-expanded="false"]')
+    while (await collapsed.count())
+      await collapsed.first().click()
+    await page.getByTestId('agent-step').filter({ hasText: text }).first().click()
+    await expect(sheet).toBeVisible()
+  }
+  await openStep('Recorded output')
+  await expect(sheet).toContainText('Recorded · step 1 of 3')
+  await expect(sheet.getByText(/Its command and exit code weren’t recorded/)).toBeVisible()
   await screenshot('historical-operation')
-  const checksCard = page.locator('.operation-card').nth(1)
-  await expect(checksCard.locator('.artifact-heading')).toContainText('Workflow checks')
-  await expect(checksCard.locator('.artifact-heading')).not.toContainText('"jobs"')
-  await checksCard.locator('.artifact-toggle').click()
-  await expect(checksCard.getByRole('region', { name: 'Workflow checks' })).toBeVisible()
-  await expect(checksCard.locator('pre')).toHaveCount(0)
-  const incompleteCard = page.locator('.operation-card').nth(2)
-  await expect(incompleteCard.locator('.artifact-heading')).toContainText('Incomplete result')
-  await expect(incompleteCard.locator('.artifact-heading')).not.toContainText('"files"')
-  await incompleteCard.locator('.artifact-toggle').click()
-  const incomplete = incompleteCard.getByRole('region', { name: 'Incomplete result' })
+  await page.keyboard.press('Escape')
+  await expect(page.getByTestId('agent-step').nth(1)).toContainText('Workflow checks')
+  await expect(page.getByTestId('agent-step').nth(1)).not.toContainText('"jobs"')
+  await openStep('Workflow checks')
+  await expect(sheet.getByRole('region', { name: 'Workflow checks' }).last()).toBeVisible()
+  await expect(sheet.locator('pre')).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await expect(page.getByTestId('agent-step').nth(2)).toContainText('Incomplete result')
+  await expect(page.getByTestId('agent-step').nth(2)).not.toContainText('"files"')
+  await openStep('Incomplete result')
+  const incomplete = sheet.getByRole('region', { name: 'Incomplete result' }).last()
   await expect(incomplete).toBeVisible()
   await expect(incomplete.locator('pre')).toHaveCount(0)
   await incomplete.scrollIntoViewIfNeeded()
@@ -304,6 +318,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
   await incomplete.locator('summary').click()
   await expect(incomplete.getByRole('button', { name: 'Copy Saved source' })).toBeVisible()
   await expect(incomplete.locator('pre')).toContainText('{"files":["src/activity.ts"')
+  await page.keyboard.press('Escape')
   history([
     { id: 1, runId: run.id, createdAt: 1000, type: 'error', text: '', payload: { message: 'WebSocket connection failed: 503 Service Unavailable' } },
     { id: 2, runId: run.id, createdAt: 2000, type: 'item.completed', text: '', payload: { item: { type: 'command_execution', command: 'rg needle src', exit_code: 1, status: 'failed' } } },
@@ -312,14 +327,15 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     { id: 5, runId: run.id, createdAt: 5000, type: 'turn.completed', text: '', payload: {} },
   ])
   await page.goto(`/runs/${run.id}`)
-  await page.getByRole('button', { name: /^Activity/ }).click()
-  await page.locator('.activity-group-toggle').click()
-  for (const label of ['Recovered', 'No matches', 'Differences found']) {
-    const card = page.locator('.operation-card').filter({ has: page.getByText(label, { exact: true }) })
-    await expect(card).toHaveAttribute('data-status', 'info')
-    await expect(card.locator('.operation-error')).toHaveCount(0)
+  // Expected outcomes and a recovered connection are not failures: only the test run counts.
+  await expect(page.getByTestId('agent-actions')).toContainText('1 failure')
+  for (const [step, label] of [['Connection restored', 'Recovered'], ['rg needle src', 'No matches'], ['diff before after', 'Differences found']]) {
+    await openStep(step)
+    await expect(sheet).toContainText(`${label} · step`)
+    await expect(sheet.locator('.operation-card')).toHaveAttribute('data-status', 'info')
+    await page.keyboard.press('Escape')
   }
-  await expect(page.locator('.operation-card[data-status="error"]')).toHaveCount(1)
+  await expect(page.getByTestId('agent-step').filter({ hasText: 'Exit 1' })).toHaveCount(1)
   await screenshot('command-outcomes')
   expect(errors).toEqual([])
 }

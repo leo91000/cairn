@@ -6,8 +6,8 @@ import { actionSentence, agentSteps } from '../src/agent-steps'
 let id = 0
 const command = (command: string, exit: number | null, type = 'item.completed'): RunEvent => ({ id: ++id, runId: 'chat', createdAt: id, type, text: '', payload: { item: { id: `c${id}`, type: 'command_execution', command, aggregated_output: '', exit_code: exit, status: exit === null ? 'in_progress' : exit ? 'failed' : 'completed' } } })
 const edit = (...paths: string[]): RunEvent => ({ id: ++id, runId: 'chat', createdAt: id, type: 'item.completed', text: '', payload: { item: { id: `f${id}`, type: 'file_change', status: 'completed', changes: paths.map(path => ({ path, kind: 'update' })) } } })
-function artifacts(events: RunEvent[]) {
-  return activityEntries(events, true).flatMap(entry => entry.kind === 'group' ? entry.artifacts : [])
+function artifacts(events: RunEvent[], chat = true) {
+  return activityEntries(events, chat).flatMap(entry => entry.kind === 'group' ? entry.artifacts : [])
 }
 
 describe('agent steps', () => {
@@ -25,5 +25,10 @@ describe('agent steps', () => {
       { title: 'Run tests', detail: 'pnpm test', failed: true, running: false },
       { title: 'Read README.md', detail: 'cat README.md', failed: false, running: true },
     ])
+  })
+
+  it('names a failed session notice of a run by its message', () => {
+    const [step] = agentSteps(artifacts([{ id: ++id, runId: 'run', createdAt: id, type: 'error', text: 'Validation needs attention.', payload: { message: 'Validation needs attention.' } }], false))
+    expect(step).toMatchObject({ detail: 'Validation needs attention.', failed: true })
   })
 })

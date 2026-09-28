@@ -150,14 +150,16 @@ test('reviews workflow permission, fresh project sources and explicit blocked ou
   await page.getByRole('button', { name: 'Cancel', exact: true }).click()
   await page.goto(`/runs/${run.id}`)
   await expect(page.getByText('Execution finished', { exact: true })).toBeVisible()
-  await page.getByText('Blocked', { exact: true }).click()
-  await expect(page.getByText('Push refused: missing workflow permission', { exact: true })).toBeVisible()
+  // The run header and the reply's outcome both say it; the header expands the evidence.
+  await page.locator('.run-title-meta').getByText('Blocked', { exact: true }).click()
+  await expect(page.getByText('Push refused: missing workflow permission', { exact: true }).first()).toBeVisible()
   for (const colorScheme of ['dark', 'light'] as const) {
     await page.emulateMedia({ colorScheme })
     await page.setViewportSize({ width: colorScheme === 'dark' ? 390 : 1440, height: 900 })
     await expectSingleScroll(page)
     await page.screenshot({ animations: 'disabled', path: testInfo.outputPath(`blocked-outcome-${colorScheme}.png`) })
   }
+  // The blocked mission says so on its card, as on Android.
   await page.goto('/tasks')
-  await expect(page.getByRole('heading', { name: 'Needs attention', exact: true })).toBeVisible()
+  await expect(page.locator('.mission-card').filter({ hasText: run.snapshot.task.name })).toContainText('Blocked')
 })

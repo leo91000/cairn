@@ -39,7 +39,8 @@ test('agent access editor and task inheritance work on mobile in both themes', a
   await expect(page.locator('.agent-scope-summary')).toContainText('1 allowed project')
   await page.screenshot({ path: testInfo.outputPath('agent-first-task.png'), animations: 'disabled' })
   await page.getByRole('button', { name: 'Create mission', exact: true }).click()
-  await expect(page.getByRole('dialog')).toHaveCount(0)
+  // As on Android, the new mission opens in its sheet on phones.
+  await expect(page.getByRole('dialog', { name: 'Review the repository' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Review the repository' })).toBeVisible()
 })
 

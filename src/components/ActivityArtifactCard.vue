@@ -7,7 +7,8 @@ import ActivityContent from './ActivityContent.vue'
 import Icon from './Icon.vue'
 import Markdown from './Markdown.vue'
 
-const props = defineProps<{ artifact: ActivityArtifact, active: boolean, expanded: boolean }>()
+// `bare` renders only the facts and detail, for a sheet that already shows the step's heading.
+const props = defineProps<{ artifact: ActivityArtifact, active: boolean, expanded: boolean, bare?: boolean }>()
 defineEmits<{ toggle: [] }>()
 const id = useId()
 const raw = ref(false)
@@ -48,13 +49,13 @@ const elapsed = computed(() => {
 
 <template>
   <article class="activity-artifact operation-card" :data-kind="artifact.kind" :data-status="artifact.status">
-    <button class="artifact-toggle flex items-center gap-3 w-full border-0 bg-transparent text-left text-muted cursor-pointer phone:gap-2 px-0 py-4" :aria-expanded="expanded" :aria-controls="id" @click="$emit('toggle')">
+    <button v-if="!bare" class="artifact-toggle flex items-center gap-3 w-full border-0 bg-transparent text-left text-muted cursor-pointer phone:gap-2 px-0 py-4" :aria-expanded="expanded" :aria-controls="id" @click="$emit('toggle')">
       <span class="operation-icon grid place-items-center w-10 h-10 border border-line rounded-xl bg-surface text-muted phone:w-8 phone:h-8 phone:rounded-[10px]"><Icon v-if="artifact.kind === 'search' && !artifact.command" :name="Globe" :size="19" /><Icon v-else :name="icons[artifact.kind]" :size="19" /></span>
       <span class="artifact-heading flex-1 min-w-0"><span class="operation-label">{{ labels[artifact.kind] }}</span><strong>{{ artifact.title }}</strong><span v-if="artifact.subtitle" class="operation-description" :class="{ 'artifact-command': artifact.command || artifact.kind === 'read' }">{{ artifact.subtitle }}</span></span>
       <span class="operation-state inline-flex items-center gap-[5px] mt-0.5 rounded-[5px] text-micro whitespace-nowrap text-muted bg-surface phone:[grid-column:2] phone:[grid-row:2] phone:[justify-self:start] px-[7px] py-1 phone:m-0" :data-state="status"><Icon v-if="running" :name="LoaderCircle" class="activity-spinning [animation:activity-spin_1.5s_linear_infinite] [@media(prefers-reduced-motion:_reduce)]:[animation:none]" :size="13" /><Icon v-else-if="artifact.status === 'error'" :name="CircleAlert" :size="13" /><Icon v-else-if="status === 'Completed'" :name="Check" :size="13" /><span>{{ status }}</span></span>
       <Icon :name="ChevronDown" class="artifact-chevron [transition:transform_.18s] shrink-0" :class="{ rotated: expanded }" :size="15" />
     </button>
-    <div class="operation-facts flex items-center flex-wrap gap-[8px_14px] -mt-0.5 mr-4 mb-3.5 ml-17 text-3xs text-muted phone:mt-0 phone:mr-3 phone:mb-3 phone:ml-[53px] phone:gap-[6px_10px]">
+    <div class="operation-facts flex items-center flex-wrap gap-[8px_14px] text-3xs text-muted phone:gap-[6px_10px]" :class="bare ? 'mb-2' : '-mt-0.5 mr-4 mb-3.5 ml-17 phone:mt-0 phone:mr-3 phone:mb-3 phone:ml-[53px]'">
       <span v-if="elapsed"><Icon :name="Clock" :size="12" />{{ elapsed }}</span>
       <span v-if="artifact.exitCode !== undefined" :class="{ 'operation-error': artifact.status === 'error' }">Exit {{ artifact.exitCode }}</span>
       <span v-if="artifact.files.length">{{ artifact.files.length }} {{ artifact.files.length === 1 ? 'file' : 'files' }}</span>
@@ -62,7 +63,7 @@ const elapsed = computed(() => {
       <span v-if="outputLines">{{ outputLines.toLocaleString() }} {{ outputLines === 1 ? 'line' : 'lines' }}</span>
       <span v-if="artifact.cwd" class="operation-cwd">{{ artifact.cwd }}</span>
     </div>
-    <div v-if="expanded" :id="id" class="artifact-body pt-0 pr-0 pb-4 pl-[29px] min-w-0 phone:pl-0">
+    <div v-if="expanded" :id="id" class="artifact-body pt-0 pr-0 pb-4 min-w-0" :class="bare ? 'pl-0' : 'pl-[29px] phone:pl-0'">
       <ul v-if="artifact.files.length" class="artifact-files [list-style:none] mt-2 mb-[15px] p-0 mx-0">
         <li v-for="(file, index) in artifact.files" :key="`${file.path}:${index}`">
           <Icon :name="FileCode" :size="16" /><code>{{ file.path }}</code><span :data-change="file.kind">{{ file.kind }}</span>

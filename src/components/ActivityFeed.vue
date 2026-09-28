@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { Deliverable } from '../../shared/artifacts'
 import type { RunEvent, TaskOutcome } from '../../shared/contracts'
-import type { ActivityArtifact, ActivityEntry } from '../activity'
+import type { ActivityEntry } from '../activity'
 import type { SendingMessage } from '../chat-delivery'
 import type { ReadingPosition } from '../history-cache'
 import { twMerge } from 'tailwind-merge'
@@ -9,15 +9,12 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { latestArtifacts } from '../../shared/artifacts'
 import { activityEntries } from '../activity'
 import { deliveryEntries } from '../deliverables'
-import { ArrowDown, ChevronDown, Layers, LoaderCircle, Maximize2, Minimize2 } from '../icons'
+import { ArrowDown, Maximize2, Minimize2 } from '../icons'
 import { workingStep } from '../signal'
 import { mentionSegments } from '../skill-mentions'
 import { iconButton } from '../ui'
-import ActivityArtifactCard from './ActivityArtifactCard.vue'
 import ActivityContent from './ActivityContent.vue'
 import AgentActions from './AgentActions.vue'
-import AgentAvatar from './AgentAvatar.vue'
-import ArtifactGallery from './ArtifactGallery.vue'
 import ArtifactRail from './ArtifactRail.vue'
 import ArtifactViewer from './ArtifactViewer.vue'
 import ChatAttachments from './ChatAttachments.vue'
@@ -27,7 +24,7 @@ import Icon from './Icon.vue'
 import UiButton from './UiButton.vue'
 import WorkingIndicator from './WorkingIndicator.vue'
 
-const props = defineProps<{ events: RunEvent[], active: boolean, agent: string, agentId?: string, task: string, more: boolean, loading: boolean, trimmed: number, preview?: boolean, compactToolbar?: boolean, chat?: boolean, outcome?: TaskOutcome | null, deliverables?: Deliverable[], sending?: SendingMessage[], cacheKey?: string, position?: ReadingPosition, loadingOlder?: boolean, olderError?: string, skills?: string[] }>()
+const props = defineProps<{ events: RunEvent[], active: boolean, agent: string, agentId?: string, task: string, more: boolean, loading: boolean, trimmed: number, compactToolbar?: boolean, chat?: boolean, outcome?: TaskOutcome | null, deliverables?: Deliverable[], sending?: SendingMessage[], cacheKey?: string, position?: ReadingPosition, loadingOlder?: boolean, olderError?: string, skills?: string[] }>()
 const emit = defineEmits<{ load: [], position: [value: ReadingPosition, key?: string] }>()
 const skillNames = computed(() => new Set(props.skills ?? []))
 const entries = computed(() => {
@@ -40,7 +37,7 @@ const entries = computed(() => {
   return deliveryEntries(entries, props.deliverables ?? [])
 })
 const working = computed(() => workingStep(entries.value.filter((entry): entry is ActivityEntry => entry.kind !== 'deliverables'), props.agent, props.events[0]?.createdAt ?? null))
-const visibleOutcome = computed(() => props.chat && !props.active && !props.sending?.length && !props.loading ? props.outcome : null)
+const visibleOutcome = computed(() => !props.active && !props.sending?.length && !props.loading ? props.outcome : null)
 const outcomeEntryId = computed(() => {
   const items = entries.value
   let index = items.findLastIndex(entry => entry.kind === 'message')
@@ -58,9 +55,6 @@ const viewer = ref<HTMLDialogElement>()
 const fullscreenHost = ref<HTMLElement>()
 const fullscreenButton = ref<HTMLButtonElement>()
 const scroller = ref<HTMLElement>()
-const opened = ref(new Set<string>())
-const expanded = ref(new Set<string>())
-let previewed = false
 let resizeObserver: ResizeObserver | undefined
 watch(scroller, (element) => {
   resizeObserver?.disconnect()
@@ -79,28 +73,6 @@ onBeforeUnmount(() => {
   savePosition()
   resizeObserver?.disconnect()
 })
-watch(entries, (items) => {
-  if (!props.preview || previewed)
-    return
-  const group = items.findLast(item => item.kind === 'group' && item.artifacts.some(artifact => artifact.kind !== 'notice'))
-  if (!group || group.kind !== 'group')
-    return
-  opened.value.add(group.id)
-  previewed = true
-}, { immediate: true })
-function toggle(set: Set<string>, id: string) {
-  if (set.has(id))
-    set.delete(id)
-  else
-    set.add(id)
-}
-function groupLabel(artifacts: ActivityArtifact[]) {
-  const actions = artifacts.filter(item => item.kind !== 'notice')
-  if (!actions.length)
-    return artifacts.some(item => item.status === 'error') ? 'Session updates · needs attention' : 'Session updates'
-  const kinds = [...new Set(actions.map(item => ({ command: 'terminal', read: 'reading', browse: 'workspace', output: 'output', files: 'files', search: 'research', tool: 'tools', plan: 'plan', thinking: 'thinking', notice: 'updates' })[item.kind]))]
-  return kinds.map(value => value[0].toUpperCase() + value.slice(1)).join(' · ')
-}
 function jump() {
   scroller.value?.scrollTo({ top: scroller.value.scrollHeight })
 }
@@ -212,25 +184,21 @@ defineExpose({
         <p v-if="olderError" class="px-5 text-sm text-danger">
           {{ olderError }}
         </p>
-        <div ref="scroller" :class="chat ? 'flex flex-col' : ''" class="activity-scroll flex-1 min-h-0 overflow-auto overscroll-contain [scrollbar-width:thin] [scrollbar-color:var(--color-control)_transparent] focus-visible:outline-2 focus-visible:outline-offset-[-3px] focus-visible:outline-accent" tabindex="0" role="region" aria-label="Activity output" @scroll="scrolled">
+        <div ref="scroller" class="activity-scroll flex flex-col flex-1 min-h-0 overflow-auto overscroll-contain [scrollbar-width:thin] [scrollbar-color:var(--color-control)_transparent] focus-visible:outline-2 focus-visible:outline-offset-[-3px] focus-visible:outline-accent" tabindex="0" role="region" aria-label="Activity output" @scroll="scrolled">
           <UiButton v-if="more" class="activity-load my-3 flex text-xs mx-auto" :disabled="loadingOlder" @click="loadOlder">
             {{ loadingOlder ? 'Loading history…' : 'Earlier messages' }}
           </UiButton>
-          <!-- As on Android, a short conversation sits just above the composer. -->
-          <div :class="chat ? 'mt-auto w-full' : ''" class="activity-conversation max-w-205 pt-5 pb-7 px-9 mx-auto my-0 phone:px-4 phone:py-6">
-            <div v-if="!chat" class="activity-intro flex items-center gap-3 mb-7 phone:gap-2.5">
-              <AgentAvatar :name="agent" :identity="agentId" :size="39" /><div><strong>{{ agent }}</strong></div>
-            </div>
+          <!-- As on Android, a short conversation sits at the bottom, next to the composer or the latest activity. -->
+          <div class="activity-conversation mt-auto w-full max-w-205 pt-5 pb-7 px-9 mx-auto my-0 phone:px-4 phone:py-6">
             <p v-if="trimmed" class="activity-retention text-2xs text-muted leading-[1.8]">
               Showing the latest {{ events.length.toLocaleString() }} events. {{ trimmed.toLocaleString() }} earlier events are outside this view.
             </p>
             <template v-for="entry in entries" :key="entry.id">
-              <div v-if="entry.kind === 'deliverables'" :class="chat ? 'my-3' : 'my-5'">
-                <ArtifactRail v-if="chat" :items="entry.files" @open="artifactViewer = $event.id" />
-                <ArtifactGallery v-else :items="entry.files" @open="artifactViewer = $event.id" />
+              <div v-if="entry.kind === 'deliverables'" class="my-3">
+                <ArtifactRail :items="entry.files" @open="artifactViewer = $event.id" />
               </div>
-              <!-- Chat messages follow the Android reader: a tonal bubble for you, plain text for the agent. -->
-              <article v-else-if="entry.kind === 'message' && chat && entry.role === 'user'" class="activity-message chat-message ml-auto! my-3 w-fit max-w-[90%] rounded-2xl rounded-br-sm bg-variant px-4 py-3">
+              <!-- Conversations and runs follow the Android reader: a tonal bubble for you, plain text for the agent. -->
+              <article v-else-if="entry.kind === 'message' && entry.role === 'user'" class="activity-message chat-message ml-auto! my-3 w-fit max-w-[90%] rounded-2xl rounded-br-sm bg-variant px-4 py-3">
                 <span class="sr-only">You</span>
                 <p class="whitespace-pre-wrap text-lg leading-normal">
                   <template v-for="(segment, index) in mentionSegments(entry.text, skillNames)" :key="index">
@@ -243,51 +211,28 @@ defineExpose({
                   <time :datetime="new Date(entry.time).toISOString()" :title="new Date(entry.time).toLocaleString()">{{ new Date(entry.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</time>
                 </p>
               </article>
-              <article v-else-if="entry.kind === 'message' && chat" class="activity-message chat-message my-3 py-2" :class="visibleOutcome && entry.id === outcomeEntryId ? 'mb-1!' : ''">
+              <article v-else-if="entry.kind === 'message'" class="activity-message chat-message my-3 py-2" :class="visibleOutcome && entry.id === outcomeEntryId ? 'mb-1!' : ''">
                 <p class="mb-1.5! flex justify-between gap-3 text-2xs text-muted">
                   <span class="truncate">{{ agent }}</span>
                   <time :datetime="new Date(entry.time).toISOString()" :title="new Date(entry.time).toLocaleString()">{{ new Date(entry.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</time>
                 </p>
                 <ActivityContent :content="entry.text" />
               </article>
-              <article v-else-if="entry.kind === 'message'" class="activity-message mt-6.5 mb-7.5 mx-0" :class="[entry.role === 'user' ? 'ml-auto! max-w-[85%] rounded-2xl rounded-br-md bg-hover px-5 py-3' : '', visibleOutcome && entry.id === outcomeEntryId ? 'mb-1!' : '']">
-                <header><span class="message-dot w-[5px] h-[5px] bg-[light-dark(#4f4c73,_var(--dark-accent-surface))] rounded-full" /><strong>{{ entry.role === 'user' ? 'You' : agent }}</strong><time :datetime="new Date(entry.time).toISOString()" :title="new Date(entry.time).toLocaleString()">{{ new Date(entry.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</time></header>
-                <p v-if="entry.role === 'user'" class="whitespace-pre-wrap text-sm leading-relaxed">
-                  <template v-for="(segment, index) in mentionSegments(entry.text, skillNames)" :key="index">
-                    <span v-if="segment.skill" class="rounded bg-accent/12 px-0.5 font-medium text-accent" :title="`Skill ${segment.skill}`" v-text="segment.text" /><span v-else v-text="segment.text" />
-                  </template>
-                </p>
-                <ActivityContent v-else :content="entry.text" />
-                <p v-if="entry.delivery" role="status" class="mt-2! mb-0! text-[11px] text-muted">
-                  {{ entry.delivery }}
-                </p>
-                <ChatAttachments v-if="entry.attachments?.length" :attachments="entry.attachments" class="mt-3!" />
-              </article>
               <ChatNotice v-else-if="entry.kind === 'notice'" :notice="entry.artifact" />
-              <AgentActions v-else-if="chat" :artifacts="entry.artifacts" :active="active" />
-              <section v-else class="activity-group border-line/70 border rounded-xl bg-transparent overflow-hidden mx-0 my-4.5" :class="{ 'expanded': opened.has(entry.id), 'notice-only': entry.artifacts.every(item => item.kind === 'notice') }">
-                <button class="activity-group-toggle bg-transparent flex items-center gap-[11px] w-full text-left border-0 text-ink cursor-pointer phone:gap-[9px] px-[17px] py-[15px] phone:px-3 phone:py-[13px]" :aria-expanded="opened.has(entry.id)" :aria-controls="`activity-${entry.id}`" @click="toggle(opened, entry.id)">
-                  <span class="activity-group-icon w-8 h-8 grid place-items-center bg-transparent rounded-lg shrink-0"><Icon v-if="active && entry.artifacts.some(item => item.status === 'running')" :name="LoaderCircle" class="activity-spinning [animation:activity-spin_1.5s_linear_infinite] [@media(prefers-reduced-motion:_reduce)]:[animation:none]" :size="17" /><Icon v-else :name="Layers" :size="17" /></span>
-                  <span class="activity-group-label min-w-0 flex-1"><strong>{{ groupLabel(entry.artifacts) }}</strong><small>{{ entry.artifacts.length }} {{ entry.artifacts.length === 1 ? 'step' : 'steps' }}<span v-if="entry.artifacts.some(item => item.status === 'error')" class="activity-attention text-danger"> · Includes errors</span></small></span>
-                  <Icon :name="ChevronDown" class="activity-chevron [transition:transform_.18s] shrink-0" :size="17" />
-                </button>
-                <div v-if="opened.has(entry.id)" :id="`activity-${entry.id}`" class="activity-artifacts bg-transparent border-t border-line px-4 py-0 phone:px-3 phone:py-0">
-                  <ActivityArtifactCard v-for="artifact in entry.artifacts" :key="artifact.id" :artifact="artifact" :active="active" :expanded="expanded.has(artifact.id)" @toggle="toggle(expanded, artifact.id)" />
-                </div>
-              </section>
+              <AgentActions v-else :artifacts="entry.artifacts" :active="active" />
               <ChatOutcome v-if="visibleOutcome && entry.id === outcomeEntryId" :key="`${visibleOutcome.messageId}:${visibleOutcome.reportedAt}`" :outcome="visibleOutcome" :agent="agent" />
             </template>
 
             <ChatOutcome v-if="visibleOutcome && !outcomeEntryId" :key="`${visibleOutcome.messageId}:${visibleOutcome.reportedAt}`" :outcome="visibleOutcome" :agent="agent" />
 
-            <div v-if="active && !sending?.length && events.length" class="activity-working mb-0.5" :class="chat ? 'mt-4' : 'mt-7.5 rounded-2xl border border-line bg-surface px-4 py-3'">
+            <div v-if="active && !sending?.length && events.length" class="activity-working mt-4 mb-0.5">
               <WorkingIndicator :step="working" />
             </div>
             <div v-else-if="active && !sending?.length" class="activity-working flex items-center justify-center gap-3 text-muted text-3xs mt-7.5 mb-0.5 mx-0">
               <span class="activity-presence w-[7px] h-[7px] rounded-full bg-[light-dark(#8e8baa,_var(--dark-accent-surface))] shrink-0 live" />Waiting for the worker…
             </div>
-            <div v-else-if="!chat" class="activity-end flex items-center justify-center gap-3 text-muted text-3xs mt-7.5 mb-0.5 mx-0">
-              <span />{{ events.length ? 'End of activity' : 'No activity recorded yet' }}<span />
+            <div v-else-if="!chat && !events.length" class="activity-end flex items-center justify-center gap-3 text-muted text-3xs mt-7.5 mb-0.5 mx-0">
+              <span />No activity recorded yet<span />
             </div>
           </div>
         </div>

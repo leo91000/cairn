@@ -35,20 +35,10 @@
   color: light-dark(#6f6c93, var(--dark-muted));
 }
 
-.task-focus-detail .activity-message .markdown {
-  font-size: 13px;
-  line-height: 1.8;
-}
-
-@media (max-width: 640px) {
-  .task-focus-detail .activity-message .markdown {
-    font-size: 12px;
-  }
-}
-
+/* Replies read at Android's body size in conversations and runs alike. */
 .activity-message .markdown {
-  font-size: 14px;
-  line-height: 1.9;
+  font-size: 16px;
+  line-height: 1.5;
   color: light-dark(#373548, var(--dark-text));
   overflow-wrap: anywhere;
 }
@@ -68,13 +58,6 @@
 
 .activity-message .markdown h3 {
   font-size: 17px;
-}
-
-@media (max-width: 640px) {
-  .activity-message .markdown {
-    font-size: 14px;
-    line-height: 1.85;
-  }
 }
 
 .read-preview-content .markdown h1 {

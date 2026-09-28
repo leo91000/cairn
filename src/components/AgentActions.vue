@@ -3,8 +3,7 @@ import type { ActivityArtifact } from '../activity'
 import { computed, ref, useId } from 'vue'
 import { actionSentence, agentSteps } from '../agent-steps'
 import { Check, ChevronDown, ChevronRight, Clock, FileText, Folder, Pencil, Plug, Search, Sparkles, Terminal } from '../icons'
-import ActivityCode from './ActivityCode.vue'
-import ActivityContent from './ActivityContent.vue'
+import ActivityArtifactCard from './ActivityArtifactCard.vue'
 import Icon from './Icon.vue'
 import Modal from './Modal.vue'
 
@@ -29,6 +28,15 @@ function status(step: (typeof steps.value)[number]) {
     return code === undefined ? 'Failed' : `Exit ${code}`
   }
   return step.running ? 'running' : ''
+}
+// The sheet names the step's state, including an expected outcome such as "No matches".
+function stepState(step: (typeof steps.value)[number]) {
+  if (step.failed)
+    return 'Failed'
+  if (step.running)
+    return 'Running'
+  const [only] = step.items
+  return step.items.length === 1 ? only!.statusLabel ?? (only!.historical ? 'Recorded' : 'Completed') : 'Completed'
 }
 </script>
 
@@ -73,39 +81,18 @@ function status(step: (typeof steps.value)[number]) {
       <div class="flex items-center gap-3">
         <span class="grid size-10 shrink-0 place-items-center rounded-xl" :class="openedStep.failed ? 'bg-coral-soft text-coral' : openedStep.running ? 'bg-soft text-accent' : 'bg-variant text-muted'"><Icon :name="glyphs[openedStep.items[0]!.kind]" :size="20" /></span>
         <p class="m-0! text-xs" :class="openedStep.failed ? 'text-coral' : openedStep.running ? 'text-accent' : 'text-muted'">
-          {{ [openedStep.failed ? 'Failed' : openedStep.running ? 'Running' : 'Completed', openedStep.failed ? status(openedStep).replace('Failed', '') : '', `step ${opened! + 1} of ${steps.length}`].filter(Boolean).join(' · ') }}
+          {{ [stepState(openedStep), openedStep.failed ? status(openedStep).replace('Failed', '') : '', `step ${opened! + 1} of ${steps.length}`].filter(Boolean).join(' · ') }}
         </p>
       </div>
-      <template v-for="(artifact, index) in openedStep.items" :key="artifact.id">
-        <hr v-if="index" class="border-line">
+      <section v-for="(artifact, index) in openedStep.items" :key="artifact.id" class="grid gap-3" :class="index ? 'border-t border-line pt-3' : ''" :aria-label="artifact.title">
         <h3 v-if="openedStep.items.length > 1" class="m-0! text-base font-semibold">
           {{ artifact.title }}
         </h3>
         <p v-if="artifact.kind === 'notice' && artifact.subtitle" class="m-0! text-sm text-muted">
           {{ artifact.subtitle }}
         </p>
-        <ul v-if="artifact.files.length && artifact.kind !== 'read'" class="m-0! grid list-none gap-1 p-0!">
-          <li v-for="(file, fileIndex) in artifact.files" :key="`${file.path}:${fileIndex}`" class="flex items-center gap-2 text-xs">
-            <Icon :name="Pencil" :size="14" class="text-muted" /><code class="min-w-0 flex-1 truncate">{{ file.path }}</code><span class="text-2xs text-muted">{{ file.kind }}</span>
-          </li>
-        </ul>
-        <ul v-if="artifact.tasks.length" class="m-0! grid list-none gap-1 p-0!">
-          <li v-for="(task, taskIndex) in artifact.tasks" :key="taskIndex" class="flex items-start gap-2 text-sm" :class="task.completed ? 'text-muted line-through' : ''">
-            <Icon :name="Check" :size="14" class="mt-0.5" :class="task.completed ? 'text-accent' : 'opacity-0'" />{{ task.text }}
-          </li>
-        </ul>
-        <ActivityCode v-if="artifact.command" label="Command" :code="artifact.command" language="bash" />
-        <ActivityContent v-for="(block, blockIndex) in artifact.blocks.filter(block => block.label !== 'Command')" :key="blockIndex" :label="block.label" :content="block.code" :language="block.language" />
-        <p v-if="!artifact.command && !artifact.blocks.length && !artifact.files.length && !artifact.tasks.length" class="m-0! text-xs text-muted">
-          {{ artifact.status === 'running' ? 'Waiting for output…' : 'No output for this step.' }}
-        </p>
-        <details class="text-xs text-muted">
-          <summary class="min-h-9 cursor-pointer py-2">
-            Technical details · JSON / source
-          </summary>
-          <ActivityCode label="Event details" :code="artifact.raw" :language="artifact.historical ? 'plaintext' : 'json'" />
-        </details>
-      </template>
+        <ActivityArtifactCard :artifact="artifact" :active="active" expanded bare />
+      </section>
     </div>
   </Modal>
 </template>
