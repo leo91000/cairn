@@ -70,8 +70,8 @@ RUN curl -fsSL https://cache.agilebits.com/dist/1P/op2/pkg/v2.39.0/op_linux_amd6
 COPY --from=backend /usr/local/bin/leo /usr/local/bin/leo
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/package.json ./package.json
-RUN mkdir -p /data /workspaces /home/node/.agents/skills /home/node/.codex \
-    && chown -R node:node /data /workspaces /home/node /app
+RUN install -d -o node -g node /data /workspaces /home/node/.agents /home/node/.agents/skills /home/node/.codex \
+    && chown node:node /home/node /app
 ARG VCS_REF=development
 ENV APP_COMMIT=$VCS_REF APP_RUNTIME_ID=$VCS_REF APP_CODEX_VERSION=$CODEX_VERSION APP_GH_VERSION=$GH_VERSION
 USER node

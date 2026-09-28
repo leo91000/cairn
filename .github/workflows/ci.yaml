@@ -98,6 +98,11 @@ jobs:
           - group: webkit
             browser: webkit
             projects: layout-webkit-*
+            shard: 1/2
+          - group: webkit-extra
+            browser: webkit
+            projects: layout-webkit-*
+            shard: 2/2
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: pnpm/setup@v2.1.0
@@ -117,10 +122,16 @@ jobs:
           name: browser-backend
           path: target/debug/
       - run: chmod +x target/debug/leo
-      - run: pnpm test:e2e --project="$BROWSER_PROJECTS" --workers="$BROWSER_WORKERS"
+      - run: |
+          args=(--project="$BROWSER_PROJECTS" --workers="$BROWSER_WORKERS")
+          if [[ -n "$BROWSER_SHARD" ]]; then
+            args+=(--shard="$BROWSER_SHARD")
+          fi
+          pnpm test:e2e "${args[@]}"
         env:
           BROWSER_PROJECTS: ${{ matrix.projects }}
           BROWSER_WORKERS: ${{ inputs.browser-workers || '2' }}
+          BROWSER_SHARD: ${{ matrix.shard || '' }}
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
@@ -179,8 +190,12 @@ jobs:
           outputs: ${{ github.event_name != 'pull_request' && format('type=image,name=ghcr.io/{0},push-by-digest=true,name-canonical=true,push=true', github.repository) || '' }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: VCS_REF=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true,timeout=2m
+          # GHCR deduplicates layers across main builds. PRs read the trusted
+          # main cache but skip the expensive cache upload on their critical path.
+          cache-from: |
+            type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
+            type=gha
+          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true', github.repository) || '' }}
           secrets: github_token=${{ github.token }}
           provenance: ${{ github.event_name != 'pull_request' && 'mode=max' || 'false' }}
           sbom: ${{ github.event_name != 'pull_request' }}
