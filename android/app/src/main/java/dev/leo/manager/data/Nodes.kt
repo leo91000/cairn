@@ -63,7 +63,7 @@ fun NodeAlert.localized(): Pair<String, String> = when (kind) {
     "waiting" -> "Conversation en attente de sa node" to "Sa machine est indisponible et aucune autre ne peut la reprendre pour l’instant. Elle repartira dès que possible."
     "resumed" -> "Conversation reprise sur une autre node" to "Sa machine est devenue indisponible ; elle a repris depuis son dernier point de reprise. Des fichiers récents peuvent manquer."
     "move-failed" -> "Échec du déplacement" to "Le transfert de l’environnement a échoué. Le disque d’origine est conservé."
-    "backup-failed" -> "Point de reprise en échec" to "Un nouveau point de reprise n’a pas pu être enregistré. Ouvrez la conversation pour le détail."
+    "backup-failed" -> "Synchronisation en échec" to "Le disque n’a pas pu être synchronisé avec S3. Ouvrez la conversation pour le détail."
     else -> title to body
 }
 

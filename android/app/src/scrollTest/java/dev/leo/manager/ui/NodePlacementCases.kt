@@ -18,7 +18,7 @@ import org.junit.Assert.*
 abstract class NodePlacementCases {
     @get:Rule val compose = createComposeRule()
 
-    @Test fun ownerCanPreferOrPinAnAuthorizedNodeAndSeeBackupAge() {
+    @Test fun ownerCanPreferOrPinAnAuthorizedNodeAndSeeSynchronizationAge() {
         MockWebServer().use { server ->
             val saved=CopyOnWriteArrayList<JsonObject>()
             server.dispatcher=object:Dispatcher() {
@@ -60,7 +60,7 @@ abstract class NodePlacementCases {
             compose.waitUntil(10000) {saved.size==2 && compose.onAllNodesWithText("Préférence enregistrée",substring=true).fetchSemanticsNodes().isNotEmpty()}
             assertEquals("node",saved[1]["pinnedNodeId"]?.jsonPrimitive?.content)
             assertEquals(JsonNull,saved[1]["preferredNodeId"])
-            compose.onNodeWithText("Dernier état restaurable",substring=true).assertExists()
+            compose.onNodeWithText("Dernière synchronisation",substring=true).assertExists()
             compose.onNodeWithText("Préférence enregistrée",substring=true).assertExists()
             // Without a recorded provider session there is nothing to resume elsewhere yet.
             compose.onNodeWithText("Déplacer maintenant").performScrollTo().assertIsNotEnabled()
