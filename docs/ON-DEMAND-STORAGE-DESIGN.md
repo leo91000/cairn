@@ -1,4 +1,4 @@
-> Révision du 28 septembre 2026 : les choix historiques sur l’archivage et la rétention sont remplacés par [la simplification de publication S3](STORAGE-SYNC-SIMPLIFICATION.md). Les garanties du journal et de lecture à la demande restent applicables.
+> Révision du 28 septembre 2026 : les choix historiques sur l’archivage et la rétention sont remplacés par [la simplification de publication S3](STORAGE-SYNC-SIMPLIFICATION.md). L’activation par node et la migration progressive sont remplacées par [ADR-0009](adr/0009-s3-backed-disks-required-on-every-node.md). Les garanties du journal et de lecture à la demande restent applicables.
 
 # Stockage des environnements et reprise à la demande
 

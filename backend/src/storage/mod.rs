@@ -1,6 +1,6 @@
 //! Conversation disk storage. Callers hold the conversation lock while preparing or exporting.
 mod local;
-pub use local::{copy_blocks, prepare};
+pub use local::prepare;
 mod device;
 pub use device::{Disk, LocalDisk, export};
 
@@ -17,7 +17,5 @@ pub mod runtime;
 pub mod checkpoint;
 
 pub mod cache;
-
-pub mod migration;
 
 pub mod bootstrap;

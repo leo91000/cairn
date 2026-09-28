@@ -9,35 +9,6 @@ use std::{future::Future, path::Path};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
 pub const BLOCK: u64 = 4 * 1024 * 1024;
-/// The baseline manifest with the written blocks re-hashed from `copy`, which holds
-/// exactly those blocks at their original offsets.
-pub async fn update(copy: &Path, baseline: &Value, written: &[u64]) -> Result<Value> {
-    validate(baseline)?;
-    let (copy, mut manifest, written) = (copy.to_owned(), baseline.clone(), written.to_owned());
-    tokio::task::spawn_blocking(move || -> Result<Value> {
-        use std::os::unix::fs::FileExt;
-        let file = std::fs::File::open(&copy)?;
-        let size = manifest["size"].as_u64().unwrap_or(0);
-        let blocks = manifest["blocks"].as_array_mut().unwrap();
-        let mut buffer = vec![0; BLOCK as usize];
-        for &index in &written {
-            let offset = index * BLOCK;
-            let length = (size.saturating_sub(offset)).min(BLOCK) as usize;
-            let entry = blocks
-                .get_mut(index as usize)
-                .ok_or_else(|| Error::bad("Written block outside the disk."))?;
-            file.read_exact_at(&mut buffer[..length], offset)?;
-            entry["hash"] = if buffer[..length].iter().all(|b| *b == 0) {
-                Value::Null
-            } else {
-                hex::encode(Sha256::digest(&buffer[..length])).into()
-            };
-        }
-        Ok(manifest)
-    })
-    .await
-    .map_err(Error::internal)?
-}
 /// Next offset at or after `offset` that may hold data. Holes read as zeros, so blocks
 /// entirely inside one need neither reading nor hashing.
 fn next_data(file: &std::fs::File, offset: u64) -> std::io::Result<u64> {

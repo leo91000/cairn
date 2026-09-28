@@ -8,7 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
-import { storageSmoke } from './runner-storage-smoke.mjs'
+import { prepareStorageOrigin, storageSmoke } from './runner-storage-smoke.mjs'
 
 async function main() {
   const image = process.argv[2] || 'leo-firecracker:dev'
@@ -137,14 +137,15 @@ console.log('probe.done');
       }
     }, 10000)}`
     await until(() => fetch(`${url}/health`).then(r => r.ok).catch(() => false))
-    await until(async () => (await (await api('/health')).json()).pool.ready === 1)
-    // The prepared VM is really suspended long enough to expose guest clock drift.
-    await setTimeout(31000)
+    const storageFixture = await prepareStorageOrigin({ root, docker, name, api })
+    const { storage } = storageFixture
     for (const mode of ['first', 'resume', 'cancel', 'crash', 'recover', 'managed-claude', 'codex-return']) {
       const id = randomUUID()
       const plan = {
         id,
         runId,
+        storage,
+        resources: { cpu: 2, memoryMiB: 4096, diskMiB: 1024 },
         expires: Date.now() + 300000,
         sandbox: 'yolo',
         cwd: `${runRoot}/workspace`,
@@ -305,7 +306,7 @@ console.log('probe.done');
         },100);
 
       `
-      const plan = { id, runId, expires: Date.now() + 60000, sandbox, cwd: workspace, command: ['/usr/local/bin/node', '-e', code], imports: [{ source: workspace, target: workspace, readOnly: sandbox === 'read-only' }] }
+      const plan = { id, runId, storage, resources: { cpu: 1, memoryMiB: 512, diskMiB: 512 }, expires: Date.now() + 60000, sandbox, cwd: workspace, command: ['/usr/local/bin/node', '-e', code], imports: [{ source: workspace, target: workspace, readOnly: sandbox === 'read-only' }] }
       await writeFile(path.join(root, 'data/runner-plans', `${id}.json`), JSON.stringify(plan))
       await api(`/runs/${id}`, 'POST')
       probes.push({ id, runId, sandbox, directory, lazyId, lazy })
@@ -351,14 +352,8 @@ console.log('probe.done');
     const status = await (await api(`/runs/${resumedId}/wait`, 'POST')).json()
     assert.equal(status.StatusCode, 0, 'lazy read-only policy survives VM restart')
     process.stdout.write(`${JSON.stringify({ mode: 'read-only-resume', status: 'passed' })}\n`)
-    // Prepared VMs share the configured five slots with active work. A sixth run cannot enter.
-    await until(async () => {
-      const health = await (await api('/health')).json()
-      return health.activeRuns === 0 && health.pool.ready === 1
-    })
-    // Kill only this disposable controller's anonymous spare. Admission must fall
-    // back before executing the user command, without leaking the occupied slot.
-    docker('exec', name, 'pkill', '-KILL', '-x', 'firecracker')
+    // Five running VMs occupy the configured slots. A sixth cannot enter.
+    await until(async () => (await (await api('/health')).json()).activeRuns === 0)
     const held = []
     for (let index = 0; index < 6; index++) {
       const id = randomUUID()
@@ -366,7 +361,7 @@ console.log('probe.done');
       const cwd = `/data/runs/${runId}/workspace`
       const directory = path.join(root, 'data/runs', runId, 'workspace')
       await mkdir(directory, { recursive: true })
-      const plan = { id, runId, expires: Date.now() + 60000, sandbox: 'yolo', cwd, command: ['/usr/local/bin/node', '-e', 'console.log("slot.ready");setInterval(()=>{},1000)'], imports: [{ source: cwd, target: cwd }] }
+      const plan = { id, runId, storage, resources: { cpu: 1, memoryMiB: 512, diskMiB: 512 }, expires: Date.now() + 60000, sandbox: 'yolo', cwd, command: ['/usr/local/bin/node', '-e', 'console.log("slot.ready");setInterval(()=>{},1000)'], imports: [{ source: cwd, target: cwd }] }
       await writeFile(path.join(root, 'data/runner-plans', `${id}.json`), JSON.stringify(plan))
       const response = await fetch(`${url}/runs/${id}`, { method: 'POST', headers })
       assert.equal(response.status, index < 5 ? 200 : 503)
@@ -394,10 +389,10 @@ console.log('probe.done');
     await Promise.all(held.map(id => api(`/runs/${id}`, 'DELETE')))
     await until(async () => {
       const health = await (await api('/health')).json()
-      return health.activeRuns === 0 && health.pool.ready === 1 && health.pool.occupied === 1
+      return health.activeRuns === 0 && health.pool.ready === 0 && health.pool.occupied === 0
     })
     process.stdout.write(`${JSON.stringify({ mode: 'pool-capacity-cancel-refill', capacity: 5, status: 'passed' })}\n`)
-    await storageSmoke({ root, docker, name, api, until, legacyRunId: runId })
+    await storageSmoke({ root, docker, name, api, until, storageFixture })
   }
   catch (error) {
     console.error(error)

@@ -12,7 +12,14 @@ const error = ref('')
 const busy = ref(false)
 function open() {
   error.value = ''
-  policy.value = { enabled: false, cacheMiB: 102400, reserveMiB: 10240, reservePercent: 5, backupSeconds: 60, maxDirtySeconds: 300, ...props.node.storage }
+  const saved = props.node.storage
+  policy.value = {
+    cacheMiB: saved?.cacheMiB ?? 102400,
+    reserveMiB: saved?.reserveMiB ?? 10240,
+    reservePercent: saved?.reservePercent ?? 5,
+    backupSeconds: saved?.backupSeconds ?? 60,
+    maxDirtySeconds: saved?.maxDirtySeconds ?? 300,
+  }
 }
 async function save() {
   busy.value = true
@@ -33,17 +40,13 @@ async function save() {
   </UiButton>
   <Modal v-if="policy" :title="`Storage · ${node.name}`" @close="policy = null">
     <form class="grid gap-4" @submit.prevent="save">
-      <p>Keep files on S3 and load them when needed. Conversations remain active when their local cache is freed. Existing stopped environments migrate one at a time.</p>
-      <label><input v-model="policy.enabled" type="checkbox"> Enable storage on demand</label>
+      <p>Files are saved to S3 and loaded when needed. Conversations remain active when their local cache is freed.</p>
       <label>Clean cache budget (MiB)<input v-model.number="policy.cacheMiB" type="number" min="0" max="16777216" required></label>
       <label>Minimum free disk (MiB)<input v-model.number="policy.reserveMiB" type="number" min="64" max="16777216" required></label>
       <label>Minimum free disk (%)<input v-model.number="policy.reservePercent" type="number" min="1" max="50" required></label>
       <p>The larger free-space reserve applies. Unsaved work stays local; executions pause before the reserve is exhausted.</p>
       <label>Synchronization target (seconds)<input v-model.number="policy.backupSeconds" type="number" min="5" max="3600" required></label>
       <label>Pause after unsaved changes (seconds)<input v-model.number="policy.maxDirtySeconds" type="number" :min="policy.backupSeconds" max="86400" required></label>
-      <p v-if="node.storageMigration?.error" role="status">
-        Migration: {{ node.storageMigration.error }}
-      </p>
       <p v-if="error" role="alert" class="text-coral">
         {{ error }}
       </p>

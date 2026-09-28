@@ -306,11 +306,7 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
             s.store
                 .patch_run(run_id, json!({"nodeState":"saving"}))
                 .await?;
-            let mut capturing = current.clone();
-            if s.get("nodes", text(movement, "nodeId")).await?["storage"]["enabled"] == true {
-                capturing["storageRequested"] = true.into();
-            }
-            let point = super::publication::capture(s, &capturing).await?;
+            let point = super::publication::capture(s, &current).await?;
             s.get("node-backups", text(&point, "id")).await?
         };
         s.store
@@ -373,12 +369,7 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
             return Ok(false);
         }
     };
-    let destination_storage =
-        if s.get("nodes", text(movement, "nodeId")).await?["storage"]["enabled"] == true {
-            json!({"mode":"on-demand","migrated":true})
-        } else {
-            json!({"mode":"local"})
-        };
+    let destination_storage = json!({"mode":"on-demand"});
     let idle = movement["idle"] == true;
     let automatic = movement["automatic"] == true;
     let destination = text(movement, "nodeId").to_owned();
@@ -425,40 +416,15 @@ pub async fn latest(s: &Service, run: &str) -> Result<Option<Value>> {
     let Some(head) = current["backup"]["id"].as_str() else {
         return Ok(None);
     };
-    let points = s
-        .store
-        .get("node-backups", head)
-        .await?
-        .into_iter()
-        .filter(|point| point["runId"] == run && point["sessionId"].is_string());
-    let demand = current["storage"]["mode"] == "on-demand";
-    for point in points {
-        let usable = async {
-            let manifest = super::publication::manifest(s, &point).await?;
-            if demand && point["destination"] == "s3" {
-                // Publication already verified every immutable dependency. Each
-                // demand read verifies it again; do not hydrate the whole disk here.
-                return Ok(());
-            }
-            let mut checked = std::collections::HashSet::new();
-            for block in manifest["blocks"].as_array().unwrap() {
-                if let Some(hash) = block["hash"].as_str()
-                    && checked.insert(hash.to_owned())
-                {
-                    let bytes = super::publication::read_block(s, &point, hash).await?;
-                    if bytes.len() as u64 != block["size"].as_u64().unwrap_or(0) {
-                        return Err(Error::bad("Backup block size mismatch."));
-                    }
-                }
-            }
-            Ok::<_, Error>(())
-        }
-        .await;
-        if usable.is_ok() {
-            return Ok(Some(point));
-        }
+    let point = s.store.get("node-backups", head).await?.filter(|point| {
+        point["runId"] == run && point["sessionId"].is_string() && point["destination"] == "s3"
+    });
+    // Publication already verified every immutable dependency. Demand reads
+    // verify blocks again, so movement need only validate the current manifest.
+    match point {
+        Some(point) if super::publication::manifest(s, &point).await.is_ok() => Ok(Some(point)),
+        _ => Ok(None),
     }
-    Ok(None)
 }
 
 async fn release_destination(s: &Service, run: &Value) -> Result<()> {

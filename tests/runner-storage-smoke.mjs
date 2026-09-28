@@ -8,27 +8,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
 
-export async function storageSmoke({ root, docker, name, api, until, legacyRunId }) {
-  // A ready migration still holds the original disk. Execution must cancel it
-  // before boot, without requiring a duplicate image or discarding user files.
-  const migration = await (await api(`/disks/${legacyRunId}/migration-snapshot`, 'POST', {})).json()
-  const legacyAttempt = randomUUID()
-  const legacyWorkspace = `/data/runs/${legacyRunId}/workspace`
-  const legacyPlan = { id: legacyAttempt, runId: legacyRunId, expires: null, sandbox: 'yolo', cwd: legacyWorkspace, imports: [{ source: legacyWorkspace, target: legacyWorkspace }], command: ['/usr/local/bin/node', '-e', `require('node:assert/strict').equal(require('node:fs').readFileSync(${JSON.stringify(`${legacyWorkspace}/preserved`)},'utf8'),'uncommitted work');console.log('migration.preempted');setInterval(()=>{},1000)`] }
-  await writeFile(path.join(root, 'data/runner-plans', `${legacyAttempt}.json`), JSON.stringify(legacyPlan))
-  await api(`/runs/${legacyAttempt}`, 'POST')
-  await until(async () => {
-    try {
-      return (await readFile(path.join(root, 'state', `${legacyAttempt}.log`), 'utf8')).split('\n').filter(Boolean).some(line => Buffer.from(JSON.parse(line).data || '', 'base64').toString().includes('migration.preempted'))
-    }
-    catch { return false }
-  })
-  docker('exec', name, 'test', '!', '-d', `/runner-state/snapshots/${migration.id}`)
-  await api(`/runs/${legacyAttempt}`, 'DELETE')
-  await until(async () => (await (await api('/health')).json()).activeRuns === 0)
-  const runId = randomUUID()
-  const workspace = `/data/runs/${runId}/workspace`
-  await mkdir(path.join(root, 'data/runs', runId, 'workspace'), { recursive: true })
+export async function prepareStorageOrigin({ root, docker, name, api }) {
   const origin = path.join(root, 'data/storage-fixture')
   await mkdir(origin)
   await writeFile(path.join(origin, 'server.mjs'), `
@@ -46,12 +26,20 @@ export async function storageSmoke({ root, docker, name, api, until, legacyRunId
     }).listen(4313,'127.0.0.1');
   `)
   docker('exec', '-d', name, '/usr/local/bin/node', '/data/storage-fixture/server.mjs')
-  const policy = { enabled: true, cacheMiB: 8, reserveMiB: 64, reservePercent: 1, backupSeconds: 60, maxDirtySeconds: 300, automaticArchiving: false }
+  const policy = { cacheMiB: 8, reserveMiB: 64, reservePercent: 1, backupSeconds: 60, maxDirtySeconds: 300 }
   const storage = { master: 'http://127.0.0.1:4313/', grant: 'fixture-storage-grant', policy }
   await api('/storage-policy', 'POST', policy)
+  return { origin, policy, storage }
+}
+
+export async function storageSmoke({ root, docker, name, api, until, storageFixture }) {
+  const runId = randomUUID()
+  const workspace = `/data/runs/${runId}/workspace`
+  await mkdir(path.join(root, 'data/runs', runId, 'workspace'), { recursive: true })
+  const { origin, policy, storage } = storageFixture || await prepareStorageOrigin({ root, docker, name, api })
   const inbox = path.join(root, 'data/runs', runId, 'chat-input')
   await mkdir(inbox)
-  async function start(first, { benchmark = false, local = false } = {}) {
+  async function start(first, { benchmark = false } = {}) {
     const id = randomUUID()
     const code = `
       const fs=require('node:fs'),assert=require('node:assert/strict'),cp=require('node:child_process');
@@ -80,7 +68,7 @@ export async function storageSmoke({ root, docker, name, api, until, legacyRunId
         },50);
       }
     `
-    const plan = { id, runId, expires: null, sandbox: 'yolo', cwd: workspace, command: ['/usr/local/bin/node', '-e', code], resources: { cpu: 1, memoryMiB: 512, diskMiB: 512 }, ...(local ? {} : { storage }), imports: [{ source: workspace, target: workspace }, ...(benchmark ? [{ source: `/data/runs/${runId}/chat-input`, target: '/run/leo-chat', readOnly: true }] : [])] }
+    const plan = { id, runId, expires: null, sandbox: 'yolo', cwd: workspace, command: ['/usr/local/bin/node', '-e', code], resources: { cpu: 1, memoryMiB: 512, diskMiB: 512 }, storage, imports: [{ source: workspace, target: workspace }, ...(benchmark ? [{ source: `/data/runs/${runId}/chat-input`, target: '/run/leo-chat', readOnly: true }] : [])] }
     await writeFile(path.join(root, 'data/runner-plans', `${id}.json`), JSON.stringify(plan))
     await api(`/runs/${id}`, 'POST')
     return id
@@ -123,7 +111,7 @@ export async function storageSmoke({ root, docker, name, api, until, legacyRunId
   docker('exec', name, 'mv', `/runner-state/disks/${runId}`, `/runner-state/disks/source-${runId}`)
   await writeFile(path.join(origin, 'offline'), '')
   const restoredAt = Date.now()
-  await api(`/disks/${runId}/restore`, 'POST', { ...storage, onDemand: true, manifest: point.manifest, backupId })
+  await api(`/disks/${runId}/restore`, 'POST', { ...storage, manifest: point.manifest, backupId })
   const metadataRestoreMs = Date.now() - restoredAt
   const blocked = await start(false)
   await until(async () => (await status()).waitingFor === 'storage-unavailable')
@@ -158,29 +146,26 @@ export async function storageSmoke({ root, docker, name, api, until, legacyRunId
     return reads.reduce((bytes, hash) => bytes + sizes.get(hash), 0)
   }
   const modes = [
-    { mode: 'local-full', local: true, latencyMs: 0 },
-    { mode: 'demand-http', local: false, latencyMs: 0 },
-    { mode: 'demand-http-delayed', local: false, latencyMs: 50 },
+    { mode: 'demand-http', latencyMs: 0 },
+    { mode: 'demand-http-delayed', latencyMs: 50 },
   ]
   for (let sample = 0; sample < 3; sample++) {
     // Rotate order to reduce systematic warm-host effects.
     for (let index = 0; index < modes.length; index++) {
       const mode = modes[(index + sample) % modes.length]
-      await api('/storage-policy', 'POST', { ...policy, enabled: !mode.local })
       docker('exec', name, 'mv', `/runner-state/disks/${runId}`, `/runner-state/disks/previous-${randomUUID()}`)
       await writeFile(path.join(inbox, 'messages.json'), '[]')
       await writeFile(path.join(origin, 'latency'), String(mode.latencyMs))
       await writeFile(path.join(origin, 'reads'), '')
       const at = performance.now()
-      await api(`/disks/${runId}/restore`, 'POST', { ...storage, onDemand: !mode.local, manifest: point.manifest, backupId })
+      await api(`/disks/${runId}/restore`, 'POST', { ...storage, manifest: point.manifest, backupId })
       const restoreMs = performance.now() - at
-      const id = await start(false, { benchmark: true, local: mode.local })
+      const id = await start(false, { benchmark: true })
       await ready(id)
       const availableMs = performance.now() - at
       const bytesAtReady = await downloaded()
-      assert.equal((await status()).mode, mode.local ? 'local' : 'on-demand')
-      if (!mode.local)
-        assert.ok(bytesAtReady < [...sizes.values()].reduce((a, b) => a + b, 0), 'ready before full download')
+      assert.equal((await status()).mode, 'on-demand')
+      assert.ok(bytesAtReady < [...sizes.values()].reduce((a, b) => a + b, 0), 'ready before full download')
       await writeFile(path.join(inbox, 'messages.json'), '[{"text":"measure"}]')
       const metrics = await until(async () => {
         const match = (await logs(id)).match(/storage.metrics (\{[^\n]+\})/)

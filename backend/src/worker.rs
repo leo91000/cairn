@@ -109,7 +109,6 @@ impl Worker {
         self.tasks
             .spawn(crate::nodes::publication::maintain(s.clone()));
         self.tasks.spawn(crate::nodes::storage::monitor(s.clone()));
-        self.tasks.spawn(crate::nodes::storage::migrate(s.clone()));
         let cleanup = s.clone();
         self.tasks.spawn(async move {
             let mut timer = tokio::time::interval(Duration::from_secs(15));
@@ -926,6 +925,7 @@ impl Worker {
                 None
             };
             if prepared["isolated"] == true {
+                crate::object_storage::Storage::configured(s)?;
                 let runner = id::new();
                 let placement =
                     crate::nodes::placement::reserve(s, &s.store.run(&id).await?, &runner).await?;
@@ -955,20 +955,19 @@ impl Worker {
                 plan["resources"] = placement["resources"].clone();
                 plan["nodeLeaseRequired"] = true.into();
                 let storage_node = crate::validation::text(&placement, "nodeId");
-                let storage_policy = s
+                let node_storage = s
                     .store
                     .get("nodes", storage_node)
                     .await?
                     .unwrap_or_default()["storage"]
                     .clone();
-                if storage_policy["enabled"] == true {
-                    let grant = crate::nodes::disk_grants::new_disk(s, run, storage_node).await?;
-                    plan["storage"] =
-                        json!({"master":s.config.public_url,"grant":grant,"policy":storage_policy});
-                    s.store
-                        .patch_run(&id, json!({"storage":{"mode":"on-demand"}}))
-                        .await?;
-                }
+                let storage_policy = crate::storage::policy::Policy::for_node(&node_storage)?;
+                let grant = crate::nodes::disk_grants::new_disk(s, run, storage_node).await?;
+                plan["storage"] =
+                    json!({"master":s.config.public_url,"grant":grant,"policy":storage_policy});
+                s.store
+                    .patch_run(&id, json!({"storage":{"mode":"on-demand"}}))
+                    .await?;
                 crate::nodes::placement::renew_local(s, &id).await?;
                 if let Some(chat) = chat {
                     plan["chat"] = chat;

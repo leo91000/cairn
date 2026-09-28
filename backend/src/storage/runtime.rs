@@ -252,7 +252,6 @@ impl Volume {
             )
         };
         status["mode"] = "on-demand".into();
-        status["migrated"] = true.into();
         status["grantId"] = self.source.grant_id().into();
         status["waitingFor"] = json!(reason);
         status["freeBytes"] = free.into();
@@ -355,11 +354,7 @@ pub async fn materialize(directory: &Path, stop: &CancellationToken) -> Result<(
     let _replacement = replacement(directory).await?;
     tokio::fs::rename(target, directory.join("data.ext4")).await?;
     tokio::fs::File::open(directory).await?.sync_all().await?;
-    tokio::fs::rename(
-        directory.join("lazy"),
-        directory.join(format!("stale-lazy-{}", crate::config::id())),
-    )
-    .await?;
+    tokio::fs::rename(directory.join("lazy"), directory.join("resize-source")).await?;
     tokio::fs::File::open(directory).await?.sync_all().await?;
     Ok(())
 }

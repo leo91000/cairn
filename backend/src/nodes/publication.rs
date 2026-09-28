@@ -7,7 +7,6 @@ use crate::{
     service::Service,
     validation::text,
 };
-use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -107,29 +106,13 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
         .unwrap_or_default();
     let attempt = text(&checkpoint, "runnerId");
     crate::validation::uuid(attempt)?;
-    if !run["sessionId"].is_string()
-        && run["storage"]["mode"] != "on-demand"
-        && run["storageRequested"] != true
-    {
-        return Err(Error::new(
-            409,
-            "No resumable provider session has been recorded yet.",
-        ));
-    }
     let settings = settings(s).await?;
     let storage = crate::object_storage::Storage::configured(s)?;
     collect_unused(s, run_id).await?;
     let base = super::transport::url(s, run_id).await?;
     let credential = crate::execution::secret(&s.config.data_dir, "runner-secret").await?;
     let capture_path = if run["status"] != "running" || run["moveRequest"]["idle"] == true {
-        format!(
-            "{base}/disks/{run_id}/{}",
-            if run["storageMigrationCapture"] == true {
-                "migration-snapshot"
-            } else {
-                "snapshot"
-            }
-        )
+        format!("{base}/disks/{run_id}/snapshot")
     } else {
         format!("{base}/runs/{attempt}/snapshot")
     };
@@ -143,13 +126,6 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
         .send()
         .await
         .map_err(|_| Error::new(503, "Snapshot capture interrupted."))?;
-    // A missing guest capability is actionable; never expose arbitrary controller bodies.
-    if response.status() == reqwest::StatusCode::PRECONDITION_FAILED {
-        return Err(Error::new(
-            412,
-            super::checkpoint::ACTIVE_CAPTURE_UNSUPPORTED,
-        ));
-    }
     if !response.status().is_success() {
         return Err(Error::new(503, "Unable to capture a coherent VM snapshot."));
     }
@@ -159,10 +135,9 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
     let result=async {
         let manifest=&snapshot["manifest"];snapshots::validate(manifest)?;
         let directory=root(s,run_id);crate::skills::private_dir(&directory.join("blocks")).await?;
-        let published=published_blocks(s,run_id).await?;
-        let mut seen=HashSet::new();let mut uploaded=0u64;let mut occupied=used(s).await?;
+        let published=published_blocks(s,run_id,&storage).await?;
+        let mut seen=HashSet::new();let mut uploaded=0u64;let occupied=used(s).await?;
         let budget=settings["budgetMiB"].as_u64().unwrap_or(102400)*1024*1024;
-        let memory_only=local_demand(s).await?;
         // Durable upload intent: the complete block inventory exists before any PUT.
         // A restart can collect an interrupted first publication without S3 bucket scans.
         let backup_id=id();
@@ -175,15 +150,14 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
         for parent in directory.ancestors().take(3) {
             tokio::fs::File::open(parent).await?.sync_all().await?;
         }
-        occupied+=intent.len() as u64;
         let mut uploads = tokio::task::JoinSet::<Result<()>>::new();
         for block in manifest["blocks"].as_array().unwrap() {
             let Some(hash)=block["hash"].as_str() else {continue};
             if !seen.insert(hash.to_owned()) {continue;}
             let file=directory.join("blocks").join(hash);
-            let remote_mark=receipt(&file,&json!({"destination":"s3","bucket":storage.bucket,"endpoint":storage.endpoint}))?;
-            if published.get(hash).copied()==block["size"].as_u64() && remote_mark.exists() {
-                // A verified immutable S3 copy remains usable after cache eviction.
+            if published.get(hash).copied()==block["size"].as_u64() {
+                // A committed immutable S3 copy remains usable after local
+                // cache and receipt eviction.
                 continue;
             }
             let mut verified=false;
@@ -198,18 +172,9 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
                     encoded.extend(vault.encrypt_bytes(&scope, &bytes)?);
                     Ok(encoded)
                 }).await.map_err(Error::internal)??;
-                if memory_only {
-                    enqueue_verified_block(&mut uploads, &storage, &file, key(run_id,hash), encoded).await?;
-                    uploaded+=length;
-                    continue;
-                }
-                // Serialize space accounting and publication across concurrent backups.
-                let _guard=s.node_backup_lock.lock().await;
-                occupied=make_room(s,occupied,encoded.len() as u64,budget).await?;
-                crate::skills::atomic_write(&file,&encoded).await?;
-                occupied+=encoded.len() as u64;
+                enqueue_verified_block(&mut uploads, &storage, &file, key(run_id,hash), encoded).await?;
                 uploaded+=length;
-                verified=true;
+                continue;
             } else if published.get(hash).copied()!=block["size"].as_u64() {
                 // Orphan files from interrupted publication have no retained proof.
                 // Published blocks are immutable and already validated at receipt.
@@ -289,9 +254,24 @@ async fn enqueue_verified_block(
 
 /// A retained, authenticated manifest proves these immutable blocks were validated
 /// before publication. Read manifests, not payloads, on the incremental path.
-async fn published_blocks(s: &Service, run: &str) -> Result<HashMap<String, u64>> {
+async fn published_blocks(
+    s: &Service,
+    run: &str,
+    storage: &crate::object_storage::Storage,
+) -> Result<HashMap<String, u64>> {
     let mut blocks = HashMap::new();
+    if s.store.run(run).await?["backup"]["snapshotId"].is_null() {
+        // A failed remote read invalidates the previous publication as a
+        // deduplication source. The next capture must re-upload every block.
+        return Ok(blocks);
+    }
     for point in s.store.node_backups_for_run(run).await? {
+        if point["destination"] != "s3"
+            || point["bucket"].as_str() != Some(storage.bucket.as_str())
+            || point["endpoint"].as_str() != storage.endpoint.as_deref()
+        {
+            continue;
+        }
         if let Ok(manifest) = manifest(s, &point).await {
             for block in manifest["blocks"].as_array().unwrap() {
                 if let Some(hash) = block["hash"].as_str() {
@@ -357,7 +337,7 @@ pub async fn read_block(s: &Service, backup: &Value, hash: &str) -> Result<Vec<u
         Ok::<_, Error>((encoded, bytes))
     }
     .await;
-    let (encoded, bytes) = match recovered {
+    let (_, bytes) = match recovered {
         Ok(recovered) => recovered,
         Err(error) => {
             // An outage or access refusal says nothing about the integrity of a verified copy.
@@ -371,23 +351,6 @@ pub async fn read_block(s: &Service, backup: &Value, hash: &str) -> Result<Vec<u
             return Err(error);
         }
     };
-    // Enabled local nodes keep their only clean disk cache in the controller.
-    if local_demand(s).await? {
-        return Ok(bytes);
-    }
-    // Never evict a payload concurrently with publication to another destination.
-    let Ok(_operation) = s.node_backup_operation.try_lock() else {
-        return Ok(bytes);
-    };
-    // Restoration remains possible when the master cache budget is full.
-    let _guard = s.node_backup_lock.lock().await;
-    let budget = settings(s).await?["budgetMiB"].as_u64().unwrap_or(102400) * 1024 * 1024;
-    if make_room(s, used(s).await?, encoded.len() as u64, budget)
-        .await
-        .is_ok()
-    {
-        crate::skills::atomic_write(&path, &encoded).await?;
-    }
     Ok(bytes)
 }
 
@@ -396,16 +359,10 @@ async fn decode_block(s: &Service, run: &str, hash: &str, encoded: Vec<u8>) -> R
     let scope = key(run, hash);
     let hash = hash.to_owned();
     tokio::task::spawn_blocking(move || {
-        let bytes = if let Some(ciphertext) = encoded.strip_prefix(BINARY_BLOCK_HEADER) {
-            vault.decrypt_bytes(&scope, ciphertext)?
-        } else {
-            // Existing recovery points remain readable without a bulk migration.
-            let value: Value = serde_json::from_slice(&encoded)?;
-            let plaintext = vault.decrypt(&scope, &value)?;
-            STANDARD
-                .decode(plaintext.as_str().unwrap_or(""))
-                .map_err(|_| Error::bad("Invalid backup ciphertext."))?
-        };
+        let ciphertext = encoded
+            .strip_prefix(BINARY_BLOCK_HEADER)
+            .ok_or_else(|| Error::bad("Invalid backup block format."))?;
+        let bytes = vault.decrypt_bytes(&scope, ciphertext)?;
         if hex::encode(Sha256::digest(&bytes)) != hash {
             return Err(Error::bad("Backup integrity check failed."));
         }
@@ -418,18 +375,9 @@ async fn decode_block(s: &Service, run: &str, hash: &str, encoded: Vec<u8>) -> R
     .map_err(|_| Error::new(409, "Recovery block integrity check failed."))
 }
 
-async fn local_demand(s: &Service) -> Result<bool> {
-    Ok(s.store
-        .get("nodes", super::LOCAL_NODE_ID)
-        .await?
-        .is_some_and(|node| node["storage"]["enabled"] == true))
-}
 /// The local controller owns the configured node cache. Retire duplicate S3
-/// payloads on the master, while preserving authoritative master-only points.
+/// payloads on the master.
 pub async fn maintain_local_cache(s: &Service) -> Result<()> {
-    if !local_demand(s).await? {
-        return Ok(());
-    }
     let Ok(_operation) = s.node_backup_operation.try_lock() else {
         return Ok(());
     };
@@ -439,24 +387,16 @@ pub async fn maintain_local_cache(s: &Service) -> Result<()> {
     Ok(())
 }
 async fn make_room(s: &Service, mut occupied: u64, incoming: u64, budget: u64) -> Result<u64> {
-    // Keep this admission policy separate from storage::cache: candidates require
-    // remote verification and master-only points are protected. Enabled local
-    // nodes retire every duplicate; publication may use the emergency reserve
-    // below the normal floor so a dirty journal can make progress.
-    let policy = s
+    // Keep this admission policy separate from storage::cache: publication may
+    // use the emergency reserve so a dirty journal can still make progress.
+    let node = s
         .store
         .get("nodes", super::LOCAL_NODE_ID)
         .await?
-        .and_then(|v| {
-            serde_json::from_value::<crate::storage::policy::Policy>(v["storage"].clone()).ok()
-        })
         .unwrap_or_default();
-    let reserve = if policy.enabled {
-        let (total, _) = crate::storage::policy::space(&s.config.data_dir)?;
-        policy.reserve(total)
-    } else {
-        0
-    };
+    let policy = crate::storage::policy::Policy::for_node(&node["storage"])?;
+    let (total, _) = crate::storage::policy::space(&s.config.data_dir)?;
+    let reserve = policy.reserve(total);
     let required = occupied
         .saturating_add(incoming)
         .saturating_sub(budget)
@@ -465,24 +405,6 @@ async fn make_room(s: &Service, mut occupied: u64, incoming: u64, budget: u64) -
                 .saturating_add(incoming.saturating_mul(3))
                 .saturating_sub(crate::storage::policy::space(&s.config.data_dir)?.1),
         );
-    if required == 0 && !policy.enabled {
-        return Ok(occupied);
-    }
-    let mut protected = HashSet::new();
-    for point in s
-        .store
-        .list("node-backups")
-        .await?
-        .into_iter()
-        .filter(|p| p["destination"] != "s3")
-    {
-        let manifest = manifest(s, &point).await?;
-        for block in manifest["blocks"].as_array().unwrap() {
-            if let Some(hash) = block["hash"].as_str() {
-                protected.insert((text(&point, "runId").to_owned(), hash.to_owned()));
-            }
-        }
-    }
     let mut candidates = Vec::new();
     let root = s.config.data_dir.join("node-backups");
     if root.exists() {
@@ -495,16 +417,13 @@ async fn make_room(s: &Service, mut occupied: u64, incoming: u64, budget: u64) -
             if !blocks.exists() {
                 continue;
             }
-            let run_id = run.file_name().to_string_lossy().into_owned();
             let mut entries = tokio::fs::read_dir(&blocks).await?;
             while let Some(entry) = entries.next_entry().await? {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 let Some((hash, _)) = name.split_once(".s3-") else {
                     continue;
                 };
-                if !snapshots::valid_hash(hash)
-                    || protected.contains(&(run_id.clone(), hash.to_owned()))
-                {
+                if !snapshots::valid_hash(hash) {
                     continue;
                 }
                 let file = blocks.join(hash);
@@ -521,9 +440,6 @@ async fn make_room(s: &Service, mut occupied: u64, incoming: u64, budget: u64) -
     candidates.sort_by_key(|v| v.2);
     let mut removed = 0;
     for (file, size, _) in candidates {
-        if removed >= required && !policy.enabled {
-            break;
-        }
         if tokio::fs::try_exists(&file).await? {
             tokio::fs::remove_file(file).await?;
             removed += size;
@@ -689,8 +605,8 @@ async fn collect_unused(s: &Service, run: &str) -> Result<()> {
     Ok(())
 }
 
-/// Continuous recovery points guard against losing a remote node. The master runner fails
-/// together with the master, so its conversations are captured only when they move.
+/// Synchronize mounted journals on either kind of execution node. The remote
+/// node fallback also covers records created before their first status report.
 pub fn protected(run: &Value) -> bool {
     run["storage"]["mode"] == "on-demand"
         || run["nodeId"]

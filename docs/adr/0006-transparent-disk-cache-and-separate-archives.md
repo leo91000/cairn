@@ -1,4 +1,4 @@
-> Décision révisée par [ADR-0008](0008-current-disk-publication-without-archives.md) : publication S3 courante, sans archivage ni historique de restauration.
+> Décision révisée par [ADR-0008](0008-current-disk-publication-without-archives.md) pour l’archivage et par [ADR-0009](0009-s3-backed-disks-required-on-every-node.md) pour l’activation et la migration.
 
 # Cache disque transparent et archivage distinct
 

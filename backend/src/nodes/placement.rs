@@ -15,8 +15,13 @@ pub fn defaults() -> Resources {
     }
 }
 fn disk_total(volume: &Value, requested: u64, replacing: bool) -> u64 {
-    if volume["storageMode"] == "on-demand" && !replacing {
-        return volume["diskMiB"].as_u64().unwrap_or(128);
+    if volume.is_null() || volume["storageMode"] == "on-demand" {
+        let local = volume["diskMiB"].as_u64().unwrap_or(128).max(128);
+        return if replacing {
+            local.saturating_add(128)
+        } else {
+            local
+        };
     }
     let total = volume["diskMiB"].as_u64().unwrap_or(0);
     let current = volume["activeDiskMiB"].as_u64().unwrap_or(total);
@@ -48,7 +53,7 @@ pub async fn reserve(s: &Service, run: &Value, attempt: &str) -> Result<Value> {
         let required=run["requiredRuntime"].as_str().or(checkpoint["runtimeId"].as_str());
         let mut nodes=db.list("nodes")?;
         // Existing development execution stays available without a controller.
-        if !configured && nodes.iter().all(|n|n["id"]!=LOCAL_NODE_ID) { nodes.push(json!({"id":LOCAL_NODE_ID,"local":true,"accepting":true,"limits":{"cpu":4096,"memoryMiB":1073741824u64,"diskMiB":1099511627776u64},"capabilities":{"kvm":configured},"runtimeId":"local"})); }
+        if !configured && nodes.iter().all(|n|n["id"]!=LOCAL_NODE_ID) { nodes.push(json!({"id":LOCAL_NODE_ID,"local":true,"accepting":true,"limits":{"cpu":4096,"memoryMiB":1073741824u64,"diskMiB":1099511627776u64},"capabilities":{"kvm":configured,"fuse":true},"runtimeId":"local"})); }
         // Ties keep the preferred node, then the current runner.
         nodes.sort_by_key(|node| (node["id"]!=run["preferredNodeId"],node["id"]!=LOCAL_NODE_ID));
         let attempts=db.list("node-attempts")?;
@@ -57,6 +62,7 @@ pub async fn reserve(s: &Service, run: &Value, attempt: &str) -> Result<Value> {
             let mut held=db.get("node-attempts",reservation)?.ok_or_else(||Error::new(409,"Movement reservation is missing."))?;
             let node=text(&held,"nodeId");
             let record=nodes.iter().find(|n|n["id"]==node).ok_or_else(||Error::new(409,"Destination removed."))?;
+            if record["capabilities"]["fuse"] != true {return Err(Error::new(409,"Destination no longer supports on-demand disks."));}
             if record["maintenance"].is_string() {return Err(Error::new(503,"Destination is preparing for maintenance."));}
             if held["released"]==true || held["runId"]!=run["id"] || !allowed(&access["nodes"],node) || record["revoked"]==true {return Err(Error::new(409,"Movement reservation was revoked."));}
             let mut consumed=held.clone();consumed["released"]=true.into();db.put("node-attempts",&consumed)?;
@@ -68,10 +74,13 @@ pub async fn reserve(s: &Service, run: &Value, attempt: &str) -> Result<Value> {
         let mut best:Option<(bool,f64,Value,Value)>=None;
         for node in nodes {
             let id=text(&node,"id");
+            // A moved disk is mounted from its published S3 state. A node that
+            // has not passed the storage probe cannot receive that disk.
+            if node["capabilities"]["fuse"] != true {continue;}
             let mut resources=resources.clone();
             if requested.is_none() {
                 // Defaults also respect the agent's own resource limit.
-                for key in ["cpu","memoryMiB","diskMiB"] {resources[key]=resources[key].as_u64().unwrap().min(if key=="diskMiB" && node["storage"]["enabled"]==true {u64::MAX}else{node["limits"][key].as_u64().unwrap_or(0)}).min(access["maxResources"][key].as_u64().unwrap_or(u64::MAX)).into();}
+                for key in ["cpu","memoryMiB","diskMiB"] {resources[key]=resources[key].as_u64().unwrap().min(if key=="diskMiB" {u64::MAX}else{node["limits"][key].as_u64().unwrap_or(0)}).min(access["maxResources"][key].as_u64().unwrap_or(u64::MAX)).into();}
                 if resources["cpu"].as_u64().unwrap()<1 || resources["memoryMiB"].as_u64().unwrap()<128 || resources["diskMiB"].as_u64().unwrap()<128 {continue;}
             }
             if node["maintenance"].is_string() {continue;}
@@ -82,13 +91,13 @@ pub async fn reserve(s: &Service, run: &Value, attempt: &str) -> Result<Value> {
             if target.is_some_and(|target|target!=id) || !allowed(&access["nodes"],id) || pinned.is_some_and(|p|p!=id) || existing.is_some_and(|p|p!=id) || node["revoked"]==true || node["accepting"]!=true {continue;}
             if (node["local"]!=true || configured) && (node["capabilities"]["kvm"]!=true || node["executionReady"]!=true || node["lastSeen"].as_i64().is_none_or(|v|now()-v>=30000)) {continue;}
             let mut headroom=f64::MAX;
+            let storage_policy = crate::storage::policy::Policy::for_node(&node["storage"])?;
             let fits=["cpu","memoryMiB","diskMiB"].iter().all(|key| {
-                if *key=="diskMiB" && node["storage"]["enabled"]==true {
-                    let policy=serde_json::from_value::<crate::storage::policy::Policy>(node["storage"].clone()).unwrap_or_default();
+                if *key=="diskMiB" && node["capabilities"]["diskMiB"].is_u64() {
                     let free=node["capabilities"]["diskMiB"].as_u64().unwrap_or(0);
                     let total=node["capabilities"]["diskTotalMiB"].as_u64().unwrap_or(free);
                     let pending=attempts.iter().filter(|a|a["nodeId"]==id && a["released"]!=true).count() as u64;
-                    return free>policy.reserve(total.saturating_mul(1048576))/1048576 + (pending+1)*128;
+                    return free>storage_policy.reserve(total.saturating_mul(1048576))/1048576 + (pending+1)*128;
                 }
                 let used=if *key=="diskMiB" {volumes.iter().filter(|v|v["nodeId"]==id && v["runId"]!=run["id"]).map(|v|v["diskMiB"].as_u64().unwrap_or(0)).sum::<u64>()} else {attempts.iter().filter(|a|a["nodeId"]==id && a["released"]!=true && !(moving && a["runId"]==run["id"])).map(|a|a["resources"][key].as_u64().unwrap_or(0)).sum::<u64>()};
                 let current=if *key=="diskMiB" {volumes.iter().filter(|v|v["nodeId"]==id && v["runId"]==run["id"]).map(|v|v["diskMiB"].as_u64().unwrap_or(0)).max().unwrap_or(0)} else if moving {attempts.iter().filter(|a|a["nodeId"]==id && a["runId"]==run["id"] && a["released"]!=true).map(|a|a["resources"][key].as_u64().unwrap_or(0)).max().unwrap_or(0)} else {0};
@@ -109,7 +118,7 @@ pub async fn reserve(s: &Service, run: &Value, attempt: &str) -> Result<Value> {
             let mut record=json!({"id":attempt,"role":if moving {"destination"} else {"execution"},"runId":run["id"],"nodeId":id,"resources":resources,"runtimeId":required.unwrap_or_else(||text(&node,"runtimeId")),"createdAt":now(),"leaseExpiresAt":now()+60000,"released":false});
             let volume_id=format!("{}:{id}",text(&run,"id"));
             let mut volume=db.get("node-volumes",&volume_id)?.unwrap_or_else(||json!({"id":volume_id,"nodeId":id,"runId":run["id"],"materialized":false}));
-            if node["storage"]["enabled"]==true && volume["materialized"]!=true {volume["storageMode"]="on-demand".into();}
+            if volume["materialized"]!=true {volume["storageMode"]="on-demand".into();}
             let previous=volume["diskMiB"].as_u64().unwrap_or(0);let requested=resources["diskMiB"].as_u64().unwrap_or(0);
             volume["diskMiB"]=disk_total(&volume,requested,moving && checkpoint["nodeId"]!=id).into();
             record["additionalDiskMiB"]=volume["diskMiB"].as_u64().unwrap().saturating_sub(previous).into();

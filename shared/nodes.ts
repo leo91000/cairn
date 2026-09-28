@@ -18,7 +18,7 @@ export interface ExecutionNode {
   status: 'online' | 'offline' | 'revoked' | 'local'
   tags: string[]
   systemTags?: string[]
-  capabilities: NodeResources & { os: string, arch: string, kvm: boolean }
+  capabilities: NodeResources & { os: string, arch: string, kvm: boolean, fuse?: boolean }
   limits: NodeResources
   reserved?: NodeResources
   available?: NodeResources
@@ -28,7 +28,6 @@ export interface ExecutionNode {
   imageDigest?: string | null
   updateError?: string | null
   storage?: NodeStoragePolicy
-  storageMigration?: { runId?: string, error?: string | null }
   runtimeId: string
   lastSeen: number | null
   agents?: NodeAgent[]
@@ -90,6 +89,8 @@ export function nodeDiagnostics(node: ExecutionNode, now = Date.now()) {
     reasons.push(node.lastSeen != null ? `No contact since ${relativeAge(node.lastSeen, now)}: check that the machine is on, online and that the leo-node service is running.` : 'The machine has never connected: run the installation command on it.')
   if (!node.capabilities.kvm)
     reasons.push('KVM is unavailable: enable virtualization in the BIOS and load the kvm module.')
+  if (!node.capabilities.fuse)
+    reasons.push('FUSE is unavailable: this node cannot mount S3-backed conversation disks.')
   if (node.status !== 'offline' && node.executionReady === false)
     reasons.push(node.updateError ? `The runtime is not ready: ${node.updateError}` : 'The runtime is not ready yet or does not match the version approved by the master.')
   if (node.maintenance)
@@ -102,7 +103,6 @@ export function nodeDiagnostics(node: ExecutionNode, now = Date.now()) {
 }
 
 export interface NodeStoragePolicy {
-  enabled: boolean
   cacheMiB: number
   reserveMiB: number
   reservePercent: number

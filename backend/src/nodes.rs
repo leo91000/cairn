@@ -13,7 +13,6 @@ pub mod relay;
 pub mod restore;
 pub mod snapshots;
 pub mod storage;
-pub mod tracking;
 pub mod transport;
 pub mod workspace;
 use crate::{
@@ -297,17 +296,20 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
 
         ("PUT", ["nodes", node, "storage"]) => {
             crate::validation::uuid(node)?;
+            if input.body["enabled"] == false {
+                return Err(Error::bad(
+                    "S3-backed disk storage is required on every node.",
+                ));
+            }
             let policy: crate::storage::policy::Policy = decode(input.body.clone())?;
             policy.validate()?;
             let record = s.get("nodes", node).await?;
             if record["revoked"] == true {
                 return Err(Error::new(409, "Node revoked."));
             }
-            if policy.enabled {
-                crate::object_storage::Storage::configured(s)?
-                    .validate()
-                    .await?;
-            }
+            crate::object_storage::Storage::configured(s)?
+                .validate()
+                .await?;
             let base = if *node == LOCAL_NODE_ID {
                 s.config.runner_url.clone()
             } else {
@@ -579,7 +581,7 @@ pub async fn internal(State(app): State<App>, request: Request) -> Result<Json<V
             let value = s.store.transaction(move |db| {
                 let invitation = db.kv(&key)?.ok_or_else(|| Error::new(401, "Invalid or expired enrollment code."))?;
                 db.delete(&key)?;
-                let node = json!({"id":node_id,"name":invitation["name"],"local":false,"accepting":false,"revoked":false,"tags":[],"systemTags":request.capabilities.tags(),"capabilities":request.capabilities.value(),"limits":request.capabilities.limits(),"runtimeId":runtime,"lastSeen":now(),"createdAt":now()});
+                let node = json!({"id":node_id,"name":invitation["name"],"local":false,"accepting":false,"revoked":false,"tags":[],"systemTags":request.capabilities.tags(),"capabilities":request.capabilities.value(),"limits":request.capabilities.limits(),"storage":crate::storage::policy::Policy::default(),"runtimeId":runtime,"lastSeen":now(),"createdAt":now()});
                 db.put("nodes", &node)?;
                 db.set(&token_key, &json!(node_id), None)?;
                 db.audit("node.enrolled", &json!({"nodeId":node_id}))?;
@@ -618,8 +620,9 @@ pub async fn internal(State(app): State<App>, request: Request) -> Result<Json<V
                 node["runtimes"]=input.body["runtimes"].clone();
                 node["lastSeen"] = now().into();
                 if let Some(capabilities)=capabilities {node["capabilities"]=capabilities;}
+                node["storage"] = json!(crate::storage::policy::Policy::for_node(&node["storage"])?);
                 node["imageDigest"]=input.body["imageDigest"].clone();
-                node["executionReady"]=(input.body["executionReady"]==true && input.body["dataRoot"]==expected_data && expected_image.as_ref().is_none_or(|image|node["imageDigest"]==*image || node["updateError"].is_string())).into();
+                node["executionReady"]=(input.body["executionReady"]==true && node["capabilities"]["fuse"]==true && input.body["dataRoot"]==expected_data && expected_image.as_ref().is_none_or(|image|node["imageDigest"]==*image || node["updateError"].is_string())).into();
                 db.put("nodes", &node)?;
                 let mut leases=Vec::new();
                 for mut attempt in db.list("node-attempts")? {
@@ -671,7 +674,7 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
     let detected: Capabilities = decode(capabilities.clone())?;
     s.store.transaction(move |db| {
         let mut record=db.get("nodes",LOCAL_NODE_ID)?.unwrap_or_else(||json!({"id":LOCAL_NODE_ID,"name":"Current runner","local":true,"revoked":false,"accepting":true,"tags":[],"createdAt":now(),"limits":detected.limits()}));
-        record["systemTags"]=detected.tags();record["runtimes"]=health["runtimes"].clone();record["capabilities"]=capabilities;record["runtimeId"]=health["runtimeId"].clone();record["executionReady"]=(health["status"]=="ok").into();record["lastSeen"]=now().into();db.put("nodes",&record)?;Ok(())
+        record["systemTags"]=detected.tags();record["runtimes"]=health["runtimes"].clone();record["capabilities"]=capabilities;record["runtimeId"]=health["runtimeId"].clone();record["storage"]=json!(crate::storage::policy::Policy::for_node(&record["storage"])?);record["executionReady"]=(health["status"]=="ok" && detected.fuse).into();record["lastSeen"]=now().into();db.put("nodes",&record)?;Ok(())
     }).await
 }
 

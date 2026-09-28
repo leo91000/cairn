@@ -12,10 +12,11 @@ Décision utilisateur du 28 septembre 2026, applicable au-dessus de la PR nodes 
 - Supprimer création/restauration d’archives, transitions froides, réglages et vues d’archives Web/Android, transferts export/import dédiés et code devenu inutile.
 - Conserver la corbeille (30 jours), la révocation des liens publics, l’annulation du travail et la suppression sûre des disques.
 - Nettoyage de production demandé séparément : supprimer les conversations archivées et vider le bucket OVH après vérification des références actives. Aucun merge/déploiement implicite.
+- Décision ultérieure : S3/FUSE obligatoire sur toutes les nodes ; suppression de l’activation par node, de la migration automatique des anciennes images locales, du transfert complet et de dm-era. Les conversations encore sur image locale doivent être supprimées avant déploiement ; voir ADR-0009.
 
 ## Architecture
 
-Le module `nodes::publication` porte la capture, publication vérifiée et collecte. Le module `object_storage` porte les accès S3 partagés. `conversation_deletion` ne porte que l’effacement des fichiers, disques et enregistrements. Les clés persistées `node-backups`, les noms de champs du protocole disque et les anciens alias de configuration S3 restent compatibles pour éviter une migration destructive des disques existants.
+Le module `nodes::publication` porte la capture, publication vérifiée et collecte. Le module `object_storage` porte les accès S3 partagés. `conversation_deletion` ne porte que l’effacement des fichiers, disques et enregistrements. Les clés persistées `node-backups` et les anciens alias de configuration S3 restent lisibles pour les données S3 déjà publiées. Les anciens disques locaux ne sont plus exécutables.
 
 ## Vérifications
 

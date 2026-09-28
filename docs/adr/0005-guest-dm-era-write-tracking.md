@@ -1,5 +1,7 @@
 # Suivre les blocs écrits avec dm-era dans l'invité
 
+> Décision historique remplacée par [ADR-0009](0009-s3-backed-disks-required-on-every-node.md). Les nouveaux disques utilisent le journal local du stockage S3.
+
 Relire tout le disque d'une conversation à chaque point de reprise est irréaliste avec
 des captures fréquentes. Firecracker ne suit que la mémoire, pas les écritures disque.
 Le noyau invité, contrôlé par Leo, empile donc la cible dm-era sur le disque de données.

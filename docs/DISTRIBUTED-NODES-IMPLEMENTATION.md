@@ -1,5 +1,7 @@
 # Distributed nodes — implementation progress
 
+> Historical implementation notes. [ADR-0009](adr/0009-s3-backed-disks-required-on-every-node.md) replaces local disk transfers and dm-era; PR status must be checked on GitHub.
+
 The approved target is [DISTRIBUTED-NODES-SPEC.md](DISTRIBUTED-NODES-SPEC.md).
 The branch implements the approved CPU-only scope. GPU passthrough remains deferred.
 The pull request remains draft until its final CI checks have passed; this work

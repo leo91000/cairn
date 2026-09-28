@@ -491,12 +491,10 @@ impl Network {
 pub struct Vm {
     pub socket: PathBuf,
     jail: PathBuf,
-    disk_dir: PathBuf,
     lock: Option<std::fs::File>,
     child: Option<tokio::process::Child>,
     consoles: Vec<tokio::task::JoinHandle<()>>,
     network: Network,
-    paused: bool,
     mounted: Option<crate::storage::fuse::MountedDisk>,
     volume: Option<std::sync::Arc<crate::storage::runtime::Volume>>,
     uid: u32,
@@ -562,27 +560,14 @@ impl Vm {
         if disk_dir.join("restore.pending").exists() {
             return Err(Error::new(409, "VM restore is incomplete."));
         }
-        let mut volume = if crate::storage::runtime::exists(&disk_dir) {
-            Some(crate::storage::runtime::load(&disk_dir).await?)
-        } else {
-            None
-        };
-        if let Some(mounted) = &volume {
-            use crate::storage::Disk;
-            let desired = resources.disk_mi_b * 1024 * 1024;
-            if desired < mounted.disk.size() {
-                return Err(Error::new(409, "A retained VM disk cannot be shrunk."));
-            }
-            if desired > mounted.disk.size() {
-                drop(volume.take());
-                crate::storage::runtime::materialize(&disk_dir, stop).await?;
-            }
+        let volume = crate::storage::runtime::load(&disk_dir).await?;
+        use crate::storage::Disk;
+        if volume.disk.size() != resources.disk_mi_b * 1024 * 1024 {
+            return Err(Error::new(
+                409,
+                "VM disk size does not match its S3-backed journal.",
+            ));
         }
-        let disk = if volume.is_some() {
-            disk_dir.join("data.ext4")
-        } else {
-            crate::storage::prepare(&disk_dir, resources.disk_mi_b * 1024 * 1024).await?
-        };
         let uid = 40000 + slot as u32;
         let jail = state.join("jails/firecracker").join(&id).join("root");
         let socket = jail.join("v.sock");
@@ -590,18 +575,15 @@ impl Vm {
         let mut vm = Self {
             socket,
             jail,
-            disk_dir,
             lock: Some(lock),
             child: None,
             consoles: Vec::new(),
             network,
-            paused: false,
             mounted: None,
-            volume,
+            volume: Some(volume),
             uid,
         };
         let jail = &vm.jail;
-        let disk_dir = &vm.disk_dir;
         let socket = &vm.socket;
         let network = &vm.network;
         let child = &mut vm.child;
@@ -610,36 +592,23 @@ impl Vm {
         let volume = &vm.volume;
         let operation = async {
             private_dir(jail).await?;
-            if let Some(volume) = volume {
-                let target = jail.join("disk");
-                private_dir(&target).await?;
-                *mounted = Some(crate::storage::fuse::mount_disk(
-                    volume.clone(),
-                    &target,
-                    uid,
-                )?);
-            } else {
-                std::os::unix::fs::chown(&disk, Some(uid), Some(uid))?;
-                tokio::fs::hard_link(&disk, jail.join("data.ext4")).await?;
-                let era = crate::nodes::tracking::prepare_boot(disk_dir, uid).await?;
-                tokio::fs::hard_link(&era, jail.join("era.meta")).await?;
-            }
+            let target = jail.join("disk");
+            private_dir(&target).await?;
+            *mounted = Some(crate::storage::fuse::mount_disk(
+                volume.as_ref().unwrap().clone(),
+                &target,
+                uid,
+            )?);
             tokio::fs::hard_link(image.join("root.ext4"), jail.join("root.ext4")).await?;
             tokio::fs::copy(image.join("vmlinux"), jail.join("vmlinux")).await?;
             network.create(uid).await?;
-            let mut config = json!({
+            let config = json!({
                 "boot-source":{"kernel_image_path":"vmlinux","boot_args":format!("console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/sbin/leo-init ip={}::{}:255.255.255.252:leo:eth0:off",network.guest,network.gateway)},
-                "drives":[{"drive_id":"root","path_on_host":"root.ext4","is_root_device":true,"is_read_only":true},{"drive_id":"data","path_on_host":"data.ext4","is_root_device":false,"is_read_only":false},{"drive_id":"era","path_on_host":"era.meta","is_root_device":false,"is_read_only":false}],
+                "drives":[{"drive_id":"root","path_on_host":"root.ext4","is_root_device":true,"is_read_only":true},{"drive_id":"data","path_on_host":"disk/data.ext4","is_root_device":false,"is_read_only":false,"cache_type":"Writeback"}],
                 "machine-config":{"vcpu_count":resources.cpu,"mem_size_mib":resources.memory_mi_b,"smt":false},
                 "network-interfaces":[{"iface_id":"net","host_dev_name":network.tap,"guest_mac":network.mac}],
                 "vsock":{"guest_cid":slot+3,"uds_path":"v.sock"}
             });
-            if volume.is_some() {
-                config["drives"] = json!([
-                    {"drive_id":"root","path_on_host":"root.ext4","is_root_device":true,"is_read_only":true},
-                    {"drive_id":"data","path_on_host":"disk/data.ext4","is_root_device":false,"is_read_only":false,"cache_type":"Writeback"}
-                ]);
-            }
             atomic_write(&jail.join("config.json"), &serde_json::to_vec(&config)?).await?;
             std::os::unix::fs::chown(jail.join("config.json"), Some(uid), Some(uid))?;
             *child = Some(
@@ -708,7 +677,6 @@ impl Vm {
             if status["version"] != 1 {
                 return Err(Error::new(503, "Unsupported guest protocol."));
             }
-            crate::nodes::tracking::booted(disk_dir, status["writeTracking"] == true).await?;
 
             Ok(())
         };
@@ -722,78 +690,20 @@ impl Vm {
         }
         Ok(vm)
     }
-    pub async fn discard_prepared(&self) {
-        if self
-            .disk_dir
-            .parent()
-            .is_some_and(|p| p.file_name().is_some_and(|n| n == "prepared"))
-        {
-            let _ = tokio::fs::remove_dir_all(&self.disk_dir).await;
-        }
-    }
-    pub async fn pause(&mut self) -> Result<()> {
-        self.vm_state("Paused").await?;
-        self.paused = true;
-        Ok(())
-    }
-    async fn vm_state(&self, state: &str) -> Result<()> {
-        let body = json!({"state":state}).to_string();
-        let operation = async {
-            let mut stream = UnixStream::connect(self.jail.join("api.sock")).await?;
-            stream.write_all(format!("PATCH /vm HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).as_bytes()).await?;
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).await?;
-            if !line.starts_with("HTTP/1.1 204 ") {
-                return Err(Error::new(503, "Firecracker refused VM state change."));
-            }
-            // Closing this local connection after the response status is sufficient.
-            Ok(())
-        };
-        tokio::time::timeout(Duration::from_secs(3), operation)
-            .await
-            .map_err(|_| Error::new(503, "VM state change timed out."))?
-    }
-    pub async fn warm(&mut self) -> Result<()> {
-        let response = tokio::time::timeout(
-            Duration::from_secs(60),
-            guest_request(&self.socket, &json!({"op":"prepare"})),
+    async fn synchronize_clock(&self) -> Result<()> {
+        let status = tokio::time::timeout(
+            Duration::from_secs(5),
+            guest_request(
+                &self.socket,
+                &json!({"op":"clock","epochMs":crate::config::now()}),
+            ),
         )
         .await
-        .map_err(|_| Error::new(503, "VM warmup timed out."))??;
-        if response["ok"] != true {
-            return Err(Error::new(503, "VM warmup failed."));
-        }
-        self.pause().await
-    }
-    pub async fn adopt(&mut self, state: &Path, run_id: &str) -> Result<()> {
-        let target = state.join("disks").join(run_id);
-        // No replace, including an existing empty directory: it may hold another owner's lock.
-        rename_new(&self.disk_dir, &target)?;
-        self.disk_dir = target;
-        std::fs::File::open(state.join("disks"))?.sync_all()?;
-        Ok(())
-    }
-    async fn resume(&mut self) -> Result<()> {
-        if !self.paused {
-            return Ok(());
-        }
-        self.vm_state("Resumed").await?;
-        self.paused = false;
-        let status = guest_request(
-            &self.socket,
-            &json!({"op":"clock","epochMs":crate::config::now()}),
-        )
-        .await?;
+        .map_err(|_| Error::new(503, "Guest clock synchronization timed out."))??;
         if status["ok"] != true {
             return Err(Error::new(503, "Guest clock synchronization failed."));
         }
         Ok(())
-    }
-    pub async fn activate(&mut self) -> Result<()> {
-        tokio::time::timeout(Duration::from_secs(5), self.resume())
-            .await
-            .map_err(|_| Error::new(503, "Guest resume timed out."))?
     }
     pub async fn shutdown(&mut self) {
         let blocked = self
@@ -802,11 +712,7 @@ impl Vm {
             .is_some_and(|volume| volume.source.waiting() || volume.paused());
         let mut acknowledged = false;
         if !blocked {
-            if self.paused {
-                let _ = self.vm_state("Resumed").await;
-                self.paused = false;
-            }
-            // Healthy guests get a bounded graceful stop and the legacy era seal.
+            // Healthy guests get a bounded graceful stop.
             if let Ok(Ok(reply)) = tokio::time::timeout(
                 Duration::from_secs(10),
                 guest_request(&self.socket, &json!({"op":"shutdown"})),
@@ -814,9 +720,6 @@ impl Vm {
             .await
             {
                 acknowledged = reply["ok"] == true;
-                if let Some(era) = reply["sealed"].as_u64() {
-                    let _ = crate::nodes::tracking::seal(&self.disk_dir, era).await;
-                }
             }
         }
         // A VMM blocked in FUSE may not exit even after SIGKILL until its read
@@ -860,7 +763,7 @@ impl Vm {
         state: &Path,
         stop: CancellationToken,
     ) -> Result<i32> {
-        self.activate().await?;
+        self.synchronize_clock().await?;
         let id = text(plan, "id");
         let vm_id = self
             .jail
@@ -1029,26 +932,6 @@ impl Vm {
     }
 }
 
-/// Atomic publication cannot overwrite another run disk, even if its directory is empty.
-fn rename_new(source: &Path, target: &Path) -> Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    let source = std::ffi::CString::new(source.as_os_str().as_bytes()).map_err(Error::internal)?;
-    let target = std::ffi::CString::new(target.as_os_str().as_bytes()).map_err(Error::internal)?;
-    if unsafe {
-        libc::renameat2(
-            libc::AT_FDCWD,
-            source.as_ptr(),
-            libc::AT_FDCWD,
-            target.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    } != 0
-    {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    Ok(())
-}
-
 /// Pause all guest CPUs before lease-loss teardown, including non-agent processes.
 pub async fn pause_attempt(state: &Path, attempt: &str) -> Result<()> {
     vm_state(state, attempt, "Paused").await
@@ -1100,23 +983,5 @@ mod tests {
         for slot in [0, 1 << 22, usize::MAX] {
             assert!(Network::new(slot).is_err());
         }
-    }
-    #[test]
-    fn adoption_never_replaces_a_workspace_or_its_lock() {
-        let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("prepared");
-        let target = root.path().join("assigned");
-        std::fs::create_dir(&source).unwrap();
-        std::fs::write(source.join("data.ext4"), b"virgin").unwrap();
-        std::fs::create_dir(&target).unwrap();
-        assert!(rename_new(&source, &target).is_err());
-        std::fs::write(target.join("lock"), b"owner").unwrap();
-        assert!(rename_new(&source, &target).is_err());
-        assert_eq!(std::fs::read(target.join("lock")).unwrap(), b"owner");
-        std::fs::remove_file(target.join("lock")).unwrap();
-        std::fs::remove_dir(&target).unwrap();
-        rename_new(&source, &target).unwrap();
-        assert_eq!(std::fs::read(target.join("data.ext4")).unwrap(), b"virgin");
-        assert!(!source.exists());
     }
 }

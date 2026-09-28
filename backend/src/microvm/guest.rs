@@ -77,24 +77,15 @@ async fn handle(
             let _guard=FILESYSTEM_CONTROL.lock().await;
             let freeze=request["op"]=="freeze";
             let generation=FREEZE_GENERATION.fetch_add(1,std::sync::atomic::Ordering::SeqCst)+1;
-            let status=Command::new("fsfreeze").arg(if freeze {"--freeze"} else {"--unfreeze"}).arg(super::era::DATA_MOUNT).stdout(Stdio::null()).stderr(Stdio::null()).status().await?;
+            let status=Command::new("fsfreeze").arg(if freeze {"--freeze"} else {"--unfreeze"}).arg("/oldroot/run/data").stdout(Stdio::null()).stderr(Stdio::null()).status().await?;
             if freeze && status.success() {
                 // A lost host control connection must not freeze the guest indefinitely.
-                tokio::spawn(async move {tokio::time::sleep(Duration::from_secs(300)).await;let _guard=FILESYSTEM_CONTROL.lock().await;if FREEZE_GENERATION.load(std::sync::atomic::Ordering::SeqCst)!=generation {return;}let _=Command::new("fsfreeze").args(["--unfreeze",super::era::DATA_MOUNT]).stdout(Stdio::null()).stderr(Stdio::null()).status().await;});
+                tokio::spawn(async move {tokio::time::sleep(Duration::from_secs(300)).await;let _guard=FILESYSTEM_CONTROL.lock().await;if FREEZE_GENERATION.load(std::sync::atomic::Ordering::SeqCst)!=generation {return;}let _=Command::new("fsfreeze").args(["--unfreeze","/oldroot/run/data"]).stdout(Stdio::null()).stderr(Stdio::null()).status().await;});
             }
             wire::write(&mut write,&json!({"ok":status.success() || !freeze})).await
         }
 
 
-        "written" => {
-            // Called by the host between freeze and thaw; any failure means a full copy.
-            let _guard=FILESYSTEM_CONTROL.lock().await;
-            let reply=match super::era::written(request["since"].as_u64()).await {
-                Ok(reply)=>reply,
-                Err(error)=>{tracing::warn!(message=%error.message,"Write tracking query failed");json!({"ok":false})}
-            };
-            wire::write(&mut write,&reply).await
-        }
         "artifact-export" => {
             let export=async {
                 let (snapshot,size)=crate::artifacts::file::snapshot(Path::new(text(&request,"path")),Path::new(text(&request,"root"))).await?;
@@ -107,23 +98,6 @@ async fn handle(
                 _=>wire::write(&mut write,&json!({"ok":false})).await,
             }
         }
-        "prepare" => {
-            let _guard = running.try_lock().map_err(|_| Error::new(409,"Guest already running."))?;
-            if Path::new(INITIALIZED).exists() || Path::new("/home/node/.codex/auth.json").exists() {
-                return Err(Error::bad("Only a virgin VM may be prepared."));
-            }
-            let mut command = Command::new("/usr/local/bin/leo");
-            command.arg("guest-warm").env("HOME","/home/node").env("CODEX_HOME","/home/node/.codex")
-                .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true);
-            unsafe { command.pre_exec(|| {
-                if libc::setgroups(0,std::ptr::null()) != 0 || libc::setgid(1000) != 0 || libc::setuid(1000) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            }); }
-            let status = command.status().await?;
-            wire::write(&mut write,&json!({"ok":status.success()})).await
-        }
         "clock" => {
             let epoch = request["epochMs"].as_i64().filter(|v| *v > 0).ok_or_else(|| Error::bad("Invalid guest clock."))?;
             let time = libc::timespec { tv_sec: epoch / 1000, tv_nsec: (epoch % 1000) * 1_000_000 };
@@ -133,7 +107,7 @@ async fn handle(
         "status" => {
             wire::write(
                 &mut write,
-                &json!({"version":1,"binaryImports":true,"filesystemSnapshots":true,"writeTracking":super::era::active().await,"initialized":Path::new(INITIALIZED).exists()}),
+                &json!({"version":1,"binaryImports":true,"filesystemSnapshots":true,"initialized":Path::new(INITIALIZED).exists()}),
             )
             .await
         }
@@ -349,18 +323,7 @@ async fn handle(
             tokio::select! { result = result => result, _ = stop.cancelled() => Ok(()) }
         }
         "shutdown" => {
-            // A clean stop freezes the data filesystem and archives the last era, so the
-            // host can list this boot's writes without booting the disk again.
-            let sealed = if super::era::active().await {
-                let _guard = FILESYSTEM_CONTROL.lock().await;
-                super::era::seal()
-                    .await
-                    .inspect_err(|error| tracing::warn!(message = %error.message, "Sealing write tracking failed"))
-                    .ok()
-            } else {
-                None
-            };
-            wire::write(&mut write, &json!({"ok":true,"sealed":sealed})).await?;
+            wire::write(&mut write, &json!({"ok":true})).await?;
             stop.cancel();
             Ok(())
         }

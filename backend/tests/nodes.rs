@@ -796,7 +796,7 @@ async fn concurrent_admission_reserves_capacity_once_and_preserves_agent_grants(
     let agent = id();
     let run_a = id();
     let run_b = id();
-    owner.service.store.put("nodes",json!({"id":node,"local":false,"accepting":true,"executionReady":true,"lastSeen":now(),"capabilities":{"kvm":true},"limits":{"cpu":2,"memoryMiB":4096,"diskMiB":65536}})).await.unwrap();
+    owner.service.store.put("nodes",json!({"id":node,"local":false,"accepting":true,"executionReady":true,"lastSeen":now(),"capabilities":{"kvm":true,"fuse":true},"limits":{"cpu":2,"memoryMiB":4096,"diskMiB":65536}})).await.unwrap();
     owner
         .service
         .store
@@ -843,7 +843,7 @@ async fn concurrent_admission_reserves_capacity_once_and_preserves_agent_grants(
 }
 
 #[tokio::test]
-async fn retained_disks_remain_charged_after_execution_and_cancellation_releases_destination() {
+async fn retained_s3_disks_charge_local_cache_and_cancellation_releases_destination() {
     use leo_agent_manager::{
         config::{id, now},
         nodes::{moves, placement},
@@ -853,7 +853,7 @@ async fn retained_disks_remain_charged_after_execution_and_cancellation_releases
     let agent = id();
     let run = id();
     let attempt = id();
-    owner.service.store.put("nodes",json!({"id":node,"accepting":true,"executionReady":true,"lastSeen":now(),"capabilities":{"kvm":true},"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":32768}})).await.unwrap();
+    owner.service.store.put("nodes",json!({"id":node,"accepting":true,"executionReady":true,"lastSeen":now(),"capabilities":{"kvm":true,"fuse":true},"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":32768}})).await.unwrap();
     owner
         .service
         .store
@@ -868,16 +868,23 @@ async fn retained_disks_remain_charged_after_execution_and_cancellation_releases
         .await
         .unwrap();
     placement::release(&owner.service, &attempt).await.unwrap();
-    assert!(
-        placement::reserve(
-            &owner.service,
-            &json!({"id":id(),"snapshot":{"agent":{"id":agent}}}),
-            &id()
-        )
+    let retained = owner
+        .service
+        .store
+        .get("node-volumes", &format!("{run}:{node}"))
         .await
-        .is_err(),
-        "Idle persistent disks consume the node's disk budget"
-    );
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained["diskMiB"], 128);
+    let other = id();
+    placement::reserve(
+        &owner.service,
+        &json!({"id":id(),"snapshot":{"agent":{"id":agent}}}),
+        &other,
+    )
+    .await
+    .expect("An idle S3 disk should leave capacity for another conversation");
+    placement::release(&owner.service, &other).await.unwrap();
     let retry = id();
     placement::reserve(&owner.service, &execution, &retry)
         .await
@@ -922,6 +929,56 @@ async fn requesting_a_smaller_disk_is_rejected_before_moving() {
     .unwrap_err();
     assert_eq!(error.status, 400);
     assert!(error.message.contains("shrink"));
+}
+
+#[tokio::test]
+async fn a_moved_disk_requires_a_node_with_fuse() {
+    use leo_agent_manager::{
+        config::{id, now},
+        nodes::placement,
+    };
+    let owner = Owner::new().await;
+    let agent = id();
+    let local_only = id();
+    let unknown = id();
+    let s3_ready = id();
+    for (node, fuse) in [(&local_only, false), (&s3_ready, true)] {
+        owner.service.store.put("nodes",json!({"id":node,"accepting":true,"executionReady":true,"lastSeen":now(),"storage":{"enabled":false,"reserveMiB":64,"reservePercent":1},"capabilities":{"kvm":true,"fuse":fuse,"diskMiB":32768,"diskTotalMiB":32768},"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":32768}})).await.unwrap();
+    }
+    owner.service.store.put("nodes",json!({"id":unknown,"accepting":true,"executionReady":true,"lastSeen":now(),"capabilities":{"kvm":true},"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":32768}})).await.unwrap();
+    owner
+        .service
+        .store
+        .put(
+            "agents",
+            json!({"id":agent,"access":{"nodes":[local_only,unknown,s3_ready]}}),
+        )
+        .await
+        .unwrap();
+    let mut run = json!({"id":id(),"snapshot":{"agent":{"id":agent}},"placementTransition":true});
+    run["targetNodeId"] = local_only.into();
+    assert_eq!(
+        placement::reserve(&owner.service, &run, &id())
+            .await
+            .unwrap_err()
+            .status,
+        503
+    );
+    run["targetNodeId"] = unknown.into();
+    assert_eq!(
+        placement::reserve(&owner.service, &run, &id())
+            .await
+            .unwrap_err()
+            .status,
+        503
+    );
+    run["targetNodeId"] = s3_ready.clone().into();
+    assert_eq!(
+        placement::reserve(&owner.service, &run, &id())
+            .await
+            .unwrap()["nodeId"],
+        s3_ready
+    );
 }
 
 #[tokio::test]
@@ -972,7 +1029,7 @@ async fn tags_filter_authorized_nodes_without_granting_access() {
     let other = id();
     let agent = id();
     for (node, tags) in [(&fast, json!(["fast"])), (&other, json!(["slow"]))] {
-        owner.service.store.put("nodes",json!({"id":node,"tags":tags,"accepting":true,"executionReady":true,"lastSeen":now(),"capabilities":{"kvm":true},"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536}})).await.unwrap();
+        owner.service.store.put("nodes",json!({"id":node,"tags":tags,"accepting":true,"executionReady":true,"lastSeen":now(),"capabilities":{"kvm":true,"fuse":true},"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536}})).await.unwrap();
     }
     owner
         .service
@@ -1512,17 +1569,14 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
     .unwrap();
     assert_eq!(std::fs::read(restored).unwrap(), original);
     let block = first_manifest["blocks"][0]["hash"].as_str().unwrap();
-    let encrypted = std::fs::read(
-        owner
-            .service
-            .config
-            .data_dir
-            .join("node-backups")
-            .join(&run)
-            .join("blocks")
-            .join(block),
-    )
-    .unwrap();
+    let encrypted = leo_agent_manager::object_storage::Storage::configured(&owner.service)
+        .unwrap()
+        .download_bytes(
+            &format!("node-backups/{run}/blocks/{block}"),
+            snapshots::BLOCK + 4096,
+        )
+        .await
+        .unwrap();
     assert!(
         !encrypted
             .windows(27)
@@ -1533,32 +1587,6 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         "A 4 MiB backup block occupies {} bytes",
         encrypted.len()
     );
-    // A retained point can contain legacy blocks next to new binary blocks.
-    // In S3 mode force the legacy read through remote storage too.
-    use base64::{Engine, engine::general_purpose::STANDARD};
-    let block_file = owner
-        .service
-        .config
-        .data_dir
-        .join("node-backups")
-        .join(&run)
-        .join("blocks")
-        .join(block);
-    let key = format!("node-backups/{run}/blocks/{block}");
-    let legacy = owner
-        .service
-        .vault
-        .encrypt(&key, &json!(STANDARD.encode(&original[..4 * 1024 * 1024])))
-        .unwrap();
-    std::fs::write(&block_file, serde_json::to_vec(&legacy).unwrap()).unwrap();
-    if s3.is_some() {
-        leo_agent_manager::object_storage::Storage::configured(&owner.service)
-            .unwrap()
-            .upload_file_verified(&block_file, &key)
-            .await
-            .unwrap();
-        std::fs::remove_file(&block_file).unwrap();
-    }
     assert_eq!(
         publication::read_block(&owner.service, &retained, block)
             .await
@@ -1667,7 +1695,6 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             .await
             .unwrap()
             .unwrap();
-        let cached = std::fs::read(directory.join(block)).unwrap();
         storage
             .purge(&format!("node-backups/{run}/blocks/{block}"))
             .await
@@ -1675,19 +1702,10 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         assert_eq!(
             publication::read_block(&owner.service, &point, block)
                 .await
-                .unwrap(),
-            &original[..4 * 1024 * 1024],
-            "A healthy local cache still serves restores when S3 disappears"
-        );
-        assert_eq!(std::fs::read(directory.join(block)).unwrap(), cached);
-        std::fs::remove_file(directory.join(block)).unwrap();
-        assert_eq!(
-            publication::read_block(&owner.service, &point, block)
-                .await
                 .unwrap_err()
                 .status,
             409,
-            "A missing S3 object is terminal, unlike a retryable storage outage"
+            "A missing S3 object requires repair, unlike a retryable storage outage"
         );
         assert!(
             owner.service.store.run(&run).await.unwrap()["backup"]["snapshotId"].is_null(),
@@ -1710,7 +1728,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         )
         .await
         .unwrap();
-        assert_eq!(third["uploadedBytes"], 4 * 1024 * 1024);
+        assert_eq!(third["uploadedBytes"], 4 * 1024 * 1024 + 128);
         let repaired = owner
             .service
             .store
@@ -1748,7 +1766,6 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             .unwrap()
             .unwrap_or_else(|| json!({"id":local}));
         node["storage"] = json!(leo_agent_manager::storage::policy::Policy {
-            enabled: true,
             reserve_mi_b: 16777216,
             ..Default::default()
         });
@@ -1953,7 +1970,7 @@ async fn abandoned_return_to_a_node_releases_only_the_unmaterialized_disk_reserv
     let node = id();
     let agent = id();
     let run = id();
-    owner.service.store.put("nodes",json!({"id":node,"accepting":true,"executionReady":true,"lastSeen":now(),"capabilities":{"kvm":true},"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536}})).await.unwrap();
+    owner.service.store.put("nodes",json!({"id":node,"accepting":true,"executionReady":true,"lastSeen":now(),"capabilities":{"kvm":true,"fuse":true},"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536}})).await.unwrap();
     owner
         .service
         .store
@@ -1986,27 +2003,26 @@ async fn abandoned_return_to_a_node_releases_only_the_unmaterialized_disk_reserv
         .await
         .unwrap();
     let other = json!({"id":id(),"snapshot":{"agent":{"id":agent}}});
-    assert!(
-        placement::reserve(&owner.service, &other, &id())
-            .await
-            .is_err()
-    );
+    let parallel = id();
+    placement::reserve(&owner.service, &other, &parallel)
+        .await
+        .expect("An S3 disk should not reserve its logical size on a node");
+    placement::release(&owner.service, &parallel).await.unwrap();
     placement::release(&owner.service, &pending).await.unwrap();
     placement::release(&owner.service, &pending).await.unwrap();
     let replacement = id();
     placement::reserve(&owner.service, &other, &replacement)
         .await
         .expect("Cancellation must return the unused destination space");
-    assert!(
-        placement::reserve(
-            &owner.service,
-            &json!({"id":id(),"snapshot":{"agent":{"id":agent}}}),
-            &id()
-        )
-        .await
-        .is_err(),
-        "Retained original disk must still count against the limit"
-    );
+    let thin = id();
+    placement::reserve(
+        &owner.service,
+        &json!({"id":id(),"snapshot":{"agent":{"id":agent}}}),
+        &thin,
+    )
+    .await
+    .expect("A retained S3 disk should consume only local cache headroom");
+    placement::release(&owner.service, &thin).await.unwrap();
     placement::release(&owner.service, &replacement)
         .await
         .unwrap();
@@ -2028,18 +2044,10 @@ async fn abandoned_return_to_a_node_releases_only_the_unmaterialized_disk_reserv
         )
         .await
         .unwrap();
-    let mut growing = original;
-    growing["requestedResources"] = json!({"cpu":2,"memoryMiB":4096,"diskMiB":49152});
-    assert!(
-        placement::reserve(&owner.service, &growing, &id())
-            .await
-            .is_err(),
-        "Growing the current disk must include retained stale disks in its budget"
-    );
 }
 
 #[tokio::test]
-async fn first_execution_fits_configured_node_ceilings_without_silently_shrinking_later_requests() {
+async fn s3_disk_keeps_its_logical_size_while_cpu_and_memory_obey_node_limits() {
     use leo_agent_manager::{
         config::{id, now},
         nodes::placement,
@@ -2048,7 +2056,7 @@ async fn first_execution_fits_configured_node_ceilings_without_silently_shrinkin
     let node = id();
     let agent = id();
     let run = id();
-    owner.service.store.put("nodes",json!({"id":node,"accepting":true,"executionReady":true,"lastSeen":now(),"capabilities":{"kvm":true},"limits":{"cpu":1,"memoryMiB":1024,"diskMiB":8192}})).await.unwrap();
+    owner.service.store.put("nodes",json!({"id":node,"accepting":true,"executionReady":true,"lastSeen":now(),"capabilities":{"kvm":true,"fuse":true},"limits":{"cpu":1,"memoryMiB":1024,"diskMiB":8192}})).await.unwrap();
     owner
         .service
         .store
@@ -2062,7 +2070,7 @@ async fn first_execution_fits_configured_node_ceilings_without_silently_shrinkin
         .unwrap();
     assert_eq!(
         selected["resources"],
-        json!({"cpu":1,"memoryMiB":1024,"diskMiB":8192})
+        json!({"cpu":1,"memoryMiB":1024,"diskMiB":32768})
     );
     placement::release(&owner.service, &attempt).await.unwrap();
     record["requestedResources"] = json!({"cpu":2,"memoryMiB":1024,"diskMiB":8192});
@@ -2080,7 +2088,8 @@ async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_
     use leo_agent_manager::{
         auth,
         config::{id, now},
-        nodes::{moves, relay, restore, snapshots},
+        nodes::{checkpoint, disk_grants, moves, relay, restore, snapshots},
+        storage::{Disk, LazyDisk, policy::Policy, remote::RemoteSource, runtime},
     };
     use std::sync::{
         Arc,
@@ -2126,14 +2135,31 @@ async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_
         if node == &source {
             let disk = state.join("disks").join(&run);
             std::fs::create_dir_all(&disk).unwrap();
-            std::fs::write(
-                disk.join("data.ext4"),
-                b"complete environment, untracked files and native session",
-            )
-            .unwrap();
+            std::fs::write(disk.join("runtime.json"), br#"{"runtimeId":"fixture"}"#).unwrap();
+            let grant = disk_grants::new_disk(&owner.service, &record, node)
+                .await
+                .unwrap();
+            let context = json!({"master":format!("http://{address}/"),"grant":grant,"policy":Policy {reserve_mi_b:64,reserve_percent:1,..Default::default()}});
+            let remote = Arc::new(
+                RemoteSource::new(
+                    &context,
+                    tokio::runtime::Handle::current(),
+                    Default::default(),
+                )
+                .unwrap(),
+            );
+            let journal=LazyDisk::create(&disk.join("lazy"),&json!({"version":1,"size":4096,"blockSize":4194304,"blocks":[{"offset":0,"size":4096,"hash":null}]}),remote).unwrap();
+            journal.set_context(&context).unwrap();
+            journal
+                .write_at(
+                    0,
+                    b"complete environment, untracked files and native session",
+                )
+                .unwrap();
+            journal.sync().unwrap();
         }
         let token = auth::token();
-        owner.service.store.put("nodes",json!({"id":node,"revoked":false,"accepting":true,"executionReady":true,"lastSeen":now(),"runtimeId":"fixture","runtimeIds":["fixture"],"capabilities":{"kvm":true},"limits":{"cpu":2,"memoryMiB":1024,"diskMiB":1024}})).await.unwrap();
+        owner.service.store.put("nodes",json!({"id":node,"revoked":false,"accepting":true,"executionReady":true,"lastSeen":now(),"runtimeId":"fixture","runtimeIds":["fixture"],"storage":Policy {reserve_mi_b:64,reserve_percent:1,..Default::default()},"capabilities":{"kvm":true,"fuse":true},"limits":{"cpu":2,"memoryMiB":1024,"diskMiB":1024}})).await.unwrap();
         owner
             .service
             .store
@@ -2160,10 +2186,15 @@ async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_
                     assert_eq!(route, format!("/disks/{run}/snapshot"), "Idle movement must capture by disk, without destination attempt history");
                     if cancel.load(Ordering::SeqCst) { service.store.patch_run(&run,json!({"cancelRequestedAt":now(),"status":"cancelled"})).await.unwrap(); }
                     if failed.load(Ordering::SeqCst) { return axum::http::StatusCode::PRECONDITION_FAILED.into_response(); }
-                    let mut manifest = snapshots::index(&state.join("disks").join(&run).join("data.ext4")).await.unwrap();
-                    manifest["runtime"] = json!({"runtimeId":"fixture"});
-                    manifest["capturedAt"] = now().into();
-                    return axum::Json(json!({"id":id(),"manifest":manifest})).into_response();
+                    let snapshot=checkpoint::capture(&state,&run,None,Arc::new(tokio::sync::Mutex::new(())),tokio_util::sync::CancellationToken::new(),&run,None).await.unwrap();
+                    return axum::Json(snapshot).into_response();
+                }
+                if route.ends_with("/published") {
+                    let body=to_bytes(request.into_body(),1000000).await.unwrap();
+                    let value: serde_json::Value=serde_json::from_slice(&body).unwrap();
+                    let volume=runtime::load(&state.join("disks").join(&run)).await.unwrap();
+                    volume.disk.commit_published(value["generation"].as_i64().unwrap(),value["backupId"].as_str().unwrap()).unwrap();
+                    return axum::Json(json!({"committed":true})).into_response();
                 }
                 if route.ends_with("/restore") {
                     let body = to_bytes(request.into_body(), 1000000).await.unwrap();
@@ -2171,9 +2202,10 @@ async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_
                     return axum::Json(restore::controller(&state,&run,value).await.unwrap()).into_response();
                 }
                 if route.starts_with("/snapshots/") {
-                    let disk = state.join("disks").join(&run).join("data.ext4");
-                    let manifest = snapshots::index(&disk).await.unwrap();
-                    return snapshots::block(&disk,&manifest,route.rsplit('/').next().unwrap()).await.unwrap().into_response();
+                    let parts=route.split('/').collect::<Vec<_>>();
+                    let directory=state.join("snapshots").join(parts[2]);
+                    if request.method()=="DELETE" {tokio::fs::remove_dir_all(directory).await.unwrap();return axum::Json(json!({"ok":true})).into_response();}
+                    return snapshots::served(&directory,parts[3]).await.unwrap().into_response();
                 }
                 panic!("Idle movement must not launch a provider: {route}");
             }
@@ -2214,17 +2246,18 @@ async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_
         assert_eq!(settled["nodeId"], *target, "{settled}");
         assert_eq!(settled["recoveryPending"], false);
         assert_eq!(settled["sessionId"], "retained-session");
+        let directory = owner._root.path().join(target).join("disks").join(&run);
+        let volume = runtime::load(&directory).await.unwrap();
+        let bytes = tokio::task::spawn_blocking(move || {
+            let mut bytes =
+                vec![0; b"complete environment, untracked files and native session".len()];
+            volume.read_at(0, &mut bytes).unwrap();
+            bytes
+        })
+        .await
+        .unwrap();
         assert_eq!(
-            std::fs::read(
-                owner
-                    ._root
-                    .path()
-                    .join(target)
-                    .join("disks")
-                    .join(&run)
-                    .join("data.ext4")
-            )
-            .unwrap(),
+            bytes,
             b"complete environment, untracked files and native session"
         );
         assert!(
@@ -2259,7 +2292,7 @@ async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_
     assert_eq!(settled["recoveryPending"], false);
     assert_eq!(
         settled["movementError"],
-        "This retained VM runtime requires a paused capture; active backups are unavailable."
+        "Unable to capture a coherent VM snapshot."
     );
     assert_eq!(settled["nodeId"], source);
     cancel_during_capture.store(true, Ordering::SeqCst);
@@ -2353,7 +2386,7 @@ async fn automatic_placement_spreads_work_unless_a_node_is_preferred() {
     let large = id();
     let agent = id();
     for (node, cpu, memory) in [(&small, 4, 8192), (&large, 16, 65536)] {
-        owner.service.store.put("nodes",json!({"id":node,"accepting":true,"executionReady":true,"lastSeen":now(),"capabilities":{"kvm":true},"limits":{"cpu":cpu,"memoryMiB":memory,"diskMiB":262144}})).await.unwrap();
+        owner.service.store.put("nodes",json!({"id":node,"accepting":true,"executionReady":true,"lastSeen":now(),"capabilities":{"kvm":true,"fuse":true},"limits":{"cpu":cpu,"memoryMiB":memory,"diskMiB":262144}})).await.unwrap();
     }
     owner
         .service
@@ -2385,7 +2418,7 @@ async fn node_agent_grants_are_edited_from_the_node_without_narrowing_all_node_a
     let owner = Owner::new().await;
     let node = id();
     let (explicit, everywhere) = (id(), id());
-    owner.service.store.put("nodes",json!({"id":node,"name":"Desktop","local":false,"revoked":false,"accepting":true,"tags":[],"lastSeen":now(),"capabilities":{"kvm":true},"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536}})).await.unwrap();
+    owner.service.store.put("nodes",json!({"id":node,"name":"Desktop","local":false,"revoked":false,"accepting":true,"tags":[],"lastSeen":now(),"capabilities":{"kvm":true,"fuse":true},"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536}})).await.unwrap();
     for (agent, nodes) in [(&explicit, json!([])), (&everywhere, Value::Null)] {
         owner
             .service
@@ -2548,7 +2581,7 @@ async fn stale_node_disks_are_reported_and_freed_on_request() {
     tokio::spawn(async move { axum::serve(listener, runner).await.unwrap() });
     let owner = Owner::with_runner("localhost:4310".into(), url).await;
     let other = id();
-    owner.service.store.put("nodes",json!({"id":LOCAL_NODE_ID,"name":"Current runner","local":true,"revoked":false,"accepting":true,"tags":[],"capabilities":{"kvm":true},"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536}})).await.unwrap();
+    owner.service.store.put("nodes",json!({"id":LOCAL_NODE_ID,"name":"Current runner","local":true,"revoked":false,"accepting":true,"tags":[],"capabilities":{"kvm":true,"fuse":true},"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536}})).await.unwrap();
     let (moved, current) = (id(), id());
     for (run, node, total) in [
         (&moved, &other, 1024),
@@ -2650,7 +2683,10 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
         config::{id, now},
         nodes::{LOCAL_NODE_ID, publication, snapshots},
     };
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
     let root = TempDir::new().unwrap();
     let disk = root.path().join("disk");
     std::fs::write(&disk, b"workspace blocks").unwrap();
@@ -2665,18 +2701,21 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
     let grant_for_runner = grant_id.clone();
     let ack_for_runner = lost_ack.clone();
     let snapshots_served = Arc::new(Mutex::new(Vec::<String>::new()));
-    let (recorded, fail, served, source, data) = (
+    let block_reads = Arc::new(AtomicUsize::new(0));
+    let (recorded, fail, served, reads, source, data) = (
         bodies.clone(),
         failing.clone(),
         snapshots_served.clone(),
+        block_reads.clone(),
         disk.clone(),
         manifest.clone(),
     );
     let runner = axum::Router::new().fallback(move |request: axum::extract::Request| {
-        let (recorded, fail, served, source, data) = (
+        let (recorded, fail, served, reads, source, data) = (
             recorded.clone(),
             fail.clone(),
             served.clone(),
+            reads.clone(),
             source.clone(),
             data.clone(),
         );
@@ -2712,6 +2751,7 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
                     .into_response();
             }
             let hash = path.rsplit('/').next().unwrap();
+            reads.fetch_add(1, Ordering::SeqCst);
             snapshots::block(&source, &data, hash)
                 .await
                 .unwrap()
@@ -2747,12 +2787,9 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
         .unwrap();
     let first = snapshots_served.lock().unwrap()[0].clone();
     assert_eq!(current().await["backup"]["snapshotId"], first);
-    // Observe real content reads, not metadata lookups or an implementation counter.
-    // An unchanged increment must reuse the immutable encrypted block without reading it.
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-    let watch = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
-    assert!(watch >= 0);
-    let watch = unsafe { OwnedFd::from_raw_fd(watch) };
+    // An unchanged capture reuses the published S3 block without asking the
+    // controller to transfer it again after its local receipt is evicted.
+    let initial_reads = block_reads.load(Ordering::SeqCst);
     let hash = manifest["blocks"][0]["hash"].as_str().unwrap();
     let block = owner
         .service
@@ -2762,20 +2799,11 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
         .join(&run)
         .join("blocks")
         .join(hash);
-    let path = std::ffi::CString::new(block.as_os_str().as_encoded_bytes()).unwrap();
-    assert!(
-        unsafe { libc::inotify_add_watch(watch.as_raw_fd(), path.as_ptr(), libc::IN_ACCESS) } >= 0
-    );
+    std::fs::remove_dir_all(block.parent().unwrap()).unwrap();
     publication::capture(&owner.service, &current().await)
         .await
         .unwrap();
-    let mut events = [0u8; 4096];
-    let read = unsafe { libc::read(watch.as_raw_fd(), events.as_mut_ptr().cast(), events.len()) };
-    assert_eq!(read, -1, "An unchanged backup reread the cached block");
-    assert_eq!(
-        std::io::Error::last_os_error().kind(),
-        std::io::ErrorKind::WouldBlock
-    );
+    assert_eq!(block_reads.load(Ordering::SeqCst), initial_reads);
     assert!(bodies.lock().unwrap()[0]["baseline"].is_null());
     assert_eq!(bodies.lock().unwrap()[1]["baseline"], first);
 
@@ -2808,9 +2836,8 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
         .unwrap()
         .unwrap();
     let baseline = current().await["backup"]["snapshotId"].clone();
-    let mut damaged = std::fs::read(&block).unwrap();
-    *damaged.last_mut().unwrap() ^= 1;
-    std::fs::write(&block, damaged).unwrap();
+    std::fs::create_dir_all(block.parent().unwrap()).unwrap();
+    std::fs::write(&block, b"damaged ciphertext").unwrap();
     assert_eq!(
         publication::read_block(&owner.service, &backup, hash)
             .await
@@ -2889,12 +2916,19 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
 
 #[tokio::test]
 async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
-    use base64::{Engine, engine::general_purpose::STANDARD};
     use leo_agent_manager::{
         config::id,
         nodes::{disk_grants, snapshots},
     };
     use sha2::{Digest, Sha256};
+    async fn permits(owner: &Owner, credential: &str, point: &Value) -> bool {
+        disk_grants::authorize(&owner.service, credential)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|grant| grant["backups"].as_array().cloned())
+            .is_some_and(|backups| backups.contains(&point["id"]))
+    }
     let owner = Owner::new().await;
     let (run, node, next, agent) = (id(), id(), id(), id());
     for node in [&node, &next] {
@@ -2920,7 +2954,6 @@ async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
         .await
         .unwrap();
     let mut points = Vec::new();
-    let mut hashes = Vec::new();
     for byte in [7u8, 9u8, 11u8] {
         let data = vec![byte; 4096];
         let hash = hex::encode(Sha256::digest(&data));
@@ -2933,53 +2966,13 @@ async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
             .put("node-backups", backup.clone())
             .await
             .unwrap();
-        let directory = owner
-            .service
-            .config
-            .data_dir
-            .join("node-backups")
-            .join(&run)
-            .join("blocks");
-        std::fs::create_dir_all(&directory).unwrap();
-        let encoded = owner
-            .service
-            .vault
-            .encrypt(
-                &format!("node-backups/{run}/blocks/{hash}"),
-                &json!(STANDARD.encode(&data)),
-            )
-            .unwrap();
-        std::fs::write(directory.join(&hash), encoded.to_string()).unwrap();
         points.push(backup);
-        hashes.push(hash);
     }
     let credential = disk_grants::issue(&owner.service, &record, &node, &points[0])
         .await
         .unwrap();
-    assert_eq!(
-        owner
-            .call(
-                "GET",
-                &format!("/internal/node-restore/{}", hashes[0]),
-                Value::Null,
-                Some(&credential)
-            )
-            .await
-            .0,
-        200
-    );
-    assert_eq!(
-        owner
-            .call(
-                "GET",
-                &format!("/internal/node-restore/{}", hashes[1]),
-                Value::Null,
-                Some(&credential)
-            )
-            .await
-            .0,
-        403
-    );
+    assert!(permits(&owner, &credential, &points[0]).await);
+    assert!(!permits(&owner, &credential, &points[1]).await);
     let _stale = disk_grants::issue(&owner.service, &record, &node, &points[0])
         .await
         .unwrap();
@@ -2997,18 +2990,7 @@ async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
             .len(),
         2
     );
-    assert_eq!(
-        owner
-            .call(
-                "GET",
-                &format!("/internal/node-restore/{}", hashes[1]),
-                Value::Null,
-                Some(&credential)
-            )
-            .await
-            .0,
-        200
-    );
+    assert!(permits(&owner, &credential, &points[1]).await);
     disk_grants::acknowledged(
         &owner.service,
         &leo_agent_manager::auth::digest(&credential),
@@ -3023,18 +3005,7 @@ async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
             .len(),
         2
     );
-    assert_eq!(
-        owner
-            .call(
-                "GET",
-                &format!("/internal/node-restore/{}", hashes[0]),
-                Value::Null,
-                Some(&credential)
-            )
-            .await
-            .0,
-        403
-    );
+    assert!(!permits(&owner, &credential, &points[0]).await);
     // Reconciliation of a lost acknowledgement must retain an in-flight successor.
     let racing = disk_grants::issue(&owner.service, &record, &node, &points[0])
         .await
@@ -3049,33 +3020,11 @@ async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
     disk_grants::acknowledged(&owner.service, &racing_id, &points[1])
         .await
         .unwrap();
-    assert_eq!(
-        owner
-            .call(
-                "GET",
-                &format!("/internal/node-restore/{}", hashes[2]),
-                Value::Null,
-                Some(&racing)
-            )
-            .await
-            .0,
-        200
-    );
+    assert!(permits(&owner, &racing, &points[2]).await);
     disk_grants::acknowledged(&owner.service, &racing_id, &points[2])
         .await
         .unwrap();
-    assert_eq!(
-        owner
-            .call(
-                "GET",
-                &format!("/internal/node-restore/{}", hashes[1]),
-                Value::Null,
-                Some(&racing)
-            )
-            .await
-            .0,
-        403
-    );
+    assert!(!permits(&owner, &racing, &points[1]).await);
     // A delayed monitor receipt must not roll authorization back behind publication.
     disk_grants::acknowledged(
         &owner.service,
@@ -3091,48 +3040,15 @@ async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
     )
     .await
     .unwrap();
-    assert_eq!(
-        owner
-            .call(
-                "GET",
-                &format!("/internal/node-restore/{}", hashes[1]),
-                Value::Null,
-                Some(&credential)
-            )
-            .await
-            .0,
-        200
-    );
-    assert_eq!(
-        owner
-            .call(
-                "GET",
-                &format!("/internal/node-restore/{}", hashes[0]),
-                Value::Null,
-                Some(&credential)
-            )
-            .await
-            .0,
-        403
-    );
+    assert!(permits(&owner, &credential, &points[1]).await);
+    assert!(!permits(&owner, &credential, &points[0]).await);
     owner
         .service
         .store
         .patch_run(&run, json!({"nodeId":next}))
         .await
         .unwrap();
-    assert_eq!(
-        owner
-            .call(
-                "GET",
-                &format!("/internal/node-restore/{}", hashes[1]),
-                Value::Null,
-                Some(&credential)
-            )
-            .await
-            .0,
-        403
-    );
+    assert!(!permits(&owner, &credential, &points[1]).await);
     assert_eq!(
         owner
             .call(

@@ -87,15 +87,13 @@ impl Transport {
         };
         self.changed.notify_waiters();
         let (status, length, kind) = tokio::time::timeout(
-            Duration::from_secs(
-                if path.ends_with("/restore") || path.ends_with("/migrate") {
-                    7200
-                } else if path.starts_with("/prepare/") || path.ends_with("snapshot") {
-                    300
-                } else {
-                    30
-                },
-            ),
+            Duration::from_secs(if path.ends_with("/restore") {
+                120
+            } else if path.starts_with("/prepare/") || path.ends_with("snapshot") {
+                300
+            } else {
+                30
+            }),
             head_rx,
         )
         .await
@@ -361,7 +359,7 @@ pub async fn proxy(State(app): State<App>, request: Request) -> Result<Response>
         format!("/{path}"),
         request.method().as_str().to_owned(),
     );
-    let limit = if path.ends_with("/restore") || path.ends_with("/migrate") {
+    let limit = if path.ends_with("/restore") {
         super::snapshots::MAX_MANIFEST_BYTES
     } else {
         2_000_000

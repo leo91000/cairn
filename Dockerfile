@@ -44,7 +44,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     zip unzip xz-utils zstd bzip2 rsync file less tree sqlite3 postgresql-client \
     dnsutils iproute2 iputils-ping netcat-openbsd procps lsof strace patch diffutils \
     pkg-config libssl-dev libffi-dev ninja-build poppler-utils imagemagick ffmpeg \
-    dmsetup thin-provisioning-tools \
     && rm -rf /var/lib/apt/lists/*
 RUN arch="${TARGETARCH:-amd64}" \
     && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${arch}.tar.gz" -o /tmp/gh.tar.gz \

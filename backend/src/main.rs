@@ -114,24 +114,6 @@ async fn entry(args: Vec<String>) -> Result<i32> {
             .await?;
             Ok(0)
         }
-        "guest-warm" => {
-            let config = Config::load()?;
-            leo_agent_manager::toolkit::environment(&config.home, std::env::vars().collect())
-                .await?;
-            // Anonymous initialization warms executable pages and local capabilities only.
-            // No thread, inference, account login or run-scoped MCP is started here.
-            let mut session = leo_agent_manager::rpc::Session::codex(
-                &config,
-                &config.home.join(".codex"),
-                &["-c".into(), "features.apps=false".into()],
-                Some(Path::new("/tmp")),
-            )
-            .await?;
-            let result = session.request("model/list", serde_json::json!({})).await;
-            session.close().await;
-            result?;
-            Ok(0)
-        }
         "guest" => {
             leo_agent_manager::microvm::guest::serve(stop).await?;
             Ok(0)

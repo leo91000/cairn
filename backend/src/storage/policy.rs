@@ -6,7 +6,6 @@ use std::path::Path;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct Policy {
-    pub enabled: bool,
     pub cache_mi_b: u64,
     pub reserve_mi_b: u64,
     pub reserve_percent: u64,
@@ -14,17 +13,19 @@ pub struct Policy {
     pub max_dirty_seconds: u64,
     #[serde(rename = "automaticArchiving", skip_serializing)]
     pub _legacy_archiving: Option<bool>,
+    #[serde(rename = "enabled", skip_serializing)]
+    pub _legacy_enabled: Option<bool>,
 }
 impl Default for Policy {
     fn default() -> Self {
         Self {
-            enabled: false,
             cache_mi_b: 102400,
             reserve_mi_b: 10240,
             reserve_percent: 5,
             backup_seconds: 60,
             max_dirty_seconds: 300,
             _legacy_archiving: None,
+            _legacy_enabled: None,
         }
     }
 }
@@ -41,6 +42,19 @@ impl Policy {
             return Err(Error::bad("Invalid storage limits."));
         }
         Ok(())
+    }
+    /// Old node records may carry the former opt-in flag. Preserve their
+    /// limits while ignoring that flag for every new execution.
+    pub fn for_node(value: &serde_json::Value) -> Result<Self> {
+        let value = if value.is_object() {
+            value.clone()
+        } else {
+            serde_json::json!({})
+        };
+        let policy: Self = serde_json::from_value(value)
+            .map_err(|_| Error::bad("Invalid node storage limits."))?;
+        policy.validate()?;
+        Ok(policy)
     }
     pub fn reserve(&self, total: u64) -> u64 {
         (self.reserve_mi_b * 1024 * 1024).max(total / 100 * self.reserve_percent)
