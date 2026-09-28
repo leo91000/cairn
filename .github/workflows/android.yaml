@@ -60,15 +60,14 @@ jobs:
       - name: Test, lint and build debug
         working-directory: android
         run: ./gradlew testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest --no-daemon
-      - name: Build optimized release
-        working-directory: android
-        run: ./gradlew assembleRelease --no-daemon
       - name: Enable emulator acceleration
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - name: Check conversation and model controls on Android 16
+      # These history tests take about half of the device-test time. The other
+      # device classes run on a second emulator while captures stay here.
+      - name: Check history and capture controls on Android 16
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
         with:
           api-level: 36
@@ -77,7 +76,7 @@ jobs:
           profile: pixel_6
           disable-animations: false
           script: |
-            cd android && ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=dev.leo.manager.ui.HistoryFollowDeviceTest,dev.leo.manager.ui.ModelPickerDeviceTest,dev.leo.manager.ui.AccountsDeviceTest,dev.leo.manager.ui.ModelCatalogDeviceTest,dev.leo.manager.ui.ChatProviderDeviceTest,dev.leo.manager.ui.SkillMentionDeviceTest,dev.leo.manager.ui.ConversationLifecycleDeviceTest,dev.leo.manager.ui.ImagePasteDeviceTest,dev.leo.manager.ui.QueueStripDeviceTest,dev.leo.manager.ui.MissionBackDeviceTest --no-daemon
+            cd android && ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=dev.leo.manager.ui.HistoryFollowDeviceTest --no-daemon
             adb install -r android/app/build/outputs/apk/debug/app-debug.apk
             adb install -r -t android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
             # Gradle uninstalls the test app, so regenerate the captures after reinstalling.
@@ -86,22 +85,6 @@ jobs:
             adb exec-out run-as dev.leo.manager cat files/model-picker/reasoning.png > android/app/build/reports/reasoning-picker.png
             adb exec-out run-as dev.leo.manager cat files/conversation-lifecycle/swipe-fil.png > android/app/build/reports/swipe-fil.png
             python3 -c 'from pathlib import Path; p = Path("android/app/build/reports"); assert "OK (3 tests)" in (p / "capture-instrumentation.txt").read_text(); assert all((p / name).read_bytes()[:8] == bytes([137, 80, 78, 71, 13, 10, 26, 10]) for name in ("pinned-stream.png", "reasoning-picker.png", "swipe-fil.png"))'
-      # Keep the optimized APK only after all checks pass. No signing key is
-      # needed on main or PRs; a tag signs these exact bytes without recompiling.
-      - name: Record the validated unsigned release
-        if: github.event_name != 'pull_request'
-        run: node scripts/android-build.mjs record android/app/build/outputs/apk/release
-      - uses: actions/upload-artifact@v7.0.1
-        if: github.event_name != 'pull_request'
-        with:
-          name: validated-android-release
-          path: |
-            android/app/build/outputs/apk/release/app-release-unsigned.apk
-            android/app/build/outputs/apk/release/output-metadata.json
-            android/app/build/outputs/apk/release/validation.json
-          if-no-files-found: error
-          retention-days: 90
-          overwrite: true
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
@@ -118,9 +101,103 @@ jobs:
             android/app/build/reports/capture-instrumentation.txt
           retention-days: 14
 
+  device-extra:
+    needs: resolve
+    if: needs.resolve.outputs.reuse != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: pnpm/setup@v2.1.0
+        with:
+          runtime: node@24
+          require-lockfile: true
+          install: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - uses: gradle/actions/setup-gradle@v5
+      - run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
+      - name: Use the tag version for a fresh release build
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: printf 'LEO_ANDROID_VERSION=%s\n' "${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Build debug and instrumentation APKs
+        working-directory: android
+        run: ./gradlew assembleDebug assembleDebugAndroidTest --no-daemon
+      - name: Enable emulator acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Check the remaining Android controls
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
+        with:
+          api-level: 36
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          disable-animations: false
+          script: |
+            cd android && ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=dev.leo.manager.ui.ModelPickerDeviceTest,dev.leo.manager.ui.AccountsDeviceTest,dev.leo.manager.ui.ModelCatalogDeviceTest,dev.leo.manager.ui.ChatProviderDeviceTest,dev.leo.manager.ui.SkillMentionDeviceTest,dev.leo.manager.ui.ConversationLifecycleDeviceTest,dev.leo.manager.ui.ImagePasteDeviceTest,dev.leo.manager.ui.QueueStripDeviceTest,dev.leo.manager.ui.MissionBackDeviceTest --no-daemon
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: leo-android-other-tests
+          path: |
+            android/app/build/reports/androidTests/
+            android/app/build/outputs/androidTest-results/
+          retention-days: 14
+
+  release:
+    needs: resolve
+    if: needs.resolve.outputs.reuse != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: pnpm/setup@v2.1.0
+        with:
+          runtime: node@24
+          require-lockfile: true
+          install: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - uses: gradle/actions/setup-gradle@v5
+      - run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
+      - name: Use the tag version for a fresh release build
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: printf 'LEO_ANDROID_VERSION=%s\n' "${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Build optimized release
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon
+      # The workflow only succeeds when this build and the device checks pass.
+      # A tag signs these exact bytes without compiling them again.
+      - name: Record the validated unsigned release
+        if: github.event_name != 'pull_request'
+        run: node scripts/android-build.mjs record android/app/build/outputs/apk/release
+      - uses: actions/upload-artifact@v7.0.1
+        if: github.event_name != 'pull_request'
+        with:
+          name: validated-android-release
+          path: |
+            android/app/build/outputs/apk/release/app-release-unsigned.apk
+            android/app/build/outputs/apk/release/output-metadata.json
+            android/app/build/outputs/apk/release/validation.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true
   publish:
-    needs: [resolve, check]
-    if: always() && !cancelled() && startsWith(github.ref, 'refs/tags/v') && needs.resolve.result == 'success' && (needs.resolve.outputs.reuse == 'true' || needs.check.result == 'success')
+    needs: [resolve, check, device-extra, release]
+    if: always() && !cancelled() && startsWith(github.ref, 'refs/tags/v') && needs.resolve.result == 'success' && (needs.resolve.outputs.reuse == 'true' || (needs.check.result == 'success' && needs.device-extra.result == 'success' && needs.release.result == 'success'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
