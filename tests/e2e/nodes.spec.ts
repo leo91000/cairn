@@ -54,7 +54,7 @@ test('registers, configures and revokes a node through the owner interface', asy
   await expect(node.getByRole('button', { name: 'Configure' })).toHaveCount(0)
 })
 
-test('conversation placement distinguishes a preference from a strict pin and shows recovery age', async ({ page, workspace }) => {
+test('conversation placement distinguishes a preference from a strict pin and shows synchronization age', async ({ page, workspace }) => {
   test.setTimeout(60000)
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Inspect the fixture' })
@@ -70,7 +70,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await page.goto(`/chats/${chat.id}`)
   await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
   await page.getByRole('button', { name: 'Sign in', exact: true }).click()
-  await expect(page.getByText('Recoverable VM state: 2 min ago', { exact: false })).toBeVisible({ timeout: 30000 })
+  await expect(page.getByText('Disk synchronized: 2 min ago', { exact: false })).toBeVisible({ timeout: 30000 })
   await page.getByText('Execution node', { exact: true }).click()
   await page.getByLabel('Placement', { exact: true }).selectOption('preferred')
   await page.getByLabel('Node', { exact: true }).selectOption(node.nodeId)
