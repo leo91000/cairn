@@ -1,4 +1,5 @@
 //! Repeatable benchmarks through the shipped backup and outbound transport interfaces.
+//! Capture benchmarks require LEO_NODE_TEST_S3_ENDPOINT and synthetic AWS credentials.
 //! Run alone with --ignored --nocapture --test-threads=1. All identities/data are fixtures.
 use axum::{extract::Request, response::IntoResponse};
 use leo_agent_manager::{
@@ -19,6 +20,16 @@ use tokio::{net::TcpListener, sync::RwLock};
 
 async fn service(root: &TempDir, origin: String, runner: String) -> Arc<Service> {
     std::fs::create_dir_all(root.path().join("home")).unwrap();
+    if let Ok(endpoint) = std::env::var("LEO_NODE_TEST_S3_ENDPOINT") {
+        let parsed: url::Url = endpoint.parse().unwrap();
+        assert_eq!(parsed.host_str(), Some("127.0.0.1"));
+        std::fs::create_dir_all(root.path().join("data")).unwrap();
+        std::fs::write(
+            root.path().join("data/storage-s3.json"),
+            json!({"bucket":"leo-node-test","endpoint":endpoint,"region":"us-east-1"}).to_string(),
+        )
+        .unwrap();
+    }
     Service::new(Config {
         data_dir: root.path().join("data"),
         home: root.path().join("home"),

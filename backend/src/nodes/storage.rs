@@ -159,8 +159,8 @@ pub async fn migrate_one(s: &Service) -> Result<bool> {
             let point=super::publication::capture(s,&run).await?;
             let point=s.get("node-backups",text(&point,"id")).await?;
             let manifest=super::publication::manifest(s,&point).await?;
-            // Only the installation shares the archive lock. Long S3 transfers
-            // must not prevent unrelated conversations from being archived.
+            // Only installation shares the conversation storage lock. Long S3 transfers
+            // must not delay deletion of unrelated conversations.
             let _storage=crate::conversation_lifecycle::storage_lock(&s.config.data_dir)?;
             let current_chat=s.get("chats",text(&chat,"id")).await?;
             let current_run=s.store.run(run_id).await?;

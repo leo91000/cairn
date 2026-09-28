@@ -1107,8 +1107,8 @@ async fn snapshot_baseline(request: axum::extract::Request) -> Result<Option<Str
 mod tests {
     use super::*;
     #[tokio::test]
-    async fn workspace_disk_round_trip_uses_authenticated_http_and_preserves_the_lock() {
-        use std::io::{Read, Seek, SeekFrom, Write};
+    async fn workspace_disk_deletion_uses_authenticated_http_and_preserves_the_lock() {
+        use std::io::{Seek, SeekFrom, Write};
         use std::os::unix::fs::MetadataExt;
         use tower::ServiceExt;
         let root = tempfile::TempDir::new().unwrap();
@@ -1215,13 +1215,9 @@ mod tests {
         );
         assert_eq!(
             request(&app, &run, "import", &transfer, "synthetic-runner-secret").await,
-            200
+            405
         );
-        let mut file = std::fs::File::open(directory.join("data.ext4")).unwrap();
-        file.seek(SeekFrom::Start(8 * 1024 * 1024)).unwrap();
-        let mut text = String::new();
-        file.read_to_string(&mut text).unwrap();
-        assert_eq!(text, "native session and unpublished work");
+        assert!(!directory.join("data.ext4").exists());
     }
     #[test]
     fn execution_plans_accept_unlimited_but_reject_invalid_or_expired_deadlines() {

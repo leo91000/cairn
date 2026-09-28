@@ -2660,6 +2660,10 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
     // The controller records each capture request body and can be told to fail.
     let bodies = Arc::new(Mutex::new(Vec::<Value>::new()));
     let failing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let lost_ack = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let grant_id = id();
+    let grant_for_runner = grant_id.clone();
+    let ack_for_runner = lost_ack.clone();
     let snapshots_served = Arc::new(Mutex::new(Vec::<String>::new()));
     let (recorded, fail, served, source, data) = (
         bodies.clone(),
@@ -2676,10 +2680,15 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
             source.clone(),
             data.clone(),
         );
+        let lost_ack = ack_for_runner.clone();
+        let grant = grant_for_runner.clone();
         async move {
             let path = request.uri().path().to_owned();
             if request.method() == "DELETE" {
                 return axum::Json(json!({"ok":true})).into_response();
+            }
+            if path.ends_with("/published") {
+                return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "ack lost").into_response();
             }
             if path.ends_with("/snapshot") {
                 let body = axum::body::to_bytes(request.into_body(), 4096)
@@ -2694,7 +2703,13 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
                 }
                 let snapshot = id();
                 served.lock().unwrap().push(snapshot.clone());
-                return axum::Json(json!({"id":snapshot,"manifest":data})).into_response();
+                let mut data = data;
+                if lost_ack.load(std::sync::atomic::Ordering::SeqCst) {
+                    data["onDemand"] = true.into();
+                    data["generation"] = 1.into();
+                }
+                return axum::Json(json!({"id":snapshot,"manifest":data,"grantId":grant}))
+                    .into_response();
             }
             let hash = path.rsplit('/').next().unwrap();
             snapshots::block(&source, &data, hash)
@@ -2820,6 +2835,55 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
             .await
             .unwrap(),
         b"workspace blocks"
+    );
+    // Losing the controller acknowledgement after S3 publication must preserve the new pointer.
+    let previous = current().await["backup"]["id"].clone();
+    owner
+        .service
+        .store
+        .put(
+            "node-disk-grants",
+            json!({"id":grant_id,"runId":run,"nodeId":LOCAL_NODE_ID,"backups":[previous]}),
+        )
+        .await
+        .unwrap();
+    owner
+        .service
+        .store
+        .patch_run(&run, json!({"storage":{"mode":"on-demand"}}))
+        .await
+        .unwrap();
+    lost_ack.store(true, std::sync::atomic::Ordering::SeqCst);
+    publication::attempt(&owner.service, &current().await).await;
+    let after = current().await;
+    assert_eq!(after["backup"]["status"], "error");
+    assert!(
+        after["backup"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("acknowledge")
+    );
+    assert_ne!(after["backup"]["id"], previous);
+    let new_point = owner
+        .service
+        .get("node-backups", after["backup"]["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        publication::read_block(&owner.service, &new_point, hash)
+            .await
+            .unwrap(),
+        b"workspace blocks"
+    );
+    publication::collect(&owner.service, &run).await.unwrap();
+    assert!(
+        owner
+            .service
+            .store
+            .get("node-backups", after["backup"]["id"].as_str().unwrap())
+            .await
+            .unwrap()
+            .is_some()
     );
 }
 
@@ -3295,4 +3359,154 @@ async fn obsolete_object_collection_deletes_versions_without_deleting_prefix_nei
         b"neighbor"
     );
     storage.purge_key(&neighbor).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires loopback S3; run tests/node_s3_test.py"]
+async fn interrupted_first_publication_is_collected_after_restart_without_another_write() {
+    use axum::response::IntoResponse;
+    use leo_agent_manager::{
+        config::id,
+        nodes::{LOCAL_NODE_ID, publication, snapshots},
+        object_storage::Storage,
+    };
+    use std::sync::Arc;
+    for explicit_purge in [false, true] {
+        let root = TempDir::new().unwrap();
+        let disk = root.path().join("disk");
+        std::fs::write(&disk, b"uncommitted publication").unwrap();
+        let manifest = snapshots::index(&disk).await.unwrap();
+        let captured = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let (signal, wait, data) = (captured.clone(), resume.clone(), manifest.clone());
+        let runner = axum::Router::new().fallback(move |request: axum::extract::Request| {
+            let (signal, wait, disk, data) =
+                (signal.clone(), wait.clone(), disk.clone(), data.clone());
+            async move {
+                if request.method() == "DELETE" {
+                    return axum::Json(json!({})).into_response();
+                }
+                if request.uri().path().ends_with("/snapshot") {
+                    signal.notify_one();
+                    wait.notified().await;
+                    return axum::Json(json!({"id":id(),"manifest":data})).into_response();
+                }
+                snapshots::block(
+                    &disk,
+                    &data,
+                    request.uri().path().rsplit('/').next().unwrap(),
+                )
+                .await
+                .unwrap()
+                .into_response()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, runner).await.unwrap() });
+        let owner = Owner::with_runner("localhost:4310".into(), url).await;
+        let (run, attempt) = (id(), id());
+        let record = json!({"id":run,"taskId":run,"createdAt":0,"status":"succeeded","sessionId":"session","nodeId":LOCAL_NODE_ID});
+        let saved = record.clone();
+        owner
+            .service
+            .store
+            .write(move |db| db.add_run(&saved, None))
+            .await
+            .unwrap();
+        owner
+            .service
+            .store
+            .set(
+                &format!("run-checkpoint:{run}"),
+                json!({"nodeId":LOCAL_NODE_ID,"runnerId":attempt}),
+                None,
+            )
+            .await
+            .unwrap();
+        let s = owner.service.clone();
+        let capture = tokio::spawn(async move { publication::capture(&s, &record).await });
+        captured.notified().await;
+        // The S3 writes finish, but the ownership fence rejects the database commit.
+        owner
+            .service
+            .store
+            .set(
+                &format!("run-checkpoint:{run}"),
+                json!({"nodeId":LOCAL_NODE_ID,"runnerId":id()}),
+                None,
+            )
+            .await
+            .unwrap();
+        resume.notify_one();
+        assert_eq!(capture.await.unwrap().unwrap_err().status, 409);
+        assert!(
+            owner
+                .service
+                .store
+                .node_backups_for_run(&run)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let directory = owner
+            .service
+            .config
+            .data_dir
+            .join("node-backups")
+            .join(&run);
+        let intent = std::fs::read_dir(&directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+            .unwrap()
+            .path();
+        let pending: Value = serde_json::from_slice(&std::fs::read(&intent).unwrap()).unwrap();
+        let object = format!(
+            "node-backups/{run}/{}.json",
+            pending["id"].as_str().unwrap()
+        );
+        let block = format!(
+            "node-backups/{run}/blocks/{}",
+            manifest["blocks"][0]["hash"].as_str().unwrap()
+        );
+        let storage = Storage::configured(&owner.service).unwrap();
+        assert!(storage.download_bytes(&object, 65536).await.is_ok());
+        assert!(storage.download_bytes(&block, 65536).await.is_ok());
+        // Missing receipts model an interruption between remote PUT and local verification receipt.
+        std::fs::remove_dir_all(directory.join("blocks")).unwrap();
+        let restarted = Service::new(owner.service.config.clone()).await.unwrap();
+        if explicit_purge {
+            publication::purge(&restarted, &run).await.unwrap();
+            assert!(!directory.exists());
+        } else {
+            let maintenance = tokio::spawn(publication::maintain(restarted.clone()));
+            tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                while intent.exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            })
+            .await
+            .unwrap();
+            restarted.shutdown.cancel();
+            maintenance.await.unwrap();
+        }
+        assert_eq!(
+            storage
+                .download_bytes(&object, 65536)
+                .await
+                .unwrap_err()
+                .status,
+            409
+        );
+        assert_eq!(
+            storage
+                .download_bytes(&block, 65536)
+                .await
+                .unwrap_err()
+                .status,
+            409
+        );
+        server.abort();
+    }
 }

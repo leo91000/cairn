@@ -29,7 +29,7 @@ pub fn command(binary: &str, args: &[String], env: &Environment, cwd: Option<&Pa
     command
         .args(args)
         .env_clear()
-        // Archive credentials stay with the archive storage's own AWS CLI calls.
+        // Storage credentials stay with the server's own S3 client.
         .envs(env.iter().filter(|(key, _)| !storage_key(key)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -98,7 +98,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn spawned_processes_never_receive_archive_credentials() {
+    async fn spawned_processes_never_receive_storage_credentials() {
         let env = Environment::from([
             ("AWS_SECRET_ACCESS_KEY".into(), "secret".into()),
             ("ARCHIVE_S3_BUCKET".into(), "bucket".into()),

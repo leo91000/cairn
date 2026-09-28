@@ -233,7 +233,7 @@ impl Storage {
         .any(|k| block["PublicAccessBlockConfiguration"][k] != true)
         {
             return Err(Error::bad(
-                "The archive bucket must block all public access.",
+                "The storage bucket must block all public access.",
             ));
         }
         let lifecycle = self
@@ -297,7 +297,7 @@ impl Storage {
             uri.ends_with("/AllUsers") || uri.ends_with("/AuthenticatedUsers")
         }) {
             return Err(Error::bad(
-                "The archive bucket must not grant public access.",
+                "The storage bucket must not grant public access.",
             ));
         }
         let policy = self
@@ -314,7 +314,7 @@ impl Storage {
         match policy {
             Ok(Value::Null) => Ok(()),
             Ok(_) => Err(Error::bad(
-                "Use a dedicated archive bucket without a bucket policy; grant access through the server's credentials.",
+                "Use a dedicated storage bucket without a bucket policy; grant access through the server's credentials.",
             )),
             // Providers without bucket policies (OVHcloud) cannot expose the bucket through one.
             Err(_) if self.endpoint.is_some() => Ok(()),
@@ -554,7 +554,7 @@ impl Storage {
             let key = item["Key"]
                 .as_str()
                 .filter(|k| k.starts_with(prefix))
-                .ok_or_else(|| Error::internal("Unexpected archive key"))?;
+                .ok_or_else(|| Error::internal("Unexpected storage key"))?;
             self.call(vec![
                 "s3api".into(),
                 "delete-object".into(),
@@ -581,7 +581,7 @@ impl Storage {
             let key = item["Key"]
                 .as_str()
                 .filter(|k| k.starts_with(prefix))
-                .ok_or_else(|| Error::internal("Unexpected archive upload"))?;
+                .ok_or_else(|| Error::internal("Unexpected storage upload"))?;
             self.call(vec![
                 "s3api".into(),
                 "abort-multipart-upload".into(),
