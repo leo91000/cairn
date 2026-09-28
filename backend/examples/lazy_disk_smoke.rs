@@ -12,7 +12,7 @@ use std::{
     path::Path,
     process::{Child, Command, Stdio},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -43,6 +43,45 @@ impl Drop for Guest {
     }
 }
 
+// The jailer cannot see a FUSE mount created after it enters its mount namespace.
+// Keep the mount anonymous until the prepared guest waits before its first disk I/O.
+struct AssignedDisk {
+    size: u64,
+    disk: Mutex<Option<Arc<LazyDisk>>>,
+    premature_io: AtomicU64,
+}
+impl AssignedDisk {
+    fn current(&self) -> io::Result<Arc<LazyDisk>> {
+        if let Some(disk) = self
+            .disk
+            .lock()
+            .map_err(|e| io::Error::other(e.to_string()))?
+            .clone()
+        {
+            Ok(disk)
+        } else {
+            self.premature_io.fetch_add(1, Ordering::SeqCst);
+            Err(io::Error::other(
+                "Prepared guest accessed its disk before assignment",
+            ))
+        }
+    }
+}
+impl Disk for AssignedDisk {
+    fn size(&self) -> u64 {
+        self.size
+    }
+    fn read_at(&self, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
+        self.current()?.read_at(offset, bytes)
+    }
+    fn write_at(&self, offset: u64, bytes: &[u8]) -> io::Result<()> {
+        self.current()?.write_at(offset, bytes)
+    }
+    fn sync(&self) -> io::Result<()> {
+        self.current()?.sync()
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let assets = std::env::args()
@@ -52,6 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().any(|arg| arg == "--cancel") {
         return cancelled_boot(&assets).await;
     }
+    let prepared = std::env::args().any(|arg| arg == "--prepared");
     let root = tempfile::tempdir_in(&assets)?;
     let manifest = snapshots::index(&assets.join("data.ext4")).await?;
     let mut blocks = HashMap::new();
@@ -81,12 +121,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let jails = root.path().join("jails");
     let jail = jails.join("firecracker").join(id).join("root");
     std::fs::create_dir_all(jail.join("disk"))?;
-    std::fs::hard_link(assets.join("root.ext4"), jail.join("root.ext4"))?;
+    std::fs::hard_link(
+        assets.join(if prepared {
+            "root-prepared.ext4"
+        } else {
+            "root.ext4"
+        }),
+        jail.join("root.ext4"),
+    )?;
     std::fs::hard_link(assets.join("vmlinux"), jail.join("vmlinux"))?;
-    let mount = storage::fuse::mount_disk(disk.clone(), &jail.join("disk"), 40001)?;
+    let assigned = if prepared {
+        Some(Arc::new(AssignedDisk {
+            size: disk.size(),
+            disk: Mutex::new(None),
+            premature_io: AtomicU64::new(0),
+        }))
+    } else {
+        None
+    };
+    if prepared {
+        let placeholder = jail.join("placeholder.ext4");
+        File::create(&placeholder)?.set_len(4 * 1024 * 1024)?;
+        std::os::unix::fs::chown(&placeholder, Some(40001), Some(40001))?;
+    }
+    let mounted_disk: Arc<dyn Disk> = match &assigned {
+        Some(assigned) => assigned.clone(),
+        None => disk.clone(),
+    };
+    let mount = storage::fuse::mount_disk(mounted_disk, &jail.join("disk"), 40001)?;
+    let drive = if prepared {
+        "placeholder.ext4"
+    } else {
+        "disk/data.ext4"
+    };
     let config = json!({
         "boot-source":{"kernel_image_path":"vmlinux","boot_args":"console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/init"},
-        "drives":[{"drive_id":"root","path_on_host":"root.ext4","is_root_device":true,"is_read_only":true}, {"drive_id":"data","path_on_host":"disk/data.ext4","is_root_device":false,"is_read_only":false,"cache_type":"Writeback"}],
+        "drives":[{"drive_id":"root","path_on_host":"root.ext4","is_root_device":true,"is_read_only":true}, {"drive_id":"data","path_on_host":drive,"is_root_device":false,"is_read_only":false,"cache_type":"Writeback"}],
         "machine-config":{"vcpu_count":1,"mem_size_mib":128,"smt":false}
     });
     std::fs::write(jail.join("config.json"), serde_json::to_vec(&config)?)?;
@@ -122,8 +192,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .stderr(output)
             .spawn()?,
     );
+    let mut prepared_ms = None;
     loop {
         let console = std::fs::read_to_string(&log)?;
+        if prepared && prepared_ms.is_none() && console.contains("LEO_STORAGE_GUEST_PREPARED") {
+            prepared_ms = Some(started.elapsed().as_millis());
+            if source.bytes.load(Ordering::SeqCst) != 0 {
+                return Err("Prepared guest fetched disk data before assignment".into());
+            }
+            *assigned.as_ref().unwrap().disk.lock().unwrap() = Some(disk.clone());
+            patch_drive(&jail.join("api.sock"))?;
+        }
         if console.contains("LEO_STORAGE_GUEST_SYNCED") {
             break;
         }
@@ -134,11 +213,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let ready_ms = started.elapsed().as_millis();
     let fetched = source.bytes.load(Ordering::SeqCst);
+    if assigned
+        .as_ref()
+        .is_some_and(|disk| disk.premature_io.load(Ordering::SeqCst) != 0)
+    {
+        return Err("Prepared guest used the target disk before assignment".into());
+    }
     if fetched >= remote_bytes {
-        return Err("Cold boot fetched the whole remote disk".into());
+        return Err("Guest fetched the whole remote disk before becoming ready".into());
     }
     drop(guest);
     mount.close()?;
+    if let Some(assigned) = &assigned {
+        assigned.disk.lock().unwrap().take();
+    }
     drop(disk);
     let disk = LazyDisk::open(&root.path().join("journal"), source)?;
     let restored = root.path().join("restored.ext4");
@@ -165,8 +253,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!(
         "{}",
-        json!({"guestReadyMs":ready_ms,"coldFetchedBytes":fetched,"remoteNonzeroBytes":remote_bytes,"virtualDiskBytes":disk.size(),"guestSyncSurvivedKill":true,"source":"local immutable block fixture, not S3"})
+        json!({"mode":if prepared {"prepared-drive-swap"} else {"cold"},"preparedMs":prepared_ms,"guestReadyMs":ready_ms,"afterPreparedMs":prepared_ms.map(|ms|ready_ms-ms),"coldFetchedBytes":fetched,"remoteNonzeroBytes":remote_bytes,"virtualDiskBytes":disk.size(),"guestSyncSurvivedKill":true,"source":"local immutable block fixture, not S3"})
     );
+    Ok(())
+}
+
+fn patch_drive(socket: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::os::unix::net::UnixStream;
+    let mut stream = UnixStream::connect(socket)?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    let body = json!({"drive_id":"data","path_on_host":"disk/data.ext4"}).to_string();
+    write!(
+        stream,
+        "PATCH /drives/data HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )?;
+    let mut reader = BufReader::new(stream);
+    let mut status = String::new();
+    reader.read_line(&mut status)?;
+    if !status.starts_with("HTTP/1.1 204") && !status.starts_with("HTTP/1.1 200") {
+        let mut content_length = 0;
+        loop {
+            let mut header = String::new();
+            if reader.read_line(&mut header)? == 0 {
+                return Err("Firecracker returned an incomplete response".into());
+            }
+            if header == "\r\n" {
+                break;
+            }
+            if let Some(length) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                content_length = length.trim().parse::<usize>()?.min(4096);
+            }
+        }
+        let mut body = vec![0; content_length];
+        reader.read_exact(&mut body)?;
+        return Err(format!(
+            "Firecracker rejected drive replacement: {status} {}",
+            String::from_utf8_lossy(&body)
+        )
+        .into());
+    }
     Ok(())
 }
 

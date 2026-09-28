@@ -62,6 +62,56 @@ Ces mesures ne constituent ni un temps de reprise de conversation complète ni u
 benchmark S3. Les sections suivantes décrivent les vérifications complémentaires. Les temps
 de transfert vers un fournisseur S3 réel ne sont pas mesurés ici.
 
+### Admission du cache propre et VM préparée — 28 septembre 2026
+
+Le remplissage d'un bloc refaisait deux parcours des fichiers propres : un
+parcours de tous les disques pour appliquer le budget de la node, puis un
+parcours du cache de la conversation même quand ce budget avait déjà admis le
+bloc. L'index en mémoire suit désormais la taille et l'ancienneté des fichiers
+propres, est reconstruit au premier accès, puis réconcilié par le moniteur au
+plus une fois par minute. Les écritures et les remplissages gardent le même
+verrou d'admission ; aucun journal n'est candidat à l'éviction. Un test à
+l'interface de `LazyDisk` vérifie que la lecture d'un bloc propre le rend plus
+récent et que l'arrivée d'une troisième conversation évince le bon fichier.
+
+Banc ciblé `large_clean_cache_admission_performance` : 8 000 fichiers propres
+valides de 4 Kio, budget 100 Gio, six admissions successives sans éviction.
+Sur le même environnement et en compilation debug, **avant** : 47–101 ms par
+admission ; **après** : 0,007–0,015 ms pour les cinq admissions suivant la
+construction de l'index. Cette première construction a pris **218 ms**. Les
+petits fichiers isolent le coût des métadonnées ; ce n'est pas une mesure du
+débit de blocs de 4 Mio ni un p95 de production. Le moniteur peut construire
+l'index avant la prochaine conversation. La réconciliation périodique permet
+de détecter les fichiers modifiés hors du contrôleur.
+
+Le même script Firecracker/jailer exécute aussi `--prepared` : la VM démarre
+avec un disque provisoire de 4 Mio ; l'invité annonce qu'il attend avant tout
+montage ou E/S sur ce disque. Un montage FUSE anonyme est présent **avant**
+le démarrage du jailer. Après l'annonce, le test lui attribue un `LazyDisk`,
+remplace le disque provisoire par `PATCH /drives/data`, attend le changement de
+taille visible dans l'invité, puis monte ext4, lit, écrit et synchronise.
+Il confirme zéro lecture avant attribution, 12 Mio de blocs lus avant le
+marqueur final sur 71 Mio non nuls, et la survie de l'écriture après arrêt
+brutal, réouverture du journal et contrôle ext4. Un montage FUSE créé **après**
+le jailer a échoué : sa namespace de montage ne voit pas le nouveau chemin.
+
+Deux essais sur la même fixture ont donné **4 701 et 4 738 ms** pour le démarrage
+classique. Le scénario préparé a atteint son marqueur d'attente à **3 301 et
+3 093 ms**, puis le marqueur après synchronisation **1 498 et 1 394 ms après
+attribution**. Le coût de préparation est donc déplacé avant la demande, pas
+éliminé. C'est une VM BusyBox minimale avec une source de blocs locale ; les
+chiffres ne prédisent pas le gain du vrai parcours conversation, ni la latence
+S3. L'init de production monte immédiatement le disque de données pour son
+overlay : il doit évoluer avant qu'une VM générique puisse utiliser ce mécanisme.
+Les outils ne peuvent pas encore être chauffés dans cette VM sans disque. Le
+pool de production reste donc inchangé en attendant une mesure complète avec
+le vrai invité, l'annulation, plusieurs tailles de disque et le coût RAM du
+stock de VM préparées. Voir la [documentation Firecracker 1.17](https://github.com/firecracker-microvm/firecracker/blob/v1.17.0/docs/api_requests/patch-block.md)
+pour la condition de ne monter ni lire le disque pendant son remplacement.
+Le script vérifie aussi l'annulation d'un démarrage froid bloqué sur une lecture
+distante (92 ms dans le dernier essai) ; l'annulation au milieu d'une attribution
+de VM préparée reste à vérifier lors de son éventuelle intégration.
+
 ## Publication et pression disque (troisième PR)
 
 Les générations du journal séparent le point envoyé des écritures reçues pendant son

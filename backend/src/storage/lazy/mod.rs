@@ -66,6 +66,22 @@ fn validate(manifest: &Value) -> io::Result<u64> {
 }
 
 impl LazyDisk {
+    fn node_state(&self) -> Option<&Path> {
+        if self
+            .directory
+            .file_name()
+            .is_some_and(|name| name == "lazy")
+        {
+            self.directory
+                .parent()
+                .and_then(Path::parent)
+                .filter(|disks| disks.file_name().is_some_and(|name| name == "disks"))
+                .and_then(Path::parent)
+        } else {
+            None
+        }
+    }
+
     pub fn create(
         directory: &Path,
         manifest: &Value,
@@ -265,7 +281,12 @@ impl LazyDisk {
             let mut bytes = Vec::new();
             (&file).take(BLOCK + 1).read_to_end(&mut bytes)?;
             if bytes.len() == length && hex::encode(Sha256::digest(&bytes)) == hash {
-                let _ = file.set_modified(std::time::SystemTime::now());
+                let now = std::time::SystemTime::now();
+                if file.set_modified(now).is_ok()
+                    && let Some(state) = self.node_state()
+                {
+                    let _ = super::cache::touched(state, &target, now);
+                }
                 return self.remember(hash, bytes);
             }
             let _ = std::fs::remove_file(&target);
@@ -279,67 +300,51 @@ impl LazyDisk {
         let _ = (|| -> io::Result<()> {
             use std::io::Write;
             let _cache = self.cache.lock().map_err(failure)?;
-            let _node_reservation = if self
-                .directory
-                .file_name()
-                .is_some_and(|name| name == "lazy")
-            {
-                if let Some(state) = self
-                    .directory
-                    .parent()
-                    .and_then(std::path::Path::parent)
-                    .and_then(std::path::Path::parent)
-                {
-                    let policy = std::fs::read(state.join("storage-policy.json"))
-                        .ok()
-                        .and_then(|bytes| {
-                            serde_json::from_slice::<super::policy::Policy>(&bytes).ok()
-                        })
-                        .unwrap_or_default();
-                    let Some(reservation) =
-                        super::cache::reserve(state, &policy, bytes.len() as u64)?
-                    else {
-                        return Ok(());
-                    };
-                    Some(reservation)
-                } else {
-                    None
-                }
+            let node_reservation = if let Some(state) = self.node_state() {
+                let policy = std::fs::read(state.join("storage-policy.json"))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<super::policy::Policy>(&bytes).ok())
+                    .unwrap_or_default();
+                let Some(reservation) = super::cache::reserve(state, &policy, bytes.len() as u64)?
+                else {
+                    return Ok(());
+                };
+                Some(reservation)
             } else {
                 None
             };
             std::fs::create_dir_all(&directory)?;
-            let mut entries = std::fs::read_dir(&directory)?
-                .filter_map(|entry| entry.ok())
-                .filter_map(|entry| {
-                    entry.metadata().ok().map(|m| {
-                        (
-                            entry.path(),
-                            m.len(),
-                            m.modified().unwrap_or(std::time::UNIX_EPOCH),
-                        )
-                    })
-                })
-                .collect::<Vec<_>>();
-            entries.sort_by_key(|entry| entry.2);
-            let mut used = entries.iter().map(|entry| entry.1).sum::<u64>();
             // Standalone disks retain a small fallback cache; controller volumes
             // share the node budget and can use its available working set.
-            let ceiling = if _node_reservation.is_some() {
-                u64::MAX
-            } else {
-                32 * 1024 * 1024
-            };
-            for (path, size, _) in entries {
-                if used.saturating_add(bytes.len() as u64) <= ceiling {
-                    break;
+            if node_reservation.is_none() {
+                let mut entries = std::fs::read_dir(&directory)?
+                    .filter_map(|entry| entry.ok())
+                    .filter_map(|entry| {
+                        entry.metadata().ok().map(|m| {
+                            (
+                                entry.path(),
+                                m.len(),
+                                m.modified().unwrap_or(std::time::UNIX_EPOCH),
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                entries.sort_by_key(|entry| entry.2);
+                let mut used = entries.iter().map(|entry| entry.1).sum::<u64>();
+                for (path, size, _) in entries {
+                    if used.saturating_add(bytes.len() as u64) <= 32 * 1024 * 1024 {
+                        break;
+                    }
+                    std::fs::remove_file(path)?;
+                    used = used.saturating_sub(size);
                 }
-                std::fs::remove_file(path)?;
-                used = used.saturating_sub(size);
             }
             let mut file = tempfile::NamedTempFile::new_in(&directory)?;
             file.write_all(&bytes)?;
             file.persist_noclobber(&target).map_err(failure)?;
+            if let Some(reservation) = &node_reservation {
+                reservation.filled(&target, bytes.len() as u64)?;
+            }
             Ok(())
         })();
         self.remember(hash, bytes)

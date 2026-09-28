@@ -18,6 +18,52 @@ impl BlockSource for Source {
     }
 }
 #[test]
+fn node_cache_evicts_the_oldest_clean_block_after_a_verified_read() {
+    struct Blocks(std::collections::HashMap<String, Vec<u8>>);
+    impl BlockSource for Blocks {
+        fn fetch(&self, hash: &str) -> io::Result<Vec<u8>> {
+            self.0
+                .get(hash)
+                .cloned()
+                .ok_or_else(|| io::Error::other("Missing block"))
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let policy = serde_json::json!({"enabled":true,"cacheMiB":8,"reserveMiB":64,"reservePercent":1,"backupSeconds":60,"maxDirtySeconds":300});
+    std::fs::write(root.path().join("storage-policy.json"), policy.to_string()).unwrap();
+    let mut blocks = std::collections::HashMap::new();
+    let mut disks = Vec::new();
+    for (name, value) in [("first", 1_u8), ("second", 2), ("third", 3)] {
+        let bytes = vec![value; 4 * 1024 * 1024];
+        let hash = hex::encode(Sha256::digest(&bytes));
+        blocks.insert(hash.clone(), bytes);
+        let directory = root.path().join("disks").join(name).join("lazy");
+        let manifest = serde_json::json!({"version":1,"size":4194304,"blockSize":4194304,"blocks":[{"offset":0,"size":4194304,"hash":hash}]});
+        disks.push((directory, manifest, hash, value));
+    }
+    let source = Arc::new(Blocks(blocks));
+    let read = |index: usize| {
+        let (directory, manifest, _, value) = &disks[index];
+        let disk = if directory.join("journal.sqlite").exists() {
+            LazyDisk::open(directory, source.clone()).unwrap()
+        } else {
+            LazyDisk::create(directory, manifest, source.clone()).unwrap()
+        };
+        let mut byte = [0];
+        disk.read_at(0, &mut byte).unwrap();
+        assert_eq!(byte[0], *value);
+    };
+    read(0);
+    read(1);
+    read(0); // A new LazyDisk verifies the disk cache and refreshes its LRU position.
+    read(2); // Filling this block must evict the second conversation's older cache.
+    for (index, present) in [(0, true), (1, false), (2, true)] {
+        let (directory, _, hash, _) = &disks[index];
+        assert_eq!(directory.join("cache").join(hash).exists(), present);
+        assert!(directory.join("journal.sqlite").exists());
+    }
+}
+#[test]
 fn acknowledged_write_survives_killing_the_storage_process() {
     use std::io::BufRead;
     let root = tempfile::tempdir().unwrap();
