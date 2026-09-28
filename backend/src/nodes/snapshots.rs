@@ -214,7 +214,7 @@ where
     temporary
         .persist_noclobber(target)
         .map_err(Error::internal)?;
-    std::fs::File::open(directory)?.sync_all()?;
+    tokio::fs::File::open(directory).await?.sync_all().await?;
     Ok(())
 }
 

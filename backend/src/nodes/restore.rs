@@ -173,6 +173,6 @@ pub async fn controller(state: &Path, run: &str, value: Value) -> Result<Value> 
     )
     .await?;
     tokio::fs::remove_file(directory.join("restore.pending")).await?;
-    std::fs::File::open(&directory)?.sync_all()?;
+    tokio::fs::File::open(&directory).await?.sync_all().await?;
     Ok(json!({"ready":true}))
 }
