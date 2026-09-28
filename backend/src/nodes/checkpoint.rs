@@ -101,7 +101,7 @@ pub async fn capture(
         let copy=tokio::time::timeout(Duration::from_secs(240),command.status());
         let status=tokio::select! {_=stop.cancelled()=>return Err(Error::new(409,"VM capture interrupted.")),result=copy=>result.map_err(|_|Error::new(503,"VM capture timed out."))??};
         if !status.success() {return Err(Error::new(503,"VM capture failed."));}
-        std::fs::File::open(directory.join("disk"))?.sync_all()?;
+        tokio::fs::File::open(directory.join("disk")).await?.sync_all().await?;
         Ok(())
     }.await;
     // Cleanup is awaited even when the HTTP caller disappears: caller spawns capture.
