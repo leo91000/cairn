@@ -1,4 +1,8 @@
-# Leo Android 0.41.0 — Missions web comme sur Android
+# Leo Android 0.41.1 — Publication des missions web
+
+- Déploie sur le serveur les missions web de la version 0.41.0, dont la publication avait été bloquée par un test de mise en page instable sous WebKit. Aucun changement pour l’application Android.
+
+## Leo Android 0.41.0 — Missions web comme sur Android
 
 - Dans l’application web, Missions reprend l’écran Android : une carte par mission avec l’agent, le projet, la planification en clair, la prochaine date, les dernières exécutions et un bouton pour lancer ; les filtres affichent leur nombre de missions.
 - La fiche d’une mission s’ouvre à côté de la liste sur grand écran et en feuille sur téléphone : heure planifiée et prochaines dates, mission dépliable, historique avec le taux de réussite, puis Modifier, Mettre en pause et Lancer maintenant. Lancer ouvre l’exécution, comme sur Android.
