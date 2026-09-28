@@ -16,6 +16,8 @@ pub async fn prepare(
     let _lock = crate::file_lock::exclusive(&directory.join("lock"), "VM disk is active.")?;
     let marker = directory.join("bootstrap.pending");
     let resize_source = directory.join("resize-source");
+    let mut context = context.clone();
+    let mut generation = 1;
     if resize_source.exists() && !super::runtime::exists(directory) {
         // Never continue from a raw image that resize2fs may have only partly
         // changed. The original journal stays authoritative until installation.
@@ -43,6 +45,9 @@ pub async fn prepare(
         if size == current {
             return Ok(());
         }
+        let (previous, next_generation) = super::runtime::rebuild_identity(directory).await?;
+        context["grant"] = previous["grant"].clone();
+        generation = next_generation;
         // Resize tools still require a local ext4 image. Mark the transition
         // before exporting so a restart can finish rebuilding the journal.
         crate::skills::atomic_write(&marker, b"resizing").await?;
@@ -76,7 +81,7 @@ pub async fn prepare(
     for block in empty["blocks"].as_array_mut().unwrap() {
         block["hash"] = Value::Null;
     }
-    let disk = super::runtime::create(&root, &empty, context).await?;
+    let disk = super::runtime::create_at_generation(&root, &empty, &context, generation).await?;
     let writer = disk.clone();
     tokio::task::spawn_blocking(move || -> Result<()> {
         let input = super::LocalDisk::open(&raw, false)?;
@@ -143,32 +148,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn growing_a_disk_returns_to_a_durable_journal_before_boot() {
-        let root = tempfile::tempdir().unwrap();
-        let disk = root.path().join("disks/conversation");
-        let context = json!({"master":"http://127.0.0.1:1/","grant":"fixture","policy":super::super::policy::Policy {reserve_mi_b:64,reserve_percent:1,..Default::default()}});
-        let stop = CancellationToken::new();
-        prepare(&disk, 128 * 1024 * 1024, &context, &stop)
-            .await
-            .unwrap();
-        assert!(super::super::runtime::exists(&disk));
-        assert!(!disk.join("data.ext4").exists());
-        prepare(&disk, 256 * 1024 * 1024, &context, &stop)
-            .await
-            .unwrap();
-        assert_eq!(
-            super::super::runtime::load(&disk)
-                .await
-                .unwrap()
-                .disk
-                .size(),
-            256 * 1024 * 1024
-        );
-        assert!(!disk.join("data.ext4").exists());
-        assert!(!disk.join("bootstrap.pending").exists());
-    }
-
-    #[tokio::test]
     async fn interrupted_resize_restarts_from_the_original_journal() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("disks/conversation");
@@ -183,6 +162,8 @@ mod tests {
             .write_at(33 * 1024 * 1024, b"retained work")
             .unwrap();
         volume.disk.sync().unwrap();
+        let before = volume.seal().await.unwrap();
+        let original_grant = volume.source.grant_id();
         drop(volume);
         crate::skills::atomic_write(&directory.join("bootstrap.pending"), b"resizing")
             .await
@@ -194,10 +175,14 @@ mod tests {
         tokio::fs::write(directory.join("data.ext4"), b"partly resized image")
             .await
             .unwrap();
-        prepare(&directory, 256 * 1024 * 1024, &context, &stop)
+        let mut restarted_context = context.clone();
+        restarted_context["grant"] = "new-attempt-grant".into();
+        prepare(&directory, 256 * 1024 * 1024, &restarted_context, &stop)
             .await
             .unwrap();
         let volume = super::super::runtime::load(&directory).await.unwrap();
+        assert_eq!(volume.source.grant_id(), original_grant);
+        assert!(volume.seal().await.unwrap() > before);
         let mut saved = [0; 13];
         volume.disk.read_at(33 * 1024 * 1024, &mut saved).unwrap();
         assert_eq!(&saved, b"retained work");

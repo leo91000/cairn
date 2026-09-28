@@ -134,6 +134,14 @@ pub(crate) async fn create(
     manifest: &Value,
     context: &Value,
 ) -> Result<Arc<LazyDisk>> {
+    create_at_generation(directory, manifest, context, 1).await
+}
+pub(crate) async fn create_at_generation(
+    directory: &Path,
+    manifest: &Value,
+    context: &Value,
+    generation: i64,
+) -> Result<Arc<LazyDisk>> {
     let (directory, manifest, context) = (directory.to_owned(), manifest.clone(), context.clone());
     blocking(move || {
         let source = Arc::new(RemoteSource::new(
@@ -141,10 +149,25 @@ pub(crate) async fn create(
             tokio::runtime::Handle::current(),
             CancellationToken::new(),
         )?);
-        let disk = Arc::new(LazyDisk::create(&directory, &manifest, source)?);
+        let disk = Arc::new(LazyDisk::create_at_generation(
+            &directory, &manifest, source, generation,
+        )?);
         disk.set_context(&context)?;
         disk.sync()?;
         Ok(disk)
+    })
+    .await
+}
+/// Retain the mounted disk's authorization and monotone publication sequence
+/// through resize; the next acknowledged publication can then retire its old base.
+pub(crate) async fn rebuild_identity(directory: &Path) -> Result<(Value, i64)> {
+    let volume = load(directory).await?;
+    blocking(move || {
+        let context = LazyDisk::context(&volume.directory.join("lazy"))?;
+        let generation = volume.disk.accounting()?["generation"]
+            .as_i64()
+            .ok_or_else(|| Error::bad("Missing journal generation."))?;
+        Ok((context, generation))
     })
     .await
 }

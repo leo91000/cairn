@@ -96,7 +96,7 @@ RUN make x86_64_defconfig && scripts/kconfig/merge_config.sh -m .config /tmp/leo
         --disable SCSI --disable ATA --disable BLK_DEV_MD --disable MMC --disable FIREWIRE \
         --disable MODULES --disable DEBUG_INFO --disable DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT \
     && make olddefconfig \
-    && for option in KVM KVM_INTEL KVM_AMD BLK_DEV_DM DM_ERA; do grep -qx "CONFIG_${option}=y" .config || exit 1; done \
+    && for option in KVM KVM_INTEL KVM_AMD; do grep -qx "CONFIG_${option}=y" .config || exit 1; done \
     && make -j8 vmlinux && strip --strip-debug vmlinux \
     && mv vmlinux /tmp/leo-vmlinux && make clean && mv /tmp/leo-vmlinux vmlinux
 

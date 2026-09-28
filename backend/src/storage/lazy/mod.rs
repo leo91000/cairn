@@ -87,15 +87,27 @@ impl LazyDisk {
         manifest: &Value,
         source: Arc<dyn BlockSource>,
     ) -> io::Result<Self> {
+        Self::create_at_generation(directory, manifest, source, 1)
+    }
+    /// A rebuilt disk keeps its grant and advances the same publication sequence.
+    pub(crate) fn create_at_generation(
+        directory: &Path,
+        manifest: &Value,
+        source: Arc<dyn BlockSource>,
+        generation: i64,
+    ) -> io::Result<Self> {
         validate(manifest)?;
-        Self::connect(directory, Some(manifest), source)
+        if generation < 1 || generation == i64::MAX {
+            return Err(failure("Invalid initial journal generation"));
+        }
+        Self::connect(directory, Some((manifest, generation)), source)
     }
     pub fn open(directory: &Path, source: Arc<dyn BlockSource>) -> io::Result<Self> {
         Self::connect(directory, None, source)
     }
     fn connect(
         directory: &Path,
-        initial: Option<&Value>,
+        initial: Option<(&Value, i64)>,
         source: Arc<dyn BlockSource>,
     ) -> io::Result<Self> {
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -125,15 +137,15 @@ impl LazyDisk {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA auto_vacuum=FULL;",
         )
         .map_err(failure)?;
-        if let Some(manifest) = initial {
+        if let Some((manifest, generation)) = initial {
             db.execute_batch("BEGIN IMMEDIATE;
                 CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), manifest TEXT NOT NULL, generation INTEGER NOT NULL, next_sequence INTEGER NOT NULL);
                 CREATE TABLE writes (seq INTEGER PRIMARY KEY AUTOINCREMENT, generation INTEGER NOT NULL, start INTEGER NOT NULL, end INTEGER NOT NULL, data BLOB NOT NULL, checksum TEXT NOT NULL);
                 CREATE INDEX write_ranges ON writes(end);
                 COMMIT;").map_err(failure)?;
             db.execute(
-                "INSERT INTO state VALUES (1, ?1, 1, 1)",
-                [manifest.to_string()],
+                "INSERT INTO state VALUES (1, ?1, ?2, 1)",
+                params![manifest.to_string(), generation],
             )
             .map_err(failure)?;
             File::open(directory)?.sync_all()?;

@@ -1593,6 +1593,27 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             .unwrap(),
         original[..4 * 1024 * 1024],
     );
+    // The previous JSON/base64 envelope and the binary format can coexist.
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let key = format!("node-backups/{run}/blocks/{block}");
+    let legacy = owner
+        .service
+        .vault
+        .encrypt(&key, &json!(STANDARD.encode(&original[..4 * 1024 * 1024])))
+        .unwrap();
+    let legacy_file = owner._root.path().join("legacy-block.json");
+    std::fs::write(&legacy_file, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    leo_agent_manager::object_storage::Storage::configured(&owner.service)
+        .unwrap()
+        .upload_file_verified(&legacy_file, &key)
+        .await
+        .unwrap();
+    assert_eq!(
+        publication::read_block(&owner.service, &retained, block)
+            .await
+            .unwrap(),
+        original[..4 * 1024 * 1024]
+    );
     original[4 * 1024 * 1024] = 2;
     std::fs::write(&source, &original).unwrap();
     let mut second = snapshots::index(&source).await.unwrap();
@@ -2913,6 +2934,71 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
             .unwrap()
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn growing_a_disk_preserves_publication_identity_and_releases_its_previous_base() {
+    use leo_agent_manager::{
+        auth,
+        config::id,
+        nodes::{LOCAL_NODE_ID, disk_grants},
+        storage::{Disk, bootstrap, policy::Policy, runtime},
+    };
+    let owner = Owner::new().await;
+    let run = id();
+    let record = json!({"id":run});
+    let token = disk_grants::new_disk(&owner.service, &record, LOCAL_NODE_ID)
+        .await
+        .unwrap();
+    let directory = owner._root.path().join("disks").join(&run);
+    let mut context = json!({"master":"http://127.0.0.1:1/","grant":token,"policy":Policy {reserve_mi_b:64,reserve_percent:1,..Default::default()}});
+    let stop = tokio_util::sync::CancellationToken::new();
+    bootstrap::prepare(&directory, 128 * 1024 * 1024, &context, &stop)
+        .await
+        .unwrap();
+    let volume = runtime::load(&directory).await.unwrap();
+    volume.seal().await.unwrap();
+    let generation = volume.seal().await.unwrap();
+    let previous = json!({"id":id(),"runId":run,"nodeId":LOCAL_NODE_ID,"destination":"s3","diskGeneration":generation});
+    disk_grants::acknowledged(&owner.service, &auth::digest(&token), &previous)
+        .await
+        .unwrap();
+    drop(volume);
+    // Each attempt supplies a fresh grant; a resize must retain the mounted
+    // disk's identity so that publication retires the pins of its old base.
+    context["grant"] = disk_grants::new_disk(&owner.service, &record, LOCAL_NODE_ID)
+        .await
+        .unwrap()
+        .into();
+    bootstrap::prepare(&directory, 256 * 1024 * 1024, &context, &stop)
+        .await
+        .unwrap();
+    let volume = runtime::load(&directory).await.unwrap();
+    assert_eq!(volume.disk.size(), 256 * 1024 * 1024);
+    assert!(!directory.join("data.ext4").exists());
+    assert!(!directory.join("resize-source").exists());
+    assert_eq!(volume.source.grant_id(), auth::digest(&token));
+    let next = volume.seal().await.unwrap();
+    assert!(
+        next > generation,
+        "publication generations must remain monotone"
+    );
+    let replacement = json!({"id":id(),"runId":run,"nodeId":LOCAL_NODE_ID,"destination":"s3","diskGeneration":next});
+    disk_grants::extend(&owner.service, &volume.source.grant_id(), &replacement)
+        .await
+        .unwrap();
+    assert!(
+        disk_grants::pinned(&owner.service, &run)
+            .await
+            .unwrap()
+            .contains(previous["id"].as_str().unwrap())
+    );
+    disk_grants::acknowledged(&owner.service, &volume.source.grant_id(), &replacement)
+        .await
+        .unwrap();
+    let pinned = disk_grants::pinned(&owner.service, &run).await.unwrap();
+    assert_eq!(pinned.len(), 1);
+    assert!(pinned.contains(replacement["id"].as_str().unwrap()));
 }
 
 #[tokio::test]

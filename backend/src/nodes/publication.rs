@@ -7,6 +7,7 @@ use crate::{
     service::Service,
     validation::text,
 };
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -359,10 +360,16 @@ async fn decode_block(s: &Service, run: &str, hash: &str, encoded: Vec<u8>) -> R
     let scope = key(run, hash);
     let hash = hash.to_owned();
     tokio::task::spawn_blocking(move || {
-        let ciphertext = encoded
-            .strip_prefix(BINARY_BLOCK_HEADER)
-            .ok_or_else(|| Error::bad("Invalid backup block format."))?;
-        let bytes = vault.decrypt_bytes(&scope, ciphertext)?;
+        let bytes = if let Some(ciphertext) = encoded.strip_prefix(BINARY_BLOCK_HEADER) {
+            vault.decrypt_bytes(&scope, ciphertext)?
+        } else {
+            // Published S3 blocks remain readable independently of archive removal.
+            let value: Value = serde_json::from_slice(&encoded)?;
+            let plaintext = vault.decrypt(&scope, &value)?;
+            STANDARD
+                .decode(plaintext.as_str().unwrap_or(""))
+                .map_err(|_| Error::bad("Invalid backup ciphertext."))?
+        };
         if hex::encode(Sha256::digest(&bytes)) != hash {
             return Err(Error::bad("Backup integrity check failed."));
         }
