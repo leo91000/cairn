@@ -102,6 +102,7 @@ jobs:
           retention-days: 14
 
   device-extra:
+    name: device-extra (${{ matrix.group }})
     needs: resolve
     if: needs.resolve.outputs.reuse != 'true'
     runs-on: ubuntu-latest
