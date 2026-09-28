@@ -102,19 +102,10 @@ jobs:
           retention-days: 14
 
   device-extra:
-    name: device-extra (${{ matrix.group }})
     needs: resolve
     if: needs.resolve.outputs.reuse != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - group: models-and-chat
-            classes: dev.leo.manager.ui.ModelPickerDeviceTest,dev.leo.manager.ui.ChatProviderDeviceTest,dev.leo.manager.ui.QueueStripDeviceTest,dev.leo.manager.ui.MissionBackDeviceTest
-          - group: remaining-controls
-            classes: dev.leo.manager.ui.AccountsDeviceTest,dev.leo.manager.ui.ModelCatalogDeviceTest,dev.leo.manager.ui.SkillMentionDeviceTest,dev.leo.manager.ui.ConversationLifecycleDeviceTest,dev.leo.manager.ui.ImagePasteDeviceTest
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: pnpm/setup@v2.1.0
@@ -151,11 +142,11 @@ jobs:
           profile: pixel_6
           disable-animations: false
           script: |
-            cd android && ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=${{ matrix.classes }} --no-daemon
+            cd android && ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=dev.leo.manager.ui.ModelPickerDeviceTest,dev.leo.manager.ui.AccountsDeviceTest,dev.leo.manager.ui.ModelCatalogDeviceTest,dev.leo.manager.ui.ChatProviderDeviceTest,dev.leo.manager.ui.SkillMentionDeviceTest,dev.leo.manager.ui.ConversationLifecycleDeviceTest,dev.leo.manager.ui.ImagePasteDeviceTest,dev.leo.manager.ui.QueueStripDeviceTest,dev.leo.manager.ui.MissionBackDeviceTest --no-daemon
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
-          name: leo-android-${{ matrix.group }}
+          name: leo-android-other-tests
           path: |
             android/app/build/reports/androidTests/
             android/app/build/outputs/androidTest-results/
