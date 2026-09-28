@@ -8,15 +8,15 @@ use tokio::{
     process::Command,
 };
 pub type Environment = HashMap<String, String>;
-pub fn archive_key(key: &str) -> bool {
-    key.starts_with("AWS_") || key.starts_with("ARCHIVE_")
+pub fn storage_key(key: &str) -> bool {
+    key.starts_with("AWS_") || key.starts_with("ARCHIVE_") || key.starts_with("STORAGE_S3_")
 }
-pub fn remove_archive_environment(env: &mut Environment) {
-    env.retain(|key, _| !archive_key(key));
+pub fn remove_storage_environment(env: &mut Environment) {
+    env.retain(|key, _| !storage_key(key));
 }
 pub fn codex_environment(config: &Config, home: &Path) -> Environment {
     let mut env = std::env::vars().collect::<Environment>();
-    remove_archive_environment(&mut env);
+    remove_storage_environment(&mut env);
     env.insert("HOME".into(), config.home.to_string_lossy().into_owned());
     env.insert("CODEX_HOME".into(), home.to_string_lossy().into_owned());
     for key in ["CODEX_API_KEY", "OPENAI_API_KEY", "CODEX_THREAD_ID"] {
@@ -30,7 +30,7 @@ pub fn command(binary: &str, args: &[String], env: &Environment, cwd: Option<&Pa
         .args(args)
         .env_clear()
         // Archive credentials stay with the archive storage's own AWS CLI calls.
-        .envs(env.iter().filter(|(key, _)| !archive_key(key)))
+        .envs(env.iter().filter(|(key, _)| !storage_key(key)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -102,6 +102,7 @@ mod tests {
         let env = Environment::from([
             ("AWS_SECRET_ACCESS_KEY".into(), "secret".into()),
             ("ARCHIVE_S3_BUCKET".into(), "bucket".into()),
+            ("STORAGE_S3_BUCKET".into(), "bucket".into()),
             ("KEPT".into(), "visible".into()),
         ]);
         let output = command("env", &[], &env, None).output().await.unwrap();
@@ -109,5 +110,6 @@ mod tests {
         assert!(printed.contains("KEPT=visible"));
         assert!(!printed.contains("AWS_"), "{printed}");
         assert!(!printed.contains("ARCHIVE_"), "{printed}");
+        assert!(!printed.contains("STORAGE_S3_"), "{printed}");
     }
 }

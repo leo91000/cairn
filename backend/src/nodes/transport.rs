@@ -88,11 +88,7 @@ impl Transport {
         self.changed.notify_waiters();
         let (status, length, kind) = tokio::time::timeout(
             Duration::from_secs(
-                if path.ends_with("/restore")
-                    || path.ends_with("/migrate")
-                    || path.ends_with("/export")
-                    || path.ends_with("/import")
-                {
+                if path.ends_with("/restore") || path.ends_with("/migrate") {
                     7200
                 } else if path.starts_with("/prepare/") || path.ends_with("snapshot") {
                     300

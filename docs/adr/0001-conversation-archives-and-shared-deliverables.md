@@ -1,3 +1,5 @@
+> Décision révisée par [ADR-0008](0008-current-disk-publication-without-archives.md) : publication S3 courante, sans archivage ni historique de restauration.
+
 # Préserver la reprise et les livrables partagés lors de l’archivage
 
 L’archivage des conversations vise à libérer le stockage principal tout en permettant de reprendre le travail : il conserve donc la session agent et l’environnement de travail, en plus de l’historique et des fichiers. Ce choix augmente le volume archivé par rapport à un simple export de messages ; si une ancienne session native devient incompatible, une nouvelle session ne sera proposée qu’en conservant l’historique et les fichiers et en demandant l’accord de l’utilisateur.

@@ -5,7 +5,7 @@ use leo_agent_manager::{
     auth,
     config::{Config, id, now},
     http::router,
-    nodes::{LOCAL_NODE_ID, backups, relay, snapshots},
+    nodes::{LOCAL_NODE_ID, publication, relay, snapshots},
     service::Service,
     store::Store,
 };
@@ -272,7 +272,7 @@ async fn master_reuses_unchanged_blocks() {
             }
             let before = usage();
             let started = Instant::now();
-            let result = backups::capture(&s, &s.store.run(&run).await.unwrap())
+            let result = publication::capture(&s, &s.store.run(&run).await.unwrap())
                 .await
                 .unwrap();
             report(
@@ -313,10 +313,10 @@ async fn master_reuses_unchanged_blocks() {
         .get("node-backups", latest["backup"]["id"].as_str().unwrap())
         .await
         .unwrap();
-    let manifest = backups::manifest(&s, &backup).await.unwrap();
+    let manifest = publication::manifest(&s, &backup).await.unwrap();
     snapshots::restore(&root.path().join("restored"), &manifest, |hash| {
         let (s, backup) = (s.clone(), backup.clone());
-        async move { backups::read_block(&s, &backup, &hash).await }
+        async move { publication::read_block(&s, &backup, &hash).await }
     })
     .await
     .unwrap();

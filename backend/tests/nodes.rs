@@ -43,6 +43,13 @@ impl Owner {
         })
         .await
         .unwrap();
+        if std::env::var_os("LEO_NODE_TEST_S3_ENDPOINT").is_some() {
+            std::fs::write(
+                s.config.data_dir.join("archive-s3.json"),
+                json!({"bucket":"leo-node-test"}).to_string(),
+            )
+            .unwrap();
+        }
         let session = s.auth.session().await.unwrap();
         Self {
             service: s.clone(),
@@ -924,8 +931,9 @@ async fn recovery_settings_validate_and_preserve_the_last_good_configuration() {
         .call("GET", "/api/nodes/settings", Value::Null, None)
         .await;
     assert_eq!(status, 200);
-    assert_eq!(initial["destination"], "master");
-    let settings = json!({"destination":"master","intervalSeconds":30,"retention":3,"budgetMiB":4096,"disconnectTimeoutSeconds":60,"shutdownTimeoutSeconds":300,"maxCapacityWaitSeconds":3600});
+    assert!(initial.get("destination").is_none());
+    assert!(initial.get("retention").is_none());
+    let settings = json!({"intervalSeconds":30,"budgetMiB":4096,"disconnectTimeoutSeconds":60,"shutdownTimeoutSeconds":300,"maxCapacityWaitSeconds":3600});
     assert_eq!(
         owner
             .call("PUT", "/api/nodes/settings", settings.clone(), None)
@@ -934,7 +942,7 @@ async fn recovery_settings_validate_and_preserve_the_last_good_configuration() {
         200
     );
     let mut bad = settings.clone();
-    bad["retention"] = 0.into();
+    bad["intervalSeconds"] = 0.into();
     assert_eq!(
         owner.call("PUT", "/api/nodes/settings", bad, None).await.0,
         400
@@ -1238,70 +1246,10 @@ async fn native_auth_relays_refresh_both_protocols_and_stop_after_grant_revocati
 }
 
 #[tokio::test]
-async fn archives_transfer_between_distinct_node_and_master_directories() {
-    use leo_agent_manager::{config::id, nodes::archive};
-    let owner = Owner::new().await;
-    let node = tempfile::TempDir::new().unwrap();
-    let remote = node.path().to_owned();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let app = axum::Router::new().fallback(axum::routing::any(
-        move |request: axum::extract::Request| {
-            let remote = remote.clone();
-            async move { archive::controller(&remote, request).await }
-        },
-    ));
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let transfer = id();
-    let staging = owner._root.path().join(&transfer);
-    std::fs::create_dir(&staging).unwrap();
-    let bytes = (0..524325).map(|i| (i % 251) as u8).collect::<Vec<_>>();
-    let file = staging.join("workspace.tar.gz");
-    std::fs::write(&file, &bytes).unwrap();
-    let base = format!("http://{address}");
-    archive::transfer(&owner.service, &base, "fixture", &staging, true)
-        .await
-        .unwrap();
-    std::fs::remove_file(&file).unwrap();
-    archive::transfer(&owner.service, &base, "fixture", &staging, false)
-        .await
-        .unwrap();
-    assert_eq!(std::fs::read(&file).unwrap(), bytes);
-    let response = owner
-        .service
-        .http
-        .post(format!("{base}/archive-transfers/{transfer}/0"))
-        .body("cannot overwrite earlier chunks")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 409);
-    assert!(
-        owner
-            .service
-            .http
-            .delete(format!("{base}/archive-transfers/{transfer}/discard"))
-            .send()
-            .await
-            .unwrap()
-            .status()
-            .is_success()
-    );
-    assert!(
-        !node
-            .path()
-            .join("archive-transfers")
-            .join(transfer)
-            .exists()
-    );
-    server.abort();
-}
-
-#[tokio::test]
 async fn retired_audit_errors_do_not_force_full_download_before_demand_resume() {
     use leo_agent_manager::{
         config::id,
-        nodes::{backups, moves, snapshots},
+        nodes::{moves, publication, snapshots},
     };
     let owner = Owner::new().await;
     let run = id();
@@ -1332,24 +1280,33 @@ async fn retired_audit_errors_do_not_force_full_download_before_demand_resume() 
     owner.service.store.put("node-backups", json!({"id":point,"runId":run,"sessionId":"saved-session","capturedAt":1,"destination":"s3","manifest":encrypted})).await.unwrap();
     // No S3 credentials or local payload: selecting verified metadata cannot
     // download the disk. Reads will validate the remote blocks when requested.
+    owner
+        .service
+        .store
+        .patch_run(&run, json!({"backup":{"id":point}}))
+        .await
+        .unwrap();
     let selected = moves::latest(&owner.service, &run)
         .await
         .unwrap()
         .expect("published metadata remains eligible");
     assert_eq!(selected["id"], point);
     assert_eq!(
-        backups::manifest(&owner.service, &selected).await.unwrap()["size"],
+        publication::manifest(&owner.service, &selected)
+            .await
+            .unwrap()["size"],
         4096
     );
 }
 
 #[tokio::test]
+#[ignore = "requires loopback S3; run tests/node_s3_test.py"]
 async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplete_publication() {
     use axum::response::IntoResponse;
     use leo_agent_manager::{
         auth,
         config::{id, now},
-        nodes::{backups, relay, snapshots},
+        nodes::{publication, relay, snapshots},
     };
     use sha2::{Digest, Sha256};
     use std::sync::{
@@ -1474,13 +1431,13 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             .call(
                 "PUT",
                 "/api/nodes/settings",
-                json!({"destination":"s3","intervalSeconds":60,"retention":2,"budgetMiB":128}),
+                json!({"intervalSeconds":60,"budgetMiB":128}),
                 None,
             )
             .await;
         assert_eq!(status, 200, "{value}");
     }
-    let first = backups::capture(&owner.service, &record).await.unwrap();
+    let first = publication::capture(&owner.service, &record).await.unwrap();
     assert_eq!(first["uploadedBytes"], 4 * 1024 * 1024 + 128);
     let retained = owner
         .service
@@ -1489,7 +1446,9 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         .await
         .unwrap()
         .unwrap();
-    let first_manifest = backups::manifest(&owner.service, &retained).await.unwrap();
+    let first_manifest = publication::manifest(&owner.service, &retained)
+        .await
+        .unwrap();
     if s3.is_some() {
         std::fs::remove_dir_all(
             owner
@@ -1526,7 +1485,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         std::fs::create_dir_all(receipt.parent().unwrap()).unwrap();
         std::fs::write(&receipt, b"verified before outage").unwrap();
         assert_eq!(
-            backups::read_block(&owner.service, &disconnected_point, hash)
+            publication::read_block(&owner.service, &disconnected_point, hash)
                 .await
                 .unwrap_err()
                 .status,
@@ -1547,7 +1506,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
     let restored = owner._root.path().join("restored-disk");
     snapshots::restore(&restored, &first_manifest, |hash| {
         let (service, backup) = (owner.service.clone(), retained.clone());
-        async move { backups::read_block(&service, &backup, &hash).await }
+        async move { publication::read_block(&service, &backup, &hash).await }
     })
     .await
     .unwrap();
@@ -1593,15 +1552,15 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         .unwrap();
     std::fs::write(&block_file, serde_json::to_vec(&legacy).unwrap()).unwrap();
     if s3.is_some() {
-        leo_agent_manager::archive_storage::Storage::configured(&owner.service)
+        leo_agent_manager::object_storage::Storage::configured(&owner.service)
             .unwrap()
-            .upload(&block_file, &key)
+            .upload_file_verified(&block_file, &key)
             .await
             .unwrap();
         std::fs::remove_file(&block_file).unwrap();
     }
     assert_eq!(
-        backups::read_block(&owner.service, &retained, block)
+        publication::read_block(&owner.service, &retained, block)
             .await
             .unwrap(),
         original[..4 * 1024 * 1024],
@@ -1613,7 +1572,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
     second["runtime"] = json!({"runtimeId":"fixture"});
     *state.lock().await = second;
     corrupt.store(true, Ordering::SeqCst);
-    assert!(backups::capture(&owner.service, &record).await.is_err());
+    assert!(publication::capture(&owner.service, &record).await.is_err());
     assert_eq!(
         owner
             .service
@@ -1629,8 +1588,28 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         first["id"]
     );
     corrupt.store(false, Ordering::SeqCst);
-    let second = backups::capture(&owner.service, &record).await.unwrap();
+    let second = publication::capture(&owner.service, &record).await.unwrap();
     assert_eq!(second["uploadedBytes"], 128);
+    assert!(
+        owner
+            .service
+            .store
+            .get("node-backups", first["id"].as_str().unwrap())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        owner
+            .service
+            .store
+            .node_backups_for_run(&run)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
     let filler = owner
         .service
         .config
@@ -1648,7 +1627,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         .await
         .unwrap();
     assert_eq!(
-        backups::capture(&owner.service, &record)
+        publication::capture(&owner.service, &record)
             .await
             .unwrap_err()
             .status,
@@ -1659,7 +1638,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         second["id"]
     );
     std::fs::remove_file(filler).unwrap();
-    let mut third = backups::capture(&owner.service, &record).await.unwrap();
+    let mut third = publication::capture(&owner.service, &record).await.unwrap();
     assert_eq!(third["uploadedBytes"], 0);
     assert!(
         owner
@@ -1671,10 +1650,9 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             .is_none(),
         "Retention removes the oldest manifest while keeping shared blocks"
     );
-    let mut fallback = second.clone();
     if s3.is_some() {
         let storage =
-            leo_agent_manager::archive_storage::Storage::configured(&owner.service).unwrap();
+            leo_agent_manager::object_storage::Storage::configured(&owner.service).unwrap();
         let directory = owner
             .service
             .config
@@ -1695,7 +1673,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             .await
             .unwrap();
         assert_eq!(
-            backups::read_block(&owner.service, &point, block)
+            publication::read_block(&owner.service, &point, block)
                 .await
                 .unwrap(),
             &original[..4 * 1024 * 1024],
@@ -1704,7 +1682,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         assert_eq!(std::fs::read(directory.join(block)).unwrap(), cached);
         std::fs::remove_file(directory.join(block)).unwrap();
         assert_eq!(
-            backups::read_block(&owner.service, &point, block)
+            publication::read_block(&owner.service, &point, block)
                 .await
                 .unwrap_err()
                 .status,
@@ -1726,7 +1704,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             }),
             "A missing remote copy must lose its upload receipt"
         );
-        third = backups::capture(
+        third = publication::capture(
             &owner.service,
             &owner.service.store.run(&run).await.unwrap(),
         )
@@ -1741,14 +1719,14 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             .unwrap()
             .unwrap();
         assert_eq!(
-            backups::read_block(&owner.service, &repaired, block)
+            publication::read_block(&owner.service, &repaired, block)
                 .await
                 .unwrap(),
             &original[..4 * 1024 * 1024]
         );
         std::fs::write(directory.join(block), b"damaged ciphertext").unwrap();
         assert_eq!(
-            backups::read_block(&owner.service, &repaired, block)
+            publication::read_block(&owner.service, &repaired, block)
                 .await
                 .unwrap(),
             &original[..4 * 1024 * 1024],
@@ -1775,7 +1753,9 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             ..Default::default()
         });
         owner.service.store.put("nodes", node).await.unwrap();
-        backups::maintain_local_cache(&owner.service).await.unwrap();
+        publication::maintain_local_cache(&owner.service)
+            .await
+            .unwrap();
         assert!(
             !directory.join(block).exists(),
             "duplicate S3 cache is reclaimed"
@@ -1787,8 +1767,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         memory["runtime"] = json!({"runtimeId":"fixture"});
         let changed = memory["blocks"][1]["hash"].as_str().unwrap().to_owned();
         *state.lock().await = memory;
-        fallback = third;
-        third = backups::capture(&owner.service, &record).await.unwrap();
+        third = publication::capture(&owner.service, &record).await.unwrap();
         assert_eq!(third["uploadedBytes"], 128);
         assert!(
             !directory.join(&changed).exists(),
@@ -1802,7 +1781,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             .unwrap()
             .unwrap();
         assert_eq!(
-            backups::read_block(&owner.service, &published, &changed)
+            publication::read_block(&owner.service, &published, &changed)
                 .await
                 .unwrap(),
             original[4 * 1024 * 1024..]
@@ -1827,15 +1806,14 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         .put("node-backups", damaged)
         .await
         .unwrap();
-    assert_eq!(
+    assert!(
         leo_agent_manager::nodes::moves::latest(&owner.service, &run)
             .await
             .unwrap()
-            .unwrap()["id"],
-        fallback["id"],
-        "Automatic recovery skips a damaged latest point"
+            .is_none(),
+        "No rollback to a previous publication after the current manifest is damaged"
     );
-    backups::purge(&owner.service, &run).await.unwrap();
+    publication::purge(&owner.service, &run).await.unwrap();
     assert!(
         owner
             .service
@@ -2096,6 +2074,7 @@ async fn first_execution_fits_configured_node_ceilings_without_silently_shrinkin
 }
 
 #[tokio::test]
+#[ignore = "requires loopback S3; run tests/node_s3_test.py"]
 async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_stay_idle() {
     use axum::response::IntoResponse;
     use leo_agent_manager::{
@@ -2637,7 +2616,7 @@ async fn stale_node_disks_are_reported_and_freed_on_request() {
 async fn only_conversations_on_remote_nodes_take_continuous_recovery_points() {
     use leo_agent_manager::{
         config::id,
-        nodes::{LOCAL_NODE_ID, backups},
+        nodes::{LOCAL_NODE_ID, publication},
     };
     let owner = Owner::new().await;
     let mut states = Vec::new();
@@ -2650,7 +2629,7 @@ async fn only_conversations_on_remote_nodes_take_continuous_recovery_points() {
             .write(move |db| db.add_run(&record, None))
             .await
             .unwrap();
-        backups::attempt(
+        publication::attempt(
             &owner.service,
             &owner.service.store.run(&run).await.unwrap(),
         )
@@ -2664,11 +2643,12 @@ async fn only_conversations_on_remote_nodes_take_continuous_recovery_points() {
 }
 
 #[tokio::test]
+#[ignore = "requires loopback S3; run tests/node_s3_test.py"]
 async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
     use axum::response::IntoResponse;
     use leo_agent_manager::{
         config::{id, now},
-        nodes::{LOCAL_NODE_ID, backups, snapshots},
+        nodes::{LOCAL_NODE_ID, publication, snapshots},
     };
     use std::sync::{Arc, Mutex};
     let root = TempDir::new().unwrap();
@@ -2747,7 +2727,7 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
         .unwrap();
     let current = || async { owner.service.store.run(&run).await.unwrap() };
 
-    backups::capture(&owner.service, &current().await)
+    publication::capture(&owner.service, &current().await)
         .await
         .unwrap();
     let first = snapshots_served.lock().unwrap()[0].clone();
@@ -2771,7 +2751,7 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
     assert!(
         unsafe { libc::inotify_add_watch(watch.as_raw_fd(), path.as_ptr(), libc::IN_ACCESS) } >= 0
     );
-    backups::capture(&owner.service, &current().await)
+    publication::capture(&owner.service, &current().await)
         .await
         .unwrap();
     let mut events = [0u8; 4096];
@@ -2787,12 +2767,12 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
     // After a failed capture, the next one asks for a full copy.
     failing.store(true, std::sync::atomic::Ordering::SeqCst);
     assert!(
-        backups::capture(&owner.service, &current().await)
+        publication::capture(&owner.service, &current().await)
             .await
             .is_err()
     );
     failing.store(false, std::sync::atomic::Ordering::SeqCst);
-    backups::capture(&owner.service, &current().await)
+    publication::capture(&owner.service, &current().await)
         .await
         .unwrap();
     assert!(
@@ -2801,8 +2781,7 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
         bodies.lock().unwrap()
     );
 
-    // A failed restore evicts bad ciphertext and forces the next capture to
-    // repopulate it, without scanning every retained block in the background.
+    // A damaged local cache is repaired from S3 without resetting the incremental baseline.
     let backup = owner
         .service
         .store
@@ -2813,20 +2792,21 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
         .await
         .unwrap()
         .unwrap();
+    let baseline = current().await["backup"]["snapshotId"].clone();
     let mut damaged = std::fs::read(&block).unwrap();
     *damaged.last_mut().unwrap() ^= 1;
     std::fs::write(&block, damaged).unwrap();
-    assert!(
-        backups::read_block(&owner.service, &backup, hash)
+    assert_eq!(
+        publication::read_block(&owner.service, &backup, hash)
             .await
-            .is_err()
+            .unwrap(),
+        b"workspace blocks"
     );
-    assert!(current().await["backup"]["snapshotId"].is_null());
-    assert!(!block.exists(), "Known bad ciphertext must not be reused");
-    backups::capture(&owner.service, &current().await)
+    assert_eq!(current().await["backup"]["snapshotId"], baseline);
+    publication::capture(&owner.service, &current().await)
         .await
         .unwrap();
-    assert!(bodies.lock().unwrap()[4]["baseline"].is_null());
+    assert_eq!(bodies.lock().unwrap()[4]["baseline"], baseline);
     let backup = owner
         .service
         .get(
@@ -2836,7 +2816,7 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
         .await
         .unwrap();
     assert_eq!(
-        backups::read_block(&owner.service, &backup, hash)
+        publication::read_block(&owner.service, &backup, hash)
             .await
             .unwrap(),
         b"workspace blocks"
@@ -3105,7 +3085,7 @@ async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
 
 #[tokio::test]
 async fn corrupted_recovery_ciphertext_is_terminal_and_invalidates_the_baseline() {
-    use leo_agent_manager::{config::id, nodes::backups};
+    use leo_agent_manager::{config::id, nodes::publication};
     use sha2::{Digest, Sha256};
     let owner = Owner::new().await;
     let run = id();
@@ -3126,7 +3106,7 @@ async fn corrupted_recovery_ciphertext_is_terminal_and_invalidates_the_baseline(
     let path = owner.service.config.data_dir.join(&key);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, encoded).unwrap();
-    let error = backups::read_block(
+    let error = publication::read_block(
         &owner.service,
         &json!({"runId":run,"destination":"master"}),
         &hash,
@@ -3139,4 +3119,180 @@ async fn corrupted_recovery_ciphertext_is_terminal_and_invalidates_the_baseline(
     );
     assert!(!path.exists());
     assert!(owner.service.store.run(&run).await.unwrap()["backup"]["snapshotId"].is_null());
+}
+
+#[tokio::test]
+async fn publication_cleanup_preserves_current_and_in_use_blocks_then_reclaims_idle_generations() {
+    use leo_agent_manager::{
+        config::id,
+        nodes::{publication, snapshots},
+    };
+    use sha2::{Digest, Sha256};
+    let owner = Owner::new().await;
+    let run = id();
+    let record = json!({"id":run,"taskId":"fixture","createdAt":0,"status":"succeeded"});
+    owner
+        .service
+        .store
+        .write(move |db| db.add_run(&record, None))
+        .await
+        .unwrap();
+    let directory = owner
+        .service
+        .config
+        .data_dir
+        .join("node-backups")
+        .join(&run)
+        .join("blocks");
+    std::fs::create_dir_all(&directory).unwrap();
+    let shared = hex::encode(Sha256::digest(b"shared"));
+    let old = hex::encode(Sha256::digest(b"old"));
+    let new = hex::encode(Sha256::digest(b"new"));
+    for hash in [&shared, &old, &new] {
+        std::fs::write(directory.join(hash), b"fixture").unwrap();
+    }
+    let mut ids = Vec::new();
+    for (generation, hash) in [&old, &new].into_iter().enumerate() {
+        let point = id();
+        let manifest = json!({"version":1,"size":2*snapshots::BLOCK,"blockSize":snapshots::BLOCK,"blocks":[
+            {"offset":0,"size":snapshots::BLOCK,"hash":shared},
+            {"offset":snapshots::BLOCK,"size":snapshots::BLOCK,"hash":hash}]});
+        owner.service.store.put("node-backups", json!({"id":point,"runId":run,"destination":"master",
+            "createdAt":100-generation,"manifest":owner.service.vault.encrypt(&format!("backup:{point}"), &manifest).unwrap()})).await.unwrap();
+        ids.push(point);
+    }
+    owner
+        .service
+        .store
+        .patch_run(&run, json!({"backup":{"id":ids[1]}}))
+        .await
+        .unwrap();
+    let grant = id();
+    owner
+        .service
+        .store
+        .put(
+            "node-disk-grants",
+            json!({"id":grant,"runId":run,"backups":[ids[0]]}),
+        )
+        .await
+        .unwrap();
+    owner
+        .service
+        .store
+        .set("node-backup-settings", json!({"retention":100}), None)
+        .await
+        .unwrap();
+    assert!(
+        publication::settings(&owner.service)
+            .await
+            .unwrap()
+            .get("retention")
+            .is_none()
+    );
+    publication::collect(&owner.service, &run).await.unwrap();
+    assert_eq!(
+        owner
+            .service
+            .store
+            .node_backups_for_run(&run)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(directory.join(&old).exists());
+    owner
+        .service
+        .store
+        .write(move |db| db.remove("node-disk-grants", &grant))
+        .await
+        .unwrap();
+    publication::collect(&owner.service, &run).await.unwrap();
+    let points = owner
+        .service
+        .store
+        .node_backups_for_run(&run)
+        .await
+        .unwrap();
+    assert_eq!(points.len(), 1);
+    assert_eq!(
+        points[0]["id"], ids[1],
+        "Published pointer wins over timestamp ordering"
+    );
+    assert!(directory.join(shared).exists());
+    assert!(directory.join(new).exists());
+    assert!(!directory.join(old).exists());
+}
+
+#[tokio::test]
+#[ignore = "requires loopback S3; run tests/node_s3_test.py"]
+async fn obsolete_object_collection_deletes_versions_without_deleting_prefix_neighbors() {
+    let owner = Owner::new().await;
+    assert!(std::env::var_os("LEO_NODE_TEST_S3_ENDPOINT").is_some());
+    let storage = leo_agent_manager::object_storage::Storage::configured(&owner.service).unwrap();
+    let versioning = std::process::Command::new("aws")
+        .args([
+            "s3api",
+            "put-bucket-versioning",
+            "--bucket",
+            "leo-node-test",
+            "--versioning-configuration",
+            "Status=Enabled",
+        ])
+        .output()
+        .unwrap();
+    assert!(versioning.status.success());
+    let key = format!("collection/{}", leo_agent_manager::config::id());
+    let neighbor = format!("{key}-neighbor");
+    storage.upload_bytes(b"first".to_vec(), &key).await.unwrap();
+    storage
+        .upload_bytes(b"second".to_vec(), &key)
+        .await
+        .unwrap();
+    storage
+        .upload_bytes(b"neighbor".to_vec(), &neighbor)
+        .await
+        .unwrap();
+    let marker = std::process::Command::new("aws")
+        .args([
+            "s3api",
+            "delete-object",
+            "--bucket",
+            "leo-node-test",
+            "--key",
+            &key,
+        ])
+        .output()
+        .unwrap();
+    assert!(marker.status.success());
+    storage.purge_key(&key).await.unwrap();
+    let listing = std::process::Command::new("aws")
+        .args([
+            "s3api",
+            "list-object-versions",
+            "--bucket",
+            "leo-node-test",
+            "--prefix",
+            &key,
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(listing.status.success());
+    let listing: Value = serde_json::from_slice(&listing.stdout).unwrap();
+    assert!(
+        listing["DeleteMarkers"]
+            .as_array()
+            .is_none_or(Vec::is_empty)
+    );
+    let versions = listing["Versions"].as_array().unwrap();
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0]["Key"], neighbor);
+    assert_eq!(
+        storage.download_bytes(&neighbor, 8).await.unwrap(),
+        b"neighbor"
+    );
+    storage.purge_key(&neighbor).await.unwrap();
 }

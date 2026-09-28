@@ -12,7 +12,8 @@ pub struct Policy {
     pub reserve_percent: u64,
     pub backup_seconds: u64,
     pub max_dirty_seconds: u64,
-    pub automatic_archiving: bool,
+    #[serde(rename = "automaticArchiving", skip_serializing)]
+    pub _legacy_archiving: Option<bool>,
 }
 impl Default for Policy {
     fn default() -> Self {
@@ -23,7 +24,7 @@ impl Default for Policy {
             reserve_percent: 5,
             backup_seconds: 60,
             max_dirty_seconds: 300,
-            automatic_archiving: false,
+            _legacy_archiving: None,
         }
     }
 }

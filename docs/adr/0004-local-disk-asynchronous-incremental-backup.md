@@ -1,3 +1,5 @@
+> Décision révisée par [ADR-0008](0008-current-disk-publication-without-archives.md) : publication S3 courante, sans archivage ni historique de restauration.
+
 # Disque local et sauvegarde incrémentale asynchrone
 
 L’utilisateur souhaite protéger les VM avec un petit retard, sans retransférer

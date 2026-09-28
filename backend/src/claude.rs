@@ -16,7 +16,7 @@ pub const CATALOG: &str = "claude-models";
 /// The CLI's environment with `directory` as its home, without any inherited credentials.
 pub fn environment(config: &Config, directory: &Path) -> Environment {
     let mut env = std::env::vars().collect::<Environment>();
-    crate::process::remove_archive_environment(&mut env);
+    crate::process::remove_storage_environment(&mut env);
     env.insert("HOME".into(), config.home.to_string_lossy().into_owned());
     configure(&mut env, directory);
     env

@@ -103,11 +103,6 @@ fn route(method: &str, path: &str) -> Result<()> {
     let parts = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
     let allowed = match parts.as_slice() {
         ["health"] => method == "GET",
-        ["archive-transfers", id, offset] => {
-            crate::validation::uuid(id).is_ok()
-                && ((method == "DELETE" && *offset == "discard")
-                    || (["GET", "POST"].contains(&method) && offset.parse::<u64>().is_ok()))
-        }
         ["snapshots", id, hash] => {
             crate::validation::uuid(id).is_ok()
                 && ((method == "GET" && super::snapshots::valid_hash(hash))
@@ -134,8 +129,6 @@ fn route(method: &str, path: &str) -> Result<()> {
             method == "POST"
                 && crate::validation::uuid(id).is_ok()
                 && [
-                    "export",
-                    "import",
                     "delete",
                     "prune",
                     "restore",
@@ -218,11 +211,7 @@ async fn forward(
     };
     let response = tokio::time::timeout(
         Duration::from_secs(
-            if path.ends_with("/restore")
-                || path.ends_with("/migrate")
-                || path.ends_with("/export")
-                || path.ends_with("/import")
-            {
+            if path.ends_with("/restore") || path.ends_with("/migrate") {
                 7200
             } else if path.ends_with("snapshot") {
                 300
@@ -244,10 +233,7 @@ async fn forward(
     send(client, master, token, &head).await?;
     // Bulk data uses one continuous, backpressured request. Keep control/log
     // frames and old masters on the existing protocol (including /wait's result).
-    if command["streamBody"] == true
-        && method == "GET"
-        && (path.starts_with("/snapshots/") || path.starts_with("/archive-transfers/"))
-    {
+    if command["streamBody"] == true && method == "GET" && (path.starts_with("/snapshots/")) {
         use futures_util::StreamExt;
         let chunks =
             futures_util::stream::try_unfold(response.bytes_stream(), |mut stream| async move {

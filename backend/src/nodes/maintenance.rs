@@ -54,7 +54,7 @@ pub async fn downloads(State(app): State<App>, request: Request) -> Result<Respo
                     .await?;
             }
             value["shutdownTimeoutSeconds"] =
-                super::backups::settings(&app.service).await?["shutdownTimeoutSeconds"].clone();
+                super::publication::settings(&app.service).await?["shutdownTimeoutSeconds"].clone();
             ("application/json", value.to_string())
         }
         "/internal/nodes/host.py" => (
@@ -111,7 +111,7 @@ pub async fn request(s: &Service, node: &str, input: &Value) -> Result<Value> {
             if !s.node_maintenance_tasks.lock().await.insert(node.clone()) {
                 return s.get("nodes", &node).await;
             }
-            let timeout = super::backups::settings(s).await?["shutdownTimeoutSeconds"]
+            let timeout = super::publication::settings(s).await?["shutdownTimeoutSeconds"]
                 .as_u64()
                 .unwrap_or(300)
                 .saturating_sub(20)
@@ -212,7 +212,7 @@ async fn drain(s: &Service, node: &str) -> Result<()> {
         }
         super::placement::release(s, text(&attempt, "id")).await?;
         if run["sessionId"].is_string()
-            && let Err(error) = super::backups::capture(s, &run).await
+            && let Err(error) = super::publication::capture(s, &run).await
         {
             failure = Some(error);
         }

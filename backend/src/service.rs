@@ -29,7 +29,7 @@ pub struct Service {
     pub models: Arc<crate::models::Models>,
     pub connections: Arc<crate::connections::Connections>,
     pub notifications: crate::notifications::Notifications,
-    pub retention_lock: Arc<tokio::sync::Mutex<()>>,
+    pub conversation_storage_lock: Arc<tokio::sync::Mutex<()>>,
     pub attachment_upload: Arc<tokio::sync::Mutex<()>>,
     pub config: Config,
     pub store: Store,
@@ -37,7 +37,7 @@ pub struct Service {
     pub vault: Vault,
     pub skills: Skills,
     pub http: reqwest::Client,
-    pub hot_s3: Arc<crate::archive_storage::HotS3>,
+    pub hot_s3: Arc<crate::object_storage::HotS3>,
     pub shutdown: CancellationToken,
 }
 impl Service {
@@ -69,7 +69,7 @@ impl Service {
             models: Default::default(),
             connections: Default::default(),
             notifications: Default::default(),
-            retention_lock: Default::default(),
+            conversation_storage_lock: Default::default(),
             attachment_upload: Default::default(),
             auth: Auth::new(store.clone(), config.public_url.clone()),
             skills: Skills {
@@ -80,7 +80,7 @@ impl Service {
                 .timeout(std::time::Duration::from_secs(20))
                 .build()
                 .map_err(Error::internal)?,
-            hot_s3: Arc::new(crate::archive_storage::HotS3::new()),
+            hot_s3: Arc::new(crate::object_storage::HotS3::new()),
             config,
             store,
             vault,

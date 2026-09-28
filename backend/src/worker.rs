@@ -106,20 +106,21 @@ impl Worker {
     pub async fn start(self: &Arc<Self>, s: Arc<Service>) -> Result<()> {
         self.initialize(&s).await?;
         self.tasks.spawn(crate::chat_titles::run(s.clone()));
-        self.tasks.spawn(crate::nodes::backups::maintain(s.clone()));
+        self.tasks
+            .spawn(crate::nodes::publication::maintain(s.clone()));
         self.tasks.spawn(crate::nodes::storage::monitor(s.clone()));
         self.tasks.spawn(crate::nodes::storage::migrate(s.clone()));
-        let retention = s.clone();
+        let cleanup = s.clone();
         self.tasks.spawn(async move {
             let mut timer = tokio::time::interval(Duration::from_secs(15));
             timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                tokio::select! { _ = retention.shutdown.cancelled() => break, _ = timer.tick() => {} }
+                tokio::select! { _ = cleanup.shutdown.cancelled() => break, _ = timer.tick() => {} }
                 tokio::select! {
-                    _ = retention.shutdown.cancelled() => break,
-                    result = retention.retention_tick() => {
+                    _ = cleanup.shutdown.cancelled() => break,
+                    result = cleanup.cleanup_conversations() => {
                         if let Err(error) = result {
-                            let _ = retention.store.audit("conversation.retention_failed", json!({"message":error.message})).await;
+                            let _ = cleanup.store.audit("conversation.cleanup_failed", json!({"message":error.message})).await;
                         }
                     }
                 }
@@ -616,7 +617,7 @@ impl Worker {
             && saved["prepared"]["backend"] == "firecracker"
             && s.store.run(&run_id).await?["status"] == "succeeded"
         {
-            crate::nodes::backups::attempt(s, &s.store.run(&run_id).await?).await;
+            crate::nodes::publication::attempt(s, &s.store.run(&run_id).await?).await;
         }
         if fenced {
             for provider in Provider::ALL {
@@ -763,7 +764,7 @@ impl Worker {
         } else {
             crate::toolkit::environment(&s.config.home, std::env::vars().collect()).await?
         };
-        crate::process::remove_archive_environment(&mut env);
+        crate::process::remove_storage_environment(&mut env);
         env.insert("HOME".into(), s.config.home.to_string_lossy().into_owned());
         env.insert(
             "CODEX_HOME".into(),

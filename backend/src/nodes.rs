@@ -1,7 +1,5 @@
 //! Trusted node identities. Enrollment and revocation are serialized with heartbeats.
 pub mod alerts;
-pub mod archive;
-pub mod backups;
 pub mod checkpoint;
 pub mod connector;
 pub mod disk_grants;
@@ -10,6 +8,7 @@ pub mod files;
 pub mod maintenance;
 pub mod moves;
 pub mod placement;
+pub mod publication;
 pub mod relay;
 pub mod restore;
 pub mod snapshots;
@@ -279,65 +278,11 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
 
         ("GET", ["nodes", "alerts"]) => alerts::recent(s).await,
         ("GET", ["nodes", "settings"]) => {
-            let mut value = backups::settings(s).await?;
-            value["s3Configured"] = crate::archive_storage::Storage::configured(s)
-                .is_ok()
-                .into();
+            let mut value = publication::settings(s).await?;
+            value["s3Configured"] = crate::object_storage::Storage::configured(s).is_ok().into();
             Ok(value)
         }
-        ("PUT", ["nodes", "settings"]) => {
-            #[derive(Deserialize, serde::Serialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct Settings {
-                destination: String,
-                interval_seconds: u64,
-                retention: u64,
-                budget_mi_b: u64,
-                #[serde(default)]
-                disconnect_timeout_seconds: Option<u64>,
-                #[serde(default)]
-                shutdown_timeout_seconds: Option<u64>,
-                #[serde(default)]
-                max_capacity_wait_seconds: Option<u64>,
-                // Read-only status echoed back by clients; never stored.
-                #[serde(default, skip_serializing)]
-                #[allow(dead_code)]
-                s3_configured: Option<bool>,
-            }
-            let settings: Settings = decode(input.body.clone())?;
-            if !["master", "s3"].contains(&settings.destination.as_str())
-                || !(5..=3600).contains(&settings.interval_seconds)
-                || !(1..=100).contains(&settings.retention)
-                || !(128..=1_048_576).contains(&settings.budget_mi_b)
-                || settings
-                    .disconnect_timeout_seconds
-                    .is_some_and(|v| !(10..=300).contains(&v))
-                || settings
-                    .shutdown_timeout_seconds
-                    .is_some_and(|v| !(30..=300).contains(&v))
-                || settings.max_capacity_wait_seconds.is_some_and(|v| v > 3600)
-            {
-                return Err(Error::bad("Invalid recovery settings."));
-            }
-            if settings.destination == "s3" {
-                crate::archive_storage::Storage::configured(s)?
-                    .validate()
-                    .await?;
-            }
-            let mut value = backups::settings(s).await?;
-            for (key, item) in json!(settings).as_object().unwrap() {
-                if !item.is_null() {
-                    value[key] = item.clone();
-                }
-            }
-            s.store
-                .set("node-backup-settings", value.clone(), None)
-                .await?;
-            s.store
-                .audit("node.recovery.configured", value.clone())
-                .await?;
-            Ok(value)
-        }
+        ("PUT", ["nodes", "settings"]) => publication::configure(s, input.body.clone()).await,
         ("GET", ["nodes", "backups", run]) => {
             crate::validation::uuid(run)?;
             Ok(s.store
@@ -345,7 +290,7 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
                 .await?
                 .into_iter()
                 .filter(|point| point["runId"] == *run)
-                .map(backups::public)
+                .map(publication::public)
                 .collect::<Vec<_>>()
                 .into())
         }
@@ -359,7 +304,7 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
                 return Err(Error::new(409, "Node revoked."));
             }
             if policy.enabled {
-                crate::archive_storage::Storage::configured(s)?
+                crate::object_storage::Storage::configured(s)?
                     .validate()
                     .await?;
             }
@@ -484,7 +429,7 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
                 .collect::<Vec<_>>();
             let (mut freed, mut failed) = (0u64, 0usize);
             for (volume, whole, mib) in stale_disks(s, &volumes, &attempts).await? {
-                match crate::conversation_archive::discard_stale_disk(
+                match crate::conversation_deletion::discard_stale_disk(
                     s,
                     text(&volume, "runId"),
                     node,
@@ -660,7 +605,7 @@ pub async fn internal(State(app): State<App>, request: Request) -> Result<Json<V
             };
             let expected_data = s.config.data_dir.to_string_lossy().into_owned();
             let expected_image = maintenance::release().ok().map(|r| r["image"].clone());
-            let lease_ms = backups::settings(s).await?["disconnectTimeoutSeconds"]
+            let lease_ms = publication::settings(s).await?["disconnectTimeoutSeconds"]
                 .as_i64()
                 .unwrap_or(60)
                 * 1000;

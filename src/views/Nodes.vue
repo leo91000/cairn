@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { ExecutionNode, NodeBackupSettings, NodeEnrollment } from '../../shared/nodes'
+import type { ExecutionNode, NodeEnrollment, NodeSyncSettings } from '../../shared/nodes'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { formatMiB, formatResources, nodeDiagnostics } from '../../shared/nodes'
 import { api, notify, refresh, state } from '../api'
@@ -20,7 +20,7 @@ const enrollment = ref<NodeEnrollment | null>(null)
 let knownBeforeEnrollment = new Set<string>()
 const error = ref('')
 const busy = ref(false)
-const recovery = ref<NodeBackupSettings | null>(null)
+const recovery = ref<NodeSyncSettings | null>(null)
 const recoveryBudgetGiB = ref(0)
 const revoking = ref<ExecutionNode | null>(null)
 const granting = ref<ExecutionNode | null>(null)
@@ -122,7 +122,7 @@ function allNodes(agentId: string) {
 }
 function configureRecovery() {
   return action(async () => {
-    recovery.value = await api<NodeBackupSettings>('/nodes/settings')
+    recovery.value = await api<NodeSyncSettings>('/nodes/settings')
     recoveryBudgetGiB.value = +(recovery.value.budgetMiB / 1024).toFixed(2)
   })
 }
@@ -256,29 +256,27 @@ function statusLabel(node: ExecutionNode) {
       {{ showRevoked ? 'Hide revoked machines' : `Show revoked machines (${revoked.length})` }}
     </UiButton>
     <details class="mt-8 rounded-xl border border-line p-5">
-      <summary>Advanced: recovery points and timeouts</summary>
+      <summary>Advanced: S3 synchronization and timeouts</summary>
       <p class="mt-2 text-sm text-muted">
-        How often VM environments are saved, where recovery points are kept and how long nodes wait before pausing. The defaults suit most setups.
+        How often disk changes are published to S3 and how long nodes wait before pausing. The defaults suit most setups.
       </p>
       <UiButton class="mt-3" variant="default" @click="configureRecovery">
-        Configure recovery points
+        Configure synchronization
       </UiButton>
     </details>
-    <Modal v-if="recovery" title="Recovery points" @close="recovery = null">
+    <Modal v-if="recovery" title="S3 synchronization" @close="recovery = null">
       <form class="grid gap-4" @submit.prevent="saveRecovery">
-        <p>Changed disk blocks upload in the background after a coherent capture. Chat history is streamed separately. Each conversation shows the date of its latest recovery point.</p>
-        <label>Destination<select v-model="recovery.destination" class="mt-1 block"><option value="master">Master storage</option><option value="s3" :disabled="!recovery.s3Configured">S3 storage{{ recovery.s3Configured ? '' : ' (not configured)' }}</option></select></label>
+        <p>Changed disk blocks upload in the background after a coherent capture. Chat history is streamed separately. Each conversation shows its last completed synchronization.</p>
         <p v-if="!recovery.s3Configured" class="text-sm text-muted">
-          Configure S3 on the server, as for conversation archival, to store recovery points there.
+          Configure S3 on the server to publish disk changes.
         </p>
-        <label>Capture interval (seconds)<input v-model.number="recovery.intervalSeconds" class="mt-1 block" type="number" min="5" max="3600" required></label>
+        <label>Synchronization target (seconds)<input v-model.number="recovery.intervalSeconds" class="mt-1 block" type="number" min="5" max="3600" required></label>
         <label>Pause after disconnection (seconds)<input v-model.number="recovery.disconnectTimeoutSeconds" class="mt-1 block" type="number" min="10" max="300" required></label>
         <label>Shutdown preparation limit (seconds)<input v-model.number="recovery.shutdownTimeoutSeconds" class="mt-1 block" type="number" min="30" max="300" required></label>
         <label>Maximum capacity wait (seconds)<input v-model.number="recovery.maxCapacityWaitSeconds" class="mt-1 block" type="number" min="0" max="3600" required></label>
-        <label>Recovery points to retain<input v-model.number="recovery.retention" class="mt-1 block" type="number" min="1" max="100" required></label>
-        <label>Master storage budget (GiB)<input v-model.number="recoveryBudgetGiB" class="mt-1 block" type="number" min="0.125" max="1024" step="any" required></label>
+        <label>Publication cache budget (GiB)<input v-model.number="recoveryBudgetGiB" class="mt-1 block" type="number" min="0.125" max="1024" step="any" required></label>
         <p class="text-sm text-muted">
-          Captures can take longer than the interval. S3 points also keep a master cache within this budget.
+          Synchronization can take longer than the target interval. The publication cache stays within this budget.
         </p>
         <UiAlert v-if="error">
           {{ error }}

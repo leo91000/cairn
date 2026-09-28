@@ -76,7 +76,7 @@ function move() {
   <div v-if="relevant" class="border-b border-line px-6 py-2 text-xs text-muted" role="status" aria-live="polite">
     <span class="font-semibold">{{ node?.name || (run.nodeId === LOCAL_NODE_ID ? 'Master runner' : 'Unknown node') }}</span>
     <span v-if="run.resources"> · {{ run.resources.cpu }} CPU · {{ formatMiB(run.resources.memoryMiB) }} RAM</span>
-    <span v-if="run.backup?.capturedAt" :title="`${new Date(run.backup.capturedAt).toLocaleString()}. Newer chat and file changes may not be in this recovery point.`"> · Recoverable VM state: {{ relativeAge(run.backup.capturedAt, now) }}</span>
+    <span v-if="run.backup?.capturedAt" :title="`${new Date(run.backup.capturedAt).toLocaleString()}. Newer disk changes may still be waiting for synchronization.`"> · Disk synchronized: {{ relativeAge(run.backup.capturedAt, now) }}</span>
     <span v-if="run.backup?.status === 'saving'"> · Saving changes…</span>
     <p v-if="run.storage?.mode === 'on-demand'" class="mt-1">
       Files load on demand. {{ run.storage.waitingFor ? storageLabels[run.storage.waitingFor] || run.storage.waitingFor : 'Storage ready' }}.
@@ -92,7 +92,7 @@ function move() {
       Waiting for capacity until {{ new Date(run.capacityWaitUntil).toLocaleString() }}.
     </p>
     <p v-if="run.backup?.error" class="mt-1 text-coral">
-      Backup: {{ run.backup.error }}
+      Synchronization: {{ run.backup.error }}
     </p>
     <p v-if="run.restoredAt" class="mt-1">
       Resumed from a recovery point of {{ new Date(run.restoredAt).toLocaleString() }}. More recent messages remain visible; restored files can be older.

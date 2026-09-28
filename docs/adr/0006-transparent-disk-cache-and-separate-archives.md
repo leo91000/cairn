@@ -1,3 +1,5 @@
+> Décision révisée par [ADR-0008](0008-current-disk-publication-without-archives.md) : publication S3 courante, sans archivage ni historique de restauration.
+
 # Cache disque transparent et archivage distinct
 
 Pour libérer le disque sans imposer une restauration complète avant chaque reprise, la copie locale de l'environnement devient un cache dont l'éviction laisse la conversation active et reprenable à la demande.

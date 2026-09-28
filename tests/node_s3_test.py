@@ -23,7 +23,7 @@ def main():
         client.put_public_access_block(Bucket='leo-node-test', PublicAccessBlockConfiguration={
             'BlockPublicAcls': True, 'IgnorePublicAcls': True, 'BlockPublicPolicy': True, 'RestrictPublicBuckets': True})
         env = {key: value for key, value in os.environ.items()
-               if not key.startswith(('AWS_', 'ARCHIVE_S3_'))}
+               if not key.startswith(('AWS_', 'ARCHIVE_S3_', 'STORAGE_S3_'))}
         env['LEO_NODE_TEST_S3_ENDPOINT'] = endpoint
         env['AWS_ENDPOINT_URL_S3'] = endpoint
         env['AWS_ACCESS_KEY_ID'] = 'node-fixture'
@@ -32,10 +32,14 @@ def main():
         env['AWS_EC2_METADATA_DISABLED'] = 'true'
         env['AWS_CONFIG_FILE'] = '/dev/null'
         env['AWS_SHARED_CREDENTIALS_FILE'] = '/dev/null'
-        subprocess.run(['pnpm', 'test:backend', '--test', 'nodes', 'encrypted_recovery_points'],
+        subprocess.run(['pnpm', 'test:backend', '--test', 'nodes', 'encrypted_recovery_points', '--', '--ignored'],
                        cwd=Path(__file__).resolve().parents[1], env=env, check=True)
         remaining = client.list_objects_v2(Bucket='leo-node-test')
         assert remaining.get('KeyCount', 0) == 0, 'Conversation purge must remove all remote recovery objects'
+        for case in ['idle_conversations_move_twice', 'active_captures_name', 'obsolete_object_collection']:
+            subprocess.run(['pnpm', 'test:backend', '--test', 'nodes', case, '--', '--ignored'],
+                           cwd=Path(__file__).resolve().parents[1], env=env, check=True)
+
     finally:
         server.stop()
 

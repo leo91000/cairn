@@ -55,7 +55,7 @@ pub mod claude_process;
 
 pub mod github_projects;
 
-pub mod archive_storage;
-pub mod conversation_archive;
+pub mod conversation_deletion;
+pub mod object_storage;
 
 pub mod storage;

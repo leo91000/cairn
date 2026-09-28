@@ -222,7 +222,7 @@ pub async fn renew_local(s: &Service, run_id: &str) -> Result<()> {
     let Some(attempt) = checkpoint["runnerId"].as_str() else {
         return Ok(());
     };
-    let lease_ms = super::backups::settings(s).await?["disconnectTimeoutSeconds"]
+    let lease_ms = super::publication::settings(s).await?["disconnectTimeoutSeconds"]
         .as_u64()
         .unwrap_or(60)
         * 1000;

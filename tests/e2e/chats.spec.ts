@@ -598,6 +598,7 @@ test('conversation trash stays secondary and restores a deleted conversation', a
   await dialog.getByLabel('Actions for Conversation to recover').click()
   await dialog.getByRole('button', { name: 'Delete', exact: true }).click()
   await expect(dialog.getByRole('link', { name: /Conversation to recover/ })).toHaveCount(0)
+  await expect(dialog.getByRole('option', { name: 'Archives', exact: true })).toHaveCount(0)
   await dialog.getByLabel('Conversation view').selectOption('trash')
   await dialog.getByRole('link', { name: /Conversation to recover/ }).click()
   await expect(page.getByText('This conversation is in the trash.')).toBeVisible()
@@ -608,22 +609,6 @@ test('conversation trash stays secondary and restores a deleted conversation', a
   await page.getByRole('button', { name: 'Conversations', exact: true }).click()
   await expect(dialog.getByLabel('Conversation view')).toHaveValue('active')
   await expect(dialog.getByRole('link', { name: /Conversation to recover/ })).toBeVisible()
-})
-
-test('archived conversations require explicit restoration and show cold retrieval progress', async ({ page, workspace }, testInfo) => {
-  test.setTimeout(60000)
-  const chat = await workspace.api('/api/chats', 'POST', {})
-  workspace.service.store.put('chats', { ...chat, title: 'Cold conversation', lifecycle: 'archived', storageClass: 'GLACIER' })
-  await page.goto(`/chats/${chat.id}`)
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
-  await expect(page.getByText('This conversation is archived.')).toBeVisible({ timeout: 30000 })
-  await expect(page.getByText('Restoration from cold storage can take a few hours.')).toBeVisible()
-  await page.screenshot({ path: testInfo.outputPath('conversation-archive.png') })
-  expect((await workspace.api(`/api/chats/${chat.id}`)).lifecycle).toBe('archived')
-  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveCount(0)
-  await page.getByRole('button', { name: 'Restore conversation', exact: true }).click()
-  await expect(page.getByText('Restoring conversation…')).toBeVisible()
 })
 
 test('deletion from another client removes the open transcript', async ({ page, workspace }) => {

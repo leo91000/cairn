@@ -21,7 +21,7 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
     var enrollment by remember { mutableStateOf<NodeEnrollment?>(null) }
     // Machines known when the code was created, to recognise the newly connected one.
     var knownBeforeEnrollment by remember { mutableStateOf(emptySet<String>()) }
-    var recovery by remember { mutableStateOf<NodeBackupSettings?>(null) }
+    var recovery by remember { mutableStateOf<NodeSyncSettings?>(null) }
     var editing by remember { mutableStateOf<ExecutionNode?>(null) }
     var revoking by remember { mutableStateOf<ExecutionNode?>(null) }
     var granting by remember { mutableStateOf<ExecutionNode?>(null) }
@@ -104,10 +104,10 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
         if (revoked.isNotEmpty()) TextButton(onClick = { showRevoked = !showRevoked }) {
             Text(if (showRevoked) "Masquer les machines révoquées" else "Afficher les machines révoquées (${revoked.size})")
         }
-        TextButton(onClick = { advanced = !advanced }) { Text(if (advanced) "Masquer les réglages avancés" else "Avancé : sauvegardes et délais") }
+        TextButton(onClick = { advanced = !advanced }) { Text(if (advanced) "Masquer les réglages avancés" else "Avancé : synchronisation et délais") }
         if (advanced) Panel {
-            Text("Fréquence des sauvegardes des VM, destination des points de reprise et délais avant mise en pause. Les valeurs par défaut conviennent à la plupart des installations.", style = MaterialTheme.typography.bodySmall)
-            TextButton(onClick = { vm.perform { recovery = api.get("/nodes/settings") } }) { Text("Configurer les sauvegardes") }
+            Text("Fréquence de synchronisation S3 des disques et délais avant mise en pause. Les valeurs par défaut conviennent à la plupart des installations.", style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = { vm.perform { recovery = api.get("/nodes/settings") } }) { Text("Configurer la synchronisation") }
         }
     }
     recovery?.let { settings ->
@@ -212,32 +212,25 @@ internal fun gib(mib: Long) = if (mib % 1024 == 0L) (mib / 1024).toString() else
 internal fun mib(gib: String) = gib.replace(',', '.').toDoubleOrNull()?.let { Math.round(it * 1024) }
 
 @Composable
-private fun RecoveryEditor(settings: NodeBackupSettings, state: Workspace, dismiss: () -> Unit, save: (NodeBackupSettings) -> Unit) {
-    var destination by remember { mutableStateOf(settings.destination) }
+private fun RecoveryEditor(settings: NodeSyncSettings, state: Workspace, dismiss: () -> Unit, save: (NodeSyncSettings) -> Unit) {
     var interval by remember { mutableStateOf(settings.intervalSeconds.toString()) }
     var disconnect by remember { mutableStateOf(settings.disconnectTimeoutSeconds.toString()) }
     var shutdown by remember { mutableStateOf(settings.shutdownTimeoutSeconds.toString()) }
     var wait by remember { mutableStateOf(settings.maxCapacityWaitSeconds.toString()) }
-    var retention by remember { mutableStateOf(settings.retention.toString()) }
     var budget by remember { mutableStateOf(gib(settings.budgetMiB)) }
     val s3 = settings.s3Configured != false
     Editor(
-        "Sauvegardes de VM", state.busy, state.error, close = dismiss,
-        valid = disconnect.toLongOrNull() in 10L..300L && shutdown.toLongOrNull() in 30L..300L && wait.toLongOrNull() in 0L..3600L && interval.toLongOrNull() in 5L..3600L && retention.toIntOrNull() in 1..100 && mib(budget) in 128L..1048576L,
-        save = { save(NodeBackupSettings(destination, interval.toLong(), retention.toInt(), mib(budget)!!, disconnect.toLong(), shutdown.toLong(), wait.toLong())) },
+        "Synchronisation S3", state.busy, state.error, close = dismiss,
+        valid = disconnect.toLongOrNull() in 10L..300L && shutdown.toLongOrNull() in 30L..300L && wait.toLongOrNull() in 0L..3600L && interval.toLongOrNull() in 5L..3600L && mib(budget) in 128L..1048576L,
+        save = { save(NodeSyncSettings(interval.toLong(), mib(budget)!!, disconnect.toLong(), shutdown.toLong(), wait.toLong())) },
     ) {
-        Text("Les blocs modifiés sont envoyés en arrière-plan après une capture cohérente. La date du dernier point de reprise est visible dans chaque conversation.")
-        Row {
-            FilterChip(selected = destination == "master", enabled = !state.busy, onClick = { destination = "master" }, label = { Text("Master") })
-            FilterChip(selected = destination == "s3", enabled = !state.busy && s3, onClick = { destination = "s3" }, label = { Text(if (s3) "S3" else "S3 (non configuré)") })
-        }
-        if (!s3) Text("Configurez S3 sur le serveur, comme pour l’archivage des conversations, pour y stocker les points de reprise.", style = MaterialTheme.typography.bodySmall)
+        Text("Les blocs modifiés sont envoyés en arrière-plan après une capture cohérente. La dernière synchronisation est visible dans chaque conversation.")
+        if (!s3) Text("Configurez S3 sur le serveur pour synchroniser les disques.", style = MaterialTheme.typography.bodySmall)
         Field("Intervalle (secondes)", interval, { interval = it }, enabled = !state.busy)
         Field("Suspension après déconnexion (secondes)", disconnect, { disconnect = it }, enabled = !state.busy)
         Field("Préparation de l’arrêt (secondes)", shutdown, { shutdown = it }, enabled = !state.busy)
         Field("Attente de capacité maximale (secondes)", wait, { wait = it }, enabled = !state.busy)
-        Field("Points conservés", retention, { retention = it }, enabled = !state.busy)
-        Field("Budget master (Gio)", budget, { budget = it }, enabled = !state.busy)
-        Text("Une capture peut dépasser l’intervalle. Le cache des sauvegardes S3 utilise aussi ce budget.")
+        Field("Budget du cache de publication (Gio)", budget, { budget = it }, enabled = !state.busy)
+        Text("Une capture peut dépasser l’intervalle. Le cache de publication utilise ce budget.")
     }
 }

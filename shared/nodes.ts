@@ -48,10 +48,8 @@ export interface NodeEnrollment {
   expiresAt: number
 }
 
-export interface NodeBackupSettings {
-  destination: 'master' | 's3'
+export interface NodeSyncSettings {
   intervalSeconds: number
-  retention: number
   budgetMiB: number
   disconnectTimeoutSeconds: number
   shutdownTimeoutSeconds: number
@@ -110,5 +108,4 @@ export interface NodeStoragePolicy {
   reservePercent: number
   backupSeconds: number
   maxDirtySeconds: number
-  automaticArchiving: boolean
 }

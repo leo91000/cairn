@@ -490,9 +490,6 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
         .await?;
         return Ok(Json(json!({"ready":true})).into_response());
     }
-    if segments.first() == Some(&"archive-transfers") {
-        return crate::nodes::archive::controller(&broker.data, request).await;
-    }
     if let ["snapshots", snapshot, hash] = segments.as_slice() {
         uuid(snapshot)?;
         let directory = broker.state.join("snapshots").join(snapshot);
@@ -662,16 +659,14 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
     if let ["disks", run, action] = segments.as_slice() {
         let run = (*run).to_owned();
         let action = (*action).to_owned();
-        if request.method() != "POST"
-            || !["export", "import", "delete", "prune"].contains(&action.as_str())
-        {
+        if request.method() != "POST" || !["delete", "prune"].contains(&action.as_str()) {
             return Err(Error::new(405, "Invalid workspace operation."));
         }
         uuid(&run)?;
         let bytes = axum::body::to_bytes(request.into_body(), 4096)
             .await
             .map_err(|_| Error::bad("Invalid workspace request."))?;
-        let body: Value = serde_json::from_slice(&bytes)?;
+        let _: Value = serde_json::from_slice(&bytes)?;
         let active = broker.active.lock().await;
         if active.values().any(|a| a.plan["runId"] == run) {
             return Err(Error::new(409, "The workspace still has an active agent."));
@@ -722,89 +717,7 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
             // Preserve the lock inode: an overlapping boot must contend on it.
             return Ok(Json(json!({"deleted":true})).into_response());
         }
-        drop(active);
-        let transfer = text(&body, "transfer");
-        uuid(transfer)?;
-        let staging = broker.data.join("archive-transfers").join(transfer);
-        private_dir(&staging).await?;
-        if tokio::fs::canonicalize(&staging).await? != staging {
-            return Err(Error::bad("Invalid workspace transfer directory."));
-        }
-        if action == "export" {
-            let mounted = if crate::storage::runtime::exists(&directory) {
-                Some(crate::storage::runtime::mount_export(&directory).await?)
-            } else {
-                None
-            };
-            let source = mounted
-                .as_ref()
-                .map(|mount| mount.path.as_path())
-                .unwrap_or(&directory);
-            if source.join("data.ext4").exists() {
-                crate::archive_storage::tar(vec![
-                    "--sparse".into(),
-                    "-czf".into(),
-                    staging.join("workspace.tar.gz").to_string_lossy().into(),
-                    "-C".into(),
-                    source.to_string_lossy().into(),
-                    "data.ext4".into(),
-                ])
-                .await?;
-                std::fs::File::open(staging.join("workspace.tar.gz"))?.sync_all()?;
-            }
-            if let Some(mounted) = mounted {
-                mounted.close().await?;
-            }
-        } else if !disk.exists() {
-            if let Some(runtime) = body["runtimeId"].as_str() {
-                if !crate::nodes::valid_runtime(runtime) {
-                    return Err(Error::bad("Invalid archived runtime."));
-                }
-                if !broker
-                    .state
-                    .join("images")
-                    .join(runtime)
-                    .join("root.ext4")
-                    .exists()
-                {
-                    return Err(Error::new(409, "Archived VM runtime is unavailable."));
-                }
-                atomic_write(
-                    &directory.join("runtime.json"),
-                    &serde_json::to_vec(&json!({"runtimeId":runtime}))?,
-                )
-                .await?;
-            }
-            let target = directory.join(format!("restore-{transfer}"));
-            if target.exists() {
-                tokio::fs::remove_dir_all(&target).await?;
-            }
-            private_dir(&target).await?;
-            crate::archive_storage::tar(vec![
-                "--no-same-owner".into(),
-                "-xzf".into(),
-                staging.join("workspace.tar.gz").to_string_lossy().into(),
-                "-C".into(),
-                target.to_string_lossy().into(),
-                "data.ext4".into(),
-            ])
-            .await?;
-            let restored = target.join("data.ext4");
-            let meta = tokio::fs::symlink_metadata(&restored).await?;
-            if !meta.is_file() {
-                return Err(Error::bad("Invalid restored workspace."));
-            }
-            std::fs::File::open(&restored)?.sync_all()?;
-            // The imported disk replaces everything the guest's write tracking described.
-            crate::nodes::tracking::invalidate(&directory).await?;
-            tokio::fs::rename(restored, &disk).await?;
-            std::fs::File::open(&directory)?.sync_all()?;
-            tokio::fs::remove_dir_all(target).await?;
-        }
-        Ok(
-            Json(json!({"ready":true,"archivePresent":staging.join("workspace.tar.gz").exists()}))
-                .into_response(),
-        )
+        Err(Error::new(405, "Invalid workspace operation."))
     } else {
         let id = segments
             .get(1)
@@ -1240,9 +1153,6 @@ mod tests {
         file.write_all(b"native session and unpublished work")
             .unwrap();
         file.sync_all().unwrap();
-        private_dir(&data.join("archive-transfers").join(&transfer))
-            .await
-            .unwrap();
         async fn request(
             app: &Router,
             run: &str,
@@ -1264,7 +1174,7 @@ mod tests {
                 .status()
                 .as_u16()
         }
-        assert_eq!(request(&app, &run, "export", &transfer, "wrong").await, 401);
+        assert_eq!(request(&app, &run, "delete", &transfer, "wrong").await, 401);
         std::fs::write(directory.join("stale-older.ext4"), "older copy").unwrap();
         assert_eq!(
             request(&app, &run, "prune", &transfer, "synthetic-runner-secret").await,
@@ -1274,7 +1184,7 @@ mod tests {
         assert!(directory.join("data.ext4").exists());
         assert_eq!(
             request(&app, &run, "export", &transfer, "synthetic-runner-secret").await,
-            200
+            405
         );
         let lock = std::fs::OpenOptions::new()
             .read(true)

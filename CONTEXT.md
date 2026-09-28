@@ -26,29 +26,20 @@ Ensemble des fichiers, outils installés et données conservés pour le travail 
 **Reprise à la demande** :
 Remise en activité d’une conversation dont l’environnement de travail devient accessible progressivement, au fil des besoins de l’agent. Elle permet de reprendre le travail avant que l’ensemble de cet environnement soit disponible sur la node d’exécution.
 
-**Travail non sauvegardé** :
-Part du travail d’une conversation encore conservée uniquement sur sa node d’exécution, après la dernière sauvegarde de reprise disponible. Sa récupération dépend de la conservation de cette node et de ses données.
+**Travail non synchronisé** :
+Part du travail d’une conversation encore conservée uniquement sur sa node d’exécution. Sa récupération dépend de la conservation de cette node jusqu’à la fin de la synchronisation.
 
-**Sauvegarde de reprise** :
-Copie datée et cohérente de la session et de l’environnement de travail d’une conversation, permettant sa reprise sur une autre node si la node d’origine est indisponible. Elle ne contient pas nécessairement le travail effectué après sa création et se distingue de l’archivage d’une conversation.
+**État publié** :
+Dernier état cohérent de l’environnement d’une conversation disponible à distance pour sa reprise sur une autre node. Il ne constitue pas un historique permettant de revenir à des versions antérieures.
 
-**Conversation archivée** :
-Une conversation conservée à part des conversations actives, dont une entrée reste visible dans l’application. Elle conserve l’historique, les fichiers et le contexte de travail nécessaires à sa reprise après restauration, éventuellement depuis un stockage froid. La libération de sa copie locale ne suffit pas à archiver une conversation : celle-ci peut rester active et reprenable à la demande.
-
-**Inactivité d’une conversation** :
-Période écoulée depuis le dernier échange ou travail de l’agent ; une simple consultation ne la réinitialise pas. Une conversation avec un travail en cours, une réponse attendue ou des messages à exécuter, même en pause, n’est pas éligible à l’archivage automatique.
+**Synchronisation d’une conversation** :
+Mise à disposition à distance de son environnement de travail courant. Elle progresse en arrière-plan ; son retard indique le travail encore exposé à la perte de la node d’origine.
 
 **Conversation à la corbeille** :
-Une conversation supprimée par l’utilisateur, récupérable pendant 30 jours avant son effacement définitif et celui de ses données associées. La corbeille se distingue de l’archivage, qui vise la conservation.
-
-**Restauration d’une conversation archivée** :
-Remise à disposition, à la demande explicite de l’utilisateur, d’une conversation conservée avec son historique, ses fichiers et son contexte de travail pour permettre sa reprise. Une archive froide peut demander plusieurs heures avant d’être disponible.
+Une conversation supprimée par l’utilisateur, récupérable pendant 30 jours avant son effacement définitif et celui de ses données associées.
 
 **Récupération depuis la corbeille** :
-Retour d’une conversation à son état précédent, actif ou archivé, sans relancer l’agent, les envois annulés ni les liens publics révoqués. Récupérer une conversation archivée ne déclenche pas la restauration de son archive.
-
-**Délai de grâce d’une conversation** :
-Période durant laquelle une conversation redevenue active après restauration ou récupération est protégée d’un nouvel archivage automatique. Ce délai correspond au délai d’archivage configuré ; une simple consultation ne le prolonge pas.
+Retour d’une conversation à l’état actif, sans relancer l’agent, les envois annulés ni les liens publics révoqués.
 
 **Agent de code** :
 Le moteur qui exécute le travail d’un agent : Codex (OpenAI) ou Claude Code (Anthropic). Chaque agent en choisit un, et une conversation peut en changer d’un message à l’autre.

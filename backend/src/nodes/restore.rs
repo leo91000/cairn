@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
 pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Result<()> {
     let _operation = s.node_backup_operation.lock().await;
-    let manifest = super::backups::manifest(s, backup).await?;
+    let manifest = super::publication::manifest(s, backup).await?;
     let policy = s.get("nodes", node).await?["storage"].clone();
     let lazy = policy["enabled"] == true;
     let credential = if lazy {
@@ -77,14 +77,14 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
             .filter_map(Value::as_str)
         {
             let backup = s.get("node-backups", id).await?;
-            let manifest = super::backups::manifest(s, &backup).await?;
+            let manifest = super::publication::manifest(s, &backup).await?;
             if manifest["blocks"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|b| b["hash"] == hash)
             {
-                let bytes = super::backups::read_block(s, &backup, hash).await?;
+                let bytes = super::publication::read_block(s, &backup, hash).await?;
                 return Ok((
                     [("content-length", bytes.len().to_string())],
                     Body::from(bytes),
@@ -120,7 +120,7 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
         .uri()
         .path()
         .trim_start_matches("/internal/node-restore/");
-    let manifest = super::backups::manifest(s, &backup).await?;
+    let manifest = super::publication::manifest(s, &backup).await?;
     if !manifest["blocks"]
         .as_array()
         .unwrap()
@@ -129,7 +129,7 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
     {
         return Err(Error::new(403, "Block outside restore scope."));
     }
-    let bytes = super::backups::read_block(s, &backup, hash).await?;
+    let bytes = super::publication::read_block(s, &backup, hash).await?;
     Ok((
         [("content-length", bytes.len().to_string())],
         Body::from(bytes),

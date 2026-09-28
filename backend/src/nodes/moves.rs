@@ -86,7 +86,7 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
     }
     let wait = args["waitSeconds"].as_u64().unwrap_or(0);
     if wait
-        > super::backups::settings(s).await?["maxCapacityWaitSeconds"]
+        > super::publication::settings(s).await?["maxCapacityWaitSeconds"]
             .as_u64()
             .unwrap_or(3600)
     {
@@ -283,7 +283,7 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
         let mut selecting = current.clone();
         selecting["placementTransition"] = true.into();
         selecting["requiredRuntime"] =
-            super::backups::manifest(s, &backup).await?["runtime"]["runtimeId"].clone();
+            super::publication::manifest(s, &backup).await?["runtime"]["runtimeId"].clone();
         let reservation = id();
         let selected = match super::placement::reserve(s, &selecting, &reservation).await {
             Ok(value) => value,
@@ -310,7 +310,7 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
             if s.get("nodes", text(movement, "nodeId")).await?["storage"]["enabled"] == true {
                 capturing["storageRequested"] = true.into();
             }
-            let point = super::backups::capture(s, &capturing).await?;
+            let point = super::publication::capture(s, &capturing).await?;
             s.get("node-backups", text(&point, "id")).await?
         };
         s.store
@@ -421,18 +421,20 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
 }
 pub async fn latest(s: &Service, run: &str) -> Result<Option<Value>> {
     let _operation = s.node_backup_operation.lock().await;
-    let mut points = s
+    let current = s.store.run(run).await?;
+    let Some(head) = current["backup"]["id"].as_str() else {
+        return Ok(None);
+    };
+    let points = s
         .store
-        .list("node-backups")
+        .get("node-backups", head)
         .await?
         .into_iter()
-        .filter(|b| b["runId"] == run && b["sessionId"].is_string())
-        .collect::<Vec<_>>();
-    points.sort_by_key(|b| std::cmp::Reverse(b["capturedAt"].as_i64().unwrap_or(0)));
-    let demand = s.store.run(run).await?["storage"]["mode"] == "on-demand";
+        .filter(|point| point["runId"] == run && point["sessionId"].is_string());
+    let demand = current["storage"]["mode"] == "on-demand";
     for point in points {
         let usable = async {
-            let manifest = super::backups::manifest(s, &point).await?;
+            let manifest = super::publication::manifest(s, &point).await?;
             if demand && point["destination"] == "s3" {
                 // Publication already verified every immutable dependency. Each
                 // demand read verifies it again; do not hydrate the whole disk here.
@@ -443,7 +445,7 @@ pub async fn latest(s: &Service, run: &str) -> Result<Option<Value>> {
                 if let Some(hash) = block["hash"].as_str()
                     && checked.insert(hash.to_owned())
                 {
-                    let bytes = super::backups::read_block(s, &point, hash).await?;
+                    let bytes = super::publication::read_block(s, &point, hash).await?;
                     if bytes.len() as u64 != block["size"].as_u64().unwrap_or(0) {
                         return Err(Error::bad("Backup block size mismatch."));
                     }

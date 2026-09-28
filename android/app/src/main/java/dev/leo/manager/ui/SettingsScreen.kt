@@ -48,7 +48,6 @@ fun SettingsScreen(vm: LeoViewModel, state: Workspace) {
         }
         AppUpdateSettings()
         NotificationSettings(vm)
-        ConversationRetention(vm, state)
         settings?.let { info ->
             Panel {
                 Text("Connecter un assistant", style = MaterialTheme.typography.titleLarge)

@@ -131,12 +131,12 @@ abstract class NodePlacementCases {
             compose.waitUntil(10000) { compose.onAllNodesWithText("fixture-enrollment").fetchSemanticsNodes().isNotEmpty() }
             assertEquals("Nouvelle node", writes.first { it.first == "/api/nodes/enrollments" }.second["name"]?.jsonPrimitive?.content)
             compose.onNodeWithText("Masquer").performScrollTo().performClick()
-            compose.onNodeWithText("Avancé : sauvegardes et délais").performScrollTo().performClick()
-            compose.onNodeWithText("Configurer les sauvegardes").performScrollTo().performClick()
+            compose.onNodeWithText("Avancé : synchronisation et délais").performScrollTo().performClick()
+            compose.onNodeWithText("Configurer la synchronisation").performScrollTo().performClick()
             compose.waitUntil(10000) { compose.onAllNodesWithText("Intervalle (secondes)").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithText("Intervalle (secondes)").performTextReplacement("30")
             compose.onNodeWithText("Enregistrer").performClick()
-            compose.waitUntil(10000) { writes.any { it.first == "/api/nodes/settings" } && compose.onAllNodesWithText("Sauvegardes de VM").fetchSemanticsNodes().isEmpty() }
+            compose.waitUntil(10000) { writes.any { it.first == "/api/nodes/settings" } && compose.onAllNodesWithText("Synchronisation S3").fetchSemanticsNodes().isEmpty() }
             assertEquals(30, writes.first { it.first == "/api/nodes/settings" }.second["intervalSeconds"]!!.jsonPrimitive.int)
             compose.onNodeWithText("Configurer", substring = false).performScrollTo().performClick()
             compose.onNodeWithText("Plafond CPU").performTextReplacement("3")

@@ -1,5 +1,5 @@
 //! S3 operations stay server-side. Recovery blocks use a shared SDK client;
-//! infrequent cold archive operations still use the AWS CLI.
+//! bucket administration and purge operations use the AWS CLI.
 use crate::{
     error::{Error, Result},
     service::Service,
@@ -7,7 +7,7 @@ use crate::{
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    path::{Path, PathBuf},
+    path::Path,
     process::Stdio,
     sync::{Arc, Weak},
     time::Duration,
@@ -104,24 +104,32 @@ pub struct Storage {
     pub(crate) endpoint: Option<String>,
     region: String,
     hot: Arc<HotS3>,
-    /// AWS names its cold tier GLACIER; OVHcloud Cold Archive is DEEP_ARCHIVE.
-    cold_class: String,
 }
-fn setting(config: &Value, env: &str, key: &str) -> String {
-    std::env::var(env)
+fn setting(config: &Value, suffix: &str, key: &str) -> String {
+    std::env::var(format!("STORAGE_S3_{suffix}"))
         .ok()
         .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::env::var(format!("ARCHIVE_S3_{suffix}"))
+                .ok()
+                .filter(|v| !v.is_empty())
+        })
         .unwrap_or_else(|| config[key].as_str().unwrap_or("").into())
 }
 impl Storage {
     pub fn configured(s: &Service) -> Result<Self> {
-        let file = s.config.data_dir.join("archive-s3.json");
+        let primary = s.config.data_dir.join("storage-s3.json");
+        let file = if primary.exists() {
+            primary
+        } else {
+            s.config.data_dir.join("archive-s3.json")
+        };
         let config: Value = if file.exists() {
             serde_json::from_slice(&std::fs::read(file)?)?
         } else {
             json!({})
         };
-        let bucket = setting(&config, "ARCHIVE_S3_BUCKET", "bucket");
+        let bucket = setting(&config, "BUCKET", "bucket");
         if bucket.is_empty()
             || !bucket
                 .bytes()
@@ -129,33 +137,22 @@ impl Storage {
         {
             return Err(Error::new(
                 409,
-                "Configure a valid ARCHIVE_S3_BUCKET on the server.",
+                "Configure a valid STORAGE_S3_BUCKET on the server.",
             ));
         }
-        let endpoint = setting(&config, "ARCHIVE_S3_ENDPOINT", "endpoint");
+        let endpoint = setting(&config, "ENDPOINT", "endpoint");
         if !endpoint.is_empty() && !endpoint.starts_with("https://") {
             return Err(Error::new(
                 409,
-                "ARCHIVE_S3_ENDPOINT must be an https:// URL.",
+                "STORAGE_S3_ENDPOINT must be an https:// URL.",
             ));
         }
-        let cold_class =
-            match setting(&config, "ARCHIVE_S3_COLD_STORAGE_CLASS", "coldStorageClass").as_str() {
-                "" | "GLACIER" => "GLACIER",
-                "DEEP_ARCHIVE" => "DEEP_ARCHIVE",
-                _ => {
-                    return Err(Error::new(
-                        409,
-                        "ARCHIVE_S3_COLD_STORAGE_CLASS must be GLACIER or DEEP_ARCHIVE.",
-                    ));
-                }
-            };
         Ok(Self {
             bucket,
             binary: config["awsBinary"].as_str().unwrap_or("aws").into(),
             endpoint: Some(endpoint).filter(|e| !e.is_empty()),
             region: {
-                let configured = setting(&config, "ARCHIVE_S3_REGION", "region");
+                let configured = setting(&config, "REGION", "region");
                 if configured.is_empty() {
                     std::env::var("AWS_REGION")
                         .ok()
@@ -171,7 +168,6 @@ impl Storage {
                 }
             },
             hot: s.hot_s3.clone(),
-            cold_class: cold_class.into(),
         })
     }
     async fn call(&self, args: Vec<String>) -> Result<Value> {
@@ -194,7 +190,7 @@ impl Storage {
         }
         let output = tokio::time::timeout(Duration::from_secs(7200), command.output())
             .await
-            .map_err(|_| Error::new(503, "Archive storage operation timed out; it will retry."))?
+            .map_err(|_| Error::new(503, "Object storage operation timed out; it will retry."))?
             .map_err(|_| Error::new(503, "Unable to start the server's AWS CLI."))?;
         if !output.status.success()
             && missing.is_some_and(|code| String::from_utf8_lossy(&output.stderr).contains(code))
@@ -204,14 +200,14 @@ impl Storage {
         if !output.status.success() {
             return Err(Error::new(
                 503,
-                "Archive storage operation failed; local data is retained and the operation will retry.",
+                "Object storage operation failed; local data is retained and the operation will retry.",
             ));
         }
         if output.stdout.is_empty() {
             return Ok(Value::Null);
         }
         serde_json::from_slice(&output.stdout)
-            .map_err(|_| Error::new(503, "Invalid response from archive storage."))
+            .map_err(|_| Error::new(503, "Invalid response from object storage."))
     }
     pub async fn validate(&self) -> Result<()> {
         let block = self
@@ -258,7 +254,7 @@ impl Storage {
             .any(|r| r["Status"] == "Enabled")
         {
             return Err(Error::bad(
-                "Use a dedicated archive bucket without enabled lifecycle rules; Léo manages retention.",
+                "Use a dedicated storage bucket without lifecycle rules that could remove active disk blocks.",
             ));
         }
         let lock = self
@@ -327,31 +323,6 @@ impl Storage {
     }
     fn uri(&self, key: &str) -> String {
         format!("s3://{}/{key}", self.bucket)
-    }
-    pub async fn upload(&self, path: &Path, key: &str) -> Result<()> {
-        self.call(vec![
-            "s3".into(),
-            "cp".into(),
-            path.to_string_lossy().into(),
-            self.uri(key),
-            "--only-show-errors".into(),
-            "--sse".into(),
-            "AES256".into(),
-        ])
-        .await?;
-        Ok(())
-    }
-    pub async fn download(&self, key: &str, path: &Path) -> Result<()> {
-        self.call(vec![
-            "s3".into(),
-            "cp".into(),
-            self.uri(key),
-            path.to_string_lossy().into(),
-            "--only-show-errors".into(),
-            "--force-glacier-transfer".into(),
-        ])
-        .await?;
-        Ok(())
     }
     pub async fn upload_bytes(&self, bytes: Vec<u8>, key: &str) -> Result<()> {
         let _permit = self.hot.writes.acquire().await.map_err(Error::internal)?;
@@ -485,93 +456,84 @@ impl Storage {
             )
         })?
     }
-    pub async fn cold(&self, key: &str) -> Result<()> {
-        let head = self
-            .call(vec![
-                "s3api".into(),
-                "head-object".into(),
-                "--bucket".into(),
-                self.bucket.clone(),
-                "--key".into(),
-                key.into(),
-            ])
-            .await?;
-        if head["StorageClass"] != self.cold_class.as_str() {
-            self.call(vec![
-                "s3".into(),
-                "cp".into(),
-                self.uri(key),
-                self.uri(key),
-                "--storage-class".into(),
-                self.cold_class.clone(),
-                "--metadata-directive".into(),
-                "REPLACE".into(),
-                "--only-show-errors".into(),
-                "--sse".into(),
-                "AES256".into(),
-            ])
-            .await?;
+    /// Collect one immutable publication object, including versions and delete markers.
+    /// Exact-key filtering prevents a prefix match from deleting a sibling object.
+    /// Publication uses PutObject only, so this path has no multipart uploads to abort.
+    pub async fn purge_key(&self, key: &str) -> Result<()> {
+        use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+        let client = self
+            .hot
+            .client(self.endpoint.as_deref(), &self.region)
+            .await;
+        loop {
+            let page = client
+                .list_object_versions()
+                .bucket(&self.bucket)
+                .prefix(key)
+                .max_keys(1000)
+                .send()
+                .await
+                .map_err(|_| {
+                    Error::new(
+                        503,
+                        "Cannot list obsolete disk object versions; cleanup will retry.",
+                    )
+                })?;
+            let mut objects = Vec::new();
+            for (object_key, version) in page
+                .versions()
+                .iter()
+                .map(|v| (v.key(), v.version_id()))
+                .chain(
+                    page.delete_markers()
+                        .iter()
+                        .map(|v| (v.key(), v.version_id())),
+                )
+            {
+                if object_key == Some(key) {
+                    objects.push(
+                        ObjectIdentifier::builder()
+                            .key(key)
+                            .set_version_id(version.map(str::to_owned))
+                            .build()
+                            .map_err(Error::internal)?,
+                    );
+                }
+            }
+            if objects.is_empty() {
+                return Ok(());
+            }
+            {
+                let result = client
+                    .delete_objects()
+                    .bucket(&self.bucket)
+                    .delete(
+                        Delete::builder()
+                            .set_objects(Some(objects))
+                            .quiet(true)
+                            .build()
+                            .map_err(Error::internal)?,
+                    )
+                    .send()
+                    .await
+                    .map_err(|_| {
+                        Error::new(
+                            503,
+                            "Cannot delete obsolete disk object; cleanup will retry.",
+                        )
+                    })?;
+                if !result.errors().is_empty() {
+                    return Err(Error::new(
+                        503,
+                        "Some obsolete disk versions could not be deleted; cleanup will retry.",
+                    ));
+                }
+            }
+            // Start at this exact key again after deletion. This avoids keeping a
+            // pagination cursor that refers to a version we have just removed.
         }
-        let versions = self
-            .call(vec![
-                "s3api".into(),
-                "list-object-versions".into(),
-                "--bucket".into(),
-                self.bucket.clone(),
-                "--prefix".into(),
-                key.into(),
-            ])
-            .await?;
-        for version in versions["Versions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|v| v["Key"] == key && v["IsLatest"] == false)
-        {
-            self.call(vec![
-                "s3api".into(),
-                "delete-object".into(),
-                "--bucket".into(),
-                self.bucket.clone(),
-                "--key".into(),
-                key.into(),
-                "--version-id".into(),
-                version["VersionId"].as_str().unwrap_or("null").into(),
-            ])
-            .await?;
-        }
-        Ok(())
     }
-    pub async fn ready(&self, key: &str) -> Result<bool> {
-        let head = self
-            .call(vec![
-                "s3api".into(),
-                "head-object".into(),
-                "--bucket".into(),
-                self.bucket.clone(),
-                "--key".into(),
-                key.into(),
-            ])
-            .await?;
-        if head["StorageClass"] != self.cold_class.as_str() {
-            return Ok(true);
-        }
-        if let Some(restore) = head["Restore"].as_str() {
-            return Ok(restore.contains("ongoing-request=\"false\""));
-        }
-        self.call(vec![
-            "s3api".into(),
-            "restore-object".into(),
-            "--bucket".into(),
-            self.bucket.clone(),
-            "--key".into(),
-            key.into(),
-            "--restore-request".into(),
-            json!({"Days":3,"GlacierJobParameters":{"Tier":"Standard"}}).to_string(),
-        ])
-        .await?;
-        Ok(false)
-    }
+
     pub async fn purge(&self, prefix: &str) -> Result<()> {
         let listed = self
             .call(vec![
@@ -644,112 +606,6 @@ impl Storage {
     }
 }
 
-pub async fn hash(path: PathBuf) -> Result<String> {
-    tokio::task::spawn_blocking(move || {
-        use sha2::{Digest, Sha256};
-        use std::io::Read;
-        let mut input = std::fs::File::open(path)?;
-        let mut hash = Sha256::new();
-        let mut buffer = vec![0; 1024 * 1024];
-        loop {
-            let n = input.read(&mut buffer)?;
-            if n == 0 {
-                break;
-            }
-            hash.update(&buffer[..n]);
-        }
-        Ok(hex::encode(hash.finalize()))
-    })
-    .await
-    .map_err(Error::internal)?
-}
-
-/// Bounded authenticated frames. AAD binds every frame to its archive and position;
-/// an authenticated terminal frame makes truncation detectable, including at EOF.
-pub async fn crypt(
-    s: &Service,
-    input: PathBuf,
-    output: PathBuf,
-    archive: String,
-    decrypt: bool,
-) -> Result<()> {
-    let vault = s.vault.clone();
-    tokio::task::spawn_blocking(move || {
-        use base64::{Engine, engine::general_purpose::STANDARD};
-        use std::io::{BufRead, BufReader, Read, Write};
-        let mut source = BufReader::new(std::fs::File::open(input)?);
-        let mut target = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(output)?;
-        let mut index = 0u64;
-        loop {
-            let aad = format!("conversation-archive-v1:{archive}:{index}");
-            if decrypt {
-                let mut line = Vec::new();
-                source
-                    .by_ref()
-                    .take(4 * 1024 * 1024)
-                    .read_until(b'\n', &mut line)?;
-                if line.last() != Some(&b'\n') {
-                    return Err(Error::bad("Truncated or invalid archive."));
-                }
-                let value = vault.decrypt(&aad, &serde_json::from_slice::<Value>(&line)?)?;
-                if value["end"] == true {
-                    if !source.fill_buf()?.is_empty() {
-                        return Err(Error::bad("Unexpected archive trailer."));
-                    }
-                    break;
-                }
-                let bytes = STANDARD
-                    .decode(
-                        value["data"]
-                            .as_str()
-                            .ok_or_else(|| Error::bad("Invalid archive frame."))?,
-                    )
-                    .map_err(Error::internal)?;
-                target.write_all(&bytes)?;
-            } else {
-                let mut bytes = vec![0; 1024 * 1024];
-                let n = source.read(&mut bytes)?;
-                let value = if n == 0 {
-                    json!({"end":true})
-                } else {
-                    json!({"data":STANDARD.encode(&bytes[..n])})
-                };
-                serde_json::to_writer(&mut target, &vault.encrypt(&aad, &value)?)?;
-                target.write_all(b"\n")?;
-                if n == 0 {
-                    break;
-                }
-            }
-            index += 1;
-        }
-        target.sync_all()?;
-        Ok(())
-    })
-    .await
-    .map_err(Error::internal)?
-}
-
-pub async fn tar(args: Vec<String>) -> Result<()> {
-    let status = Command::new("tar")
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .status()
-        .await?;
-    if !status.success() {
-        return Err(Error::new(
-            503,
-            "Archive filesystem transfer failed; local data is retained.",
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -803,7 +659,6 @@ mod tests {
                 endpoint: Some(endpoint),
                 region: "us-east-1".into(),
                 hot,
-                cold_class: "GLACIER".into(),
             };
             let error = storage.download_bytes("block", 4096).await.unwrap_err();
             server.abort();

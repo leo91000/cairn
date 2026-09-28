@@ -13,7 +13,7 @@ import kotlinx.serialization.json.put
 @Serializable
 private data class Placement(val nodes: List<ExecutionNode> = emptyList(), val pinnedNodeId: String? = null, val preferredNodeId: String? = null)
 
-private val nodeStates = mapOf("pausing" to "Suspension de la VM", "saving" to "Sauvegarde de l’environnement", "restoring" to "Restauration de l’environnement", "resuming" to "Reprise de la conversation", "waiting-for-node" to "En attente d’une node compatible", "updating" to "Mise à jour de la node")
+private val nodeStates = mapOf("pausing" to "Suspension de la VM", "saving" to "Synchronisation de l’environnement", "restoring" to "Restauration de l’environnement", "resuming" to "Reprise de la conversation", "waiting-for-node" to "En attente d’une node compatible", "updating" to "Mise à jour de la node")
 
 @Composable
 fun NodePlacement(vm: LeoViewModel, run: Run) {
@@ -46,8 +46,8 @@ fun NodePlacement(vm: LeoViewModel, run: Run) {
     val current = placement.nodes.find { it.id == run.nodeId }?.name ?: if (run.nodeId == LOCAL_NODE_ID) "Runner du master" else "Node inconnue"
     Text("Node : $current" + (run.resources?.let { " · ${it.cpu} CPU · ${formatMiB(it.memoryMiB)} RAM" } ?: ""))
     run.nodeState?.let { Text(nodeStates[it] ?: it) }
-    run.backup?.capturedAt?.let { Text("Dernier état restaurable : ${relativeAge(it, now)}. Le chat peut être plus récent que les fichiers sauvegardés.") }
-    run.backup?.error?.let { Text("Sauvegarde : $it", color = MaterialTheme.colorScheme.error) }
+    run.backup?.capturedAt?.let { Text("Dernière synchronisation : ${relativeAge(it, now)}. Les modifications récentes peuvent être en attente de synchronisation.") }
+    run.backup?.error?.let { Text("Synchronisation : $it", color = MaterialTheme.colorScheme.error) }
     run.restoredAt?.let { Text("Reprise depuis un point du ${date(it)} ; le chat plus récent reste visible.") }
     run.capacityWaitUntil?.let { Text("Attente de capacité jusqu’à ${date(it)}") }
     if (run.pinnedNodeId != null) Text("Node fixe : aucune bascule automatique ailleurs.")

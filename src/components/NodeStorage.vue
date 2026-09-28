@@ -12,7 +12,7 @@ const error = ref('')
 const busy = ref(false)
 function open() {
   error.value = ''
-  policy.value = { enabled: false, cacheMiB: 102400, reserveMiB: 10240, reservePercent: 5, backupSeconds: 60, maxDirtySeconds: 300, automaticArchiving: false, ...props.node.storage }
+  policy.value = { enabled: false, cacheMiB: 102400, reserveMiB: 10240, reservePercent: 5, backupSeconds: 60, maxDirtySeconds: 300, ...props.node.storage }
 }
 async function save() {
   busy.value = true
@@ -39,9 +39,8 @@ async function save() {
       <label>Minimum free disk (MiB)<input v-model.number="policy.reserveMiB" type="number" min="64" max="16777216" required></label>
       <label>Minimum free disk (%)<input v-model.number="policy.reservePercent" type="number" min="1" max="50" required></label>
       <p>The larger free-space reserve applies. Unsaved work stays local; executions pause before the reserve is exhausted.</p>
-      <label>Backup target (seconds)<input v-model.number="policy.backupSeconds" type="number" min="5" max="3600" required></label>
+      <label>Synchronization target (seconds)<input v-model.number="policy.backupSeconds" type="number" min="5" max="3600" required></label>
       <label>Pause after unsaved changes (seconds)<input v-model.number="policy.maxDirtySeconds" type="number" :min="policy.backupSeconds" max="86400" required></label>
-      <label><input v-model="policy.automaticArchiving" type="checkbox"> Also apply automatic conversation archiving</label>
       <p v-if="node.storageMigration?.error" role="status">
         Migration: {{ node.storageMigration.error }}
       </p>

@@ -82,7 +82,7 @@ data class NodeConfiguration(
 data class NodeBackup(val id: String? = null, val capturedAt: Long? = null, val status: String = "", val error: String? = null, val uploadedBytes: Long? = null)
 
 @Serializable
-data class NodeBackupSettings(val destination: String = "master", val intervalSeconds: Long = 60, val retention: Int = 3, val budgetMiB: Long = 102400, val disconnectTimeoutSeconds: Long = 60, val shutdownTimeoutSeconds: Long = 300, val maxCapacityWaitSeconds: Long = 3600, val s3Configured: Boolean? = null)
+data class NodeSyncSettings(val intervalSeconds: Long = 60, val budgetMiB: Long = 102400, val disconnectTimeoutSeconds: Long = 60, val shutdownTimeoutSeconds: Long = 300, val maxCapacityWaitSeconds: Long = 3600, val s3Configured: Boolean? = null)
 
 fun formatMiB(value: Long): String {
     if (value < 1024) return "$value Mio"

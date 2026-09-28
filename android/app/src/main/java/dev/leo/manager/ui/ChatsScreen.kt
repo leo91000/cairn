@@ -132,14 +132,14 @@ internal fun ConversationList(
                 Box {
                     ActionIcon("Afficher les conversations", LeoIcons.More) { menu = true }
                     DropdownMenu(menu, { menu = false }) {
-                        listOf("active" to "Actives", "archives" to "Archives", "trash" to "Corbeille").forEach { (key, label) ->
+                        listOf("active" to "Actives", "trash" to "Corbeille").forEach { (key, label) ->
                             DropdownMenuItem(text = { Text(label) }, onClick = { view = key; menu = false })
                         }
                     }
                 }
                 ActionIcon("Nouvelle conversation", LeoIcons.Plus, onClick = create)
             }
-            if (view != "active") Text(if (view == "archives") "Archives" else "Corbeille", style = MaterialTheme.typography.labelMedium)
+            if (view != "active") Text("Corbeille", style = MaterialTheme.typography.labelMedium)
             SearchField("Rechercher une conversation", query) { query = it }
             if (loading || fetching) LinearProgressIndicator(Modifier.fillMaxWidth())
             (listError ?: error)?.let { Text(it, color = MaterialTheme.colorScheme.error) }
@@ -759,16 +759,13 @@ internal fun ChatPage(
                     Text(when (chat.lifecycle) {
                         "trash" -> "Cette conversation est dans la corbeille."
                         "purging" -> "Effacement en cours…"
-                        "restoring" -> "Restauration en cours…"
-                        "archiving" -> "Archivage en cours…"
-                        else -> "Cette conversation est archivée."
+                        else -> "Cette conversation est indisponible."
                     }, style = MaterialTheme.typography.titleLarge)
                     chat.purgeAt?.let { Text("Effacement prévu : ${date(it)}") }
-                    if (chat.storageClass == "GLACIER") Text("La restauration peut prendre plusieurs heures.")
                     chat.lifecycleError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                    if (chat.lifecycle in setOf("trash", "archived") || (chat.lifecycle == "restoring" && chat.lifecycleError != null)) Button(onClick = {
+                    if (chat.lifecycle == "trash") Button(onClick = {
                         vm.perform { api.request("POST", "/chats/${segment(chat.id)}/restore") }
-                    }, enabled = !state.busy) { Text(if (chat.lifecycle == "restoring") "Réessayer la restauration" else "Restaurer la conversation") }
+                    }, enabled = !state.busy) { Text("Restaurer la conversation") }
                 }
             } else Column(
                 Modifier.weight(1f)

@@ -364,50 +364,6 @@ pub async fn materialize(directory: &Path, stop: &CancellationToken) -> Result<(
     Ok(())
 }
 
-/// A cold archive streams the mounted view without another full raw disk copy.
-pub struct ExportMount {
-    pub path: PathBuf,
-    volume: Arc<Volume>,
-    mounted: Option<super::fuse::MountedDisk>,
-}
-impl ExportMount {
-    pub async fn close(mut self) -> Result<()> {
-        self.volume.stop.cancel();
-        if let Some(mounted) = self.mounted.take() {
-            tokio::task::spawn_blocking(move || mounted.close())
-                .await
-                .map_err(Error::internal)??;
-        }
-        std::fs::remove_dir(&self.path)?;
-        Ok(())
-    }
-}
-impl Drop for ExportMount {
-    fn drop(&mut self) {
-        self.volume.stop.cancel();
-        if let Some(mounted) = self.mounted.take() {
-            let path = self.path.clone();
-            // Cancellation of an async archive must not join a FUSE thread on
-            // the same Tokio worker its cancelled remote transfer needs.
-            std::thread::spawn(move || {
-                let _ = mounted.close();
-                let _ = std::fs::remove_dir(path);
-            });
-        }
-    }
-}
-pub async fn mount_export(directory: &Path) -> Result<ExportMount> {
-    let volume = load(directory).await?;
-    let path = directory.join(format!("export-{}", crate::config::id()));
-    std::fs::create_dir(&path)?;
-    let mounted = super::fuse::mount_disk(volume.disk.clone(), &path, unsafe { libc::geteuid() })?;
-    Ok(ExportMount {
-        path,
-        volume,
-        mounted: Some(mounted),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

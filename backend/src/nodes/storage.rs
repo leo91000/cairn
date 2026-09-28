@@ -49,7 +49,7 @@ fn record_volume(db: &crate::store::Db<'_>, run: &str, node: &str, status: &Valu
 pub async fn monitor(s: Arc<Service>) {
     loop {
         tokio::select! {_=s.shutdown.cancelled()=>return,_=tokio::time::sleep(Duration::from_secs(5))=>{}}
-        let _ = super::backups::maintain_local_cache(&s).await;
+        let _ = super::publication::maintain_local_cache(&s).await;
         let Ok(runs) = s.store.read(|db| db.active()).await else {
             continue;
         };
@@ -150,15 +150,15 @@ pub async fn migrate_one(s: &Service) -> Result<bool> {
             let status=controller(s,run_id,"storage-status",&json!({})).await?;
             if status["mode"]=="on-demand" {
                 if status["dirtyBytes"].as_u64().unwrap_or(0)>0 {
-                    run["storage"]=status;super::backups::capture(s,&run).await?;
+                    run["storage"]=status;super::publication::capture(s,&run).await?;
                     return controller(s,run_id,"storage-status",&json!({})).await;
                 }
                 return Ok(status);
             }
             run["storageRequested"]=true.into();run["storageMigrationCapture"]=true.into();
-            let point=super::backups::capture(s,&run).await?;
+            let point=super::publication::capture(s,&run).await?;
             let point=s.get("node-backups",text(&point,"id")).await?;
-            let manifest=super::backups::manifest(s,&point).await?;
+            let manifest=super::publication::manifest(s,&point).await?;
             // Only the installation shares the archive lock. Long S3 transfers
             // must not prevent unrelated conversations from being archived.
             let _storage=crate::conversation_lifecycle::storage_lock(&s.config.data_dir)?;

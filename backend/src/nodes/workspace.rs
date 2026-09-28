@@ -74,7 +74,7 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
     match *operation {
         "lease" => {
             let id = (*attempt).to_owned();
-            let lease_ms = super::backups::settings(s).await?["disconnectTimeoutSeconds"]
+            let lease_ms = super::publication::settings(s).await?["disconnectTimeoutSeconds"]
                 .as_u64()
                 .unwrap_or(60)
                 * 1000;

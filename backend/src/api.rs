@@ -80,8 +80,6 @@ pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
             s.enqueue(text(&run, "taskId"), "retry", None).await
         }
         ("GET", ["codex", "models"]) => s.models.list(s).await,
-        ("GET", ["conversation-retention"]) => s.retention_preview(if input.query.contains_key("inactivityDays") { Some(input.number("inactivityDays",30,1,3650)?) } else { None }).await,
-        ("PUT", ["conversation-retention"]) => s.retention_save(input.body.clone()).await,
         ("GET", ["chats"]) => Ok(s.chat_list_view(input.query.get("view").map(String::as_str).unwrap_or("active")).await?.into()),
         ("DELETE", ["chats", id]) => s.chat_trash(id, input.body["confirm"] == true).await,
         ("POST", ["chats", id, "new-session"]) => s.chat_new_session(id, input.body["confirm"] == true).await,

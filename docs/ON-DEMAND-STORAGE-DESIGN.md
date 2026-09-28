@@ -1,3 +1,5 @@
+> Révision du 28 septembre 2026 : les choix historiques sur l’archivage et la rétention sont remplacés par [la simplification de publication S3](STORAGE-SYNC-SIMPLIFICATION.md). Les garanties du journal et de lecture à la demande restent applicables.
+
 # Stockage des environnements et reprise à la demande
 
 Statut : conception validée le 27 septembre 2026 à la question Q9 de l'entretien
