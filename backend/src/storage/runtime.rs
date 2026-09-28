@@ -167,6 +167,44 @@ impl Volume {
         let volume = self.clone();
         blocking(move || Ok(!volume.health()?["waitingFor"].is_null())).await
     }
+    /// Called under the attempt's control lock, shared with checkpoint capture.
+    pub async fn enforce_limits(
+        self: &Arc<Self>,
+        state: &Path,
+        attempt: &str,
+        stop: &CancellationToken,
+    ) -> Result<()> {
+        use crate::microvm::host;
+        use std::time::Duration;
+        // A journal can be open while boot is still preparing the VM. Its
+        // execution identity is installed only after activation.
+        if matches!(
+            tokio::fs::try_exists(state.join(format!("{attempt}.vm.json"))).await,
+            Ok(false)
+        ) {
+            return Ok(());
+        }
+        let blocked = tokio::select! {
+            _ = stop.cancelled() => return Err(Error::new(409, "Execution stopped.")),
+            value = tokio::time::timeout(Duration::from_secs(1), self.needs_pause()) => value.ok().and_then(std::result::Result::ok).unwrap_or(true),
+        };
+        if blocked != self.paused() {
+            let result = if blocked {
+                host::pause_attempt(state, attempt).await
+            } else {
+                host::resume_attempt(state, attempt).await
+            };
+            if let Err(error) = result {
+                // Either command may have taken effect despite a lost response.
+                // Stop the attempt and release blocked reads for its shutdown.
+                stop.cancel();
+                self.stop.cancel();
+                return Err(error);
+            }
+            self.set_paused(blocked);
+        }
+        Ok(())
+    }
     fn policy(&self) -> io::Result<Policy> {
         let state = self
             .directory

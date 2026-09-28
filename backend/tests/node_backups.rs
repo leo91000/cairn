@@ -82,20 +82,68 @@ async fn holes_are_indexed_as_zero_blocks_without_reading_them() {
 
 #[tokio::test]
 async fn a_lost_pause_acknowledgement_resumes_and_thaws_before_returning_error() {
-    lost_pause_acknowledgement(false, false).await;
+    exercise_vm_control(ControlScenario::LegacyCapture).await;
 }
 
 #[tokio::test]
 async fn an_on_demand_lost_pause_acknowledgement_resumes_and_thaws_before_returning_error() {
-    lost_pause_acknowledgement(true, false).await;
+    exercise_vm_control(ControlScenario::DemandCapture).await;
 }
 
 #[tokio::test]
 async fn an_emergency_capture_with_unknown_pause_state_stops_the_attempt() {
-    lost_pause_acknowledgement(true, true).await;
+    exercise_vm_control(ControlScenario::EmergencyCapture).await;
 }
 
-async fn lost_pause_acknowledgement(on_demand: bool, emergency: bool) {
+#[derive(Clone, Copy)]
+enum ControlScenario {
+    LegacyCapture,
+    DemandCapture,
+    EmergencyCapture,
+    MonitorPause,
+    MonitorResume,
+    MonitorStarting,
+    MonitorHealthy,
+}
+
+#[tokio::test]
+async fn monitor_stops_unknown_cpu_state_after_a_lost_pause_acknowledgement() {
+    exercise_vm_control(ControlScenario::MonitorPause).await;
+}
+
+#[tokio::test]
+async fn monitor_stops_unknown_cpu_state_after_a_lost_resume_acknowledgement() {
+    exercise_vm_control(ControlScenario::MonitorResume).await;
+}
+
+#[tokio::test]
+async fn monitor_waits_for_vm_identity_during_boot() {
+    exercise_vm_control(ControlScenario::MonitorStarting).await;
+}
+
+#[tokio::test]
+async fn monitor_applies_and_releases_pressure_with_acknowledged_commands() {
+    exercise_vm_control(ControlScenario::MonitorHealthy).await;
+}
+
+async fn exercise_vm_control(case: ControlScenario) {
+    let on_demand = !matches!(case, ControlScenario::LegacyCapture);
+    let emergency = matches!(
+        case,
+        ControlScenario::EmergencyCapture
+            | ControlScenario::MonitorPause
+            | ControlScenario::MonitorStarting
+            | ControlScenario::MonitorHealthy
+    );
+    let resume_ack = matches!(case, ControlScenario::MonitorResume);
+    let lose_ack = !matches!(case, ControlScenario::MonitorHealthy);
+    let monitor = matches!(
+        case,
+        ControlScenario::MonitorPause
+            | ControlScenario::MonitorResume
+            | ControlScenario::MonitorStarting
+            | ControlScenario::MonitorHealthy
+    );
     use leo_agent_manager::{config::id, nodes::checkpoint};
     use serde_json::json;
     use std::sync::{
@@ -144,7 +192,7 @@ async fn lost_pause_acknowledgement(on_demand: bool, emergency: bool) {
     let api = root.path().join("jails/firecracker").join(vm).join("root");
     std::fs::create_dir_all(&api).unwrap();
     let controller = UnixListener::bind(api.join("api.sock")).unwrap();
-    let paused = Arc::new(AtomicBool::new(false));
+    let paused = Arc::new(AtomicBool::new(resume_ack));
     let state = paused.clone();
     let controller_task = tokio::spawn(async move {
         loop {
@@ -169,11 +217,11 @@ async fn lost_pause_acknowledgement(on_demand: bool, emergency: bool) {
                     .await
                     .unwrap();
                 let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                if value["state"] == "Paused" {
-                    state.store(true, Ordering::SeqCst);
+                let pause = value["state"] == "Paused";
+                state.store(pause, Ordering::SeqCst);
+                if lose_ack && pause != resume_ack {
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 } else {
-                    state.store(false, Ordering::SeqCst);
                     let _ = socket
                         .get_mut()
                         .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
@@ -207,6 +255,74 @@ async fn lost_pause_acknowledgement(on_demand: bool, emergency: bool) {
         }
     });
     let stop = tokio_util::sync::CancellationToken::new();
+    if monitor {
+        use leo_agent_manager::storage::{Disk, runtime};
+        let volume = runtime::load(&disk).await.unwrap();
+        volume.disk.write_at(0, b"unsaved").unwrap();
+        volume.set_paused(resume_ack);
+        if matches!(case, ControlScenario::MonitorStarting) {
+            std::fs::remove_file(root.path().join(format!("{attempt}.vm.json"))).unwrap();
+        }
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            volume.enforce_limits(root.path(), &attempt, &stop),
+        )
+        .await
+        .unwrap();
+        match case {
+            ControlScenario::MonitorStarting => {
+                result.unwrap();
+                assert!(!stop.is_cancelled());
+                assert!(!paused.load(Ordering::SeqCst));
+                assert!(!volume.paused());
+            }
+            ControlScenario::MonitorHealthy => {
+                result.unwrap();
+                assert!(volume.paused());
+                assert!(paused.load(Ordering::SeqCst));
+                std::fs::write(
+                    root.path().join("storage-policy.json"),
+                    serde_json::to_vec(&leo_agent_manager::storage::policy::Policy {
+                        reserve_mi_b: 64,
+                        reserve_percent: 1,
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+                volume
+                    .enforce_limits(root.path(), &attempt, &stop)
+                    .await
+                    .unwrap();
+                assert!(!volume.paused());
+                assert!(!paused.load(Ordering::SeqCst));
+                assert!(!stop.is_cancelled());
+                assert!(!volume.stop.is_cancelled());
+            }
+            _ => {
+                assert!(result.is_err());
+                assert_eq!(
+                    paused.load(Ordering::SeqCst),
+                    !resume_ack,
+                    "the VM applied the command even though its acknowledgement was lost"
+                );
+                assert!(
+                    stop.is_cancelled(),
+                    "an ambiguous monitor command must stop execution"
+                );
+                assert!(
+                    volume.stop.is_cancelled(),
+                    "blocked disk reads must be released for shutdown"
+                );
+            }
+        }
+        controller_task.abort();
+        guest_task.abort();
+        let mut saved = [0; 7];
+        volume.read_at(0, &mut saved).unwrap();
+        assert_eq!(&saved, b"unsaved");
+        return;
+    }
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         checkpoint::capture(

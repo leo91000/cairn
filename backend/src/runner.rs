@@ -278,19 +278,12 @@ impl Broker {
                         if expiry.is_cancelled() {
                             break;
                         }
-                        let blocked = tokio::select! {
-                            _ = expiry.cancelled() => break,
-                            value = tokio::time::timeout(Duration::from_secs(1), volume.needs_pause()) => value.ok().and_then(std::result::Result::ok).unwrap_or(true),
-                        };
-                        if blocked != volume.paused() {
-                            let result = if blocked {
-                                host::pause_attempt(&owner.state, &attempt).await
-                            } else {
-                                host::resume_attempt(&owner.state, &attempt).await
-                            };
-                            if result.is_ok() {
-                                volume.set_paused(blocked);
-                            }
+                        if volume
+                            .enforce_limits(&owner.state, &attempt, &expiry)
+                            .await
+                            .is_err()
+                        {
+                            break;
                         }
                     }
                     tokio::time::sleep(Duration::from_millis(500)).await;

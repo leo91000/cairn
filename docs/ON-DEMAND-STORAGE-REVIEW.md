@@ -109,3 +109,22 @@ remplacement et la libération de la réservation en cas d'échec.
 La contre-revue doit examiner les commits publiés, y compris les nouveaux chemins
 de concurrence. La validation avec deux hôtes physiques et un vrai S3 reste une
 limite opérationnelle distincte ; elle n'est pas revendiquée par ces fixtures.
+
+### Deuxième tour
+
+Le run `0189eb08-ae33-47e5-93ee-832272b690b4` confirme STD-02, SPEC-A1,
+SPEC-R2 et SPEC-R3 dans les chemins examinés. Il relève deux corrections
+incomplètes : les barrières de restauration classique dans la PR nodes seule
+(STD-01) et les acquittements perdus du moniteur périodique (SPEC-R1).
+
+Les deux barrières restantes de restauration utilisent désormais Tokio. Le
+moniteur passe par `Volume::enforce_limits`, appelé sous le verrou de contrôle
+de l'exécution. Une erreur de pause ou de reprise annule l'exécution et libère
+les lectures bloquées pour permettre son arrêt, tout en conservant le journal.
+Le moniteur attend l'installation de l'identité VM avant d'agir sur les CPU.
+
+Les deux pertes d'acquittement ont été reproduites avant correction par les
+tests du client de contrôle réel avec un socket Unix simulant Firecracker.
+La fixture couvre aussi le démarrage sans identité VM et le cycle normal
+pression, pause, libération d'espace, reprise. Le test simulé indépendant et
+ces tests HTTP ne constituent pas une validation avec deux hôtes physiques.
