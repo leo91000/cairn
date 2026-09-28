@@ -131,10 +131,10 @@ applicative supplémentaire. Une panne de lecture distante reporte la capture.
 L'activation vérifie la configuration S3 existante (notamment l'absence de règle de
 cycle de vie indépendante) et réalise un montage, une écriture et une
 synchronisation FUSE avec l'identité du contrôleur. Sur les installations Compose,
-`LEO_NODE_FUSE=1` lors de la génération du déploiement expose `/dev/fuse` ; les
-configurations existantes qui l'exposent le conservent. Le superviseur des nodes
-expose ce périphérique lorsqu'il est présent sur l'hôte. Les nodes sans FUSE
-continuent à prendre en charge les disques historiques.
+le déploiement expose `/dev/fuse` au runner, y compris pour les configurations
+existantes qui ne l'exposaient pas. Le superviseur des nodes expose également ce
+périphérique lorsqu'il est présent sur l'hôte. Les nouvelles conversations exigent
+FUSE sur toutes les nodes.
 
 
 ## Migration et cycle de vie (quatrième PR)

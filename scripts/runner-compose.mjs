@@ -1,6 +1,5 @@
 // Preserve the service document, including any secret expressions, while adding
 // the persistent storage required by the runner's stop markers.
-import process from 'node:process'
 import { parseDocument } from 'yaml'
 
 export function persistentRunnerCompose(compose) {
@@ -127,7 +126,7 @@ export function firecrackerRunnerCompose(compose) {
     cap_drop: ['ALL'],
     cap_add: ['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'],
     security_opt: ['apparmor:unconfined', 'seccomp:unconfined'],
-    devices: ['/dev/kvm:/dev/kvm', '/dev/net/tun:/dev/net/tun', ...(process.env.LEO_NODE_FUSE === '1' || runner.get('devices')?.toJSON()?.some(device => typeof device === 'string' && device.split(':')[0] === '/dev/fuse') ? ['/dev/fuse:/dev/fuse'] : [])],
+    devices: ['/dev/kvm:/dev/kvm', '/dev/fuse:/dev/fuse', '/dev/net/tun:/dev/net/tun'],
     sysctls: { 'net.ipv4.ip_forward': '1', 'net.ipv6.conf.all.disable_ipv6': '1' },
     tmpfs: ['/run', '/tmp'],
     environment: { DATA_DIR: '/data', CONCURRENCY: concurrency },
