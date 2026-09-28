@@ -79,8 +79,16 @@ export async function storageSmoke({ root, docker, name, api, until, storageFixt
     }
     catch { return '' }
   }
-  const ready = id => until(async () => (await logs(id)).includes('storage.ready'))
   const status = async () => (await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json())
+  async function ready(id) {
+    try {
+      await until(async () => (await logs(id)).includes('storage.ready'))
+    }
+    catch (error) {
+      console.error({ runId, attempt: id, storage: await status(), guest: await logs(id) })
+      throw error
+    }
+  }
   async function stop(id) {
     await api(`/runs/${id}`, 'DELETE')
     await until(async () => (await (await api('/health')).json()).activeRuns === 0)

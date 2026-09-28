@@ -248,6 +248,8 @@ console.log('probe.done');
               if (text.includes('probe.pause') && mode === 'crash') {
                 docker('kill', '--signal', 'KILL', name)
                 docker('start', name)
+                // The test origin is an exec process, so container restart killed it too.
+                docker('exec', '-d', name, '/usr/local/bin/node', '/data/storage-fixture/server.mjs')
                 url = `http://${await until(() => {
                   try {
                     return docker('port', name, '4311/tcp')
