@@ -164,8 +164,11 @@ mod tests {
             reserve_percent: 1,
             ..Default::default()
         };
-        let context =
-            json!({ "master": "http://127.0.0.1:1/", "grant": "fixture", "policy": policy });
+        let context = json!({
+            "master": "http://127.0.0.1:1/",
+            "grant": "fixture",
+            "policy": policy
+        });
         let stop = CancellationToken::new();
         prepare(&directory, 128 * 1024 * 1024, &context, &stop)
             .await

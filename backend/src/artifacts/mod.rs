@@ -327,7 +327,10 @@ async fn export(s: &Service, run_id: &str, attempt: &str, path: &str) -> Result<
         .http
         .post(format!("{node}/runs/{attempt}/artifact"))
         .bearer_auth(credential)
-        .json(&json!({ "runId": run_id, "path": path }))
+        .json(&json!({
+            "runId": run_id,
+            "path": path
+        }))
         .timeout(Duration::from_secs(300))
         .send()
         .await

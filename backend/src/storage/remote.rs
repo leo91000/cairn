@@ -203,7 +203,10 @@ mod tests {
         let stop = CancellationToken::new();
         let source = Arc::new(
             RemoteSource::new(
-                &json!({ "master": origin, "grant": "fixture-scoped-token" }),
+                &json!({
+                    "master": origin,
+                    "grant": "fixture-scoped-token"
+                }),
                 tokio::runtime::Handle::current(),
                 stop.clone(),
             )

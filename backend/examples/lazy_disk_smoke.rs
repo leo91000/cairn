@@ -325,7 +325,11 @@ fn patch_drive(socket: &Path) -> Result<(), Failure> {
     use std::os::unix::net::UnixStream;
     let mut stream = UnixStream::connect(socket)?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    let body = json!({ "drive_id": "data", "path_on_host": "disk/data.ext4" }).to_string();
+    let body = json!({
+        "drive_id": "data",
+        "path_on_host": "disk/data.ext4"
+    })
+    .to_string();
     write!(
         stream,
         "PATCH /drives/data HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -411,7 +415,11 @@ async fn cancelled_boot(assets: &Path) -> Result<(), Failure> {
             directory,
             41,
             &stopping,
-            Some(&json!({ "cpu": 1, "memoryMiB": 128, "diskMiB": 256 })),
+            Some(&json!({
+                "cpu": 1,
+                "memoryMiB": 128,
+                "diskMiB": 256
+            })),
         )
         .await
     });

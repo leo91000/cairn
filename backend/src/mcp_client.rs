@@ -34,7 +34,10 @@ pub const LEGACY: &str = "2025-11-25";
 const MAX_TOOLS: usize = 1000;
 
 pub fn client_info() -> Value {
-    json!({ "name": "leo-mcp-client", "version": env!("CARGO_PKG_VERSION") })
+    json!({
+        "name": "leo-mcp-client",
+        "version": env!("CARGO_PKG_VERSION")
+    })
 }
 
 /// Request `_meta` that replaces the `initialize` handshake in the modern protocol.

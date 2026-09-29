@@ -135,7 +135,11 @@ async fn import(
 ) -> Result<Value> {
     let credential = crate::execution::secret(&s.config.data_dir, "runner-secret").await?;
     let node = crate::nodes::transport::url(s, text(run, "id")).await?;
-    let body = json!({ "runId": run["id"], "source": entry["path"], "target": entry["path"] });
+    let body = json!({
+        "runId": run["id"],
+        "source": entry["path"],
+        "target": entry["path"]
+    });
     let response = s
         .http
         .post(format!("{node}/runs/{attempt}/projects/{project_id}"))

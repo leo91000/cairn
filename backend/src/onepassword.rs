@@ -441,7 +441,11 @@ mod tests {
         .unwrap();
         let task = s
             .task(
-                json!({ "name": "Probe", "agentId": MAIN_AGENT_ID, "prompt": "Hello" }),
+                json!({
+                    "name": "Probe",
+                    "agentId": MAIN_AGENT_ID,
+                    "prompt": "Hello"
+                }),
                 None,
             )
             .await
@@ -460,7 +464,12 @@ mod tests {
     }
 
     fn account() -> Value {
-        json!({ "name": "Production", "token": "ops_fixture", "enabled": true, "agentIds": [] })
+        json!({
+            "name": "Production",
+            "token": "ops_fixture",
+            "enabled": true,
+            "agentIds": []
+        })
     }
 
     #[tokio::test]
@@ -516,7 +525,11 @@ mod tests {
                 call_with_binary(
                     &s,
                     &bearer,
-                    &json!({ "operation": operation, "accountId": id, "vault": "vault" }),
+                    &json!({
+                        "operation": operation,
+                        "accountId": id,
+                        "vault": "vault"
+                    }),
                     &binary
                 )
                 .await
@@ -644,8 +657,12 @@ mod tests {
         }));
         assert!(!fields.to_string().contains("hidden-secret"));
         assert_eq!(fields["fields"][0]["reference"], "op://vault/item/password");
-        let args = arguments(&json!({ "operation": "fields", "vault": "vault", "item": "--help" }))
-            .unwrap();
+        let args = arguments(&json!({
+            "operation": "fields",
+            "vault": "vault",
+            "item": "--help"
+        }))
+        .unwrap();
         assert_eq!(&args[4..], &["--", "--help"]);
         assert_eq!(
             crate::run_output::redact("ops_abcdefghijklmnopq", &[]),
@@ -657,13 +674,20 @@ mod tests {
         );
         for input in [
             json!({ "operation": "write" }),
-            json!({ "operation": "read", "reference": "--out-file=/tmp/leak" }),
+            json!({
+                "operation": "read",
+                "reference": "--out-file=/tmp/leak"
+            }),
             json!({ "operation": "items" }),
         ] {
             assert!(arguments(&input).is_err());
         }
         assert_eq!(
-            arguments(&json!({ "operation": "items", "vault": "--help" })).unwrap()[2],
+            arguments(&json!({
+                "operation": "items",
+                "vault": "--help"
+            }))
+            .unwrap()[2],
             "--vault=--help"
         );
     }

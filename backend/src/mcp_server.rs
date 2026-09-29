@@ -234,7 +234,10 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
         .or_else(|| body["params"]["_meta"][PROTOCOL_META].as_str())
         .unwrap_or(DEFAULT_VERSION);
     if !VERSIONS.contains(&version) {
-        let data = json!({ "requested": version, "supported": VERSIONS });
+        let data = json!({
+            "requested": version,
+            "supported": VERSIONS
+        });
         let frame = Frame::error(
             id,
             UNSUPPORTED_VERSION,
@@ -307,9 +310,16 @@ async fn dispatch(
     } else {
         "leo-agent-manager"
     };
-    let server_info = json!({ "name": name, "version": env!("CARGO_PKG_VERSION") });
+    let server_info = json!({
+        "name": name,
+        "version": env!("CARGO_PKG_VERSION")
+    });
     let capabilities = if gateway {
-        json!({ "tools": {}, "resources": {}, "prompts": {} })
+        json!({
+            "tools": {},
+            "resources": {},
+            "prompts": {}
+        })
     } else {
         json!({ "tools": {} })
     };
@@ -444,7 +454,10 @@ fn run_record_preview(record: Value, fields: &[&str]) -> Result<(Value, usize)> 
     if bytes <= RUN_PAGE_BYTES {
         return Ok((record, bytes));
     }
-    let mut preview = json!({ "truncated": true, "totalBytes": bytes });
+    let mut preview = json!({
+        "truncated": true,
+        "totalBytes": bytes
+    });
     let mut bytes = serde_json::to_vec(&preview)?.len();
     for field in fields {
         if let Some(value) = record.get(*field) {
