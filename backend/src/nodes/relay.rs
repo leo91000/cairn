@@ -115,6 +115,7 @@ fn route(method: &str, path: &str) -> Result<()> {
         ["snapshots", id, hash] => {
             crate::validation::uuid(id).is_ok()
                 && ((method == "GET" && super::snapshots::valid_hash(hash))
+                    || (method == "POST" && *hash == "blocks")
                     || (method == "DELETE" && *hash == "discard"))
         }
         ["runs", id] => crate::validation::uuid(id).is_ok() && ["POST", "DELETE"].contains(&method),
@@ -262,7 +263,10 @@ async fn forward(
     send(client, master, token, &head).await?;
     // Bulk data uses one continuous, backpressured request. Keep control/log
     // frames and old masters on the existing protocol (including /wait's result).
-    if command["streamBody"] == true && method == "GET" && (path.starts_with("/snapshots/")) {
+    if command["streamBody"] == true
+        && path.starts_with("/snapshots/")
+        && (method == "GET" || (method == "POST" && path.ends_with("/blocks")))
+    {
         use futures_util::StreamExt;
         let chunks =
             futures_util::stream::try_unfold(response.bytes_stream(), |mut stream| async move {

@@ -114,10 +114,11 @@ async fn forget_baseline(s: &Service, run_id: &str) -> Result<()> {
 async fn publish(s: &Service, run: &Value) -> Result<Value> {
     let mut timing =
         crate::performance::Operation::new("disk_publication", text(run, "id"), "queue");
-    let _operation = s.node_backup_operation.lock().await;
-    timing.next("collect_before");
     let run_id = text(run, "id");
     crate::validation::uuid(run_id)?;
+    let _operation = s.node_backup_operation.lock(run_id).await;
+    let _transfer = s.node_backup_operation.transfer().await;
+    timing.next("collect_before");
     let checkpoint = s
         .store
         .kv(&format!("run-checkpoint:{run_id}"))
@@ -169,6 +170,7 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
         let published = published_blocks(s, run_id, &storage).await?;
         let mut seen = HashSet::new();
         let mut uploaded = 0u64;
+        let admission = s.node_backup_lock.lock().await;
         let occupied = used(s).await?;
         let budget = settings["budgetMiB"].as_u64().unwrap_or(102400) * 1024 * 1024;
         // Durable upload intent: the complete block inventory exists before any PUT.
@@ -206,7 +208,28 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
         for parent in directory.ancestors().take(3) {
             tokio::fs::File::open(parent).await?.sync_all().await?;
         }
+        drop(admission);
         let mut uploads = tokio::task::JoinSet::<Result<()>>::new();
+        let mut requested = HashSet::new();
+        let missing = manifest["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|block| {
+                let hash = block["hash"].as_str()?;
+                let size = block["size"].as_u64()?;
+                (published.get(hash).copied() != Some(size)
+                    && !directory.join("blocks").join(hash).exists()
+                    && requested.insert(hash.to_owned()))
+                    .then(|| (hash.to_owned(), size))
+            })
+            .collect();
+        let mut reads = snapshots::Fetch::new(
+            s.http.clone(),
+            format!("{base}/snapshots/{snapshot_id}"),
+            credential.clone(),
+            missing,
+        );
         timing.next("transfer_blocks");
         for block in manifest["blocks"].as_array().unwrap() {
             let Some(hash) = block["hash"].as_str() else {
@@ -223,18 +246,7 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
             }
             let mut verified = false;
             if !file.exists() {
-                let response = s
-                    .http
-                    .get(format!("{base}/snapshots/{snapshot_id}/{hash}"))
-                    .bearer_auth(&credential)
-                    .timeout(Duration::from_secs(120))
-                    .send()
-                    .await
-                    .map_err(|_| Error::new(503, "Backup block transfer interrupted."))?;
-                if !response.status().is_success() {
-                    return Err(Error::new(503, "Backup block unavailable."));
-                }
-                let bytes = super::snapshots::response_block(response).await?;
+                let bytes = reads.block(hash).await?;
                 if bytes.len() as u64 != block["size"].as_u64().unwrap()
                     || hex::encode(Sha256::digest(&bytes)) != hash
                 {
@@ -505,7 +517,7 @@ async fn decode_block(s: &Service, run: &str, hash: &str, encoded: Vec<u8>) -> R
 /// The local controller owns the configured node cache. Retire duplicate S3
 /// payloads on the master.
 pub async fn maintain_local_cache(s: &Service) -> Result<()> {
-    let Ok(_operation) = s.node_backup_operation.try_lock() else {
+    let Some(_operation) = s.node_backup_operation.try_cache_eviction() else {
         return Ok(());
     };
     let _guard = s.node_backup_lock.lock().await;
@@ -594,9 +606,17 @@ async fn used(s: &Service) -> Result<u64> {
         if !path.exists() {
             continue;
         }
-        let mut entries = tokio::fs::read_dir(path).await?;
+        let mut entries = match tokio::fs::read_dir(path).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
         while let Some(entry) = entries.next_entry().await? {
-            let meta = entry.metadata().await?;
+            let meta = match entry.metadata().await {
+                Ok(meta) => meta,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
             if meta.is_dir() {
                 pending.push(entry.path());
             } else {
@@ -610,13 +630,13 @@ async fn used(s: &Service) -> Result<u64> {
 /// Remove superseded publications only after every disk has released its read grant.
 /// This also serves idle disks: cleanup must not depend on another guest write.
 pub async fn collect(s: &Service, run: &str) -> Result<()> {
-    let _operation = s.node_backup_operation.lock().await;
+    let _operation = s.node_backup_operation.lock(run).await;
     collect_unused(s, run).await
 }
 
 async fn collect_unused(s: &Service, run: &str) -> Result<()> {
     let mut timing = crate::performance::Operation::new("disk_collection", run, "reader_lock");
-    let _readers = s.node_disk_reads.write().await;
+    let _readers = s.node_backup_operation.drain(run).await;
     timing.next("inventory");
     let pinned = super::disk_grants::pinned(s, run).await?;
     let _guard = s.node_backup_lock.lock().await;
@@ -657,9 +677,9 @@ async fn collect_unused(s: &Service, run: &str) -> Result<()> {
             }
         }
     }
-    // Readers of retired grants have drained. The operation lock still serializes
-    // publication/restoration; release cache/read locks before remote deletion so
-    // unrelated mounted disks can keep reading while S3 cleanup is slow.
+    // Readers of retired grants have drained. This disk's operation lock still
+    // excludes publication/restoration; release cache/read locks before remote
+    // deletion so the current generation remains readable during cleanup.
     drop(_guard);
     drop(_readers);
     timing.next("delete_objects");
@@ -822,32 +842,25 @@ async fn collection_runs(s: &Service) -> Result<HashSet<String>> {
 pub async fn maintain(s: std::sync::Arc<Service>) {
     let mut last = std::collections::HashMap::<String, i64>::new();
     let mut last_cleanup = 0;
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut active = HashMap::<String, tokio::task::AbortHandle>::new();
+    let mut cleanup = HashSet::new();
     loop {
         tokio::select! {
             _ = s.shutdown.cancelled() => break,
             _ = tokio::time::sleep(Duration::from_secs(5)) => {}
         }
+        while tasks.try_join_next().is_some() {}
+        active.retain(|_, task| !task.is_finished());
         if now() - last_cleanup >= 60_000 {
             last_cleanup = now();
             if let Ok(runs) = collection_runs(&s).await {
-                for run in runs {
-                    tokio::select! {
-                        _ = s.shutdown.cancelled() => return,
-                        result = collect(&s, &run) => {
-                            if let Err(error) = result {
-                                let _ = s
-                                    .store
-                                    .audit("disk.cleanup_failed", json!({"runId": run,"message": error.message}))
-                                    .await;
-                            }
-                        }
-                    }
-                }
+                cleanup.extend(runs);
             }
         }
         let settings = settings(&s).await.unwrap_or_default();
         let interval = settings["intervalSeconds"].as_i64().unwrap_or(60) * 1000;
-        if let Ok(runs) = s
+        if let Ok(mut runs) = s
             .store
             .read(|db| {
                 db.json_rows(
@@ -860,9 +873,16 @@ pub async fn maintain(s: std::sync::Arc<Service>) {
             })
             .await
         {
+            // Oldest scheduling time first, so a busy early row cannot starve
+            // conversations beyond the bounded worker slots.
+            runs.sort_by_key(|run| last.get(text(run, "id")).copied().unwrap_or(0));
             for run in runs {
+                if tasks.len() >= super::coordination::SYNC_CONCURRENCY {
+                    break;
+                }
                 let id = text(&run, "id");
-                if !protected(&run)
+                if active.contains_key(id)
+                    || !protected(&run)
                     || run["isolated"] != true
                     || (!run["sessionId"].is_string() && run["storage"]["mode"] != "on-demand")
                     || run["moveRequest"].is_object()
@@ -886,8 +906,40 @@ pub async fn maintain(s: std::sync::Arc<Service>) {
                     continue;
                 }
                 last.insert(id.into(), now());
-                tokio::select! {_ = s.shutdown.cancelled() => return,_ = attempt(&s,&run) => {}}
+                cleanup.remove(id);
+                let run_id = id.to_owned();
+                let s = s.clone();
+                let task = tasks.spawn(async move {
+                    attempt(&s, &run).await;
+                });
+                active.insert(run_id, task);
             }
+        }
+        let remaining = super::coordination::SYNC_CONCURRENCY.saturating_sub(tasks.len());
+        let ready: Vec<_> = cleanup
+            .iter()
+            .filter(|run| !active.contains_key(*run))
+            .take(remaining)
+            .cloned()
+            .collect();
+        for run in ready {
+            cleanup.remove(&run);
+            let run_id = run.clone();
+            let s = s.clone();
+            let task = tasks.spawn(async move {
+                if let Err(error) = collect(&s, &run).await {
+                    let _ = s
+                        .store
+                        .audit(
+                            "disk.cleanup_failed",
+                            json!({
+                                "runId": run, "message": error.message
+                            }),
+                        )
+                        .await;
+                }
+            });
+            active.insert(run_id, task);
         }
     }
 }
@@ -930,8 +982,8 @@ pub async fn purge(s: &Service, run: &str) -> Result<()> {
         return Ok(());
     }
     crate::validation::uuid(run)?;
-    let _operation = s.node_backup_operation.lock().await;
-    let _readers = s.node_disk_reads.write().await;
+    let _operation = s.node_backup_operation.lock(run).await;
+    let _readers = s.node_backup_operation.drain(run).await;
     let points = s.store.node_backups_for_run(run).await?;
     let mut locations = points
         .iter()
