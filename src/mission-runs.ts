@@ -17,7 +17,7 @@ watch(() => state.authenticated, (signedIn) => {
 
 // Only while signed in: a request racing sign-in or sign-out must not reset the session.
 export async function refreshMissionRuns() {
-  if (!state.authenticated || state.signingOut)
+  if (!state.authenticated || state.signingOut || state.redirecting)
     return
   fetchedAt = Date.now()
   try {

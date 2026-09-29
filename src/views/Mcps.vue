@@ -3,7 +3,7 @@ import type { McpInput, McpView } from '../../shared/mcp'
 import { twMerge } from 'tailwind-merge'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { api, date, notify, state } from '../api'
+import { api, date, notify, redirect, state } from '../api'
 import Empty from '../components/Empty.vue'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
@@ -107,7 +107,7 @@ async function action(item: McpView, kind: 'test' | 'connect') {
   try {
     const result = await api(`/mcps/${item.id}/${kind}`, { method: 'POST' })
     if (kind === 'connect') {
-      window.location.assign(result.url)
+      redirect(result.url)
       return
     }
     await load()

@@ -5,7 +5,7 @@ import { createMcpHandler, McpServer } from '@modelcontextprotocol/server'
 import Fastify from 'fastify'
 import { z } from 'zod'
 
-export async function mcpProvider(options: { clientSecret?: string } = {}) {
+export async function mcpProvider(options: { clientSecret?: string, beforeAuthorize?: () => Promise<void> } = {}) {
   // The manager outlives this fixture and can retain HTTP/SSE connections.
   // Closing the provider must also close those sockets, without waiting for the client.
   const app = Fastify({ forceCloseConnections: true })
@@ -20,7 +20,8 @@ export async function mcpProvider(options: { clientSecret?: string } = {}) {
   app.get('/.well-known/oauth-protected-resource', metadata)
   app.get('/.well-known/oauth-authorization-server', () => ({ issuer: origin, authorization_endpoint: `${origin}/authorize`, token_endpoint: `${origin}/token`, registration_endpoint: `${origin}/register`, response_types_supported: ['code'], grant_types_supported: ['authorization_code', 'refresh_token'], token_endpoint_auth_methods_supported: ['none', 'client_secret_post'], code_challenge_methods_supported: ['S256'], authorization_response_iss_parameter_supported: true }))
   app.post('/register', request => ({ ...(request.body as object), client_id: 'fixture-client' }))
-  app.get('/authorize', (request, reply) => {
+  app.get('/authorize', async (request, reply) => {
+    await options.beforeAuthorize?.()
     const query = request.query as Record<string, string>
     challenge = query.code_challenge
     const callback = new URL(query.redirect_uri)

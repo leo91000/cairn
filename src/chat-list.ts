@@ -14,7 +14,7 @@ export function publishChats(chats: ChatView[]) {
 
 // Only while signed in: a request racing sign-in or sign-out must not reset the session.
 export async function refreshChats() {
-  if (!state.authenticated || state.signingOut)
+  if (!state.authenticated || state.signingOut || state.redirecting)
     return
   try {
     chatList.value = await api<ChatView[]>('/chats')
