@@ -1,5 +1,8 @@
 name: UI formatting recovery
-on: workflow_dispatch
+on:
+  push:
+    branches: [feat/nodes-variant-a]
+    paths: [.github/workflows/ui-format-recovery.yaml]
 permissions:
   contents: read
 jobs:
