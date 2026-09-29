@@ -398,13 +398,14 @@ impl Chat {
             // Read individual items, not full turns: one turn can contain megabytes
             // of command output. Summary view omits steered user messages, whose
             // client IDs are necessary to avoid delivering them twice after restart.
-            let indices: HashMap<String, usize> = turns
+            let mut indices: HashMap<String, usize> = turns
                 .iter()
                 .enumerate()
                 .map(|(index, turn)| (text(turn, "id").to_owned(), index))
                 .collect();
             let mut cursor = Value::Null;
             let mut cursors = HashSet::new();
+            let mut previous_item_turn = None;
             loop {
                 let page = self
                     .request(
@@ -421,11 +422,34 @@ impl Chat {
                     .as_array()
                     .ok_or_else(|| Error::new(502, "Codex returned invalid conversation items."))?;
                 for entry in entries {
-                    let index = indices.get(text(entry, "turnId")).ok_or_else(|| {
-                        Error::new(502, "Codex returned an unknown conversation turn.")
-                    })?;
+                    let turn_id = entry["turnId"]
+                        .as_str()
+                        .filter(|id| !id.is_empty())
+                        .ok_or_else(|| {
+                            Error::new(502, "Codex returned an invalid conversation turn.")
+                        })?;
+                    let index = if let Some(index) = indices.get(turn_id) {
+                        *index
+                    } else {
+                        // After interruption, persisted items can outlive their turn
+                        // metadata. Recover receipts without assuming completion.
+                        // Items arrive oldest first; turns are stored newest first.
+                        let index = previous_item_turn.unwrap_or(turns.len());
+                        for position in indices.values_mut() {
+                            if *position >= index {
+                                *position += 1;
+                            }
+                        }
+                        turns.insert(
+                            index,
+                            json!({"id":turn_id,"status":"interrupted","items":[]}),
+                        );
+                        indices.insert(turn_id.to_owned(), index);
+                        index
+                    };
+                    previous_item_turn = Some(index);
                     let item = &entry["item"];
-                    let items = turns[*index]["items"].as_array_mut().ok_or_else(|| {
+                    let items = turns[index]["items"].as_array_mut().ok_or_else(|| {
                         Error::new(502, "Codex returned invalid conversation history.")
                     })?;
                     match text(item, "type") {
