@@ -117,6 +117,8 @@ impl Worker {
         self.tasks.spawn(crate::chat_titles::run(s.clone()));
         self.tasks
             .spawn(crate::nodes::publication::maintain(s.clone()));
+        self.tasks
+            .spawn(crate::nodes::shared_blocks::maintain(s.clone()));
         self.tasks.spawn(crate::nodes::storage::monitor(s.clone()));
         let cleanup = s.clone();
         self.tasks.spawn(async move {

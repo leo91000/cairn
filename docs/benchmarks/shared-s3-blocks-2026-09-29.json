@@ -1,0 +1,467 @@
+{
+  "baseline": "1903506",
+  "candidate": "feat/shared-s3-blocks",
+  "environment": "Local release build, loopback Moto 5.2.3, 64 MiB disk, fresh bucket per repetition, three repetitions. Separate Cargo target directories. Foreground capture latency; reclamation moves to a background worker. Not a WAN latency or peak memory measurement.",
+  "summary": {
+    "before": {
+      "base": {
+        "samples": 3,
+        "wallMs": 231.49155900000002,
+        "cpuMs": 230.902
+      },
+      "unchanged": {
+        "samples": 9,
+        "wallMs": 51.710791,
+        "cpuMs": 2.8369999999999784
+      },
+      "delta": {
+        "samples": 9,
+        "wallMs": 127.89319199999998,
+        "cpuMs": 17.32699999999998
+      }
+    },
+    "after": {
+      "base": {
+        "samples": 3,
+        "wallMs": 229.789421,
+        "cpuMs": 230.92700000000002
+      },
+      "unchanged": {
+        "samples": 9,
+        "wallMs": 5.995817,
+        "cpuMs": 1.7420000000000213
+      },
+      "delta": {
+        "samples": 9,
+        "wallMs": 33.360397,
+        "cpuMs": 15.30400000000004
+      }
+    }
+  },
+  "samples": {
+    "before": [
+      {
+        "cpuMs": 230.902,
+        "details": {
+          "sample": 0,
+          "uploadedBytes": 67108864
+        },
+        "processReadBytes": 68290640,
+        "scenario": "base",
+        "wallMs": 230.404745
+      },
+      {
+        "cpuMs": 2.578999999999998,
+        "details": {
+          "sample": 0,
+          "uploadedBytes": 0
+        },
+        "processReadBytes": 67703,
+        "scenario": "unchanged",
+        "wallMs": 48.834348999999996
+      },
+      {
+        "cpuMs": 2.8759999999999897,
+        "details": {
+          "sample": 1,
+          "uploadedBytes": 0
+        },
+        "processReadBytes": 96368,
+        "scenario": "unchanged",
+        "wallMs": 50.635178
+      },
+      {
+        "cpuMs": 2.811000000000008,
+        "details": {
+          "sample": 2,
+          "uploadedBytes": 0
+        },
+        "processReadBytes": 96368,
+        "scenario": "unchanged",
+        "wallMs": 49.305628
+      },
+      {
+        "cpuMs": 16.769000000000034,
+        "details": {
+          "sample": 0,
+          "uploadedBytes": 4194304
+        },
+        "processReadBytes": 4290786,
+        "scenario": "delta",
+        "wallMs": 125.87431099999999
+      },
+      {
+        "cpuMs": 19.730999999999998,
+        "details": {
+          "sample": 1,
+          "uploadedBytes": 4194304
+        },
+        "processReadBytes": 4290793,
+        "scenario": "delta",
+        "wallMs": 127.781072
+      },
+      {
+        "cpuMs": 16.33300000000004,
+        "details": {
+          "sample": 2,
+          "uploadedBytes": 4194304
+        },
+        "processReadBytes": 4290793,
+        "scenario": "delta",
+        "wallMs": 127.89319199999998
+      },
+      {
+        "cpuMs": 225.02800000000002,
+        "details": {
+          "sample": 0,
+          "uploadedBytes": 67108864
+        },
+        "processReadBytes": 68290640,
+        "scenario": "base",
+        "wallMs": 231.49155900000002
+      },
+      {
+        "cpuMs": 2.4880000000000457,
+        "details": {
+          "sample": 0,
+          "uploadedBytes": 0
+        },
+        "processReadBytes": 67703,
+        "scenario": "unchanged",
+        "wallMs": 50.559345
+      },
+      {
+        "cpuMs": 2.603000000000022,
+        "details": {
+          "sample": 1,
+          "uploadedBytes": 0
+        },
+        "processReadBytes": 96371,
+        "scenario": "unchanged",
+        "wallMs": 52.217366
+      },
+      {
+        "cpuMs": 2.8369999999999784,
+        "details": {
+          "sample": 2,
+          "uploadedBytes": 0
+        },
+        "processReadBytes": 96371,
+        "scenario": "unchanged",
+        "wallMs": 51.710791
+      },
+      {
+        "cpuMs": 18.84199999999997,
+        "details": {
+          "sample": 0,
+          "uploadedBytes": 4194304
+        },
+        "processReadBytes": 4290789,
+        "scenario": "delta",
+        "wallMs": 140.33920899999998
+      },
+      {
+        "cpuMs": 17.069000000000003,
+        "details": {
+          "sample": 1,
+          "uploadedBytes": 4194304
+        },
+        "processReadBytes": 4290796,
+        "scenario": "delta",
+        "wallMs": 133.19078100000002
+      },
+      {
+        "cpuMs": 19.290999999999947,
+        "details": {
+          "sample": 2,
+          "uploadedBytes": 4194304
+        },
+        "processReadBytes": 4290796,
+        "scenario": "delta",
+        "wallMs": 134.253372
+      },
+      {
+        "cpuMs": 243.94499999999996,
+        "details": {
+          "sample": 0,
+          "uploadedBytes": 67108864
+        },
+        "processReadBytes": 68290640,
+        "scenario": "base",
+        "wallMs": 248.161678
+      },
+      {
+        "cpuMs": 3.059000000000034,
+        "details": {
+          "sample": 0,
+          "uploadedBytes": 0
+        },
+        "processReadBytes": 67703,
+        "scenario": "unchanged",
+        "wallMs": 55.241427
+      },
+      {
+        "cpuMs": 3.029000000000004,
+        "details": {
+          "sample": 1,
+          "uploadedBytes": 0
+        },
+        "processReadBytes": 96368,
+        "scenario": "unchanged",
+        "wallMs": 53.615962
+      },
+      {
+        "cpuMs": 3.1039999999999957,
+        "details": {
+          "sample": 2,
+          "uploadedBytes": 0
+        },
+        "processReadBytes": 96368,
+        "scenario": "unchanged",
+        "wallMs": 53.92654
+      },
+      {
+        "cpuMs": 19.204999999999973,
+        "details": {
+          "sample": 0,
+          "uploadedBytes": 4194304
+        },
+        "processReadBytes": 4290786,
+        "scenario": "delta",
+        "wallMs": 120.567258
+      },
+      {
+        "cpuMs": 16.95599999999997,
+        "details": {
+          "sample": 1,
+          "uploadedBytes": 4194304
+        },
+        "processReadBytes": 4290793,
+        "scenario": "delta",
+        "wallMs": 134.621283
+      },
+      {
+        "cpuMs": 17.32699999999998,
+        "details": {
+          "sample": 2,
+          "uploadedBytes": 4194304
+        },
+        "processReadBytes": 4290793,
+        "scenario": "delta",
+        "wallMs": 118.274404
+      }
+    ],
+    "after": [
+      {
+        "cpuMs": 218.82399999999996,
+        "details": {
+          "sample": 0,
+          "uploadedBytes": 67108864
+        },
+        "processReadBytes": 68287593,
+        "scenario": "base",
+        "wallMs": 224.03563200000002
+      },
+      {
+        "cpuMs": 1.7059999999999853,
+        "details": {
+          "sample": 0,
+          "uploadedBytes": 0
+        },
+        "processReadBytes": 69756,
+        "scenario": "unchanged",
+        "wallMs": 5.462363
+      },
+      {
+        "cpuMs": 1.6490000000000116,
+        "details": {
+          "sample": 1,
+          "uploadedBytes": 0
+        },
+        "processReadBytes": 102517,
+        "scenario": "unchanged",
+        "wallMs": 5.765359999999999
+      },
+      {
+        "cpuMs": 1.556999999999975,
+        "details": {
+          "sample": 2,
+          "uploadedBytes": 0
+        },
+        "processReadBytes": 102517,
+        "scenario": "unchanged",
+        "wallMs": 5.375167
+      },
+      {
+        "cpuMs": 14.305999999999985,
+        "details": {
+          "sample": 0,
+          "uploadedBytes": 4194304
+        },
+        "processReadBytes": 4296827,
+        "scenario": "delta",
+        "wallMs": 30.110163
+      },
+      {
+        "cpuMs": 15.30400000000004,
+        "details": {
+          "sample": 1,
+          "uploadedBytes": 4194304
+        },
+        "processReadBytes": 4296834,
+        "scenario": "delta",
+        "wallMs": 33.045929
+      },
+      {
+        "cpuMs": 13.083999999999985,
+        "details": {
+          "sample": 2,
+          "uploadedBytes": 4194304
+        },
+        "processReadBytes": 4296837,
+        "scenario": "delta",
+        "wallMs": 28.65502
+      },
+      {
+        "cpuMs": 230.92700000000002,
+        "details": {
+          "sample": 0,
+          "uploadedBytes": 67108864
+        },
+        "processReadBytes": 68295786,
+        "scenario": "base",
+        "wallMs": 229.789421
+      },
+      {
+        "cpuMs": 1.9249999999999545,
+        "details": {
+          "sample": 0,
+          "uploadedBytes": 0
+        },
+        "processReadBytes": 69756,
+        "scenario": "unchanged",
+        "wallMs": 5.995817
+      },
+      {
+        "cpuMs": 2.014999999999989,
+        "details": {
+          "sample": 1,
+          "uploadedBytes": 0
+        },
+        "processReadBytes": 102517,
+        "scenario": "unchanged",
+        "wallMs": 6.368721
+      },
+      {
+        "cpuMs": 2.027000000000001,
+        "details": {
+          "sample": 2,
+          "uploadedBytes": 0
+        },
+        "processReadBytes": 102517,
+        "scenario": "unchanged",
+        "wallMs": 6.14555
+      },
+      {
+        "cpuMs": 15.61900000000005,
+        "details": {
+          "sample": 0,
+          "uploadedBytes": 4194304
+        },
+        "processReadBytes": 4296827,
+        "scenario": "delta",
+        "wallMs": 35.25806
+      },
+      {
+        "cpuMs": 15.483999999999998,
+        "details": {
+          "sample": 1,
+          "uploadedBytes": 4194304
+        },
+        "processReadBytes": 4296833,
+        "scenario": "delta",
+        "wallMs": 38.087283
+      },
+      {
+        "cpuMs": 15.360999999999958,
+        "details": {
+          "sample": 2,
+          "uploadedBytes": 4194304
+        },
+        "processReadBytes": 4296834,
+        "scenario": "delta",
+        "wallMs": 33.720333
+      },
+      {
+        "cpuMs": 238.157,
+        "details": {
+          "sample": 0,
+          "uploadedBytes": 67108864
+        },
+        "processReadBytes": 68287594,
+        "scenario": "base",
+        "wallMs": 230.757197
+      },
+      {
+        "cpuMs": 1.9240000000000368,
+        "details": {
+          "sample": 0,
+          "uploadedBytes": 0
+        },
+        "processReadBytes": 69756,
+        "scenario": "unchanged",
+        "wallMs": 6.3432699999999995
+      },
+      {
+        "cpuMs": 1.7420000000000213,
+        "details": {
+          "sample": 1,
+          "uploadedBytes": 0
+        },
+        "processReadBytes": 102517,
+        "scenario": "unchanged",
+        "wallMs": 4.619599
+      },
+      {
+        "cpuMs": 1.650999999999958,
+        "details": {
+          "sample": 2,
+          "uploadedBytes": 0
+        },
+        "processReadBytes": 102517,
+        "scenario": "unchanged",
+        "wallMs": 6.100422
+      },
+      {
+        "cpuMs": 16.369999999999997,
+        "details": {
+          "sample": 0,
+          "uploadedBytes": 4194304
+        },
+        "processReadBytes": 4296827,
+        "scenario": "delta",
+        "wallMs": 35.588177
+      },
+      {
+        "cpuMs": 14.394000000000018,
+        "details": {
+          "sample": 1,
+          "uploadedBytes": 4194304
+        },
+        "processReadBytes": 4296833,
+        "scenario": "delta",
+        "wallMs": 33.360397
+      },
+      {
+        "cpuMs": 14.351000000000003,
+        "details": {
+          "sample": 2,
+          "uploadedBytes": 4194304
+        },
+        "processReadBytes": 4296834,
+        "scenario": "delta",
+        "wallMs": 33.079674000000004
+      }
+    ]
+  }
+}

@@ -26,8 +26,7 @@ async fn service(root: &TempDir, origin: String, runner: String) -> Arc<Service>
         std::fs::create_dir_all(root.path().join("data")).unwrap();
         std::fs::write(
             root.path().join("data/storage-s3.json"),
-            json!({"bucket": "leo-node-test","endpoint": endpoint,"region": "us-east-1"})
-                .to_string(),
+            json!({"bucket": "leo-node-test","region": "us-east-1"}).to_string(),
         )
         .unwrap();
     }

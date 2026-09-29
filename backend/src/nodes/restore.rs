@@ -85,13 +85,13 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
         {
             let backup = s.get("node-backups", id).await?;
             let manifest = super::publication::manifest(s, &backup).await?;
-            if manifest["blocks"]
+            if let Some(block) = manifest["blocks"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|b| b["hash"] == hash)
+                .find(|b| b["hash"] == hash)
             {
-                let bytes = super::publication::read_block(s, &backup, hash).await?;
+                let bytes = super::publication::read_manifest_block(s, &backup, block).await?;
                 return Ok((
                     [("content-length", bytes.len().to_string())],
                     Body::from(bytes),

@@ -398,6 +398,14 @@ impl Fixture {
 async fn migration_resumes_a_checkpoint_written_by_the_node_backend() {
     let mut fixture = Fixture::new().await;
     fixture.stop(false).await;
+    // Seed an actual version-4 fixture before asking the historical backend to
+    // create its checkpoint. A version-5 database must reject that executable.
+    fixture.service.store.transaction(|db| {
+        let objects: i64=db.0.query_row("SELECT count(*) FROM shared_objects",[],|r|r.get(0))?;
+        assert_eq!(objects,0);
+        db.0.execute_batch("DROP TABLE shared_references; DROP TABLE shared_publications; DROP TABLE shared_objects; DROP TABLE remote_deletions; PRAGMA user_version=4;")?;
+        Ok(())
+    }).await.unwrap();
     fixture.start_backend(true).await;
     let run = fixture.enqueue("fixture:restart").await;
     let id = text(&run, "id");
