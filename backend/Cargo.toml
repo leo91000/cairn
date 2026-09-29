@@ -1,6 +1,6 @@
 [package]
 name = "leo-agent-manager"
-version = "0.45.3"
+version = "0.45.4"
 edition = "2024"
 rust-version = "1.97"
 publish = false

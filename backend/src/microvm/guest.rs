@@ -46,40 +46,42 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     std::os::unix::fs::chown(AUTH_SOCKET, Some(AGENT_ID), Some(AGENT_ID))?;
     tokio::spawn(relay_auth(auth, stop.clone()));
     let running = Arc::new(Mutex::new(()));
-    loop {
-        let accepted = tokio::select! {
-            () = stop.cancelled() => break,
-            accepted = listener.accept() => accepted,
-        };
-        let (stream, _) = accepted?;
-        let running = running.clone();
-        let stopping = stop.clone();
-        tokio::spawn(async move {
-            if let Err(error) = handle(stream, running, stopping).await {
-                tracing::warn!(message = %error.message, "Guest operation failed");
+    super::listener::serve(
+        || listener.accept(),
+        |(stream, _)| {
+            let running = running.clone();
+            let stopping = stop.clone();
+            async move {
+                if let Err(error) = handle(stream, running, stopping).await {
+                    tracing::warn!(message = %error.message, "Guest operation failed");
+                }
             }
-        });
-    }
+        },
+        32,
+        stop.clone(),
+    )
+    .await?;
     Ok(())
 }
 
 /// Forwards agent authentication requests to the host relay.
 async fn relay_auth(auth: UnixListener, stop: CancellationToken) {
-    loop {
-        let accepted = tokio::select! {
-            () = stop.cancelled() => break,
-            accepted = auth.accept() => accepted,
-        };
-        let Ok((mut client, _)) = accepted else {
-            break;
-        };
-        tokio::spawn(async move {
-            let host = VsockAddr::new(2, wire::PORT + 1);
-            if let Ok(mut remote) = VsockStream::connect(host).await {
-                let relay = tokio::io::copy_bidirectional(&mut client, &mut remote);
-                let _ = tokio::time::timeout(Duration::from_secs(45), relay).await;
-            }
-        });
+    let result = super::listener::serve(
+        || auth.accept(),
+        |(mut client, _)| async move {
+            let relay = async {
+                let host = VsockAddr::new(2, wire::PORT + 1);
+                let mut remote = VsockStream::connect(host).await?;
+                tokio::io::copy_bidirectional(&mut client, &mut remote).await
+            };
+            let _ = tokio::time::timeout(Duration::from_secs(45), relay).await;
+        },
+        32,
+        stop,
+    )
+    .await;
+    if let Err(error) = result {
+        tracing::warn!(%error, "Guest authentication listener stopped");
     }
 }
 
@@ -90,8 +92,9 @@ async fn handle(
 ) -> Result<()> {
     let (read, mut write) = tokio::io::split(stream);
     let mut read = BufReader::new(read);
-    let request = wire::read(&mut read)
-        .await?
+    let request = tokio::time::timeout(Duration::from_secs(10), wire::read(&mut read))
+        .await
+        .map_err(|_| Error::bad("Guest request timed out."))??
         .ok_or_else(|| Error::bad("Missing guest request."))?;
     let request: GuestRequest = wire::decode(request, "Unknown guest operation.")?;
     match request {
