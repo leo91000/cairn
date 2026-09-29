@@ -230,7 +230,7 @@ async function toggle() {
 }
 
 function resized() {
-  if (!moving.value)
+  if (open.value && !moving.value)
     close(true)
 }
 

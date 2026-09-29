@@ -585,7 +585,7 @@ function key(event: KeyboardEvent) {
               <span class="flex min-w-0 items-center gap-1.5"><Icon :name="FolderGit2" :size="13" /><span class="truncate max-w-48 phone:max-w-32">{{ detail.projectName }}</span></span>
             </template>
             <span class="flex items-center gap-1.5 font-semibold" :class="chatStatus === 'Working' ? 'text-accent' : chatStatus === 'Failed' || chatStatus === 'Interrupted' ? 'text-coral' : ''"><span v-if="chatStatus !== 'Working'" class="size-1 shrink-0 rounded-full" :class="active ? 'bg-accent' : 'bg-muted'" />{{ chatStatus }}<span v-if="chatStatus === 'Working'" class="working-wave"><i /><i /><i /></span></span>
-            <NodeExecution v-if="detail.run" :run="detail.run" />
+            <NodeExecution v-if="detail.run" :key="detail.run.id" :run="detail.run" />
           </div>
         </div>
       </div>
@@ -593,7 +593,7 @@ function key(event: KeyboardEvent) {
         Chats
       </h1>
       <div v-if="detail?.run" class="hidden phone:block">
-        <NodeExecution :run="detail.run" class="mx-4 mb-2" />
+        <NodeExecution :key="detail.run.id" :run="detail.run" class="mx-4 mb-2" />
       </div>
       <div class="flex min-h-0 flex-1 flex-col">
         <section

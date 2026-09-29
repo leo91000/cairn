@@ -56,11 +56,11 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
     Page {
         Heading(
             "Nodes",
-            "Vos machines Linux de confiance. Chaque conversation y tourne dans sa propre VM Firecracker. Le GPU n’est pas encore disponible.",
+            "Gérez vos machines, leur capacité et les agents autorisés.",
         )
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
-                "${nodes.count { !it.revoked }} machines",
+                nodes.count { !it.revoked }.let { if (it == 1) "1 machine" else "$it machines" },
                 Modifier.weight(1f),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

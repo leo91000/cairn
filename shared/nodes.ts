@@ -66,6 +66,10 @@ export function formatMiB(value: number) {
 }
 
 export function formatBytes(bytes: number) {
+  if (bytes < 1024)
+    return `${bytes} B`
+  if (bytes < 1048576)
+    return `${Number((bytes / 1024).toFixed(1))} KiB`
   return formatMiB(bytes / 1048576)
 }
 

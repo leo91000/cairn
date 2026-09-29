@@ -176,6 +176,14 @@ data class NodeStoragePolicy(
 )
 
 fun formatBytes(bytes: Long): String {
+    if (bytes < 1024) return "$bytes o"
+    if (bytes < 1048576) {
+        val kib = bytes / 1024.0
+        val amount =
+            if (bytes % 1024L == 0L) kib.toLong().toString()
+            else "%.1f".format(java.util.Locale.FRANCE, kib)
+        return "$amount Kio"
+    }
     val mib = bytes / 1048576.0
     val value = if (mib < 1024) mib else mib / 1024
     val amount =

@@ -104,12 +104,9 @@ abstract class NodePlacementCases {
                 .onNodeWithText("182,5 Mio sur cette node · 175,4 Mio non synchronisés")
                 .assertExists()
             capture("execution-sheet")
-            compose
-                .onNodeWithText("Enregistrer la préférence")
-                .performScrollTo()
-                .assertIsNotEnabled()
+            compose.onNodeWithText("Enregistrer").performScrollTo().assertIsNotEnabled()
             compose.onNodeWithText("Préférer").performClick()
-            compose.onNodeWithText("Enregistrer la préférence").performScrollTo().performClick()
+            compose.onNodeWithText("Enregistrer").performScrollTo().performClick()
             // Receipt by the server precedes the response and its UI confirmation.
             compose.waitUntil(10000) {
                 saved.size == 1 &&
@@ -121,7 +118,7 @@ abstract class NodePlacementCases {
             assertEquals("node", saved[0]["preferredNodeId"]?.jsonPrimitive?.content)
             assertEquals(JsonNull, saved[0]["pinnedNodeId"])
             compose.onNodeWithText("Fixer").performScrollTo().performClick()
-            compose.onNodeWithText("Enregistrer la préférence").performScrollTo().performClick()
+            compose.onNodeWithText("Enregistrer").performScrollTo().performClick()
             compose.waitUntil(10000) {
                 saved.size == 2 &&
                     compose

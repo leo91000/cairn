@@ -1,4 +1,11 @@
-# Leo Android 0.41.1 — Publication des missions web
+# Leo Android 0.47.0 — Nodes et synchronisation
+
+- La node d’exécution tient dans une ligne compacte. Touchez-la pour voir les fichiers chargés à la demande, les changements non synchronisés et les erreurs éventuelles.
+- Choisissez Automatique, Préférer ou Fixer avec une explication adaptée. Enregistrer devient disponible quand la préférence change ; le déplacement dispose de sa propre fiche.
+- L’écran Nodes présente la capacité disponible par machine. L’inscription, les accès, la configuration et le stockage ont des formulaires mieux regroupés.
+- Le web reprend la même présentation, sur ordinateur comme sur téléphone, avec des tailles de stockage arrondies et une navigation au clavier.
+
+## Leo Android 0.41.1 — Publication des missions web
 
 - Déploie sur le serveur les missions web de la version 0.41.0, dont la publication avait été bloquée par un test de mise en page instable sous WebKit. Aucun changement pour l’application Android.
 

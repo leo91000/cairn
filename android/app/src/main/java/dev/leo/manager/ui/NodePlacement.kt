@@ -6,6 +6,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import dev.leo.manager.data.*
 import kotlinx.coroutines.delay
 import kotlinx.serialization.Serializable
@@ -144,15 +145,20 @@ fun NodePlacement(vm: LeoViewModel, run: Run) {
     }
     if (expanded)
         DetailSheet("Node d’exécution", { expanded = false }) {
-            Text(current, style = MaterialTheme.typography.titleMedium)
-            run.resources?.let {
-                Text(
-                    "${it.cpu} CPU · ${formatMiB(it.memoryMiB)} RAM",
-                    style = MaterialTheme.typography.bodySmall,
-                )
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(current, style = MaterialTheme.typography.titleMedium)
+                run.resources?.let {
+                    Text(
+                        "${it.cpu} CPU · ${formatMiB(it.memoryMiB)} RAM",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                if (run.storage?.mode == "on-demand")
+                    Text(
+                        "Fichiers chargés à la demande",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
             }
-            if (run.storage?.mode == "on-demand")
-                Text("Fichiers chargés à la demande", style = MaterialTheme.typography.bodySmall)
             Panel {
                 Text("Synchronisation", style = MaterialTheme.typography.titleSmall)
                 Text(sync, color = tone)
@@ -220,41 +226,6 @@ fun NodePlacement(vm: LeoViewModel, run: Run) {
                 Choice("Node", selected, placement.nodes.map { it.id to it.name }) {
                     if (!busy) selected = it
                 }
-            TextButton(
-                enabled =
-                    loaded &&
-                        !busy &&
-                        (mode != savedMode || (mode != "automatic" && selected != savedNode)) &&
-                        (mode == "automatic" || selected.isNotEmpty()),
-                onClick = {
-                    request(
-                        {
-                            val requestedMode = mode
-                            val requestedNode = selected
-                            api.request(
-                                "PUT",
-                                "/nodes/placement/${run.id}",
-                                buildJsonObject {
-                                    put(
-                                        "pinnedNodeId",
-                                        if (mode == "fixed") JsonPrimitive(selected) else JsonNull,
-                                    )
-                                    put(
-                                        "preferredNodeId",
-                                        if (mode == "preferred") JsonPrimitive(selected)
-                                        else JsonNull,
-                                    )
-                                },
-                            )
-                            savedMode = requestedMode
-                            savedNode = requestedNode
-                        },
-                        "Préférence enregistrée. Elle s’applique au prochain démarrage ou à la prochaine reprise.",
-                    )
-                },
-            ) {
-                Text("Enregistrer la préférence")
-            }
             Text(
                 when (mode) {
                     "preferred" ->
@@ -264,9 +235,49 @@ fun NodePlacement(vm: LeoViewModel, run: Run) {
                 } + " Cela ne déplace pas la conversation maintenant.",
                 style = MaterialTheme.typography.bodySmall,
             )
-            val others = placement.nodes.filter { it.id != run.nodeId }
-            if (others.isNotEmpty())
-                OutlinedButton(onClick = { moving = true }) { Text("Déplacer…") }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (placement.nodes.any { it.id != run.nodeId })
+                    OutlinedButton(onClick = { moving = true }, modifier = Modifier.weight(1f)) {
+                        Text("Déplacer…")
+                    }
+                Button(
+                    modifier = Modifier.weight(1f),
+                    enabled =
+                        loaded &&
+                            !busy &&
+                            (mode != savedMode || (mode != "automatic" && selected != savedNode)) &&
+                            (mode == "automatic" || selected.isNotEmpty()),
+                    onClick = {
+                        request(
+                            {
+                                val requestedMode = mode
+                                val requestedNode = selected
+                                api.request(
+                                    "PUT",
+                                    "/nodes/placement/${run.id}",
+                                    buildJsonObject {
+                                        put(
+                                            "pinnedNodeId",
+                                            if (mode == "fixed") JsonPrimitive(selected)
+                                            else JsonNull,
+                                        )
+                                        put(
+                                            "preferredNodeId",
+                                            if (mode == "preferred") JsonPrimitive(selected)
+                                            else JsonNull,
+                                        )
+                                    },
+                                )
+                                savedMode = requestedMode
+                                savedNode = requestedNode
+                            },
+                            "Préférence enregistrée. Elle s’applique au prochain démarrage ou à la prochaine reprise.",
+                        )
+                    },
+                ) {
+                    Text("Enregistrer")
+                }
+            }
             saved?.let { Text(it) }
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }
