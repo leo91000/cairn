@@ -79,7 +79,7 @@ export function chatFixture() {
 
     if (method === 'thread/turns/list' || method === 'thread/items/list') {
       let data = method === 'thread/turns/list'
-        ? thread.turns.map(turn => ({ ...turn, items: params.itemsView === 'notLoaded' ? [] : params.itemsView === 'summary' ? [turn.items.find(item => item.type === 'userMessage'), turn.items.findLast(item => item.type === 'agentMessage')].filter(Boolean) : turn.items }))
+        ? thread.turns.filter(turn => !thread.fixtureUnlistedTurns?.includes(turn.id)).map(turn => ({ ...turn, items: params.itemsView === 'notLoaded' ? [] : params.itemsView === 'summary' ? [turn.items.find(item => item.type === 'userMessage'), turn.items.findLast(item => item.type === 'agentMessage')].filter(Boolean) : turn.items }))
         : thread.turns.filter(turn => !params.turnId || turn.id === params.turnId).flatMap(turn => turn.items.map(item => ({ turnId: turn.id, item })))
       if (params.sortDirection === 'desc')
         data = data.toReversed()

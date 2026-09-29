@@ -145,6 +145,94 @@ async fn long_chat_history_preserves_steered_messages_without_repeating_complete
     }
 }
 
+#[tokio::test]
+async fn resume_recovers_items_whose_turn_metadata_is_missing() {
+    // Production had one listed in-progress turn and 53 items belonging to an
+    // unlisted continuation. Keep the same mismatch without private history.
+    for (unlisted_first, listed_status, message_id, recovery, expected_new_turn) in [
+        (false, "inProgress", "original", true, true),
+        (false, "completed", "original", true, true),
+        (false, "completed", "steered", true, true),
+        (false, "completed", "steered", false, true),
+        (true, "completed", "original", true, false),
+        (false, "completed", "new-message", false, true),
+    ] {
+        let root = TempDir::new().unwrap();
+        let config = config(&root);
+        let home = config.home.join(".codex");
+        std::fs::create_dir_all(&home).unwrap();
+        let file = home.join("fixture-conversation.json");
+        let listed = json!({"id":"listed","status":listed_status,"items":[
+            {"id":"u","type":"userMessage","clientId":"original","content":[{"type":"text","text":"Original request"}]},
+            {"id":"a","type":"agentMessage","text":"Earlier reply"}
+        ]});
+        let unlisted = json!({"id":"unlisted","status":"inProgress","items":[
+            {"id":"tool","type":"commandExecution","aggregatedOutput":"Work already done"},
+            {"id":"steer","type":"userMessage","clientId":"steered","content":[{"type":"text","text":"Steered request"}]},
+            {"id":"commentary","type":"agentMessage","text":"Still working"}
+        ]});
+        let turns = if unlisted_first {
+            vec![unlisted, listed]
+        } else {
+            vec![listed, unlisted]
+        };
+        std::fs::write(
+            &file,
+            json!({
+                "id":"fixture-chat","historyMode":"paginated",
+                "fixtureUnlistedTurns":["unlisted"],"turns":turns
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (events, mut receiver) = tokio::sync::mpsc::channel(64);
+        let plan = json!({
+            "args":[],"cwd":root.path(),"model":"fixture","reasoning":"medium",
+            "sandbox":"yolo","sessionId":"fixture-chat","output":root.path().join("reply.md"),
+            "inputDirectory":root.path(),"writableRoots":[],
+            "execution":{"messageId":message_id,"text":"Pending request","attachments":[],"recovery":recovery}
+        });
+        leo_agent_manager::chat_process::run(&config, &home, plan, events, Default::default())
+            .await
+            .unwrap();
+        let mut receipts = Vec::new();
+        while let Some(event) = receiver.recv().await {
+            if event["type"] == "chat.delivered" {
+                receipts.push(event["messageId"].as_str().unwrap().to_owned());
+            }
+        }
+        for id in ["original", "steered", message_id] {
+            assert_eq!(receipts.iter().filter(|receipt| *receipt == id).count(), 1);
+        }
+        let history: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        let turns = history["turns"].as_array().unwrap();
+        assert_eq!(turns.len(), if expected_new_turn { 3 } else { 2 });
+        if expected_new_turn {
+            let input = &turns.last().unwrap()["items"][0];
+            if message_id == "new-message" {
+                assert_eq!(input["clientId"], message_id);
+                assert_eq!(input["content"][0]["text"], "Pending request");
+            } else {
+                assert!(
+                    input["clientId"].is_null(),
+                    "do not deliver an accepted user message twice"
+                );
+                assert!(
+                    input["content"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("Continue the interrupted conversation")
+                );
+            }
+        } else {
+            assert_eq!(
+                std::fs::read_to_string(root.path().join("reply.md")).unwrap(),
+                "Earlier reply"
+            );
+        }
+    }
+}
+
 /// Reconnects a Codex account whose sign-in follows the fixture's `mode`.
 async fn sign_in(mode: &str) -> (TempDir, Arc<Service>, String) {
     let root = TempDir::new().unwrap();
