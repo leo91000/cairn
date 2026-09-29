@@ -96,6 +96,7 @@ impl Service {
         tokio::spawn(crate::artifacts::preview::recover(service.clone()));
         Ok(service)
     }
+
     async fn migrate_agents(&self) -> Result<()> {
         for mut agent in self.store.list("agents").await? {
             if agent["access"].get("mcps").is_none() || agent["access"].get("nodes").is_none() {
@@ -173,6 +174,7 @@ impl Service {
         }
         Ok(agent)
     }
+
     /// Every project, MCP connection and tool permission must reference an existing record.
     async fn require_access_targets(&self, access: &Value) -> Result<()> {
         for kind in ["projects", "mcps"] {
@@ -193,6 +195,7 @@ impl Service {
         }
         Ok(())
     }
+
     pub async fn project(&self, input: Value, existing: Option<&str>) -> Result<Value> {
         let mut project = parse("project", input)?;
         let actual = crate::skills::workspace(
@@ -381,7 +384,10 @@ impl Service {
                 .await
                 && error.status != 409
             {
-                let detail = json!({ "taskId": task["id"], "error": error.message });
+                let detail = json!({
+                    "taskId": task["id"],
+                    "error": error.message
+                });
                 self.store.audit("schedule.failed", detail).await?;
             }
             let next = next_occurrences(text(&task, "cron"), text(&task, "timezone"), now(), 1)?[0];
@@ -400,15 +406,18 @@ impl Service {
         Ok(())
     }
 }
+
 fn schedule_due(task: &Value) -> bool {
     task["enabled"] == true
         && task["archived"] != true
         && !task["cron"].is_null()
         && task["nextRun"].as_i64().is_some_and(|time| time <= now())
 }
+
 fn skill_key(skill: &Value) -> String {
     format!("{}/{}", text(skill, "scope"), text(skill, "name"))
 }
+
 async fn git_origin(path: &Path) -> String {
     let args = [
         "-C",
@@ -429,6 +438,7 @@ async fn git_origin(path: &Path) -> String {
     .map(|output| output.stdout.trim().to_owned())
     .unwrap_or_default()
 }
+
 fn uses_project(run: &Value, id: &str) -> bool {
     run_projects(run).iter().any(|p| p["id"] == id)
         || run["workspaces"]
@@ -437,6 +447,7 @@ fn uses_project(run: &Value, id: &str) -> bool {
             .flatten()
             .any(|w| w["projectId"] == id)
 }
+
 /// Refuses to remove a record still referenced by an agent, a task or active work.
 fn ensure_removable(db: &Db<'_>, kind: &str, id: &str) -> Result<()> {
     if kind == "agents" && id == MAIN_AGENT_ID {
@@ -473,6 +484,7 @@ fn ensure_removable(db: &Db<'_>, kind: &str, id: &str) -> Result<()> {
     }
     Ok(())
 }
+
 /// Drops an agent's credentials, portrait and 1Password assignments.
 fn forget_agent(db: &Db<'_>, id: &str) -> Result<()> {
     db.delete(&format!("agent-github:{id}"))?;
@@ -485,6 +497,7 @@ fn forget_agent(db: &Db<'_>, id: &str) -> Result<()> {
     }
     Ok(())
 }
+
 /// Older clients omit settings they do not know about; keep the saved ones.
 fn inherit_agent_settings(input: &mut Value, existing: &Value) {
     if input.get("access").is_none() {
@@ -504,6 +517,7 @@ fn inherit_agent_settings(input: &mut Value, existing: &Value) {
         }
     }
 }
+
 fn restricted(access: &Value) -> bool {
     !access["projects"].is_null()
         || !access["skills"].is_null()
@@ -513,6 +527,7 @@ fn restricted(access: &Value) -> bool {
             .as_object()
             .is_some_and(|tools| !tools.is_empty())
 }
+
 fn validate_access(agent: &Value, access: &Value) -> Result<()> {
     if !access["projects"].is_null() && access["github"] == true {
         return Err(Error::bad(
@@ -526,6 +541,7 @@ fn validate_access(agent: &Value, access: &Value) -> Result<()> {
     }
     Ok(())
 }
+
 fn save_agent(db: &Db<'_>, mut agent: Value, access: &Value) -> Result<Value> {
     // Serialize grants with revocation; a concurrent editor must never
     // restore a grant that the revocation transaction just removed.
@@ -552,6 +568,7 @@ fn save_agent(db: &Db<'_>, mut agent: Value, access: &Value) -> Result<Value> {
     db.audit("agent.saved", &json!({ "id": agent["id"] }))?;
     Ok(agent)
 }
+
 pub fn policy(agent: &Value) -> Value {
     let mut value = json!({
         "projects": null,

@@ -73,7 +73,7 @@ fn arg<'a>(args: &'a [String], index: usize, missing: &str) -> Result<&'a String
 }
 
 async fn entry(args: Vec<String>) -> Result<i32> {
-    let mode = args.first().map(String::as_str).unwrap_or("serve");
+    let mode = args.first().map_or("serve", String::as_str);
     if ["--version", "-V", "version"].contains(&mode) {
         println!("leo {}", env!("CARGO_PKG_VERSION"));
         return Ok(0);
@@ -302,7 +302,12 @@ async fn chat(config: &Config, plan: Value, stop: CancellationToken) -> Result<i
         leo_agent_manager::chat_process::run(config, Path::new(&home), plan, tx.clone(), stop).await
     };
     if let Err(error) = &result {
-        let failure = json!({ "type": "turn.failed", "error": { "message": error.message } });
+        let failure = json!({
+            "type": "turn.failed",
+            "error": {
+                "message": error.message
+            }
+        });
         // The output task only stops when stdout is gone; nobody would read the event.
         let _ = tx.send(failure).await;
     }

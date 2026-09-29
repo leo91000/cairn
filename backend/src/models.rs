@@ -26,6 +26,7 @@ pub async fn discover(session: &mut Session) -> Result<Value> {
         .await
         .unwrap_or_else(|_| Err(Error::gateway_timeout("Codex model discovery timed out.")))
 }
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ReasoningEffort {
@@ -92,7 +93,11 @@ async fn discover_pages(session: &mut Session) -> Result<Value> {
         let page = session
             .request(
                 "model/list",
-                json!({ "limit": 100, "includeHidden": true, "cursor": cursor }),
+                json!({
+                    "limit": 100,
+                    "includeHidden": true,
+                    "cursor": cursor
+                }),
             )
             .await?;
         let rows = page["data"]
@@ -147,6 +152,7 @@ pub async fn refresh_from_session(s: &Service, source: &str, session: &mut Sessi
     }
     Ok(())
 }
+
 /// Combines one model listed by several accounts: only effort levels supported by
 /// every account, hidden only when hidden everywhere, default when default anywhere.
 fn intersect(existing: &mut Value, model: &Value) {
@@ -164,12 +170,14 @@ fn intersect(existing: &mut Value, model: &Value) {
     existing["hidden"] = (existing["hidden"] == true && model["hidden"] == true).into();
     existing["isDefault"] = (existing["isDefault"] == true || model["isDefault"] == true).into();
 }
+
 async fn discover_local(s: &Service) -> Result<Value> {
     let mut session = Session::codex(&s.config, &s.config.home.join(".codex"), &[], None).await?;
     let result = discover(&mut session).await;
     session.close().await;
     result
 }
+
 impl Models {
     pub async fn list(&self, s: &Service) -> Result<Value> {
         // Deduplicate simultaneous editor/chat requests, with a short retry backoff.
@@ -327,20 +335,20 @@ mod tests {
             "checkedAt": now(),
             "models": [
                 {
-                "model": "default-model",
-                "isDefault": true,
-                "defaultReasoningEffort": "high",
-                "supportedReasoningEfforts": [{
-                    "reasoningEffort": "high"
-                }]
-            },
+                    "model": "default-model",
+                    "isDefault": true,
+                    "defaultReasoningEffort": "high",
+                    "supportedReasoningEfforts": [{
+                        "reasoningEffort": "high"
+                    }]
+                },
                 {
-                "model": "fast-model",
-                "defaultReasoningEffort": "low",
-                "supportedReasoningEfforts": [{
-                    "reasoningEffort": "low"
-                }]
-            }
+                    "model": "fast-model",
+                    "defaultReasoningEffort": "low",
+                    "supportedReasoningEfforts": [{
+                        "reasoningEffort": "low"
+                    }]
+                }
             ]
         });
         assert_eq!(defaults(&cached, ""), Some(("default-model", "high")));
