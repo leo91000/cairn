@@ -137,6 +137,7 @@ data class Run(
     val restoredAt: Long? = null,
     val movementError: String? = null,
     val backup: NodeBackup? = null,
+    val storage: RunStorage? = null,
 ) {
     val active
         get() = status == "running" || status == "queued"

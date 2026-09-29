@@ -62,10 +62,15 @@ export interface NodeSyncSettings {
 }
 
 export function formatMiB(value: number) {
-  if (value < 1024)
-    return `${value} MiB`
-  const gib = value / 1024
-  return `${Number.isInteger(gib) ? gib : gib.toFixed(1)} GiB`
+  return value < 1024 ? `${Number(value.toFixed(1))} MiB` : `${Number((value / 1024).toFixed(1))} GiB`
+}
+
+export function formatBytes(bytes: number) {
+  if (bytes < 1024)
+    return `${bytes} B`
+  if (bytes < 1048576)
+    return `${Number((bytes / 1024).toFixed(1))} KiB`
+  return formatMiB(bytes / 1048576)
 }
 
 export function formatResources(value: NodeResources) {

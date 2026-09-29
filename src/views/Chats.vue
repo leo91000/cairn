@@ -578,20 +578,23 @@ function key(event: KeyboardEvent) {
           <h1 class="line-clamp-2 text-xl! leading-snug! tracking-tight! phone:text-base! wrap-anywhere">
             {{ detail.title }}
           </h1>
-          <p class="m-0! mt-1.5! flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted phone:mt-1! phone:text-[10px]">
+          <div class="m-0! mt-1.5! flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted phone:mt-1! phone:text-[10px]">
             <span class="flex min-w-0 items-center gap-1.5"><Icon :name="Bot" :size="13" /><span class="truncate max-w-40">{{ detail.agentName }}</span></span>
             <template v-if="detail.projectName">
               <span aria-hidden="true" class="text-muted/40">/</span>
               <span class="flex min-w-0 items-center gap-1.5"><Icon :name="FolderGit2" :size="13" /><span class="truncate max-w-48 phone:max-w-32">{{ detail.projectName }}</span></span>
             </template>
             <span class="flex items-center gap-1.5 font-semibold" :class="chatStatus === 'Working' ? 'text-accent' : chatStatus === 'Failed' || chatStatus === 'Interrupted' ? 'text-coral' : ''"><span v-if="chatStatus !== 'Working'" class="size-1 shrink-0 rounded-full" :class="active ? 'bg-accent' : 'bg-muted'" />{{ chatStatus }}<span v-if="chatStatus === 'Working'" class="working-wave"><i /><i /><i /></span></span>
-          </p>
+            <NodeExecution v-if="detail.run" :key="detail.run.id" :run="detail.run" />
+          </div>
         </div>
       </div>
       <h1 v-else class="sr-only">
         Chats
       </h1>
-      <NodeExecution v-if="detail?.run" :run="detail.run" />
+      <div v-if="detail?.run" class="hidden phone:block">
+        <NodeExecution :key="detail.run.id" :run="detail.run" class="mx-4 mb-2" />
+      </div>
       <div class="flex min-h-0 flex-1 flex-col">
         <section
           class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden transition-opacity"

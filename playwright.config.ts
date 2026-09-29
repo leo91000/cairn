@@ -13,6 +13,7 @@ export default defineConfig({
   use: { trace: 'retain-on-failure', screenshot: 'only-on-failure', ...devices['Desktop Chrome'] },
   projects: [
     { name: 'journeys-nodes', testMatch: 'nodes.spec.ts' },
+    { name: 'layout-webkit-nodes', testMatch: 'nodes.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
     { name: 'journeys-agent-avatars', testMatch: 'agent-avatars.spec.ts' },
     { name: 'layout-webkit-agent-avatars', testMatch: 'agent-avatars.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
     { name: 'journeys-github-projects', testMatch: 'github-projects.spec.ts' },

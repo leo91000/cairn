@@ -16,6 +16,8 @@ import org.junit.Rule
 import org.junit.Test
 
 abstract class NodePlacementCases {
+    protected open fun capture(name: String) {}
+
     @get:Rule val compose = createComposeRule()
 
     @Test
@@ -72,6 +74,14 @@ abstract class NodePlacementCases {
                                     id = "run",
                                     status = "succeeded",
                                     nodeId = "node",
+                                    resources = NodeResources(2, 4096, 32768),
+                                    storage =
+                                        RunStorage(
+                                            mode = "on-demand",
+                                            localBytes = 191392768,
+                                            dirtyBytes = 183890000,
+                                            dirtySince = System.currentTimeMillis() - 60000,
+                                        ),
                                     backup =
                                         NodeBackup(
                                             capturedAt = System.currentTimeMillis() - 120000,
@@ -88,9 +98,15 @@ abstract class NodePlacementCases {
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
-            compose.onNodeWithText("Automatique").performClick()
-            compose.onNodeWithText("Préférer une node").performClick()
-            compose.onNodeWithText("Enregistrer la préférence").performScrollTo().performClick()
+            compose.onNodeWithText("Node : Mon serveur").performClick()
+            compose.onNodeWithText("Fichiers chargés à la demande").assertExists()
+            compose
+                .onNodeWithText("182,5 Mio sur cette node · 175,4 Mio non synchronisés")
+                .assertExists()
+            capture("execution-sheet")
+            compose.onNodeWithText("Enregistrer").performScrollTo().assertIsNotEnabled()
+            compose.onNodeWithText("Préférer").performClick()
+            compose.onNodeWithText("Enregistrer").performScrollTo().performClick()
             // Receipt by the server precedes the response and its UI confirmation.
             compose.waitUntil(10000) {
                 saved.size == 1 &&
@@ -101,9 +117,8 @@ abstract class NodePlacementCases {
             }
             assertEquals("node", saved[0]["preferredNodeId"]?.jsonPrimitive?.content)
             assertEquals(JsonNull, saved[0]["pinnedNodeId"])
-            compose.onNodeWithText("Préférer une node").performScrollTo().performClick()
-            compose.onNodeWithText("Fixer à une node").performClick()
-            compose.onNodeWithText("Enregistrer la préférence").performScrollTo().performClick()
+            compose.onNodeWithText("Fixer").performScrollTo().performClick()
+            compose.onNodeWithText("Enregistrer").performScrollTo().performClick()
             compose.waitUntil(10000) {
                 saved.size == 2 &&
                     compose
@@ -116,6 +131,7 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Dernière synchronisation", substring = true).assertExists()
             compose.onNodeWithText("Préférence enregistrée", substring = true).assertExists()
             // Without a recorded provider session there is nothing to resume elsewhere yet.
+            compose.onNodeWithText("Déplacer…").performScrollTo().performClick()
             compose.onNodeWithText("Déplacer maintenant").performScrollTo().assertIsNotEnabled()
         }
     }
@@ -195,7 +211,7 @@ abstract class NodePlacementCases {
                 LeoTheme { if (state.session.authenticated) NodesScreen(vm, state) }
             }
             compose.waitUntil(20000) {
-                compose.onAllNodesWithText("Nom de la machine").fetchSemanticsNodes().isNotEmpty()
+                compose.onAllNodesWithText("Ajouter une machine").fetchSemanticsNodes().isNotEmpty()
             }
             compose.waitUntil(20000) {
                 compose.onAllNodesWithText("Serveur test").fetchSemanticsNodes().isNotEmpty()
@@ -206,6 +222,26 @@ abstract class NodePlacementCases {
                     substring = true,
                 )
                 .assertExists()
+            capture("nodes")
+            compose.onNodeWithText("Stockage").performScrollTo().performClick()
+            compose.onNodeWithText("Cache propre (Mio)").performTextReplacement("51200")
+            capture("storage")
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.waitUntil(10000) {
+                writes.any { it.first == "/api/nodes/node/storage" } &&
+                    compose
+                        .onAllNodesWithText("Stockage · Serveur test")
+                        .fetchSemanticsNodes()
+                        .isEmpty()
+            }
+            assertEquals(
+                51200,
+                writes
+                    .first { it.first == "/api/nodes/node/storage" }
+                    .second["cacheMiB"]!!
+                    .jsonPrimitive
+                    .int,
+            )
             compose.onNodeWithText("Choisir les agents").performScrollTo().performClick()
             compose.waitUntil(10000) {
                 compose.onAllNodesWithText("Agent test").fetchSemanticsNodes().isNotEmpty()
@@ -245,6 +281,7 @@ abstract class NodePlacementCases {
                         .fetchSemanticsNodes()
                         .isEmpty()
             }
+            compose.onNodeWithText("Ajouter une machine").performScrollTo().performClick()
             compose.onNodeWithText("Nom de la machine").performTextInput("Nouvelle node")
             compose.onNodeWithText("Créer un code d’inscription").performScrollTo().performClick()
             compose.waitUntil(10000) {
