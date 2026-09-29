@@ -263,7 +263,10 @@ async fn skill_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resu
             let project = skill_project(s, scope).await?;
             let content = input.string("content", 100000)?;
             let result = s.skills.save(name, content, project.as_deref()).await?;
-            let detail = json!({ "scope": scope, "name": name });
+            let detail = json!({
+                "scope": scope,
+                "name": name
+            });
             s.store.audit("skill.saved", detail).await?;
             result
         }
@@ -322,7 +325,10 @@ async fn delete_skill(
         ));
     }
     s.skills.remove(name, project).await?;
-    let detail = json!({ "scope": scope, "name": name });
+    let detail = json!({
+        "scope": scope,
+        "name": name
+    });
     s.store.audit("skill.deleted", detail).await?;
     Ok(json!({ "deleted": true }))
 }
@@ -369,7 +375,10 @@ async fn set_github_token(s: &Service, id: &str, input: &Input) -> Result<Value>
     } else {
         s.store.set(&key, token.into(), None).await?;
     }
-    let detail = json!({ "agentId": id, "provider": "github" });
+    let detail = json!({
+        "agentId": id,
+        "provider": "github"
+    });
     s.store.audit("agent.connection.updated", detail).await?;
     Ok(json!({ "configured": !token.is_empty() }))
 }

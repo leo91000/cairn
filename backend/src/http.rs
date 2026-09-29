@@ -163,6 +163,7 @@ async fn security(State(app): State<App>, mut request: Request, next: Next) -> R
     }
     response
 }
+
 fn is_dynamic(path: &str) -> bool {
     path.starts_with("/api/")
         || path == "/mcp"
@@ -172,6 +173,7 @@ fn is_dynamic(path: &str) -> bool {
         || path.starts_with("/internal/")
         || path == "/health"
 }
+
 /// Dynamic responses are never cached; the app shell revalidates; assets are cached.
 fn cache_policy(path: &str, response: &Response) -> &'static str {
     if is_dynamic(path) {
@@ -186,12 +188,14 @@ fn cache_policy(path: &str, response: &Response) -> &'static str {
     }
     "public, max-age=3600"
 }
+
 fn is_node_traffic(path: &str) -> bool {
     path.starts_with("/internal/nodes/")
         || path.starts_with("/internal/execution/")
         || path.starts_with("/internal/node-restore/")
         || path.starts_with("/internal/node-workspace/")
 }
+
 /// Requests per minute shared by every path of a peer: `(bucket, limit)`.
 fn general_limit(path: &str) -> (&'static str, u32) {
     if is_node_traffic(path) {
@@ -202,6 +206,7 @@ fn general_limit(path: &str) -> (&'static str, u32) {
         ("", 300)
     }
 }
+
 /// Stricter limits on credential endpoints: `(limit, window in ms)`.
 fn endpoint_limit(path: &str) -> Option<(u32, i64)> {
     match path {
@@ -211,9 +216,11 @@ fn endpoint_limit(path: &str) -> Option<(u32, i64)> {
         _ => None,
     }
 }
+
 fn too_many_requests() -> Error {
     Error::too_many_requests("Too many requests. Try again later.")
 }
+
 fn rate_limit(app: &App, peer: IpAddr, path: &str) -> Result<()> {
     let mut limits = app.limits.lock().unwrap();
     // Expiration also bounds memory used by unauthenticated clients.
@@ -240,6 +247,7 @@ fn rate_limit(app: &App, peer: IpAddr, path: &str) -> Result<()> {
     }
     Ok(())
 }
+
 fn development_origin(origin: &str) -> bool {
     std::env::var("NODE_ENV").unwrap_or_default() != "production"
         && ["http://localhost:5178", "http://127.0.0.1:5178"].contains(&origin)
@@ -376,6 +384,7 @@ impl Input {
             .ok_or_else(|| Error::bad(format!("{name}: expected a boolean")))
     }
 }
+
 fn session_response(app: &App, session: &Value) -> Response {
     let secure = if app.service.config.public_url.starts_with("https:") {
         "; Secure"
@@ -386,23 +395,29 @@ fn session_response(app: &App, session: &Value) -> Response {
         "leo_session={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800{secure}",
         text(session, "value"),
     );
-    let mut response =
-        Json(json!({ "authenticated": true, "csrf": session["csrf"] })).into_response();
+    let mut response = Json(json!({
+        "authenticated": true,
+        "csrf": session["csrf"]
+    }))
+    .into_response();
     response
         .headers_mut()
         .insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
     response
 }
+
 #[derive(Serialize)]
 struct Execution {
     backend: &'static str,
     ready: bool,
 }
+
 #[derive(Serialize)]
 struct Tools {
     codex: Option<String>,
     gh: Option<String>,
 }
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Health<'a> {
@@ -416,9 +431,11 @@ struct Health<'a> {
     active_runs: usize,
     maintenance: bool,
 }
+
 fn env(key: &str) -> Option<String> {
     std::env::var(key).ok()
 }
+
 /// The Firecracker runner is ready when it reports this release's runtime.
 async fn runner_ready(app: &App) -> bool {
     let response = app
@@ -440,6 +457,7 @@ async fn runner_ready(app: &App) -> bool {
     let runtime = env("APP_RUNTIME_ID").unwrap_or_else(|| "development".into());
     health["backend"] == "firecracker" && health["status"] == "ok" && health["runtimeId"] == runtime
 }
+
 async fn health(State(app): State<App>, request: Request) -> Result<Response> {
     if !["GET", "HEAD"].contains(&request.method().as_str()) {
         return Err(Error::method_not_allowed("Method not allowed."));
@@ -500,11 +518,13 @@ async fn lease(State(app): State<App>, request: Request) -> Result<Json<Value>> 
             .await?,
     ))
 }
+
 /// A request left for the next router stage.
 enum Route {
     Done(Response),
     Next(Request),
 }
+
 /// Routes that read the raw request body or stream their response.
 async fn raw_route(app: &App, path: &str, request: Request) -> Result<Route> {
     let s = &app.service;
@@ -547,6 +567,7 @@ async fn raw_route(app: &App, path: &str, request: Request) -> Result<Route> {
     };
     Ok(Route::Done(response))
 }
+
 async fn set_artifact_visibility(
     s: &Service,
     run: &str,
@@ -561,6 +582,7 @@ async fn set_artifact_visibility(
     let result = crate::artifacts::sharing::set(s, run, artifact, visibility, None).await?;
     Ok(Json(result).into_response())
 }
+
 /// Sign-in routes, reachable without a session.
 async fn session_route(app: &App, input: &Input) -> Result<Option<Response>> {
     let s = &app.service;
@@ -602,9 +624,11 @@ async fn session_route(app: &App, input: &Input) -> Result<Option<Response>> {
     };
     Ok(Some(response))
 }
+
 fn json_bytes(bytes: Vec<u8>) -> Response {
     ([(header::CONTENT_TYPE, "application/json")], bytes).into_response()
 }
+
 /// Large run listings, serialized from stored JSON without building `Value` trees.
 async fn run_pages(s: &Service, input: &Input) -> Result<Option<Response>> {
     if input.method != "GET" {
@@ -644,6 +668,7 @@ async fn run_pages(s: &Service, input: &Input) -> Result<Option<Response>> {
         .await?;
     Ok(Some(json_bytes(bytes)))
 }
+
 async fn api(State(app): State<App>, request: Request) -> Result<Response> {
     let path = request.uri().path().to_owned();
     let request = match raw_route(&app, &path, request).await? {
@@ -660,6 +685,7 @@ async fn api(State(app): State<App>, request: Request) -> Result<Response> {
     }
     Ok(Json(crate::api::dispatch(s, &input).await?).into_response())
 }
+
 /// Shown in the browser tab after the Android app captured an MCP OAuth callback.
 fn native_callback_page() -> Response {
     let headers = [
@@ -674,6 +700,7 @@ fn native_callback_page() -> Response {
     let page = "<!doctype html><html lang=fr><meta name=viewport content='width=device-width,initial-scale=1'><title>Leo</title><h1>Revenez dans Leo</h1><p>Fermez cet onglet pour terminer la connexion dans l’application Android.</p></html>";
     (headers, page).into_response()
 }
+
 async fn oauth(State(app): State<App>, request: Request) -> Result<Response> {
     let input = Input::read(request).await?;
     let auth = &app.service.auth;

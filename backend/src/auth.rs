@@ -142,9 +142,11 @@ impl Auth {
             hash_slots: Arc::new(Semaphore::new(2)),
         }
     }
+
     fn resource(&self) -> String {
         format!("{}/mcp", self.public_url)
     }
+
     async fn password(&self, password: &str, salt: &str) -> Result<String> {
         let permit = self
             .hash_slots
@@ -269,6 +271,7 @@ impl Auth {
             })
             .await
     }
+
     async fn authorize(&self, params: &Value) -> Result<Authorization> {
         let client = self
             .store
@@ -312,6 +315,7 @@ impl Auth {
             scopes: scopes.into_iter().map(str::to_owned).collect(),
         })
     }
+
     pub async fn authorization(&self, params: &Value) -> Result<Value> {
         Ok(serde_json::to_value(self.authorize(params).await?)?)
     }
@@ -410,7 +414,10 @@ impl Auth {
                 let expires = Some(expires_at);
                 db.set_as(&format!("access:{}", digest(&value)), &grant, expires)?;
                 db.set_as(&format!("grant:{}", grant.family), &grant, expires)?;
-                Ok(json!({ "token": value, "expiresAt": expires_at }))
+                Ok(json!({
+                    "token": value,
+                    "expiresAt": expires_at
+                }))
             })
             .await
     }
