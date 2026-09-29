@@ -108,6 +108,9 @@ describe('real worker subprocess lifecycle', () => {
     expect(ctx.service.store.run(second.id)?.status).toBe('queued')
     ctx.worker.cancel(first.id)
     expect((await finished(first.id)).status).toBe('cancelled')
+    // A terminal run is persisted before asynchronous cleanup releases its
+    // project lock. This fixture has no timer to retry a tick that is too early.
+    await expect.poll(() => ctx.worker.active.has(first.id)).toBe(false)
     await ctx.worker.tick()
     expect((await finished(second.id)).status).toBe('succeeded')
   })

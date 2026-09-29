@@ -7,6 +7,7 @@ export const state = reactive({
   ready: false,
   authenticated: false,
   signingOut: false,
+  redirecting: false,
   setupRequired: false,
   csrf: '',
   agents: [] as Agent[],
@@ -30,6 +31,22 @@ export function notify(message: string) {
 }
 export class ApiError extends Error {
   constructor(message: string, readonly status: number) { super(message) }
+}
+export function redirect(url: string) {
+  const resume = () => {
+    state.redirecting = false
+  }
+  state.redirecting = true
+  // Restore polling if Back returns this document from the browser's page cache.
+  window.addEventListener('pageshow', resume, { once: true })
+  try {
+    window.location.assign(url)
+  }
+  catch (error) {
+    window.removeEventListener('pageshow', resume)
+    resume()
+    throw error
+  }
 }
 export async function api<T = any>(
   url: string,

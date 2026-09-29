@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { api } from '../api'
+import { api, redirect } from '../api'
 import Icon from '../components/Icon.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
@@ -28,7 +28,7 @@ async function consent(approved: boolean) {
       method: 'POST',
       body: JSON.stringify({ parameters, approved }),
     })
-    location.assign(result.redirect)
+    redirect(result.redirect)
   }
   catch (e) {
     error.value = (e as Error).message

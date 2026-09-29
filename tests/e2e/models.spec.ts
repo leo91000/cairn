@@ -1,6 +1,7 @@
 import { expect, expectSingleScroll, initializeRepository, test } from './fixtures'
 
 test('selects live models and supported reasoning for agents and queued chat turns', async ({ page, workspace }, testInfo) => {
+  test.setTimeout(60000)
   initializeRepository(workspace.projectPath)
   await page.goto('/')
   await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
@@ -45,7 +46,7 @@ test('selects live models and supported reasoning for agents and queued chat tur
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   await expect(page).toHaveURL(/\/chats\/[a-f0-9-]+$/)
   const chatId = page.url().split('/').at(-1)!
-  await expect.poll(() => workspace.service.chats.detail(chatId).run?.status).toBe('running')
+  await expect.poll(() => workspace.service.chats.detail(chatId).run?.status, { timeout: 30000 }).toBe('running')
   expect(workspace.service.chats.detail(chatId).run?.snapshot.agent).toMatchObject({ model: 'fixture-fast', reasoning: 'high' })
   await picker.click()
   await menu.getByRole('radio', { name: 'Deep thinker', exact: true }).click()

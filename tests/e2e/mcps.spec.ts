@@ -1,5 +1,25 @@
+import { setTimeout } from 'node:timers/promises'
 import { mcpProvider } from '../mcp-provider'
 import { expect, expectSingleScroll, test } from './fixtures'
+
+test('OAuth navigation does not leave background polls running in the departing page', async ({ page, workspace }) => {
+  // Keep the cross-origin navigation pending across the shell's initial poll.
+  const provider = await mcpProvider({ beforeAuthorize: () => setTimeout(4000) })
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  try {
+    await workspace.api('/api/mcps', 'POST', { name: 'Slow OAuth', transport: 'http', url: `${provider.origin}/mcp`, auth: 'oauth', allowPrivateNetwork: true })
+    await page.goto('/mcps')
+    await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+    const card = page.locator('.mcp-card').filter({ hasText: 'Slow OAuth' })
+    await card.getByRole('button', { name: 'Connect', exact: true }).click()
+    await expect(card.getByText('Connected', { exact: true })).toBeVisible()
+    expect(provider.exchanges).toBe(1)
+    expect(errors).toEqual([])
+  }
+  finally { await provider.close() }
+})
 
 test('manages MCP connections, OAuth consent, tools and agent access on desktop and mobile', async ({ page }, testInfo) => {
   const provider = await mcpProvider()
