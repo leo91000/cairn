@@ -22,6 +22,9 @@ export async function prepareStorageOrigin({
 }) {
   const origin = path.join(root, 'data/storage-fixture')
   await mkdir(origin)
+  // The server runs as root with the runner's private umask. Pre-create the
+  // read ledger as the test user so subsequent assertions can read/reset it.
+  await writeFile(path.join(origin, 'reads'), '')
   await writeFile(path.join(origin, 'server.mjs'), `
     import http from 'node:http'; import fs from 'node:fs';
     const root='/data/storage-fixture';
