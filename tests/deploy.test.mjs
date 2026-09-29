@@ -6,6 +6,9 @@ import { parse, stringify } from 'yaml'
 import { deploy } from '../scripts/deploy-coolify.mjs'
 import { firecrackerRunnerCompose, nativeRunnerCompose, persistentRunnerCompose } from '../scripts/runner-compose.mjs'
 
+// eslint-disable-next-line no-template-curly-in-string -- Compose resolves this expression at deployment time.
+const nodeImage = '${LEO_IMAGE:-}'
+
 describe('coolify deployment over HTTP', () => {
   let server
   let config
@@ -15,6 +18,7 @@ describe('coolify deployment over HTTP', () => {
   let compose
   let persistCompose
   let normalizeCompose
+  let releaseImage
 
   beforeEach(async () => {
     requests = []
@@ -22,6 +26,7 @@ describe('coolify deployment over HTTP', () => {
     compose = readFileSync(new URL('../compose.yaml', import.meta.url), 'utf8')
     persistCompose = true
     normalizeCompose = false
+    releaseImage = undefined
     healthResponses = [{ status: 'ok', commit: 'new-commit' }]
     server = createServer(async (request, response) => {
       let body = ''
@@ -48,6 +53,10 @@ describe('coolify deployment over HTTP', () => {
         const health = healthResponses.length > 1 ? healthResponses.shift() : healthResponses[0]
         response.statusCode = health ? 200 : 503
         response.end(JSON.stringify(health))
+        return
+      }
+      if (request.url === '/internal/nodes/release') {
+        response.end(JSON.stringify({ protocol: 2, commit: config.commit, image: releaseImage ?? config.image }))
         return
       }
       response.statusCode = request.method === 'PATCH' ? patchStatus : 200
@@ -131,10 +140,27 @@ describe('coolify deployment over HTTP', () => {
     expect(requests.some(request => request.path.endsWith('/restart'))).toBe(true)
   })
 
+  it.each(['mapping', 'list'])('enables remote node updates in a legacy %s manager environment', async (shape) => {
+    const document = parse(compose)
+    delete document.services.manager.environment.LEO_NODE_IMAGE
+    if (shape === 'list')
+      document.services.manager.environment = Object.entries(document.services.manager.environment).map(([key, value]) => `${key}=${value}`)
+    compose = stringify(document)
+    await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
+    const environment = parse(compose).services.manager.environment
+    expect(shape === 'list' ? environment : [`LEO_NODE_IMAGE=${environment.LEO_NODE_IMAGE}`]).toContain(`LEO_NODE_IMAGE=${nodeImage}`)
+  })
+
   it('fails if a healthy service keeps serving the previous commit', async () => {
     healthResponses = [{ status: 'ok', commit: 'old-commit' }]
     await expect(deploy(config, { intervalMs: 0, timeoutMs: 25 })).rejects.toThrow('did not serve commit')
     expect(requests.some(request => request.path === '/health')).toBe(true)
+  })
+
+  it('does not report success while nodes would receive an old image', async () => {
+    releaseImage = `ghcr.io/owner/leo@sha256:${'b'.repeat(64)}`
+    await expect(deploy(config, { intervalMs: 0, timeoutMs: 25 })).rejects.toThrow('node image')
+    expect(requests.some(request => request.path === '/internal/nodes/release')).toBe(true)
   })
 
   it('adds persistent runner storage and verifies it before updating the image', async () => {
@@ -168,7 +194,9 @@ describe('coolify deployment over HTTP', () => {
     document.services.manager.environment = environment
     const migrated = firecrackerRunnerCompose(stringify(document))
     const result = parse(migrated)
-    expect(result.services.manager.environment).toEqual(environment)
+    expect(result.services.manager.environment).toEqual(Array.isArray(environment)
+      ? [...environment, `LEO_NODE_IMAGE=${nodeImage}`]
+      : { ...environment, LEO_NODE_IMAGE: nodeImage })
     expect(result.services.runner.environment.CONCURRENCY).toBe('12')
     expect(firecrackerRunnerCompose(migrated)).toBe(migrated)
   })

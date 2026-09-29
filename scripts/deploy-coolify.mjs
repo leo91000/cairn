@@ -55,8 +55,21 @@ export async function deploy(config, { timeoutMs = 600000, intervalMs = 2000 } =
       })
       if (response.ok) {
         const health = await response.json()
-        if (health.status === 'ok' && health.commit === commit && (!config.runtimeId || health.runtimeId === config.runtimeId))
-          return { updateMs: updated - started, restartMs: restarted - updated, healthyMs: Date.now() - restarted, totalMs: Date.now() - started, polls }
+        if (health.status === 'ok' && health.commit === commit && (!config.runtimeId || health.runtimeId === config.runtimeId)) {
+          const releaseResponse = await fetch(new URL('/internal/nodes/release', publicUrl), {
+            cache: 'no-store',
+            redirect: 'error',
+            signal: AbortSignal.timeout(10000),
+          })
+          if (releaseResponse.ok) {
+            const release = await releaseResponse.json()
+            if (release.protocol === 2 && release.commit === commit && release.image === image)
+              return { updateMs: updated - started, restartMs: restarted - updated, healthyMs: Date.now() - restarted, totalMs: Date.now() - started, polls }
+          }
+          else {
+            await releaseResponse.body?.cancel()
+          }
+        }
       }
       else {
         await response.body?.cancel()
@@ -67,7 +80,7 @@ export async function deploy(config, { timeoutMs = 600000, intervalMs = 2000 } =
     }
     await setTimeout(intervalMs)
   }
-  throw new Error(`Deployment did not serve commit ${commit} before the timeout`)
+  throw new Error(`Deployment did not serve commit ${commit} with node image ${image} before the timeout`)
 }
 
 function configuration() {

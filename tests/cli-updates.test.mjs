@@ -48,6 +48,9 @@ describe('cLI update deployment and rollback', () => {
       else if (request.url === '/health') {
         response.end(JSON.stringify({ status: 'ok', commit: plan.commit, runtimeId: selectedImage === candidate && !failCandidate ? 'cli-123-1' : 'old-runtime' }))
       }
+      else if (request.url === '/internal/nodes/release') {
+        response.end(JSON.stringify({ protocol: 2, commit: plan.commit, image: selectedImage }))
+      }
       else {
         response.writeHead(404).end('{}')
       }
