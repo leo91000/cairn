@@ -98,8 +98,8 @@ pub async fn run<T>(
         };
         let result = tokio::select! {
             biased;
-            _ = stop.cancelled() => Err(Error::unavailable(STOPPED)),
-            _ = s.shutdown.cancelled() => Err(Error::unavailable(STOPPED)),
+            () = stop.cancelled() => Err(Error::unavailable(STOPPED)),
+            () = s.shutdown.cancelled() => Err(Error::unavailable(STOPPED)),
             _ = yield_requested(s) => Err(Error::unavailable(YIELDED)),
             result = authenticated => result,
         };
@@ -108,7 +108,10 @@ pub async fn run<T>(
     }
     .await;
     let released = s.accounts.release(&lease).await;
-    let _ = tokio::fs::remove_dir_all(s.config.data_dir.join("runs").join(&lease_id)).await;
+    let run = s.config.data_dir.join("runs").join(&lease_id);
+    if let Err(error) = crate::accounts::remove_directory(&run).await {
+        tracing::warn!(%error, "could not remove background Codex files");
+    }
     released.and(result)
 }
 
@@ -128,19 +131,30 @@ pub async fn turn<T>(
     tokio::pin!(request);
     let mut acknowledged = false;
     loop {
-        tokio::select! {
-            result = &mut request,
-            if !acknowledged => { result?; acknowledged = true; }
-            incoming = session.incoming.recv() => {
-                let incoming = incoming.ok_or_else(|| Error::bad("Background session disconnected."))?;
-                if session.handle_auth(&incoming).await? { continue }
-                if let Some(id) = incoming.id { rpc.reject(id).await?; continue }
-                if incoming.params["threadId"] != thread_id { continue }
-                if let Some(result) = receive(&incoming)? { return Ok(result) }
-                if incoming.method == "turn/completed" {
-                    return Err(Error::bad("Codex finished without the requested output."));
-                }
+        let incoming = tokio::select! {
+            result = &mut request, if !acknowledged => {
+                result?;
+                acknowledged = true;
+                continue;
             }
+            incoming = session.incoming.recv() => incoming,
+        };
+        let incoming = incoming.ok_or_else(|| Error::bad("Background session disconnected."))?;
+        if session.handle_auth(&incoming).await? {
+            continue;
+        }
+        if let Some(id) = incoming.id {
+            rpc.reject(id).await?;
+            continue;
+        }
+        if incoming.params["threadId"] != thread_id.as_str() {
+            continue;
+        }
+        if let Some(result) = receive(&incoming)? {
+            return Ok(result);
+        }
+        if incoming.method == "turn/completed" {
+            return Err(Error::bad("Codex finished without the requested output."));
         }
     }
 }

@@ -12,6 +12,22 @@ use tower::ServiceExt;
 
 type Reply = oneshot::Sender<(StatusCode, Json<Value>)>;
 
+/// Synthetic Codex credentials whose account ID routes the fixture to `endpoint`.
+fn tokens(endpoint: &str) -> Value {
+    json!({
+        "tokens": {
+            "access_token": "synthetic",
+            "refresh_token": "synthetic-refresh",
+            "account_id": endpoint,
+        },
+    })
+}
+
+/// A queued conversation, which background work yields to.
+fn foreground_run() -> Value {
+    json!({ "id": "foreground", "taskId": "chat", "status": "queued", "createdAt": 1 })
+}
+
 struct Fixture {
     _root: TempDir,
     s: Arc<Service>,
@@ -48,6 +64,8 @@ impl Fixture {
             }),
         );
         let provider = tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let codex = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/avatar-codex.mjs");
         let config: Config = serde_json::from_value(json!({
             "dataDir": root.path().join("data"),
             "home": root.path().join("home"),
@@ -56,12 +74,12 @@ impl Fixture {
             "host": "127.0.0.1",
             "port": 0,
             "setupToken": "test",
-            "codexBin": std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/avatar-codex.mjs"),
+            "codexBin": codex,
             "ghBin": "gh",
             "concurrency": 1,
             "logger": false,
             "workerEnabled": false,
-            "runnerUrl": ""
+            "runnerUrl": "",
         }))
         .unwrap();
         let s = Service::new(config).await.unwrap();
@@ -75,13 +93,7 @@ impl Fixture {
             s.vault
                 .set(
                     &format!("codex-account:{}", text(&account, "id")),
-                    &json!({
-                        "tokens": {
-                            "access_token": "synthetic",
-                            "refresh_token": "synthetic-refresh",
-                            "account_id": endpoint
-                        }
-                    }),
+                    &tokens(&endpoint),
                 )
                 .await
                 .unwrap();
@@ -97,7 +109,7 @@ impl Fixture {
                     .header("host", "localhost:4310")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        json!({"setupToken": "test", "password": "portrait-test-password"})
+                        json!({ "setupToken": "test", "password": "portrait-test-password" })
                             .to_string(),
                     ))
                     .unwrap(),
@@ -151,16 +163,12 @@ impl Fixture {
     }
 
     async fn create(&self) -> Value {
-        self.json(
-            "POST",
-            "/api/agents",
-            json!({
-                "name": "Release engineer",
-                "description": "Ship tested software",
-                "instructions": "PRIVATE INSTRUCTIONS NEVER SENT"
-            }),
-        )
-        .await
+        let agent = json!({
+            "name": "Release engineer",
+            "description": "Ship tested software",
+            "instructions": "PRIVATE INSTRUCTIONS NEVER SENT",
+        });
+        self.json("POST", "/api/agents", agent).await
     }
 
     async fn wait(&self, id: &str, status: &str) -> Value {
@@ -204,7 +212,7 @@ fn generated(bytes: Vec<u8>) -> (StatusCode, Json<Value>) {
             "type": "imageGeneration",
             "id": "image-1",
             "status": "completed",
-            "result": STANDARD.encode(bytes)
+            "result": STANDARD.encode(bytes),
         })),
     )
 }
@@ -228,7 +236,7 @@ async fn creation_is_nonblocking_and_portrait_survives_edits_with_private_authen
     f.json(
         "PUT",
         &format!("/api/agents/{id}"),
-        json!({"name": "Renamed agent"}),
+        json!({ "name": "Renamed agent" }),
     )
     .await;
     reply.send(generated(png([50, 100, 180]))).unwrap();
@@ -241,7 +249,7 @@ async fn creation_is_nonblocking_and_portrait_survives_edits_with_private_authen
         .json(
             "PUT",
             &format!("/api/agents/{id}"),
-            json!({"name": "New role", "avatar": {"url": "https://evil.invalid"}}),
+            json!({ "name": "New role", "avatar": { "url": "https://evil.invalid" } }),
         )
         .await;
     assert_eq!(edited["avatar"], ready["avatar"]);
@@ -366,7 +374,7 @@ async fn regeneration_failure_keeps_the_image_and_does_not_expose_provider_error
         .1
         .send((
             StatusCode::TOO_MANY_REQUESTS,
-            Json(json!({"error": "SECRET PROVIDER RESPONSE"})),
+            Json(json!({ "error": "SECRET PROVIDER RESPONSE" })),
         ))
         .unwrap();
     let failed = f.wait(id, "failed").await;
@@ -433,18 +441,18 @@ async fn uploads_work_without_provider_configuration_and_restart_never_rebills()
 async fn missing_or_invalid_images_fail_without_retry_and_release_the_account() {
     let mut f = Fixture::new(true).await;
     for item in [
-        json!({"type": "agentMessage","text": "Here is an SVG instead"}),
-        json!({"type": "imageGeneration","status": "completed","result": "not base64"}),
+        json!({ "type": "agentMessage", "text": "Here is an SVG instead" }),
+        json!({ "type": "imageGeneration", "status": "completed", "result": "not base64" }),
         json!({
             "type": "imageGeneration",
             "status": "completed",
-            "result": STANDARD.encode(b"not an image")
+            "result": STANDARD.encode(b"not an image"),
         }),
         json!({
             "type": "imageGeneration",
             "status": "failed",
             "result": "",
-            "failure": {"type": "usageLimitExceeded"}
+            "failure": { "type": "usageLimitExceeded" },
         }),
     ] {
         let agent = f.create().await;
@@ -554,7 +562,7 @@ async fn portrait_selection_respects_the_explicit_models_quota() {
             "id": "astra:weekly",
             "usedPercent": 100,
             "models": ["gpt-6-astra"],
-            "reached": true
+            "reached": true,
         }));
     f.s.store
         .put(crate::accounts::KIND, limited.clone())
@@ -568,13 +576,7 @@ async fn portrait_selection_respects_the_explicit_models_quota() {
     f.s.vault
         .set(
             &format!("codex-account:{}", text(&available, "id")),
-            &json!({
-                "tokens": {
-                    "access_token": "synthetic",
-                    "refresh_token": "synthetic-refresh",
-                    "account_id": format!("{}?available", f.endpoint)
-                }
-            }),
+            &tokens(&format!("{}?available", f.endpoint)),
         )
         .await
         .unwrap();
@@ -611,15 +613,7 @@ async fn queued_conversation_interrupts_portrait_and_gets_the_single_account_slo
     let (_, reply) = f.next().await;
     f.s.store
         .transaction(|db| {
-            db.add_run(
-                &json!({
-                    "id": "foreground",
-                    "taskId": "chat",
-                    "status": "queued",
-                    "createdAt": 1
-                }),
-                None,
-            )?;
+            db.add_run(&foreground_run(), None)?;
             Ok(())
         })
         .await
@@ -650,15 +644,7 @@ async fn foreground_queue_and_deployment_prevent_starting_a_portrait() {
         } else {
             f.s.store
                 .transaction(|db| {
-                    db.add_run(
-                        &json!({
-                            "id": "foreground",
-                            "taskId": "chat",
-                            "status": "queued",
-                            "createdAt": 1
-                        }),
-                        None,
-                    )?;
+                    db.add_run(&foreground_run(), None)?;
                     Ok(())
                 })
                 .await
