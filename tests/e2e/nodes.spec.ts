@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { LOCAL_NODE_ID } from '../../shared/nodes'
 import { expect, test } from './fixtures'
 
 test('registers, configures and revokes a node through the owner interface', async ({ page, workspace }) => {
@@ -98,8 +99,8 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   expect(response.ok()).toBe(true)
   const node = await response.json()
   const agent = (await workspace.api('/api/agents')).find((agent: { id: string }) => agent.id === detail.run.snapshot.agent.id)
-  await workspace.api(`/api/agents/${agent.id}`, 'PUT', { ...agent, access: { ...agent.access, nodes: [node.nodeId] } })
-  workspace.service.store.updateRun(detail.run.id, { nodeId: node.nodeId, backup: { capturedAt: Date.now() - 120000, status: 'ready' } } as any)
+  await workspace.api(`/api/agents/${agent.id}`, 'PUT', { ...agent, access: { ...agent.access, nodes: [node.nodeId, LOCAL_NODE_ID] } })
+  workspace.service.store.updateRun(detail.run.id, { nodeId: node.nodeId, resources: { cpu: 2, memoryMiB: 4096, diskMiB: 32768 }, backup: { capturedAt: Date.now() - 120000, status: 'ready' } } as any)
   await page.goto(`/chats/${chat.id}`)
   await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
   await page.getByRole('button', { name: 'Sign in', exact: true }).click()

@@ -11,9 +11,12 @@ class NodePlacementDeviceTest : NodePlacementCases() {
     override fun capture(name: String) {
         compose.waitForIdle()
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val directory = File(instrumentation.targetContext.filesDir, "node-screenshots").apply { mkdirs() }
-        instrumentation.uiAutomation.takeScreenshot().let { bitmap ->
-            File(directory, "$name.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        val directory =
+            File(instrumentation.targetContext.filesDir, "node-screenshots").apply { mkdirs() }
+        requireNotNull(instrumentation.uiAutomation.takeScreenshot()).let { bitmap ->
+            File(directory, "$name.png").outputStream().use {
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
             bitmap.recycle()
         }
     }

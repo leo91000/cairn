@@ -196,7 +196,7 @@ function statusLabel(node: ExecutionNode) {
       </UiButton>
     </header>
     <div class="fleet-summary">
-      <span><strong>{{ active.length }}</strong> machines</span><span><strong>{{ active.filter(n => n.local || n.status === 'online').length }}</strong> connected</span><span>Linux · isolated conversations</span>
+      <span><strong>{{ active.length }}</strong>{{ active.length === 1 ? ' machine' : ' machines' }}</span><span><strong>{{ active.filter(n => n.local || n.status === 'online').length }}</strong>{{ ' connected' }}</span><span>Linux · isolated conversations</span>
     </div>
     <UiAlert v-if="error" class="mt-4">
       {{ error }}

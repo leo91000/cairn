@@ -3,8 +3,8 @@ package dev.leo.manager.ui
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import dev.leo.manager.data.*
 import java.util.Date
@@ -59,7 +59,11 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
             "Vos machines Linux de confiance. Chaque conversation y tourne dans sa propre VM Firecracker. Le GPU n’est pas encore disponible.",
         )
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("${nodes.count { !it.revoked }} machines", Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                "${nodes.count { !it.revoked }} machines",
+                Modifier.weight(1f),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             FilledTonalButton(onClick = { adding = true }) { Text("Ajouter une machine") }
         }
         nodes
@@ -83,10 +87,28 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
                         return@Panel
                     }
                     val available = node.available ?: node.limits
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        NodeCapacity("CPU libres", available.cpu.toString(), "sur ${node.limits.cpu}", Modifier.weight(1f))
-                        NodeCapacity("RAM libre", formatMiB(available.memoryMiB), "sur ${formatMiB(node.limits.memoryMiB)}", Modifier.weight(1f))
-                        NodeCapacity("Disque libre", formatMiB(available.diskMiB), "sur ${formatMiB(node.limits.diskMiB)}", Modifier.weight(1f))
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        NodeCapacity(
+                            "CPU libres",
+                            available.cpu.toString(),
+                            "sur ${node.limits.cpu}",
+                            Modifier.weight(1f),
+                        )
+                        NodeCapacity(
+                            "RAM libre",
+                            formatMiB(available.memoryMiB),
+                            "sur ${formatMiB(node.limits.memoryMiB)}",
+                            Modifier.weight(1f),
+                        )
+                        NodeCapacity(
+                            "Disque libre",
+                            formatMiB(available.diskMiB),
+                            "sur ${formatMiB(node.limits.diskMiB)}",
+                            Modifier.weight(1f),
+                        )
                     }
                     if (node.agents.isNotEmpty())
                         Text(
@@ -115,24 +137,34 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
                     }
                     if (node.tags.isNotEmpty()) Text(node.tags.joinToString(" · "))
                     var technical by remember(node.id) { mutableStateOf(false) }
-                    TextButton(onClick = { technical = !technical }) { Text(if (technical) "Masquer les détails" else "Détails techniques") }
+                    TextButton(onClick = { technical = !technical }) {
+                        Text(if (technical) "Masquer les détails" else "Détails techniques")
+                    }
                     if (technical) {
-                        Text("Détecté : ${node.capabilities.cpu} CPU · ${formatMiB(node.capabilities.memoryMiB)} RAM · ${formatMiB(node.capabilities.diskMiB)} disque · KVM ${if (node.capabilities.kvm) "disponible" else "indisponible"}", style = MaterialTheme.typography.bodySmall)
-                        node.reserved?.let { Text("Réservé : ${formatResources(it)}", style = MaterialTheme.typography.bodySmall) }
-                    if (node.systemTags.isNotEmpty())
                         Text(
-                            "Tags détectés : ${node.systemTags.joinToString(" · ")}",
+                            "Détecté : ${node.capabilities.cpu} CPU · ${formatMiB(node.capabilities.memoryMiB)} RAM · ${formatMiB(node.capabilities.diskMiB)} disque · KVM ${if (node.capabilities.kvm) "disponible" else "indisponible"}",
                             style = MaterialTheme.typography.bodySmall,
                         )
-                    node.lastSeen?.let {
-                        Text(
-                            "Dernier contact : ${Date(it)}",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                    node.imageDigest?.let {
-                        Text("Version : $it", style = MaterialTheme.typography.bodySmall)
-                    }
+                        node.reserved?.let {
+                            Text(
+                                "Réservé : ${formatResources(it)}",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        if (node.systemTags.isNotEmpty())
+                            Text(
+                                "Tags détectés : ${node.systemTags.joinToString(" · ")}",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        node.lastSeen?.let {
+                            Text(
+                                "Dernier contact : ${Date(it)}",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        node.imageDigest?.let {
+                            Text("Version : $it", style = MaterialTheme.typography.bodySmall)
+                        }
                     }
                     HorizontalDivider()
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -170,8 +202,12 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
                 }
             }
     }
-    if (adding) DetailSheet("Ajouter une machine", { adding = false }) {
-            Text("Connectez une machine Linux, puis choisissez les agents autorisés.", style = MaterialTheme.typography.bodyMedium)
+    if (adding)
+        DetailSheet("Ajouter une machine", { adding = false }) {
+            Text(
+                "Connectez une machine Linux, puis choisissez les agents autorisés.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
             Field("Nom de la machine", name, { name = it })
             Button(
                 enabled = !state.busy && name.isNotBlank(),
@@ -214,7 +250,14 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
                     "3. Cette page détecte la machine dès qu’elle se connecte et demande quels agents peuvent l’utiliser.",
                     style = MaterialTheme.typography.bodySmall,
                 )
-                TextButton(onClick = { enrollment = null; adding = false }) { Text("Masquer") }
+                TextButton(
+                    onClick = {
+                        enrollment = null
+                        adding = false
+                    }
+                ) {
+                    Text("Masquer")
+                }
             }
         }
     recovery?.let { settings ->
@@ -232,7 +275,11 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
     storage?.let { node ->
         NodeStorageEditor(node, state, { storage = null }) { policy ->
             vm.perform {
-                api.request("PUT", "/nodes/${node.id}/storage", wireJson.encodeToJsonElement(policy))
+                api.request(
+                    "PUT",
+                    "/nodes/${node.id}/storage",
+                    wireJson.encodeToJsonElement(policy),
+                )
                 storage = null
                 load()
             }
@@ -344,13 +391,14 @@ private fun AgentGrants(
             "Les agents choisis peuvent exécuter des conversations sur cette machine. Un tag ou une capacité ne donne jamais d’accès à lui seul."
         )
         Panel {
-        state.agents.forEach { agent ->
-            if (agent.id in everywhere) Text("${agent.name} (autorisé sur toutes les nodes)")
-            else
-                Toggle(agent.name, agent.id in selected) {
-                    if (!state.busy) selected = if (it) selected + agent.id else selected - agent.id
-                }
-        }
+            state.agents.forEach { agent ->
+                if (agent.id in everywhere) Text("${agent.name} (autorisé sur toutes les nodes)")
+                else
+                    Toggle(agent.name, agent.id in selected) {
+                        if (!state.busy)
+                            selected = if (it) selected + agent.id else selected - agent.id
+                    }
+            }
         }
     }
 }
@@ -394,19 +442,19 @@ private fun NodeEditor(
     ) {
         Heading(node.name, "Identité et capacité de cette machine")
         Panel {
-        Text("Identité", style = MaterialTheme.typography.titleSmall)
-        Field("Nom", name, { name = it }, enabled = !state.busy)
-        Field("Tags séparés par des virgules", tags, { tags = it }, enabled = !state.busy)
+            Text("Identité", style = MaterialTheme.typography.titleSmall)
+            Field("Nom", name, { name = it }, enabled = !state.busy)
+            Field("Tags séparés par des virgules", tags, { tags = it }, enabled = !state.busy)
         }
         Panel {
-        Text("Ressources autorisées", style = MaterialTheme.typography.titleSmall)
-        Field("Plafond CPU", cpu, { cpu = it }, enabled = !state.busy)
-        Field("Plafond RAM (Gio)", memory, { memory = it }, enabled = !state.busy)
-        Field("Plafond disque (Gio)", disk, { disk = it }, enabled = !state.busy)
-        Text(
-            "Détecté sur cette machine : ${node.capabilities.cpu} CPU · ${formatMiB(node.capabilities.memoryMiB)} RAM · ${formatMiB(node.capabilities.diskMiB)} disque.",
-            style = MaterialTheme.typography.bodySmall,
-        )
+            Text("Ressources autorisées", style = MaterialTheme.typography.titleSmall)
+            Field("Plafond CPU", cpu, { cpu = it }, enabled = !state.busy)
+            Field("Plafond RAM (Gio)", memory, { memory = it }, enabled = !state.busy)
+            Field("Plafond disque (Gio)", disk, { disk = it }, enabled = !state.busy)
+            Text(
+                "Détecté sur cette machine : ${node.capabilities.cpu} CPU · ${formatMiB(node.capabilities.memoryMiB)} RAM · ${formatMiB(node.capabilities.diskMiB)} disque.",
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
         Toggle("Accepter de nouveaux travaux", accepting, { if (!state.busy) accepting = it })
     }
@@ -464,27 +512,32 @@ private fun RecoveryEditor(
                 style = MaterialTheme.typography.bodySmall,
             )
         Panel {
-        Text("Fréquence et délais", style = MaterialTheme.typography.titleSmall)
-        Field("Intervalle (secondes)", interval, { interval = it }, enabled = !state.busy)
-        Field(
-            "Suspension après déconnexion (secondes)",
-            disconnect,
-            { disconnect = it },
-            enabled = !state.busy,
-        )
-        Field(
-            "Préparation de l’arrêt (secondes)",
-            shutdown,
-            { shutdown = it },
-            enabled = !state.busy,
-        )
-        Field("Attente de capacité maximale (secondes)", wait, { wait = it }, enabled = !state.busy)
-        Field(
-            "Budget du cache de publication (Gio)",
-            budget,
-            { budget = it },
-            enabled = !state.busy,
-        )
+            Text("Fréquence et délais", style = MaterialTheme.typography.titleSmall)
+            Field("Intervalle (secondes)", interval, { interval = it }, enabled = !state.busy)
+            Field(
+                "Suspension après déconnexion (secondes)",
+                disconnect,
+                { disconnect = it },
+                enabled = !state.busy,
+            )
+            Field(
+                "Préparation de l’arrêt (secondes)",
+                shutdown,
+                { shutdown = it },
+                enabled = !state.busy,
+            )
+            Field(
+                "Attente de capacité maximale (secondes)",
+                wait,
+                { wait = it },
+                enabled = !state.busy,
+            )
+            Field(
+                "Budget du cache de publication (Gio)",
+                budget,
+                { budget = it },
+                enabled = !state.busy,
+            )
         }
         Text("Une capture peut dépasser l’intervalle. Le cache de publication utilise ce budget.")
     }
@@ -492,39 +545,114 @@ private fun RecoveryEditor(
 
 @Composable
 private fun NodeCapacity(label: String, value: String, limit: String, modifier: Modifier) {
-    Surface(modifier, shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+    Surface(
+        modifier,
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    ) {
         Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             Text(value, style = MaterialTheme.typography.titleMedium)
-            Text(limit, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                limit,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
 
 @Composable
-private fun NodeStorageEditor(node: ExecutionNode, state: Workspace, dismiss: () -> Unit, save: (NodeStoragePolicy) -> Unit) {
+private fun NodeStorageEditor(
+    node: ExecutionNode,
+    state: Workspace,
+    dismiss: () -> Unit,
+    save: (NodeStoragePolicy) -> Unit,
+) {
     val policy = node.storage ?: NodeStoragePolicy()
     var cache by remember { mutableStateOf(policy.cacheMiB.toString()) }
     var reserve by remember { mutableStateOf(policy.reserveMiB.toString()) }
     var percent by remember { mutableStateOf(policy.reservePercent.toString()) }
     var interval by remember { mutableStateOf(policy.backupSeconds.toString()) }
     var dirty by remember { mutableStateOf(policy.maxDirtySeconds.toString()) }
-    Editor("Stockage · ${node.name}", state.busy, state.error, close = dismiss,
-        valid = cache.toLongOrNull() in 0L..16777216L && reserve.toLongOrNull() in 64L..16777216L && percent.toIntOrNull() in 1..50 && interval.toLongOrNull() in 5L..3600L && dirty.toLongOrNull() in (interval.toLongOrNull() ?: 5L)..86400L,
-        save = { save(NodeStoragePolicy(cache.toLong(), reserve.toLong(), percent.toInt(), interval.toLong(), dirty.toLong())) }) {
-        Text("Les fichiers sont sauvegardés sur S3 et chargés à la demande. Libérer le cache ne ferme pas les conversations.")
+    Editor(
+        "Stockage · ${node.name}",
+        state.busy,
+        state.error,
+        close = dismiss,
+        valid =
+            cache.toLongOrNull() in 0L..16777216L &&
+                reserve.toLongOrNull() in 64L..16777216L &&
+                percent.toIntOrNull() in 1..50 &&
+                interval.toLongOrNull() in 5L..3600L &&
+                dirty.toLongOrNull() in (interval.toLongOrNull() ?: 5L)..86400L,
+        save = {
+            save(
+                NodeStoragePolicy(
+                    cache.toLong(),
+                    reserve.toLong(),
+                    percent.toInt(),
+                    interval.toLong(),
+                    dirty.toLong(),
+                )
+            )
+        },
+    ) {
+        Text(
+            "Les fichiers sont sauvegardés sur S3 et chargés à la demande. Libérer le cache ne ferme pas les conversations."
+        )
         Panel {
             Text("Disque local", style = MaterialTheme.typography.titleSmall)
-            Field("Cache propre (Mio)", cache, { cache = it }, enabled = !state.busy, keyboardOptions = InputKeyboards.Number)
-            Field("Espace libre minimum (Mio)", reserve, { reserve = it }, enabled = !state.busy, keyboardOptions = InputKeyboards.Number)
-            Field("Espace libre minimum (%)", percent, { percent = it }, enabled = !state.busy, keyboardOptions = InputKeyboards.Number)
-            Text("La plus grande réserve s’applique. Le travail non synchronisé reste local.", style = MaterialTheme.typography.bodySmall)
+            Field(
+                "Cache propre (Mio)",
+                cache,
+                { cache = it },
+                enabled = !state.busy,
+                keyboardOptions = InputKeyboards.Number,
+            )
+            Field(
+                "Espace libre minimum (Mio)",
+                reserve,
+                { reserve = it },
+                enabled = !state.busy,
+                keyboardOptions = InputKeyboards.Number,
+            )
+            Field(
+                "Espace libre minimum (%)",
+                percent,
+                { percent = it },
+                enabled = !state.busy,
+                keyboardOptions = InputKeyboards.Number,
+            )
+            Text(
+                "La plus grande réserve s’applique. Le travail non synchronisé reste local.",
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
         Panel {
             Text("Synchronisation", style = MaterialTheme.typography.titleSmall)
-            Field("Synchroniser toutes les (secondes)", interval, { interval = it }, enabled = !state.busy, keyboardOptions = InputKeyboards.Number)
-            Field("Suspendre après (secondes)", dirty, { dirty = it }, enabled = !state.busy, keyboardOptions = InputKeyboards.Number)
-            Text("Suspend les exécutions si leurs modifications restent non synchronisées trop longtemps.", style = MaterialTheme.typography.bodySmall)
+            Field(
+                "Synchroniser toutes les (secondes)",
+                interval,
+                { interval = it },
+                enabled = !state.busy,
+                keyboardOptions = InputKeyboards.Number,
+            )
+            Field(
+                "Suspendre après (secondes)",
+                dirty,
+                { dirty = it },
+                enabled = !state.busy,
+                keyboardOptions = InputKeyboards.Number,
+            )
+            Text(
+                "Suspend les exécutions si leurs modifications restent non synchronisées trop longtemps.",
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
     }
 }

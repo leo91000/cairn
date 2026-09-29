@@ -299,7 +299,7 @@ onUnmounted(() => {
                 {{ run.resources.cpu }} CPU · {{ formatMiB(run.resources.memoryMiB) }} RAM
               </template>
               <template v-if="run.storage?.mode === 'on-demand'">
-                · files load on demand
+                {{ run.resources ? ' · ' : '' }}Files load on demand
               </template>
             </p>
             <p v-if="savedPlacement.mode === 'fixed'" class="m-0! mt-0.5!">

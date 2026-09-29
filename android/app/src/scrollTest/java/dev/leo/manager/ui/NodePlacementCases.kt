@@ -17,6 +17,7 @@ import org.junit.Test
 
 abstract class NodePlacementCases {
     protected open fun capture(name: String) {}
+
     @get:Rule val compose = createComposeRule()
 
     @Test
@@ -74,7 +75,13 @@ abstract class NodePlacementCases {
                                     status = "succeeded",
                                     nodeId = "node",
                                     resources = NodeResources(2, 4096, 32768),
-                                    storage = RunStorage(mode = "on-demand", localBytes = 191392768, dirtyBytes = 183890000, dirtySince = System.currentTimeMillis() - 60000),
+                                    storage =
+                                        RunStorage(
+                                            mode = "on-demand",
+                                            localBytes = 191392768,
+                                            dirtyBytes = 183890000,
+                                            dirtySince = System.currentTimeMillis() - 60000,
+                                        ),
                                     backup =
                                         NodeBackup(
                                             capturedAt = System.currentTimeMillis() - 120000,
@@ -93,9 +100,14 @@ abstract class NodePlacementCases {
             }
             compose.onNodeWithText("Node : Mon serveur").performClick()
             compose.onNodeWithText("Fichiers chargés à la demande").assertExists()
-            compose.onNodeWithText("182,5 Mio sur cette node · 175,4 Mio non synchronisés").assertExists()
+            compose
+                .onNodeWithText("182,5 Mio sur cette node · 175,4 Mio non synchronisés")
+                .assertExists()
             capture("execution-sheet")
-            compose.onNodeWithText("Enregistrer la préférence").performScrollTo().assertIsNotEnabled()
+            compose
+                .onNodeWithText("Enregistrer la préférence")
+                .performScrollTo()
+                .assertIsNotEnabled()
             compose.onNodeWithText("Préférer").performClick()
             compose.onNodeWithText("Enregistrer la préférence").performScrollTo().performClick()
             // Receipt by the server precedes the response and its UI confirmation.
@@ -218,8 +230,21 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Cache propre (Mio)").performTextReplacement("51200")
             capture("storage")
             compose.onNodeWithText("Enregistrer").performClick()
-            compose.waitUntil(10000) { writes.any { it.first == "/api/nodes/node/storage" } && compose.onAllNodesWithText("Stockage · Serveur test").fetchSemanticsNodes().isEmpty() }
-            assertEquals(51200, writes.first { it.first == "/api/nodes/node/storage" }.second["cacheMiB"]!!.jsonPrimitive.int)
+            compose.waitUntil(10000) {
+                writes.any { it.first == "/api/nodes/node/storage" } &&
+                    compose
+                        .onAllNodesWithText("Stockage · Serveur test")
+                        .fetchSemanticsNodes()
+                        .isEmpty()
+            }
+            assertEquals(
+                51200,
+                writes
+                    .first { it.first == "/api/nodes/node/storage" }
+                    .second["cacheMiB"]!!
+                    .jsonPrimitive
+                    .int,
+            )
             compose.onNodeWithText("Choisir les agents").performScrollTo().performClick()
             compose.waitUntil(10000) {
                 compose.onAllNodesWithText("Agent test").fetchSemanticsNodes().isNotEmpty()
