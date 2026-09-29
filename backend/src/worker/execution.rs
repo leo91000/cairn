@@ -89,6 +89,17 @@ async fn record_failure(
     sensitive: &[String],
 ) -> Result<()> {
     let run_id = checkpoint.id.as_str();
+    // Another conversation took the last room after the scheduler checked:
+    // wait again instead of failing.
+    if !cancel.is_cancelled() && crate::nodes::placement::is_no_capacity(error) {
+        let patch = json!({
+            "status": RunStatus::Queued,
+            "recoveryPending": true,
+            "finishedAt": null,
+        });
+        let run = s.store.patch_run(run_id, patch).await?;
+        return super::schedule::report_capacity_wait(s, &run, &error.message).await;
+    }
     let saved = checkpoint.snapshot().await;
     let recover_controller = recovers_controller(s, checkpoint, &saved, cancel, error).await?;
     if recover_controller {

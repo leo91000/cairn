@@ -139,7 +139,15 @@ pub async fn request_by_agent(s: &Service, run: &Value, args: &Value) -> Result<
             limit["cpu"], limit["memoryMiB"], limit["diskMiB"]
         )));
     }
-    requested(s, run, args, true).await
+    requested(s, run, args, true).await.map_err(|mut error| {
+        // The agent decides whether to wait or ask for less.
+        if super::placement::is_no_capacity(&error) {
+            error.message.push_str(
+                " The current conversation keeps running. Call request_capacity again with waitSeconds to wait for room, or request fewer resources.",
+            );
+        }
+        error
+    })
 }
 
 /// The requested resources, which may not shrink the conversation's existing disk.

@@ -25,6 +25,8 @@ use tokio_util::sync::CancellationToken;
 const MAINTENANCE_INTERVAL_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 86_400_000;
 const RECOVERY_WAIT_REASON: &str = "Waiting for the previous execution to stop before recovery.";
+/// Starts the reason of a run that stays queued until a node has room for it.
+pub(super) const CAPACITY_WAIT_REASON: &str = "Waiting for capacity.";
 
 impl Worker {
     pub async fn tick(self: &Arc<Self>, s: &Arc<Service>) -> Result<()> {
@@ -102,6 +104,15 @@ impl Worker {
         }
         if recovering && !recover_or_wait(s, &run).await? {
             return Ok(());
+        }
+        // Waiting here keeps the account free and retries on every tick.
+        if execution::uses_vm(&run, &s.config) {
+            let current = s.store.run(&run_id).await?;
+            if let Err(error) = crate::nodes::placement::check(s, &current).await
+                && error.is_unavailable()
+            {
+                return report_capacity_wait(s, &current, &error.message).await;
+            }
         }
         let provider = Provider::of_run(&run);
         let model = text(&run["snapshot"]["agent"], "model");
@@ -193,6 +204,23 @@ async fn report_account_wait(
     let patch = json!({ "accountWaitReason": error.message, "accountRequired": required });
     s.store.patch_run(run_id, patch).await?;
     s.store.event(run_id, "status", &error.message, None).await
+}
+
+/// Shows why `run` waits for a node. Updated figures replace the reason
+/// without adding another status event.
+pub(super) async fn report_capacity_wait(s: &Service, run: &Value, detail: &str) -> Result<()> {
+    let reason = format!("{CAPACITY_WAIT_REASON} {detail}");
+    let previous = run["accountWaitReason"].as_str().unwrap_or_default();
+    if previous == reason {
+        return Ok(());
+    }
+    let run_id = text(run, "id");
+    let patch = json!({ "accountWaitReason": reason, "accountRequired": null });
+    s.store.patch_run(run_id, patch).await?;
+    if previous.starts_with(CAPACITY_WAIT_REASON) {
+        return Ok(());
+    }
+    s.store.event(run_id, "status", &reason, None).await
 }
 
 /// Returns whether a recovering run may launch again now.
