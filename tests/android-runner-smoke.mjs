@@ -4,7 +4,13 @@ import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -28,17 +34,34 @@ async function main() {
     docker('pull', image)
     const labels = JSON.parse(docker('image', 'inspect', '--format', '{{json .Config.Labels}}', image))
     assert.equal(labels['org.opencontainers.image.revision'], process.env.ANDROID_TEST_COMMIT)
-    evidence = { schema: 1, repository: image.slice('ghcr.io/'.length).split('@')[0], image, commit: process.env.ANDROID_TEST_COMMIT, cpuVendor: 'GenuineIntel', api: '34', system: 'aosp', results }
+    evidence = {
+      schema: 1,
+      repository: image.slice('ghcr.io/'.length).split('@')[0],
+      image,
+      commit: process.env.ANDROID_TEST_COMMIT,
+      cpuVendor: 'GenuineIntel',
+      api: '34',
+      system: 'aosp',
+      results,
+    }
   }
+
   const runId = randomUUID()
   const runRoot = `/data/runs/${runId}`
   let url
   const headers = { 'authorization': 'Bearer fixture-android-token', 'content-type': 'application/json' }
+
   async function api(route, method = 'GET', body) {
-    const result = await fetch(url + route, { method, headers, body: body && JSON.stringify(body), signal: AbortSignal.timeout(1800000) })
+    const result = await fetch(url + route, {
+      method,
+      headers,
+      body: body && JSON.stringify(body),
+      signal: AbortSignal.timeout(1800000),
+    })
     assert.ok(result.ok, `${route}: ${result.status}`)
     return result
   }
+
   async function until(fn, timeout = 180000) {
     const deadline = Date.now() + timeout
     while (Date.now() < deadline) {
@@ -46,8 +69,10 @@ async function main() {
         return
       await sleep(200)
     }
+
     throw new Error('Android VM probe timed out')
   }
+
   try {
     const source = path.join(root, 'data/runs', runId)
     for (const dir of ['data/runner-plans', 'state', `data/runs/${runId}/workspace`, `data/runs/${runId}/home`, `data/runs/${runId}/output`])
@@ -59,11 +84,27 @@ async function main() {
     url = `http://${docker('port', name, '4311/tcp')}`
     await until(() => fetch(`${url}/health`).then(r => r.ok).catch(() => false))
     // This device probe has no manager publishing while the SDK is installed.
-    const { storage } = await prepareStorageOrigin({ root, docker, name, api, maxDirtySeconds: 3600 })
+    const { storage } = await prepareStorageOrigin({
+      root,
+      docker,
+      name,
+      api,
+      maxDirtySeconds: 3600,
+    })
     for (const mode of ['first', 'resume']) {
       const id = randomUUID()
       const ackId = randomUUID()
-      const plan = { id, runId, storage, expires: Date.now() + 1800000, sandbox: 'yolo', cwd: `${runRoot}/workspace`, command: ['/usr/local/bin/node', `${runRoot}/workspace/probe.mjs`, mode, ackId, process.env.ANDROID_TEST_API || '34', process.env.ANDROID_TEST_SYSTEM || 'google-apis'], chat: { output: `${runRoot}/output/result.md` }, imports: ['workspace', 'home', 'output'].map(dir => ({ source: `${runRoot}/${dir}`, target: dir === 'home' ? '/home/node' : `${runRoot}/${dir}`, readOnly: false })) }
+      const plan = {
+        id,
+        runId,
+        storage,
+        expires: Date.now() + 1800000,
+        sandbox: 'yolo',
+        cwd: `${runRoot}/workspace`,
+        command: ['/usr/local/bin/node', `${runRoot}/workspace/probe.mjs`, mode, ackId, process.env.ANDROID_TEST_API || '34', process.env.ANDROID_TEST_SYSTEM || 'google-apis'],
+        chat: { output: `${runRoot}/output/result.md` },
+        imports: ['workspace', 'home', 'output'].map(dir => ({ source: `${runRoot}/${dir}`, target: dir === 'home' ? '/home/node' : `${runRoot}/${dir}`, readOnly: false })),
+      }
       await writeFile(path.join(root, 'data/runner-plans', `${id}.json`), JSON.stringify(plan))
       const started = Date.now()
       await api(`/runs/${id}`, 'POST')
@@ -96,6 +137,7 @@ async function main() {
           }
         }
       }
+
       const result = await (await api(`/runs/${id}/wait`, 'POST')).json()
       assert.equal(result.StatusCode, 0, output.slice(-6000))
       assert.ok(output.includes('probe.done'))
@@ -119,13 +161,16 @@ async function main() {
         docker('rm', name)
       }
       catch {}
+
       docker('run', '--rm', '--user', '0:0', '-v', `${root}:/cleanup`, '--entrypoint', '/bin/rm', image, '-r', '/cleanup/data', '/cleanup/state')
       await rm(root, { recursive: true, force: true })
     }
   }
+
   if (evidence)
     await writeFile(process.env.ANDROID_EVIDENCE, JSON.stringify({ ...evidence, completedAt: new Date().toISOString() }, null, 2))
 }
+
 main().catch((error) => {
   console.error(error)
   process.exitCode = 1

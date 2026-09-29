@@ -6,6 +6,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
+
 async fn controller(s: &Service, run: &str, operation: &str, value: &Value) -> Result<Value> {
     let base = super::transport::url(s, run).await?;
     let response = s
@@ -25,6 +26,7 @@ async fn controller(s: &Service, run: &str, operation: &str, value: &Value) -> R
     }
     response.json().await.map_err(Error::internal)
 }
+
 fn record_volume(db: &crate::store::Db<'_>, run: &str, node: &str, status: &Value) -> Result<()> {
     if let Some(mut volume) = db.get("node-volumes", &format!("{run}:{node}"))? {
         volume["storageMode"] = "on-demand".into();
@@ -42,9 +44,13 @@ fn record_volume(db: &crate::store::Db<'_>, run: &str, node: &str, status: &Valu
     }
     Ok(())
 }
+
 pub async fn monitor(s: Arc<Service>) {
     loop {
-        tokio::select! {_=s.shutdown.cancelled()=>return,_=tokio::time::sleep(Duration::from_secs(5))=>{}}
+        tokio::select! {
+            _ = s.shutdown.cancelled() => return,
+            _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+        }
         let _ = super::publication::maintain_local_cache(&s).await;
         let Ok(runs) = s.store.read(|db| db.active()).await else {
             continue;
@@ -84,21 +90,31 @@ pub async fn refresh(s: &Service, run: &Value) -> Result<()> {
             .unwrap_or(super::LOCAL_NODE_ID)
             .to_owned(),
     );
-    s.store.transaction(move |db| {
-        let Some(current) = db.run(&id)? else { return Ok(()); };
-        if current["nodeId"].as_str().unwrap_or(super::LOCAL_NODE_ID) != node {
-            return Ok(());
-        }
-        let mut patch = json!({"storage":status});
-        if status["dirtyBytes"] == 0
-            && let Some(point) = point
-            && point["capturedAt"].as_i64().unwrap_or(0)
-                >= current["backup"]["capturedAt"].as_i64().unwrap_or(0)
-        {
-            patch["backup"] = json!({"id":point["id"],"snapshotId":point["snapshotId"],"capturedAt":point["capturedAt"],"status":"ready","error":null});
-        }
-        db.patch_run(&id, &patch)?;
-        record_volume(db, &id, &node, &status)?;
-        Ok(())
-    }).await
+    s.store
+        .transaction(move |db| {
+            let Some(current) = db.run(&id)? else {
+                return Ok(());
+            };
+            if current["nodeId"].as_str().unwrap_or(super::LOCAL_NODE_ID) != node {
+                return Ok(());
+            }
+            let mut patch = json!({"storage": status});
+            if status["dirtyBytes"] == 0
+                && let Some(point) = point
+                && point["capturedAt"].as_i64().unwrap_or(0)
+                    >= current["backup"]["capturedAt"].as_i64().unwrap_or(0)
+            {
+                patch["backup"] = json!({
+                    "id": point["id"],
+                    "snapshotId": point["snapshotId"],
+                    "capturedAt": point["capturedAt"],
+                    "status": "ready",
+                    "error": null
+                });
+            }
+            db.patch_run(&id, &patch)?;
+            record_volume(db, &id, &node, &status)?;
+            Ok(())
+        })
+        .await
 }

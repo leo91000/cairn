@@ -1,5 +1,11 @@
 import { randomUUID } from 'node:crypto'
-import { expect, expectChatReady, expectSingleScroll, initializeRepository, test } from './fixtures'
+import {
+  expect,
+  expectChatReady,
+  expectSingleScroll,
+  initializeRepository,
+  test,
+} from './fixtures'
 
 test('queued Claude conversation explains the missing account and continues after sign-in', async ({ page, workspace }) => {
   test.setTimeout(90000)
@@ -70,6 +76,7 @@ test('conversation switcher preserves drafts and supports search, keyboard and m
       await expect(message).toBeInViewport()
     }
   }
+
   await trigger.click()
   const search = page.getByRole('searchbox', { name: 'Search conversations' })
   await search.fill('nothing-matches-this')
@@ -129,6 +136,7 @@ test('compact mobile toolbar keeps details and workspace controls accessible', a
       await expect(message).toHaveValue('Keep my draft while browsing details')
     }
   }
+
   await page.setViewportSize({ width: 390, height: 844 })
   await details.click()
   await panel.getByRole('button', { name: 'Search conversations', exact: true }).click()
@@ -204,6 +212,7 @@ test('ordinary sends and steering stay in the transcript while only follow-ups q
     await page.screenshot({ path: test.info().outputPath('normal-send-mobile.png'), animations: 'disabled' })
   }
   finally { release() }
+
   await expect(userMessages.filter({ hasText: first }).getByRole('status')).toHaveText('Starting agent…')
   await expect(composer).toHaveValue('')
   await page.reload()
@@ -305,6 +314,7 @@ test('task outcomes stay with the reply and expose evidence without crowding the
       await page.screenshot({ path: test.info().outputPath(`outcome-expanded-${width}-${colorScheme}.png`), animations: 'disabled' })
     }
   }
+
   await panel.getByRole('button', { name: 'Hide evidence' }).click()
   await expect(panel.getByRole('link', { name: 'View commit' })).toHaveCount(0)
   await page.setViewportSize({ width: 1440, height: 1000 })
@@ -326,15 +336,25 @@ test('task outcomes stay with the reply and expose evidence without crowding the
   await expect(panel).toHaveCount(0)
   // Outcomes without evidence still expose their reason; attention stays visible.
   for (const status of ['completed', 'blocked', 'needs_input'] as const) {
-    workspace.service.store.updateRun(run.id, { outcome: { ...outcome, status, reason: 'A concrete explanation of this result.', evidence: [], reportedAt: Date.now() } })
+    workspace.service.store.updateRun(run.id, {
+      outcome: {
+        ...outcome,
+        status,
+        reason: 'A concrete explanation of this result.',
+        evidence: [],
+        reportedAt: Date.now(),
+      },
+    })
     await page.reload()
     await expect(panel.getByRole('button', { name: 'View details' })).toBeVisible()
     if (status === 'completed') {
       await expect(panel.getByText('A concrete explanation of this result.')).toHaveCount(0)
       await panel.getByRole('button', { name: 'View details' }).click()
     }
+
     await expect(panel.getByText('A concrete explanation of this result.')).toBeVisible()
   }
+
   workspace.service.store.updateRun(run.id, { status: 'failed' })
   await page.reload()
   await expect(panel).toHaveCount(0)
@@ -358,6 +378,7 @@ test('failed replies show the current error instead of an old answer and can be 
     await expectSingleScroll(page)
     await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeInViewport()
   }
+
   // Diagnostic run activity still has the complete lifecycle records.
   await page.goto(`/runs/${firstRun.id}`)
   await page.getByTestId('agent-actions').filter({ hasText: '1 failure' }).locator(':scope > button').click()
@@ -373,6 +394,7 @@ test('failed replies show the current error instead of an old answer and can be 
     await expectSingleScroll(page)
     await page.screenshot({ path: test.info().outputPath(`chat-failure-${colorScheme}.png`), animations: 'disabled' })
   }
+
   await page.getByRole('button', { name: 'Dismiss error' }).click()
   await expect(page.getByRole('alert')).toHaveCount(0)
   await page.reload()
@@ -496,7 +518,12 @@ test('answers in-flight questions with choices or free text on desktop and mobil
   await page.screenshot({ path: test.info().outputPath('notifications-mobile.png'), animations: 'disabled' })
 })
 
-test('opts into device notifications and can revoke that device', async ({ page, context, browserName, workspace }) => {
+test('opts into device notifications and can revoke that device', async ({
+  page,
+  context,
+  browserName,
+  workspace,
+}) => {
   test.skip(browserName !== 'chromium', 'Permission automation uses Chromium; WebKit renders the same settings in the chat journey.')
   // This independent journey must not inherit the chat tests' request budget.
   await workspace.restart()
@@ -513,10 +540,13 @@ test('opts into device notifications and can revoke that device', async ({ page,
     let current: object | null = null
     PushManager.prototype.getSubscription = async () => current as PushSubscription | null
     PushManager.prototype.subscribe = async () => {
-      current = { toJSON: () => data, unsubscribe: async () => {
-        current = null
-        return true
-      } }
+      current = {
+        toJSON: () => data,
+        unsubscribe: async () => {
+          current = null
+          return true
+        },
+      }
       return current as PushSubscription
     }
   }, subscription)
@@ -554,6 +584,7 @@ test('long words and URLs wrap inside messages without widening the conversation
   const user = page.locator('.activity-message').filter({ has: page.locator('p', { hasText: 'Here is the document:' }) }).first()
   await expect(user).toContainText(text)
   const scroller = page.getByRole('region', { name: 'Activity output' })
+
   async function fits() {
     await expect.poll(() => scroller.evaluate(el => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1)
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
@@ -566,10 +597,12 @@ test('long words and URLs wrap inside messages without widening the conversation
     expect(overflow).toBe(false)
     await expectSingleScroll(page)
   }
+
   for (const width of [390, 320, 1440]) {
     await page.setViewportSize({ width, height: width === 1440 ? 960 : 844 })
     await fits()
   }
+
   await page.setViewportSize({ width: 390, height: 844 })
   await user.scrollIntoViewIfNeeded()
   await page.screenshot({ path: test.info().outputPath('long-message-mobile.png'), animations: 'disabled' })

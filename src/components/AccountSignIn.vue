@@ -4,7 +4,12 @@ import type { AccountsState } from '../accounts'
 import { computed, ref, watch } from 'vue'
 import { providers } from '../../shared/accounts'
 import { brands } from '../accounts'
-import { ArrowUpRight, Check, Copy, LoaderCircle } from '../icons'
+import {
+  ArrowUpRight,
+  Check,
+  Copy,
+  LoaderCircle,
+} from '../icons'
 import { buttonBase, buttonSizes, buttonVariants } from '../ui'
 import Icon from './Icon.vue'
 import Modal from './Modal.vue'
@@ -41,9 +46,11 @@ watch([() => flow.value?.code, () => flow.value?.state], () => {
   copyError.value = ''
   submitted.value = false
 })
+
 async function add() {
   await props.accounts.add(chosen.value, name.value.trim() || `${providers[chosen.value].label} account`)
 }
+
 async function copyCode() {
   const value = flow.value?.code
   if (!value)
@@ -59,6 +66,7 @@ async function copyCode() {
     copyError.value = 'Couldn’t copy automatically. Select the code and copy it manually.'
   }
 }
+
 async function submit() {
   if (!code.value.trim())
     return
@@ -66,6 +74,7 @@ async function submit() {
   code.value = ''
   submitted.value = !props.accounts.error.value
 }
+
 async function close() {
   // Leaving before the account is verified cancels the sign-in; an account that never
   // connected is removed.
@@ -103,7 +112,12 @@ async function close() {
         </div>
         <label class="gap-1.5 text-sm text-ink">
           Name
-          <input v-model="name" maxlength="100" autocomplete="off" placeholder="e.g. Work">
+          <input
+            v-model="name"
+            maxlength="100"
+            autocomplete="off"
+            placeholder="e.g. Work"
+          >
         </label>
         <p class="text-xs text-muted">
           You sign in on {{ providers[chosen].vendor }}’s page. Your password stays there.
@@ -131,7 +145,12 @@ async function close() {
         <ol class="grid gap-1" aria-live="polite">
           <template v-if="flow.provider === 'codex'">
             <li class="flex gap-3">
-              <span class="step-number" :class="flow.code ? 'done' : 'current'"><Icon v-if="flow.code" :name="Check" :size="14" /><Icon v-else :name="LoaderCircle" :size="14" class="animate-spin motion-reduce:animate-none" /></span>
+              <span class="step-number" :class="flow.code ? 'done' : 'current'"><Icon v-if="flow.code" :name="Check" :size="14" /><Icon
+                v-else
+                :name="LoaderCircle"
+                :size="14"
+                class="animate-spin motion-reduce:animate-none"
+              /></span>
               <p class="pt-1 text-sm font-semibold">
                 {{ flow.code ? 'Code ready' : 'Getting a secure code from Codex…' }}
               </p>
@@ -145,26 +164,51 @@ async function close() {
                 <template v-if="flow.code && flow.phase !== 'verifying'">
                   <div class="mt-2.5 flex items-center justify-between gap-3 rounded-2xl border border-line bg-inset px-4 py-3">
                     <code aria-label="Verification code" class="min-w-0 select-all font-mono text-2xl font-bold tracking-widest break-all phone:text-xl">{{ flow.code }}</code>
-                    <button type="button" class="grid size-8 shrink-0 place-items-center rounded-lg text-muted hover:bg-hover hover:text-ink" :aria-label="copied ? 'Code copied' : 'Copy verification code'" @click="copyCode">
+                    <button
+                      type="button"
+                      class="grid size-8 shrink-0 place-items-center rounded-lg text-muted hover:bg-hover hover:text-ink"
+                      :aria-label="copied ? 'Code copied' : 'Copy verification code'"
+                      @click="copyCode"
+                    >
                       <Icon :name="copied ? Check : Copy" :size="16" />
                     </button>
                   </div>
                   <p v-if="copyError" role="alert" class="mt-2 text-sm text-warning">
                     {{ copyError }}
                   </p>
-                  <a v-if="flow.url" :href="flow.url" target="_blank" rel="noopener noreferrer" class="mt-3 w-full" :class="[buttonBase, buttonVariants.primary, buttonSizes.default]" @click="copyCode">Copy code &amp; open sign-in<Icon :name="ArrowUpRight" :size="15" /></a>
+                  <a
+                    v-if="flow.url"
+                    :href="flow.url"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="mt-3 w-full"
+                    :class="[buttonBase, buttonVariants.primary, buttonSizes.default]"
+                    @click="copyCode"
+                  >Copy code &amp; open sign-in<Icon :name="ArrowUpRight" :size="15" /></a>
                 </template>
               </div>
             </li>
           </template>
           <template v-else>
             <li class="flex gap-3">
-              <span class="step-number" :class="flow.url ? 'done' : 'current'"><Icon v-if="flow.url" :name="Check" :size="14" /><Icon v-else :name="LoaderCircle" :size="14" class="animate-spin motion-reduce:animate-none" /></span>
+              <span class="step-number" :class="flow.url ? 'done' : 'current'"><Icon v-if="flow.url" :name="Check" :size="14" /><Icon
+                v-else
+                :name="LoaderCircle"
+                :size="14"
+                class="animate-spin motion-reduce:animate-none"
+              /></span>
               <div class="min-w-0 flex-1 pt-1">
                 <p class="text-sm font-semibold">
                   {{ flow.url ? 'Sign in on Anthropic’s page' : 'Preparing your secure sign-in link…' }}
                 </p>
-                <a v-if="flow.url && flow.phase !== 'verifying'" :href="flow.url" target="_blank" rel="noopener noreferrer" class="mt-2.5" :class="[buttonBase, buttonVariants.default, buttonSizes.small]">Open Claude sign-in<Icon :name="ArrowUpRight" :size="14" /></a>
+                <a
+                  v-if="flow.url && flow.phase !== 'verifying'"
+                  :href="flow.url"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="mt-2.5"
+                  :class="[buttonBase, buttonVariants.default, buttonSizes.small]"
+                >Open Claude sign-in<Icon :name="ArrowUpRight" :size="14" /></a>
               </div>
             </li>
             <li class="flex gap-3">
@@ -172,9 +216,23 @@ async function close() {
               <form class="min-w-0 flex-1 pt-1" @submit.prevent="submit">
                 <label class="grid gap-2 text-sm font-semibold">
                   Paste the code Anthropic shows
-                  <input v-model="code" type="password" autocomplete="off" spellcheck="false" placeholder="Authorization code" :disabled="busy || !flow.acceptsCode || submitted" aria-label="Claude authorization code">
+                  <input
+                    v-model="code"
+                    type="password"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="Authorization code"
+                    :disabled="busy || !flow.acceptsCode || submitted"
+                    aria-label="Claude authorization code"
+                  >
                 </label>
-                <UiButton v-if="flow.acceptsCode && !submitted" type="submit" variant="primary" class="mt-3 w-full" :disabled="busy || !code.trim()">
+                <UiButton
+                  v-if="flow.acceptsCode && !submitted"
+                  type="submit"
+                  variant="primary"
+                  class="mt-3 w-full"
+                  :disabled="busy || !code.trim()"
+                >
                   Finish sign-in
                 </UiButton>
               </form>
@@ -183,7 +241,12 @@ async function close() {
           <li class="flex gap-3">
             <span class="step-number" :class="flow.phase === 'verifying' || submitted ? 'current' : ''">3</span>
             <p class="flex items-center gap-2 pt-1 text-sm" :class="flow.phase === 'verifying' || submitted ? 'font-semibold' : 'text-muted'">
-              <Icon v-if="flow.phase === 'verifying' || submitted" :name="LoaderCircle" :size="14" class="animate-spin motion-reduce:animate-none" />
+              <Icon
+                v-if="flow.phase === 'verifying' || submitted"
+                :name="LoaderCircle"
+                :size="14"
+                class="animate-spin motion-reduce:animate-none"
+              />
               {{ flow.phase === 'verifying' || submitted ? 'Verifying your account…' : 'Approve access — this window finishes on its own' }}
             </p>
           </li>

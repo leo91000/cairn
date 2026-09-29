@@ -11,9 +11,21 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
 @Serializable
-private data class Placement(val nodes: List<ExecutionNode> = emptyList(), val pinnedNodeId: String? = null, val preferredNodeId: String? = null)
+private data class Placement(
+    val nodes: List<ExecutionNode> = emptyList(),
+    val pinnedNodeId: String? = null,
+    val preferredNodeId: String? = null,
+)
 
-private val nodeStates = mapOf("pausing" to "Suspension de la VM", "saving" to "Synchronisation de l’environnement", "restoring" to "Restauration de l’environnement", "resuming" to "Reprise de la conversation", "waiting-for-node" to "En attente d’une node compatible", "updating" to "Mise à jour de la node")
+private val nodeStates =
+    mapOf(
+        "pausing" to "Suspension de la VM",
+        "saving" to "Synchronisation de l’environnement",
+        "restoring" to "Restauration de l’environnement",
+        "resuming" to "Reprise de la conversation",
+        "waiting-for-node" to "En attente d’une node compatible",
+        "updating" to "Mise à jour de la node",
+    )
 
 @Composable
 fun NodePlacement(vm: LeoViewModel, run: Run) {
@@ -32,23 +44,52 @@ fun NodePlacement(vm: LeoViewModel, run: Run) {
     LaunchedEffect(run.id) {
         try {
             placement = vm.api.get("/nodes/placement/${run.id}")
-            mode = if (placement.pinnedNodeId != null) "fixed" else if (placement.preferredNodeId != null) "preferred" else "automatic"
+            mode =
+                if (placement.pinnedNodeId != null) "fixed"
+                else if (placement.preferredNodeId != null) "preferred" else "automatic"
             selected = placement.pinnedNodeId ?: placement.preferredNodeId ?: run.nodeId.orEmpty()
             destination = placement.nodes.firstOrNull { it.id != run.nodeId }?.id.orEmpty()
-        } catch (e: Exception) { error = e.message }
+        } catch (e: Exception) {
+            error = e.message
+        }
     }
     // Recovery ages are shown to the minute, so a slow clock is enough.
-    LaunchedEffect(run.id) { while (true) { delay(30_000); now = System.currentTimeMillis() } }
-    // With only the master runner there is nothing to choose, so stay out of the way unless something happens.
-    val relevant = (run.nodeId != null && run.nodeId != LOCAL_NODE_ID) || placement.nodes.any { !it.local } ||
-        run.nodeState != null || run.movementError != null || run.restoredAt != null || run.capacityWaitUntil != null || run.backup?.error != null
+    LaunchedEffect(run.id) {
+        while (true) {
+            delay(30_000)
+            now = System.currentTimeMillis()
+        }
+    }
+    // With only the master runner there is nothing to choose, so stay out of the way unless
+    // something happens.
+    val relevant =
+        (run.nodeId != null && run.nodeId != LOCAL_NODE_ID) ||
+            placement.nodes.any { !it.local } ||
+            run.nodeState != null ||
+            run.movementError != null ||
+            run.restoredAt != null ||
+            run.capacityWaitUntil != null ||
+            run.backup?.error != null
     if (!relevant) return
-    val current = placement.nodes.find { it.id == run.nodeId }?.name ?: if (run.nodeId == LOCAL_NODE_ID) "Runner du master" else "Node inconnue"
-    Text("Node : $current" + (run.resources?.let { " · ${it.cpu} CPU · ${formatMiB(it.memoryMiB)} RAM" } ?: ""))
+    val current =
+        placement.nodes.find { it.id == run.nodeId }?.name
+            ?: if (run.nodeId == LOCAL_NODE_ID) "Runner du master" else "Node inconnue"
+    Text(
+        "Node : $current" +
+            (run.resources?.let { " · ${it.cpu} CPU · ${formatMiB(it.memoryMiB)} RAM" } ?: "")
+    )
     run.nodeState?.let { Text(nodeStates[it] ?: it) }
-    run.backup?.capturedAt?.let { Text("Dernière synchronisation : ${relativeAge(it, now)}. Les modifications récentes peuvent être en attente de synchronisation.") }
-    run.backup?.error?.let { Text("Synchronisation : $it", color = MaterialTheme.colorScheme.error) }
-    run.restoredAt?.let { Text("Reprise depuis un point du ${date(it)} ; le chat plus récent reste visible.") }
+    run.backup?.capturedAt?.let {
+        Text(
+            "Dernière synchronisation : ${relativeAge(it, now)}. Les modifications récentes peuvent être en attente de synchronisation."
+        )
+    }
+    run.backup?.error?.let {
+        Text("Synchronisation : $it", color = MaterialTheme.colorScheme.error)
+    }
+    run.restoredAt?.let {
+        Text("Reprise depuis un point du ${date(it)} ; le chat plus récent reste visible.")
+    }
     run.capacityWaitUntil?.let { Text("Attente de capacité jusqu’à ${date(it)}") }
     if (run.pinnedNodeId != null) Text("Node fixe : aucune bascule automatique ailleurs.")
     run.movementError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
@@ -57,40 +98,109 @@ fun NodePlacement(vm: LeoViewModel, run: Run) {
         error = null
         saved = null
         vm.perform {
-            try { block(); saved = done } catch (e: Exception) { error = e.message } finally { busy = false }
+            try {
+                block()
+                saved = done
+            } catch (e: Exception) {
+                error = e.message
+            } finally {
+                busy = false
+            }
         }
     }
     Text("Où elle tournera la prochaine fois", style = MaterialTheme.typography.titleSmall)
-    Choice("Placement", mode, listOf("automatic" to "Automatique", "preferred" to "Préférer une node", "fixed" to "Fixer à une node")) { if (!busy) mode = it }
-    if (mode != "automatic") Choice("Node", selected, placement.nodes.map { it.id to it.name }) { if (!busy) selected = it }
-    TextButton(enabled = !busy && (mode == "automatic" || selected.isNotEmpty()), onClick = {
-        request({
-            api.request("PUT", "/nodes/placement/${run.id}", buildJsonObject {
-                put("pinnedNodeId", if (mode == "fixed") JsonPrimitive(selected) else JsonNull)
-                put("preferredNodeId", if (mode == "preferred") JsonPrimitive(selected) else JsonNull)
-            })
-        }, "Préférence enregistrée. Elle s’applique au prochain démarrage ou à la prochaine reprise.")
-    }) { Text("Enregistrer la préférence") }
-    Text("Automatique choisit la node autorisée qui a le plus de CPU et de RAM libres. Une préférence autorise la reprise ailleurs ; une node fixe attend cette machine. Cela ne déplace pas la conversation maintenant.", style = MaterialTheme.typography.bodySmall)
+    Choice(
+        "Placement",
+        mode,
+        listOf(
+            "automatic" to "Automatique",
+            "preferred" to "Préférer une node",
+            "fixed" to "Fixer à une node",
+        ),
+    ) {
+        if (!busy) mode = it
+    }
+    if (mode != "automatic")
+        Choice("Node", selected, placement.nodes.map { it.id to it.name }) {
+            if (!busy) selected = it
+        }
+    TextButton(
+        enabled = !busy && (mode == "automatic" || selected.isNotEmpty()),
+        onClick = {
+            request(
+                {
+                    api.request(
+                        "PUT",
+                        "/nodes/placement/${run.id}",
+                        buildJsonObject {
+                            put(
+                                "pinnedNodeId",
+                                if (mode == "fixed") JsonPrimitive(selected) else JsonNull,
+                            )
+                            put(
+                                "preferredNodeId",
+                                if (mode == "preferred") JsonPrimitive(selected) else JsonNull,
+                            )
+                        },
+                    )
+                },
+                "Préférence enregistrée. Elle s’applique au prochain démarrage ou à la prochaine reprise.",
+            )
+        },
+    ) {
+        Text("Enregistrer la préférence")
+    }
+    Text(
+        "Automatique choisit la node autorisée qui a le plus de CPU et de RAM libres. Une préférence autorise la reprise ailleurs ; une node fixe attend cette machine. Cela ne déplace pas la conversation maintenant.",
+        style = MaterialTheme.typography.bodySmall,
+    )
     val others = placement.nodes.filter { it.id != run.nodeId }
     if (others.isNotEmpty()) {
         Text("Déplacer vers une autre node", style = MaterialTheme.typography.titleSmall)
-        Choice("Destination", destination, others.map { it.id to it.name }) { if (!busy) destination = it }
+        Choice("Destination", destination, others.map { it.id to it.name }) {
+            if (!busy) destination = it
+        }
         Field("CPU", cpu, { cpu = it }, enabled = !busy, keyboardOptions = InputKeyboards.Number)
         Field("RAM (Gio)", memory, { memory = it }, enabled = !busy)
         Field("Disque (Gio)", disk, { disk = it }, enabled = !busy)
-        val resources = cpu.toIntOrNull()?.takeIf { it > 0 }?.let { c -> mib(memory)?.let { m -> mib(disk)?.let { d -> NodeResources(c, m, d) } } }
-        TextButton(enabled = !busy && destination.isNotEmpty() && resources != null && run.status in listOf("running", "succeeded") && run.sessionId != null && run.nodeState == null, onClick = {
-            request({
-                api.request("POST", "/nodes/placement/${run.id}/move", buildJsonObject {
-                    put("nodeId", destination)
-                    put("cpu", resources!!.cpu)
-                    put("memoryMiB", resources.memoryMiB)
-                    put("diskMiB", resources.diskMiB)
-                })
-            }, "Déplacement demandé.")
-        }) { Text("Déplacer maintenant") }
-        Text("Réserve la destination, suspend la conversation, transfère son environnement puis la reprend là-bas. Les commandes en cours sont interrompues. Le disque ne peut pas rétrécir.", style = MaterialTheme.typography.bodySmall)
+        val resources =
+            cpu.toIntOrNull()
+                ?.takeIf { it > 0 }
+                ?.let { c ->
+                    mib(memory)?.let { m -> mib(disk)?.let { d -> NodeResources(c, m, d) } }
+                }
+        TextButton(
+            enabled =
+                !busy &&
+                    destination.isNotEmpty() &&
+                    resources != null &&
+                    run.status in listOf("running", "succeeded") &&
+                    run.sessionId != null &&
+                    run.nodeState == null,
+            onClick = {
+                request(
+                    {
+                        api.request(
+                            "POST",
+                            "/nodes/placement/${run.id}/move",
+                            buildJsonObject {
+                                put("nodeId", destination)
+                                put("cpu", resources!!.cpu)
+                                put("memoryMiB", resources.memoryMiB)
+                                put("diskMiB", resources.diskMiB)
+                            },
+                        )
+                    },
+                    "Déplacement demandé.",
+                )
+            },
+        ) {
+            Text("Déplacer maintenant")
+        }
+        Text(
+            "Réserve la destination, suspend la conversation, transfère son environnement puis la reprend là-bas. Les commandes en cours sont interrompues. Le disque ne peut pas rétrécir.",
+            style = MaterialTheme.typography.bodySmall,
+        )
     }
     saved?.let { Text(it) }
     error?.let { Text(it, color = MaterialTheme.colorScheme.error) }

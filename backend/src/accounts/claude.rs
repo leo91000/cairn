@@ -34,12 +34,14 @@ const CREDENTIALS: &str = ".credentials.json";
 pub fn account_home(config: &Config, id: &str) -> PathBuf {
     config.data_dir.join("claude-accounts").join(id)
 }
+
 fn unavailable() -> Error {
     Error::new(
         503,
         "Claude authentication is unavailable. Check the account in Connections.",
     )
 }
+
 async fn read_private(path: &Path) -> Result<Option<Vec<u8>>> {
     match tokio::fs::OpenOptions::new()
         .read(true)
@@ -52,6 +54,7 @@ async fn read_private(path: &Path) -> Result<Option<Vec<u8>>> {
         Err(e) => Err(e.into()),
     }
 }
+
 async fn credentials(home: &Path) -> Result<Value> {
     let bytes = read_private(&home.join(CREDENTIALS))
         .await
@@ -59,6 +62,7 @@ async fn credentials(home: &Path) -> Result<Value> {
         .ok_or_else(unavailable)?;
     serde_json::from_slice(&bytes).map_err(|_| unavailable())
 }
+
 /// Access-only credentials: an explicit allowlist keeps refresh tokens on the manager.
 fn snapshot(value: &Value) -> Result<Value> {
     let oauth = &value["claudeAiOauth"];
@@ -79,8 +83,9 @@ fn snapshot(value: &Value) -> Result<Value> {
             safe[key] = value.clone();
         }
     }
-    Ok(json!({"claudeAiOauth":safe}))
+    Ok(json!({"claudeAiOauth": safe}))
 }
+
 /// Rotates the login when it is about to expire. The caller holds the account lock through
 /// persistence, so concurrent runs share one rotation.
 async fn access_at(home: &Path, endpoint: &str) -> Result<Value> {
@@ -95,7 +100,12 @@ async fn access_at(home: &Path, endpoint: &str) -> Result<Value> {
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(|_| unavailable())?;
-        let body = json!({"grant_type":"refresh_token","refresh_token":oauth["refreshToken"],"client_id":oauth["clientId"].as_str().unwrap_or(CLIENT_ID),"scope":oauth["scopes"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")});
+        let body = json!({
+            "grant_type": "refresh_token",
+            "refresh_token": oauth["refreshToken"],
+            "client_id": oauth["clientId"].as_str().unwrap_or(CLIENT_ID),
+            "scope": oauth["scopes"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")
+        });
         let mut response = client
             .post(endpoint)
             .json(&body)
@@ -140,6 +150,7 @@ async fn access_at(home: &Path, endpoint: &str) -> Result<Value> {
     }
     snapshot(&value)
 }
+
 /// Access-only credential storage for a manager-side metadata query. Caller holds the
 /// account lock.
 pub async fn metadata_credentials(config: &Config, id: &str) -> Result<tempfile::TempDir> {
@@ -174,13 +185,17 @@ async fn status(config: &Config, home: &Path) -> Result<Value> {
             "Update Claude Code: authentication status was not valid JSON.",
         )
     })?;
-    Ok(
-        json!({"connected":output.success && value["loggedIn"]==true,"email":value["email"].as_str(),"subscriptionType":value["subscriptionType"].as_str()}),
-    )
+    Ok(json!({
+        "connected": output.success && value["loggedIn"]==true,
+        "email": value["email"].as_str(),
+        "subscriptionType": value["subscriptionType"].as_str()
+    }))
 }
+
 fn identity(email: &str) -> String {
     hex_digest(&format!("claude:{}", email.trim().to_lowercase()))
 }
+
 fn usage_windows(value: &Value) -> Result<Vec<Value>> {
     if value["rate_limits_available"] != true {
         return Err(Error::new(
@@ -201,7 +216,15 @@ fn usage_windows(value: &Value) -> Result<Vec<Value>> {
             .as_str()
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
             .map(|date| date.timestamp());
-        windows.push(json!({"id":id,"label":label,"usedPercent":used,"resetsAt":resets_at,"durationMins":minutes,"models":models,"reached":false}));
+        windows.push(json!({
+            "id": id,
+            "label": label,
+            "usedPercent": used,
+            "resetsAt": resets_at,
+            "durationMins": minutes,
+            "models": models,
+            "reached": false
+        }));
     };
     add(
         "five_hour".into(),
@@ -252,6 +275,7 @@ fn usage_windows(value: &Value) -> Result<Vec<Value>> {
     }
     Ok(windows)
 }
+
 /// A model-scoped window names a model family, such as "opus". It also limits each catalog
 /// model that runs the family, such as "opus[1m]", or "default" when it resolves to Opus.
 fn scope(windows: &mut [Value], catalog: &Value) {
@@ -271,6 +295,7 @@ fn scope(windows: &mut [Value], catalog: &Value) {
         }
     }
 }
+
 /// Reads usage at most every five minutes. A failure keeps the last known windows.
 async fn read_usage(s: &Service, id: &str, previous: &Value) -> Value {
     let mut current = if previous.is_object() {
@@ -288,7 +313,7 @@ async fn read_usage(s: &Service, id: &str, previous: &Value) -> Value {
     match crate::claude::query_metadata(
         s,
         id,
-        Some(json!({"subtype":"get_usage","skip_behaviors":true})),
+        Some(json!({"subtype": "get_usage","skip_behaviors": true})),
     )
     .await
     .and_then(|v| usage_windows(&v))
@@ -312,6 +337,7 @@ async fn read_usage(s: &Service, id: &str, previous: &Value) -> Value {
     }
     current
 }
+
 fn login_url(output: &str) -> Option<String> {
     output
         .split_whitespace()
@@ -332,6 +358,7 @@ fn login_url(output: &str) -> Option<String> {
         })
         .map(|u| u.to_string())
 }
+
 async fn copy_private(source: &Path, target: &Path) -> Result<()> {
     if let Some(bytes) = read_private(source).await? {
         atomic_write(target, &bytes).await?;
@@ -368,15 +395,20 @@ async fn migrate(s: &Service) -> Result<()> {
         let email = saved["email"].as_str();
         merge(
             &mut account,
-            &json!({"email":email,"plan":saved["subscriptionType"],"identity":email.map(identity),"maxConcurrentRuns":limit,
-                "error":if interrupted {"Reconnect this account after an interrupted credential transfer."} else {""}}),
+            &json!({
+                "email": email,
+                "plan": saved["subscriptionType"],
+                "identity": email.map(identity),
+                "maxConcurrentRuns": limit,
+                "error": if interrupted {"Reconnect this account after an interrupted credential transfer."} else {""}
+            }),
         );
         private_dir(&s.config.data_dir.join("claude-accounts")).await?;
         tokio::fs::rename(&legacy, account_home(&s.config, &id)).await?;
         remove_file(&account_home(&s.config, &id).join("sync-required")).await?;
         s.store.put(KIND, account).await?;
         s.store
-            .audit("account.imported", json!({"id":id,"provider":"claude"}))
+            .audit("account.imported", json!({"id": id,"provider": "claude"}))
             .await?;
     } else {
         remove_directory(&legacy).await?;
@@ -386,13 +418,17 @@ async fn migrate(s: &Service) -> Result<()> {
     }
     Ok(())
 }
+
 /// Local runs used the shared home, so their session transcripts move into each run.
 async fn migrate_sessions(s: &Service, legacy: &Path) -> Result<()> {
     let runs = s
         .store
         .read(|db| {
             db.json_rows(
-                "SELECT data FROM runs WHERE json_extract(data,'$.snapshot.agent.provider')='claude' AND json_extract(data,'$.sessionId') IS NOT NULL AND COALESCE(json_extract(data,'$.isolated'),0)!=1",
+                "SELECT data FROM runs WHERE \
+                    json_extract(data,'$.snapshot.agent.provider')='claude' AND \
+                    json_extract(data,'$.sessionId') IS NOT NULL AND \
+                    COALESCE(json_extract(data,'$.isolated'),0)!=1",
                 [],
             )
         })
@@ -424,14 +460,17 @@ async fn migrate_sessions(s: &Service, legacy: &Path) -> Result<()> {
 }
 
 pub struct Claude;
+
 #[async_trait::async_trait]
 impl Driver for Claude {
     async fn initialize(&self, s: &Service) -> Result<()> {
         migrate(s).await
     }
+
     async fn managed(&self, _s: &Service) -> Result<bool> {
         Ok(true)
     }
+
     async fn authorize(&self, s: &Service, home: &Path, login: &Login) -> Result<()> {
         let mut cmd = command(
             &s.config.claude_bin,
@@ -466,11 +505,24 @@ impl Driver for Claude {
                         stdin.write_all(b"\n").await?;
                     },
                     status = child.wait() => return Ok(status?.success()),
-                    n = stdout.read(&mut a), if stdout_open => { let n = n?; stdout_open = n > 0; output.push_str(&String::from_utf8_lossy(&a[..n])); },
-                    n = stderr.read(&mut b), if stderr_open => { let n = n?; stderr_open = n > 0; output.push_str(&String::from_utf8_lossy(&b[..n])); },
+                    n = stdout.read(&mut a),
+                    if stdout_open => {
+                        let n = n?;
+                        stdout_open = n > 0;
+                        output.push_str(&String::from_utf8_lossy(&a[..n]));
+                    },
+                    n = stderr.read(&mut b),
+                    if stderr_open => {
+                        let n = n?;
+                        stderr_open = n > 0;
+                        output.push_str(&String::from_utf8_lossy(&b[..n]));
+                    },
                 }
                 if output.len() > 64_000 {
-                    return Err(Error::new(502, "Claude Code sign-in returned too much output."));
+                    return Err(Error::new(
+                        502,
+                        "Claude Code sign-in returned too much output.",
+                    ));
                 }
                 if let Some(url) = login_url(&output) {
                     login.update(|v| {
@@ -493,6 +545,7 @@ impl Driver for Claude {
             Err(error) => Err(error),
         }
     }
+
     async fn adopt(&self, s: &Service, id: &str, home: &Path) -> Result<()> {
         let signed_in = status(&s.config, home).await?;
         let email = text(&signed_in, "email");
@@ -508,7 +561,16 @@ impl Driver for Claude {
         }
         merge(
             &mut account,
-            &json!({"identity":fingerprint,"email":email,"plan":signed_in["subscriptionType"],"state":"ready","error":"","checkedAt":now(),"usage":null,"exhausted":null}),
+            &json!({
+                "identity": fingerprint,
+                "email": email,
+                "plan": signed_in["subscriptionType"],
+                "state": "ready",
+                "error": "",
+                "checkedAt": now(),
+                "usage": null,
+                "exhausted": null
+            }),
         );
         super::claim(s, account).await?;
         let target = account_home(&s.config, id);
@@ -520,6 +582,7 @@ impl Driver for Claude {
         s.store.delete(crate::claude::CATALOG).await?;
         self.refresh(s, id, &[]).await
     }
+
     async fn refresh(&self, s: &Service, id: &str, _models: &[String]) -> Result<()> {
         let current = status(&s.config, &account_home(&s.config, id)).await?;
         if current["connected"] != true {
@@ -529,24 +592,35 @@ impl Driver for Claude {
         let usage = read_usage(s, id, &account["usage"]).await;
         merge(
             &mut account,
-            &json!({"email":current["email"],"plan":current["subscriptionType"],"state":"ready","error":"","checkedAt":now()}),
+            &json!({
+                "email": current["email"],
+                "plan": current["subscriptionType"],
+                "state": "ready",
+                "error": "",
+                "checkedAt": now()
+            }),
         );
         account["usage"] = usage;
         s.store.put(KIND, account).await?;
         Ok(())
     }
+
     async fn due(&self, _s: &Service, _account: &Value, attempted: i64) -> Result<bool> {
         Ok(now() - attempted >= USAGE_TTL)
     }
+
     fn fresh_for(&self) -> i64 {
         3 * USAGE_TTL
     }
+
     fn requires_usage(&self) -> bool {
         false
     }
+
     async fn supports(&self, _s: &Service, _id: &str, _model: &str) -> Result<bool> {
         Ok(true)
     }
+
     fn home(&self, s: &Service, run_id: &str) -> PathBuf {
         s.config
             .data_dir
@@ -554,21 +628,26 @@ impl Driver for Claude {
             .join(run_id)
             .join("home/.claude")
     }
+
     async fn prepare(&self, s: &Service, id: &str, home: &Path) -> Result<()> {
         private_dir(home).await?;
         copy_private(&account_home(&s.config, id).join(STATE), &home.join(STATE)).await?;
         self.clear(home).await
     }
+
     async fn clear(&self, home: &Path) -> Result<()> {
         remove_file(&home.join(CREDENTIALS)).await
     }
+
     async fn recover(&self, s: &Service, run_id: &str) -> Result<()> {
         self.clear(&self.home(s, run_id)).await
     }
+
     async fn access(&self, s: &Service, lease: &Lease, _request: &Value) -> Result<Value> {
         let _rotation = s.accounts.lock(&lease.account_id).await;
         access_at(&account_home(&s.config, &lease.account_id), TOKEN_URL).await
     }
+
     async fn redactions(&self, s: &Service, id: &str) -> Result<Vec<String>> {
         let value = credentials(&account_home(&s.config, id))
             .await
@@ -583,6 +662,7 @@ impl Driver for Claude {
             })
             .collect())
     }
+
     async fn forget(&self, s: &Service, id: &str) -> Result<()> {
         let directory = account_home(&s.config, id);
         if directory.join(CREDENTIALS).exists() {
@@ -611,6 +691,7 @@ pub struct Client {
     expires: i64,
     previous: Vec<u8>,
 }
+
 impl Client {
     pub fn new(home: &Path) -> Self {
         Self {
@@ -620,6 +701,7 @@ impl Client {
             previous: Vec::new(),
         }
     }
+
     pub async fn sync(&mut self) -> Result<()> {
         let result = async {
             let value = broker::request(&self.socket, &json!({}), Duration::from_secs(40))
@@ -657,17 +739,32 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use tokio::net::UnixListener;
+
     #[test]
     fn model_windows_limit_the_catalog_models_of_their_family() {
-        let catalog = json!({"models":[{"model":"opus"},{"model":"opus[1m]"},{"model":"default","resolvedModel":"claude-opus-fixture[1m]"},{"model":"sonnet","resolvedModel":"claude-sonnet-fixture"}]});
+        let catalog = json!({
+            "models": [{"model": "opus"},{"model": "opus[1m]"},{"model": "default","resolvedModel": "claude-opus-fixture[1m]"},{"model": "sonnet","resolvedModel": "claude-sonnet-fixture"}]
+        });
         let mut windows = vec![json!({"models":[]}), json!({"models":["opus"]})];
         scope(&mut windows, &catalog);
         assert_eq!(windows[0]["models"], json!([]));
         assert_eq!(windows[1]["models"], json!(["opus", "opus[1m]", "default"]));
     }
+
     fn stored() -> Value {
-        json!({"claudeAiOauth":{"accessToken":"old-access","refreshToken":"private-refresh","expiresAt":now()-1000,"scopes":["user:profile","user:inference"],"subscriptionType":"max","clientId":"login-client"},"otherSecret":"must-stay-on-host"})
+        json!({
+            "claudeAiOauth": {
+                "accessToken": "old-access",
+                "refreshToken": "private-refresh",
+                "expiresAt": now()-1000,
+                "scopes": ["user:profile","user:inference"],
+                "subscriptionType": "max",
+                "clientId": "login-client"
+            },
+            "otherSecret": "must-stay-on-host"
+        })
     }
+
     #[tokio::test]
     async fn concurrent_requests_rotate_once_and_keep_refresh_state_on_host() {
         let root = tempfile::TempDir::new().unwrap();
@@ -679,12 +776,25 @@ mod tests {
         .unwrap();
         let requests = Arc::new(AtomicUsize::new(0));
         let count = requests.clone();
-        let router=axum::Router::new().route("/token",axum::routing::post(move |axum::Json(v):axum::Json<Value>| {let count=count.clone();async move {
-            assert_eq!(v["grant_type"],"refresh_token");assert_eq!(v["refresh_token"],"private-refresh");assert_eq!(v["client_id"],"login-client");
-            count.fetch_add(1,Ordering::SeqCst);
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            axum::Json(json!({"access_token":"new-access","refresh_token":"new-private-refresh","expires_in":3600,"scope":"user:profile user:inference"}))
-        }}));
+        let router = axum::Router::new().route(
+            "/token",
+            axum::routing::post(move |axum::Json(v): axum::Json<Value>| {
+                let count = count.clone();
+                async move {
+                    assert_eq!(v["grant_type"], "refresh_token");
+                    assert_eq!(v["refresh_token"], "private-refresh");
+                    assert_eq!(v["client_id"], "login-client");
+                    count.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    axum::Json(json!({
+                        "access_token": "new-access",
+                        "refresh_token": "new-private-refresh",
+                        "expires_in": 3600,
+                        "scope": "user:profile user:inference"
+                    }))
+                }
+            }),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -712,6 +822,7 @@ mod tests {
         );
         server.abort();
     }
+
     #[tokio::test]
     async fn failed_refresh_is_private_and_does_not_destroy_credentials() {
         let root = tempfile::TempDir::new().unwrap();
@@ -739,6 +850,7 @@ mod tests {
         assert_eq!(credentials(root.path()).await.unwrap(), original);
         server.abort();
     }
+
     #[tokio::test]
     async fn client_replaces_credentials_without_refresh_tokens_and_survives_transient_outage() {
         let root = tempfile::TempDir::new().unwrap();
@@ -781,9 +893,19 @@ mod tests {
         client.expires = 0;
         assert!(client.sync().await.is_err());
     }
+
     #[test]
     fn usage_windows_scope_model_limits() {
-        let windows = usage_windows(&json!({"rate_limits_available":true,"rate_limits":{"five_hour":{"utilization":25,"resets_at":"2030-01-01T12:00:00Z"},"seven_day_opus":{"utilization":80},"model_scoped":[{"display_name":"Fixture","utilization":5}],"accessToken":"secret"}})).unwrap();
+        let windows = usage_windows(&json!({
+            "rate_limits_available": true,
+            "rate_limits": {
+                "five_hour": {"utilization": 25,"resets_at": "2030-01-01T12:00:00Z"},
+                "seven_day_opus": {"utilization": 80},
+                "model_scoped": [{"display_name": "Fixture","utilization": 5}],
+                "accessToken": "secret"
+            }
+        }))
+        .unwrap();
         assert_eq!(windows.len(), 3);
         assert_eq!(windows[0]["models"], json!([]));
         assert_eq!(windows[0]["resetsAt"], 1893499200);

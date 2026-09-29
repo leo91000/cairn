@@ -30,35 +30,72 @@ class LiveTest {
         "event: batch\nid: $cursor\ndata: ${wireJson.encodeToString(batch)}\n\n"
 
     @Test
-    fun `slow display receives the complete answer without blocking or dropping wire deltas`() = runBlocking {
-        MockWebServer().use { server ->
-            val body = buildString {
-                append(frame(1, LiveBatch(listOf(message(1, "Bonjour")), LiveState(run = Run("r1", status = "running")), false, false)))
-                for (id in 2L..101L) append(frame(id, LiveBatch(listOf(message(id, " é$id", true)), null, false, false)))
+    fun `slow display receives the complete answer without blocking or dropping wire deltas`() =
+        runBlocking {
+            MockWebServer().use { server ->
+                val body = buildString {
+                    append(
+                        frame(
+                            1,
+                            LiveBatch(
+                                listOf(message(1, "Bonjour")),
+                                LiveState(run = Run("r1", status = "running")),
+                                false,
+                                false,
+                            ),
+                        )
+                    )
+                    for (id in 2L..101L) append(
+                        frame(id, LiveBatch(listOf(message(id, " é$id", true)), null, false, false))
+                    )
+                }
+                server.enqueue(
+                    MockResponse().setHeader("Content-Type", "text/event-stream").setBody(body)
+                )
+                server.start()
+                val api = LeoApi(server.url("/"), MemoryVault())
+                val session = LiveSession()
+                val final =
+                    withTimeout(15000) {
+                        api.live("/runs/r1/stream", session)
+                            .onEach {
+                                // Simulate a display stalled while the producer keeps decoding.
+                                while (session.cursor < 101) delay(10)
+                            }
+                            .first { it.cursor == 101L }
+                    }
+                assertEquals(
+                    "Bonjour" + (2..101).joinToString("") { " é$it" },
+                    final.events.single().text,
+                )
+                assertEquals(101L, final.cursor)
+                assertEquals(1L, final.events.single().displayId)
+                assertTrue(api.streamCalls.isEmpty())
             }
-            server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(body))
-            server.start()
-            val api = LeoApi(server.url("/"), MemoryVault())
-            val session = LiveSession()
-            val final = withTimeout(15000) {
-                api.live("/runs/r1/stream", session).onEach {
-                    // Simulate a display stalled while the producer keeps decoding.
-                    while (session.cursor < 101) delay(10)
-                }.first { it.cursor == 101L }
-            }
-            assertEquals("Bonjour" + (2..101).joinToString("") { " é$it" }, final.events.single().text)
-            assertEquals(101L, final.cursor)
-            assertEquals(1L, final.events.single().displayId)
-            assertTrue(api.streamCalls.isEmpty())
         }
-    }
 
     @Test
     fun `backwards page keeps latest message snapshot and intervening tools`() {
-        fun message(id: Long, content: String) = RunEvent(id, id, "item.updated", content, mapOf("item" to buildJsonObject {
-            put("id", "m"); put("type", "agent_message"); put("text", content)
-        }))
-        val merged = mergeHistory(listOf(message(1, "old"), RunEvent(2, 2, "output", "tool")), listOf(message(3, "complete")))
+        fun message(id: Long, content: String) =
+            RunEvent(
+                id,
+                id,
+                "item.updated",
+                content,
+                mapOf(
+                    "item" to
+                        buildJsonObject {
+                            put("id", "m")
+                            put("type", "agent_message")
+                            put("text", content)
+                        }
+                ),
+            )
+        val merged =
+            mergeHistory(
+                listOf(message(1, "old"), RunEvent(2, 2, "output", "tool")),
+                listOf(message(3, "complete")),
+            )
         assertEquals(2, merged.size)
         assertEquals("complete", merged[0].text)
         assertEquals("tool", merged[1].text)

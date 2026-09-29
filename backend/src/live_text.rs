@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 #[derive(Default)]
 pub(crate) struct TextDeltas(HashMap<String, String>);
+
 impl TextDeltas {
     pub fn encode(&mut self, events: Vec<Event>, reset: bool) -> Result<Vec<Value>> {
         if reset {

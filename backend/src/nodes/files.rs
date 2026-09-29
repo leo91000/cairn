@@ -29,11 +29,11 @@ pub async fn send(root: &Path, writer: &mut (impl tokio::io::AsyncWrite + Unpin)
                 let target = tokio::fs::read_link(&path).await?;
                 wire::write(
                     writer,
-                    &json!({"path":relative,"kind":"link","target":target}),
+                    &json!({"path": relative,"kind": "link","target": target}),
                 )
                 .await?;
             } else if kind.is_dir() {
-                wire::write(writer,&json!({"path":relative,"kind":"directory","mode":metadata.permissions().mode()&0o777})).await?;
+                wire::write(writer,&json!({"path": relative,"kind": "directory","mode": metadata.permissions().mode()&0o777})).await?;
                 directories.push(path);
             } else if kind.is_file() {
                 let mut file = tokio::fs::OpenOptions::new()
@@ -42,7 +42,16 @@ pub async fn send(root: &Path, writer: &mut (impl tokio::io::AsyncWrite + Unpin)
                     .open(&path)
                     .await?;
                 let size = file.metadata().await?.len();
-                wire::write(writer,&json!({"path":relative,"kind":"file","size":size,"mode":metadata.permissions().mode()&0o777})).await?;
+                wire::write(
+                    writer,
+                    &json!({
+                        "path": relative,
+                        "kind": "file",
+                        "size": size,
+                        "mode": metadata.permissions().mode()&0o777
+                    }),
+                )
+                .await?;
                 let mut left = size;
                 let mut buffer = vec![0; 65536];
                 while left > 0 {
@@ -51,14 +60,16 @@ pub async fn send(root: &Path, writer: &mut (impl tokio::io::AsyncWrite + Unpin)
                     if count == 0 {
                         return Err(Error::new(409, "Workspace changed during transfer."));
                     }
-                    wire::write(writer, &json!({"data":STANDARD.encode(&buffer[..count])})).await?;
+                    wire::write(writer, &json!({"data": STANDARD.encode(&buffer[..count])}))
+                        .await?;
                     left -= count as u64;
                 }
             }
         }
     }
-    wire::write(writer, &json!({"complete":true})).await
+    wire::write(writer, &json!({"complete": true})).await
 }
+
 pub async fn receive(
     reader: &mut (impl AsyncBufRead + Unpin),
     root: &Path,

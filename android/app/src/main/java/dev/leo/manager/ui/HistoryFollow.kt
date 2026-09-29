@@ -1,30 +1,30 @@
 package dev.leo.manager.ui
 
 import androidx.compose.foundation.OverscrollEffect
-import androidx.compose.foundation.rememberOverscrollEffect
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.rememberOverscrollEffect
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.drawscope.ContentDrawScope
-import androidx.compose.ui.node.DelegatableNode
-import androidx.compose.ui.node.DelegatingNode
-import androidx.compose.ui.node.DrawModifierNode
-import androidx.compose.ui.node.invalidateDraw
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.drawscope.ContentDrawScope
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.node.DelegatableNode
+import androidx.compose.ui.node.DelegatingNode
+import androidx.compose.ui.node.DrawModifierNode
+import androidx.compose.ui.node.invalidateDraw
 import androidx.compose.ui.semantics.scrollBy
 import androidx.compose.ui.semantics.scrollByOffset
 import androidx.compose.ui.semantics.scrollToIndex
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Velocity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.conflate
@@ -41,7 +41,9 @@ internal class HistoryFollowGesture(
     var followRequested = true
         private set
 
-    fun syncFollow(value: Boolean) { followRequested = value }
+    fun syncFollow(value: Boolean) {
+        followRequested = value
+    }
 
     private fun changeFollow(value: Boolean) {
         followRequested = value
@@ -50,12 +52,14 @@ internal class HistoryFollowGesture(
 
     var touching by mutableStateOf(false)
         private set
+
     private var flinging by mutableStateOf(false)
     private var moved = false
     private var pointerMoved = false
     private var nonTouchScroll = false
     private var semanticScrolls by mutableIntStateOf(0)
-    val busy get() = touching || flinging || semanticScrolls > 0
+    val busy
+        get() = touching || flinging || semanticScrolls > 0
 
     // Accessibility actions are explicit reading intent too. Native focus
     // relocation has no such action and must not silently turn following off.
@@ -74,7 +78,9 @@ internal class HistoryFollowGesture(
     }
 
     fun semanticScrollTo(index: Int): Boolean {
-        require(index in 0 until list.layoutInfo.totalItemsCount) { "Invalid history index: $index" }
+        require(index in 0 until list.layoutInfo.totalItemsCount) {
+            "Invalid history index: $index"
+        }
         return semanticScroll { list.scrollToItem(index) }
     }
 
@@ -110,11 +116,15 @@ internal class HistoryFollowGesture(
         nonTouchScroll = true
     }
 
-    override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+    override fun onPostScroll(
+        consumed: Offset,
+        available: Offset,
+        source: NestedScrollSource,
+    ): Offset {
         // Native selectable text can relocate after release as well as during
         // rebinding. Require an observed input, not just a UserInput scroll label.
-        val directInput = source == NestedScrollSource.UserInput &&
-            ((touching && pointerMoved) || nonTouchScroll)
+        val directInput =
+            source == NestedScrollSource.UserInput && ((touching && pointerMoved) || nonTouchScroll)
         if (directInput || flinging) {
             if (consumed.y > 0f) {
                 // Touch slop has already been handled by LazyColumn. Any actual
@@ -143,7 +153,11 @@ internal class HistoryFollowGesture(
 }
 
 @Composable
-internal fun rememberHistoryFollowGesture(list: LazyListState, follow: Boolean, changeFollow: (Boolean) -> Unit): HistoryFollowGesture {
+internal fun rememberHistoryFollowGesture(
+    list: LazyListState,
+    follow: Boolean,
+    changeFollow: (Boolean) -> Unit,
+): HistoryFollowGesture {
     val currentChange by rememberUpdatedState(changeFollow)
     val scope = rememberCoroutineScope()
     return remember(list, scope) { HistoryFollowGesture(list, scope) { currentChange(it) } }
@@ -158,10 +172,20 @@ internal fun Modifier.historyFollowGesture(gesture: HistoryFollowGesture): Modif
             scrollToIndex { gesture.semanticScrollTo(it) }
         }
         .onPreviewKeyEvent { event ->
-            if (event.type == KeyEventType.KeyDown && event.key in listOf(
-                    Key.DirectionUp, Key.DirectionDown, Key.PageUp, Key.PageDown,
-                    Key.MoveHome, Key.MoveEnd, Key.Spacebar,
-                )) gesture.wheelOrKey()
+            if (
+                event.type == KeyEventType.KeyDown &&
+                    event.key in
+                        listOf(
+                            Key.DirectionUp,
+                            Key.DirectionDown,
+                            Key.PageUp,
+                            Key.PageDown,
+                            Key.MoveHome,
+                            Key.MoveEnd,
+                            Key.Spacebar,
+                        )
+            )
+                gesture.wheelOrKey()
             false
         }
         .pointerInput(gesture) {
@@ -173,29 +197,30 @@ internal fun Modifier.historyFollowGesture(gesture: HistoryFollowGesture): Modif
             }
         }
         .pointerInput(gesture) {
-        awaitEachGesture {
-            // Initial pass also observes touches handled by selectable Android text.
-            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-            gesture.contact(true)
-            try {
-                do {
-                    val event = awaitPointerEvent(PointerEventPass.Initial)
-                    if (event.changes.any { it.position != it.previousPosition }) gesture.motion()
-                } while (event.changes.any { it.pressed })
-                // Keep the contact active until selectable child views have handled
-                // the release; their focus relocation is still part of this tap.
-                awaitPointerEvent(PointerEventPass.Final)
-            } finally {
-                gesture.contact(false)
+            awaitEachGesture {
+                // Initial pass also observes touches handled by selectable Android text.
+                awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                gesture.contact(true)
+                try {
+                    do {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        if (event.changes.any { it.position != it.previousPosition })
+                            gesture.motion()
+                    } while (event.changes.any { it.pressed })
+                    // Keep the contact active until selectable child views have handled
+                    // the release; their focus relocation is still part of this tap.
+                    awaitPointerEvent(PointerEventPass.Final)
+                } finally {
+                    gesture.contact(false)
+                }
             }
         }
-    }
 
 /**
  * Android's stretch overscroll only relaxes while its node keeps drawing, and it asks for those
  * frames through a state write that, on device, stopped redrawing the history's layer: the stretch
- * froze mid-release. A scrollable with overscroll in progress starts dragging on every down, so taps
- * and horizontal swipes over the history would never reach its items or the chat pager.
+ * froze mid-release. A scrollable with overscroll in progress starts dragging on every down, so
+ * taps and horizontal swipes over the history would never reach its items or the chat pager.
  */
 @Composable
 internal fun rememberHistoryOverscroll(): OverscrollEffect? {
@@ -203,7 +228,8 @@ internal fun rememberHistoryOverscroll(): OverscrollEffect? {
     return remember(effect) { RelaxingOverscroll(effect) }
 }
 
-internal class RelaxingOverscroll(private val effect: OverscrollEffect) : OverscrollEffect by effect {
+internal class RelaxingOverscroll(private val effect: OverscrollEffect) :
+    OverscrollEffect by effect {
     override val node: DelegatableNode = RelaxingOverscrollNode(effect)
 }
 
@@ -215,7 +241,8 @@ private class RelaxingOverscrollNode(effect: OverscrollEffect) : DelegatingNode(
     }
 }
 
-private class RelaxDrawNode(private val effect: OverscrollEffect) : Modifier.Node(), DrawModifierNode {
+private class RelaxDrawNode(private val effect: OverscrollEffect) :
+    Modifier.Node(), DrawModifierNode {
     private var frameRequested = false
 
     override fun ContentDrawScope.draw() {
@@ -226,7 +253,7 @@ private class RelaxDrawNode(private val effect: OverscrollEffect) : Modifier.Nod
             frameRequested = true
             coroutineScope.launch {
                 try {
-                    withFrameNanos { }
+                    withFrameNanos {}
                     invalidateDraw()
                 } finally {
                     frameRequested = false
@@ -248,36 +275,47 @@ internal fun FollowHistoryTail(
     val currentContent by rememberUpdatedState(content)
     val allowed = enabled && gesture?.busy != true
     LaunchedEffect(list, allowed, rendering, gesture) {
-        if (allowed) snapshotFlow {
-            val info = list.layoutInfo
-            val tail = info.visibleItemsInfo.lastOrNull()
-            // Selectable native text may relocate after release without changing
-            // content or viewport size. Observe its measured position as well;
-            // intentional gestures disable this collector before it can repin.
-            val geometry = listOf(
-                info.totalItemsCount, info.viewportSize.height, info.viewportEndOffset,
-                info.afterContentPadding, tail?.index, tail?.offset, tail?.size,
-            )
-            Triple(geometry, rendering.revision, currentContent)
-        }.conflate().collect {
-            withFrameNanos { }
-            if (gesture?.let { it.busy || !it.followRequested } == true) return@collect
-            val count = list.layoutInfo.totalItemsCount
-            if (count > 0) {
-                // Locate the last item first, then use its measured bottom. Its
-                // height may exceed the viewport, and content padding counts too.
-                if (list.layoutInfo.visibleItemsInfo.none { it.index == count - 1 }) {
-                    list.scrollToItem(count - 1)
-                    withFrameNanos { }
-                }
-                if (gesture?.let { it.busy || !it.followRequested } == true) return@collect
+        if (allowed)
+            snapshotFlow {
                 val info = list.layoutInfo
-                val last = info.visibleItemsInfo.lastOrNull { it.index == count - 1 }
-                if (last != null) {
-                    val remaining = last.offset + last.size + info.afterContentPadding - info.viewportEndOffset
-                    if (remaining > 0) list.scrollBy(remaining.toFloat())
-                }
+                val tail = info.visibleItemsInfo.lastOrNull()
+                // Selectable native text may relocate after release without changing
+                // content or viewport size. Observe its measured position as well;
+                // intentional gestures disable this collector before it can repin.
+                val geometry =
+                    listOf(
+                        info.totalItemsCount,
+                        info.viewportSize.height,
+                        info.viewportEndOffset,
+                        info.afterContentPadding,
+                        tail?.index,
+                        tail?.offset,
+                        tail?.size,
+                    )
+                Triple(geometry, rendering.revision, currentContent)
             }
-        }
+                .conflate()
+                .collect {
+                    withFrameNanos {}
+                    if (gesture?.let { it.busy || !it.followRequested } == true) return@collect
+                    val count = list.layoutInfo.totalItemsCount
+                    if (count > 0) {
+                        // Locate the last item first, then use its measured bottom. Its
+                        // height may exceed the viewport, and content padding counts too.
+                        if (list.layoutInfo.visibleItemsInfo.none { it.index == count - 1 }) {
+                            list.scrollToItem(count - 1)
+                            withFrameNanos {}
+                        }
+                        if (gesture?.let { it.busy || !it.followRequested } == true) return@collect
+                        val info = list.layoutInfo
+                        val last = info.visibleItemsInfo.lastOrNull { it.index == count - 1 }
+                        if (last != null) {
+                            val remaining =
+                                last.offset + last.size + info.afterContentPadding -
+                                    info.viewportEndOffset
+                            if (remaining > 0) list.scrollBy(remaining.toFloat())
+                        }
+                    }
+                }
     }
 }

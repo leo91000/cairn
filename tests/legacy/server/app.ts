@@ -58,6 +58,7 @@ export async function buildApp(overrides: Partial<Config> = {}) {
         .code(400)
         .send({ error: error.code, error_description: error.message })
     }
+
     if (error instanceof ZodError) {
       return reply.code(400).send({
         error: error.issues
@@ -65,6 +66,7 @@ export async function buildApp(overrides: Partial<Config> = {}) {
           .join('; '),
       })
     }
+
     const status = (error as { statusCode?: number }).statusCode ?? 500
     if (status >= 500)
       app.log.error(error)
@@ -90,6 +92,7 @@ export async function buildApp(overrides: Partial<Config> = {}) {
     ) {
       throw new AppError(403, 'Unexpected host.')
     }
+
     if (request.headers.origin && !origins.has(request.headers.origin))
       throw new AppError(403, 'Unexpected origin.')
     const url = request.url.split('?')[0]
@@ -110,6 +113,7 @@ export async function buildApp(overrides: Partial<Config> = {}) {
         )
       }
     }
+
     reply
       .header('X-Content-Type-Options', 'nosniff')
       .header('Referrer-Policy', 'same-origin')
@@ -134,9 +138,19 @@ export async function buildApp(overrides: Partial<Config> = {}) {
     })
     return { authenticated: true, csrf: session.csrf }
   }
+
   app.get('/health', (_request, reply) => {
     reply.header('Cache-Control', 'no-store')
-    return { status: 'ok', commit: process.env.APP_COMMIT || 'development', runtimeId: process.env.APP_RUNTIME_ID || process.env.APP_COMMIT || 'development', baseImage: process.env.APP_BASE_IMAGE || null, tools: { codex: process.env.APP_CODEX_VERSION || null, gh: process.env.APP_GH_VERSION || null }, toolkit, activeRuns: worker.active.size, maintenance: maintenanceActive(store) }
+    return {
+      status: 'ok',
+      commit: process.env.APP_COMMIT || 'development',
+      runtimeId: process.env.APP_RUNTIME_ID || process.env.APP_COMMIT || 'development',
+      baseImage: process.env.APP_BASE_IMAGE || null,
+      tools: { codex: process.env.APP_CODEX_VERSION || null, gh: process.env.APP_GH_VERSION || null },
+      toolkit,
+      activeRuns: worker.active.size,
+      maintenance: maintenanceActive(store),
+    }
   })
   app.route<{ Body: { owner: string } }>({
     method: ['POST', 'DELETE'],
@@ -211,6 +225,7 @@ export async function buildApp(overrides: Partial<Config> = {}) {
       if (['failed', 'interrupted', 'cancelled'].includes(run.status))
         worker.resume(run.id)
     }
+
     store.delete(`chat-error:${chat.id}`)
     return service.chats.pause(chat.id, paused)
   })
@@ -248,6 +263,7 @@ export async function buildApp(overrides: Partial<Config> = {}) {
       return { deleted: true }
     })
   }
+
   app.post<{ Params: { id: string } }>('/api/tasks/:id/run', request =>
     service.enqueue(request.params.id))
   app.post('/api/schedule/preview', (request) => {
@@ -323,6 +339,7 @@ export async function buildApp(overrides: Partial<Config> = {}) {
           'This skill is selected by a task. Update that task first.',
         )
       }
+
       await service.skills.remove(
         request.params.name,
         skillProject(request.params.scope),
@@ -412,7 +429,8 @@ export async function buildApp(overrides: Partial<Config> = {}) {
     const key = `agent-github:${request.params.id}`
     if (token)
       store.set(key, token)
-    else store.delete(key)
+    else
+      store.delete(key)
     store.audit('agent.connection.updated', { agentId: request.params.id, provider: 'github' })
     return { configured: !!token }
   })
@@ -523,9 +541,11 @@ export async function buildApp(overrides: Partial<Config> = {}) {
       ) {
         return reply.header('Cache-Control', 'no-cache').sendFile('index.html')
       }
+
       return reply.code(404).send({ error: 'Not found' })
     })
   }
+
   app.addHook('preClose', async () => {
     await worker.close()
   })
@@ -540,5 +560,12 @@ export async function buildApp(overrides: Partial<Config> = {}) {
     service.accounts.start()
     service.notifications.start()
   }
-  return { app, service, worker, auth, connections }
+
+  return {
+    app,
+    service,
+    worker,
+    auth,
+    connections,
+  }
 }

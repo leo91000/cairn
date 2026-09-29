@@ -1,8 +1,18 @@
 <script setup lang="ts">
 import type { ExecutionNode, NodeEnrollment, NodeSyncSettings } from '../../shared/nodes'
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import {
+  computed,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+} from 'vue'
 import { formatMiB, formatResources, nodeDiagnostics } from '../../shared/nodes'
-import { api, notify, refresh, state } from '../api'
+import {
+  api,
+  notify,
+  refresh,
+  state,
+} from '../api'
 import Modal from '../components/Modal.vue'
 import NodeStorage from '../components/NodeStorage.vue'
 import UiAlert from '../components/UiAlert.vue'
@@ -31,6 +41,7 @@ const active = computed(() => nodes.value.filter(node => !node.revoked))
 const revoked = computed(() => nodes.value.filter(node => node.revoked))
 const visible = computed(() => showRevoked.value ? nodes.value : active.value)
 let timer: ReturnType<typeof setInterval> | undefined
+
 async function load() {
   try {
     nodes.value = await api<ExecutionNode[]>('/nodes')
@@ -39,6 +50,7 @@ async function load() {
     error.value = (e as Error).message
     return
   }
+
   if (!enrollment.value)
     return
   const connected = nodes.value.find(node => !node.local && !node.revoked && !knownBeforeEnrollment.has(node.id))
@@ -48,11 +60,13 @@ async function load() {
     grant(connected)
   }
 }
+
 onMounted(() => {
   void load()
   timer = setInterval(load, 10_000)
 })
 onBeforeUnmount(() => clearInterval(timer))
+
 async function action(operation: () => Promise<void>) {
   if (busy.value)
     return
@@ -69,33 +83,46 @@ async function action(operation: () => Promise<void>) {
     busy.value = false
   }
 }
+
 function enroll() {
   return action(async () => {
     knownBeforeEnrollment = new Set(nodes.value.map(node => node.id))
     enrollment.value = await api<NodeEnrollment>('/nodes/enrollments', { method: 'POST', body: JSON.stringify({ name: name.value }) })
   })
 }
+
 function edit(node: ExecutionNode) {
   editing.value = JSON.parse(JSON.stringify(node))
   tags.value = node.tags.join(', ')
   memoryGiB.value = +(node.limits.memoryMiB / 1024).toFixed(2)
   diskGiB.value = +(node.limits.diskMiB / 1024).toFixed(2)
 }
+
 function save() {
   const node = editing.value
   if (!node)
     return
   const limits = { cpu: node.limits.cpu, memoryMiB: Math.round(memoryGiB.value * 1024), diskMiB: Math.round(diskGiB.value * 1024) }
   return action(async () => {
-    await api(`/nodes/${node.id}`, { method: 'PUT', body: JSON.stringify({ name: node.name, tags: tags.value.split(',').map(tag => tag.trim()).filter(Boolean), limits, accepting: node.accepting }) })
+    await api(`/nodes/${node.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        name: node.name,
+        tags: tags.value.split(',').map(tag => tag.trim()).filter(Boolean),
+        limits,
+        accepting: node.accepting,
+      }),
+    })
     editing.value = null
     notify('Node saved')
   })
 }
+
 function grant(node: ExecutionNode) {
   granting.value = node
   granted.value = (node.agents || []).filter(agent => !agent.allNodes).map(agent => agent.id)
 }
+
 function saveGrants() {
   const node = granting.value
   if (!node)
@@ -107,6 +134,7 @@ function saveGrants() {
     await refresh()
   })
 }
+
 function freeStaleDisks() {
   const node = cleaning.value
   if (!node)
@@ -117,15 +145,18 @@ function freeStaleDisks() {
     notify(result.failed ? `Freed ${formatMiB(result.freedMiB)}; ${result.failed} disks are in use or the node is unreachable` : `Freed ${formatMiB(result.freedMiB)}`)
   })
 }
+
 function allNodes(agentId: string) {
   return granting.value?.agents?.some(agent => agent.id === agentId && agent.allNodes) ?? false
 }
+
 function configureRecovery() {
   return action(async () => {
     recovery.value = await api<NodeSyncSettings>('/nodes/settings')
     recoveryBudgetGiB.value = +(recovery.value.budgetMiB / 1024).toFixed(2)
   })
 }
+
 function saveRecovery() {
   const settings = recovery.value
   if (!settings)
@@ -136,6 +167,7 @@ function saveRecovery() {
     recovery.value = null
   })
 }
+
 function statusLabel(node: ExecutionNode) {
   return node.status === 'local' ? 'master runner' : node.status
 }
@@ -153,7 +185,12 @@ function statusLabel(node: ExecutionNode) {
     <section class="my-6 rounded-xl border border-line p-5">
       <h2>Add a machine</h2>
       <form class="mt-3 flex flex-wrap items-end gap-3" @submit.prevent="enroll">
-        <label>Machine name<input v-model="name" class="mt-1 block" maxlength="100" required></label>
+        <label>Machine name<input
+          v-model="name"
+          class="mt-1 block"
+          maxlength="100"
+          required
+        ></label>
         <UiButton type="submit" :disabled="busy">
           Create enrollment code
         </UiButton>
@@ -201,7 +238,12 @@ function statusLabel(node: ExecutionNode) {
           </p>
           <p v-if="node.staleDisks?.count" class="mt-2 text-sm">
             Old disks: {{ formatMiB(node.staleDisks.diskMiB) }} kept from {{ node.staleDisks.count }} conversation{{ node.staleDisks.count > 1 ? 's' : '' }}
-            <UiButton class="ml-2" size="small" variant="default" @click="cleaning = node">
+            <UiButton
+              class="ml-2"
+              size="small"
+              variant="default"
+              @click="cleaning = node"
+            >
               Free old disks
             </UiButton>
           </p>
@@ -252,7 +294,13 @@ function statusLabel(node: ExecutionNode) {
         </p>
       </article>
     </div>
-    <UiButton v-if="revoked.length" class="mt-4" size="small" variant="default" @click="showRevoked = !showRevoked">
+    <UiButton
+      v-if="revoked.length"
+      class="mt-4"
+      size="small"
+      variant="default"
+      @click="showRevoked = !showRevoked"
+    >
       {{ showRevoked ? 'Hide revoked machines' : `Show revoked machines (${revoked.length})` }}
     </UiButton>
     <details class="mt-8 rounded-xl border border-line p-5">
@@ -270,11 +318,47 @@ function statusLabel(node: ExecutionNode) {
         <p v-if="!recovery.s3Configured" class="text-sm text-muted">
           Configure S3 on the server to publish disk changes.
         </p>
-        <label>Synchronization target (seconds)<input v-model.number="recovery.intervalSeconds" class="mt-1 block" type="number" min="5" max="3600" required></label>
-        <label>Pause after disconnection (seconds)<input v-model.number="recovery.disconnectTimeoutSeconds" class="mt-1 block" type="number" min="10" max="300" required></label>
-        <label>Shutdown preparation limit (seconds)<input v-model.number="recovery.shutdownTimeoutSeconds" class="mt-1 block" type="number" min="30" max="300" required></label>
-        <label>Maximum capacity wait (seconds)<input v-model.number="recovery.maxCapacityWaitSeconds" class="mt-1 block" type="number" min="0" max="3600" required></label>
-        <label>Publication cache budget (GiB)<input v-model.number="recoveryBudgetGiB" class="mt-1 block" type="number" min="0.125" max="1024" step="any" required></label>
+        <label>Synchronization target (seconds)<input
+          v-model.number="recovery.intervalSeconds"
+          class="mt-1 block"
+          type="number"
+          min="5"
+          max="3600"
+          required
+        ></label>
+        <label>Pause after disconnection (seconds)<input
+          v-model.number="recovery.disconnectTimeoutSeconds"
+          class="mt-1 block"
+          type="number"
+          min="10"
+          max="300"
+          required
+        ></label>
+        <label>Shutdown preparation limit (seconds)<input
+          v-model.number="recovery.shutdownTimeoutSeconds"
+          class="mt-1 block"
+          type="number"
+          min="30"
+          max="300"
+          required
+        ></label>
+        <label>Maximum capacity wait (seconds)<input
+          v-model.number="recovery.maxCapacityWaitSeconds"
+          class="mt-1 block"
+          type="number"
+          min="0"
+          max="3600"
+          required
+        ></label>
+        <label>Publication cache budget (GiB)<input
+          v-model.number="recoveryBudgetGiB"
+          class="mt-1 block"
+          type="number"
+          min="0.125"
+          max="1024"
+          step="any"
+          required
+        ></label>
         <p class="text-sm text-muted">
           Synchronization can take longer than the target interval. The publication cache stays within this budget.
         </p>
@@ -292,8 +376,18 @@ function statusLabel(node: ExecutionNode) {
           Chosen agents may run conversations on this machine. A tag or capability never grants access by itself.
         </p>
         <label v-for="agent in state.agents" :key="agent.id" class="flex gap-2">
-          <input v-if="allNodes(agent.id)" type="checkbox" checked disabled>
-          <input v-else v-model="granted" type="checkbox" :value="agent.id">
+          <input
+            v-if="allNodes(agent.id)"
+            type="checkbox"
+            checked
+            disabled
+          >
+          <input
+            v-else
+            v-model="granted"
+            type="checkbox"
+            :value="agent.id"
+          >
           {{ agent.name }}<span v-if="allNodes(agent.id)" class="text-muted">(allowed on all nodes)</span>
         </label>
         <UiAlert v-if="error">
@@ -323,11 +417,39 @@ function statusLabel(node: ExecutionNode) {
         <UiAlert v-if="error">
           {{ error }}
         </UiAlert>
-        <label>Name<input v-model="editing.name" class="mt-1 block w-full" maxlength="100" required></label>
+        <label>Name<input
+          v-model="editing.name"
+          class="mt-1 block w-full"
+          maxlength="100"
+          required
+        ></label>
         <label>Tags, separated by commas<input v-model="tags" class="mt-1 block w-full"></label>
-        <label>CPU ceiling<input v-model.number="editing.limits.cpu" class="mt-1 block" type="number" min="1" :max="editing.capabilities.cpu" required></label>
-        <label>RAM ceiling (GiB)<input v-model.number="memoryGiB" class="mt-1 block" type="number" min="0.125" step="any" :max="editing.capabilities.memoryMiB / 1024" required></label>
-        <label>Disk ceiling (GiB)<input v-model.number="diskGiB" class="mt-1 block" type="number" min="0.125" step="any" :max="editing.capabilities.diskMiB / 1024" required></label>
+        <label>CPU ceiling<input
+          v-model.number="editing.limits.cpu"
+          class="mt-1 block"
+          type="number"
+          min="1"
+          :max="editing.capabilities.cpu"
+          required
+        ></label>
+        <label>RAM ceiling (GiB)<input
+          v-model.number="memoryGiB"
+          class="mt-1 block"
+          type="number"
+          min="0.125"
+          step="any"
+          :max="editing.capabilities.memoryMiB / 1024"
+          required
+        ></label>
+        <label>Disk ceiling (GiB)<input
+          v-model.number="diskGiB"
+          class="mt-1 block"
+          type="number"
+          min="0.125"
+          step="any"
+          :max="editing.capabilities.diskMiB / 1024"
+          required
+        ></label>
         <p class="text-sm text-muted">
           Detected on this machine: {{ editing.capabilities.cpu }} CPU · {{ formatMiB(editing.capabilities.memoryMiB) }} RAM · {{ formatMiB(editing.capabilities.diskMiB) }} disk.
         </p>

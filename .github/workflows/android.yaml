@@ -50,6 +50,9 @@ jobs:
           packages: platform-tools
       - uses: gradle/actions/setup-gradle@v5
       - run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
+      - name: Check Kotlin formatting
+        working-directory: android
+        run: ./gradlew spotlessCheck --no-daemon
       - name: Use the tag version for a fresh release build
         if: startsWith(github.ref, 'refs/tags/v')
         run: printf 'LEO_ANDROID_VERSION=%s\n' "${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"

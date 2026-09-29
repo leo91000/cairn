@@ -1,12 +1,32 @@
 import { writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { ImageValidationPendingError, resolveRelease, trustedRun, verifiedImage } from '../scripts/resolve-release.mjs'
+import {
+  ImageValidationPendingError,
+  resolveRelease,
+  trustedRun,
+  verifiedImage,
+} from '../scripts/resolve-release.mjs'
 
 const config = { repository: 'leo91000/leo-agent-manager', commit: 'a'.repeat(40) }
 const digest = `sha256:${'b'.repeat(64)}`
-const run = { id: 123, event: 'push', head_branch: 'main', head_sha: config.commit, head_repository: { full_name: config.repository }, path: '.github/workflows/ci.yaml', status: 'completed', conclusion: 'success' }
-const evidence = { schema: 1, repository: config.repository, commit: config.commit, digest, runId: run.id }
+const run = {
+  id: 123,
+  event: 'push',
+  head_branch: 'main',
+  head_sha: config.commit,
+  head_repository: { full_name: config.repository },
+  path: '.github/workflows/ci.yaml',
+  status: 'completed',
+  conclusion: 'success',
+}
+const evidence = {
+  schema: 1,
+  repository: config.repository,
+  commit: config.commit,
+  digest,
+  runId: run.id,
+}
 
 describe('release validation reuse', () => {
   it('accepts only this workflow on main at the exact commit and repository', () => {
@@ -38,6 +58,7 @@ describe('release validation reuse', () => {
         sleep: async () => {},
       })).toBeNull()
     }
+
     await expect(resolveRelease(config, {
       gh: async (args) => {
         if (args[0] === 'api')

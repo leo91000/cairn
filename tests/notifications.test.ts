@@ -1,6 +1,13 @@
 import type { ChatQuestion } from '../shared/chats.ts'
 import { createECDH, randomBytes } from 'node:crypto'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
 import { fixture } from './helpers.ts'
 import { Notifications } from './legacy/server/notifications.ts'
 
@@ -9,6 +16,7 @@ function subscription() {
   curve.generateKeys()
   return { endpoint: 'https://fcm.googleapis.com/fcm/send/synthetic-device', keys: { p256dh: curve.getPublicKey().toString('base64url'), auth: randomBytes(16).toString('base64url') } }
 }
+
 describe('question push notifications', () => {
   let ctx: Awaited<ReturnType<typeof fixture>>
   beforeEach(async () => {
@@ -19,17 +27,47 @@ describe('question push notifications', () => {
   })
   const question = () => {
     const chat = ctx.service.chats.create({})
-    return ctx.service.questions.save({ id: 'a'.repeat(64), chatId: chat.id, runId: 'fixture', status: 'pending', createdAt: Date.now(), blocking: false, fields: [{ id: 'choice', title: 'A private question', secret: false, options: [] }] } satisfies ChatQuestion)
+    return ctx.service.questions.save({
+      id: 'a'.repeat(64),
+      chatId: chat.id,
+      runId: 'fixture',
+      status: 'pending',
+      createdAt: Date.now(),
+      blocking: false,
+      fields: [{
+        id: 'choice',
+        title: 'A private question',
+        secret: false,
+        options: [],
+      }],
+    } satisfies ChatQuestion)
   }
+
   it('protects subscription endpoints with authentication, CSRF and push-provider validation', async () => {
     const input = subscription()
     expect((await ctx.app.inject({ method: 'POST', url: '/api/notifications/subscriptions', payload: input })).statusCode).toBe(401)
     const headers = await ctx.login()
-    expect((await ctx.app.inject({ method: 'POST', url: '/api/notifications/subscriptions', headers: { cookie: headers.cookie }, payload: input })).statusCode).toBe(403)
+    expect((await ctx.app.inject({
+      method: 'POST',
+      url: '/api/notifications/subscriptions',
+      headers: { cookie: headers.cookie },
+      payload: input,
+    })).statusCode).toBe(403)
     for (const endpoint of ['http://fcm.googleapis.com/send', 'https://127.0.0.1/', 'https://fcm.googleapis.com.evil.test/', 'https://user@web.push.apple.com/', 'https://web.push.apple.com:9000/', 'https://[::1]/']) {
-      expect((await ctx.app.inject({ method: 'POST', url: '/api/notifications/subscriptions', headers, payload: { ...input, endpoint } })).statusCode).toBe(400)
+      expect((await ctx.app.inject({
+        method: 'POST',
+        url: '/api/notifications/subscriptions',
+        headers,
+        payload: { ...input, endpoint },
+      })).statusCode).toBe(400)
     }
-    const response = await ctx.app.inject({ method: 'POST', url: '/api/notifications/subscriptions', headers, payload: input })
+
+    const response = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/notifications/subscriptions',
+      headers,
+      payload: input,
+    })
     expect(response.statusCode).toBe(200)
     expect(response.json()).toEqual({ id: expect.any(String) })
   })

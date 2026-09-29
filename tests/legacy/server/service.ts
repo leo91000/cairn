@@ -1,11 +1,21 @@
 import type { Config } from './config.ts'
-import type { Agent, Project, Run, Task } from './contracts.ts'
+import type {
+  Agent,
+  Project,
+  Run,
+  Task,
+} from './contracts.ts'
 import type { Store } from './store.ts'
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { promisify } from 'node:util'
 import { CronExpressionParser } from 'cron-parser'
-import { agentInput, MAIN_AGENT_ID, projectInput, taskInput } from '../../../shared/contracts.ts'
+import {
+  agentInput,
+  MAIN_AGENT_ID,
+  projectInput,
+  taskInput,
+} from '../../../shared/contracts.ts'
 import { ChatQuestions } from './chat-questions.ts'
 import { Chats } from './chats.ts'
 import { CodexAccounts } from './codex-accounts.ts'
@@ -13,10 +23,17 @@ import { AppError, requireValue } from './errors.ts'
 import { McpConnections } from './mcp-connections.ts'
 import { Notifications } from './notifications.ts'
 import { workspaceDirectory } from './paths.ts'
-import { allowedProjects, policy, runProjects, taskProjects, validateAccess } from './policy.ts'
+import {
+  allowedProjects,
+  policy,
+  runProjects,
+  taskProjects,
+  validateAccess,
+} from './policy.ts'
 import { Skills } from './skills.ts'
 
 const exec = promisify(execFile)
+
 async function projectOrigin(directory: string) {
   try {
     const { stdout } = await exec('git', ['-C', directory, 'config', '--get', 'remote.origin.url'], { timeout: 3000, maxBuffer: 8000 })
@@ -57,6 +74,7 @@ export function nextOccurrences(
     )
   }
 }
+
 export class Service {
   readonly chats = new Chats(this)
   readonly questions = new ChatQuestions(this)
@@ -77,6 +95,7 @@ export class Service {
         if (!agent.access || !Object.hasOwn(agent.access, 'mcps'))
           store.put('agents', { ...agent, access: policy(agent) })
       }
+
       if (!store.get('agents', MAIN_AGENT_ID))
         store.put('agents', { ...agentInput.parse({ name: 'Main agent', description: 'Your default agent, with access to every registered project, skill, and shared connection.' }), id: MAIN_AGENT_ID, createdAt: Date.now() })
     })
@@ -98,12 +117,14 @@ export class Service {
       requireValue(this.store.get('projects', projectId), 'Allowed project not found')
     if (existingId === MAIN_AGENT_ID && (item.access.projects !== null || item.access.skills !== null || !item.access.github || item.access.mcps !== null || Object.keys(item.access.mcpTools).length > 0))
       throw new AppError(400, 'The main agent always has access to all resources. Create another agent for restricted access.')
-    for (const id of item.access.mcps ?? []) this.mcps.get(id)
+    for (const id of item.access.mcps ?? [])
+      this.mcps.get(id)
     for (const id of Object.keys(item.access.mcpTools)) {
       this.mcps.get(id)
       if (item.access.mcps !== null && !item.access.mcps.includes(id))
         throw new AppError(400, 'Tool permissions require access to the MCP connection.')
     }
+
     this.store.put('agents', item)
     this.store.audit('agent.saved', { id: item.id })
     return item
@@ -174,6 +195,7 @@ export class Service {
         'This item is used by a task. Update or remove that task first.',
       )
     }
+
     if (
       this.store
         .active()
@@ -190,6 +212,7 @@ export class Service {
         'This item has active work. Cancel or wait for the run first.',
       )
     }
+
     if (kind === 'agents')
       this.store.delete(`agent-github:${id}`)
     this.store.remove(kind, id)
@@ -224,8 +247,10 @@ export class Service {
           'This task already has active work or this occurrence was already queued.',
         )
       }
+
       throw e
     }
+
     this.store.event(run.id, 'status', 'Queued')
     this.store.audit('run.queued', { id: run.id, taskId, trigger })
     return run
@@ -261,7 +286,13 @@ export class Service {
       sessionId: null,
       workspace: null,
       usage: null,
-      snapshot: { task, agent, project, projects, skills },
+      snapshot: {
+        task,
+        agent,
+        project,
+        projects,
+        skills,
+      },
     }
     return run
   }
@@ -277,6 +308,7 @@ export class Service {
       ) {
         continue
       }
+
       try {
         await this.enqueue(task.id, 'schedule', `${task.id}:${task.nextRun}`)
       }
@@ -288,6 +320,7 @@ export class Service {
           })
         }
       }
+
       const current = this.store.get('tasks', task.id)
       if (current?.nextRun === task.nextRun) {
         this.store.put('tasks', {

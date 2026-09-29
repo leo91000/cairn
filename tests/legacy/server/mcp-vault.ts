@@ -15,6 +15,7 @@ export class McpVault {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST')
         throw error
     }
+
     this.key = readFileSync(filename)
     if (this.key.length !== 32)
       throw new Error('Invalid MCP encryption key.')

@@ -11,6 +11,7 @@ async function main() {
     await runChat(plan.chat)
     return
   }
+
   const child = spawn('codex', plan.args, { cwd: plan.cwd, env: { ...await toolkitEnvironment('/home/node'), ...(plan.mcpEnv?.LEO_MCP_RUN_TOKEN ? { LEO_MCP_RUN_TOKEN: plan.mcpEnv.LEO_MCP_RUN_TOKEN } : {}) }, stdio: ['pipe', 'inherit', 'inherit'] })
   child.stdin.on('error', () => {})
   child.stdin.end(plan.prompt)
@@ -23,6 +24,7 @@ async function main() {
   })
   process.on('SIGTERM', () => child.kill('SIGTERM'))
 }
+
 main().catch((error) => {
   console.error(error)
   process.exitCode = 1

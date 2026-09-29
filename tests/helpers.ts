@@ -47,10 +47,12 @@ export async function fixture(overrides: Partial<Config> = {}) {
       'x-csrf-token': response.json().csrf as string,
     }
   }
+
   const dispose = async () => {
     await app.close()
     await rm(directory, { recursive: true, force: true })
   }
+
   return {
     ...context,
     directory,

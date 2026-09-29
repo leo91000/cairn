@@ -4,7 +4,13 @@ import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { copyFile, link, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import {
+  copyFile,
+  link,
+  mkdir,
+  mkdtemp,
+  writeFile,
+} from 'node:fs/promises'
 import { createServer } from 'node:http'
 import path from 'node:path'
 import process from 'node:process'
@@ -22,11 +28,18 @@ async function main() {
   const home = path.join(data, 'runs', run, 'home')
   const blocks = new Map()
   let server
+
   async function request(port, route, method = 'GET', body) {
-    const response = await fetch(`http://127.0.0.1:${port}${route}`, { method, headers, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(300000) })
+    const response = await fetch(`http://127.0.0.1:${port}${route}`, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(300000),
+    })
     assert.ok(response.ok, `${method} ${route}: ${response.status} ${response.ok ? '' : await response.text()}`)
     return response
   }
+
   async function until(fn) {
     const deadline = Date.now() + 120000
     while (Date.now() < deadline) {
@@ -34,8 +47,10 @@ async function main() {
         return
       await delay(250)
     }
+
     throw new Error('KVM condition timed out')
   }
+
   async function controller(name, port) {
     const state = path.join(root, name)
     const image = path.join(state, 'images', 'nodes-integration')
@@ -56,6 +71,7 @@ async function main() {
     })
     return { state, child }
   }
+
   async function stopController(child) {
   // Signal the controller (PID 1 in its namespace) first so tap/firewall cleanup runs.
     let pid = child.pid
@@ -69,20 +85,34 @@ async function main() {
       assert.ok(next, 'Controller process must still be supervised')
       pid = Number(next[0])
     }
+
     execFileSync('sudo', ['-n', 'kill', '-TERM', String(pid)])
     await until(() => child.exitCode !== null || child.signalCode !== null)
   }
+
   async function start(port, code, leased = false) {
     const attempt = randomUUID()
-    const plan = { id: attempt, runId: run, expires: Date.now() + 240000, resources: { cpu: 1, memoryMiB: 1024, diskMiB: 1024 }, nodeLeaseRequired: leased, sandbox: 'yolo', cwd: workspace, command: ['/usr/local/bin/node', '-e', `process.chdir(${JSON.stringify(workspace)});${code}`], imports: [{ source: workspace, target: workspace }, { source: home, target: '/home/node' }] }
+    const plan = {
+      id: attempt,
+      runId: run,
+      expires: Date.now() + 240000,
+      resources: { cpu: 1, memoryMiB: 1024, diskMiB: 1024 },
+      nodeLeaseRequired: leased,
+      sandbox: 'yolo',
+      cwd: workspace,
+      command: ['/usr/local/bin/node', '-e', `process.chdir(${JSON.stringify(workspace)});${code}`],
+      imports: [{ source: workspace, target: workspace }, { source: home, target: '/home/node' }],
+    }
     await writeFile(path.join(data, 'runner-plans', `${attempt}.json`), JSON.stringify(plan))
     if (leased)
       await request(port, `/runs/${attempt}/lease`, 'POST', { remainingMs: 8000 })
     await request(port, `/runs/${attempt}`, 'POST')
     return attempt
   }
+
   try {
-    for (const directory of [workspace, home, path.join(data, 'runner-plans')]) await mkdir(directory, { recursive: true })
+    for (const directory of [workspace, home, path.join(data, 'runner-plans')])
+      await mkdir(directory, { recursive: true })
     await writeFile(path.join(data, 'runner-secret'), 'fixture-node-controller')
     await copyFile(path.join(assets, 'busybox.tar'), path.join(workspace, 'busybox.tar'))
     await copyFile(new URL('./fixtures/native-sessions.mjs', import.meta.url), path.join(workspace, 'native-sessions.mjs'))
@@ -92,7 +122,8 @@ async function main() {
     let ended = false
     const reading = (async () => {
       const r = await request(44311, `/runs/${first}/logs`)
-      for await (const chunk of r.body) logs += Buffer.from(chunk).toString()
+      for await (const chunk of r.body)
+        logs += Buffer.from(chunk).toString()
       ended = true
     })()
     await until(() => {
@@ -114,6 +145,7 @@ async function main() {
       assert.equal(createHash('sha256').update(bytes).digest('hex'), block.hash)
       blocks.set(block.hash, bytes)
     }
+
     const baseBytes = [...blocks.values()].reduce((sum, b) => sum + b.length, 0)
     const firstHashes = new Set(blocks.keys())
     await request(44311, `/snapshots/${snapshot.id}/discard`, 'DELETE')
@@ -129,7 +161,13 @@ async function main() {
       blocks.set(block.hash, bytes)
       incrementalBytes += bytes.length
     }
-    process.stdout.write(`${JSON.stringify({ stage: 'incremental', baseBytes, incrementalBytes, localBytesRead: snapshot.manifest.localBytesRead })}\n`)
+
+    process.stdout.write(`${JSON.stringify({
+      stage: 'incremental',
+      baseBytes,
+      incrementalBytes,
+      localBytesRead: snapshot.manifest.localBytesRead,
+    })}\n`)
     await request(44311, `/runs/${first}`, 'DELETE')
     await reading
     const after = await (await request(44311, `/runs/${first}/wait`, 'POST')).json()
@@ -143,12 +181,18 @@ async function main() {
         res.writeHead(403).end()
         return
       }
+
       res.writeHead(200, { 'content-length': bytes.length })
       res.end(bytes)
     })
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
     await controller('destination', 44312)
-    await request(44312, `/disks/${run}/restore`, 'POST', { manifest: snapshot.manifest, master: `http://127.0.0.1:${server.address().port}`, grant: 'fixture-restore-grant', backupId: randomUUID() })
+    await request(44312, `/disks/${run}/restore`, 'POST', {
+      manifest: snapshot.manifest,
+      master: `http://127.0.0.1:${server.address().port}`,
+      grant: 'fixture-restore-grant',
+      backupId: randomUUID(),
+    })
     // A restored idle conversation has no destination attempt history yet.
     const idle = await (await request(44312, `/disks/${run}/snapshot`, 'POST')).json()
     assert.equal(idle.manifest.size, snapshot.manifest.size)
@@ -160,7 +204,13 @@ async function main() {
     const fenced = await (await request(44312, `/runs/${leased}/wait`, 'POST')).json()
     assert.equal(fenced.StatusCode, 75, 'An expired lease must stop the complete VM as a recoverable interruption')
     process.stdout.write(`${JSON.stringify({ stage: 'lease-expired', exitCode: fenced.StatusCode })}\n`)
-    process.stdout.write(`${JSON.stringify({ capturePauseMs: snapshot.manifest.pauseMs, indexMs: snapshot.manifest.indexMs, transferredBlocks: blocks.size, transferredBytes: [...blocks.values()].reduce((sum, b) => sum + b.length, 0), restored: ['untracked files', 'installed tool', 'native Codex and Claude sessions (local model fixture)', 'Docker volume'] })}\n`)
+    process.stdout.write(`${JSON.stringify({
+      capturePauseMs: snapshot.manifest.pauseMs,
+      indexMs: snapshot.manifest.indexMs,
+      transferredBlocks: blocks.size,
+      transferredBytes: [...blocks.values()].reduce((sum, b) => sum + b.length, 0),
+      restored: ['untracked files', 'installed tool', 'native Codex and Claude sessions (local model fixture)', 'Docker volume'],
+    })}\n`)
   }
   finally {
     server?.closeAllConnections()
@@ -176,10 +226,12 @@ async function main() {
         }
       }
     }
+
     await delay(1500)
     execFileSync('sudo', ['-n', 'rm', '-rf', '--', root])
   }
 }
+
 main().catch((error) => {
   console.error(error)
   process.exitCode = 1

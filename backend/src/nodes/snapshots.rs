@@ -7,8 +7,10 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{future::Future, path::Path};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
 pub const BLOCK: u64 = 4 * 1024 * 1024;
+
 /// Next offset at or after `offset` that may hold data. Holes read as zeros, so blocks
 /// entirely inside one need neither reading nor hashing.
 fn next_data(file: &std::fs::File, offset: u64) -> std::io::Result<u64> {
@@ -26,6 +28,7 @@ fn next_data(file: &std::fs::File, offset: u64) -> std::io::Result<u64> {
         _ => Err(error),
     }
 }
+
 pub async fn index(path: &Path) -> Result<Value> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || -> Result<Value> {
@@ -54,14 +57,21 @@ pub async fn index(path: &Path) -> Result<Value> {
                     hex::encode(Sha256::digest(&buffer[..length])).into()
                 }
             };
-            blocks.push(json!({"offset":offset,"size":length,"hash":hash}));
+            blocks.push(json!({"offset": offset,"size": length,"hash": hash}));
             offset += length as u64;
         }
-        Ok(json!({"version":1,"size":size,"blockSize":BLOCK,"blocks":blocks,"localBytesRead":read}))
+        Ok(json!({
+            "version": 1,
+            "size": size,
+            "blockSize": BLOCK,
+            "blocks": blocks,
+            "localBytesRead": read
+        }))
     })
     .await
     .map_err(Error::internal)?
 }
+
 pub fn validate(manifest: &Value) -> Result<()> {
     let blocks = manifest["blocks"]
         .as_array()
@@ -87,15 +97,18 @@ pub fn validate(manifest: &Value) -> Result<()> {
     }
     Ok(())
 }
+
 pub fn valid_hash(hash: &str) -> bool {
     hash.len() == 64
         && hash
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
+
 pub async fn block(path: &Path, manifest: &Value, hash: &str) -> Result<Vec<u8>> {
     block_where(path, manifest, hash, |_| true).await
 }
+
 /// Serves a block from a capture directory. An incremental capture holds only the
 /// blocks written since its baseline, listed in `present.json`; the others are
 /// already stored by the master.
@@ -140,6 +153,7 @@ pub async fn served(directory: &Path, hash: &str) -> Result<Vec<u8>> {
     })
     .await
 }
+
 async fn block_where(
     path: &Path,
     manifest: &Value,
@@ -173,6 +187,7 @@ async fn block_where(
     }
     Ok(bytes)
 }
+
 pub async fn restore<F, Fut>(target: &Path, manifest: &Value, mut fetch: F) -> Result<()>
 where
     F: FnMut(String) -> Fut,

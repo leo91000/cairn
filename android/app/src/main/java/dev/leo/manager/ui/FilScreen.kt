@@ -22,7 +22,16 @@ import androidx.compose.ui.unit.dp
 import dev.leo.manager.data.*
 import kotlinx.coroutines.delay
 
-internal enum class FeedKind { QUESTION, FAILED_CHAT, RECONNECT, FAILED_TASK, REVIEW_TASK, RUNNING_CHAT, RUNNING_TASK, CHAT }
+internal enum class FeedKind {
+    QUESTION,
+    FAILED_CHAT,
+    RECONNECT,
+    FAILED_TASK,
+    REVIEW_TASK,
+    RUNNING_CHAT,
+    RUNNING_TASK,
+    CHAT,
+}
 
 internal data class FeedItem(
     val key: String,
@@ -40,7 +49,11 @@ internal data class FeedItem(
     val working: Boolean = false,
 )
 
-internal data class Feed(val forYou: List<FeedItem>, val running: List<FeedItem>, val recent: List<FeedItem>) {
+internal data class Feed(
+    val forYou: List<FeedItem>,
+    val running: List<FeedItem>,
+    val recent: List<FeedItem>,
+) {
     val empty
         get() = forYou.isEmpty() && running.isEmpty() && recent.isEmpty()
 }
@@ -56,45 +69,60 @@ internal fun buildFeed(chats: List<Chat>, activity: List<Run>, tasks: List<Task>
     val forYou = mutableListOf<FeedItem>()
     val running = mutableListOf<FeedItem>()
     val recent = mutableListOf<FeedItem>()
-    chats.sortedByDescending { it.updatedAt }.forEach { chat ->
-        val agent = chat.agentName.ifBlank { "Agent" }
-        fun item(kind: FeedKind, subtitle: String) =
-            FeedItem(
-                "chat:${chat.id}",
-                kind,
-                chat.title,
-                subtitle,
-                agent,
-                chat.agentId,
-                chat.updatedAt,
-                chat.run?.startedAt,
-                chatId = chat.id,
-                runId = chat.runId,
-            )
-        val wait = chatWaitNotice(chat.run)
-        when {
-            chat.pendingQuestions > 0 ->
-                forYou += item(
-                    FeedKind.QUESTION,
-                    if (chat.pendingQuestions == 1) "Une question vous attend"
-                    else "${chat.pendingQuestions} questions vous attendent",
+    chats
+        .sortedByDescending { it.updatedAt }
+        .forEach { chat ->
+            val agent = chat.agentName.ifBlank { "Agent" }
+            fun item(kind: FeedKind, subtitle: String) =
+                FeedItem(
+                    "chat:${chat.id}",
+                    kind,
+                    chat.title,
+                    subtitle,
+                    agent,
+                    chat.agentId,
+                    chat.updatedAt,
+                    chat.run?.startedAt,
+                    chatId = chat.id,
+                    runId = chat.runId,
                 )
-            wait?.account != null -> forYou += item(FeedKind.RECONNECT, "Compte ${wait.account} requis pour continuer")
-            chat.status in setOf("failed", "interrupted") ->
-                forYou += item(FeedKind.FAILED_CHAT, chat.error?.lineSequence()?.firstOrNull()?.ifBlank { null } ?: statusLabel(chat.status))
-            !chat.paused && chat.status in setOf("running", "queued") ->
-                running += item(
-                    FeedKind.RUNNING_CHAT,
-                    if (chat.status == "queued") "En attente · ${context(agent, chat.projectName)}"
-                    else context(agent, chat.projectName),
-                ).copy(working = chat.status == "running")
-            else ->
-                recent += item(
-                    FeedKind.CHAT,
-                    if (chat.paused) "En pause · ${context(agent, chat.projectName)}" else context(agent, chat.projectName),
-                )
+            val wait = chatWaitNotice(chat.run)
+            when {
+                chat.pendingQuestions > 0 ->
+                    forYou +=
+                        item(
+                            FeedKind.QUESTION,
+                            if (chat.pendingQuestions == 1) "Une question vous attend"
+                            else "${chat.pendingQuestions} questions vous attendent",
+                        )
+                wait?.account != null ->
+                    forYou +=
+                        item(FeedKind.RECONNECT, "Compte ${wait.account} requis pour continuer")
+                chat.status in setOf("failed", "interrupted") ->
+                    forYou +=
+                        item(
+                            FeedKind.FAILED_CHAT,
+                            chat.error?.lineSequence()?.firstOrNull()?.ifBlank { null }
+                                ?: statusLabel(chat.status),
+                        )
+                !chat.paused && chat.status in setOf("running", "queued") ->
+                    running +=
+                        item(
+                                FeedKind.RUNNING_CHAT,
+                                if (chat.status == "queued")
+                                    "En attente · ${context(agent, chat.projectName)}"
+                                else context(agent, chat.projectName),
+                            )
+                            .copy(working = chat.status == "running")
+                else ->
+                    recent +=
+                        item(
+                            FeedKind.CHAT,
+                            if (chat.paused) "En pause · ${context(agent, chat.projectName)}"
+                            else context(agent, chat.projectName),
+                        )
+            }
         }
-    }
     val names = tasks.associateBy { it.id }
     activity
         .filter { it.trigger != "chat" && it.taskId.isNotBlank() }
@@ -119,13 +147,22 @@ internal fun buildFeed(chats: List<Chat>, activity: List<Run>, tasks: List<Task>
                 )
             when {
                 run.active ->
-                    running += item(
-                        FeedKind.RUNNING_TASK,
-                        if (run.status == "queued") "Mission en attente · $agent" else "Mission · $agent",
-                    ).copy(working = run.status == "running")
+                    running +=
+                        item(
+                                FeedKind.RUNNING_TASK,
+                                if (run.status == "queued") "Mission en attente · $agent"
+                                else "Mission · $agent",
+                            )
+                            .copy(working = run.status == "running")
                 run.status in setOf("failed", "interrupted") ->
-                    forYou += item(FeedKind.FAILED_TASK, "${statusLabel(run.status)} · ${shortStamp(run.finishedAt ?: run.createdAt)}")
-                run.status == "succeeded" && run.outcome != null && run.outcome.status != "completed" ->
+                    forYou +=
+                        item(
+                            FeedKind.FAILED_TASK,
+                            "${statusLabel(run.status)} · ${shortStamp(run.finishedAt ?: run.createdAt)}",
+                        )
+                run.status == "succeeded" &&
+                    run.outcome != null &&
+                    run.outcome.status != "completed" ->
                     forYou += item(FeedKind.REVIEW_TASK, outcomeLabel(run.outcome))
             }
         }
@@ -135,9 +172,13 @@ internal fun buildFeed(chats: List<Chat>, activity: List<Run>, tasks: List<Task>
 internal fun feedSummary(feed: Feed): String {
     val parts = mutableListOf<String>()
     if (feed.running.isNotEmpty())
-        parts += if (feed.running.size == 1) "1 agent au travail" else "${feed.running.size} agents au travail"
+        parts +=
+            if (feed.running.size == 1) "1 agent au travail"
+            else "${feed.running.size} agents au travail"
     if (feed.forYou.isNotEmpty())
-        parts += if (feed.forYou.size == 1) "1 élément pour vous" else "${feed.forYou.size} éléments pour vous"
+        parts +=
+            if (feed.forYou.size == 1) "1 élément pour vous"
+            else "${feed.forYou.size} éléments pour vous"
     return parts.joinToString(" · ").ifBlank { "Tout est calme." }
 }
 
@@ -171,7 +212,8 @@ fun FilScreen(
     }
     val trash = rememberConversationTrash(vm)
     val chats = live.state?.chats?.filter { it.id !in trash.hidden }
-    val feed = remember(chats, activity, state.tasks) { buildFeed(chats.orEmpty(), activity, state.tasks) }
+    val feed =
+        remember(chats, activity, state.tasks) { buildFeed(chats.orEmpty(), activity, state.tasks) }
     fun retry(item: FeedItem) {
         val task = item.taskId ?: return
         vm.perform { openRun(api.send<Run>("POST", "/tasks/${segment(task)}/run").id) }
@@ -188,7 +230,9 @@ fun FilScreen(
         contentPadding = PaddingValues(bottom = 24.dp),
     ) {
         item(key = "header") {
-            Column(Modifier.widthIn(max = 760.dp).padding(horizontal = 20.dp).padding(top = 12.dp)) {
+            Column(
+                Modifier.widthIn(max = 760.dp).padding(horizontal = 20.dp).padding(top = 12.dp)
+            ) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Wordmark()
                     Spacer(Modifier.weight(1f))
@@ -202,7 +246,8 @@ fun FilScreen(
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                if (chats == null) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 12.dp))
+                if (chats == null)
+                    LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 12.dp))
                 live.error?.let {
                     Text(it, Modifier.padding(top = 8.dp), color = MaterialTheme.colorScheme.error)
                 }
@@ -218,12 +263,20 @@ fun FilScreen(
                 }
             }
         section("Pour vous", feed.forYou) { item ->
-            FeedRow(item, { open(item) }, onDelete = item.chatId?.let { id -> { trash.trash(id) } }) {
+            FeedRow(
+                item,
+                { open(item) },
+                onDelete = item.chatId?.let { id -> { trash.trash(id) } },
+            ) {
                 ForYouAction(item, now, !state.busy, { open(item) }, { retry(item) })
             }
         }
         section("En cours", feed.running) { item ->
-            FeedRow(item, { open(item) }, onDelete = item.chatId?.let { id -> { trash.trash(id) } }) {
+            FeedRow(
+                item,
+                { open(item) },
+                onDelete = item.chatId?.let { id -> { trash.trash(id) } },
+            ) {
                 Text(
                     elapsed(item.startedAt, now),
                     style = MaterialTheme.typography.labelLarge,
@@ -231,7 +284,15 @@ fun FilScreen(
                 )
             }
         }
-        section("Récents", feed.recent) { item -> FeedRow(item, { open(item) }, onDelete = item.chatId?.let { id -> { trash.trash(id) } }) { Stamp(item.stamp, now) } }
+        section("Récents", feed.recent) { item ->
+            FeedRow(
+                item,
+                { open(item) },
+                onDelete = item.chatId?.let { id -> { trash.trash(id) } },
+            ) {
+                Stamp(item.stamp, now)
+            }
+        }
     }
 }
 
@@ -242,18 +303,34 @@ private fun androidx.compose.foundation.lazy.LazyListScope.section(
 ) {
     if (items.isEmpty()) return
     item(key = "section:$label") {
-        Eyebrow(label, Modifier.padding(start = 20.dp, top = 24.dp, bottom = 4.dp).semantics { heading() })
+        Eyebrow(
+            label,
+            Modifier.padding(start = 20.dp, top = 24.dp, bottom = 4.dp).semantics { heading() },
+        )
     }
     items(items, key = { it.key }) { Box(Modifier.animateItem()) { row(it) } }
 }
 
 /** The one action a "for you" row offers: answer, reconnect, retry, or just its time. */
 @Composable
-private fun ForYouAction(item: FeedItem, now: Long, enabled: Boolean, open: () -> Unit, retry: () -> Unit) {
+private fun ForYouAction(
+    item: FeedItem,
+    now: Long,
+    enabled: Boolean,
+    open: () -> Unit,
+    retry: () -> Unit,
+) {
     if (item.kind == FeedKind.QUESTION) SignalButton("Répondre", height = 36.dp, onClick = open)
-    else if (item.kind == FeedKind.RECONNECT) SignalButton("Connexions", height = 36.dp, onClick = open)
+    else if (item.kind == FeedKind.RECONNECT)
+        SignalButton("Connexions", height = 36.dp, onClick = open)
     else if (item.kind == FeedKind.FAILED_TASK)
-        RoundAction("Relancer ${item.title}", LeoIcons.Retry, size = 38.dp, enabled = enabled, onClick = retry)
+        RoundAction(
+            "Relancer ${item.title}",
+            LeoIcons.Retry,
+            size = 38.dp,
+            enabled = enabled,
+            onClick = retry,
+        )
     else Stamp(item.stamp, now)
 }
 
@@ -292,9 +369,13 @@ private fun FeedRow(
 ) {
     val badge =
         when (item.kind) {
-            FeedKind.RUNNING_CHAT, FeedKind.RUNNING_TASK -> AvatarBadge.LIVE
-            FeedKind.QUESTION, FeedKind.FAILED_CHAT, FeedKind.FAILED_TASK, FeedKind.REVIEW_TASK, FeedKind.RECONNECT ->
-                AvatarBadge.ATTENTION
+            FeedKind.RUNNING_CHAT,
+            FeedKind.RUNNING_TASK -> AvatarBadge.LIVE
+            FeedKind.QUESTION,
+            FeedKind.FAILED_CHAT,
+            FeedKind.FAILED_TASK,
+            FeedKind.REVIEW_TASK,
+            FeedKind.RECONNECT -> AvatarBadge.ATTENTION
             FeedKind.CHAT -> null
         }
     SwipeToTrashRow(enabled = onDelete != null, onTrash = { onDelete?.invoke() }) { swipe ->
@@ -315,7 +396,10 @@ private fun FeedRow(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    Row(Modifier.padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        Modifier.padding(top = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         if (item.working) WorkingLabel("En cours", Modifier.padding(end = 6.dp))
                         Text(
                             item.subtitle,

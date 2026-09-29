@@ -2,7 +2,12 @@ import type { Deliverable } from '../../shared/artifacts'
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { expect, expectSingleScroll, initializeRepository, test } from './fixtures'
+import {
+  expect,
+  expectSingleScroll,
+  initializeRepository,
+  test,
+} from './fixtures'
 
 test('persistent deliverables have a gallery, revisions, mobile viewer, and playable media', async ({ page, browser, workspace }) => {
   test.setTimeout(60000)
@@ -20,7 +25,27 @@ test('persistent deliverables have a gallery, revisions, mobile viewer, and play
   const image = await readFile('docs/screenshots/model-selectors/chat-mobile-dark.png')
   const files: Deliverable[] = []
   const publish = async (title: string, name: string, kind: Deliverable['kind'], bytes: Uint8Array, key = title, version = 1) => {
-    const item: Deliverable = { id: randomUUID(), runId, messageId: null, key, version, title, name, kind, size: bytes.length, mediaType: ({ image: 'image/png', video: 'video/mp4', audio: 'audio/wav', pdf: 'application/pdf' } as Record<string, string>)[kind] || 'text/plain', createdAt: Date.now(), url: '', group: 'Mobile review', previewStatus: 'none' }
+    const item: Deliverable = {
+      id: randomUUID(),
+      runId,
+      messageId: null,
+      key,
+      version,
+      title,
+      name,
+      kind,
+      size: bytes.length,
+      mediaType: ({
+        image: 'image/png',
+        video: 'video/mp4',
+        audio: 'audio/wav',
+        pdf: 'application/pdf',
+      } as Record<string, string>)[kind] || 'text/plain',
+      createdAt: Date.now(),
+      url: '',
+      group: 'Mobile review',
+      previewStatus: 'none',
+    }
     if (kind === 'markdown' || kind === 'code')
       item.excerpt = new TextDecoder().decode(bytes).slice(0, 400)
     files.push(item)
@@ -29,6 +54,7 @@ test('persistent deliverables have a gallery, revisions, mobile viewer, and play
     workspace.service.store.event(runId, 'artifact', title, { ...item })
     return item
   }
+
   await publish('Mobile · before', 'mobile-before.png', 'image', image, 'mobile', 1)
   const second = await publish('Mobile · refined', 'mobile.png', 'image', await readFile('docs/screenshots/chat-questions/questions-mobile-dark.png'), 'mobile', 2)
   await publish('Review notes', 'review.md', 'markdown', new TextEncoder().encode('# Mobile review\n\nThe controls stay within reach.\n\n- More room for the conversation\n- A clear place for every deliverable\n\n**Ready for your feedback.**'))
@@ -80,6 +106,7 @@ test('persistent deliverables have a gallery, revisions, mobile viewer, and play
     await expect(sharing.getByText('Private file', { exact: true })).toBeVisible()
   }
   finally { await guest.close() }
+
   await page.getByRole('button', { name: 'Close viewer', exact: true }).click()
   await page.getByRole('link', { name: 'View image', exact: true }).click()
   await expect(page.getByRole('dialog').getByRole('img').first()).toBeVisible()

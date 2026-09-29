@@ -8,7 +8,12 @@ defineEmits<{ close: [] }>()
 <template>
   <Modal title="Keyboard shortcuts" wide @close="$emit('close')">
     <div class="grid gap-x-8 gap-y-6 px-6.5 py-6 sm:grid-cols-2 phone:p-5">
-      <section v-for="(group, index) in shortcutGroups" :key="group.title" class="shortcut-group" :style="{ animationDelay: `${index * 50}ms` }">
+      <section
+        v-for="(group, index) in shortcutGroups"
+        :key="group.title"
+        class="shortcut-group"
+        :style="{ animationDelay: `${index * 50}ms` }"
+      >
         <h3 class="eyebrow mb-2">
           {{ group.title }}
         </h3>

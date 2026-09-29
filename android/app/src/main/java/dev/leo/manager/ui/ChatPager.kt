@@ -19,7 +19,9 @@ import dev.leo.manager.data.*
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
-/** The route identifies the starting chat; the pager owns subsequent selection and its restoration. */
+/**
+ * The route identifies the starting chat; the pager owns subsequent selection and its restoration.
+ */
 @Composable
 fun ChatScreen(
     vm: LeoViewModel,
@@ -35,9 +37,19 @@ fun ChatScreen(
 ) {
     val conversations = rememberLive(vm, state, "/chats/stream")
     if (id == null) {
-        ChatPage(vm, state, null, conversations, initialAgent = initialAgent,
-            initialProject = initialProject, openChat = openChat, openRun = openRun,
-            back = back, create = create, openConnections = openConnections)
+        ChatPage(
+            vm,
+            state,
+            null,
+            conversations,
+            initialAgent = initialAgent,
+            initialProject = initialProject,
+            openChat = openChat,
+            openRun = openRun,
+            back = back,
+            create = create,
+            openConnections = openConnections,
+        )
         return
     }
     key(id) {
@@ -45,10 +57,14 @@ fun ChatScreen(
         val pager = rememberPagerState { ids.size }
         val scope = rememberCoroutineScope()
         val focus = LocalFocusManager.current
-        val liveIds = remember(conversations.state?.chats) {
-            conversations.state?.chats?.filter { it.lifecycle == "active" }
-                ?.sortedByDescending { it.updatedAt }?.map { it.id }
-        }
+        val liveIds =
+            remember(conversations.state?.chats) {
+                conversations.state
+                    ?.chats
+                    ?.filter { it.lifecycle == "active" }
+                    ?.sortedByDescending { it.updatedAt }
+                    ?.map { it.id }
+            }
         LaunchedEffect(liveIds) {
             val available = liveIds ?: return@LaunchedEffect
             // Activity can reorder the list while a finger is down. Keep both visible pages
@@ -65,26 +81,41 @@ fun ChatScreen(
         LaunchedEffect(selectedId) { focus.clearFocus() }
         HorizontalPager(
             state = pager,
-            modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)
-                .testTag("conversation-pager"),
+            modifier =
+                Modifier.fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background)
+                    .testTag("conversation-pager"),
             key = { ids[it] },
             beyondViewportPageCount = 1,
             userScrollEnabled = ids.size > 1,
         ) { page ->
             val chatId = ids[page]
             val selected = page == pager.settledPage
-            Box(Modifier.fillMaxSize().testTag("chat-page:$chatId").semantics { this.selected = selected }) {
+            Box(
+                Modifier.fillMaxSize().testTag("chat-page:$chatId").semantics {
+                    this.selected = selected
+                }
+            ) {
                 // Preloaded pages render real content but cannot take keyboard or TalkBack focus.
-                Box(Modifier.fillMaxSize().focusProperties { canFocus = selected }
-                    .then(if (selected) Modifier else Modifier.clearAndSetSemantics {})) {
+                Box(
+                    Modifier.fillMaxSize()
+                        .focusProperties { canFocus = selected }
+                        .then(if (selected) Modifier else Modifier.clearAndSetSemantics {})
+                ) {
                     ChatPage(
-                        vm, state, chatId, conversations, selected = selected,
+                        vm,
+                        state,
+                        chatId,
+                        conversations,
+                        selected = selected,
                         openChat = { target ->
                             val index = ids.indexOf(target)
                             if (index < 0) openChat(target)
                             else scope.launch { pager.scrollToPage(index) }
                         },
-                        openRun = openRun, back = back, create = create,
+                        openRun = openRun,
+                        back = back,
+                        create = create,
                         openConnections = openConnections,
                     )
                 }

@@ -2,7 +2,13 @@
 import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist'
 import { getDocument, GlobalWorkerOptions, version } from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import {
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from 'vue'
 import { ArrowLeft, ChevronRight } from '../icons'
 import { iconButton } from '../ui'
 import Icon from './Icon.vue'
@@ -20,7 +26,17 @@ let render: RenderTask | undefined
 let disposed = false
 let generation = 0
 const base = `/pdfjs/${version}/`
-const loading = getDocument({ url: props.url, withCredentials: true, maxImageSize: 16_000_000, canvasMaxAreaInBytes: 64_000_000, cMapUrl: `${base}cmaps/`, cMapPacked: true, standardFontDataUrl: `${base}standard_fonts/`, wasmUrl: `${base}wasm/` })
+const loading = getDocument({
+  url: props.url,
+  withCredentials: true,
+  maxImageSize: 16_000_000,
+  canvasMaxAreaInBytes: 64_000_000,
+  cMapUrl: `${base}cmaps/`,
+  cMapPacked: true,
+  standardFontDataUrl: `${base}standard_fonts/`,
+  wasmUrl: `${base}wasm/`,
+})
+
 async function draw() {
   const turn = ++generation
   render?.cancel()
@@ -46,6 +62,7 @@ async function draw() {
       busy.value = false
   }
 }
+
 onMounted(async () => {
   try {
     document = await loading.promise
@@ -72,20 +89,44 @@ onBeforeUnmount(() => {
 <template>
   <div>
     <div class="sticky top-0 z-1 mb-4 flex items-center justify-center gap-3 rounded-lg bg-raised/95 p-2 text-xs backdrop-blur">
-      <button :class="iconButton" aria-label="Previous PDF page" :disabled="page <= 1 || busy" @click="page--">
+      <button
+        :class="iconButton"
+        aria-label="Previous PDF page"
+        :disabled="page <= 1 || busy"
+        @click="page--"
+      >
         <Icon :name="ArrowLeft" :size="16" />
       </button>
       <span role="status">{{ pages ? `Page ${page} of ${pages}` : 'Loading PDF…' }}</span>
-      <button :class="iconButton" aria-label="Next PDF page" :disabled="page >= pages || busy" @click="page++">
+      <button
+        :class="iconButton"
+        aria-label="Next PDF page"
+        :disabled="page >= pages || busy"
+        @click="page++"
+      >
         <Icon :name="ChevronRight" :size="16" />
       </button>
-      <button class="rounded px-2 py-1 hover:bg-hover" :disabled="busy" aria-label="Change PDF zoom" @click="scale = scale === 1 ? 1.5 : scale === 1.5 ? 2 : 1">
+      <button
+        class="rounded px-2 py-1 hover:bg-hover"
+        :disabled="busy"
+        aria-label="Change PDF zoom"
+        @click="scale = scale === 1 ? 1.5 : scale === 1.5 ? 2 : 1"
+      >
         {{ scale * 100 }}%
       </button>
     </div>
     <p v-if="error" role="alert" class="text-sm text-muted">
       {{ error }}
     </p>
-    <canvas v-show="!error" ref="canvas" :aria-label="`${title}, page ${page}`" role="img" class="mx-auto block bg-white shadow-sm" :class="scale === 1 ? 'max-w-full' : 'max-w-none'" :style="{ width: canvas ? `${canvas.width / 1.5}px` : undefined }" :aria-busy="busy" />
+    <canvas
+      v-show="!error"
+      ref="canvas"
+      :aria-label="`${title}, page ${page}`"
+      role="img"
+      class="mx-auto block bg-white shadow-sm"
+      :class="scale === 1 ? 'max-w-full' : 'max-w-none'"
+      :style="{ width: canvas ? `${canvas.width / 1.5}px` : undefined }"
+      :aria-busy="busy"
+    />
   </div>
 </template>

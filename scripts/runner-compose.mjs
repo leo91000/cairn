@@ -23,8 +23,10 @@ export function persistentRunnerCompose(compose) {
         volumeIndent = line.search(/\S/)
         volumeStart = index
       }
+
       continue
     }
+
     if (line.search(/\S/) <= volumeIndent)
       break
     const mount = line.match(/^(\s*-\s*['"]?[^'"\s]+:\/runner-state)(?::(ro|rw))?(['"]?\s*(?:#.*)?)$/)
@@ -33,10 +35,12 @@ export function persistentRunnerCompose(compose) {
         throw new Error('Cannot verify runner storage: unsupported runner-state mount.')
       continue
     }
+
     if (mount[2] === 'ro')
       lines[index] = `${mount[1]}:rw${mount[3]}`
     return lines.join('\n')
   }
+
   if (volumeStart === undefined)
     throw new Error('Cannot verify runner storage: runner volumes block not found.')
   const declarations = lines.findIndex(line => /^volumes:\s*$/.test(line))
@@ -49,6 +53,7 @@ export function persistentRunnerCompose(compose) {
     if (lines[index].startsWith('  runner-state:'))
       declared = true
   }
+
   if (!declared)
     lines.splice(declarations + 1, 0, '  runner-state:')
   // Locate the service block again in case top-level volumes precede services.
@@ -72,7 +77,8 @@ export function nativeRunnerCompose(compose) {
       continue
     const entryIndent = lines[index].search(/\S/)
     let end = index + 1
-    while (end < lines.length && lines[end].trim() && lines[end].search(/\S/) > entryIndent) end++
+    while (end < lines.length && lines[end].trim() && lines[end].search(/\S/) > entryIndent)
+      end++
     // Coolify serializes flow sequences as block sequences. Recognize the
     // already-correct argv without rewriting its formatting on every deploy.
     const scalar = value => value.trim().replace(/\s+#.*$/, '').replace(/^(['"])(.*)\1$/, '$2')
@@ -86,9 +92,11 @@ export function nativeRunnerCompose(compose) {
       || (args.length === 1 && args[0] === '/usr/local/bin/leo runner-broker')) {
       return lines.join('\n')
     }
+
     lines.splice(index, end - index, `${' '.repeat(entryIndent)}entrypoint: [/usr/local/bin/leo, runner-broker]`)
     return lines.join('\n')
   }
+
   lines.splice(start + 1, 0, `${' '.repeat(indent + 2)}entrypoint: [/usr/local/bin/leo, runner-broker]`)
   return lines.join('\n')
 }
@@ -130,6 +138,7 @@ export function firecrackerRunnerCompose(compose) {
   else {
     throw new Error('Manager environment must be a mapping or list.')
   }
+
   const runner = document.getIn(['services', 'runner'])
   if (!runner || typeof runner.set !== 'function')
     throw new Error('Runner service not found.')
@@ -174,9 +183,11 @@ export function firecrackerRunnerCompose(compose) {
       changed = true
     }
   }
+
   if (runner.has('privileged')) {
     runner.delete('privileged')
     changed = true
   }
+
   return changed ? document.toString() : compose
 }

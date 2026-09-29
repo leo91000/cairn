@@ -39,6 +39,7 @@ export class LiveEvents {
         this.cursor = event.id
         continue
       }
+
       const index = this.messages.get(item.id)
       if (typeof item.delta === 'string') {
         if (index === undefined)
@@ -48,12 +49,14 @@ export class LiveEvents {
         const text = (original?.text ?? previous.text) + item.delta
         event = { ...event, text, payload: { ...event.payload, item: { ...item, delta: undefined, text } } }
       }
+
       this.cursor = event.id
       if (index !== undefined) {
         // Preserve when and where the message first appeared, as ActivityFeed does.
         target[index] = { ...event, createdAt: target[index].createdAt }
         continue
       }
+
       this.messages.set(item.id, target.length)
       target.push(event)
     }

@@ -30,7 +30,12 @@ describe('persistent Android tooling', () => {
 
 describe('device process ownership across VM restarts', () => {
   it('never signals a reused PID from an earlier VM boot', async () => {
-    const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises')
+    const {
+      mkdtemp,
+      mkdir,
+      writeFile,
+      rm,
+    } = await import('node:fs/promises')
     const { tmpdir } = await import('node:os')
     const { default: path } = await import('node:path')
     const { default: process } = await import('node:process')
@@ -64,6 +69,7 @@ describe('android system image selection', () => {
       selected.push(...args)
       throw stop
     }
+
     await expect(emulator('start', ['34', '--aosp', '--accept-licenses'], env, setup)).rejects.toBe(stop)
     expect(selected).toEqual(['emulator', 'system-images;android-34;default;x86_64', '--accept-licenses'])
   })
@@ -76,6 +82,7 @@ describe('android system image selection', () => {
       selected.push(...args)
       throw stop
     }
+
     await expect(emulator('start', ['34', '--accept-licenses'], env, setup)).rejects.toBe(stop)
     expect(selected).toEqual(['emulator', 'system-images;android-34;google_apis;x86_64', '--accept-licenses'])
   })

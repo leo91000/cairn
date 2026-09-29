@@ -3,12 +3,23 @@
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import {
+  mkdir,
+  readFile,
+  rm,
+  writeFile,
+} from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
 
-export async function prepareStorageOrigin({ root, docker, name, api, maxDirtySeconds = 300 }) {
+export async function prepareStorageOrigin({
+  root,
+  docker,
+  name,
+  api,
+  maxDirtySeconds = 300,
+}) {
   const origin = path.join(root, 'data/storage-fixture')
   await mkdir(origin)
   await writeFile(path.join(origin, 'server.mjs'), `
@@ -26,19 +37,38 @@ export async function prepareStorageOrigin({ root, docker, name, api, maxDirtySe
     }).listen(4313,'127.0.0.1');
   `)
   docker('exec', '-d', name, '/usr/local/bin/node', '/data/storage-fixture/server.mjs')
-  const policy = { cacheMiB: 8, reserveMiB: 64, reservePercent: 1, backupSeconds: 60, maxDirtySeconds }
+  const policy = {
+    cacheMiB: 8,
+    reserveMiB: 64,
+    reservePercent: 1,
+    backupSeconds: 60,
+    maxDirtySeconds,
+  }
   const storage = { master: 'http://127.0.0.1:4313/', grant: 'fixture-storage-grant', policy }
   await api('/storage-policy', 'POST', policy)
   return { origin, policy, storage }
 }
 
-export async function storageSmoke({ root, docker, name, api, until, storageFixture }) {
+export async function storageSmoke({
+  root,
+  docker,
+  name,
+  api,
+  until,
+  storageFixture,
+}) {
   const runId = randomUUID()
   const workspace = `/data/runs/${runId}/workspace`
   await mkdir(path.join(root, 'data/runs', runId, 'workspace'), { recursive: true })
-  const { origin, policy, storage } = storageFixture || await prepareStorageOrigin({ root, docker, name, api })
+  const { origin, policy, storage } = storageFixture || await prepareStorageOrigin({
+    root,
+    docker,
+    name,
+    api,
+  })
   const inbox = path.join(root, 'data/runs', runId, 'chat-input')
   await mkdir(inbox)
+
   async function start(first, { benchmark = false } = {}) {
     const id = randomUUID()
     const code = `
@@ -68,31 +98,51 @@ export async function storageSmoke({ root, docker, name, api, until, storageFixt
         },50);
       }
     `
-    const plan = { id, runId, expires: null, sandbox: 'yolo', cwd: workspace, command: ['/usr/local/bin/node', '-e', code], resources: { cpu: 1, memoryMiB: 512, diskMiB: 512 }, storage, imports: [{ source: workspace, target: workspace }, ...(benchmark ? [{ source: `/data/runs/${runId}/chat-input`, target: '/run/leo-chat', readOnly: true }] : [])] }
+    const plan = {
+      id,
+      runId,
+      expires: null,
+      sandbox: 'yolo',
+      cwd: workspace,
+      command: ['/usr/local/bin/node', '-e', code],
+      resources: { cpu: 1, memoryMiB: 512, diskMiB: 512 },
+      storage,
+      imports: [{ source: workspace, target: workspace }, ...(benchmark ? [{ source: `/data/runs/${runId}/chat-input`, target: '/run/leo-chat', readOnly: true }] : [])],
+    }
     await writeFile(path.join(root, 'data/runner-plans', `${id}.json`), JSON.stringify(plan))
     await api(`/runs/${id}`, 'POST')
     return id
   }
+
   async function logs(id) {
     try {
       return (await readFile(path.join(root, 'state', `${id}.log`), 'utf8')).split('\n').filter(Boolean).map(line => Buffer.from(JSON.parse(line).data || '', 'base64').toString()).join('')
     }
     catch { return '' }
   }
+
   const status = async () => (await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json())
+
   async function ready(id) {
     try {
       await until(async () => (await logs(id)).includes('storage.ready'))
     }
     catch (error) {
-      console.error({ runId, attempt: id, storage: await status(), guest: await logs(id) })
+      console.error({
+        runId,
+        attempt: id,
+        storage: await status(),
+        guest: await logs(id),
+      })
       throw error
     }
   }
+
   async function stop(id) {
     await api(`/runs/${id}`, 'DELETE')
     await until(async () => (await (await api('/health')).json()).activeRuns === 0)
   }
+
   async function publish(id) {
     const point = await (await api(`/runs/${id}/snapshot`, 'POST', {})).json()
     const hashes = new Set()
@@ -104,11 +154,13 @@ export async function storageSmoke({ root, docker, name, api, until, storageFixt
       assert.equal(createHash('sha256').update(bytes).digest('hex'), block.hash)
       await writeFile(path.join(origin, block.hash), bytes)
     }
+
     const backupId = randomUUID()
     await api(`/disks/${runId}/published`, 'POST', { generation: point.manifest.generation, grantId: point.grantId, backupId })
     await api(`/snapshots/${point.id}/discard`, 'DELETE')
     return { point, backupId, hashes }
   }
+
   const first = await start(true)
   await ready(first)
   const { point, backupId, hashes } = await publish(first)
@@ -149,10 +201,12 @@ export async function storageSmoke({ root, docker, name, api, until, storageFixt
   // Identical snapshot, guest command and read workload; each sample gets a new
   // VM and empty disk directory. The host page cache is intentionally not flushed.
   const sizes = new Map(point.manifest.blocks.filter(block => block.hash).map(block => [block.hash, block.size]))
+
   async function downloaded() {
     const reads = (await readFile(path.join(origin, 'reads'), 'utf8')).trim().split('\n').filter(Boolean)
     return reads.reduce((bytes, hash) => bytes + sizes.get(hash), 0)
   }
+
   const modes = [
     { mode: 'demand-http', latencyMs: 0 },
     { mode: 'demand-http-delayed', latencyMs: 50 },
@@ -181,9 +235,31 @@ export async function storageSmoke({ root, docker, name, api, until, storageFixt
       })
       const bytesAfterReads = await downloaded()
       assert.ok(Number.isFinite(metrics.mibPerSecond) && metrics.mibPerSecond > 0)
-      process.stdout.write(`${JSON.stringify({ benchmark: 'conversation-disk', sample, ...mode, restoreMs, availableMs, bootMs: availableMs - restoreMs, bytesAtReady, bytesAfterReads, ...metrics, source: 'loopback HTTP with optional per-request delay; not S3/WAN' })}\n`)
+      process.stdout.write(`${JSON.stringify({
+        benchmark: 'conversation-disk',
+        sample,
+        ...mode,
+        restoreMs,
+        availableMs,
+        bootMs: availableMs - restoreMs,
+        bytesAtReady,
+        bytesAfterReads,
+        ...metrics,
+        source: 'loopback HTTP with optional per-request delay; not S3/WAN',
+      })}\n`)
       await stop(id)
     }
   }
-  process.stdout.write(`${JSON.stringify({ mode: 'on-demand-controller', metadataRestoreMs, resumedMs, fetchedBlocks: fetched.size, remoteBlocks: hashes.size, cancellableOutage: true, pressureResume: true, status: 'passed', source: 'loopback immutable origin, not S3 benchmark' })}\n`)
+
+  process.stdout.write(`${JSON.stringify({
+    mode: 'on-demand-controller',
+    metadataRestoreMs,
+    resumedMs,
+    fetchedBlocks: fetched.size,
+    remoteBlocks: hashes.size,
+    cancellableOutage: true,
+    pressureResume: true,
+    status: 'passed',
+    source: 'loopback immutable origin, not S3 benchmark',
+  })}\n`)
 }

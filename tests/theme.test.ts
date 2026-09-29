@@ -3,6 +3,7 @@ import { runInNewContext } from 'node:vm'
 import { describe, expect, it } from 'vitest'
 
 const script = readFileSync(new URL('../public/theme.js', import.meta.url), 'utf8')
+
 function bootstrap(stored: string | null = null, dark = false, blocked = false) {
   const root = { dataset: {} as Record<string, string>, style: {} as Record<string, string> }
   const listeners: Record<string, (event?: any) => void> = {}
@@ -26,8 +27,16 @@ function bootstrap(stored: string | null = null, dark = false, blocked = false) 
       },
     },
   })
-  return { root, media, listeners, controller: window.leoTheme, stored: () => value, color: () => color }
+  return {
+    root,
+    media,
+    listeners,
+    controller: window.leoTheme,
+    stored: () => value,
+    color: () => color,
+  }
 }
+
 describe('theme bootstrap', () => {
   it('applies the preferred scheme before the application starts', () => {
     const page = bootstrap(null, true)

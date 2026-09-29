@@ -1,9 +1,22 @@
 <script setup lang="ts">
 import type { IconName } from './icons'
-import { computed, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue'
+import {
+  computed,
+  onBeforeUnmount,
+  onMounted,
+  provide,
+  ref,
+  watch,
+} from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAgentPortraits } from './agent-avatars'
-import { api, refresh, session, signOut, state } from './api'
+import {
+  api,
+  refresh,
+  session,
+  signOut,
+  state,
+} from './api'
 import { useChatList } from './chat-list'
 import CommandPalette from './components/CommandPalette.vue'
 import Icon from './components/Icon.vue'
@@ -11,7 +24,18 @@ import ShortcutSheet from './components/ShortcutSheet.vue'
 import ThemeControl from './components/ThemeControl.vue'
 import UiAlert from './components/UiAlert.vue'
 import UiButton from './components/UiButton.vue'
-import { ArrowUpRight, CalendarClock, Check, Inbox, Keyboard, Layers, LogOut, Plus, Search, Zap } from './icons'
+import {
+  ArrowUpRight,
+  CalendarClock,
+  Check,
+  Inbox,
+  Keyboard,
+  Layers,
+  LogOut,
+  Plus,
+  Search,
+  Zap,
+} from './icons'
 import { useMissionRuns } from './mission-runs'
 import { modifier, typingTarget } from './shortcuts'
 import { filOf } from './signal'
@@ -44,10 +68,30 @@ const atelierSections = [
   { to: '/settings', label: 'Settings' },
 ]
 const atelierSection = computed(() => atelierSections.find(item => route.path === item.to))
-const places: Array<{ to: string, label: string, icon: IconName, keys: string }> = [
-  { to: '/', label: 'Fil', icon: Inbox, keys: 'G F' },
-  { to: '/tasks', label: 'Missions', icon: CalendarClock, keys: 'G M' },
-  { to: '/atelier', label: 'Atelier', icon: Layers, keys: 'G A' },
+const places: Array<{
+  to: string
+  label: string
+  icon: IconName
+  keys: string
+}> = [
+  {
+    to: '/',
+    label: 'Fil',
+    icon: Inbox,
+    keys: 'G F',
+  },
+  {
+    to: '/tasks',
+    label: 'Missions',
+    icon: CalendarClock,
+    keys: 'G M',
+  },
+  {
+    to: '/atelier',
+    label: 'Atelier',
+    icon: Layers,
+    keys: 'G A',
+  },
 ]
 const place = computed(() => route.path === '/' || route.path.startsWith('/chats') ? 0 : route.path.startsWith('/tasks') ? 1 : atelierPaths.some(path => route.path.startsWith(path)) ? 2 : -1)
 // Reading screens take the whole phone; the dock returns on the three places.
@@ -68,6 +112,7 @@ onMounted(async () => {
     error.value = (e as Error).message
     state.ready = true
   }
+
   document.addEventListener('keydown', key)
 })
 onBeforeUnmount(() => document.removeEventListener('keydown', key))
@@ -78,6 +123,7 @@ watch(() => route.fullPath, () => {
 // Global shortcuts: ⌘K anywhere; single keys only outside fields and dialogs. G starts a chord.
 let chord = 0
 const chordHint = ref(false)
+
 function key(event: KeyboardEvent) {
   if (!state.authenticated)
     return
@@ -86,10 +132,12 @@ function key(event: KeyboardEvent) {
     paletteOpen.value = !paletteOpen.value
     return
   }
+
   if (event.key === 'Escape' && event.target instanceof HTMLTextAreaElement && event.target.closest('.chat-composer')) {
     event.target.blur()
     return
   }
+
   if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.isComposing || typingTarget(event.target) || document.querySelector('dialog[open]'))
     return
   const letter = event.key.toLowerCase()
@@ -101,8 +149,10 @@ function key(event: KeyboardEvent) {
       event.preventDefault()
       void router.push(destination)
     }
+
     return
   }
+
   if (letter === 'g') {
     chord = Date.now()
     chordHint.value = true
@@ -124,10 +174,12 @@ function key(event: KeyboardEvent) {
     }
   }
 }
+
 function openShortcuts() {
   paletteOpen.value = false
   shortcutsOpen.value = true
 }
+
 async function login() {
   busy.value = true
   error.value = ''
@@ -204,7 +256,12 @@ async function login() {
           <UiAlert v-if="error">
             {{ error }}
           </UiAlert>
-          <UiButton class="w-full" variant="primary" type="submit" :disabled="busy">
+          <UiButton
+            class="w-full"
+            variant="primary"
+            type="submit"
+            :disabled="busy"
+          >
             {{
               busy
                 ? "Please wait…"
@@ -240,23 +297,64 @@ async function login() {
           <span class="relative flex flex-col items-center gap-1">
             <Icon :name="item.icon" :size="20" />
             <span class="text-[10.5px] font-semibold">{{ item.label }}</span>
-            <span v-if="index === 0 && needsYou" class="absolute -right-2.5 -top-1.5 grid h-4 min-w-4 place-items-center rounded-full bg-coral px-1 text-[10px] font-bold text-white" aria-hidden="true" :title="`${needsYou} need you`">{{ needsYou }}</span>
-            <span v-if="index === 1 && missionRunning" class="live-dot absolute -right-1.5 -top-1" aria-hidden="true" title="A mission is running" />
+            <span
+              v-if="index === 0 && needsYou"
+              class="absolute -right-2.5 -top-1.5 grid h-4 min-w-4 place-items-center rounded-full bg-coral px-1 text-[10px] font-bold text-white"
+              aria-hidden="true"
+              :title="`${needsYou} need you`"
+            >{{ needsYou }}</span>
+            <span
+              v-if="index === 1 && missionRunning"
+              class="live-dot absolute -right-1.5 -top-1"
+              aria-hidden="true"
+              title="A mission is running"
+            />
           </span>
         </RouterLink>
       </div>
-      <RouterLink to="/chats" class="press mt-4 grid size-12 place-items-center rounded-full bg-accent text-surface shadow-[0_10px_24px_-10px_var(--color-accent)]" aria-label="New conversation" data-tip="New conversation" data-kbd="C" data-side="right">
+      <RouterLink
+        to="/chats"
+        class="press mt-4 grid size-12 place-items-center rounded-full bg-accent text-surface shadow-[0_10px_24px_-10px_var(--color-accent)]"
+        aria-label="New conversation"
+        data-tip="New conversation"
+        data-kbd="C"
+        data-side="right"
+      >
         <Icon :name="Plus" :size="22" />
       </RouterLink>
       <div class="mt-auto flex flex-col items-center gap-1">
-        <button type="button" class="grid size-10 place-items-center rounded-xl text-muted hover:bg-hover hover:text-ink" aria-label="Search workspace" data-tip="Search" :data-kbd="`${modifier} K`" data-side="right" @click="paletteOpen = true">
+        <button
+          type="button"
+          class="grid size-10 place-items-center rounded-xl text-muted hover:bg-hover hover:text-ink"
+          aria-label="Search workspace"
+          data-tip="Search"
+          :data-kbd="`${modifier} K`"
+          data-side="right"
+          @click="paletteOpen = true"
+        >
           <Icon :name="Search" :size="19" />
         </button>
-        <button type="button" class="grid size-10 place-items-center rounded-xl text-muted hover:bg-hover hover:text-ink" aria-label="Keyboard shortcuts" data-tip="Shortcuts" data-kbd="?" data-side="right" @click="shortcutsOpen = true">
+        <button
+          type="button"
+          class="grid size-10 place-items-center rounded-xl text-muted hover:bg-hover hover:text-ink"
+          aria-label="Keyboard shortcuts"
+          data-tip="Shortcuts"
+          data-kbd="?"
+          data-side="right"
+          @click="shortcutsOpen = true"
+        >
           <Icon :name="Keyboard" :size="19" />
         </button>
         <ThemeControl compact />
-        <button type="button" class="grid size-10 place-items-center rounded-xl text-muted hover:bg-coral-soft hover:text-coral" aria-label="Sign out" data-tip="Sign out" data-side="right" :disabled="state.signingOut" @click="signOut">
+        <button
+          type="button"
+          class="grid size-10 place-items-center rounded-xl text-muted hover:bg-coral-soft hover:text-coral"
+          aria-label="Sign out"
+          data-tip="Sign out"
+          data-side="right"
+          :disabled="state.signingOut"
+          @click="signOut"
+        >
           <Icon :name="LogOut" :size="18" />
         </button>
       </div>

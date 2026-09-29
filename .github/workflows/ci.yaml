@@ -57,11 +57,11 @@ jobs:
             target/
           key: rust-${{ runner.os }}-1.97.1-debug0-${{ hashFiles('Cargo.lock') }}
           restore-keys: rust-${{ runner.os }}-1.97.1-debug0-
-      - run: pnpm check
+      - name: Check formatting, lint, tests and frontend build
+        run: pnpm check
       - run: |
           node --import tsx scripts/backend-schemas.mjs
           git diff --exit-code -- backend/schemas/inputs.json
-          cargo fmt --all --check
           cargo clippy --locked --workspace --all-targets -- -D warnings
           node scripts/test-backend.mjs
           cargo build --locked --bin leo

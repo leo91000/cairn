@@ -13,38 +13,96 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import dev.leo.manager.R
 
-private val LeoBody = FontFamily(
-    Font(R.font.leo_body_400, FontWeight.Normal),
-    Font(R.font.leo_body_500, FontWeight.Medium),
-    Font(R.font.leo_body_600, FontWeight.SemiBold),
-    Font(R.font.leo_body_700, FontWeight.Bold),
-)
-private val LeoHeading = FontFamily(
-    Font(R.font.leo_heading_600, FontWeight.SemiBold),
-    Font(R.font.leo_heading_700, FontWeight.Bold),
-)
+private val LeoBody =
+    FontFamily(
+        Font(R.font.leo_body_400, FontWeight.Normal),
+        Font(R.font.leo_body_500, FontWeight.Medium),
+        Font(R.font.leo_body_600, FontWeight.SemiBold),
+        Font(R.font.leo_body_700, FontWeight.Bold),
+    )
+private val LeoHeading =
+    FontFamily(
+        Font(R.font.leo_heading_600, FontWeight.SemiBold),
+        Font(R.font.leo_heading_700, FontWeight.Bold),
+    )
 
 // The web's DM Sans / Manrope identity, with Android font scaling intact.
-private val LeoTypography = Typography().let { base ->
-    base.copy(
-        displayLarge = base.displayLarge.copy(fontFamily = LeoHeading),
-        displayMedium = base.displayMedium.copy(fontFamily = LeoHeading),
-        displaySmall = base.displaySmall.copy(fontFamily = LeoHeading),
-        // Screen titles: large, bold and slightly tightened for character.
-        headlineLarge = base.headlineLarge.copy(fontFamily = LeoHeading, fontSize = 32.sp, lineHeight = 36.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.8).sp),
-        headlineMedium = base.headlineMedium.copy(fontFamily = LeoHeading, fontSize = 26.sp, lineHeight = 31.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.6).sp),
-        headlineSmall = base.headlineSmall.copy(fontFamily = LeoHeading, fontSize = 24.sp, lineHeight = 29.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.4).sp),
-        titleLarge = base.titleLarge.copy(fontFamily = LeoHeading, fontSize = 20.sp, lineHeight = 28.sp, fontWeight = FontWeight.SemiBold),
-        titleMedium = base.titleMedium.copy(fontFamily = LeoHeading, fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.SemiBold),
-        titleSmall = base.titleSmall.copy(fontFamily = LeoBody, fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold),
-        bodyLarge = base.bodyLarge.copy(fontFamily = LeoBody, fontSize = 16.sp, lineHeight = 24.sp, letterSpacing = 0.sp),
-        bodyMedium = base.bodyMedium.copy(fontFamily = LeoBody, fontSize = 14.sp, lineHeight = 20.sp, letterSpacing = 0.sp),
-        bodySmall = base.bodySmall.copy(fontFamily = LeoBody, fontSize = 12.sp, lineHeight = 16.sp),
-        labelLarge = base.labelLarge.copy(fontFamily = LeoBody, fontSize = 13.sp, lineHeight = 18.sp),
-        labelMedium = base.labelMedium.copy(fontFamily = LeoBody, fontSize = 12.sp, lineHeight = 16.sp),
-        labelSmall = base.labelSmall.copy(fontFamily = LeoBody, fontSize = 11.sp, lineHeight = 14.sp),
-    )
-}
+private val LeoTypography =
+    Typography().let { base ->
+        base.copy(
+            displayLarge = base.displayLarge.copy(fontFamily = LeoHeading),
+            displayMedium = base.displayMedium.copy(fontFamily = LeoHeading),
+            displaySmall = base.displaySmall.copy(fontFamily = LeoHeading),
+            // Screen titles: large, bold and slightly tightened for character.
+            headlineLarge =
+                base.headlineLarge.copy(
+                    fontFamily = LeoHeading,
+                    fontSize = 32.sp,
+                    lineHeight = 36.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = (-0.8).sp,
+                ),
+            headlineMedium =
+                base.headlineMedium.copy(
+                    fontFamily = LeoHeading,
+                    fontSize = 26.sp,
+                    lineHeight = 31.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = (-0.6).sp,
+                ),
+            headlineSmall =
+                base.headlineSmall.copy(
+                    fontFamily = LeoHeading,
+                    fontSize = 24.sp,
+                    lineHeight = 29.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = (-0.4).sp,
+                ),
+            titleLarge =
+                base.titleLarge.copy(
+                    fontFamily = LeoHeading,
+                    fontSize = 20.sp,
+                    lineHeight = 28.sp,
+                    fontWeight = FontWeight.SemiBold,
+                ),
+            titleMedium =
+                base.titleMedium.copy(
+                    fontFamily = LeoHeading,
+                    fontSize = 16.sp,
+                    lineHeight = 22.sp,
+                    fontWeight = FontWeight.SemiBold,
+                ),
+            titleSmall =
+                base.titleSmall.copy(
+                    fontFamily = LeoBody,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp,
+                    fontWeight = FontWeight.SemiBold,
+                ),
+            bodyLarge =
+                base.bodyLarge.copy(
+                    fontFamily = LeoBody,
+                    fontSize = 16.sp,
+                    lineHeight = 24.sp,
+                    letterSpacing = 0.sp,
+                ),
+            bodyMedium =
+                base.bodyMedium.copy(
+                    fontFamily = LeoBody,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp,
+                    letterSpacing = 0.sp,
+                ),
+            bodySmall =
+                base.bodySmall.copy(fontFamily = LeoBody, fontSize = 12.sp, lineHeight = 16.sp),
+            labelLarge =
+                base.labelLarge.copy(fontFamily = LeoBody, fontSize = 13.sp, lineHeight = 18.sp),
+            labelMedium =
+                base.labelMedium.copy(fontFamily = LeoBody, fontSize = 12.sp, lineHeight = 16.sp),
+            labelSmall =
+                base.labelSmall.copy(fontFamily = LeoBody, fontSize = 11.sp, lineHeight = 14.sp),
+        )
+    }
 
 // "Signal" palette: warm paper and ink, with the Leo blue as the single accent colour for
 // actions, selection and live work. Coral is reserved for things that need the user.

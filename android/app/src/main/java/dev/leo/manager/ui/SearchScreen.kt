@@ -34,7 +34,13 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import dev.leo.manager.data.*
 
-internal enum class SearchKind(val label: String) { CHAT("Conversations"), MISSION("Missions"), AGENT("Agents"), PROJECT("Projets"), SKILL("Skills") }
+internal enum class SearchKind(val label: String) {
+    CHAT("Conversations"),
+    MISSION("Missions"),
+    AGENT("Agents"),
+    PROJECT("Projets"),
+    SKILL("Skills"),
+}
 
 internal data class SearchHit(
     val kind: SearchKind,
@@ -55,32 +61,61 @@ internal fun searchWorkspace(query: String, chats: List<Chat>, state: Workspace)
     chats.forEach {
         val extra = "${it.agentName} ${it.projectName.orEmpty()}"
         if (it.title.hit() || extra.hit())
-            hits += (if (it.title.hit()) 0 else 1) to
-                SearchHit(
-                    SearchKind.CHAT,
-                    it.id,
-                    it.title,
-                    listOfNotNull(it.agentName.ifBlank { null }, it.projectName).joinToString(" · "),
-                    it.agentId,
-                    it.agentName.ifBlank { it.title },
-                )
+            hits +=
+                (if (it.title.hit()) 0 else 1) to
+                    SearchHit(
+                        SearchKind.CHAT,
+                        it.id,
+                        it.title,
+                        listOfNotNull(it.agentName.ifBlank { null }, it.projectName)
+                            .joinToString(" · "),
+                        it.agentId,
+                        it.agentName.ifBlank { it.title },
+                    )
     }
-    state.tasks.filter { !it.archived }.forEach {
-        if (it.name.hit() || it.tags.any { tag -> tag.hit() } || it.prompt.hit())
-            hits += (if (it.name.hit()) 0 else 1) to SearchHit(SearchKind.MISSION, it.id, it.name, describeSchedule(it), it.agentId)
-    }
+    state.tasks
+        .filter { !it.archived }
+        .forEach {
+            if (it.name.hit() || it.tags.any { tag -> tag.hit() } || it.prompt.hit())
+                hits +=
+                    (if (it.name.hit()) 0 else 1) to
+                        SearchHit(
+                            SearchKind.MISSION,
+                            it.id,
+                            it.name,
+                            describeSchedule(it),
+                            it.agentId,
+                        )
+        }
     state.agents.forEach {
         if (it.name.hit() || it.description.hit())
-            hits += (if (it.name.hit()) 0 else 1) to
-                SearchHit(SearchKind.AGENT, it.id, it.name, listOf(providerLabel(it.provider), it.description).filter { d -> d.isNotBlank() }.joinToString(" · "))
+            hits +=
+                (if (it.name.hit()) 0 else 1) to
+                    SearchHit(
+                        SearchKind.AGENT,
+                        it.id,
+                        it.name,
+                        listOf(providerLabel(it.provider), it.description)
+                            .filter { d -> d.isNotBlank() }
+                            .joinToString(" · "),
+                    )
     }
     state.projects.forEach {
         if (it.name.hit() || it.description.hit())
-            hits += (if (it.name.hit()) 0 else 1) to SearchHit(SearchKind.PROJECT, it.id, it.name, it.description.ifBlank { it.path })
+            hits +=
+                (if (it.name.hit()) 0 else 1) to
+                    SearchHit(
+                        SearchKind.PROJECT,
+                        it.id,
+                        it.name,
+                        it.description.ifBlank { it.path },
+                    )
     }
     state.skills.forEach {
         if (it.name.hit() || it.description.hit())
-            hits += (if (it.name.hit()) 0 else 1) to SearchHit(SearchKind.SKILL, "${it.scope}/${it.name}", it.name, it.description)
+            hits +=
+                (if (it.name.hit()) 0 else 1) to
+                    SearchHit(SearchKind.SKILL, "${it.scope}/${it.name}", it.name, it.description)
     }
     return hits.sortedBy { it.first }.map { it.second }
 }
@@ -101,11 +136,16 @@ fun SearchScreen(
     var scope by rememberSaveable { mutableStateOf<String?>(null) }
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
-    val hits = remember(query, live.state?.chats, state) { searchWorkspace(query, live.state?.chats.orEmpty(), state) }
+    val hits =
+        remember(query, live.state?.chats, state) {
+            searchWorkspace(query, live.state?.chats.orEmpty(), state)
+        }
     val shown = hits.filter { scope == null || it.kind.name == scope }
     val topMission = hits.firstOrNull { it.kind == SearchKind.MISSION }
     val topAgent = hits.firstOrNull { it.kind == SearchKind.AGENT }
-    fun launch(taskId: String) = vm.perform { openRun(api.send<Run>("POST", "/tasks/${segment(taskId)}/run").id) }
+    fun launch(taskId: String) = vm.perform {
+        openRun(api.send<Run>("POST", "/tasks/${segment(taskId)}/run").id)
+    }
     Column(Modifier.fillMaxSize()) {
         Row(
             Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 4.dp),
@@ -120,14 +160,22 @@ fun SearchScreen(
                     .padding(horizontal = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(LeoIcons.Search, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+                Icon(
+                    LeoIcons.Search,
+                    null,
+                    Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
                 Spacer(Modifier.width(10.dp))
                 BasicTextField(
                     query,
                     { query = it.take(200) },
                     Modifier.weight(1f).focusRequester(focus).testTag("search-field"),
                     singleLine = true,
-                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+                    textStyle =
+                        MaterialTheme.typography.bodyLarge.copy(
+                            color = MaterialTheme.colorScheme.onSurface
+                        ),
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                     keyboardOptions = InputKeyboards.Search,
                     decorationBox = { inner ->
@@ -143,7 +191,10 @@ fun SearchScreen(
                     },
                 )
                 if (query.isNotEmpty())
-                    androidx.compose.material3.IconButton(onClick = { query = "" }, Modifier.offset(x = 12.dp)) {
+                    androidx.compose.material3.IconButton(
+                        onClick = { query = "" },
+                        Modifier.offset(x = 12.dp),
+                    ) {
                         Icon(
                             LeoIcons.Close,
                             "Effacer la recherche",
@@ -160,7 +211,11 @@ fun SearchScreen(
         ) {
             SignalChip("Tout", scope == null) { scope = null }
             SearchKind.entries.forEach { kind ->
-                SignalChip(kind.label, scope == kind.name, hits.count { it.kind == kind }.takeIf { query.isNotBlank() }) {
+                SignalChip(
+                    kind.label,
+                    scope == kind.name,
+                    hits.count { it.kind == kind }.takeIf { query.isNotBlank() },
+                ) {
                     scope = if (scope == kind.name) null else kind.name
                 }
             }
@@ -183,7 +238,14 @@ fun SearchScreen(
                     Eyebrow("Actions", Modifier.padding(start = 4.dp, top = 16.dp, bottom = 8.dp))
                     SignalCard(Modifier.fillMaxWidth(), padding = PaddingValues(6.dp)) {
                         topMission?.let {
-                            ActionRow(LeoIcons.Play, signal.ink, signal.onInk, "Lancer « ${it.title} »", "Mission", !state.busy) {
+                            ActionRow(
+                                LeoIcons.Play,
+                                signal.ink,
+                                signal.onInk,
+                                "Lancer « ${it.title} »",
+                                "Mission",
+                                !state.busy,
+                            ) {
                                 launch(it.id)
                             }
                         }
@@ -213,7 +275,10 @@ fun SearchScreen(
                 val group = shown.filter { it.kind == kind }
                 if (group.isNotEmpty()) {
                     item(key = "group:${kind.name}") {
-                        Eyebrow(kind.label, Modifier.padding(start = 4.dp, top = 18.dp, bottom = 4.dp))
+                        Eyebrow(
+                            kind.label,
+                            Modifier.padding(start = 4.dp, top = 18.dp, bottom = 4.dp),
+                        )
                     }
                     items(group, key = { "${kind.name}:${it.id}" }) { hit ->
                         ResultRow(hit, query.trim()) {
@@ -242,15 +307,35 @@ private fun ActionRow(
     enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
-    Surface(onClick = onClick, enabled = enabled, shape = RoundedCornerShape(17.dp), color = Color.Transparent) {
-        Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(38.dp).clip(CircleShape).background(container), contentAlignment = Alignment.Center) {
+    Surface(
+        onClick = onClick,
+        enabled = enabled,
+        shape = RoundedCornerShape(17.dp),
+        color = Color.Transparent,
+    ) {
+        Row(
+            Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier.size(38.dp).clip(CircleShape).background(container),
+                contentAlignment = Alignment.Center,
+            ) {
                 Icon(icon, null, Modifier.size(17.dp), tint = content)
             }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    title,
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }
@@ -269,14 +354,27 @@ internal fun highlight(text: String, query: String, style: SpanStyle): Annotated
 
 @Composable
 private fun ResultRow(hit: SearchHit, query: String, onClick: () -> Unit) {
-    val mark = SpanStyle(background = MaterialTheme.colorScheme.primaryContainer, color = MaterialTheme.colorScheme.onPrimaryContainer, fontWeight = FontWeight.Bold)
+    val mark =
+        SpanStyle(
+            background = MaterialTheme.colorScheme.primaryContainer,
+            color = MaterialTheme.colorScheme.onPrimaryContainer,
+            fontWeight = FontWeight.Bold,
+        )
     Surface(onClick = onClick, color = Color.Transparent, shape = RoundedCornerShape(14.dp)) {
-        Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(horizontal = 4.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.fillMaxWidth()
+                .heightIn(min = 64.dp)
+                .padding(horizontal = 4.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             when (hit.kind) {
-                SearchKind.CHAT, SearchKind.AGENT -> AgentAvatar(hit.avatar, hit.key, 40.dp)
+                SearchKind.CHAT,
+                SearchKind.AGENT -> AgentAvatar(hit.avatar, hit.key, 40.dp)
                 else ->
                     Box(
-                        Modifier.size(40.dp).clip(RoundedCornerShape(13.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
+                        Modifier.size(40.dp)
+                            .clip(RoundedCornerShape(13.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant),
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(
@@ -293,7 +391,12 @@ private fun ResultRow(hit: SearchHit, query: String, onClick: () -> Unit) {
             }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(highlight(hit.title, query, mark), style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    highlight(hit.title, query, mark),
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
                 if (hit.detail.isNotBlank())
                     Text(
                         highlight(hit.detail, query, mark),

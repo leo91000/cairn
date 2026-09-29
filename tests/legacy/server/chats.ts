@@ -1,4 +1,9 @@
-import type { Chat, ChatDetail, ChatQuestion, ChatView } from '../../../shared/chats.ts'
+import type {
+  Chat,
+  ChatDetail,
+  ChatQuestion,
+  ChatView,
+} from '../../../shared/chats.ts'
 import type { Service } from './service.ts'
 import type { Worker } from './worker.ts'
 import { randomUUID } from 'node:crypto'
@@ -14,19 +19,38 @@ export class Chats {
   get store() { return this.service.store }
   get(id: string) { return requireValue(this.store.get('chats', id), 'Chat not found') }
   view(chat: Chat): ChatView {
-    return { ...chat, pendingQuestions: this.service.questions.list(chat.id).filter(question => question.status === 'pending').length, agentName: this.store.get('agents', chat.agentId)?.name ?? 'Deleted agent', projectName: chat.projectId ? this.store.get('projects', chat.projectId)?.name ?? 'Deleted project' : null, status: chat.runId ? this.store.run(chat.runId)?.status ?? 'idle' : 'idle' }
+    return {
+      ...chat,
+      pendingQuestions: this.service.questions.list(chat.id).filter(question => question.status === 'pending').length,
+      agentName: this.store.get('agents', chat.agentId)?.name ?? 'Deleted agent',
+      projectName: chat.projectId ? this.store.get('projects', chat.projectId)?.name ?? 'Deleted project' : null,
+      status: chat.runId ? this.store.run(chat.runId)?.status ?? 'idle' : 'idle',
+    }
   }
 
   detail(id: string): ChatDetail {
     const chat = this.get(id)
-    return { ...this.view(chat), questions: this.service.questions.list(id), run: chat.runId ? this.store.run(chat.runId)! : null, messages: this.store.chatMessages(id) }
+    return {
+      ...this.view(chat),
+      questions: this.service.questions.list(id),
+      run: chat.runId ? this.store.run(chat.runId)! : null,
+      messages: this.store.chatMessages(id),
+    }
   }
 
   create(input: unknown) {
     const values = chatInput.parse(input)
     const agent = requireValue(this.store.get('agents', values.agentId), 'Agent not found')
     taskProjects(agent, { projectId: values.projectId }, this.store.list('projects'))
-    return this.store.put('chats', { ...values, id: randomUUID(), title: 'New chat', runId: null, paused: false, createdAt: Date.now(), updatedAt: Date.now() })
+    return this.store.put('chats', {
+      ...values,
+      id: randomUUID(),
+      title: 'New chat',
+      runId: null,
+      paused: false,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    })
   }
 
   send(id: string, input: unknown, answer?: { question: ChatQuestion, answers: Record<string, string[]> }) {
@@ -39,6 +63,7 @@ export class Chats {
         throw new AppError(409, 'This message identifier has already been used.')
       return existing
     }
+
     if (messages.filter(message => message.status !== 'delivered').length >= 20)
       throw new AppError(409, 'The queue is full. Wait for a reply or remove a queued message.')
     if (this.store.db.prepare('SELECT id FROM chat_messages WHERE id=?').get(values.id))
@@ -54,7 +79,13 @@ export class Chats {
       this.store.put('chats', { ...chat, title: messages.length ? chat.title : values.text.replace(/\s+/g, ' ').slice(0, 90), updatedAt: Date.now() })
       if (answer)
         this.service.questions.save({ ...answer.question, status: 'answering', messageId: values.id })
-      return this.store.putChatMessage({ ...values, ...(answer ? { questionId: answer.question.id, answers: answer.answers } : {}), chatId: id, status: 'queued', createdAt: Date.now() })
+      return this.store.putChatMessage({
+        ...values,
+        ...(answer ? { questionId: answer.question.id, answers: answer.answers } : {}),
+        chatId: id,
+        status: 'queued',
+        createdAt: Date.now(),
+      })
     })
   }
 
@@ -70,10 +101,12 @@ export class Chats {
           if (question)
             this.service.questions.save({ ...question, status: 'pending', messageId: undefined })
         }
+
         this.store.deleteChatMessage(id, messageId)
         return { deleted: true }
       })
     }
+
     if (message.questionId)
       throw new AppError(409, 'A submitted answer cannot be edited.')
     const values = chatMessageInput.parse({ ...(input as object), id: messageId })
@@ -130,6 +163,7 @@ export class Chats {
         await rename(`${file}.tmp`, file)
         continue
       }
+
       if (chat.paused)
         continue
       if (run && (worker.active.has(run.id) || run.recoveryPending))
@@ -138,16 +172,29 @@ export class Chats {
         this.pause(chat.id, true)
         continue
       }
+
       for (const pending of messages) {
         if (pending.status === 'sending') {
           pending.status = 'queued'
           this.store.putChatMessage(pending)
         }
       }
+
       const message = messages.find(message => message.status === 'queued')
       if (!message)
         continue
-      const task = { ...taskInput.parse({ name: chat.title, prompt: message.text, agentId: chat.agentId, projectId: chat.projectId, worktree: true }), id: chat.id, createdAt: chat.createdAt, nextRun: null }
+      const task = {
+        ...taskInput.parse({
+          name: chat.title,
+          prompt: message.text,
+          agentId: chat.agentId,
+          projectId: chat.projectId,
+          worktree: true,
+        }),
+        id: chat.id,
+        createdAt: chat.createdAt,
+        nextRun: null,
+      }
       try {
         const snapshot = await this.service.snapshotRun(task, 'chat')
         // Reads above may have raced a queue edit or pause while skills loaded.
@@ -167,7 +214,15 @@ export class Chats {
           delete checkpoint.settled
           this.store.transaction(() => {
             worker.recovery.save(run!.id, checkpoint)
-            run = this.store.updateRun(run!.id, { snapshot: snapshot.snapshot, status: 'queued', summary: '', finishedAt: null, cancelRequestedAt: null, recoveryPending: true, chatExecution: { messageId: message.id, text: message.text, recovery: false } })
+            run = this.store.updateRun(run!.id, {
+              snapshot: snapshot.snapshot,
+              status: 'queued',
+              summary: '',
+              finishedAt: null,
+              cancelRequestedAt: null,
+              recoveryPending: true,
+              chatExecution: { messageId: message.id, text: message.text, recovery: false },
+            })
             this.store.putChatMessage({ ...message, status: 'sending' })
           })
         }

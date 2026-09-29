@@ -12,9 +12,24 @@ test('GitHub picker handles retry, search, keyboard selection and import on a ph
       failed = false
       return route.fulfill({ status: 502, json: { error: 'Check the GitHub connection and retry.' } })
     }
+
     const second = route.request().url().endsWith('page=2')
     requested.push(second ? '2' : '1')
-    const repo = (name: string, extra = {}) => ({ fullName: `team/${name}`, name, owner: 'team', description: 'A private repository', defaultBranch: 'develop', private: true, archived: false, fork: false, language: 'Rust', stars: 1200, pushedAt: new Date(Date.now() - 3 * 86400000).toISOString(), imported: false, ...extra })
+    const repo = (name: string, extra = {}) => ({
+      fullName: `team/${name}`,
+      name,
+      owner: 'team',
+      description: 'A private repository',
+      defaultBranch: 'develop',
+      private: true,
+      archived: false,
+      fork: false,
+      language: 'Rust',
+      stars: 1200,
+      pushedAt: new Date(Date.now() - 3 * 86400000).toISOString(),
+      imported: false,
+      ...extra,
+    })
     await route.fulfill({ json: second ? { repositories: [repo('selected')], nextPage: null } : { repositories: [repo('existing', { imported: true }), repo('public-site', { private: false, language: 'Vue' })], nextPage: 2 } })
   })
   let payload: any
@@ -54,5 +69,10 @@ test('GitHub picker handles retry, search, keyboard selection and import on a ph
   await dialog.getByRole('option', { name: /team\/selected/ }).click()
   await dialog.getByRole('button', { name: 'Save project', exact: true }).click()
   await expect(dialog).toHaveCount(0)
-  expect(payload).toEqual({ repository: 'team/selected', name: 'selected', description: 'A private repository', baseBranch: 'develop' })
+  expect(payload).toEqual({
+    repository: 'team/selected',
+    name: 'selected',
+    description: 'A private repository',
+    baseBranch: 'develop',
+  })
 })

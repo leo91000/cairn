@@ -15,10 +15,11 @@ import org.robolectric.annotation.Config
 @Config(sdk = [36])
 class MarkdownBlocksTest {
     private val context = ApplicationProvider.getApplicationContext<Application>()
-    private val markwon = Markwon.builder(context)
-        .usePlugin(TablePlugin.create(context))
-        .usePlugin(StrikethroughPlugin.create())
-        .build()
+    private val markwon =
+        Markwon.builder(context)
+            .usePlugin(TablePlugin.create(context))
+            .usePlugin(StrikethroughPlugin.create())
+            .build()
 
     @Test
     fun `append only rerenders the tail and does not rebind completed text views`() {
@@ -53,18 +54,22 @@ class MarkdownBlocksTest {
     @Test
     fun `fences tables lists and corrections retain complete document semantics`() {
         val renderer = MarkdownBlocks(markwon)
-        val cases = listOf(
-            "# Titre\n\n```kotlin\nval a = 1\n\nval b = 2",
-            "# Titre\n\n```kotlin\nval a = 1\n\nval b = 2\n```\n\nFin",
-            "| Nom | Valeur |\n| :-- | --: |\n| **Un** | ~~Deux~~ |",
-            "3. Trois\n4. Quatre\n   - Enfant\n\n> Citation\n> suite",
-            "[Lien](https://example.com) avec **gras**, *italique* et `code`.",
-            "Texte remplacé",
-            "",
-        )
+        val cases =
+            listOf(
+                "# Titre\n\n```kotlin\nval a = 1\n\nval b = 2",
+                "# Titre\n\n```kotlin\nval a = 1\n\nval b = 2\n```\n\nFin",
+                "| Nom | Valeur |\n| :-- | --: |\n| **Un** | ~~Deux~~ |",
+                "3. Trois\n4. Quatre\n   - Enfant\n\n> Citation\n> suite",
+                "[Lien](https://example.com) avec **gras**, *italique* et `code`.",
+                "Texte remplacé",
+                "",
+            )
         for (source in cases) {
             val blocks = renderer.render(source)
-            assertEquals(markwon.toMarkdown(source).toString(), blocks.joinToString("\n\n") { it.text.toString() })
+            assertEquals(
+                markwon.toMarkdown(source).toString(),
+                blocks.joinToString("\n\n") { it.text.toString() },
+            )
         }
     }
 }

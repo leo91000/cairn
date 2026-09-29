@@ -34,13 +34,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.focusProperties
-import androidx.compose.ui.semantics.clearAndSetSemantics
-import androidx.compose.ui.semantics.selected
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -126,25 +126,45 @@ internal fun ArtifactStrip(vm: LeoViewModel, artifacts: List<Deliverable>) {
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
                             Box(
-                                Modifier.size(44.dp).clip(RoundedCornerShape(6.dp))
+                                Modifier.size(44.dp)
+                                    .clip(RoundedCornerShape(6.dp))
                                     .background(MaterialTheme.colorScheme.surface),
                                 contentAlignment = Alignment.Center,
                             ) {
-                                Icon(LeoIcons.File, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.primary)
-                                if (artifact.previewStatus == "ready") ArtifactThumbnail(vm, artifact)
+                                Icon(
+                                    LeoIcons.File,
+                                    null,
+                                    Modifier.size(22.dp),
+                                    tint = MaterialTheme.colorScheme.primary,
+                                )
+                                if (artifact.previewStatus == "ready")
+                                    ArtifactThumbnail(vm, artifact)
                             }
-                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                Text(artifact.title.ifBlank { artifact.name }, style = MaterialTheme.typography.titleSmall,
-                                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Column(
+                                Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(3.dp),
+                            ) {
+                                Text(
+                                    artifact.title.ifBlank { artifact.name },
+                                    style = MaterialTheme.typography.titleSmall,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
                                 Text(
                                     "${artifact.name.substringAfterLast('.', artifact.kind).uppercase()} · ${fileSize(artifact.size)}" +
                                         if (artifact.version > 1) " · v${artifact.version}" else "",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                             }
-                            Icon(LeoIcons.Right, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Icon(
+                                LeoIcons.Right,
+                                null,
+                                Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     }
@@ -268,29 +288,62 @@ internal fun ArtifactGallery(
             (if (artifacts.any { it.id == initial.id }) artifacts else artifacts + initial)
                 .distinctBy { it.id }
         }
-        val pager = rememberPagerState(initialPage = pages.indexOfFirst { it.id == initial.id }) { pages.size }
+        val pager =
+            rememberPagerState(initialPage = pages.indexOfFirst { it.id == initial.id }) {
+                pages.size
+            }
         val scope = rememberCoroutineScope()
         var zoomedId by remember { mutableStateOf<String?>(null) }
-        Dialog(onDismissRequest = close, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Dialog(
+            onDismissRequest = close,
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
             HorizontalPager(
                 state = pager,
-                modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)
-                    .testTag("artifact-pager"),
+                modifier =
+                    Modifier.fillMaxSize()
+                        .background(MaterialTheme.colorScheme.background)
+                        .testTag("artifact-pager"),
                 key = { pages[it].id },
                 beyondViewportPageCount = 1,
                 userScrollEnabled = pages.size > 1 && zoomedId != pages[pager.settledPage].id,
             ) { page ->
                 val item = pages[page]
                 val active = page == pager.settledPage
-                Box(Modifier.fillMaxSize().clipToBounds()
-                    .testTag("artifact-page:${item.id}").semantics { selected = active }) {
-                    Box(Modifier.fillMaxSize().focusProperties { canFocus = active }
-                        .then(if (active) Modifier else Modifier.clearAndSetSemantics {})) {
+                Box(
+                    Modifier.fillMaxSize()
+                        .clipToBounds()
+                        .testTag("artifact-page:${item.id}")
+                        .semantics { selected = active }
+                ) {
+                    Box(
+                        Modifier.fillMaxSize()
+                            .focusProperties { canFocus = active }
+                            .then(if (active) Modifier else Modifier.clearAndSetSemantics {})
+                    ) {
                         FilePreviewPage(
-                            vm, item.path(), item.name, item.mediaType, item.kind,
-                            version = item.version, artifact = item, active = active,
-                            previous = if (page > 0) ({ scope.launch { pager.animateScrollToPage(page - 1) }; Unit }) else null,
-                            next = if (page < pages.lastIndex) ({ scope.launch { pager.animateScrollToPage(page + 1) }; Unit }) else null,
+                            vm,
+                            item.path(),
+                            item.name,
+                            item.mediaType,
+                            item.kind,
+                            version = item.version,
+                            artifact = item,
+                            active = active,
+                            previous =
+                                if (page > 0)
+                                    ({
+                                        scope.launch { pager.animateScrollToPage(page - 1) }
+                                        Unit
+                                    })
+                                else null,
+                            next =
+                                if (page < pages.lastIndex)
+                                    ({
+                                        scope.launch { pager.animateScrollToPage(page + 1) }
+                                        Unit
+                                    })
+                                else null,
                             position = "${page + 1} / ${pages.size}",
                             zoomChanged = { zoomed ->
                                 if (zoomed) zoomedId = item.id
@@ -315,7 +368,10 @@ internal fun FilePreview(
     localPath: String? = null,
     close: () -> Unit,
 ) {
-    Dialog(onDismissRequest = close, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    Dialog(
+        onDismissRequest = close,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
         FilePreviewPage(vm, path, name, mime, kind, localPath, close = close)
     }
 }
@@ -349,8 +405,13 @@ private fun FilePreviewPage(
         ) { uri ->
             if (uri != null && file != null) vm.perform { files.save(file!!, uri) }
         }
-    val load = active || (artifact != null && artifact.size in 1..10L * 1024 * 1024 &&
-        kind !in listOf("video", "audio") && !mime.startsWith("video/") && !mime.startsWith("audio/"))
+    val load =
+        active ||
+            (artifact != null &&
+                artifact.size in 1..10L * 1024 * 1024 &&
+                kind !in listOf("video", "audio") &&
+                !mime.startsWith("video/") &&
+                !mime.startsWith("audio/"))
     LaunchedEffect(path, localPath, retry, load) {
         if (!load) return@LaunchedEffect
         error = null
@@ -402,7 +463,8 @@ private fun FilePreviewPage(
                     }
                 },
                 actions = {
-                    if (artifact != null) ActionIcon("Lien public", Icons.Default.Share) { sharing = true }
+                    if (artifact != null)
+                        ActionIcon("Lien public", Icons.Default.Share) { sharing = true }
                     ActionIcon("Enregistrer", LeoIcons.Download, currentFile != null) {
                         save.launch(name)
                     }
@@ -464,7 +526,8 @@ private fun FilePreviewPage(
             }
             currentFile?.let { current ->
                 when {
-                    kind == "image" || mime.startsWith("image/") -> NativeImage(current, name, active, zoomChanged)
+                    kind == "image" || mime.startsWith("image/") ->
+                        NativeImage(current, name, active, zoomChanged)
                     kind == "pdf" || mime == "application/pdf" -> NativePdf(current)
                     kind in listOf("video", "audio") ||
                         mime.startsWith("video/") ||
@@ -485,9 +548,7 @@ private fun FilePreviewPage(
                         }
                         Page {
                             if (kind == "markdown" || mime.contains("markdown")) Markdown(text)
-                            else if (
-                                mime == "application/json" || name.endsWith(".json", true)
-                            ) {
+                            else if (mime == "application/json" || name.endsWith(".json", true)) {
                                 if (text.length <= 500_000) ResultContent(text)
                                 else
                                     Text(
@@ -516,7 +577,11 @@ private fun FilePreviewPage(
                         contentAlignment = androidx.compose.ui.Alignment.Center,
                     ) {
                         if (load) CircularProgressIndicator()
-                        else Text("Aperçu au relâchement", style = MaterialTheme.typography.labelMedium)
+                        else
+                            Text(
+                                "Aperçu au relâchement",
+                                style = MaterialTheme.typography.labelMedium,
+                            )
                     }
                 else Unit
         }
@@ -524,7 +589,12 @@ private fun FilePreviewPage(
 }
 
 @Composable
-private fun NativeImage(file: File, description: String, active: Boolean, zoomChanged: (Boolean) -> Unit) {
+private fun NativeImage(
+    file: File,
+    description: String,
+    active: Boolean,
+    zoomChanged: (Boolean) -> Unit,
+) {
     var bitmap by remember(file) { mutableStateOf<Bitmap?>(null) }
     var failed by remember(file) { mutableStateOf(false) }
     var scale by remember { mutableFloatStateOf(1f) }
@@ -711,8 +781,9 @@ internal fun ArtifactLinkHost(
         try {
             val files = vm.api.get<List<Deliverable>>(path.substringBeforeLast('/'))
             openingFiles = latestArtifacts(files)
-            opening = files.find { it.path().substringBefore('?') == path }
-                ?: error("Ce fichier n’est plus disponible.")
+            opening =
+                files.find { it.path().substringBefore('?') == path }
+                    ?: error("Ce fichier n’est plus disponible.")
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -733,8 +804,10 @@ internal fun ArtifactLinkHost(
                         pending = null
                         openingFiles = latestArtifacts(artifacts)
                         opening = item
+                    } else {
+                        opening = null
+                        pending = path
                     }
-                    else { opening = null; pending = path }
                     true
                 }
             }
@@ -742,10 +815,27 @@ internal fun ArtifactLinkHost(
         content()
         if (pending != null || failure != null) {
             AlertDialog(
-                onDismissRequest = { pending = null; failure = null },
-                title = { Text(if (failure == null) "Ouverture du fichier…" else "Fichier indisponible") },
-                text = { if (failure != null) Text(failure!!) else LinearProgressIndicator(Modifier.fillMaxWidth()) },
-                confirmButton = { TextButton(onClick = { pending = null; failure = null }) { Text("Fermer") } },
+                onDismissRequest = {
+                    pending = null
+                    failure = null
+                },
+                title = {
+                    Text(if (failure == null) "Ouverture du fichier…" else "Fichier indisponible")
+                },
+                text = {
+                    if (failure != null) Text(failure!!)
+                    else LinearProgressIndicator(Modifier.fillMaxWidth())
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            pending = null
+                            failure = null
+                        }
+                    ) {
+                        Text("Fermer")
+                    }
+                },
             )
         }
         opening?.let { item ->

@@ -14,6 +14,7 @@ export function useAgentPortraits() {
   let timer: ReturnType<typeof setTimeout> | undefined
   let stopped = false
   let loading = false
+
   async function refreshPortraits() {
     clearTimeout(timer)
     if (loading || stopped || !state.authenticated || document.hidden)
@@ -35,11 +36,13 @@ export function useAgentPortraits() {
       schedule()
     }
   }
+
   function schedule() {
     clearTimeout(timer)
     if (!stopped && state.authenticated && !document.hidden && state.agents.some(agent => agent.avatar?.status === 'generating'))
       timer = setTimeout(refreshPortraits, 2000)
   }
+
   watch(() => [state.authenticated, ...state.agents.map(agent => agent.avatar?.status)], schedule)
   document.addEventListener('visibilitychange', refreshPortraits)
   window.addEventListener('focus', refreshPortraits)

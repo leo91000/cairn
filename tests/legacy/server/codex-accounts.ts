@@ -5,7 +5,14 @@ import type { Run } from './contracts.ts'
 import type { Store } from './store.ts'
 import { Buffer } from 'node:buffer'
 import { createHash, randomUUID } from 'node:crypto'
-import { chmod, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import {
+  chmod,
+  mkdir,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from 'node:fs/promises'
 import path from 'node:path'
 import { z } from 'zod'
 import { CodexAccountResets } from './codex-account-resets.ts'
@@ -16,11 +23,41 @@ import { AppError, requireValue } from './errors.ts'
 import { McpVault } from './mcp-vault.ts'
 
 const codexAccountInput = z.object({ name: z.string().trim().min(1).max(100), enabled: z.boolean().default(true) })
-const authSchema = z.object({ tokens: z.object({ access_token: z.string().min(1), refresh_token: z.string().optional(), id_token: z.string().optional(), account_id: z.string().optional() }).passthrough() }).passthrough()
+const authSchema = z.object({
+  tokens: z.object({
+    access_token: z.string().min(1),
+    refresh_token: z.string().optional(),
+    id_token: z.string().optional(),
+    account_id: z.string().optional(),
+  }).passthrough(),
+}).passthrough()
 const windowSchema = z.object({ usedPercent: z.number().finite().min(0), windowDurationMins: z.number().nullable(), resetsAt: z.number().nullable() })
-const bucketSchema = z.object({ limitId: z.string().nullable(), limitName: z.string().nullable().default(null), normalModelSlug: z.string().nullable().optional(), primary: windowSchema.nullable(), secondary: windowSchema.nullable(), rateLimitReachedType: z.string().nullable().optional(), spendControlReached: z.boolean().nullable().optional() })
-const resetCreditsSchema = z.object({ availableCount: z.number().int().min(0), credits: z.array(z.object({ id: z.string().min(1), resetType: z.string(), status: z.string(), expiresAt: z.number().nullable() })).nullable().optional() })
-const limitsSchema = z.object({ ordinaryUsageAllowed: z.boolean().nullable().optional(), accountId: z.string().nullable().optional(), rateLimits: bucketSchema, rateLimitsByLimitId: z.record(z.string(), bucketSchema).nullable().optional(), rateLimitResetCredits: resetCreditsSchema.nullable().optional() })
+const bucketSchema = z.object({
+  limitId: z.string().nullable(),
+  limitName: z.string().nullable().default(null),
+  normalModelSlug: z.string().nullable().optional(),
+  primary: windowSchema.nullable(),
+  secondary: windowSchema.nullable(),
+  rateLimitReachedType: z.string().nullable().optional(),
+  spendControlReached: z.boolean().nullable().optional(),
+})
+const resetCreditsSchema = z.object({
+  availableCount: z.number().int().min(0),
+  credits: z.array(z.object({
+    id: z.string().min(1),
+    resetType: z.string(),
+    status: z.string(),
+    expiresAt: z.number().nullable(),
+  })).nullable().optional(),
+})
+const limitsSchema = z.object({
+  ordinaryUsageAllowed: z.boolean().nullable().optional(),
+  accountId: z.string().nullable().optional(),
+  rateLimits: bucketSchema,
+  rateLimitsByLimitId: z.record(z.string(), bucketSchema).nullable().optional(),
+  rateLimitResetCredits: resetCreditsSchema.nullable().optional(),
+})
+
 function authSubject(token?: string): string {
   try {
     return JSON.parse(Buffer.from(token?.split('.')[1] || '', 'base64url').toString()).sub || ''
@@ -29,6 +66,7 @@ function authSubject(token?: string): string {
     return ''
   }
 }
+
 const credentialKey = (id: string) => `codex-account:${id}`
 const safeError = (error: unknown) => error instanceof AppError ? error.message : 'Unable to read this Codex account. Reconnect it and try again.'
 
@@ -53,7 +91,12 @@ export class CodexAccounts {
   private initialized: Promise<void> | undefined
   private polling: Promise<void> | undefined
   private closing = false
-  private login: { accountId: string, controller: Connections, home: string, completion?: Promise<void> } | undefined
+  private login: {
+    accountId: string
+    controller: Connections
+    home: string
+    completion?: Promise<void>
+  } | undefined
 
   constructor(readonly store: Store, readonly config: Config, session?: CodexSession) {
     this.vault = new McpVault(store, config.dataDir)
@@ -71,7 +114,12 @@ export class CodexAccounts {
 
   view(account: CodexAccount): CodexAccountView {
     const { identity: _identity, ...safe } = account
-    return { ...safe, remainingPercent: remainingUsage(account.limits), stale: !account.checkedAt || Date.now() - account.checkedAt > 90000, activeRunId: this.leases.get(account.id)?.runId ?? null }
+    return {
+      ...safe,
+      remainingPercent: remainingUsage(account.limits),
+      stale: !account.checkedAt || Date.now() - account.checkedAt > 90000,
+      activeRunId: this.leases.get(account.id)?.runId ?? null,
+    }
   }
 
   list() {
@@ -96,7 +144,20 @@ export class CodexAccounts {
   }
 
   private newAccount(name: string) {
-    const account: CodexAccount = { ...codexAccountInput.parse({ name }), id: randomUUID(), email: null, plan: null, identity: null, createdAt: Date.now(), checkedAt: null, state: 'pending', error: '', limits: null, lastUsedAt: null, exhausted: null }
+    const account: CodexAccount = {
+      ...codexAccountInput.parse({ name }),
+      id: randomUUID(),
+      email: null,
+      plan: null,
+      identity: null,
+      createdAt: Date.now(),
+      checkedAt: null,
+      state: 'pending',
+      error: '',
+      limits: null,
+      lastUsedAt: null,
+      exhausted: null,
+    }
     this.save(account)
     this.store.set('codex-accounts-enabled', true)
     return account
@@ -122,6 +183,7 @@ export class CodexAccounts {
         await this.capture(run.codexAccountId, home).catch(() => {})
       await rm(path.join(home, 'auth.json'), { force: true })
     }
+
     for (const [id, lease] of this.leases) {
       if (lease.runId === run.id)
         this.leases.delete(id)
@@ -151,6 +213,7 @@ export class CodexAccounts {
           await rm(directory, { recursive: true, force: true })
         }
       }
+
       // Recover rotated credentials from a process that stopped before releasing its lease.
       for (const id of await readdir(path.join(this.config.dataDir, 'runs')).catch(() => [])) {
         if (!z.uuid().safeParse(id).success)
@@ -165,6 +228,7 @@ export class CodexAccounts {
           await rm(path.join(home, 'auth.json'), { force: true })
         }
       }
+
       if (this.managed())
         return
       const legacy = path.join(this.config.home, '.codex')
@@ -178,6 +242,7 @@ export class CodexAccounts {
       catch {
         return
       }
+
       const account = this.newAccount('Primary account')
       await this.capture(account.id, legacy)
       this.store.audit('codex.account.imported', { id: account.id })
@@ -239,6 +304,7 @@ export class CodexAccounts {
             throw new AppError(409, 'Codex returned usage for a different account. Reconnect this account.')
           return limits
         }
+
         let limits = await readLimits()
         let account = this.get(id)
         const subject = authSubject(auth.tokens.id_token) || identity.account.email || ''
@@ -250,7 +316,16 @@ export class CodexAccounts {
         const duplicate = this.store.list('codexAccounts').find(other => other.id !== id && other.identity === fingerprint)
         if (duplicate)
           throw new AppError(409, 'This account is already connected. Reconnect the existing account instead.')
-        account = { ...account, identity: fingerprint, email: identity.account.email, plan: identity.account.planType, state: 'ready', checkedAt: Date.now(), error: '', limits }
+        account = {
+          ...account,
+          identity: fingerprint,
+          email: identity.account.email,
+          plan: identity.account.planType,
+          state: 'ready',
+          checkedAt: Date.now(),
+          error: '',
+          limits,
+        }
         if (account.exhausted && usageRecovered(account.exhausted.limits, limits, account.exhausted.model))
           account.exhausted = null
         this.save(account)
@@ -262,6 +337,7 @@ export class CodexAccounts {
           const recovered = (reset.resetConfirmed && !usageBlocked(limits, account.exhausted.model) && (remainingUsage(limits, account.exhausted.model) ?? 0) > 0) || usageRecovered(account.exhausted.limits, limits, account.exhausted.model)
           account = { ...account, exhausted: recovered ? null : { ...account.exhausted, limits } }
         }
+
         this.save(account)
       })
       await this.capture(id, home)
@@ -309,7 +385,12 @@ export class CodexAccounts {
     const account = candidates[0]
     if (!account)
       throw new AppError(409, 'Waiting for a Codex account with available usage. Usage is checked every minute.')
-    const lease = { accountId: account.id, runId, model, home: path.join(this.config.dataDir, 'runs', runId, 'codex') }
+    const lease = {
+      accountId: account.id,
+      runId,
+      model,
+      home: path.join(this.config.dataDir, 'runs', runId, 'codex'),
+    }
     this.leases.set(account.id, lease)
     try {
       await this.exclusive(account.id, () => this.materialize(account.id, lease.home))
@@ -386,7 +467,12 @@ export class CodexAccounts {
     await mkdir(path.join(home, '.codex'), { recursive: true, mode: 0o700 })
     await writeFile(path.join(home, '.codex', 'config.toml'), 'cli_auth_credentials_store = "file"\nforced_login_method = "chatgpt"\n', { mode: 0o600 })
     const controller = new Connections({ ...this.config, home })
-    const login = { accountId: account.id, controller, home, completion: undefined as Promise<void> | undefined }
+    const login = {
+      accountId: account.id,
+      controller,
+      home,
+      completion: undefined as Promise<void> | undefined,
+    }
     this.login = login
     controller.start('codex')
     controller.child!.once('close', () => {
@@ -401,9 +487,11 @@ export class CodexAccounts {
           if (this.get(account.id).state !== 'ready') {
             if (previous)
               this.vault.set(credentialKey(account.id), previous)
-            else this.vault.delete(credentialKey(account.id))
+            else
+              this.vault.delete(credentialKey(account.id))
             throw new AppError(400, this.get(account.id).error)
           }
+
           controller.flow.state = 'complete'
         }
         catch (error) {
@@ -439,6 +527,7 @@ export class CodexAccounts {
         })
       })
     }
+
     await login.completion
     await rm(login.home, { recursive: true, force: true })
     this.login = undefined

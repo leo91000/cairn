@@ -1,8 +1,33 @@
 import type { RunListItem, Task } from '../shared/contracts'
 import { describe, expect, it } from 'vitest'
-import { describeCron, describeSchedule, missionFilter, missionOrder, successRate, upcomingStamp } from '../src/missions'
+import {
+  describeCron,
+  describeSchedule,
+  missionFilter,
+  missionOrder,
+  successRate,
+  upcomingStamp,
+} from '../src/missions'
 
-const task = (id: string, extra: Partial<Task> = {}): Task => ({ id, name: id, prompt: 'Do it', agentId: 'main', projectId: null, skills: null, tags: [], cron: null, timezone: 'Europe/Paris', enabled: true, archived: false, worktree: true, createdAt: 0, nextRun: null, ...extra })
+function task(id: string, extra: Partial<Task> = {}): Task {
+  return {
+    id,
+    name: id,
+    prompt: 'Do it',
+    agentId: 'main',
+    projectId: null,
+    skills: null,
+    tags: [],
+    cron: null,
+    timezone: 'Europe/Paris',
+    enabled: true,
+    archived: false,
+    worktree: true,
+    createdAt: 0,
+    nextRun: null,
+    ...extra,
+  }
+}
 
 describe('missions', () => {
   it('words common schedules and keeps anything else visible as cron', () => {

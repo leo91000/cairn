@@ -43,6 +43,7 @@ struct Attempt {
     imports: Arc<Mutex<()>>,
     control: Arc<Mutex<()>>,
 }
+
 #[derive(Clone)]
 struct Broker {
     data: PathBuf,
@@ -63,6 +64,7 @@ fn normalized(path: &Path) -> bool {
         })
         && !path.to_string_lossy().contains("//")
 }
+
 fn validate(plan: &Value, id: &str, data: &Path) -> Result<()> {
     uuid(text(plan, "runId"))?;
     if plan["id"] != id
@@ -105,6 +107,7 @@ fn validate(plan: &Value, id: &str, data: &Path) -> Result<()> {
     }
     Ok(())
 }
+
 impl Broker {
     async fn start(&self, id: &str) -> Result<()> {
         if self.active.lock().await.contains_key(id) {
@@ -257,7 +260,11 @@ impl Broker {
             let code = match result {
                 Ok(code) => code,
                 Err(error) => {
-                    let event = json!({"type":"output","stderr":true,"data":STANDARD.encode(format!("{}\n",error.message))});
+                    let event = json!({
+                        "type": "output",
+                        "stderr": true,
+                        "data": STANDARD.encode(format!("{}\n",error.message))
+                    });
                     if let Ok(mut log) = tokio::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
@@ -285,6 +292,7 @@ impl Broker {
         });
         Ok(())
     }
+
     async fn open_project(&self, id: &str, project_id: &str, value: Value) -> Result<Value> {
         uuid(project_id)?;
         let (plan, stop, lock, socket) = {
@@ -321,9 +329,13 @@ impl Broker {
             .ok_or_else(|| Error::new(409, "VM is still starting."))?;
         tokio::select! {
             _ = stop.cancelled() => Err(Error::new(409,"VM stopped during project import.")),
-            result = tokio::time::timeout(Duration::from_secs(290),host::import_project(socket,source,text(&value,"target"),plan["sandbox"] == "read-only")) => result.map_err(|_| Error::new(503,"Project import timed out."))?,
+            result = tokio::time::timeout(
+                Duration::from_secs(290),
+                host::import_project(socket, source, text(&value, "target"), plan["sandbox"] == "read-only"),
+            ) => result.map_err(|_| Error::new(503, "Project import timed out."))?,
         }
     }
+
     async fn stop(&self, id: &str) -> Result<()> {
         atomic_write(&self.state.join(format!("{id}.stopped")), b"").await?;
         let attempt = {
@@ -341,6 +353,7 @@ impl Broker {
         Ok(())
     }
 }
+
 async fn erase_attempt_content(broker: &Broker, run: &str) -> Result<()> {
     let mut attempts = std::collections::HashSet::new();
     let plans = broker.data.join("runner-plans");
@@ -414,7 +427,18 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
                 }
             }
         }
-        return Ok(Json(json!({"status":"ok","backend":"firecracker","runtimeId":std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_|"development".into()),"nodeProtocol":2,"runtimes":runtimes,"dataRoot":broker.data,"activeRuns":broker.active.lock().await.len(),"capabilities":crate::nodes::connector::capabilities(&broker.state).ok(),"pool":broker.pool.health().await})).into_response());
+        return Ok(Json(json!({
+            "status": "ok",
+            "backend": "firecracker",
+            "runtimeId": std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_|"development".into()),
+            "nodeProtocol": 2,
+            "runtimes": runtimes,
+            "dataRoot": broker.data,
+            "activeRuns": broker.active.lock().await.len(),
+            "capabilities": crate::nodes::connector::capabilities(&broker.state).ok(),
+            "pool": broker.pool.health().await
+        }))
+        .into_response());
     }
     let credential = tokio::fs::read_to_string(broker.data.join("runner-secret")).await?;
     let authorization = request
@@ -449,14 +473,14 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
             &serde_json::to_vec(&policy)?,
         )
         .await?;
-        return Ok(Json(json!({"ready":true})).into_response());
+        return Ok(Json(json!({"ready": true})).into_response());
     }
     if let ["snapshots", snapshot, hash] = segments.as_slice() {
         uuid(snapshot)?;
         let directory = broker.state.join("snapshots").join(snapshot);
         if request.method() == "DELETE" && *hash == "discard" {
             tokio::fs::remove_dir_all(directory).await?;
-            return Ok(Json(json!({"ok":true})).into_response());
+            return Ok(Json(json!({"ok": true})).into_response());
         }
         if request.method() != "GET" {
             return Err(Error::new(405, "Method not allowed."));
@@ -528,7 +552,7 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
         tokio::task::spawn_blocking(move || disk.commit_published(generation, &backup_id))
             .await
             .map_err(Error::internal)??;
-        return Ok(Json(json!({"committed":true})).into_response());
+        return Ok(Json(json!({"committed": true})).into_response());
     }
     if let ["disks", run, "restore"] = segments.as_slice() {
         let run = (*run).to_owned();
@@ -585,7 +609,9 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
                     tokio::fs::remove_file(entry.path()).await?;
                 }
             }
-            return Ok(Json(json!({"pruned":true,"retiredGrants":retired_grants})).into_response());
+            return Ok(
+                Json(json!({"pruned": true,"retiredGrants": retired_grants})).into_response(),
+            );
         }
         if action == "delete" {
             match tokio::fs::remove_file(&disk).await {
@@ -606,7 +632,7 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
                 }
             }
             // Preserve the lock inode: an overlapping boot must contend on it.
-            return Ok(Json(json!({"deleted":true})).into_response());
+            return Ok(Json(json!({"deleted": true})).into_response());
         }
         Err(Error::new(405, "Invalid workspace operation."))
     } else {
@@ -681,7 +707,7 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
                     .lock()
                     .await
                     .insert((*id).to_owned(), crate::nodes::boot_ms() + remaining);
-                Ok(Json(json!({"ok":true})).into_response())
+                Ok(Json(json!({"ok": true})).into_response())
             }
             ("POST", ["runs", id, "artifact"]) => {
                 let id = (*id).to_owned();
@@ -709,8 +735,11 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
                 };
                 let root = broker.data.join("runs").join(run);
                 let (stream, size) = tokio::select! {
-                    _=stop.cancelled()=>return Err(Error::new(409,"VM stopped.")),
-                    result=tokio::time::timeout(Duration::from_secs(10),host::export_artifact(&socket,text(&value,"path"),&root))=>result.map_err(|_|Error::new(408,"Artifact export timed out."))??,
+                    _ = stop.cancelled() => return Err(Error::new(409,"VM stopped.")),
+                    result = tokio::time::timeout(
+                        Duration::from_secs(10),
+                        host::export_artifact(&socket, text(&value, "path"), &root),
+                    ) => result.map_err(|_| Error::new(408, "Artifact export timed out."))??,
                 };
                 let stream = tokio_util::io::ReaderStream::new(stream.take(size))
                     .take_until(async move { stop.cancelled().await });
@@ -798,7 +827,7 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
                         {
                             return Some((
                                 Ok::<_, std::io::Error>(Bytes::from(
-                                    json!({"StatusCode":code.parse::<i32>().unwrap_or(1)})
+                                    json!({"StatusCode": code.parse::<i32>().unwrap_or(1)})
                                         .to_string(),
                                 )),
                                 (broker, id, true),
@@ -882,7 +911,9 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     drop(controller);
     Ok(())
 }
+
 use std::os::fd::AsRawFd;
+
 pub async fn client(id: &str, stop: CancellationToken) -> Result<i32> {
     uuid(id)?;
     let base = std::env::var("RUNNER_URL").map_err(|_| Error::bad("Missing runner URL."))?;
@@ -963,7 +994,7 @@ pub async fn client(id: &str, stop: CancellationToken) -> Result<i32> {
         let (_, code) = tokio::try_join!(output, wait)?;
         Ok(code)
     };
-    let result = tokio::select! {_=stop.cancelled()=>Ok(143),result=operation=>result};
+    let result = tokio::select! {_ = stop.cancelled() => Ok(143),result = operation => result};
     let _ = http
         .delete(url)
         .bearer_auth(token)
@@ -993,6 +1024,7 @@ async fn snapshot_baseline(request: axum::extract::Request) -> Result<Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[tokio::test]
     async fn wait_does_not_report_completion_until_the_attempt_is_released() {
         use tower::ServiceExt;
@@ -1100,7 +1132,7 @@ mod tests {
                 stop: CancellationToken::new(),
                 done: receiver,
                 socket: Default::default(),
-                plan: json!({"runId":run}),
+                plan: json!({"runId": run}),
                 imports: Default::default(),
                 control: Default::default(),
             },
@@ -1125,6 +1157,7 @@ mod tests {
         assert_eq!(body["error"], "VM is still starting.");
         assert!(!state.join("disks").join(run).exists());
     }
+
     #[tokio::test]
     async fn workspace_disk_deletion_uses_authenticated_http_and_preserves_the_lock() {
         use std::io::{Seek, SeekFrom, Write};
@@ -1183,7 +1216,7 @@ mod tests {
                         .method("POST")
                         .uri(format!("/disks/{run}/{action}"))
                         .header("authorization", format!("Bearer {credential}"))
-                        .body(Body::from(json!({"transfer":transfer}).to_string()))
+                        .body(Body::from(json!({"transfer": transfer}).to_string()))
                         .unwrap(),
                 )
                 .await
@@ -1236,10 +1269,17 @@ mod tests {
         );
         assert!(!directory.join("data.ext4").exists());
     }
+
     #[test]
     fn execution_plans_accept_unlimited_but_reject_invalid_or_expired_deadlines() {
         let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-        let mut plan = json!({"id":id,"runId":id,"expires":null,"cwd":format!("/data/runs/{id}/workspace"),"imports":[]});
+        let mut plan = json!({
+            "id": id,
+            "runId": id,
+            "expires": null,
+            "cwd": format!("/data/runs/{id}/workspace"),
+            "imports": []
+        });
         assert!(validate(&plan, id, Path::new("/data")).is_ok());
         for expiry in [
             json!(0),
@@ -1253,10 +1293,17 @@ mod tests {
         plan.as_object_mut().unwrap().remove("expires");
         assert!(validate(&plan, id, Path::new("/data")).is_err());
     }
+
     #[test]
     fn imports_cannot_grant_host_or_other_run_access() {
         let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-        let mut plan = json!({"id":id,"runId":id,"expires":now()+60000,"cwd":format!("/data/runs/{id}/workspace"),"imports":[]});
+        let mut plan = json!({
+            "id": id,
+            "runId": id,
+            "expires": now()+60000,
+            "cwd": format!("/data/runs/{id}/workspace"),
+            "imports": []
+        });
         assert!(validate(&plan, id, Path::new("/data")).is_ok());
         for source in [
             "/data/private",
@@ -1264,7 +1311,7 @@ mod tests {
             "/data/runs/another/workspace",
             "/data/runs/../private",
         ] {
-            plan["imports"] = json!([{"source":source,"target":"/home/node"}]);
+            plan["imports"] = json!([{"source": source,"target": "/home/node"}]);
             assert!(validate(&plan, id, Path::new("/data")).is_err());
         }
     }

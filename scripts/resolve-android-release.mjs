@@ -19,10 +19,20 @@ export function trustedAndroidRun(run, config) {
     && run.path === '.github/workflows/android.yaml'
 }
 
-export async function resolveAndroidRelease(config, { gh, sleep = setTimeout, now = Date.now, timeoutMs = 45 * 60 * 1000 } = {}) {
+export async function resolveAndroidRelease(config, {
+  gh,
+  sleep = setTimeout,
+  now = Date.now,
+  timeoutMs = 45 * 60 * 1000,
+} = {}) {
   androidVersion(config.tag)
   const deadline = now() + timeoutMs
-  const query = new URLSearchParams({ head_sha: config.commit, branch: 'main', event: 'push', per_page: '30' })
+  const query = new URLSearchParams({
+    head_sha: config.commit,
+    branch: 'main',
+    event: 'push',
+    per_page: '30',
+  })
   let discoveryAttempts = 0
   while (now() < deadline) {
     const response = await gh(['api', `repos/${config.repository}/actions/workflows/android.yaml/runs?${query}`])
@@ -39,14 +49,17 @@ export async function resolveAndroidRelease(config, { gh, sleep = setTimeout, no
         await rm(directory, { recursive: true, force: true })
       }
     }
+
     if (!runs.some(run => run.status !== 'completed')) {
       // A tag-only commit, failed main run or missing Android path trigger still
       // gets the complete pipeline. Allow discovery of an atomic main+tag push.
       if (runs.length || ++discoveryAttempts >= 3)
         return null
     }
+
     await sleep(runs.length ? 10000 : 5000)
   }
+
   // Do not start a second full build while main may still be validating it.
   throw new AndroidValidationPendingError('Timed out waiting for Android validation on main; retry after it finishes')
 }
@@ -67,6 +80,7 @@ if (import.meta.main) {
       console.log('Reusable Android build is unavailable or incompatible; running the complete validation pipeline.')
     }
   }
+
   await appendFile(process.env.GITHUB_OUTPUT, `reuse=${!!result}\nrun-id=${result?.runId || ''}\n`)
   const summary = result
     ? `Reusing the verified Android APK for ${process.env.GITHUB_SHA} from https://github.com/${process.env.GITHUB_REPOSITORY}/actions/runs/${result.runId}. Only signing and publication remain.\n`

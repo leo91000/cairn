@@ -3,7 +3,13 @@ import { expect, expectSingleScroll, test } from './fixtures'
 test('reconnects after a temporary restart and resumes a cancelled conversation in place', async ({ page, workspace }) => {
   const agent = workspace.service.agent({ name: 'Recovery engineer' })
   const project = workspace.service.store.list('projects')[0]
-  const task = workspace.service.task({ name: 'Recover a deployment review', agentId: agent.id, projectId: project.id, prompt: 'fixture:restart', worktree: false })
+  const task = workspace.service.task({
+    name: 'Recover a deployment review',
+    agentId: agent.id,
+    projectId: project.id,
+    prompt: 'fixture:restart',
+    worktree: false,
+  })
   const run = await workspace.service.enqueue(task.id)
   await expect.poll(() => workspace.service.store.run(run.id)?.sessionId).toBe('fixture-session')
   await page.goto('/tasks')
@@ -14,7 +20,8 @@ test('reconnects after a temporary restart and resumes a cancelled conversation 
   await page.route(`**/api/runs/${run.id}/stream?*`, async (route) => {
     if (available)
       await route.continue()
-    else await route.fulfill({ status: 503, json: { error: 'Worker is restarting' } })
+    else
+      await route.fulfill({ status: 503, json: { error: 'Worker is restarting' } })
   })
   await page.goto(`/runs/${run.id}`)
   await expect(page.getByRole('status').filter({ hasText: 'Reconnecting' })).toBeVisible()
@@ -59,7 +66,13 @@ test('keeps the selected mission across reloads and runs it from its mobile shee
   await page.getByRole('button', { name: 'Sign in', exact: true }).click()
   await expect(page.locator('.task-focus-detail')).toBeVisible()
   const agent = workspace.service.store.list('agents')[0]
-  const task = workspace.service.task({ name: 'Fresh task without a run', prompt: 'This is the new task brief. fixture:hang', agentId: agent.id, enabled: false, worktree: false })
+  const task = workspace.service.task({
+    name: 'Fresh task without a run',
+    prompt: 'This is the new task brief. fixture:hang',
+    agentId: agent.id,
+    enabled: false,
+    worktree: false,
+  })
   await page.reload()
   await page.getByRole('button', { name: 'Open Fresh task without a run', exact: true }).click()
   const detail = page.getByTestId('mission-detail')
@@ -88,7 +101,15 @@ test('mission cards and sheet show the schedule, the brief and the history, as o
   await workspace.restart()
   const agent = workspace.service.store.list('agents')[0]
   const project = workspace.service.store.list('projects')[0]
-  const task = workspace.service.task({ name: 'Weekly Graphile Worker upstream ports', agentId: agent.id, projectId: project.id, prompt: 'Review upstream changes and report the checks you ran. fixture:activity', cron: '0 9 * * 4', enabled: false, worktree: false })
+  const task = workspace.service.task({
+    name: 'Weekly Graphile Worker upstream ports',
+    agentId: agent.id,
+    projectId: project.id,
+    prompt: 'Review upstream changes and report the checks you ran. fixture:activity',
+    cron: '0 9 * * 4',
+    enabled: false,
+    worktree: false,
+  })
   const run = await workspace.service.enqueue(task.id)
   await expect.poll(() => workspace.service.store.run(run.id)?.status).toBe('succeeded')
   const reply = '## The upstream review is complete.\n\nThe applicable changes have been integrated. No identified change remains pending.'
@@ -126,9 +147,17 @@ test('mission cards and sheet show the schedule, the brief and the history, as o
   await expectSingleScroll(page)
   await page.screenshot({ animations: 'disabled', path: test.info().outputPath('missions-desktop.png') })
   for (const status of ['needs_input', 'blocked'] as const) {
-    workspace.service.store.updateRun(run.id, { outcome: { status, reason: 'Review the upstream API change before continuing.', evidence: [], reportedAt: Date.now() } })
+    workspace.service.store.updateRun(run.id, {
+      outcome: {
+        status,
+        reason: 'Review the upstream API change before continuing.',
+        evidence: [],
+        reportedAt: Date.now(),
+      },
+    })
     await page.reload()
     await expect(page.locator('.mission-card').filter({ hasText: task.name })).toContainText(status === 'needs_input' ? 'Your input needed' : 'Blocked')
   }
+
   await workspace.restart()
 })

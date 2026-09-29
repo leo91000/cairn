@@ -5,10 +5,15 @@ plugins {
 }
 
 val releaseVersion = providers.environmentVariable("LEO_ANDROID_VERSION").orElse("0.43.0").get()
+
 require(Regex("(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)").matches(releaseVersion))
+
 val versionParts = releaseVersion.split(".").map { it.toInt() }
+
 require(versionParts[0] in 0..1999 && versionParts[1] in 0..999 && versionParts[2] in 0..999)
-val releaseCode = 100_000_000 + versionParts[0] * 1_000_000 + versionParts[1] * 1000 + versionParts[2]
+
+val releaseCode =
+    100_000_000 + versionParts[0] * 1_000_000 + versionParts[1] * 1000 + versionParts[2]
 val releaseKeystore = providers.environmentVariable("LEO_ANDROID_KEYSTORE").orNull
 
 android {

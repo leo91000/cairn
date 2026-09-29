@@ -7,6 +7,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
+
 pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
     if input.path == "/api/nodes" || input.path.starts_with("/api/nodes/") {
         return crate::nodes::admin(s, input).await;
@@ -40,12 +41,18 @@ pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
             s.store
                 .read(move |db| {
                     Ok(json!({
-                    "counts":db.stats()?,"agents":db.list("agents")?.len(),"projects":db.list("projects")?.len(),"tasks":db.list("tasks")?,"runs":db.runs(None,None,8,0,false)?,"concurrency":concurrency}
+                        "counts": db.stats()?,
+                        "agents": db.list("agents")?.len(),
+                        "projects": db.list("projects")?.len(),
+                        "tasks": db.list("tasks")?,
+                        "runs": db.runs(None,None,8,0,false)?,
+                        "concurrency": concurrency
+                    }
                     ))
                 })
                 .await
         }
-        ("GET", ["agent-avatars"]) => Ok(json!({"configured":s.avatars.configured(s).await?})),
+        ("GET", ["agent-avatars"]) => Ok(json!({"configured": s.avatars.configured(s).await?})),
         ("POST", ["agents", id, "avatar", "generate"]) => s.avatars.generate(s, id).await,
         ("GET", [kind @ ("agents" | "projects" | "tasks")]) => Ok(s.store.list(kind).await?.into()),
         ("POST", [kind @ ("agents" | "projects" | "tasks")]) => save(s, kind, input.body.clone(), None).await,
@@ -53,14 +60,20 @@ pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
         ("DELETE", [kind @ ("agents" | "projects" | "tasks"), id]) => {
             s.remove(kind, id).await?;
             Ok(json!({
-            "deleted":true}
+                "deleted": true
+            }
             ))
         }
         ("POST", ["tasks", id, "run"]) => s.enqueue(id, "manual", None).await,
         ("POST", ["schedule", "preview"]) => Ok(json!({
-        "occurrences":next_occurrences(input.string("cron",500)?,input.string("timezone",100)?,now(),3)?}
+            "occurrences": next_occurrences(input.string("cron",500)?,input.string("timezone",100)?,now(),3)?
+        }
         )),
-        ("GET", ["tasks", "activity"]) => s.store.read(|db| Ok(db.json_rows("SELECT json_set(json_remove(data,'$.snapshot','$.summary'),'$.taskName',json_extract(data,'$.snapshot.task.name'),'$.agentName',json_extract(data,'$.snapshot.agent.name')) FROM runs WHERE id IN (SELECT (SELECT id FROM runs WHERE task_id=records.id ORDER BY created_at DESC,id DESC LIMIT 1) FROM records WHERE kind='tasks') ORDER BY created_at DESC,id DESC", [])?.into())).await,
+        ("GET", ["tasks", "activity"]) => s.store.read(|db| Ok(db.json_rows("SELECT \
+            json_set(json_remove(data,'$.snapshot','$.summary'),'$.taskName',json_extract(data,'$.snapshot.task.name'),'$.agentName',json_extract(data,'$.snapshot.agent.name')) \
+            FROM runs WHERE id IN (SELECT (SELECT id FROM runs WHERE task_id=records.id \
+            ORDER BY created_at DESC,id DESC LIMIT 1) FROM records WHERE kind='tasks') \
+            ORDER BY created_at DESC,id DESC", [])?.into())).await,
         ("GET", ["runs"]) => {
             let (limit, offset) = (input.number("limit", 40, 1, 100)?, input.number("offset", 0, 0, i64::MAX)?);
             let status = input.query.get("status").cloned();
@@ -87,15 +100,35 @@ pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
         ("POST", ["chats"]) => s.chat_create(input.body.clone()).await,
         ("GET", ["chats", id]) => {
             let mut detail = s.chat_detail(id).await?;
-            let private = detail["questions"].as_array().into_iter().flatten().filter(|q| q["fields"].as_array().is_some_and(|fields| fields.iter().any(|f| f["secret"] == true))).map(|q| q["id"].clone()).collect::<Vec<_>>();
-            detail["messages"].as_array_mut().unwrap().retain(|m| m["status"] != "delivered");
+            let private = detail["questions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|q| {
+                    q["fields"]
+                        .as_array()
+                        .is_some_and(|fields| fields.iter().any(|f| f["secret"] == true))
+                })
+                .map(|q| q["id"].clone())
+                .collect::<Vec<_>>();
+            detail["messages"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|m| m["status"] != "delivered");
             for message in detail["messages"].as_array_mut().unwrap() {
                 if private.contains(&message["questionId"]) {
                     message["text"] = "Private answer".into();
                     message.as_object_mut().unwrap().remove("answers");
                 }
             }
-            detail["error"] = if crate::conversation_lifecycle::state(&detail) == "active" { s.store.kv(&format!("chat-error:{id}")).await?.unwrap_or(Value::Null) } else { Value::Null };
+            detail["error"] = if crate::conversation_lifecycle::state(&detail) == "active" {
+                s.store
+                    .kv(&format!("chat-error:{id}"))
+                    .await?
+                    .unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            };
             Ok(detail)
         }
         ("POST", ["chats", id, "messages"]) => s.chat_send(id, input.body.clone()).await,
@@ -107,7 +140,8 @@ pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
         ("GET", ["notifications", "subscriptions", id]) => {
             hash(id)?;
             Ok(json!({
-            "registered":s.store.kv(&format!("push-device:{id}")).await?.is_some()}
+                "registered": s.store.kv(&format!("push-device:{id}")).await?.is_some()
+            }
             ))
         }
         ("DELETE", ["notifications", "subscriptions", id]) => {
@@ -130,7 +164,9 @@ pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
                         .audit(
                             "skill.saved",
                             json!({
-                            "scope":scope,"name":name}
+                                "scope": scope,
+                                "name": name
+                            }
                             ),
                         )
                         .await?;
@@ -146,12 +182,15 @@ pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
                         .audit(
                             "skill.deleted",
                             json!({
-                            "scope":scope,"name":name}
+                                "scope": scope,
+                                "name": name
+                            }
                             ),
                         )
                         .await?;
                     Ok(json!({
-                    "deleted":true}
+                        "deleted": true
+                    }
                     ))
                 }
                 _ => Err(Error::new(404, "Not found")),
@@ -159,9 +198,28 @@ pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
         }
         ("GET", ["skills", scope, name, "files"]) => Ok(s.skills.files(name, skill_project(s, scope).await?.as_deref()).await?.into()),
         (method @ ("GET" | "PUT"), ["skills", scope, name, "file"]) => {
-            let file = if method == "GET" { input.query.get("path").map(String::as_str).ok_or_else(|| Error::bad("Choose a file path."))? } else { input.string("path", 4096)? };
-            let content = if method == "PUT" { Some(input.string("content", 100000)?) } else { None };
-            s.skills.file(name, file, content, skill_project(s, scope).await?.as_deref()).await
+            let file = if method == "GET" {
+                input
+                    .query
+                    .get("path")
+                    .map(String::as_str)
+                    .ok_or_else(|| Error::bad("Choose a file path."))?
+            } else {
+                input.string("path", 4096)?
+            };
+            let content = if method == "PUT" {
+                Some(input.string("content", 100000)?)
+            } else {
+                None
+            };
+            s.skills
+                .file(
+                    name,
+                    file,
+                    content,
+                    skill_project(s, scope).await?.as_deref(),
+                )
+                .await
         }
         ("GET", ["connections"]) => s.connections.status(s, input.query.get("refresh").is_some_and(|s| s == "true")).await,
         ("GET", ["claude", "models"]) => crate::claude::model_catalog(s).await,
@@ -175,13 +233,15 @@ pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
         ("DELETE", ["connections", "login"]) => {
             s.connections.cancel().await;
             Ok(json!({
-            "cancelled":true}
+                "cancelled": true
+            }
             ))
         }
         ("GET", ["agents", id, "github-token"]) => {
             s.get("agents", id).await?;
             Ok(json!({
-            "configured":s.store.kv(&format!("agent-github:{id}")).await?.is_some()}
+                "configured": s.store.kv(&format!("agent-github:{id}")).await?.is_some()
+            }
             ))
         }
         ("PUT", ["agents", id, "github-token"]) => {
@@ -197,18 +257,32 @@ pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 .audit(
                     "agent.connection.updated",
                     json!({
-                    "agentId":id,"provider":"github"}
+                        "agentId": id,
+                        "provider": "github"
+                    }
                     ),
                 )
                 .await?;
             Ok(json!({
-            "configured":!token.is_empty()}
+                "configured": !token.is_empty()
+            }
             ))
         }
         ("GET", ["settings"]) => Ok(json!({
-        "publicUrl":s.config.public_url,"workspaceRoots":s.config.workspace_roots,"home":s.config.home,"concurrency":s.config.concurrency,"mcpUrl":format!("{}/mcp",s.config.public_url),"version":env!("CARGO_PKG_VERSION"),"commit":std::env::var("APP_COMMIT").unwrap_or_else(|_|"development".into()),"protocol":"2026-07-28","nativeMcpOauth":true}
+            "publicUrl": s.config.public_url,
+            "workspaceRoots": s.config.workspace_roots,
+            "home": s.config.home,
+            "concurrency": s.config.concurrency,
+            "mcpUrl": format!("{}/mcp",s.config.public_url),
+            "version": env!("CARGO_PKG_VERSION"),
+            "commit": std::env::var("APP_COMMIT").unwrap_or_else(|_|"development".into()),
+            "protocol": "2026-07-28",
+            "nativeMcpOauth": true
+        }
         )),
-        ("GET", ["audit"]) => s.store.read(|db| Ok(db.json_rows("SELECT json_object('id',id,'created_at',created_at,'action',action,'detail',detail) FROM audit ORDER BY id DESC LIMIT 100", [])?.into())).await,
+        ("GET", ["audit"]) => s.store.read(|db| Ok(db.json_rows("SELECT \
+            json_object('id',id,'created_at',created_at,'action',action,'detail',detail) \
+            FROM audit ORDER BY id DESC LIMIT 100", [])?.into())).await,
         ("GET", ["tokens"]) => Ok(s
             .store
             .keys("grant:")
@@ -222,22 +296,30 @@ pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
             .into()),
         ("POST", ["tokens"]) => {
             let label = input.string("label", 100)?;
-            let scopes = input.body["scopes"].as_array().ok_or_else(|| Error::bad("Choose token scopes."))?.iter().map(|v| v.as_str().ok_or_else(|| Error::bad("Invalid scope."))).collect::<Result<Vec<_>>>()?;
+            let scopes = input.body["scopes"]
+                .as_array()
+                .ok_or_else(|| Error::bad("Choose token scopes."))?
+                .iter()
+                .map(|v| v.as_str().ok_or_else(|| Error::bad("Invalid scope.")))
+                .collect::<Result<Vec<_>>>()?;
             s.auth.personal(label, scopes).await
         }
         ("DELETE", ["tokens", id]) => {
             s.auth.revoke(id).await?;
             Ok(json!({
-            "revoked":true}
+                "revoked": true
+            }
             ))
         }
         ("POST", ["oauth", "preview"]) => s.auth.authorization(&input.body).await,
         ("POST", ["oauth", "consent"]) => Ok(json!({
-        "redirect":s.auth.consent(input.body["parameters"].clone(),input.boolean("approved")?).await?}
+            "redirect": s.auth.consent(input.body["parameters"].clone(),input.boolean("approved")?).await?
+        }
         )),
         _ => Err(Error::new(404, "Not found")),
     }
 }
+
 async fn save(s: &Arc<Service>, kind: &str, input: Value, id: Option<&str>) -> Result<Value> {
     match kind {
         "agents" => s.agent(input, id).await,
@@ -245,6 +327,7 @@ async fn save(s: &Arc<Service>, kind: &str, input: Value, id: Option<&str>) -> R
         _ => s.task(input, id).await,
     }
 }
+
 async fn skill_project(s: &Service, scope: &str) -> Result<Option<PathBuf>> {
     if scope == "global" {
         return Ok(None);
@@ -254,6 +337,7 @@ async fn skill_project(s: &Service, scope: &str) -> Result<Option<PathBuf>> {
         "path",
     ))))
 }
+
 fn hash(value: &str) -> Result<()> {
     if value.len() != 64
         || !value

@@ -14,6 +14,7 @@ use std::{
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
 pub fn chat_item(mut item: Value) -> Value {
     let kind = match text(&item, "type") {
         "agentMessage" => "agent_message",
@@ -55,10 +56,12 @@ pub fn chat_item(mut item: Value) -> Value {
     }
     item
 }
+
 struct Question {
     request_id: Value,
     message_id: Option<String>,
 }
+
 struct Chat {
     session: Session,
     events: mpsc::Sender<Value>,
@@ -72,6 +75,7 @@ struct Chat {
     texts: HashMap<String, String>,
     questions: HashMap<String, Question>,
 }
+
 impl Chat {
     async fn emit(&self, value: Value) -> Result<()> {
         self.events
@@ -79,15 +83,18 @@ impl Chat {
             .await
             .map_err(|_| Error::new(503, "Conversation output stopped."))
     }
+
     async fn acknowledge(&mut self, id: &str) -> Result<()> {
         if self.seen.insert(id.to_owned()) {
             self.emit(json!({
-            "type":"chat.delivered","messageId":id}
-            ))
+                "type": "chat.delivered",
+                "messageId": id
+            }))
             .await?;
         }
         Ok(())
     }
+
     async fn item(&mut self, item: Value, kind: &str) -> Result<()> {
         if item["type"] == "functionCallOutput"
             && ["request_user_input", "request_user_input_async"].contains(&text(&item, "name"))
@@ -112,27 +119,43 @@ impl Chat {
                     .enumerate()
                     .map(|(i, q)| {
                         json!({
-                        "id":i.to_string(),"title":q["title"],"options":q["options"].as_array().into_iter().flatten().map(|label|json!({
-                        "label":label}
-                        )).collect::<Vec<_>>()}
-                        )
+                            "id": i.to_string(),
+                            "title": q["title"],
+                            "options": q["options"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .map(|label| json!({
+                                "label": label
+                            }))
+                                .collect::<Vec<_>>()
+                        })
                     })
                     .collect::<Vec<_>>();
                 if let Ok(fields) = parse("questions", fields.into()) {
                     self.emit(json!({
-                    "type":"chat.question","question":{
-                    "id":hex_digest(&format!("{}:{}",self.thread,text(&item,"id"))),"blocking":false,"fields":fields}
-                    }
-                    ))
+                        "type": "chat.question",
+                        "question": {
+                            "id": hex_digest(&format!(
+                                "{}:{}",
+                                self.thread,
+                                text(&item, "id")
+                            )),
+                            "blocking": false,
+                            "fields": fields
+                        }
+                    }))
                     .await?;
                 }
             }
         }
         self.emit(json!({
-        "type":kind,"item":chat_item(item)}
-        ))
+            "type": kind,
+            "item": chat_item(item)
+        }))
         .await
     }
+
     async fn incoming(&mut self, incoming: Incoming) -> Result<()> {
         if self.session.handle_auth(&incoming).await? {
             return Ok(());
@@ -149,8 +172,11 @@ impl Chat {
                     .flatten()
                     .map(|q| {
                         json!({
-                        "id":q["id"],"title":q["question"],"secret":q["isSecret"].as_bool().unwrap_or(false),"options":q["options"].as_array().cloned().unwrap_or_default()}
-                        )
+                            "id": q["id"],
+                            "title": q["question"],
+                            "secret": q["isSecret"].as_bool().unwrap_or(false),
+                            "options": q["options"].as_array().cloned().unwrap_or_default()
+                        })
                     })
                     .collect::<Vec<_>>();
                 if let Ok(fields) = parse("questions", fields.into()) {
@@ -169,10 +195,13 @@ impl Chat {
                     );
                     return self
                         .emit(json!({
-                        "type":"chat.question","question":{
-                        "id":id,"blocking":params["isBlocking"]!=false,"fields":fields}
-                        }
-                        ))
+                            "type": "chat.question",
+                            "question": {
+                                "id": id,
+                                "blocking": params["isBlocking"] != false,
+                                "fields": fields
+                            }
+                        }))
                         .await;
                 }
             }
@@ -198,16 +227,17 @@ impl Chat {
                         self.acknowledge(&message).await?;
                     }
                     self.emit(json!({
-                    "type":"chat.question.closed","questionId":id}
-                    ))
+                        "type": "chat.question.closed",
+                        "questionId": id
+                    }))
                     .await?;
                 }
             }
             "turn/started" => {
                 self.turn = text(&params["turn"], "id").to_owned();
                 self.emit(json!({
-                "type":"turn.started"}
-                ))
+                    "type": "turn.started"
+                }))
                 .await?;
             }
             "item/started" | "item/completed" => {
@@ -228,10 +258,13 @@ impl Chat {
                 value.push_str(text(&params, "delta"));
                 let value = value.clone();
                 self.emit(json!({
-                "type":"item.updated","item":{
-                "id":params["itemId"],"type":"agent_message","text":value}
-                }
-                ))
+                    "type": "item.updated",
+                    "item": {
+                        "id": params["itemId"],
+                        "type": "agent_message",
+                        "text": value
+                    }
+                }))
                 .await?;
             }
             "turn/completed" => self.completed = Some(params["turn"].clone()),
@@ -239,21 +272,27 @@ impl Chat {
         }
         Ok(())
     }
+
     async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
         let rpc = self.session.rpc.clone();
         let request = rpc.request(method, params);
         tokio::pin!(request);
         loop {
             tokio::select! {
-                            _=self.cancel.cancelled()=>return Err(Error::new(409,"Conversation stopped.")),
-                            result=&mut request=>return result,
-                            incoming=self.session.incoming.recv()=>{
-            let Some(incoming) = incoming else { return Err(self.session.rpc.failure().await); };
-            self.incoming(incoming).await?;
+                _ = self.cancel.cancelled() => {
+                    return Err(Error::new(409, "Conversation stopped."));
+                }
+                result = &mut request => return result,
+                incoming = self.session.incoming.recv() => {
+                    let Some(incoming) = incoming else {
+                        return Err(self.session.rpc.failure().await);
+                    };
+                    self.incoming(incoming).await?;
+                }
             }
-                        }
         }
     }
+
     async fn execute(&mut self, plan: &Value) -> Result<()> {
         let mut effort = text(plan, "reasoning").to_owned();
         if effort.is_empty() {
@@ -272,16 +311,22 @@ impl Chat {
             }
         }
         let mut settings = json!({
-        "cwd":plan["cwd"],"approvalPolicy":"never","sandbox":if plan["sandbox"]=="yolo"{
-        "danger-full-access"}
-        else{
-        text(plan,"sandbox")}
-        ,"developerInstructions":plan["instructions"],"config":{
-        "features.default_mode_request_user_input":true,"sandbox_workspace_write":{
-        "network_access":true,"writable_roots":plan["writableRoots"]}
-        }
-        }
-        );
+            "cwd": plan["cwd"],
+            "approvalPolicy": "never",
+            "sandbox": if plan["sandbox"] == "yolo" {
+                "danger-full-access"
+            } else {
+                text(plan, "sandbox")
+            },
+            "developerInstructions": plan["instructions"],
+            "config": {
+                "features.default_mode_request_user_input": true,
+                "sandbox_workspace_write": {
+                    "network_access": true,
+                    "writable_roots": plan["writableRoots"]
+                }
+            }
+        });
         if !effort.is_empty() {
             settings["config"]["model_reasoning_effort"] = effort.clone().into();
         }
@@ -308,12 +353,13 @@ impl Chat {
             return Err(Error::new(502, "Codex returned an invalid conversation."));
         }
         self.emit(json!({
-        "type":"chat.question.closed"}
-        ))
+            "type": "chat.question.closed"
+        }))
         .await?;
         self.emit(json!({
-        "type":"thread.started","thread_id":self.thread}
-        ))
+            "type": "thread.started",
+            "thread_id": self.thread
+        }))
         .await?;
         let mut turns = result["thread"]["turns"]
             .as_array()
@@ -326,8 +372,11 @@ impl Chat {
             let mut cursors = HashSet::new();
             loop {
                 let mut params = json!({
-                "threadId":self.thread,"limit":100,"itemsView":"notLoaded","sortDirection":"desc"}
-                );
+                    "threadId": self.thread,
+                    "limit": 100,
+                    "itemsView": "notLoaded",
+                    "sortDirection": "desc"
+                });
                 if !cursor.is_null() {
                     params["cursor"] = cursor;
                 }
@@ -361,7 +410,10 @@ impl Chat {
                     .request(
                         "thread/items/list",
                         json!({
-                            "threadId":self.thread,"limit":1,"sortDirection":"asc","cursor":cursor
+                            "threadId": self.thread,
+                            "limit": 1,
+                            "sortDirection": "asc",
+                            "cursor": cursor
                         }),
                     )
                     .await?;
@@ -377,9 +429,10 @@ impl Chat {
                         Error::new(502, "Codex returned invalid conversation history.")
                     })?;
                     match text(item, "type") {
-                        "userMessage" => {
-                            items.push(json!({"type":"userMessage","clientId":item["clientId"]}))
-                        }
+                        "userMessage" => items.push(json!({
+                            "type": "userMessage",
+                            "clientId": item["clientId"]
+                        })),
                         "agentMessage" => {
                             // Only the final answer is needed to settle a completed
                             // turn. Its tools are already in our durable event log.
@@ -443,15 +496,22 @@ impl Chat {
         }
         let message = if previous.is_some() {
             format!(
-                "Continue the interrupted conversation from its last completed step. Preserve completed work and verify external effects before repeating any action. The pending user request is:\n{}",
+                "Continue the interrupted conversation from its last completed step. Preserve completed \
+                    work and verify external effects before repeating any action. The pending user request \
+                    is:\n{}",
                 text(&plan["execution"], "text")
             )
         } else {
             crate::chats::execution_text(plan)
         };
         let mut params = json!({
-        "threadId":self.thread,"input":crate::attachments::input(&message, &plan["execution"]["attachments"], Path::new(text(plan,"inputDirectory")))}
-        );
+            "threadId": self.thread,
+            "input": crate::attachments::input(
+                &message,
+                &plan["execution"]["attachments"],
+                Path::new(text(plan, "inputDirectory"))
+            )
+        });
         if !effort.is_empty() {
             params["effort"] = effort.into();
         }
@@ -469,27 +529,34 @@ impl Chat {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         while self.completed.is_none() {
             tokio::select! {
-                            _=self.cancel.cancelled()=>return Err(Error::new(409,"Conversation stopped.")),
-                            incoming=self.session.incoming.recv()=>{
-            let Some(incoming) = incoming else { return Err(self.session.rpc.failure().await); };
-            self.incoming(incoming).await?;
+                _ = self.cancel.cancelled() => {
+                    return Err(Error::new(409, "Conversation stopped."));
+                }
+                incoming = self.session.incoming.recv() => {
+                    let Some(incoming) = incoming else {
+                        return Err(self.session.rpc.failure().await);
+                    };
+                    self.incoming(incoming).await?;
+                }
+                _ = interval.tick() => self.steer(plan).await?,
             }
-            ,
-                            _=interval.tick()=>self.steer(plan).await?,
-                        }
         }
         let turn = self.completed.take().unwrap();
         if turn["status"] != "completed" {
             self.emit(json!({
-            "type":"turn.failed","error":turn.get("error").cloned().unwrap_or_else(||json!({
-            "message":"Conversation interrupted."}
-            ))}
-            ))
+                "type": "turn.failed",
+                "error": turn.get("error").cloned().unwrap_or_else(|| json!(
+                    {
+                    "message": "Conversation interrupted."
+                }
+                ))
+            }))
             .await?;
             return Err(Error::new(409, "Conversation interrupted."));
         }
         self.finish(plan).await
     }
+
     async fn steer(&mut self, plan: &Value) -> Result<()> {
         let Ok(bytes) =
             tokio::fs::read(Path::new(text(plan, "inputDirectory")).join("messages.json")).await
@@ -515,10 +582,17 @@ impl Chat {
             {
                 question.message_id = Some(id.to_owned());
                 let result = json!({
-                "answers":answers.iter().map(|(id,answers)|(id.clone(),json!({
-                "answers":answers}
-                ))).collect::<serde_json::Map<_,_>>()}
-                );
+                    "answers": answers
+                        .iter()
+                        .map(|(id, answers)| (
+                            id.clone(),
+                            json!({
+                        "answers": answers
+                    })
+                        ))
+                        .collect::<serde_json::Map<_,
+                    _>>()
+                });
                 self.session
                     .rpc
                     .reply(question.request_id.clone(), result)
@@ -526,8 +600,15 @@ impl Chat {
                 continue;
             }
             let params = json!({
-            "threadId":self.thread,"expectedTurnId":self.turn,"clientUserMessageId":id,"input":crate::attachments::input(text(&message,"text"), &message["attachments"], Path::new(text(plan,"inputDirectory")))}
-            );
+                "threadId": self.thread,
+                "expectedTurnId": self.turn,
+                "clientUserMessageId": id,
+                "input": crate::attachments::input(
+                    text(&message, "text"),
+                    &message["attachments"],
+                    Path::new(text(plan, "inputDirectory"))
+                )
+            });
             if self.request("turn/steer", params).await.is_err() {
                 break;
             }
@@ -535,6 +616,7 @@ impl Chat {
         }
         Ok(())
     }
+
     async fn finish(&self, plan: &Value) -> Result<()> {
         atomic_write(
             Path::new(text(plan, "output")),
@@ -542,11 +624,12 @@ impl Chat {
         )
         .await?;
         self.emit(json!({
-        "type":"turn.completed"}
-        ))
+            "type": "turn.completed"
+        }))
         .await
     }
 }
+
 pub async fn run(
     config: &Config,
     home: &Path,

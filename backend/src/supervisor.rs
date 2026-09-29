@@ -13,10 +13,12 @@ use tokio::{
     net::UnixStream,
     process::Child,
 };
+
 pub struct Supervised {
     pub child: Child,
     control: UnixStream,
 }
+
 impl Supervised {
     pub async fn spawn(
         binary: &str,
@@ -62,6 +64,7 @@ impl Supervised {
             control: UnixStream::from_std(parent)?,
         })
     }
+
     pub async fn start(&mut self, prompt: String) -> Result<()> {
         self.control.write_all(b"start\n").await?;
         if let Some(mut stdin) = self.child.stdin.take() {
@@ -71,6 +74,7 @@ impl Supervised {
         }
         Ok(())
     }
+
     pub async fn stop(&mut self) {
         let _ = self.control.shutdown().await;
         if let Some(pid) = self.child.id() {
@@ -86,11 +90,13 @@ impl Supervised {
         }
     }
 }
+
 fn signal_group(pid: u32, signal: i32) {
     unsafe {
         libc::kill(-(pid as i32), signal);
     }
 }
+
 pub async fn entry(binary: &str, args: &[String]) -> Result<i32> {
     let stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(3) };
     stream.set_nonblocking(true)?;
@@ -105,13 +111,15 @@ pub async fn entry(binary: &str, args: &[String]) -> Result<i32> {
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut start = String::new();
     tokio::select! {
-    read=control.read_line(&mut start)=>{
-    read?;
-    if start!="start\n"{
-    return Ok(143);
+        read = control.read_line(&mut start) => {
+            read?;
+            if start != "start\n" {
+                return Ok(143);
+            }
+        }
+        _ = terminate.recv() => return Ok(143),
+        _ = interrupt.recv() => return Ok(143),
     }
-    }
-    ,_=terminate.recv()=>return Ok(143),_=interrupt.recv()=>return Ok(143)}
     let mut child = tokio::process::Command::new(binary)
         .args(args)
         .stdin(Stdio::piped())
@@ -128,7 +136,11 @@ pub async fn entry(binary: &str, args: &[String]) -> Result<i32> {
     });
     let mut byte = [0; 1];
     let result = tokio::select! {
-    result=child.wait()=>Some(result?),_=control.read(&mut byte)=>None,_=terminate.recv()=>None,_=interrupt.recv()=>None};
+        result = child.wait() => Some(result?),
+        _ = control.read(&mut byte) => None,
+        _ = terminate.recv() => None,
+        _ = interrupt.recv() => None,
+    };
     signal_group(pid, libc::SIGTERM);
     let status = if let Some(status) = result {
         status

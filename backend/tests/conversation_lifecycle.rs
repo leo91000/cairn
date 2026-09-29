@@ -16,6 +16,7 @@ struct App {
     cookie: String,
     csrf: String,
 }
+
 impl App {
     async fn new() -> Self {
         let root = TempDir::new().unwrap();
@@ -47,6 +48,7 @@ impl App {
             csrf: session["csrf"].as_str().unwrap().into(),
         }
     }
+
     async fn request(&self, method: &str, path: &str, body: Value) -> (u16, Value) {
         let response = self
             .router
@@ -103,7 +105,10 @@ async fn trash_requires_confirmation_for_pending_work_and_never_replays_cancelle
     let app = App::new().await;
     let (_, chat) = app.request("POST", "/api/chats", json!({})).await;
     let path = format!("/api/chats/{}", chat["id"].as_str().unwrap());
-    let message = json!({"id":leo_agent_manager::config::id(),"text":"Keep these instructions, do not execute them after recovery"});
+    let message = json!({
+        "id": leo_agent_manager::config::id(),
+        "text": "Keep these instructions, do not execute them after recovery"
+    });
     assert_eq!(
         app.request("POST", &format!("{path}/messages"), message)
             .await
@@ -159,11 +164,20 @@ async fn trash_denies_direct_run_history_and_artifact_access() {
     let (_, mut chat) = app.request("POST", "/api/chats", json!({})).await;
     let run = leo_agent_manager::config::id();
     let owned = run.clone();
-    app.service.store.transaction(move |db| {
-        db.0.execute("INSERT INTO runs(id,task_id,project_id,status,created_at,data) VALUES(?1,?1,'','succeeded',0,?2)", rusqlite::params![owned,json!({"id":owned,"status":"succeeded"}).to_string()])?;
-        db.event(&owned, "chat.user", "Private transcript", None)?;
-        Ok(())
-    }).await.unwrap();
+    app.service
+        .store
+        .transaction(move |db| {
+            db.0.execute(
+                "INSERT INTO \
+            runs(id,task_id,project_id,status,created_at,data) \
+            VALUES(?1,?1,'','succeeded',0,?2)",
+                rusqlite::params![owned, json!({"id":owned,"status":"succeeded"}).to_string()],
+            )?;
+            db.event(&owned, "chat.user", "Private transcript", None)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     chat["runId"] = run.clone().into();
     app.service.store.put("chats", chat.clone()).await.unwrap();
     let path = format!("/api/chats/{}", chat["id"].as_str().unwrap());
@@ -186,12 +200,28 @@ async fn incompatible_restored_session_requires_consent_and_never_restarts_on_it
     chat["paused"] = true.into();
     app.service.store.put("chats", chat.clone()).await.unwrap();
     let owned = run.clone();
-    app.service.store.transaction(move |db| {
-        db.0.execute("INSERT INTO runs(id,task_id,project_id,status,created_at,data) VALUES(?1,?1,'','failed',0,?2)",rusqlite::params![owned,json!({"id":owned,"status":"failed","sessionId":"old-native"}).to_string()])?;
-        db.set(&format!("run-checkpoint:{owned}"),&json!({"prepared":{"workspace":"preserved"},"launched":true}),None)?;
-        db.event(&owned,"chat.user","Context to preserve",None)?;
-        Ok(())
-    }).await.unwrap();
+    app.service
+        .store
+        .transaction(move |db| {
+            db.0.execute(
+                "INSERT INTO \
+            runs(id,task_id,project_id,status,created_at,data) \
+            VALUES(?1,?1,'','failed',0,?2)",
+                rusqlite::params![
+                    owned,
+                    json!({"id":owned,"status":"failed","sessionId":"old-native"}).to_string()
+                ],
+            )?;
+            db.set(
+                &format!("run-checkpoint:{owned}"),
+                &json!({"prepared": {"workspace": "preserved"},"launched": true}),
+                None,
+            )?;
+            db.event(&owned, "chat.user", "Context to preserve", None)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     let path = format!("/api/chats/{}/new-session", chat["id"].as_str().unwrap());
     assert_eq!(app.request("POST", &path, json!({})).await.0, 409);
     assert_eq!(
@@ -223,7 +253,7 @@ async fn inactivity_never_archives_even_with_an_old_enabled_policy() {
         .store
         .set(
             "conversation-retention",
-            json!({"enabled":true,"inactivityDays":1,"coldAfterDays":1}),
+            json!({"enabled": true,"inactivityDays": 1,"coldAfterDays": 1}),
             None,
         )
         .await

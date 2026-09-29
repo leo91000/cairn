@@ -9,8 +9,10 @@ pub enum Provider {
     Codex,
     Claude,
 }
+
 impl Provider {
     pub const ALL: [Provider; 2] = [Provider::Codex, Provider::Claude];
+
     /// Agents saved before Claude Code support have no provider and run on Codex.
     pub fn of_agent(agent: &Value) -> Self {
         if agent["provider"] == "claude" {
@@ -19,12 +21,15 @@ impl Provider {
             Self::Codex
         }
     }
+
     pub fn of_run(run: &Value) -> Self {
         Self::of_agent(&run["snapshot"]["agent"])
     }
+
     pub fn of_account(account: &Value) -> Self {
         Self::of_agent(account)
     }
+
     pub fn parse(value: &str) -> Result<Self> {
         match value {
             "codex" => Ok(Self::Codex),
@@ -32,12 +37,14 @@ impl Provider {
             _ => Err(Error::bad("Choose Codex or Claude Code.")),
         }
     }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
         }
     }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Codex => "Codex",
@@ -50,6 +57,7 @@ impl Provider {
 mod tests {
     use super::*;
     use serde_json::json;
+
     #[test]
     fn agents_without_a_provider_run_on_codex() {
         assert_eq!(Provider::of_agent(&json!({})), Provider::Codex);

@@ -9,8 +9,8 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.buffer
-import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.isActive
@@ -87,10 +87,12 @@ class LiveAccumulator {
                 if (index == null) {
                     indices[id] = next.size
                     next.add(event)
-                } else next[index] = event.copy(
-                    createdAt = next[index].createdAt,
-                    displayId = event.displayId ?: next[index].displayId ?: next[index].id,
-                )
+                } else
+                    next[index] =
+                        event.copy(
+                            createdAt = next[index].createdAt,
+                            displayId = event.displayId ?: next[index].displayId ?: next[index].id,
+                        )
             } else next.add(event)
             accepted = original.id
         }
@@ -129,7 +131,11 @@ private fun LeoApi.frames(
 ): Flow<StreamFrame> = callbackFlow {
     val call =
         streaming.newCall(
-            builder("$path?after=$cursor" + (history?.let { "&history=${segment(it)}" } ?: "") + if (path == "/chats/stream") "" else "&window=1")
+            builder(
+                    "$path?after=$cursor" +
+                        (history?.let { "&history=${segment(it)}" } ?: "") +
+                        if (path == "/chats/stream") "" else "&window=1"
+                )
                 .header("Accept", "text/event-stream")
                 .get()
                 .build()
@@ -272,7 +278,8 @@ fun LeoApi.live(path: String, session: LiveSession = LiveSession()): Flow<LiveSn
                             history = batch.history,
                             cursor = frame.cursor,
                             oldest = batch.oldest ?: snapshot.oldest,
-                            hasOlder = if (batch.oldest != null) batch.hasOlder else snapshot.hasOlder,
+                            hasOlder =
+                                if (batch.oldest != null) batch.hasOlder else snapshot.hasOlder,
                             position =
                                 if (
                                     batch.reset ||

@@ -1,8 +1,22 @@
 import { describe, expect, it } from 'vitest'
 import { evidenceStatus, waitForValidation } from '../scripts/nested-android-validation.mjs'
 
-const config = { repository: 'leo91000/leo-agent-manager', commit: 'a'.repeat(40), digest: `sha256:${'b'.repeat(64)}`, validator: 'leo91000' }
-const evidence = { schema: 1, repository: config.repository, commit: config.commit, image: `ghcr.io/${config.repository}@${config.digest}`, cpuVendor: 'GenuineIntel', api: '34', system: 'aosp', results: [{ mode: 'first', status: 'passed' }, { mode: 'resume', status: 'passed' }] }
+const config = {
+  repository: 'leo91000/leo-agent-manager',
+  commit: 'a'.repeat(40),
+  digest: `sha256:${'b'.repeat(64)}`,
+  validator: 'leo91000',
+}
+const evidence = {
+  schema: 1,
+  repository: config.repository,
+  commit: config.commit,
+  image: `ghcr.io/${config.repository}@${config.digest}`,
+  cpuVendor: 'GenuineIntel',
+  api: '34',
+  system: 'aosp',
+  results: [{ mode: 'first', status: 'passed' }, { mode: 'resume', status: 'passed' }],
+}
 const url = 'https://agents.example.test/evidence/1'
 const status = { ...evidenceStatus(evidence, url), id: 12, creator: { login: config.validator } }
 
@@ -27,8 +41,13 @@ describe('external nested Android release qualification', () => {
   })
   it('fails closed at the deadline when no matching qualification exists', async () => {
     let time = 0
-    await expect(waitForValidation(config, { statuses: async () => [], now: () => time, sleep: async () => {
-      time += 1000
-    }, timeoutMs: 1000 })).rejects.toThrow('Timed out')
+    await expect(waitForValidation(config, {
+      statuses: async () => [],
+      now: () => time,
+      sleep: async () => {
+        time += 1000
+      },
+      timeoutMs: 1000,
+    })).rejects.toThrow('Timed out')
   })
 })

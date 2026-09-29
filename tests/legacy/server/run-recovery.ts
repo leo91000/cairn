@@ -36,6 +36,7 @@ export class RunRecovery {
       if (!response.ok && response.status !== 404)
         throw new AppError(503, 'Waiting for the previous isolated container to stop.')
     }
+
     if (checkpoint) {
       delete checkpoint.process
       this.save(run.id, checkpoint)
@@ -51,7 +52,13 @@ export class RunRecovery {
             return run.sessionId
           throw new Error('Session mismatch')
         }
-        const result = await rpc.request<{ data: { id: string, cwd: string, parentThreadId?: string | null }[] }>('thread/list', { limit: 2, cwd, sourceKinds: [run.chatExecution ? 'appServer' : 'exec'], archived: false })
+
+        const result = await rpc.request<{ data: { id: string, cwd: string, parentThreadId?: string | null }[] }>('thread/list', {
+          limit: 2,
+          cwd,
+          sourceKinds: [run.chatExecution ? 'appServer' : 'exec'],
+          archived: false,
+        })
         const matches = result.data.filter(thread => thread.cwd === cwd && !thread.parentThreadId)
         if (matches.length === 1)
           return matches[0].id
@@ -77,11 +84,13 @@ export async function processIdentity(pid: number): Promise<ProcessIdentity | un
     throw error
   }
 }
+
 async function stopPreviousProcess(identity: ProcessIdentity) {
   const matches = async () => {
     const current = await processIdentity(identity.pid)
     return current?.start === identity.start && current?.boot === identity.boot
   }
+
   if (!await matches())
     return
   try {
@@ -91,6 +100,7 @@ async function stopPreviousProcess(identity: ProcessIdentity) {
     if ((error as NodeJS.ErrnoException).code !== 'ESRCH')
       throw error
   }
+
   const deadline = Date.now() + 5000
   while (await matches()) {
     if (Date.now() >= deadline)

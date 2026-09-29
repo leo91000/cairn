@@ -37,9 +37,15 @@ async fn fixture() -> (TempDir, Arc<Service>, Vec<Value>) {
         std::fs::create_dir(&path).unwrap();
         std::fs::write(path.join("hello"), name).unwrap();
         projects.push(
-            s.project(json!({"name":name,"path":path}), None)
-                .await
-                .unwrap(),
+            s.project(
+                json!({
+                    "name": name,
+                    "path": path
+                }),
+                None,
+            )
+            .await
+            .unwrap(),
         );
     }
     (root, s, projects)
@@ -48,7 +54,12 @@ async fn fixture() -> (TempDir, Arc<Service>, Vec<Value>) {
 async fn run(s: &Service, project: Value, agent: &str) -> Value {
     let task = s
         .task(
-            json!({"name":"Probe","agentId":agent,"projectId":project,"prompt":"Hello"}),
+            json!({
+                "name": "Probe",
+                "agentId": agent,
+                "projectId": project,
+                "prompt": "Hello"
+            }),
             None,
         )
         .await
@@ -89,7 +100,9 @@ async fn empty_start_does_not_touch_unselected_repositories_and_selected_start_l
         &selected,
         &prepared,
         Path::new("/tmp"),
-        &json!({"args":[]}),
+        &json!({
+            "args": []
+        }),
         None,
     );
     assert!(
@@ -103,10 +116,30 @@ async fn empty_start_does_not_touch_unselected_repositories_and_selected_start_l
 #[tokio::test]
 async fn scoped_access_rejects_other_projects_expired_grants_and_changed_permissions() {
     let (_root, s, projects) = fixture().await;
-    let agent = s.agent(json!({"name":"Restricted","access":{"projects":[projects[0]["id"]],"skills":[],"mcps":[],"github":false,"sandbox":"read-only"}}),None).await.unwrap();
+    let agent = s
+        .agent(
+            json!({
+                "name": "Restricted",
+                "access": {
+                    "projects": [projects[0]["id"]],
+                    "skills": [],
+                    "mcps": [],
+                    "github": false,
+                    "sandbox": "read-only"
+                }
+            }),
+            None,
+        )
+        .await
+        .unwrap();
     let run = run(&s, Value::Null, text(&agent, "id")).await;
     s.store
-        .patch_run(text(&run, "id"), json!({"status":"running"}))
+        .patch_run(
+            text(&run, "id"),
+            json!({
+                "status": "running"
+            }),
+        )
         .await
         .unwrap();
     let config = s.mcps.run_configuration(&s, &run).await.unwrap();
@@ -151,7 +184,10 @@ async fn open_imports_once_reuses_seed_and_restores_loaded_catalog_without_check
             async move {
                 let mut requests = requests.lock().await;
                 requests.push(value);
-                axum::Json(json!({"ok":true,"reused":requests.len()>1}))
+                axum::Json(json!({
+                    "ok": true,
+                    "reused": requests.len() > 1
+                }))
             }
         },
     ));
@@ -169,14 +205,20 @@ async fn open_imports_once_reuses_seed_and_restores_loaded_catalog_without_check
     s.store
         .patch_run(
             text(&run, "id"),
-            json!({"status":"running","workspaces":[]}),
+            json!({
+                "status": "running",
+                "workspaces": []
+            }),
         )
         .await
         .unwrap();
     s.store
         .set(
             &format!("run-checkpoint:{}", text(&run, "id")),
-            json!({"runnerId":id(),"prepared":prepared}),
+            json!({
+                "runnerId": id(),
+                "prepared": prepared
+            }),
             None,
         )
         .await
@@ -223,12 +265,20 @@ async fn open_imports_once_reuses_seed_and_restores_loaded_catalog_without_check
 async fn delivered_message_retains_its_original_submission_timestamp() {
     let (_root, s, _) = fixture().await;
     let chat = s
-        .chat_create(json!({"agentId":MAIN_AGENT_ID}))
+        .chat_create(json!({
+            "agentId": MAIN_AGENT_ID
+        }))
         .await
         .unwrap();
     let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
     let message = s
-        .chat_send(text(&chat, "id"), json!({"id":id(),"text":"Hello"}))
+        .chat_send(
+            text(&chat, "id"),
+            json!({
+                "id": id(),
+                "text": "Hello"
+            }),
+        )
         .await
         .unwrap();
     let mut chat = chat;
@@ -264,7 +314,12 @@ async fn builtin_mcp_endpoint_exposes_scoped_workspace_tools_and_checks_the_run_
     });
     let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
     s.store
-        .patch_run(text(&run, "id"), json!({"status":"running"}))
+        .patch_run(
+            text(&run, "id"),
+            json!({
+                "status": "running"
+            }),
+        )
         .await
         .unwrap();
     let config = s.mcps.run_configuration(&s, &run).await.unwrap();
@@ -272,13 +327,23 @@ async fn builtin_mcp_endpoint_exposes_scoped_workspace_tools_and_checks_the_run_
     let client = reqwest::Client::new();
     let endpoint = format!("{url}/mcp-workspace");
     for (method, params) in [
-        ("initialize", json!({"protocolVersion":"2025-11-25"})),
+        (
+            "initialize",
+            json!({
+                "protocolVersion": "2025-11-25"
+            }),
+        ),
         ("tools/list", json!({})),
     ] {
         let response = client
             .post(&endpoint)
             .bearer_auth(token)
-            .json(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}))
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": method,
+                "params": params
+            }))
             .send()
             .await
             .unwrap();
@@ -297,7 +362,11 @@ async fn builtin_mcp_endpoint_exposes_scoped_workspace_tools_and_checks_the_run_
     let response = client
         .post(endpoint)
         .bearer_auth(token)
-        .json(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list"
+        }))
         .send()
         .await
         .unwrap();
@@ -350,6 +419,7 @@ fn git(directory: &Path, args: &[&str]) -> String {
     );
     String::from_utf8(output.stdout).unwrap().trim().into()
 }
+
 #[tokio::test]
 async fn new_git_work_is_fresh_and_local_snapshots_preserve_the_registered_checkout() {
     let (root, s, _) = fixture().await;
@@ -370,7 +440,13 @@ async fn new_git_work_is_fresh_and_local_snapshots_preserve_the_registered_check
     let current = git(&origin, &["rev-parse", "HEAD"]);
     std::fs::write(source.join("file"), "uncommitted").unwrap();
     let mut project = s
-        .project(json!({"name":"Git","path":source}), None)
+        .project(
+            json!({
+                "name": "Git",
+                "path": source
+            }),
+            None,
+        )
         .await
         .unwrap();
     let fresh = root.path().join("fresh");
@@ -407,6 +483,7 @@ async fn new_git_work_is_fresh_and_local_snapshots_preserve_the_registered_check
         "uncommitted"
     );
 }
+
 #[tokio::test]
 async fn partial_clone_missing_blobs_are_fetched_from_the_real_promisor() {
     let (root, s, _) = fixture().await;
@@ -437,7 +514,13 @@ async fn partial_clone_missing_blobs_are_fetched_from_the_real_promisor() {
         "fixture must actually omit blobs"
     );
     let mut project = s
-        .project(json!({"name":"Partial","path":source}), None)
+        .project(
+            json!({
+                "name": "Partial",
+                "path": source
+            }),
+            None,
+        )
         .await
         .unwrap();
     for mode in ["remote", "local"] {
@@ -459,17 +542,27 @@ async fn partial_clone_missing_blobs_are_fetched_from_the_real_promisor() {
         missing
     );
 }
+
 #[tokio::test]
 async fn outcome_is_explicit_validated_and_rejected_after_run_revocation() {
     let (_root, s, _) = fixture().await;
     let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
     s.store
-        .patch_run(text(&run, "id"), json!({"status":"running"}))
+        .patch_run(
+            text(&run, "id"),
+            json!({
+                "status": "running"
+            }),
+        )
         .await
         .unwrap();
     let config = s.mcps.run_configuration(&s, &run).await.unwrap();
     let bearer = text(&config["env"], "LEO_MCP_RUN_TOKEN");
-    let input = json!({"status":"blocked","reason":"GitHub workflow permission is missing.","evidence":["Local tests passed; push was refused."]});
+    let input = json!({
+        "status": "blocked",
+        "reason": "GitHub workflow permission is missing.",
+        "evidence": ["Local tests passed; push was refused."]
+    });
     leo_agent_manager::outcome::report(&s, bearer, &input)
         .await
         .unwrap();
@@ -481,13 +574,22 @@ async fn outcome_is_explicit_validated_and_rejected_after_run_revocation() {
         leo_agent_manager::outcome::report(
             &s,
             bearer,
-            &json!({"status":"completed","reason":" " ,"evidence":[]})
+            &json!({
+                "status": "completed",
+                "reason": " ",
+                "evidence": []
+            })
         )
         .await
         .is_err()
     );
     s.store
-        .patch_run(text(&run, "id"), json!({"status":"succeeded"}))
+        .patch_run(
+            text(&run, "id"),
+            json!({
+                "status": "succeeded"
+            }),
+        )
         .await
         .unwrap();
     assert!(
@@ -506,7 +608,13 @@ async fn github_sign_in_requests_workflow_and_releases_the_startup_fence() {
     use std::os::unix::fs::PermissionsExt;
     let (root, mut s, _) = fixture().await;
     let script = root.path().join("gh-fixture");
-    std::fs::write(&script,"#!/bin/sh\nif [ \"$1\" = '--version' ]; then echo 'gh fixture'; elif [ \"$1\" = api ]; then printf 'HTTP/2 200\\r\\nX-OAuth-Scopes: repo\\r\\n\\r\\nfixture\\n'; else printf '%s\\n' \"$@\" > \"$HOME/login-args\"; fi\n").unwrap();
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nif [ \"$1\" = '--version' ]; then echo 'gh fixture'; elif [ \"$1\" = api ]; \
+        then printf 'HTTP/2 200\\r\\nX-OAuth-Scopes: repo\\r\\n\\r\\nfixture\\n'; else printf \
+        '%s\\n' \"$@\" > \"$HOME/login-args\"; fi\n",
+    )
+    .unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     Arc::get_mut(&mut s).unwrap().config.gh_bin = script.to_string_lossy().into();
     let status = s.connections.status(&s, true).await.unwrap();
@@ -531,7 +639,10 @@ async fn github_sign_in_requests_workflow_and_releases_the_startup_fence() {
     s.store
         .patch_run(
             text(&run, "id"),
-            json!({"status":"running","recoveryPending":true}),
+            json!({
+                "status": "running",
+                "recoveryPending": true
+            }),
         )
         .await
         .unwrap();
@@ -546,7 +657,12 @@ async fn an_old_message_grant_cannot_report_an_outcome_for_a_new_turn() {
     s.store
         .patch_run(
             text(&run, "id"),
-            json!({"status":"running","chatExecution":{"messageId":"first"}}),
+            json!({
+                "status": "running",
+                "chatExecution": {
+                    "messageId": "first"
+                }
+            }),
         )
         .await
         .unwrap();
@@ -555,11 +671,20 @@ async fn an_old_message_grant_cannot_report_an_outcome_for_a_new_turn() {
     s.store
         .patch_run(
             text(&run, "id"),
-            json!({"chatExecution":{"messageId":"second"},"outcome":null}),
+            json!({
+                "chatExecution": {
+                    "messageId": "second"
+                },
+                "outcome": null
+            }),
         )
         .await
         .unwrap();
-    let input = json!({"status":"completed","reason":"Validated and delivered.","evidence":["Tests passed"]});
+    let input = json!({
+        "status": "completed",
+        "reason": "Validated and delivered.",
+        "evidence": ["Tests passed"]
+    });
     assert!(
         leo_agent_manager::outcome::report(&s, text(&old["env"], "LEO_MCP_RUN_TOKEN"), &input)
             .await
@@ -632,7 +757,21 @@ async fn isolated_commits_keep_the_configured_owner_for_main_and_restricted_agen
         "[user]\n name = Account Owner\n email = owner@example.test\n",
     )
     .unwrap();
-    let agent = s.agent(json!({"name":"Another agent","access":{"projects":[],"skills":[],"mcps":[],"github":false}}), None).await.unwrap();
+    let agent = s
+        .agent(
+            json!({
+                "name": "Another agent",
+                "access": {
+                    "projects": [],
+                    "skills": [],
+                    "mcps": [],
+                    "github": false
+                }
+            }),
+            None,
+        )
+        .await
+        .unwrap();
     for agent_id in [MAIN_AGENT_ID, text(&agent, "id")] {
         let run = run(&s, Value::Null, agent_id).await;
         let prepared = execution::prepare(&run, &s.config, None, None, None)
@@ -690,7 +829,21 @@ cat "$HOME/github-profile.json"
         "[user]\n name = Incomplete Owner\n",
     )
     .unwrap();
-    let agent = s.agent(json!({"name":"Dedicated agent","access":{"projects":[],"skills":[],"mcps":[],"github":false}}), None).await.unwrap();
+    let agent = s
+        .agent(
+            json!({
+                "name": "Dedicated agent",
+                "access": {
+                    "projects": [],
+                    "skills": [],
+                    "mcps": [],
+                    "github": false
+                }
+            }),
+            None,
+        )
+        .await
+        .unwrap();
     for (agent_id, token, name, expected) in [
         (MAIN_AGENT_ID, None, json!("GitHub Owner"), "GitHub Owner"),
         (
@@ -710,8 +863,13 @@ cat "$HOME/github-profile.json"
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(
             home.join("github-profile.json"),
-            json!({"id":12345,"login":"owner-login","name":name,"email":"public@example.test"})
-                .to_string(),
+            json!({
+                "id": 12345,
+                "login": "owner-login",
+                "name": name,
+                "email": "public@example.test"
+            })
+            .to_string(),
         )
         .unwrap();
         // Also cover replacing the synthetic identity when preparation is retried.

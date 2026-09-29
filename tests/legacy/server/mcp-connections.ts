@@ -15,8 +15,11 @@ import { policy } from './policy.ts'
 import { toolkitEnvironment } from './toolkit.ts'
 
 type Tokens = Parameters<OAuthClientProvider['saveTokens']>[0]
+
 type ClientInfo = NonNullable<Awaited<ReturnType<OAuthClientProvider['clientInformation']>>>
+
 type Discovery = Parameters<NonNullable<OAuthClientProvider['saveDiscoveryState']>>[0]
+
 interface Secrets {
   token?: string
   clientSecret?: string
@@ -27,12 +30,14 @@ interface Secrets {
   verifier?: string
   tokenExpiresAt?: number
 }
+
 interface Pending {
   connectionId: string
   revision: number
   session: string
   nonce: string
 }
+
 interface Grant {
   runId: string
   servers: Record<string, {
@@ -40,8 +45,10 @@ interface Grant {
     tools: string[] | null
   }>
 }
+
 export const digest = (value: string) => createHash('sha256').update(value).digest('hex')
 const serverKey = (id: string) => `leo_${id.replaceAll('-', '_')}`
+
 function toml(value: unknown): string {
   if (Array.isArray(value))
     return `[${value.map(toml).join(',')}]`
@@ -49,6 +56,7 @@ function toml(value: unknown): string {
     return `{${Object.entries(value).map(([key, item]) => `${JSON.stringify(key)}=${toml(item)}`).join(',')}}`
   return JSON.stringify(value)
 }
+
 export class McpConnections {
   readonly vault: McpVault
   private locks = new Map<string, Promise<unknown>>()
@@ -71,7 +79,13 @@ export class McpConnections {
   changeSecrets(id: string, patch: Partial<Secrets>) { this.vault.set(id, { ...this.secrets(id), ...patch }) }
   view(item: McpConnection): McpView {
     const secret = this.secrets(item.id)
-    return { ...item, hasToken: !!secret.token, hasClientSecret: !!secret.clientSecret, envKeys: Object.keys(secret.env || {}), callbackUrl: `${this.config.publicUrl}/oauth/mcp/callback` }
+    return {
+      ...item,
+      hasToken: !!secret.token,
+      hasClientSecret: !!secret.clientSecret,
+      envKeys: Object.keys(secret.env || {}),
+      callbackUrl: `${this.config.publicUrl}/oauth/mcp/callback`,
+    }
   }
 
   list() { return this.store.list('mcps').map(item => this.view(item)) }
@@ -89,17 +103,37 @@ export class McpConnections {
     const input = mcpInput.parse(value)
     return this.exclusive(id, async () => {
       const existing = this.store.get('mcps', id)
-      const { token, clientSecret, env, removeEnv, ...settings } = input
+      const {
+        token,
+        clientSecret,
+        env,
+        removeEnv,
+        ...settings
+      } = input
       const authChanged = existing && ['url', 'transport', 'auth', 'clientId', 'scopes'].some(key => existing[key as keyof McpConnection] !== settings[key as keyof typeof settings])
       const secrets = authChanged ? {} : this.secrets(id)
-      const nextSecrets = { ...secrets, ...(token !== undefined ? { token } : {}), ...(clientSecret !== undefined ? { clientSecret } : {}), ...(env !== undefined ? { env: { ...secrets.env, ...env } } : {}) }
+      const nextSecrets = {
+        ...secrets,
+        ...(token !== undefined ? { token } : {}),
+        ...(clientSecret !== undefined ? { clientSecret } : {}),
+        ...(env !== undefined ? { env: { ...secrets.env, ...env } } : {}),
+      }
       for (const key of removeEnv || [])
         delete nextSecrets.env?.[key]
       if (settings.auth === 'bearer' && !nextSecrets.token)
         throw new AppError(400, 'Enter a bearer token.')
       if (settings.transport === 'stdio' && Object.keys(nextSecrets.env || {}).some(key => /^(?:HOME|CODEX_HOME|PATH|LD_PRELOAD|LD_LIBRARY_PATH|NODE_OPTIONS)$|^(?:LEO_|RUNNER_)/.test(key)))
         throw new AppError(400, 'Environment variables cannot override the agent runtime or home.')
-      const item: McpConnection = { ...settings, id, createdAt: existing?.createdAt ?? Date.now(), revision: (existing?.revision || 0) + 1, state: 'untested', tools: existing?.tools || [], checkedAt: null, error: '' }
+      const item: McpConnection = {
+        ...settings,
+        id,
+        createdAt: existing?.createdAt ?? Date.now(),
+        revision: (existing?.revision || 0) + 1,
+        state: 'untested',
+        tools: existing?.tools || [],
+        checkedAt: null,
+        error: '',
+      }
       this.store.transaction(() => {
         this.store.put('mcps', item)
         this.vault.set(id, nextSecrets)
@@ -135,8 +169,15 @@ export class McpConnections {
         })
       }
       else {
-        this.store.put('mcps', { ...item, revision: item.revision + 1, state: 'untested', error: '', checkedAt: null })
+        this.store.put('mcps', {
+          ...item,
+          revision: item.revision + 1,
+          state: 'untested',
+          error: '',
+          checkedAt: null,
+        })
       }
+
       this.store.audit(remove ? 'mcp.deleted' : 'mcp.disconnected', { id })
     })
   }
@@ -147,7 +188,14 @@ export class McpConnections {
   }): OAuthClientProvider {
     return {
       redirectUrl: `${this.config.publicUrl}/oauth/mcp/callback`,
-      clientMetadata: { client_name: 'Leo Agent Manager', redirect_uris: [`${this.config.publicUrl}/oauth/mcp/callback`], grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], token_endpoint_auth_method: item.clientId && this.secrets(item.id).clientSecret ? 'client_secret_post' : 'none', ...(item.scopes ? { scope: item.scopes } : {}) },
+      clientMetadata: {
+        client_name: 'Leo Agent Manager',
+        redirect_uris: [`${this.config.publicUrl}/oauth/mcp/callback`],
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+        token_endpoint_auth_method: item.clientId && this.secrets(item.id).clientSecret ? 'client_secret_post' : 'none',
+        ...(item.scopes ? { scope: item.scopes } : {}),
+      },
       state: () => {
         if (!interactive)
           throw new UnauthorizedError()
@@ -176,6 +224,7 @@ export class McpConnections {
           delete secret.discovery
           delete secret.verifier
         }
+
         if (scope === 'tokens')
           delete secret.tokens
         if (scope === 'client')
@@ -207,7 +256,15 @@ export class McpConnections {
   }) {
     const client = new Client({ name: 'leo-mcp-client', version })
     const env = item.transport === 'stdio' ? await toolkitEnvironment(this.config.home) : undefined
-    const transport = item.transport === 'http' ? this.transport(item, interactive) : new StdioClientTransport({ command: item.command, args: item.args, cwd: this.config.home, env: { PATH: env?.PATH || '/usr/local/bin:/usr/bin:/bin', HOME: this.config.home, ...this.secrets(item.id).env }, stderr: 'pipe' })
+    const transport = item.transport === 'http'
+      ? this.transport(item, interactive)
+      : new StdioClientTransport({
+          command: item.command,
+          args: item.args,
+          cwd: this.config.home,
+          env: { PATH: env?.PATH || '/usr/local/bin:/usr/bin:/bin', HOME: this.config.home, ...this.secrets(item.id).env },
+          stderr: 'pipe',
+        })
     if (transport instanceof StdioClientTransport)
       transport.stderr?.on('data', () => { })
     try {
@@ -235,6 +292,7 @@ export class McpConnections {
       if (cursor)
         seen.add(cursor)
     } while (cursor)
+
     return tools
   }
 
@@ -242,7 +300,12 @@ export class McpConnections {
     const needsAuth = error instanceof UnauthorizedError
     const known = ['Private network access is disabled for this connection.', 'The endpoint redirects. Configure its final URL.', 'Instance metadata endpoints are unavailable.']
     const message = error instanceof Error && known.includes(error.message) ? error.message : needsAuth ? 'Sign in to connect this server.' : 'Could not connect. Check the endpoint, credentials, and server availability.'
-    this.store.put('mcps', { ...item, state: needsAuth ? 'needs-auth' : 'error', error: message, checkedAt: Date.now() })
+    this.store.put('mcps', {
+      ...item,
+      state: needsAuth ? 'needs-auth' : 'error',
+      error: message,
+      checkedAt: Date.now(),
+    })
   }
 
   async test(id: string) {
@@ -250,11 +313,18 @@ export class McpConnections {
       const item = this.get(id)
       try {
         const tools = await this.withClient(item, client => this.discover(client))
-        this.store.put('mcps', { ...item, tools, state: 'connected', error: '', checkedAt: Date.now() })
+        this.store.put('mcps', {
+          ...item,
+          tools,
+          state: 'connected',
+          error: '',
+          checkedAt: Date.now(),
+        })
       }
       catch (error) {
         this.failure(item, error)
       }
+
       return this.view(this.get(id))
     })
   }
@@ -271,7 +341,12 @@ export class McpConnections {
       } = { nonce: randomBytes(32).toString('base64url') }
       // Explicit reconnect requests fresh consent, while ordinary tool calls reuse/refresh tokens.
       this.changeSecrets(id, { tokens: undefined, verifier: undefined, discovery: undefined })
-      this.store.put('mcps', { ...item, state: 'needs-auth', error: '', checkedAt: null })
+      this.store.put('mcps', {
+        ...item,
+        state: 'needs-auth',
+        error: '',
+        checkedAt: null,
+      })
       try {
         await this.withClient(item, client => this.discover(client), interactive)
       }
@@ -281,9 +356,15 @@ export class McpConnections {
           throw new AppError(400, 'OAuth could not start. Check the server URL and OAuth client registration.')
         }
       }
+
       if (!interactive.redirect)
         throw new AppError(400, 'The server did not request OAuth. Use Test connection or choose no authentication.')
-      this.store.set(`mcp-oauth:${digest(interactive.nonce)}`, { connectionId: id, revision: item.revision, session: digest(session), nonce: interactive.nonce }, Date.now() + 10 * 60000)
+      this.store.set(`mcp-oauth:${digest(interactive.nonce)}`, {
+        connectionId: id,
+        revision: item.revision,
+        session: digest(session),
+        nonce: interactive.nonce,
+      }, Date.now() + 10 * 60000)
       return { url: interactive.redirect }
     })
   }
@@ -311,7 +392,13 @@ export class McpConnections {
         await transport.finishAuth(code, params.get('iss') || undefined)
         this.changeSecrets(item.id, { verifier: undefined })
         const tools = await this.withClient(item, client => this.discover(client))
-        this.store.put('mcps', { ...item, state: 'connected', tools, error: '', checkedAt: Date.now() })
+        this.store.put('mcps', {
+          ...item,
+          state: 'connected',
+          tools,
+          error: '',
+          checkedAt: Date.now(),
+        })
         return 'connected'
       }
       catch (error) {
@@ -343,9 +430,15 @@ export class McpConnections {
         configs[serverKey(item.id)] = { url: `${this.config.publicUrl}/mcp-gateway/${item.id}`, bearer_token_env_var: 'LEO_MCP_RUN_TOKEN', ...(tools !== null ? { enabled_tools: tools } : {}) }
       }
       else {
-        configs[serverKey(item.id)] = { command: item.command, args: item.args, env: this.secrets(item.id).env || {}, ...(tools !== null ? { enabled_tools: tools } : {}) }
+        configs[serverKey(item.id)] = {
+          command: item.command,
+          args: item.args,
+          env: this.secrets(item.id).env || {},
+          ...(tools !== null ? { enabled_tools: tools } : {}),
+        }
       }
     }
+
     if (Object.keys(servers).length)
       this.store.set(`mcp-grant:${digest(token)}`, { runId: run.id, servers }, run.snapshot.agent.timeoutMinutes > 0 ? Date.now() + run.snapshot.agent.timeoutMinutes * 60000 : undefined)
     return { redactions: [token, ...items.flatMap(item => Object.values(this.secrets(item.id).env || {}))].filter(value => value.length > 3), args: Object.entries(configs).flatMap(([key, value]) => ['-c', `mcp_servers.${key}=${toml(value)}`]), env: Object.keys(servers).length ? { LEO_MCP_RUN_TOKEN: token } : {} }

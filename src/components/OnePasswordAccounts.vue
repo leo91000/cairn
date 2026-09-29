@@ -1,14 +1,26 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { api, notify } from '../api'
-import { BrandOnePassword, CheckCircle2, Pencil, Plus, Trash2 } from '../icons'
+import {
+  BrandOnePassword,
+  CheckCircle2,
+  Pencil,
+  Plus,
+  Trash2,
+} from '../icons'
 import { iconButton } from '../ui'
 import Icon from './Icon.vue'
 import Modal from './Modal.vue'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
 
-interface Account { id: string, name: string, enabled: boolean, agentIds: string[] }
+interface Account {
+  id: string
+  name: string
+  enabled: boolean
+  agentIds: string[]
+}
+
 const accounts = ref<Account[]>([])
 const agents = ref<{ id: string, name: string }[]>([])
 const loaded = ref(false)
@@ -22,6 +34,7 @@ const token = ref('')
 const enabled = ref(true)
 const agentIds = ref<string[]>([])
 const sharedWith = computed(() => new Set(accounts.value.filter(a => a.enabled).flatMap(a => a.agentIds).filter(id => agents.value.some(agent => agent.id === id))).size)
+
 async function action(operation: () => Promise<void>) {
   busy.value = true
   error.value = ''
@@ -35,10 +48,12 @@ async function action(operation: () => Promise<void>) {
     busy.value = false
   }
 }
+
 async function load() {
   [accounts.value, agents.value] = await Promise.all([api('/onepassword'), api('/agents')])
   loaded.value = true
 }
+
 function edit(account?: Account) {
   editing.value = account?.id ?? ''
   name.value = account?.name ?? ''
@@ -48,17 +63,24 @@ function edit(account?: Account) {
   error.value = ''
   open.value = true
 }
+
 function close() {
   if (busy.value)
     return
   token.value = ''
   open.value = false
 }
+
 async function save() {
   await action(async () => {
     await api(`/onepassword${editing.value ? `/${editing.value}` : ''}`, {
       method: editing.value ? 'PUT' : 'POST',
-      body: JSON.stringify({ name: name.value, enabled: enabled.value, agentIds: agentIds.value, ...(token.value.trim() ? { token: token.value.trim() } : {}) }),
+      body: JSON.stringify({
+        name: name.value,
+        enabled: enabled.value,
+        agentIds: agentIds.value,
+        ...(token.value.trim() ? { token: token.value.trim() } : {}),
+      }),
     })
     token.value = ''
     open.value = false
@@ -66,12 +88,14 @@ async function save() {
     await load()
   })
 }
+
 async function test(account: Account) {
   await action(async () => {
     await api(`/onepassword/${account.id}/test`, { method: 'POST' })
     notify(`1Password: ${account.name} is connected`)
   })
 }
+
 onMounted(() => action(load))
 </script>
 
@@ -94,7 +118,12 @@ onMounted(() => action(load))
     <UiAlert v-if="error && !open && !removing">
       {{ error }}
     </UiAlert>
-    <UiButton v-if="!loaded && error" size="small" :disabled="busy" @click="action(load)">
+    <UiButton
+      v-if="!loaded && error"
+      size="small"
+      :disabled="busy"
+      @click="action(load)"
+    >
       Retry loading 1Password
     </UiButton>
     <ul v-if="accounts.length" class="grid gap-1.5">
@@ -103,13 +132,34 @@ onMounted(() => action(load))
           <span class="block truncate text-sm font-semibold">{{ account.name }}</span>
           <span class="block text-xs text-muted">{{ account.enabled ? 'Enabled' : 'Disabled' }} · {{ account.agentIds.filter(id => agents.some(agent => agent.id === id)).length }} authorized agents</span>
         </span>
-        <button type="button" :class="iconButton" :disabled="busy" :aria-label="`Test ${account.name}`" title="Test connection" @click="test(account)">
+        <button
+          type="button"
+          :class="iconButton"
+          :disabled="busy"
+          :aria-label="`Test ${account.name}`"
+          title="Test connection"
+          @click="test(account)"
+        >
           <Icon :name="CheckCircle2" :size="16" />
         </button>
-        <button type="button" :class="iconButton" :disabled="busy" :aria-label="`Edit ${account.name}`" title="Edit access and token" @click="edit(account)">
+        <button
+          type="button"
+          :class="iconButton"
+          :disabled="busy"
+          :aria-label="`Edit ${account.name}`"
+          title="Edit access and token"
+          @click="edit(account)"
+        >
           <Icon :name="Pencil" :size="16" />
         </button>
-        <button type="button" :class="iconButton" :disabled="busy" :aria-label="`Delete ${account.name}`" title="Delete" @click="removing = account; error = ''">
+        <button
+          type="button"
+          :class="iconButton"
+          :disabled="busy"
+          :aria-label="`Delete ${account.name}`"
+          title="Delete"
+          @click="removing = account; error = ''"
+        >
           <Icon :name="Trash2" :size="16" />
         </button>
       </li>
@@ -120,8 +170,21 @@ onMounted(() => action(load))
           {{ error }}
         </UiAlert>
         <fieldset :disabled="busy" class="space-y-4">
-          <label>Name<input v-model="name" required maxlength="100" autocomplete="off"></label>
-          <label>Service account token<input v-model="token" type="password" :required="!editing" maxlength="16384" autocomplete="new-password" spellcheck="false" :placeholder="editing ? 'Leave blank to keep saved token' : 'ops_…'"></label>
+          <label>Name<input
+            v-model="name"
+            required
+            maxlength="100"
+            autocomplete="off"
+          ></label>
+          <label>Service account token<input
+            v-model="token"
+            type="password"
+            :required="!editing"
+            maxlength="16384"
+            autocomplete="new-password"
+            spellcheck="false"
+            :placeholder="editing ? 'Leave blank to keep saved token' : 'ops_…'"
+          ></label>
           <p class="text-muted text-sm">
             Tokens are encrypted on the server and never shown again. Only read access is exposed to agents; choose the vault permissions in 1Password.
           </p>

@@ -15,13 +15,16 @@ struct Owner {
     csrf: String,
     host: String,
 }
+
 impl Owner {
     async fn new() -> Self {
         Self::at("localhost:4310".into()).await
     }
+
     async fn at(host: String) -> Self {
         Self::with_runner(host, String::new()).await
     }
+
     async fn with_runner(host: String, runner_url: String) -> Self {
         let root = TempDir::new().unwrap();
         std::fs::create_dir(root.path().join("home")).unwrap();
@@ -46,7 +49,7 @@ impl Owner {
         if std::env::var_os("LEO_NODE_TEST_S3_ENDPOINT").is_some() {
             std::fs::write(
                 s.config.data_dir.join("archive-s3.json"),
-                json!({"bucket":"leo-node-test"}).to_string(),
+                json!({"bucket": "leo-node-test"}).to_string(),
             )
             .unwrap();
         }
@@ -60,6 +63,7 @@ impl Owner {
             csrf: session["csrf"].as_str().unwrap().into(),
         }
     }
+
     async fn call(
         &self,
         method: &str,
@@ -102,12 +106,25 @@ async fn enrollment_is_single_use_and_revocation_removes_node_access() {
         .call(
             "POST",
             "/api/nodes/enrollments",
-            json!({"name":"Desktop"}),
+            json!({"name": "Desktop"}),
             None,
         )
         .await;
     assert_eq!(status, 200, "{invitation}");
-    let input = json!({"code":invitation["code"],"name":"Desktop","protocol":1,"capabilities":{"os":"linux","arch":"x86_64","kvm":true,"cpu":16,"memoryMiB":32768,"diskMiB":131072},"runtimeId":"fixture"});
+    let input = json!({
+        "code": invitation["code"],
+        "name": "Desktop",
+        "protocol": 1,
+        "capabilities": {
+            "os": "linux",
+            "arch": "x86_64",
+            "kvm": true,
+            "cpu": 16,
+            "memoryMiB": 32768,
+            "diskMiB": 131072
+        },
+        "runtimeId": "fixture"
+    });
     let (status, identity) = owner
         .call("POST", "/internal/nodes/enroll", input.clone(), None)
         .await;
@@ -164,14 +181,39 @@ async fn node_configuration_validates_capacity_and_never_grants_agent_access() {
         .call(
             "POST",
             "/api/nodes/enrollments",
-            json!({"name":"Small node"}),
+            json!({"name": "Small node"}),
             None,
         )
         .await;
-    let (_, identity)=owner.call("POST","/internal/nodes/enroll",json!({"code":invitation["code"],"name":"ignored","protocol":1,"capabilities":{"os":"linux","arch":"x86_64","kvm":true,"cpu":8,"memoryMiB":8192,"diskMiB":65536},"runtimeId":"fixture"}),None).await;
+    let (_, identity) = owner
+        .call(
+            "POST",
+            "/internal/nodes/enroll",
+            json!({
+                "code": invitation["code"],
+                "name": "ignored",
+                "protocol": 1,
+                "capabilities": {
+                    "os": "linux",
+                    "arch": "x86_64",
+                    "kvm": true,
+                    "cpu": 8,
+                    "memoryMiB": 8192,
+                    "diskMiB": 65536
+                },
+                "runtimeId": "fixture"
+            }),
+            None,
+        )
+        .await;
     let node = identity["nodeId"].as_str().unwrap();
     let path = format!("/api/nodes/{node}");
-    let config = json!({"name":"My node","tags":["fast"],"accepting":true,"limits":{"cpu":4,"memoryMiB":4096,"diskMiB":32768}});
+    let config = json!({
+        "name": "My node",
+        "tags": ["fast"],
+        "accepting": true,
+        "limits": {"cpu": 4,"memoryMiB": 4096,"diskMiB": 32768}
+    });
     let (status, saved) = owner.call("PUT", &path, config.clone(), None).await;
     assert_eq!(status, 200, "{saved}");
     let mut invalid = config;
@@ -203,19 +245,34 @@ async fn main_node_policy_survives_an_update_from_an_older_client() {
         .call(
             "PUT",
             path,
-            json!({"name":"Main","access":{"nodes":[]}}),
+            json!({"name": "Main","access": {"nodes": []}}),
             None,
         )
         .await;
     assert_eq!(status, 200, "{restricted}");
-    let (status,saved)=owner.call("PUT",path,json!({"name":"Renamed main","access":{"projects":null,"skills":null,"mcps":null,"github":true}}),None).await;
+    let (status, saved) = owner
+        .call(
+            "PUT",
+            path,
+            json!({
+                "name": "Renamed main",
+                "access": {
+                    "projects": null,
+                    "skills": null,
+                    "mcps": null,
+                    "github": true
+                }
+            }),
+            None,
+        )
+        .await;
     assert_eq!(status, 200, "{saved}");
     assert_eq!(saved["access"]["nodes"], json!([]));
     let (status, _) = owner
         .call(
             "PUT",
             path,
-            json!({"name":"Main","access":{"nodes":["10000000-0000-4000-8000-000000000000"]}}),
+            json!({"name": "Main","access": {"nodes": ["10000000-0000-4000-8000-000000000000"]}}),
             None,
         )
         .await;
@@ -229,11 +286,24 @@ async fn concurrent_enrollment_has_exactly_one_winner() {
         .call(
             "POST",
             "/api/nodes/enrollments",
-            json!({"name":"Race"}),
+            json!({"name": "Race"}),
             None,
         )
         .await;
-    let input = json!({"code":invitation["code"],"name":"Race","protocol":1,"capabilities":{"os":"linux","arch":"x86_64","kvm":true,"cpu":2,"memoryMiB":4096,"diskMiB":32768},"runtimeId":"fixture"});
+    let input = json!({
+        "code": invitation["code"],
+        "name": "Race",
+        "protocol": 1,
+        "capabilities": {
+            "os": "linux",
+            "arch": "x86_64",
+            "kvm": true,
+            "cpu": 2,
+            "memoryMiB": 4096,
+            "diskMiB": 32768
+        },
+        "runtimeId": "fixture"
+    });
     let (first, second) = tokio::join!(
         owner.call("POST", "/internal/nodes/enroll", input.clone(), None),
         owner.call("POST", "/internal/nodes/enroll", input, None)
@@ -255,7 +325,7 @@ async fn connector_enrolls_over_http_without_printing_or_exposing_its_token() {
         .call(
             "POST",
             "/api/nodes/enrollments",
-            json!({"name":"Linux connector"}),
+            json!({"name": "Linux connector"}),
             None,
         )
         .await;
@@ -326,7 +396,19 @@ async fn a_task_cannot_use_the_local_runner_without_node_permission() {
             .0,
         200
     );
-    let (status,task)=owner.call("POST","/api/tasks",json!({"name":"Restricted node task","prompt":"Do nothing","agentId":main,"enabled":false}),None).await;
+    let (status, task) = owner
+        .call(
+            "POST",
+            "/api/tasks",
+            json!({
+                "name": "Restricted node task",
+                "prompt": "Do nothing",
+                "agentId": main,
+                "enabled": false
+            }),
+            None,
+        )
+        .await;
     assert_eq!(status, 200, "{task}");
     let (status, error) = owner
         .call(
@@ -346,11 +428,31 @@ async fn node_credentials_cannot_administer_nodes_and_owner_sessions_cannot_impe
         .call(
             "POST",
             "/api/nodes/enrollments",
-            json!({"name":"Scoped"}),
+            json!({"name": "Scoped"}),
             None,
         )
         .await;
-    let (_, identity)=owner.call("POST","/internal/nodes/enroll",json!({"code":invitation["code"],"name":"Scoped","protocol":1,"capabilities":{"os":"linux","arch":"x86_64","kvm":false,"cpu":2,"memoryMiB":4096,"diskMiB":32768},"runtimeId":"fixture"}),None).await;
+    let (_, identity) = owner
+        .call(
+            "POST",
+            "/internal/nodes/enroll",
+            json!({
+                "code": invitation["code"],
+                "name": "Scoped",
+                "protocol": 1,
+                "capabilities": {
+                    "os": "linux",
+                    "arch": "x86_64",
+                    "kvm": false,
+                    "cpu": 2,
+                    "memoryMiB": 4096,
+                    "diskMiB": 32768
+                },
+                "runtimeId": "fixture"
+            }),
+            None,
+        )
+        .await;
     let request = Request::builder()
         .method("GET")
         .uri("/api/nodes")
@@ -391,11 +493,31 @@ async fn revocation_removes_node_grants_without_blocking_later_agent_edits() {
         .call(
             "POST",
             "/api/nodes/enrollments",
-            json!({"name":"Revocation"}),
+            json!({"name": "Revocation"}),
             None,
         )
         .await;
-    let (_, identity) = owner.call("POST", "/internal/nodes/enroll", json!({"code":invitation["code"],"name":"Revocation","protocol":1,"capabilities":{"os":"linux","arch":"x86_64","kvm":true,"cpu":2,"memoryMiB":4096,"diskMiB":32768},"runtimeId":"fixture"}), None).await;
+    let (_, identity) = owner
+        .call(
+            "POST",
+            "/internal/nodes/enroll",
+            json!({
+                "code": invitation["code"],
+                "name": "Revocation",
+                "protocol": 1,
+                "capabilities": {
+                    "os": "linux",
+                    "arch": "x86_64",
+                    "kvm": true,
+                    "cpu": 2,
+                    "memoryMiB": 4096,
+                    "diskMiB": 32768
+                },
+                "runtimeId": "fixture"
+            }),
+            None,
+        )
+        .await;
     let node = identity["nodeId"].as_str().unwrap();
     let main = "/api/agents/00000000-0000-4000-8000-000000000001";
     let local = "00000000-0000-4000-8000-000000000002";
@@ -441,17 +563,17 @@ fn mcp_agent_updates_preserve_omitted_node_permissions() {
     use leo_agent_manager::validation::parse;
     let update = parse(
         "mcp:update_agent",
-        json!({"id":"00000000-0000-4000-8000-000000000001","agent":{"access":{"mcps":[]}}}),
+        json!({"id": "00000000-0000-4000-8000-000000000001","agent": {"access": {"mcps": []}}}),
     )
     .unwrap();
     assert!(update["agent"]["access"].get("nodes").is_none());
     let restricted = parse(
         "mcp:update_agent",
-        json!({"id":"00000000-0000-4000-8000-000000000001","agent":{"access":{"nodes":[]}}}),
+        json!({"id": "00000000-0000-4000-8000-000000000001","agent": {"access": {"nodes": []}}}),
     )
     .unwrap();
     assert_eq!(restricted["agent"]["access"]["nodes"], json!([]));
-    let created = parse("mcp:save_agent", json!({"name":"Default"})).unwrap();
+    let created = parse("mcp:save_agent", json!({"name": "Default"})).unwrap();
     assert_eq!(
         created["access"]["nodes"],
         json!(["00000000-0000-4000-8000-000000000002"])
@@ -466,11 +588,31 @@ async fn outbound_transport_streams_only_to_the_authenticated_node() {
         .call(
             "POST",
             "/api/nodes/enrollments",
-            json!({"name":"Worker"}),
+            json!({"name": "Worker"}),
             None,
         )
         .await;
-    let (_, identity) = owner.call("POST", "/internal/nodes/enroll", json!({"code":invite["code"],"name":"Worker","protocol":1,"capabilities":{"os":"linux","arch":"x86_64","kvm":true,"cpu":4,"memoryMiB":8192,"diskMiB":65536},"runtimeId":"fixture"}), None).await;
+    let (_, identity) = owner
+        .call(
+            "POST",
+            "/internal/nodes/enroll",
+            json!({
+                "code": invite["code"],
+                "name": "Worker",
+                "protocol": 1,
+                "capabilities": {
+                    "os": "linux",
+                    "arch": "x86_64",
+                    "kvm": true,
+                    "cpu": 4,
+                    "memoryMiB": 8192,
+                    "diskMiB": 65536
+                },
+                "runtimeId": "fixture"
+            }),
+            None,
+        )
+        .await;
     let credential = secret(&owner._root.path().join("data"), "runner-secret")
         .await
         .unwrap();
@@ -585,7 +727,7 @@ async fn binary_node_responses_are_scoped_and_never_hide_truncation() {
         owner
             .service
             .store
-            .put("nodes", json!({"id":node,"revoked":false}))
+            .put("nodes", json!({"id": node,"revoked": false}))
             .await
             .unwrap();
         owner
@@ -696,7 +838,7 @@ async fn bulk_stream_backpressure_and_reader_cancellation_bound_the_upload() {
     owner
         .service
         .store
-        .put("nodes", json!({"id":node}))
+        .put("nodes", json!({"id": node}))
         .await
         .unwrap();
     owner
@@ -796,15 +938,31 @@ async fn concurrent_admission_reserves_capacity_once_and_preserves_agent_grants(
     let agent = id();
     let run_a = id();
     let run_b = id();
-    owner.service.store.put("nodes",json!({"id":node,"local":false,"accepting":true,"executionReady":true,"lastSeen":now(),"capabilities":{"kvm":true,"fuse":true},"limits":{"cpu":2,"memoryMiB":4096,"diskMiB":65536}})).await.unwrap();
     owner
         .service
         .store
-        .put("agents", json!({"id":agent,"access":{"nodes":[node]}}))
+        .put(
+            "nodes",
+            json!({
+                "id": node,
+                "local": false,
+                "accepting": true,
+                "executionReady": true,
+                "lastSeen": now(),
+                "capabilities": {"kvm": true,"fuse": true},
+                "limits": {"cpu": 2,"memoryMiB": 4096,"diskMiB": 65536}
+            }),
+        )
         .await
         .unwrap();
-    let a = json!({"id":run_a,"snapshot":{"agent":{"id":agent}}});
-    let b = json!({"id":run_b,"snapshot":{"agent":{"id":agent}}});
+    owner
+        .service
+        .store
+        .put("agents", json!({"id": agent,"access": {"nodes": [node]}}))
+        .await
+        .unwrap();
+    let a = json!({"id": run_a,"snapshot": {"agent": {"id": agent}}});
+    let b = json!({"id": run_b,"snapshot": {"agent": {"id": agent}}});
     let attempt_a = id();
     let attempt_b = id();
     let (first, second) = tokio::join!(
@@ -828,7 +986,7 @@ async fn concurrent_admission_reserves_capacity_once_and_preserves_agent_grants(
     owner
         .service
         .store
-        .put("agents", json!({"id":agent,"access":{"nodes":[]}}))
+        .put("agents", json!({"id": agent,"access": {"nodes": []}}))
         .await
         .unwrap();
     assert!(
@@ -853,14 +1011,29 @@ async fn retained_s3_disks_charge_local_cache_and_cancellation_releases_destinat
     let agent = id();
     let run = id();
     let attempt = id();
-    owner.service.store.put("nodes",json!({"id":node,"accepting":true,"executionReady":true,"lastSeen":now(),"capabilities":{"kvm":true,"fuse":true},"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":32768}})).await.unwrap();
     owner
         .service
         .store
-        .put("agents", json!({"id":agent,"access":{"nodes":[node]}}))
+        .put(
+            "nodes",
+            json!({
+                "id": node,
+                "accepting": true,
+                "executionReady": true,
+                "lastSeen": now(),
+                "capabilities": {"kvm": true,"fuse": true},
+                "limits": {"cpu": 4,"memoryMiB": 8192,"diskMiB": 32768}
+            }),
+        )
         .await
         .unwrap();
-    let execution = json!({"id":run,"snapshot":{"agent":{"id":agent}}});
+    owner
+        .service
+        .store
+        .put("agents", json!({"id": agent,"access": {"nodes": [node]}}))
+        .await
+        .unwrap();
+    let execution = json!({"id": run,"snapshot": {"agent": {"id": agent}}});
     placement::reserve(&owner.service, &execution, &attempt)
         .await
         .unwrap();
@@ -879,7 +1052,7 @@ async fn retained_s3_disks_charge_local_cache_and_cancellation_releases_destinat
     let other = id();
     placement::reserve(
         &owner.service,
-        &json!({"id":id(),"snapshot":{"agent":{"id":agent}}}),
+        &json!({"id": id(),"snapshot": {"agent": {"id": agent}}}),
         &other,
     )
     .await
@@ -896,12 +1069,18 @@ async fn retained_s3_disks_charge_local_cache_and_cancellation_releases_destinat
         .store
         .put(
             "node-attempts",
-            json!({"id":pending,"nodeId":node,"runId":run,"role":"destination","released":false}),
+            json!({
+                "id": pending,
+                "nodeId": node,
+                "runId": run,
+                "role": "destination",
+                "released": false
+            }),
         )
         .await
         .unwrap();
     let cancelled =
-        json!({"id":run,"cancelRequestedAt":now(),"moveRequest":{"reservation":pending}});
+        json!({"id": run,"cancelRequestedAt": now(),"moveRequest": {"reservation": pending}});
     assert!(moves::advance(&owner.service, &cancelled).await.unwrap());
     assert_eq!(
         owner
@@ -919,11 +1098,11 @@ async fn retained_s3_disks_charge_local_cache_and_cancellation_releases_destinat
 async fn requesting_a_smaller_disk_is_rejected_before_moving() {
     use leo_agent_manager::{config::id, nodes::moves};
     let owner = Owner::new().await;
-    let run = json!({"id":id(),"resources":{"cpu":2,"memoryMiB":4096,"diskMiB":32768}});
+    let run = json!({"id": id(),"resources": {"cpu": 2,"memoryMiB": 4096,"diskMiB": 32768}});
     let error = moves::request(
         &owner.service,
         &run,
-        &json!({"cpu":2,"memoryMiB":4096,"diskMiB":128}),
+        &json!({"cpu": 2,"memoryMiB": 4096,"diskMiB": 128}),
     )
     .await
     .unwrap_err();
@@ -943,19 +1122,56 @@ async fn a_moved_disk_requires_a_node_with_fuse() {
     let unknown = id();
     let s3_ready = id();
     for (node, fuse) in [(&local_only, false), (&s3_ready, true)] {
-        owner.service.store.put("nodes",json!({"id":node,"accepting":true,"executionReady":true,"lastSeen":now(),"storage":{"enabled":false,"reserveMiB":64,"reservePercent":1},"capabilities":{"kvm":true,"fuse":fuse,"diskMiB":32768,"diskTotalMiB":32768},"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":32768}})).await.unwrap();
+        owner
+            .service
+            .store
+            .put(
+                "nodes",
+                json!({
+                    "id": node,
+                    "accepting": true,
+                    "executionReady": true,
+                    "lastSeen": now(),
+                    "storage": {"enabled": false,"reserveMiB": 64,"reservePercent": 1},
+                    "capabilities": {
+                        "kvm": true,
+                        "fuse": fuse,
+                        "diskMiB": 32768,
+                        "diskTotalMiB": 32768
+                    },
+                    "limits": {"cpu": 4,"memoryMiB": 8192,"diskMiB": 32768}
+                }),
+            )
+            .await
+            .unwrap();
     }
-    owner.service.store.put("nodes",json!({"id":unknown,"accepting":true,"executionReady":true,"lastSeen":now(),"capabilities":{"kvm":true},"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":32768}})).await.unwrap();
+    owner
+        .service
+        .store
+        .put(
+            "nodes",
+            json!({
+                "id": unknown,
+                "accepting": true,
+                "executionReady": true,
+                "lastSeen": now(),
+                "capabilities": {"kvm": true},
+                "limits": {"cpu": 4,"memoryMiB": 8192,"diskMiB": 32768}
+            }),
+        )
+        .await
+        .unwrap();
     owner
         .service
         .store
         .put(
             "agents",
-            json!({"id":agent,"access":{"nodes":[local_only,unknown,s3_ready]}}),
+            json!({"id": agent,"access": {"nodes": [local_only,unknown,s3_ready]}}),
         )
         .await
         .unwrap();
-    let mut run = json!({"id":id(),"snapshot":{"agent":{"id":agent}},"placementTransition":true});
+    let mut run =
+        json!({"id": id(),"snapshot": {"agent": {"id": agent}},"placementTransition": true});
     run["targetNodeId"] = local_only.into();
     assert_eq!(
         placement::reserve(&owner.service, &run, &id())
@@ -990,7 +1206,13 @@ async fn recovery_settings_validate_and_preserve_the_last_good_configuration() {
     assert_eq!(status, 200);
     assert!(initial.get("destination").is_none());
     assert!(initial.get("retention").is_none());
-    let settings = json!({"intervalSeconds":30,"budgetMiB":4096,"disconnectTimeoutSeconds":60,"shutdownTimeoutSeconds":300,"maxCapacityWaitSeconds":3600});
+    let settings = json!({
+        "intervalSeconds": 30,
+        "budgetMiB": 4096,
+        "disconnectTimeoutSeconds": 60,
+        "shutdownTimeoutSeconds": 300,
+        "maxCapacityWaitSeconds": 3600
+    });
     assert_eq!(
         owner
             .call("PUT", "/api/nodes/settings", settings.clone(), None)
@@ -1029,15 +1251,31 @@ async fn tags_filter_authorized_nodes_without_granting_access() {
     let other = id();
     let agent = id();
     for (node, tags) in [(&fast, json!(["fast"])), (&other, json!(["slow"]))] {
-        owner.service.store.put("nodes",json!({"id":node,"tags":tags,"accepting":true,"executionReady":true,"lastSeen":now(),"capabilities":{"kvm":true,"fuse":true},"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536}})).await.unwrap();
+        owner
+            .service
+            .store
+            .put(
+                "nodes",
+                json!({
+                    "id": node,
+                    "tags": tags,
+                    "accepting": true,
+                    "executionReady": true,
+                    "lastSeen": now(),
+                    "capabilities": {"kvm": true,"fuse": true},
+                    "limits": {"cpu": 4,"memoryMiB": 8192,"diskMiB": 65536}
+                }),
+            )
+            .await
+            .unwrap();
     }
     owner
         .service
         .store
-        .put("agents", json!({"id":agent,"access":{"nodes":[other]}}))
+        .put("agents", json!({"id": agent,"access": {"nodes": [other]}}))
         .await
         .unwrap();
-    let run = json!({"id":id(),"snapshot":{"agent":{"id":agent}},"requiredTags":["fast"]});
+    let run = json!({"id": id(),"snapshot": {"agent": {"id": agent}},"requiredTags": ["fast"]});
     assert!(
         placement::reserve(&owner.service, &run, &id())
             .await
@@ -1048,7 +1286,7 @@ async fn tags_filter_authorized_nodes_without_granting_access() {
         .store
         .put(
             "agents",
-            json!({"id":agent,"access":{"nodes":[fast,other]}}),
+            json!({"id": agent,"access": {"nodes": [fast,other]}}),
         )
         .await
         .unwrap();
@@ -1069,7 +1307,18 @@ async fn a_remote_only_agent_prepares_a_private_vm_without_a_local_controller() 
         "1",
     )
     .unwrap();
-    let run = json!({"id":"e2000000-0000-4000-8000-000000000001","snapshot":{"agent":{"id":"00000000-0000-4000-8000-000000000001","access":{"nodes":["e2000000-0000-4000-8000-000000000002"]}},"projects":[],"skills":[],"task":{}}});
+    let run = json!({
+        "id": "e2000000-0000-4000-8000-000000000001",
+        "snapshot": {
+            "agent": {
+                "id": "00000000-0000-4000-8000-000000000001",
+                "access": {"nodes": ["e2000000-0000-4000-8000-000000000002"]}
+            },
+            "projects": [],
+            "skills": [],
+            "task": {}
+        }
+    });
     owner
         .service
         .store
@@ -1100,7 +1349,13 @@ async fn owner_placement_obeys_agent_grants_and_preserves_last_good_selection() 
     let run = leo_agent_manager::config::id();
     let main = "00000000-0000-4000-8000-000000000001";
     let local = leo_agent_manager::nodes::LOCAL_NODE_ID;
-    let record = json!({"id":run,"taskId":"fixture","createdAt":0,"status":"succeeded","snapshot":{"agent":{"id":main}}});
+    let record = json!({
+        "id": run,
+        "taskId": "fixture",
+        "createdAt": 0,
+        "status": "succeeded",
+        "snapshot": {"agent": {"id": main}}
+    });
     owner
         .service
         .store
@@ -1112,7 +1367,7 @@ async fn owner_placement_obeys_agent_grants_and_preserves_last_good_selection() 
         .call(
             "PUT",
             &path,
-            json!({"pinnedNodeId":local,"preferredNodeId":null}),
+            json!({"pinnedNodeId": local,"preferredNodeId": null}),
             None,
         )
         .await;
@@ -1121,7 +1376,7 @@ async fn owner_placement_obeys_agent_grants_and_preserves_last_good_selection() 
         .call(
             "PUT",
             &path,
-            json!({"pinnedNodeId":leo_agent_manager::config::id(),"preferredNodeId":null}),
+            json!({"pinnedNodeId": leo_agent_manager::config::id(),"preferredNodeId": null}),
             None,
         )
         .await;
@@ -1133,7 +1388,7 @@ async fn owner_placement_obeys_agent_grants_and_preserves_last_good_selection() 
         .call(
             "PUT",
             &path,
-            json!({"pinnedNodeId":null,"preferredNodeId":local}),
+            json!({"pinnedNodeId": null,"preferredNodeId": local}),
             None,
         )
         .await;
@@ -1162,7 +1417,7 @@ async fn native_auth_relays_refresh_both_protocols_and_stop_after_grant_revocati
         owner
             .service
             .store
-            .put("nodes", json!({"id":node,"revoked":false}))
+            .put("nodes", json!({"id": node,"revoked": false}))
             .await
             .unwrap();
         owner
@@ -1178,7 +1433,7 @@ async fn native_auth_relays_refresh_both_protocols_and_stop_after_grant_revocati
         owner
             .service
             .store
-            .put("agents", json!({"id":main,"access":{"nodes":[node]}}))
+            .put("agents", json!({"id": main,"access": {"nodes": [node]}}))
             .await
             .unwrap();
         owner
@@ -1186,11 +1441,22 @@ async fn native_auth_relays_refresh_both_protocols_and_stop_after_grant_revocati
             .store
             .put(
                 "node-attempts",
-                json!({"id":attempt,"runId":run,"nodeId":node,"released":false}),
+                json!({
+                    "id": attempt,
+                    "runId": run,
+                    "nodeId": node,
+                    "released": false
+                }),
             )
             .await
             .unwrap();
-        let record = json!({"id":run,"taskId":"fixture","createdAt":0,"status":"running","snapshot":{"agent":{"id":main}}});
+        let record = json!({
+            "id": run,
+            "taskId": "fixture",
+            "createdAt": 0,
+            "status": "running",
+            "snapshot": {"agent": {"id": main}}
+        });
         owner
             .service
             .store
@@ -1202,7 +1468,7 @@ async fn native_auth_relays_refresh_both_protocols_and_stop_after_grant_revocati
             .store
             .set(
                 &format!("run-checkpoint:{run}"),
-                json!({"nodeId":node,"runnerId":attempt}),
+                json!({"nodeId": node,"runnerId": attempt}),
                 None,
             )
             .await
@@ -1211,7 +1477,10 @@ async fn native_auth_relays_refresh_both_protocols_and_stop_after_grant_revocati
         std::fs::create_dir_all(&plans).unwrap();
         std::fs::write(
             plans.join(format!("{attempt}.json")),
-            json!({"runId":run,"chat":{"provider":if claude {"claude"} else {"codex"},"claudeManagedAuth":claude}}).to_string(),
+            json!({
+                "runId": run,
+                "chat": {"provider": if claude {"claude"} else {"codex"},"claudeManagedAuth": claude}
+            }).to_string(),
         )
         .unwrap();
         let home = owner
@@ -1236,7 +1505,7 @@ async fn native_auth_relays_refresh_both_protocols_and_stop_after_grant_revocati
                 }
                 wire::write(
                     stream.get_mut(),
-                    &json!({"accessToken":format!("synthetic-{generation}")}),
+                    &json!({"accessToken": format!("synthetic-{generation}")}),
                 )
                 .await
                 .unwrap();
@@ -1264,7 +1533,7 @@ async fn native_auth_relays_refresh_both_protocols_and_stop_after_grant_revocati
         for generation in 1..=2 {
             let mut stream = BufReader::new(UnixStream::connect(&path).await.unwrap());
             {
-                wire::write(stream.get_mut(), &json!({"method":"refresh"}))
+                wire::write(stream.get_mut(), &json!({"method": "refresh"}))
                     .await
                     .unwrap();
             }
@@ -1280,12 +1549,12 @@ async fn native_auth_relays_refresh_both_protocols_and_stop_after_grant_revocati
         owner
             .service
             .store
-            .put("agents", json!({"id":main,"access":{"nodes":[]}}))
+            .put("agents", json!({"id": main,"access": {"nodes": []}}))
             .await
             .unwrap();
         let mut stream = BufReader::new(UnixStream::connect(&path).await.unwrap());
         {
-            wire::write(stream.get_mut(), &json!({"method":"refresh"}))
+            wire::write(stream.get_mut(), &json!({"method": "refresh"}))
                 .await
                 .unwrap();
         }
@@ -1311,13 +1580,31 @@ async fn completed_run_storage_refresh_clears_stale_dirty_counts() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
-        axum::serve(listener, axum::Router::new().fallback(|| async {
-            axum::Json(json!({"mode":"on-demand","dirtyBytes":0,"dirtySince":null,"localBytes":4096,"activeLocalBytes":4096}))
-        })).await.unwrap();
+        axum::serve(
+            listener,
+            axum::Router::new().fallback(|| async {
+                axum::Json(json!({
+                    "mode": "on-demand",
+                    "dirtyBytes": 0,
+                    "dirtySince": null,
+                    "localBytes": 4096,
+                    "activeLocalBytes": 4096
+                }))
+            }),
+        )
+        .await
+        .unwrap();
     });
     let owner = Owner::with_runner("localhost:4310".into(), format!("http://{address}")).await;
     let run = id();
-    let record = json!({"id":run,"taskId":"fixture","createdAt":0,"status":"succeeded","nodeId":LOCAL_NODE_ID,"storage":{"mode":"on-demand","dirtyBytes":1048576,"dirtySince":1}});
+    let record = json!({
+        "id": run,
+        "taskId": "fixture",
+        "createdAt": 0,
+        "status": "succeeded",
+        "nodeId": LOCAL_NODE_ID,
+        "storage": {"mode": "on-demand","dirtyBytes": 1048576,"dirtySince": 1}
+    });
     let saved = record.clone();
     owner
         .service
@@ -1325,7 +1612,20 @@ async fn completed_run_storage_refresh_clears_stale_dirty_counts() {
         .write(move |db| db.add_run(&saved, None))
         .await
         .unwrap();
-    owner.service.store.put("node-volumes", json!({"id":format!("{run}:{LOCAL_NODE_ID}"),"runId":run,"nodeId":LOCAL_NODE_ID,"diskMiB":100})).await.unwrap();
+    owner
+        .service
+        .store
+        .put(
+            "node-volumes",
+            json!({
+                "id": format!("{run}:{LOCAL_NODE_ID}"),
+                "runId": run,
+                "nodeId": LOCAL_NODE_ID,
+                "diskMiB": 100
+            }),
+        )
+        .await
+        .unwrap();
     storage::refresh(&owner.service, &record).await.unwrap();
     let current = owner.service.store.run(&run).await.unwrap();
     assert_eq!(current["status"], "succeeded");
@@ -1343,7 +1643,7 @@ async fn completed_run_storage_refresh_clears_stale_dirty_counts() {
     owner
         .service
         .store
-        .patch_run(&run, json!({"nodeId":id(),"storage":{"dirtyBytes":42}}))
+        .patch_run(&run, json!({"nodeId": id(),"storage": {"dirtyBytes": 42}}))
         .await
         .unwrap();
     storage::refresh(&owner.service, &record).await.unwrap();
@@ -1370,7 +1670,7 @@ async fn starting_vm_defers_publication_without_a_sync_failure() {
                     captured.notify_one();
                     (
                         axum::http::StatusCode::CONFLICT,
-                        axum::Json(json!({"error":"VM is still starting."})),
+                        axum::Json(json!({"error": "VM is still starting."})),
                     )
                 }
             }),
@@ -1386,7 +1686,14 @@ async fn starting_vm_defers_publication_without_a_sync_failure() {
     .unwrap();
     let run = id();
     let previous_snapshot = id();
-    let record = json!({"id":run,"taskId":"fixture","createdAt":0,"status":"running","isolated":true,"backup":{"snapshotId":previous_snapshot}});
+    let record = json!({
+        "id": run,
+        "taskId": "fixture",
+        "createdAt": 0,
+        "status": "running",
+        "isolated": true,
+        "backup": {"snapshotId": previous_snapshot}
+    });
     let saved = record.clone();
     owner
         .service
@@ -1399,7 +1706,7 @@ async fn starting_vm_defers_publication_without_a_sync_failure() {
         .store
         .set(
             &format!("run-checkpoint:{run}"),
-            json!({"runnerId":id()}),
+            json!({"runnerId": id()}),
             None,
         )
         .await
@@ -1419,7 +1726,7 @@ async fn starting_vm_defers_publication_without_a_sync_failure() {
         .store
         .patch_run(
             &run,
-            json!({"status":"succeeded","storage":{"mode":"on-demand","dirtyBytes":0}}),
+            json!({"status": "succeeded","storage": {"mode": "on-demand","dirtyBytes": 0}}),
         )
         .await
         .unwrap();
@@ -1449,7 +1756,13 @@ async fn retired_audit_errors_do_not_force_full_download_before_demand_resume() 
     let owner = Owner::new().await;
     let run = id();
     let point = id();
-    let record = json!({"id":run,"taskId":"fixture","createdAt":0,"status":"queued","storage":{"mode":"on-demand"}});
+    let record = json!({
+        "id": run,
+        "taskId": "fixture",
+        "createdAt": 0,
+        "status": "queued",
+        "storage": {"mode": "on-demand"}
+    });
     owner
         .service
         .store
@@ -1461,24 +1774,44 @@ async fn retired_audit_errors_do_not_force_full_download_before_demand_resume() 
         .store
         .set(
             &format!("node-backup-audit:{run}"),
-            json!({"error":"historical audit failure"}),
+            json!({"error": "historical audit failure"}),
             None,
         )
         .await
         .unwrap();
-    let manifest = json!({"version":1,"size":4096,"blockSize":snapshots::BLOCK,"blocks":[{"offset":0,"size":4096,"hash":"a".repeat(64)}]});
+    let manifest = json!({
+        "version": 1,
+        "size": 4096,
+        "blockSize": snapshots::BLOCK,
+        "blocks": [{"offset": 0,"size": 4096,"hash": "a".repeat(64)}]
+    });
     let encrypted = owner
         .service
         .vault
         .encrypt(&format!("backup:{point}"), &manifest)
         .unwrap();
-    owner.service.store.put("node-backups", json!({"id":point,"runId":run,"sessionId":"saved-session","capturedAt":1,"destination":"s3","manifest":encrypted})).await.unwrap();
+    owner
+        .service
+        .store
+        .put(
+            "node-backups",
+            json!({
+                "id": point,
+                "runId": run,
+                "sessionId": "saved-session",
+                "capturedAt": 1,
+                "destination": "s3",
+                "manifest": encrypted
+            }),
+        )
+        .await
+        .unwrap();
     // No S3 credentials or local payload: selecting verified metadata cannot
     // download the disk. Reads will validate the remote blocks when requested.
     owner
         .service
         .store
-        .patch_run(&run, json!({"backup":{"id":point}}))
+        .patch_run(&run, json!({"backup": {"id": point}}))
         .await
         .unwrap();
     let selected = moves::latest(&owner.service, &run)
@@ -1518,7 +1851,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
     owner
         .service
         .store
-        .put("nodes", json!({"id":node,"revoked":false}))
+        .put("nodes", json!({"id": node,"revoked": false}))
         .await
         .unwrap();
     owner
@@ -1531,7 +1864,13 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         )
         .await
         .unwrap();
-    let record = json!({"id":run,"taskId":"fixture","createdAt":0,"status":"running","sessionId":"synthetic-native-session"});
+    let record = json!({
+        "id": run,
+        "taskId": "fixture",
+        "createdAt": 0,
+        "status": "running",
+        "sessionId": "synthetic-native-session"
+    });
     let owned = record.clone();
     owner
         .service
@@ -1544,7 +1883,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         .store
         .set(
             &format!("run-checkpoint:{run}"),
-            json!({"nodeId":node,"runnerId":attempt}),
+            json!({"nodeId": node,"runnerId": attempt}),
             None,
         )
         .await
@@ -1556,7 +1895,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
     std::fs::write(&source, &original).unwrap();
     let mut manifest = snapshots::index(&source).await.unwrap();
     manifest["capturedAt"] = now().into();
-    manifest["runtime"] = json!({"runtimeId":"fixture"});
+    manifest["runtime"] = json!({"runtimeId": "fixture"});
     let snapshot = id();
     let state = Arc::new(tokio::sync::Mutex::new(manifest));
     let corrupt = Arc::new(AtomicBool::new(false));
@@ -1573,11 +1912,13 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
                     "Bearer controller-fixture"
                 );
                 if request.method() == "DELETE" {
-                    return axum::Json(json!({"ok":true})).into_response();
+                    return axum::Json(json!({"ok": true})).into_response();
                 }
                 if request.uri().path().ends_with("/snapshot") {
-                    return axum::Json(json!({"id":snapshot,"manifest":data.lock().await.clone()}))
-                        .into_response();
+                    return axum::Json(
+                        json!({"id": snapshot,"manifest": data.lock().await.clone()}),
+                    )
+                    .into_response();
                 }
                 let hash = request.uri().path().rsplit('/').next().unwrap();
                 let mut bytes = snapshots::block(&disk, &*data.lock().await, hash)
@@ -1612,21 +1953,23 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         assert_eq!(parsed.scheme(), "http");
         let wrapper = owner._root.path().join("aws-fixture-client");
         let script = format!(
-            "#!/usr/bin/env python3\nimport os,subprocess,sys\nenv={{k:v for k,v in os.environ.items() if not k.startswith('AWS_')}}\nenv.update(AWS_ACCESS_KEY_ID='node-fixture',AWS_SECRET_ACCESS_KEY='node-fixture-secret',AWS_DEFAULT_REGION='us-east-1',AWS_EC2_METADATA_DISABLED='true',AWS_CONFIG_FILE='/dev/null',AWS_SHARED_CREDENTIALS_FILE='/dev/null')\nsys.exit(subprocess.run(['aws','--endpoint-url',{}]+sys.argv[1:],env=env).returncode)\n",
+            "#!/usr/bin/env python3\nimport os,subprocess,sys\nenv={{k:v for k,v in \
+                os.environ.items() if not \
+                k.startswith('AWS_')}}\nenv.update(AWS_ACCESS_KEY_ID='node-fixture',AWS_SECRET_ACCESS_KEY='node-fixture-secret',AWS_DEFAULT_REGION='us-east-1',AWS_EC2_METADATA_DISABLED='true',AWS_CONFIG_FILE='/dev/null',AWS_SHARED_CREDENTIALS_FILE='/dev/null')\nsys.exit(subprocess.run(['aws','--endpoint-url',{}]+sys.argv[1:],env=env).returncode)\n",
             serde_json::to_string(endpoint).unwrap()
         );
         std::fs::write(&wrapper, script).unwrap();
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::write(
             owner.service.config.data_dir.join("archive-s3.json"),
-            json!({"bucket":"leo-node-test","awsBinary":wrapper}).to_string(),
+            json!({"bucket": "leo-node-test","awsBinary": wrapper}).to_string(),
         )
         .unwrap();
         let (status, value) = owner
             .call(
                 "PUT",
                 "/api/nodes/settings",
-                json!({"intervalSeconds":60,"budgetMiB":128}),
+                json!({"intervalSeconds": 60,"budgetMiB": 128}),
                 None,
             )
             .await;
@@ -1664,8 +2007,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         std::fs::write(&config_path, disconnected_config.to_string()).unwrap();
         let mut disconnected_point = retained.clone();
         disconnected_point["endpoint"] = json!("https://127.0.0.1:1");
-        let location =
-            json!({"destination":"s3","bucket":"leo-node-test","endpoint":"https://127.0.0.1:1"});
+        let location = json!({"destination": "s3","bucket": "leo-node-test","endpoint": "https://127.0.0.1:1"});
         let receipt = owner
             .service
             .config
@@ -1756,7 +2098,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
     std::fs::write(&source, &original).unwrap();
     let mut second = snapshots::index(&source).await.unwrap();
     second["capturedAt"] = now().into();
-    second["runtime"] = json!({"runtimeId":"fixture"});
+    second["runtime"] = json!({"runtimeId": "fixture"});
     *state.lock().await = second;
     corrupt.store(true, Ordering::SeqCst);
     assert!(publication::capture(&owner.service, &record).await.is_err());
@@ -1806,7 +2148,12 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         .unwrap()
         .set_len(128 * 1024 * 1024)
         .unwrap();
-    let settings = json!({"destination":if s3.is_some() {"s3"} else {"master"},"intervalSeconds":60,"retention":2,"budgetMiB":128});
+    let settings = json!({
+        "destination": if s3.is_some() {"s3"} else {"master"},
+        "intervalSeconds": 60,
+        "retention": 2,
+        "budgetMiB": 128
+    });
     owner
         .service
         .store
@@ -1923,7 +2270,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             .get("nodes", local)
             .await
             .unwrap()
-            .unwrap_or_else(|| json!({"id":local}));
+            .unwrap_or_else(|| json!({"id": local}));
         node["storage"] = json!(leo_agent_manager::storage::policy::Policy {
             reserve_mi_b: 16777216,
             ..Default::default()
@@ -1940,7 +2287,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         std::fs::write(&source, &original).unwrap();
         let mut memory = snapshots::index(&source).await.unwrap();
         memory["capturedAt"] = now().into();
-        memory["runtime"] = json!({"runtimeId":"fixture"});
+        memory["runtime"] = json!({"runtimeId": "fixture"});
         let changed = memory["blocks"][1]["hash"].as_str().unwrap().to_owned();
         *state.lock().await = memory;
         third = publication::capture(&owner.service, &record).await.unwrap();
@@ -1975,7 +2322,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         .unwrap()
         .unwrap();
     damaged["capturedAt"] = (now() + 1000).into();
-    damaged["manifest"] = json!({"corrupt":true});
+    damaged["manifest"] = json!({"corrupt": true});
     owner
         .service
         .store
@@ -2034,13 +2381,13 @@ async fn an_unreachable_owner_is_fenced_only_after_its_last_lease_and_cannot_ren
         owner
             .service
             .store
-            .put("nodes", json!({"id":node,"revoked":false}))
+            .put("nodes", json!({"id": node,"revoked": false}))
             .await
             .unwrap();
         owner
             .service
             .store
-            .put("agents", json!({"id":main,"access":{"nodes":[node]}}))
+            .put("agents", json!({"id": main,"access": {"nodes": [node]}}))
             .await
             .unwrap();
         owner
@@ -2054,15 +2401,28 @@ async fn an_unreachable_owner_is_fenced_only_after_its_last_lease_and_cannot_ren
             .await
             .unwrap();
         owner
-        .service
-        .store
-        .put(
-            "node-attempts",
-            json!({"id":attempt,"nodeId":node,"runId":run,"released":false,"leaseRequired":true}),
-        )
-        .await
-        .unwrap();
-        let record = json!({"id":run,"taskId":"fixture","createdAt":0,"status":"running","isolated":true,"snapshot":{"agent":{"id":main}}});
+            .service
+            .store
+            .put(
+                "node-attempts",
+                json!({
+                    "id": attempt,
+                    "nodeId": node,
+                    "runId": run,
+                    "released": false,
+                    "leaseRequired": true
+                }),
+            )
+            .await
+            .unwrap();
+        let record = json!({
+            "id": run,
+            "taskId": "fixture",
+            "createdAt": 0,
+            "status": "running",
+            "isolated": true,
+            "snapshot": {"agent": {"id": main}}
+        });
         let saved = record.clone();
         owner
             .service
@@ -2071,15 +2431,20 @@ async fn an_unreachable_owner_is_fenced_only_after_its_last_lease_and_cannot_ren
             .await
             .unwrap();
         owner
-        .service
-        .store
-        .set(
-            &format!("run-checkpoint:{run}"),
-            json!({"nodeId":node,"runnerId":attempt,"launched":true,"prepared":{"isolated":true}}),
-            None,
-        )
-        .await
-        .unwrap();
+            .service
+            .store
+            .set(
+                &format!("run-checkpoint:{run}"),
+                json!({
+                    "nodeId": node,
+                    "runnerId": attempt,
+                    "launched": true,
+                    "prepared": {"isolated": true}
+                }),
+                None,
+            )
+            .await
+            .unwrap();
         owner.service.node_lease_deadlines.lock().await.insert(
             attempt.clone(),
             tokio::time::Instant::now() + std::time::Duration::from_secs(60),
@@ -2110,7 +2475,7 @@ async fn an_unreachable_owner_is_fenced_only_after_its_last_lease_and_cannot_ren
             .call(
                 "POST",
                 "/internal/nodes/heartbeat",
-                json!({"runtimeId":"fixture"}),
+                json!({"runtimeId": "fixture"}),
                 Some(&token),
             )
             .await;
@@ -2129,14 +2494,29 @@ async fn abandoned_return_to_a_node_releases_only_the_unmaterialized_disk_reserv
     let node = id();
     let agent = id();
     let run = id();
-    owner.service.store.put("nodes",json!({"id":node,"accepting":true,"executionReady":true,"lastSeen":now(),"capabilities":{"kvm":true,"fuse":true},"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536}})).await.unwrap();
     owner
         .service
         .store
-        .put("agents", json!({"id":agent,"access":{"nodes":[node]}}))
+        .put(
+            "nodes",
+            json!({
+                "id": node,
+                "accepting": true,
+                "executionReady": true,
+                "lastSeen": now(),
+                "capabilities": {"kvm": true,"fuse": true},
+                "limits": {"cpu": 4,"memoryMiB": 8192,"diskMiB": 65536}
+            }),
+        )
         .await
         .unwrap();
-    let original = json!({"id":run,"snapshot":{"agent":{"id":agent}}});
+    owner
+        .service
+        .store
+        .put("agents", json!({"id": agent,"access": {"nodes": [node]}}))
+        .await
+        .unwrap();
+    let original = json!({"id": run,"snapshot": {"agent": {"id": agent}}});
     let attempt = id();
     placement::reserve(&owner.service, &original, &attempt)
         .await
@@ -2150,7 +2530,7 @@ async fn abandoned_return_to_a_node_releases_only_the_unmaterialized_disk_reserv
         .store
         .set(
             &format!("run-checkpoint:{run}"),
-            json!({"nodeId":id()}),
+            json!({"nodeId": id()}),
             None,
         )
         .await
@@ -2161,7 +2541,7 @@ async fn abandoned_return_to_a_node_releases_only_the_unmaterialized_disk_reserv
     placement::reserve(&owner.service, &returning, &pending)
         .await
         .unwrap();
-    let other = json!({"id":id(),"snapshot":{"agent":{"id":agent}}});
+    let other = json!({"id": id(),"snapshot": {"agent": {"id": agent}}});
     let parallel = id();
     placement::reserve(&owner.service, &other, &parallel)
         .await
@@ -2176,7 +2556,7 @@ async fn abandoned_return_to_a_node_releases_only_the_unmaterialized_disk_reserv
     let thin = id();
     placement::reserve(
         &owner.service,
-        &json!({"id":id(),"snapshot":{"agent":{"id":agent}}}),
+        &json!({"id": id(),"snapshot": {"agent": {"id": agent}}}),
         &thin,
     )
     .await
@@ -2198,7 +2578,7 @@ async fn abandoned_return_to_a_node_releases_only_the_unmaterialized_disk_reserv
         .store
         .set(
             &format!("run-checkpoint:{run}"),
-            json!({"nodeId":node}),
+            json!({"nodeId": node}),
             None,
         )
         .await
@@ -2215,14 +2595,29 @@ async fn s3_disk_keeps_its_logical_size_while_cpu_and_memory_obey_node_limits() 
     let node = id();
     let agent = id();
     let run = id();
-    owner.service.store.put("nodes",json!({"id":node,"accepting":true,"executionReady":true,"lastSeen":now(),"capabilities":{"kvm":true,"fuse":true},"limits":{"cpu":1,"memoryMiB":1024,"diskMiB":8192}})).await.unwrap();
     owner
         .service
         .store
-        .put("agents", json!({"id":agent,"access":{"nodes":[node]}}))
+        .put(
+            "nodes",
+            json!({
+                "id": node,
+                "accepting": true,
+                "executionReady": true,
+                "lastSeen": now(),
+                "capabilities": {"kvm": true,"fuse": true},
+                "limits": {"cpu": 1,"memoryMiB": 1024,"diskMiB": 8192}
+            }),
+        )
         .await
         .unwrap();
-    let mut record = json!({"id":run,"snapshot":{"agent":{"id":agent}}});
+    owner
+        .service
+        .store
+        .put("agents", json!({"id": agent,"access": {"nodes": [node]}}))
+        .await
+        .unwrap();
+    let mut record = json!({"id": run,"snapshot": {"agent": {"id": agent}}});
     let attempt = id();
     let selected = placement::reserve(&owner.service, &record, &attempt)
         .await
@@ -2232,7 +2627,7 @@ async fn s3_disk_keeps_its_logical_size_while_cpu_and_memory_obey_node_limits() 
         json!({"cpu":1,"memoryMiB":1024,"diskMiB":32768})
     );
     placement::release(&owner.service, &attempt).await.unwrap();
-    record["requestedResources"] = json!({"cpu":2,"memoryMiB":1024,"diskMiB":8192});
+    record["requestedResources"] = json!({"cpu": 2,"memoryMiB": 1024,"diskMiB": 8192});
     assert!(
         placement::reserve(&owner.service, &record, &id())
             .await
@@ -2262,17 +2657,27 @@ async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_
     let source = id();
     let destination = id();
     let attempt = id();
-    let resources = json!({"cpu":1,"memoryMiB":512,"diskMiB":128});
+    let resources = json!({"cpu": 1,"memoryMiB": 512,"diskMiB": 128});
     owner
         .service
         .store
         .put(
             "agents",
-            json!({"id":agent,"access":{"nodes":[source,destination]}}),
+            json!({"id": agent,"access": {"nodes": [source,destination]}}),
         )
         .await
         .unwrap();
-    let record = json!({"id":run,"taskId":"fixture","createdAt":0,"status":"succeeded","isolated":true,"sessionId":"retained-session","nodeId":source,"resources":resources,"snapshot":{"agent":{"id":agent}}});
+    let record = json!({
+        "id": run,
+        "taskId": "fixture",
+        "createdAt": 0,
+        "status": "succeeded",
+        "isolated": true,
+        "sessionId": "retained-session",
+        "nodeId": source,
+        "resources": resources,
+        "snapshot": {"agent": {"id": agent}}
+    });
     let saved = record.clone();
     owner
         .service
@@ -2280,7 +2685,21 @@ async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_
         .write(move |db| db.add_run(&saved, None))
         .await
         .unwrap();
-    owner.service.store.set(&format!("run-checkpoint:{run}"),json!({"nodeId":source,"runnerId":attempt,"completed":true,"prepared":{"backend":"firecracker","isolated":true}}),None).await.unwrap();
+    owner
+        .service
+        .store
+        .set(
+            &format!("run-checkpoint:{run}"),
+            json!({
+                "nodeId": source,
+                "runnerId": attempt,
+                "completed": true,
+                "prepared": {"backend": "firecracker","isolated": true}
+            }),
+            None,
+        )
+        .await
+        .unwrap();
     let stop = tokio_util::sync::CancellationToken::new();
     let failed = Arc::new(AtomicBool::new(false));
     let cancel_during_capture = Arc::new(AtomicBool::new(false));
@@ -2298,7 +2717,11 @@ async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_
             let grant = disk_grants::new_disk(&owner.service, &record, node)
                 .await
                 .unwrap();
-            let context = json!({"master":format!("http://{address}/"),"grant":grant,"policy":Policy {reserve_mi_b:64,reserve_percent:1,..Default::default()}});
+            let context = json!({
+                "master": format!("http://{address}/"),
+                "grant": grant,
+                "policy": Policy {reserve_mi_b:64,reserve_percent:1,..Default::default()}
+            });
             let remote = Arc::new(
                 RemoteSource::new(
                     &context,
@@ -2307,7 +2730,17 @@ async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_
                 )
                 .unwrap(),
             );
-            let journal=LazyDisk::create(&disk.join("lazy"),&json!({"version":1,"size":4096,"blockSize":4194304,"blocks":[{"offset":0,"size":4096,"hash":null}]}),remote).unwrap();
+            let journal = LazyDisk::create(
+                &disk.join("lazy"),
+                &json!({
+                    "version": 1,
+                    "size": 4096,
+                    "blockSize": 4194304,
+                    "blocks": [{"offset": 0,"size": 4096,"hash": null}]
+                }),
+                remote,
+            )
+            .unwrap();
             journal.set_context(&context).unwrap();
             journal
                 .write_at(
@@ -2318,7 +2751,26 @@ async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_
             journal.sync().unwrap();
         }
         let token = auth::token();
-        owner.service.store.put("nodes",json!({"id":node,"revoked":false,"accepting":true,"executionReady":true,"lastSeen":now(),"runtimeId":"fixture","runtimeIds":["fixture"],"storage":Policy {reserve_mi_b:64,reserve_percent:1,..Default::default()},"capabilities":{"kvm":true,"fuse":true},"limits":{"cpu":2,"memoryMiB":1024,"diskMiB":1024}})).await.unwrap();
+        owner
+            .service
+            .store
+            .put(
+                "nodes",
+                json!({
+                    "id": node,
+                    "revoked": false,
+                    "accepting": true,
+                    "executionReady": true,
+                    "lastSeen": now(),
+                    "runtimeId": "fixture",
+                    "runtimeIds": ["fixture"],
+                    "storage": Policy {reserve_mi_b:64,reserve_percent:1,..Default::default()},
+                    "capabilities": {"kvm": true,"fuse": true},
+                    "limits": {"cpu": 2,"memoryMiB": 1024,"diskMiB": 1024}
+                }),
+            )
+            .await
+            .unwrap();
         owner
             .service
             .store
@@ -2334,41 +2786,90 @@ async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_
         let (disk_state, failed_capture, run_id) = (state.clone(), failed.clone(), run.clone());
         let cancellation = cancel_during_capture.clone();
         let service = owner.service.clone();
-        let app = axum::Router::new().fallback(axum::routing::any(move |request:axum::extract::Request| {
-            let (state, failed, run) = (disk_state.clone(),failed_capture.clone(),run_id.clone());
-            let (cancel, service) = (cancellation.clone(), service.clone());
-            async move {
-                assert_eq!(request.headers()["authorization"],"Bearer controller-fixture");
-                let route = request.uri().path().to_owned();
-                if request.method() == "DELETE" { return axum::Json(json!({"ok":true})).into_response(); }
-                if route.ends_with("/snapshot") {
-                    assert_eq!(route, format!("/disks/{run}/snapshot"), "Idle movement must capture by disk, without destination attempt history");
-                    if cancel.load(Ordering::SeqCst) { service.store.patch_run(&run,json!({"cancelRequestedAt":now(),"status":"cancelled"})).await.unwrap(); }
-                    if failed.load(Ordering::SeqCst) { return axum::http::StatusCode::PRECONDITION_FAILED.into_response(); }
-                    let snapshot=checkpoint::capture(&state,&run,None,Arc::new(tokio::sync::Mutex::new(())),tokio_util::sync::CancellationToken::new(),&run,None).await.unwrap();
-                    return axum::Json(snapshot).into_response();
+        let app = axum::Router::new().fallback(axum::routing::any(
+            move |request: axum::extract::Request| {
+                let (state, failed, run) =
+                    (disk_state.clone(), failed_capture.clone(), run_id.clone());
+                let (cancel, service) = (cancellation.clone(), service.clone());
+                async move {
+                    assert_eq!(
+                        request.headers()["authorization"],
+                        "Bearer controller-fixture"
+                    );
+                    let route = request.uri().path().to_owned();
+                    if request.method() == "DELETE" {
+                        return axum::Json(json!({"ok": true})).into_response();
+                    }
+                    if route.ends_with("/snapshot") {
+                        assert_eq!(
+                            route,
+                            format!("/disks/{run}/snapshot"),
+                            "Idle movement must capture by disk, without \
+                            destination attempt history"
+                        );
+                        if cancel.load(Ordering::SeqCst) {
+                            service
+                                .store
+                                .patch_run(
+                                    &run,
+                                    json!({"cancelRequestedAt": now(),"status": "cancelled"}),
+                                )
+                                .await
+                                .unwrap();
+                        }
+                        if failed.load(Ordering::SeqCst) {
+                            return axum::http::StatusCode::PRECONDITION_FAILED.into_response();
+                        }
+                        let snapshot = checkpoint::capture(
+                            &state,
+                            &run,
+                            None,
+                            Arc::new(tokio::sync::Mutex::new(())),
+                            tokio_util::sync::CancellationToken::new(),
+                            &run,
+                            None,
+                        )
+                        .await
+                        .unwrap();
+                        return axum::Json(snapshot).into_response();
+                    }
+                    if route.ends_with("/published") {
+                        let body = to_bytes(request.into_body(), 1000000).await.unwrap();
+                        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let volume = runtime::load(&state.join("disks").join(&run))
+                            .await
+                            .unwrap();
+                        volume
+                            .disk
+                            .commit_published(
+                                value["generation"].as_i64().unwrap(),
+                                value["backupId"].as_str().unwrap(),
+                            )
+                            .unwrap();
+                        return axum::Json(json!({"committed": true})).into_response();
+                    }
+                    if route.ends_with("/restore") {
+                        let body = to_bytes(request.into_body(), 1000000).await.unwrap();
+                        let value = serde_json::from_slice(&body).unwrap();
+                        return axum::Json(restore::controller(&state, &run, value).await.unwrap())
+                            .into_response();
+                    }
+                    if route.starts_with("/snapshots/") {
+                        let parts = route.split('/').collect::<Vec<_>>();
+                        let directory = state.join("snapshots").join(parts[2]);
+                        if request.method() == "DELETE" {
+                            tokio::fs::remove_dir_all(directory).await.unwrap();
+                            return axum::Json(json!({"ok": true})).into_response();
+                        }
+                        return snapshots::served(&directory, parts[3])
+                            .await
+                            .unwrap()
+                            .into_response();
+                    }
+                    panic!("Idle movement must not launch a provider: {route}");
                 }
-                if route.ends_with("/published") {
-                    let body=to_bytes(request.into_body(),1000000).await.unwrap();
-                    let value: serde_json::Value=serde_json::from_slice(&body).unwrap();
-                    let volume=runtime::load(&state.join("disks").join(&run)).await.unwrap();
-                    volume.disk.commit_published(value["generation"].as_i64().unwrap(),value["backupId"].as_str().unwrap()).unwrap();
-                    return axum::Json(json!({"committed":true})).into_response();
-                }
-                if route.ends_with("/restore") {
-                    let body = to_bytes(request.into_body(), 1000000).await.unwrap();
-                    let value = serde_json::from_slice(&body).unwrap();
-                    return axum::Json(restore::controller(&state,&run,value).await.unwrap()).into_response();
-                }
-                if route.starts_with("/snapshots/") {
-                    let parts=route.split('/').collect::<Vec<_>>();
-                    let directory=state.join("snapshots").join(parts[2]);
-                    if request.method()=="DELETE" {tokio::fs::remove_dir_all(directory).await.unwrap();return axum::Json(json!({"ok":true})).into_response();}
-                    return snapshots::served(&directory,parts[3]).await.unwrap().into_response();
-                }
-                panic!("Idle movement must not launch a provider: {route}");
-            }
-        }));
+            },
+        ));
         tasks.push(tokio::spawn(async move {
             axum::serve(controller, app).await.unwrap()
         }));
@@ -2503,7 +3004,13 @@ async fn pending_movement_retries_a_lost_stop_without_stopping_a_later_execution
     .await;
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let run = id();
-    let saved = json!({"id":run,"taskId":"fixture","createdAt":0,"status":"running","moveRequest":{"requestedAt":now()-3000}});
+    let saved = json!({
+        "id": run,
+        "taskId": "fixture",
+        "createdAt": 0,
+        "status": "running",
+        "moveRequest": {"requestedAt": now()-3000}
+    });
     owner
         .service
         .store
@@ -2515,7 +3022,7 @@ async fn pending_movement_retries_a_lost_stop_without_stopping_a_later_execution
         .store
         .set(
             &format!("run-checkpoint:{run}"),
-            json!({"runnerId":id()}),
+            json!({"runnerId": id()}),
             None,
         )
         .await
@@ -2526,7 +3033,7 @@ async fn pending_movement_retries_a_lost_stop_without_stopping_a_later_execution
     owner
         .service
         .store
-        .patch_run(&run, json!({"moveRequest":null}))
+        .patch_run(&run, json!({"moveRequest": null}))
         .await
         .unwrap();
     moves::pause_pending(&owner.service, &run).await.unwrap();
@@ -2545,18 +3052,33 @@ async fn automatic_placement_spreads_work_unless_a_node_is_preferred() {
     let large = id();
     let agent = id();
     for (node, cpu, memory) in [(&small, 4, 8192), (&large, 16, 65536)] {
-        owner.service.store.put("nodes",json!({"id":node,"accepting":true,"executionReady":true,"lastSeen":now(),"capabilities":{"kvm":true,"fuse":true},"limits":{"cpu":cpu,"memoryMiB":memory,"diskMiB":262144}})).await.unwrap();
+        owner
+            .service
+            .store
+            .put(
+                "nodes",
+                json!({
+                    "id": node,
+                    "accepting": true,
+                    "executionReady": true,
+                    "lastSeen": now(),
+                    "capabilities": {"kvm": true,"fuse": true},
+                    "limits": {"cpu": cpu,"memoryMiB": memory,"diskMiB": 262144}
+                }),
+            )
+            .await
+            .unwrap();
     }
     owner
         .service
         .store
         .put(
             "agents",
-            json!({"id":agent,"access":{"nodes":[small,large]}}),
+            json!({"id": agent,"access": {"nodes": [small,large]}}),
         )
         .await
         .unwrap();
-    let run = |preferred: Value| json!({"id":id(),"snapshot":{"agent":{"id":agent}},"preferredNodeId":preferred});
+    let run = |preferred: Value| json!({"id": id(),"snapshot": {"agent": {"id": agent}},"preferredNodeId": preferred});
     assert_eq!(
         placement::reserve(&owner.service, &run(Value::Null), &id())
             .await
@@ -2577,14 +3099,32 @@ async fn node_agent_grants_are_edited_from_the_node_without_narrowing_all_node_a
     let owner = Owner::new().await;
     let node = id();
     let (explicit, everywhere) = (id(), id());
-    owner.service.store.put("nodes",json!({"id":node,"name":"Desktop","local":false,"revoked":false,"accepting":true,"tags":[],"lastSeen":now(),"capabilities":{"kvm":true,"fuse":true},"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536}})).await.unwrap();
+    owner
+        .service
+        .store
+        .put(
+            "nodes",
+            json!({
+                "id": node,
+                "name": "Desktop",
+                "local": false,
+                "revoked": false,
+                "accepting": true,
+                "tags": [],
+                "lastSeen": now(),
+                "capabilities": {"kvm": true,"fuse": true},
+                "limits": {"cpu": 4,"memoryMiB": 8192,"diskMiB": 65536}
+            }),
+        )
+        .await
+        .unwrap();
     for (agent, nodes) in [(&explicit, json!([])), (&everywhere, Value::Null)] {
         owner
             .service
             .store
             .put(
                 "agents",
-                json!({"id":agent,"name":agent,"access":{"nodes":nodes}}),
+                json!({"id": agent,"name": agent,"access": {"nodes": nodes}}),
             )
             .await
             .unwrap();
@@ -2606,7 +3146,7 @@ async fn node_agent_grants_are_edited_from_the_node_without_narrowing_all_node_a
     assert_eq!(granted(&nodes), vec![everywhere.clone()]);
     let path = format!("/api/nodes/{node}/agents");
     let (status, body) = owner
-        .call("PUT", &path, json!({"agentIds":[explicit]}), None)
+        .call("PUT", &path, json!({"agentIds": [explicit]}), None)
         .await;
     assert_eq!(status, 200, "{body}");
     let (_, nodes) = owner.call("GET", "/api/nodes", Value::Null, None).await;
@@ -2615,7 +3155,9 @@ async fn node_agent_grants_are_edited_from_the_node_without_narrowing_all_node_a
     let mut expected = vec![explicit.clone(), everywhere.clone()];
     expected.sort();
     assert_eq!(agents, expected);
-    owner.call("PUT", &path, json!({"agentIds":[]}), None).await;
+    owner
+        .call("PUT", &path, json!({"agentIds": []}), None)
+        .await;
     let (_, nodes) = owner.call("GET", "/api/nodes", Value::Null, None).await;
     assert_eq!(granted(&nodes), vec![everywhere.clone()]);
     let agent = owner
@@ -2636,7 +3178,10 @@ async fn agents_cannot_request_more_than_their_limit_and_older_clients_keep_it()
         .call(
             "POST",
             "/api/agents",
-            json!({"name":"Limited","access":{"maxResources":{"cpu":2,"memoryMiB":4096,"diskMiB":32768}}}),
+            json!({
+                "name": "Limited",
+                "access": {"maxResources": {"cpu": 2,"memoryMiB": 4096,"diskMiB": 32768}}
+            }),
             None,
         )
         .await;
@@ -2647,17 +3192,17 @@ async fn agents_cannot_request_more_than_their_limit_and_older_clients_keep_it()
         .call(
             "PUT",
             &format!("/api/agents/{id}"),
-            json!({"name":"Limited","access":{"nodes":null}}),
+            json!({"name": "Limited","access": {"nodes": null}}),
             None,
         )
         .await;
     assert_eq!(status, 200, "{updated}");
     assert_eq!(updated["access"]["maxResources"]["cpu"], 2);
-    let run = json!({"id":leo_agent_manager::config::id(),"snapshot":{"agent":{"id":id}}});
+    let run = json!({"id": leo_agent_manager::config::id(),"snapshot": {"agent": {"id": id}}});
     let error = moves::request_by_agent(
         &owner.service,
         &run,
-        &json!({"cpu":8,"memoryMiB":4096,"diskMiB":32768}),
+        &json!({"cpu": 8,"memoryMiB": 4096,"diskMiB": 32768}),
     )
     .await
     .unwrap_err();
@@ -2673,8 +3218,13 @@ async fn node_alerts_reach_the_conversation_and_clients_without_repeating() {
     let owner = Owner::new().await;
     let run = id();
     let chat = id();
-    let record =
-        json!({"id":run,"taskId":"fixture","createdAt":0,"status":"running","trigger":"chat"});
+    let record = json!({
+        "id": run,
+        "taskId": "fixture",
+        "createdAt": 0,
+        "status": "running",
+        "trigger": "chat"
+    });
     owner
         .service
         .store
@@ -2684,7 +3234,7 @@ async fn node_alerts_reach_the_conversation_and_clients_without_repeating() {
     owner
         .service
         .store
-        .put("chats", json!({"id":chat,"runId":run,"title":"Fixture"}))
+        .put("chats", json!({"id": chat,"runId": run,"title": "Fixture"}))
         .await
         .unwrap();
     for _ in 0..2 {
@@ -2740,13 +3290,35 @@ async fn stale_node_disks_are_reported_and_freed_on_request() {
     tokio::spawn(async move { axum::serve(listener, runner).await.unwrap() });
     let owner = Owner::with_runner("localhost:4310".into(), url).await;
     let other = id();
-    owner.service.store.put("nodes",json!({"id":LOCAL_NODE_ID,"name":"Current runner","local":true,"revoked":false,"accepting":true,"tags":[],"capabilities":{"kvm":true,"fuse":true},"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536}})).await.unwrap();
+    owner
+        .service
+        .store
+        .put(
+            "nodes",
+            json!({
+                "id": LOCAL_NODE_ID,
+                "name": "Current runner",
+                "local": true,
+                "revoked": false,
+                "accepting": true,
+                "tags": [],
+                "capabilities": {"kvm": true,"fuse": true},
+                "limits": {"cpu": 4,"memoryMiB": 8192,"diskMiB": 65536}
+            }),
+        )
+        .await
+        .unwrap();
     let (moved, current) = (id(), id());
     for (run, node, total) in [
         (&moved, &other, 1024),
         (&current, &LOCAL_NODE_ID.to_owned(), 3072),
     ] {
-        let record = json!({"id":run,"taskId":"fixture","createdAt":0,"status":"succeeded"});
+        let record = json!({
+            "id": run,
+            "taskId": "fixture",
+            "createdAt": 0,
+            "status": "succeeded"
+        });
         owner
             .service
             .store
@@ -2758,12 +3330,27 @@ async fn stale_node_disks_are_reported_and_freed_on_request() {
             .store
             .set(
                 &format!("run-checkpoint:{run}"),
-                json!({"nodeId":node}),
+                json!({"nodeId": node}),
                 None,
             )
             .await
             .unwrap();
-        owner.service.store.put("node-volumes",json!({"id":format!("{run}:{LOCAL_NODE_ID}"),"runId":run,"nodeId":LOCAL_NODE_ID,"materialized":true,"diskMiB":total,"activeDiskMiB":1024})).await.unwrap();
+        owner
+            .service
+            .store
+            .put(
+                "node-volumes",
+                json!({
+                    "id": format!("{run}:{LOCAL_NODE_ID}"),
+                    "runId": run,
+                    "nodeId": LOCAL_NODE_ID,
+                    "materialized": true,
+                    "diskMiB": total,
+                    "activeDiskMiB": 1024
+                }),
+            )
+            .await
+            .unwrap();
     }
     let (_, nodes) = owner.call("GET", "/api/nodes", Value::Null, None).await;
     let local = nodes
@@ -2814,7 +3401,15 @@ async fn isolated_conversations_synchronize_on_local_and_remote_nodes() {
     let mut states = Vec::new();
     for node in [LOCAL_NODE_ID.to_owned(), id()] {
         let run = id();
-        let record = json!({"id":run,"taskId":run,"createdAt":0,"status":"running","isolated":true,"sessionId":"session","nodeId":node});
+        let record = json!({
+            "id": run,
+            "taskId": run,
+            "createdAt": 0,
+            "status": "running",
+            "isolated": true,
+            "sessionId": "session",
+            "nodeId": node
+        });
         owner
             .service
             .store
@@ -2852,7 +3447,7 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
     std::fs::write(&disk, b"workspace blocks").unwrap();
     let mut manifest = snapshots::index(&disk).await.unwrap();
     manifest["capturedAt"] = now().into();
-    manifest["runtime"] = json!({"runtimeId":"fixture"});
+    manifest["runtime"] = json!({"runtimeId": "fixture"});
     // The controller records each capture request body and can be told to fail.
     let bodies = Arc::new(Mutex::new(Vec::<Value>::new()));
     let failing = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2884,7 +3479,7 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
         async move {
             let path = request.uri().path().to_owned();
             if request.method() == "DELETE" {
-                return axum::Json(json!({"ok":true})).into_response();
+                return axum::Json(json!({"ok": true})).into_response();
             }
             if path.ends_with("/published") {
                 return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "ack lost").into_response();
@@ -2907,7 +3502,7 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
                     data["onDemand"] = true.into();
                     data["generation"] = 1.into();
                 }
-                return axum::Json(json!({"id":snapshot,"manifest":data,"grantId":grant}))
+                return axum::Json(json!({"id": snapshot,"manifest": data,"grantId": grant}))
                     .into_response();
             }
             let hash = path.rsplit('/').next().unwrap();
@@ -2923,7 +3518,15 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
     tokio::spawn(async move { axum::serve(listener, runner).await.unwrap() });
     let owner = Owner::with_runner("localhost:4310".into(), url).await;
     let (run, attempt) = (id(), id());
-    let record = json!({"id":run,"taskId":run,"createdAt":0,"status":"running","isolated":true,"sessionId":"session","nodeId":LOCAL_NODE_ID});
+    let record = json!({
+        "id": run,
+        "taskId": run,
+        "createdAt": 0,
+        "status": "running",
+        "isolated": true,
+        "sessionId": "session",
+        "nodeId": LOCAL_NODE_ID
+    });
     owner
         .service
         .store
@@ -2935,7 +3538,7 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
         .store
         .set(
             &format!("run-checkpoint:{run}"),
-            json!({"nodeId":LOCAL_NODE_ID,"runnerId":attempt}),
+            json!({"nodeId": LOCAL_NODE_ID,"runnerId": attempt}),
             None,
         )
         .await
@@ -3030,14 +3633,19 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
         .store
         .put(
             "node-disk-grants",
-            json!({"id":grant_id,"runId":run,"nodeId":LOCAL_NODE_ID,"backups":[previous]}),
+            json!({
+                "id": grant_id,
+                "runId": run,
+                "nodeId": LOCAL_NODE_ID,
+                "backups": [previous]
+            }),
         )
         .await
         .unwrap();
     owner
         .service
         .store
-        .patch_run(&run, json!({"storage":{"mode":"on-demand"}}))
+        .patch_run(&run, json!({"storage": {"mode": "on-demand"}}))
         .await
         .unwrap();
     lost_ack.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -3084,12 +3692,16 @@ async fn growing_a_disk_preserves_publication_identity_and_releases_its_previous
     };
     let owner = Owner::new().await;
     let run = id();
-    let record = json!({"id":run});
+    let record = json!({"id": run});
     let token = disk_grants::new_disk(&owner.service, &record, LOCAL_NODE_ID)
         .await
         .unwrap();
     let directory = owner._root.path().join("disks").join(&run);
-    let mut context = json!({"master":"http://127.0.0.1:1/","grant":token,"policy":Policy {reserve_mi_b:64,reserve_percent:1,..Default::default()}});
+    let mut context = json!({
+        "master": "http://127.0.0.1:1/",
+        "grant": token,
+        "policy": Policy {reserve_mi_b:64,reserve_percent:1,..Default::default()}
+    });
     let stop = tokio_util::sync::CancellationToken::new();
     bootstrap::prepare(&directory, 128 * 1024 * 1024, &context, &stop)
         .await
@@ -3097,7 +3709,13 @@ async fn growing_a_disk_preserves_publication_identity_and_releases_its_previous
     let volume = runtime::load(&directory).await.unwrap();
     volume.seal().await.unwrap();
     let generation = volume.seal().await.unwrap();
-    let previous = json!({"id":id(),"runId":run,"nodeId":LOCAL_NODE_ID,"destination":"s3","diskGeneration":generation});
+    let previous = json!({
+        "id": id(),
+        "runId": run,
+        "nodeId": LOCAL_NODE_ID,
+        "destination": "s3",
+        "diskGeneration": generation
+    });
     disk_grants::acknowledged(&owner.service, &auth::digest(&token), &previous)
         .await
         .unwrap();
@@ -3121,7 +3739,13 @@ async fn growing_a_disk_preserves_publication_identity_and_releases_its_previous
         next > generation,
         "publication generations must remain monotone"
     );
-    let replacement = json!({"id":id(),"runId":run,"nodeId":LOCAL_NODE_ID,"destination":"s3","diskGeneration":next});
+    let replacement = json!({
+        "id": id(),
+        "runId": run,
+        "nodeId": LOCAL_NODE_ID,
+        "destination": "s3",
+        "diskGeneration": next
+    });
     disk_grants::extend(&owner.service, &volume.source.grant_id(), &replacement)
         .await
         .unwrap();
@@ -3160,17 +3784,27 @@ async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
         owner
             .service
             .store
-            .put("nodes", json!({"id":node,"revoked":false}))
+            .put("nodes", json!({"id": node,"revoked": false}))
             .await
             .unwrap();
     }
     owner
         .service
         .store
-        .put("agents", json!({"id":agent,"access":{"nodes":[node,next]}}))
+        .put(
+            "agents",
+            json!({"id": agent,"access": {"nodes": [node,next]}}),
+        )
         .await
         .unwrap();
-    let record = json!({"id":run,"taskId":"fixture","createdAt":0,"status":"succeeded","nodeId":node,"snapshot":{"agent":{"id":agent}}});
+    let record = json!({
+        "id": run,
+        "taskId": "fixture",
+        "createdAt": 0,
+        "status": "succeeded",
+        "nodeId": node,
+        "snapshot": {"agent": {"id": agent}}
+    });
     let record_copy = record.clone();
     owner
         .service
@@ -3183,8 +3817,21 @@ async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
         let data = vec![byte; 4096];
         let hash = hex::encode(Sha256::digest(&data));
         let point = id();
-        let manifest = json!({"version":1,"size":4096,"blockSize":snapshots::BLOCK,"blocks":[{"offset":0,"size":4096,"hash":hash}]});
-        let backup = json!({"id":point,"runId":run,"nodeId":node,"destination":"s3","diskGeneration":points.len()+1,"bucket":"fixture","manifest":owner.service.vault.encrypt(&format!("backup:{point}"),&manifest).unwrap()});
+        let manifest = json!({
+            "version": 1,
+            "size": 4096,
+            "blockSize": snapshots::BLOCK,
+            "blocks": [{"offset": 0,"size": 4096,"hash": hash}]
+        });
+        let backup = json!({
+            "id": point,
+            "runId": run,
+            "nodeId": node,
+            "destination": "s3",
+            "diskGeneration": points.len()+1,
+            "bucket": "fixture",
+            "manifest": owner.service.vault.encrypt(&format!("backup:{point}"),&manifest).unwrap()
+        });
         owner
             .service
             .store
@@ -3270,7 +3917,7 @@ async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
     owner
         .service
         .store
-        .patch_run(&run, json!({"nodeId":next}))
+        .patch_run(&run, json!({"nodeId": next}))
         .await
         .unwrap();
     assert!(!permits(&owner, &credential, &points[1]).await);
@@ -3294,8 +3941,13 @@ async fn corrupted_recovery_ciphertext_is_terminal_and_invalidates_the_baseline(
     use sha2::{Digest, Sha256};
     let owner = Owner::new().await;
     let run = id();
-    let record = json!({"id":run,"taskId":"fixture","createdAt":0,"status":"succeeded",
-        "backup":{"snapshotId":"previous"}});
+    let record = json!({
+        "id": run,
+        "taskId": "fixture",
+        "createdAt": 0,
+        "status": "succeeded",
+        "backup": {"snapshotId": "previous"}
+    });
     owner
         .service
         .store
@@ -3313,7 +3965,7 @@ async fn corrupted_recovery_ciphertext_is_terminal_and_invalidates_the_baseline(
     std::fs::write(&path, encoded).unwrap();
     let error = publication::read_block(
         &owner.service,
-        &json!({"runId":run,"destination":"master"}),
+        &json!({"runId": run,"destination": "master"}),
         &hash,
     )
     .await
@@ -3335,7 +3987,12 @@ async fn publication_cleanup_preserves_current_and_in_use_blocks_then_reclaims_i
     use sha2::{Digest, Sha256};
     let owner = Owner::new().await;
     let run = id();
-    let record = json!({"id":run,"taskId":"fixture","createdAt":0,"status":"succeeded"});
+    let record = json!({
+        "id": run,
+        "taskId": "fixture",
+        "createdAt": 0,
+        "status": "succeeded"
+    });
     owner
         .service
         .store
@@ -3359,17 +4016,32 @@ async fn publication_cleanup_preserves_current_and_in_use_blocks_then_reclaims_i
     let mut ids = Vec::new();
     for (generation, hash) in [&old, &new].into_iter().enumerate() {
         let point = id();
-        let manifest = json!({"version":1,"size":2*snapshots::BLOCK,"blockSize":snapshots::BLOCK,"blocks":[
-            {"offset":0,"size":snapshots::BLOCK,"hash":shared},
-            {"offset":snapshots::BLOCK,"size":snapshots::BLOCK,"hash":hash}]});
-        owner.service.store.put("node-backups", json!({"id":point,"runId":run,"destination":"master",
-            "createdAt":100-generation,"manifest":owner.service.vault.encrypt(&format!("backup:{point}"), &manifest).unwrap()})).await.unwrap();
+        let manifest = json!({
+            "version": 1,
+            "size": 2*snapshots::BLOCK,
+            "blockSize": snapshots::BLOCK,
+            "blocks": [
+            {"offset": 0,"size": snapshots::BLOCK,"hash": shared},
+            {"offset": snapshots::BLOCK,"size": snapshots::BLOCK,"hash": hash}]
+        });
+        owner
+            .service
+            .store
+            .put("node-backups", json!({
+                "id": point,
+                "runId": run,
+                "destination": "master",
+                "createdAt": 100-generation,
+                "manifest": owner.service.vault.encrypt(&format!("backup:{point}"), &manifest).unwrap()
+            }))
+            .await
+            .unwrap();
         ids.push(point);
     }
     owner
         .service
         .store
-        .patch_run(&run, json!({"backup":{"id":ids[1]}}))
+        .patch_run(&run, json!({"backup": {"id": ids[1]}}))
         .await
         .unwrap();
     let grant = id();
@@ -3378,14 +4050,14 @@ async fn publication_cleanup_preserves_current_and_in_use_blocks_then_reclaims_i
         .store
         .put(
             "node-disk-grants",
-            json!({"id":grant,"runId":run,"backups":[ids[0]]}),
+            json!({"id": grant,"runId": run,"backups": [ids[0]]}),
         )
         .await
         .unwrap();
     owner
         .service
         .store
-        .set("node-backup-settings", json!({"retention":100}), None)
+        .set("node-backup-settings", json!({"retention": 100}), None)
         .await
         .unwrap();
     assert!(
@@ -3530,7 +4202,7 @@ async fn interrupted_first_publication_is_collected_after_restart_without_anothe
                 if request.uri().path().ends_with("/snapshot") {
                     signal.notify_one();
                     wait.notified().await;
-                    return axum::Json(json!({"id":id(),"manifest":data})).into_response();
+                    return axum::Json(json!({"id": id(),"manifest": data})).into_response();
                 }
                 snapshots::block(
                     &disk,
@@ -3547,7 +4219,14 @@ async fn interrupted_first_publication_is_collected_after_restart_without_anothe
         let server = tokio::spawn(async move { axum::serve(listener, runner).await.unwrap() });
         let owner = Owner::with_runner("localhost:4310".into(), url).await;
         let (run, attempt) = (id(), id());
-        let record = json!({"id":run,"taskId":run,"createdAt":0,"status":"succeeded","sessionId":"session","nodeId":LOCAL_NODE_ID});
+        let record = json!({
+            "id": run,
+            "taskId": run,
+            "createdAt": 0,
+            "status": "succeeded",
+            "sessionId": "session",
+            "nodeId": LOCAL_NODE_ID
+        });
         let saved = record.clone();
         owner
             .service
@@ -3560,7 +4239,7 @@ async fn interrupted_first_publication_is_collected_after_restart_without_anothe
             .store
             .set(
                 &format!("run-checkpoint:{run}"),
-                json!({"nodeId":LOCAL_NODE_ID,"runnerId":attempt}),
+                json!({"nodeId": LOCAL_NODE_ID,"runnerId": attempt}),
                 None,
             )
             .await
@@ -3574,7 +4253,7 @@ async fn interrupted_first_publication_is_collected_after_restart_without_anothe
             .store
             .set(
                 &format!("run-checkpoint:{run}"),
-                json!({"nodeId":LOCAL_NODE_ID,"runnerId":id()}),
+                json!({"nodeId": LOCAL_NODE_ID,"runnerId": id()}),
                 None,
             )
             .await

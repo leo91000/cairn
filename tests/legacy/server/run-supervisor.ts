@@ -7,6 +7,7 @@ let child: ReturnType<typeof spawn> | undefined
 let stopping = false
 let finished = false
 let timer: NodeJS.Timeout | undefined
+
 function stop() {
   if (stopping || finished)
     return
@@ -17,17 +18,21 @@ function stop() {
       process.disconnect()
     return
   }
+
   const signal = (value: NodeJS.Signals) => {
     try {
       if (process.platform === 'win32')
         child!.kill(value)
-      else process.kill(-child!.pid!, value)
+      else
+        process.kill(-child!.pid!, value)
     }
     catch { /* The process already exited. */ }
   }
+
   signal('SIGTERM')
   timer = setTimeout(signal, 2000, 'SIGKILL')
 }
+
 process.on('disconnect', stop)
 process.on('SIGTERM', stop)
 process.on('SIGINT', stop)

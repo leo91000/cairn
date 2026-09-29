@@ -4,7 +4,12 @@ import type { ExecutionNode } from '../../shared/nodes'
 import { computed, ref } from 'vue'
 import { MAIN_AGENT_ID } from '../../shared/constants'
 import { DEFAULT_RESOURCES, LOCAL_NODE_ID } from '../../shared/nodes'
-import { api, notify, refresh, state } from '../api'
+import {
+  api,
+  notify,
+  refresh,
+  state,
+} from '../api'
 import AgentAvatar from '../components/AgentAvatar.vue'
 import AgentPortraitEditor from '../components/AgentPortraitEditor.vue'
 import AssistantPicker from '../components/AssistantPicker.vue'
@@ -15,7 +20,15 @@ import Modal from '../components/Modal.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
 import VirtualSelect from '../components/VirtualSelect.vue'
-import { FolderGit2, GitBranch, MessageCircle, Pencil, Plus, ShieldCheck, Trash2 } from '../icons'
+import {
+  FolderGit2,
+  GitBranch,
+  MessageCircle,
+  Pencil,
+  Plus,
+  ShieldCheck,
+  Trash2,
+} from '../icons'
 import { iconButton } from '../ui'
 
 const props = defineProps<{
@@ -30,8 +43,10 @@ const taskCounts = computed(() => {
     if (task.projectId && !task.archived)
       counts.set(task.projectId, (counts.get(task.projectId) || 0) + 1)
   }
+
   return counts
 })
+
 function repositoryLabel(origin?: string) {
   if (!origin)
     return 'Local project'
@@ -43,6 +58,7 @@ function repositoryLabel(origin?: string) {
     return 'Git repository'
   }
 }
+
 const editing = ref<string | null>(null)
 const open = ref(false)
 const deleting = ref<any>(null)
@@ -62,6 +78,7 @@ const limited = computed({
     form.value.access.maxResources = value ? { ...DEFAULT_RESOURCES } : null
   },
 })
+
 function limitGiB(key: 'memoryMiB' | 'diskMiB') {
   return computed({
     get: () => form.value.access.maxResources[key] / 1024,
@@ -70,16 +87,19 @@ function limitGiB(key: 'memoryMiB' | 'diskMiB') {
     },
   })
 }
+
 const limitMemoryGiB = limitGiB('memoryMiB')
 const limitDiskGiB = limitGiB('diskMiB')
 const projectMode = ref('local')
 const repository = ref('')
+
 function selectRepository(repo: GithubRepository) {
   repository.value = repo.fullName
   form.value.name = repo.name.slice(0, 100)
   form.value.description = repo.description.slice(0, 500)
   form.value.baseBranch = repo.defaultBranch
 }
+
 const githubImport = computed(() => !isAgent.value && !editing.value && projectMode.value === 'github')
 const githubToken = ref('')
 const githubConfigured = ref(false)
@@ -89,15 +109,22 @@ const sandboxOptions = [
   { value: 'workspace-write', label: 'Workspace write', description: 'Limit writes to task workspaces' },
   { value: 'read-only', label: 'Read only', description: 'Project mounts are read-only; no approval escalation' },
 ]
-const allProjects = computed({ get: () => form.value.access?.projects === null, set: (value: boolean) => {
-  form.value.access.projects = value ? null : []
-  if (!value)
-    form.value.access.github = false
-} })
-const allMcps = computed({ get: () => form.value.access?.mcps === null, set: (value: boolean) => {
-  form.value.access.mcps = value ? null : []
-  form.value.access.mcpTools = {}
-} })
+const allProjects = computed({
+  get: () => form.value.access?.projects === null,
+  set: (value: boolean) => {
+    form.value.access.projects = value ? null : []
+    if (!value)
+      form.value.access.github = false
+  },
+})
+const allMcps = computed({
+  get: () => form.value.access?.mcps === null,
+  set: (value: boolean) => {
+    form.value.access.mcps = value ? null : []
+    form.value.access.mcpTools = {}
+  },
+})
+
 function toggleMcp(id: string, enabled: boolean) {
   if (enabled) {
     form.value.access.mcps.push(id)
@@ -107,10 +134,15 @@ function toggleMcp(id: string, enabled: boolean) {
     delete form.value.access.mcpTools[id]
   }
 }
-const allSkills = computed({ get: () => form.value.access?.skills === null, set: (value: boolean) => {
-  form.value.access.skills = value ? null : []
-} })
+
+const allSkills = computed({
+  get: () => form.value.access?.skills === null,
+  set: (value: boolean) => {
+    form.value.access.skills = value ? null : []
+  },
+})
 const permittedSkills = computed(() => state.skills.filter(skill => skill.valid && (skill.scope === 'global' || form.value.access?.projects === null || form.value.access?.projects?.includes(skill.scope))))
+
 async function edit(item?: any) {
   projectMode.value = 'local'
   repository.value = ''
@@ -129,9 +161,24 @@ async function edit(item?: any) {
           reasoning: '',
           instructions: '',
           timeoutMinutes: 0,
-          access: { nodes: [LOCAL_NODE_ID], maxResources: null, projects: null, skills: null, mcps: null, mcpTools: {}, github: true, sandbox: 'yolo' },
+          access: {
+            nodes: [LOCAL_NODE_ID],
+            maxResources: null,
+            projects: null,
+            skills: null,
+            mcps: null,
+            mcpTools: {},
+            github: true,
+            sandbox: 'yolo',
+          },
         }
-      : { name: '', description: '', path: '', baseBranch: 'main', sourceMode: 'remote' }
+      : {
+          name: '',
+          description: '',
+          path: '',
+          baseBranch: 'main',
+          sourceMode: 'remote',
+        }
   if (isAgent.value) {
     form.value.provider ??= 'codex'
     form.value.access.nodes ??= form.value.access.nodes === null ? null : [LOCAL_NODE_ID]
@@ -143,6 +190,7 @@ async function edit(item?: any) {
       return
     }
   }
+
   if (!isAgent.value)
     form.value.sourceMode ??= 'remote'
   error.value = ''
@@ -159,6 +207,7 @@ async function edit(item?: any) {
     }
   }
 }
+
 async function save() {
   if (busy.value || (githubImport.value && !repository.value))
     return
@@ -167,7 +216,14 @@ async function save() {
   try {
     const saved = await api(githubImport.value ? '/projects/github' : `/${props.kind}${editing.value ? `/${editing.value}` : ''}`, {
       method: editing.value ? 'PUT' : 'POST',
-      body: JSON.stringify(githubImport.value ? { repository: repository.value, name: form.value.name, description: form.value.description, baseBranch: form.value.baseBranch } : form.value),
+      body: JSON.stringify(githubImport.value
+        ? {
+            repository: repository.value,
+            name: form.value.name,
+            description: form.value.description,
+            baseBranch: form.value.baseBranch,
+          }
+        : form.value),
     })
     if (isAgent.value && (githubToken.value || removeGithub.value))
       await api(`/agents/${saved.id}/github-token`, { method: 'PUT', body: JSON.stringify({ token: removeGithub.value ? '' : githubToken.value }) })
@@ -183,6 +239,7 @@ async function save() {
     busy.value = false
   }
 }
+
 async function remove() {
   try {
     await api(`/${props.kind}/${deleting.value.id}`, { method: 'DELETE' })
@@ -209,7 +266,12 @@ async function remove() {
     {{ error }}
   </UiAlert>
   <div v-if="items.length" class="resource-grid grid" :class="isAgent ? 'grid-cols-2 gap-4 tablet:grid-cols-1' : 'grid-cols-1 border-t border-line'">
-    <article v-for="item in items" :key="item.id" class="resource-card grid min-w-0 gap-x-3" :class="isAgent ? 'grid-cols-[36px_minmax(0,1fr)] grid-rows-[1fr_auto] gap-y-4 rounded-xl border border-line/70 bg-surface/50 p-5 phone:p-4' : 'grid-cols-[36px_minmax(0,1fr)_auto] items-center border-b border-line py-4 phone:items-start phone:gap-y-2'">
+    <article
+      v-for="item in items"
+      :key="item.id"
+      class="resource-card grid min-w-0 gap-x-3"
+      :class="isAgent ? 'grid-cols-[36px_minmax(0,1fr)] grid-rows-[1fr_auto] gap-y-4 rounded-xl border border-line/70 bg-surface/50 p-5 phone:p-4' : 'grid-cols-[36px_minmax(0,1fr)_auto] items-center border-b border-line py-4 phone:items-start phone:gap-y-2'"
+    >
       <AgentAvatar v-if="isAgent" :name="item.name" :identity="item.id" />
       <span v-else class="grid size-9 place-items-center rounded-lg text-accent bg-soft"><Icon :name="FolderGit2" :size="20" /></span>
       <div class="min-w-0" :class="!isAgent ? 'flex items-center gap-5 phone:block' : ''">
@@ -240,10 +302,21 @@ async function remove() {
           <Icon :name="MessageCircle" :size="15" />Start chat
         </RouterLink>
         <div class="flex items-center gap-1">
-          <button :class="iconButton" :aria-label="`Edit ${item.name}`" :title="`Edit ${item.name}`" @click="edit(item)">
+          <button
+            :class="iconButton"
+            :aria-label="`Edit ${item.name}`"
+            :title="`Edit ${item.name}`"
+            @click="edit(item)"
+          >
             <Icon :name="Pencil" :size="15" />
           </button>
-          <button v-if="item.id !== MAIN_AGENT_ID" :class="iconButton" :aria-label="`Delete ${item.name}`" :title="`Delete ${item.name}`" @click="deleting = item">
+          <button
+            v-if="item.id !== MAIN_AGENT_ID"
+            :class="iconButton"
+            :aria-label="`Delete ${item.name}`"
+            :title="`Delete ${item.name}`"
+            @click="deleting = item"
+          >
             <Icon :name="Trash2" :size="15" />
           </button>
         </div>
@@ -269,10 +342,26 @@ async function remove() {
   >
     <form @submit.prevent="save">
       <div class="modal-body form-grid grid grid-cols-[1fr_1fr] gap-5 phone:grid-cols-1 phone:gap-4.5 px-6.5 py-6 phone:p-5">
-        <AgentPortraitEditor v-if="isAgent" :key="editing || 'new'" :agent-id="editing" :name="form.name" :disabled="busy" />
+        <AgentPortraitEditor
+          v-if="isAgent"
+          :key="editing || 'new'"
+          :agent-id="editing"
+          :name="form.name"
+          :disabled="busy"
+        />
         <div v-if="!isAgent && !editing" class="col-span-2 phone:col-span-1 grid gap-4">
-          <VirtualSelect v-model="projectMode" label="Add from" :disabled="busy" :options="[{ value: 'local', label: 'Server directory' }, { value: 'github', label: 'GitHub' }]" />
-          <GithubRepositoryPicker v-if="githubImport" :disabled="busy" :selected="repository" @select="selectRepository" />
+          <VirtualSelect
+            v-model="projectMode"
+            label="Add from"
+            :disabled="busy"
+            :options="[{ value: 'local', label: 'Server directory' }, { value: 'github', label: 'GitHub' }]"
+          />
+          <GithubRepositoryPicker
+            v-if="githubImport"
+            :disabled="busy"
+            :selected="repository"
+            @select="selectRepository"
+          />
         </div>
         <label class="span-2 col-span-2 phone:col-span-1">Name<input
           v-model="form.name"
@@ -288,7 +377,13 @@ async function remove() {
           maxlength="500"
           placeholder="A short reminder of what this is for."
         /></label><template v-if="isAgent">
-          <AssistantPicker v-model:provider="form.provider" v-model:model="form.model" v-model:reasoning="form.reasoning" variant="field" :disabled="busy" /><div class="span-2 col-span-2 phone:col-span-1 agent-access-panel">
+          <AssistantPicker
+            v-model:provider="form.provider"
+            v-model:model="form.model"
+            v-model:reasoning="form.reasoning"
+            variant="field"
+            :disabled="busy"
+          /><div class="span-2 col-span-2 phone:col-span-1 agent-access-panel">
             <div class="agent-access-heading">
               <Icon :name="ShieldCheck" :size="20" /><div><h3>Access &amp; execution</h3><p>Choose the resources this agent can use.</p></div>
             </div>
@@ -305,7 +400,12 @@ async function remove() {
               <fieldset class="access-choices">
                 <legend>MCP permissions</legend>
                 <div v-for="connection in state.mcps" :key="connection.id">
-                  <label class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input type="checkbox" :checked="allMcps || form.access.mcps.includes(connection.id)" :disabled="allMcps" @change="toggleMcp(connection.id, ($event.target as HTMLInputElement).checked)">{{ connection.name }}</label>
+                  <label class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input
+                    type="checkbox"
+                    :checked="allMcps || form.access.mcps.includes(connection.id)"
+                    :disabled="allMcps"
+                    @change="toggleMcp(connection.id, ($event.target as HTMLInputElement).checked)"
+                  >{{ connection.name }}</label>
                   <details v-if="allMcps || form.access.mcps.includes(connection.id)" class="mcp-agent-tools mt-[7px] mr-0 mb-4 ml-6 text-xs">
                     <summary>Tool access</summary>
                     <label class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input type="checkbox" :checked="!(connection.id in form.access.mcpTools)" @change="($event.target as HTMLInputElement).checked ? delete form.access.mcpTools[connection.id] : form.access.mcpTools[connection.id] = []">All enabled tools</label>
@@ -317,7 +417,12 @@ async function remove() {
                 <small v-if="!state.mcps.length">Add connections in MCPs first.</small>
               </fieldset>
               <label class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input v-model="form.access.github" type="checkbox" :disabled="!allProjects">Shared GitHub connection</label>
-              <label v-if="!form.access.github">Dedicated GitHub token<input v-model="githubToken" type="password" autocomplete="new-password" :placeholder="githubConfigured ? 'Saved token · leave blank to keep' : 'Optional fine-grained GitHub token'"><small>Select only this agent’s repositories and permissions when creating the token on GitHub. Its remote permissions are determined by the token.</small></label>
+              <label v-if="!form.access.github">Dedicated GitHub token<input
+                v-model="githubToken"
+                type="password"
+                autocomplete="new-password"
+                :placeholder="githubConfigured ? 'Saved token · leave blank to keep' : 'Optional fine-grained GitHub token'"
+              ><small>Select only this agent’s repositories and permissions when creating the token on GitHub. Its remote permissions are determined by the token.</small></label>
               <label v-if="githubConfigured && !form.access.github" class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input v-model="removeGithub" type="checkbox">Remove saved GitHub token</label>
               <small>Shared GitHub credentials can access other repositories, so they are available only to agents with all-project access. Restricted agents receive only their selected MCP connections.</small>
             </template>
@@ -333,11 +438,33 @@ async function remove() {
             <label class="checkbox"><input v-model="limited" type="checkbox">Limit the resources this agent can request per conversation</label>
             <fieldset v-if="limited" class="access-choices">
               <legend>Largest conversation</legend>
-              <label>CPU<input v-model.number="form.access.maxResources.cpu" type="number" min="1" required></label>
-              <label>RAM (GiB)<input v-model.number="limitMemoryGiB" type="number" min="0.125" step="any" required></label>
-              <label>Disk (GiB)<input v-model.number="limitDiskGiB" type="number" min="0.125" step="any" required></label>
+              <label>CPU<input
+                v-model.number="form.access.maxResources.cpu"
+                type="number"
+                min="1"
+                required
+              ></label>
+              <label>RAM (GiB)<input
+                v-model.number="limitMemoryGiB"
+                type="number"
+                min="0.125"
+                step="any"
+                required
+              ></label>
+              <label>Disk (GiB)<input
+                v-model.number="limitDiskGiB"
+                type="number"
+                min="0.125"
+                step="any"
+                required
+              ></label>
             </fieldset>
-            <VirtualSelect v-model="form.access.sandbox" label="Execution mode" :options="sandboxOptions" :icon="ShieldCheck" />
+            <VirtualSelect
+              v-model="form.access.sandbox"
+              label="Execution mode"
+              :options="sandboxOptions"
+              :icon="ShieldCheck"
+            />
             <p class="muted text-muted">
               YOLO is the default. Every agent runs in a private VM. Sandboxed runs never bypass denied operations or wait for unattended approvals.
             </p>
@@ -360,7 +487,12 @@ async function remove() {
           />
           </label>
         </template><template v-else>
-          <VirtualSelect v-if="!githubImport" v-model="form.sourceMode" label="New work starts from" :options="[{ value: 'remote', label: 'Latest remote branch', description: 'Fetch a fresh copy; local files stay untouched' }, { value: 'local', label: 'Local branch snapshot', description: 'Use committed files from the local branch' }]" />
+          <VirtualSelect
+            v-if="!githubImport"
+            v-model="form.sourceMode"
+            label="New work starts from"
+            :options="[{ value: 'remote', label: 'Latest remote branch', description: 'Fetch a fresh copy; local files stay untouched' }, { value: 'local', label: 'Local branch snapshot', description: 'Use committed files from the local branch' }]"
+          />
           <label v-if="!githubImport" class="span-2 col-span-2 phone:col-span-1">Project directory<input
             v-model="form.path"
             required

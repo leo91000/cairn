@@ -26,7 +26,8 @@ async fn service(root: &TempDir, origin: String, runner: String) -> Arc<Service>
         std::fs::create_dir_all(root.path().join("data")).unwrap();
         std::fs::write(
             root.path().join("data/storage-s3.json"),
-            json!({"bucket":"leo-node-test","endpoint":endpoint,"region":"us-east-1"}).to_string(),
+            json!({"bucket": "leo-node-test","endpoint": endpoint,"region": "us-east-1"})
+                .to_string(),
         )
         .unwrap();
     }
@@ -60,10 +61,13 @@ async fn backup_lookup_with_many_conversations() {
             for index in 0..20_000 {
                 db.put(
                     "node-backups",
-                    &json!({"id":format!("other-{index}"),"runId":format!("run-{index}")}),
+                    &json!({"id": format!("other-{index}"),"runId": format!("run-{index}")}),
                 )?;
             }
-            db.put("node-backups", &json!({"id":"wanted","runId":"wanted-run"}))?;
+            db.put(
+                "node-backups",
+                &json!({"id": "wanted","runId": "wanted-run"}),
+            )?;
             Ok(())
         })
         .await
@@ -84,15 +88,15 @@ async fn backup_lookup_is_scoped_to_one_conversation() {
     let root = TempDir::new().unwrap();
     let store = Store::open(root.path()).unwrap();
     store
-        .put("node-backups", json!({"id":"a","runId":"one"}))
+        .put("node-backups", json!({"id": "a","runId": "one"}))
         .await
         .unwrap();
     store
-        .put("node-backups", json!({"id":"b","runId":"two"}))
+        .put("node-backups", json!({"id": "b","runId": "two"}))
         .await
         .unwrap();
     store
-        .put("other-kind", json!({"id":"c","runId":"one"}))
+        .put("other-kind", json!({"id": "c","runId": "one"}))
         .await
         .unwrap();
     let found = store.node_backups_for_run("one").await.unwrap();
@@ -139,7 +143,7 @@ async fn outbound_transfer_with_ack_latency() {
         let s = service(&root, origin.clone(), String::new()).await;
         let (node, token) = (id(), auth::token());
         s.store
-            .put("nodes", json!({"id":node,"revoked":false}))
+            .put("nodes", json!({"id": node,"revoked": false}))
             .await
             .unwrap();
         s.store
@@ -204,8 +208,12 @@ async fn outbound_transfer_with_ack_latency() {
                 "outbound",
                 elapsed,
                 before,
-                json!({"sample":sample,"latencyMs":latency_ms,
-                "bytes":bytes.len(),"mibPerSecond":4.0/elapsed.as_secs_f64()}),
+                json!({
+                    "sample": sample,
+                    "latencyMs": latency_ms,
+                    "bytes": bytes.len(),
+                    "mibPerSecond": 4.0/elapsed.as_secs_f64()
+                }),
             );
         }
         stop.cancel();
@@ -227,7 +235,7 @@ async fn master_reuses_unchanged_blocks() {
     }
     std::fs::write(&disk, &bytes).unwrap();
     let mut manifest = snapshots::index(&disk).await.unwrap();
-    manifest["runtime"] = json!({"runtimeId":"fixture"});
+    manifest["runtime"] = json!({"runtimeId": "fixture"});
     manifest["capturedAt"] = now().into();
     let state = Arc::new(RwLock::new(manifest));
     let (source, data) = (disk.clone(), state.clone());
@@ -235,11 +243,11 @@ async fn master_reuses_unchanged_blocks() {
         let (source, data) = (source.clone(), data.clone());
         async move {
             if request.method() == "DELETE" {
-                return axum::Json(json!({"ok":true})).into_response();
+                return axum::Json(json!({"ok": true})).into_response();
             }
             let manifest = data.read().await.clone();
             if request.uri().path().ends_with("/snapshot") {
-                return axum::Json(json!({"id":id(),"manifest":manifest})).into_response();
+                return axum::Json(json!({"id": id(),"manifest": manifest})).into_response();
             }
             snapshots::block(
                 &source,
@@ -256,8 +264,13 @@ async fn master_reuses_unchanged_blocks() {
     let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let s = service(&root, "http://localhost:4310".into(), runner).await;
     let run = id();
-    let record =
-        json!({"id":run,"taskId":run,"createdAt":now(),"status":"running","sessionId":"fixture"});
+    let record = json!({
+        "id": run,
+        "taskId": run,
+        "createdAt": now(),
+        "status": "running",
+        "sessionId": "fixture"
+    });
     let saved = record.clone();
     s.store
         .write(move |db| db.add_run(&saved, None))
@@ -266,7 +279,7 @@ async fn master_reuses_unchanged_blocks() {
     s.store
         .set(
             &format!("run-checkpoint:{run}"),
-            json!({"nodeId":LOCAL_NODE_ID,"runnerId":id()}),
+            json!({"nodeId": LOCAL_NODE_ID,"runnerId": id()}),
             None,
         )
         .await
@@ -277,7 +290,7 @@ async fn master_reuses_unchanged_blocks() {
                 bytes[..4 * 1024 * 1024].fill(100 + sample);
                 std::fs::write(&disk, &bytes).unwrap();
                 let mut manifest = snapshots::index(&disk).await.unwrap();
-                manifest["runtime"] = json!({"runtimeId":"fixture"});
+                manifest["runtime"] = json!({"runtimeId": "fixture"});
                 manifest["capturedAt"] = now().into();
                 *state.write().await = manifest;
             }
@@ -290,7 +303,7 @@ async fn master_reuses_unchanged_blocks() {
                 kind,
                 started.elapsed(),
                 before,
-                json!({"sample":sample,"uploadedBytes":result["uploadedBytes"]}),
+                json!({"sample": sample,"uploadedBytes": result["uploadedBytes"]}),
             );
             if kind == "base" {
                 let blocks = s

@@ -108,10 +108,12 @@ class LeoApi(val origin: HttpUrl, vault: SessionVault, client: OkHttpClient = Ok
             .callTimeout(java.time.Duration.ofMinutes(10))
             .readTimeout(java.time.Duration.ofSeconds(45))
             .build()
-    private val imports = http.newBuilder()
-        .callTimeout(java.time.Duration.ofMinutes(4))
-        .readTimeout(java.time.Duration.ofMinutes(4))
-        .build()
+    private val imports =
+        http
+            .newBuilder()
+            .callTimeout(java.time.Duration.ofMinutes(4))
+            .readTimeout(java.time.Duration.ofMinutes(4))
+            .build()
     internal val streamCalls = java.util.concurrent.ConcurrentHashMap.newKeySet<Call>()
     internal val streamGeneration = java.util.concurrent.atomic.AtomicLong()
     @Volatile var csrf: String = ""
@@ -178,7 +180,8 @@ class LeoApi(val origin: HttpUrl, vault: SessionVault, client: OkHttpClient = Ok
     }
 
     suspend fun agentPortrait(id: String, revision: String): ByteArray =
-        exchange(builder("/agents/${segment(id)}/avatar?v=${segment(revision)}").get().build()) { response ->
+        exchange(builder("/agents/${segment(id)}/avatar?v=${segment(revision)}").get().build()) {
+            response ->
             checkResponse(response)
             val bytes = response.body.byteStream().use { readPortraitBytes(it, 512 * 1024) }
             require(bytes.size <= 512 * 1024) { "Le portrait est trop volumineux." }
@@ -187,8 +190,11 @@ class LeoApi(val origin: HttpUrl, vault: SessionVault, client: OkHttpClient = Ok
 
     suspend fun uploadAgentPortrait(id: String, bytes: ByteArray): Agent {
         require(bytes.size <= 5 * 1024 * 1024) { "Choisissez une image de moins de 5 Mo." }
-        return exchange(builder("/agents/${segment(id)}/avatar")
-            .put(bytes.toRequestBody("application/octet-stream".toMediaType())).build()) { response ->
+        return exchange(
+            builder("/agents/${segment(id)}/avatar")
+                .put(bytes.toRequestBody("application/octet-stream".toMediaType()))
+                .build()
+        ) { response ->
             checkResponse(response)
             wireJson.decodeFromString<Agent>(response.body.string())
         }

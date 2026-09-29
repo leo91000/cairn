@@ -15,5 +15,6 @@ export function newerTool(tool, current, available) {
     if (left[index] !== right[index])
       return right[index] > left[index] ? available : current
   }
+
   return current
 }

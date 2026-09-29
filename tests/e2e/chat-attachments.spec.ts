@@ -1,6 +1,12 @@
 import { Buffer } from 'node:buffer'
 import { readFileSync } from 'node:fs'
-import { expect, expectChatReady, expectSingleScroll, initializeRepository, test } from './fixtures'
+import {
+  expect,
+  expectChatReady,
+  expectSingleScroll,
+  initializeRepository,
+  test,
+} from './fixtures'
 
 test('uploads images and files, previews them and preserves attachments while editing the queue', async ({ page, workspace }) => {
   initializeRepository(workspace.projectPath)

@@ -15,6 +15,7 @@ pub mod snapshots;
 pub mod storage;
 pub mod transport;
 pub mod workspace;
+
 use crate::{
     auth::{digest, token},
     config::{id, now},
@@ -54,6 +55,7 @@ pub struct Resources {
     pub memory_mi_b: u64,
     pub disk_mi_b: u64,
 }
+
 impl Resources {
     pub(crate) fn validate(&self) -> Result<()> {
         if !(1..=4096).contains(&self.cpu)
@@ -65,6 +67,7 @@ impl Resources {
         Ok(())
     }
 }
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Capabilities {
@@ -79,6 +82,7 @@ struct Capabilities {
     #[serde(default)]
     disk_total_mi_b: u64,
 }
+
 impl Capabilities {
     fn validate(&self) -> Result<()> {
         if self.os != "linux" || self.arch != "x86_64" {
@@ -86,6 +90,7 @@ impl Capabilities {
         }
         self.resources().validate()
     }
+
     fn resources(&self) -> Resources {
         Resources {
             cpu: self.cpu,
@@ -93,6 +98,7 @@ impl Capabilities {
             disk_mi_b: self.disk_mi_b,
         }
     }
+
     fn limits(&self) -> Resources {
         Resources {
             cpu: self.cpu.saturating_sub(1).max(1),
@@ -100,6 +106,7 @@ impl Capabilities {
             disk_mi_b: (self.disk_mi_b * 4 / 5).max(128),
         }
     }
+
     fn tags(&self) -> Value {
         if self.kvm {
             json!(["linux", "x86_64", "kvm"])
@@ -107,6 +114,7 @@ impl Capabilities {
             json!(["linux", "x86_64"])
         }
     }
+
     fn value(&self) -> Value {
         let mut value = json!(self.resources());
         value["os"] = self.os.clone().into();
@@ -117,6 +125,7 @@ impl Capabilities {
         value
     }
 }
+
 pub(crate) fn valid_runtime(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 100
@@ -124,9 +133,11 @@ pub(crate) fn valid_runtime(value: &str) -> bool {
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || c == b'-')
 }
+
 fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T> {
     serde_json::from_value(value).map_err(|_| Error::bad("Invalid node request."))
 }
+
 fn name(value: &str) -> Result<String> {
     let value = value.trim();
     if value.is_empty() || value.chars().count() > 100 || value.chars().any(char::is_control) {
@@ -136,6 +147,7 @@ fn name(value: &str) -> Result<String> {
     }
     Ok(value.into())
 }
+
 fn public(mut node: Value) -> Value {
     node["status"] = if node["revoked"] == true {
         "revoked"
@@ -152,6 +164,7 @@ fn public(mut node: Value) -> Value {
     .into();
     node
 }
+
 /// Disk kept on nodes that no conversation needs there any more: the whole disk of a
 /// conversation now running elsewhere (it may hold changes newer than the recovery
 /// point used to resume it), or older copies set aside beside a current disk.
@@ -231,7 +244,7 @@ pub async fn inventory(s: &Service) -> Result<Vec<Value>> {
             }
             let id = node["id"].as_str().unwrap_or_default().to_owned();
             let old = stale.iter().filter(|(v, _, _)| v["nodeId"] == node["id"]);
-            node["staleDisks"] = json!({"count":old.clone().count(),"diskMiB":old.map(|(_, _, mib)| mib).sum::<u64>()});
+            node["staleDisks"] = json!({"count": old.clone().count(),"diskMiB": old.map(|(_, _, mib)| mib).sum::<u64>()});
             node["agents"] = agents
                 .iter()
                 .filter(|agent| {
@@ -239,7 +252,11 @@ pub async fn inventory(s: &Service) -> Result<Vec<Value>> {
                         && crate::service::allowed(&crate::service::policy(agent)["nodes"], &id)
                 })
                 .map(|agent| {
-                    json!({"id":agent["id"],"name":agent["name"],"allNodes":crate::service::policy(agent)["nodes"].is_null()})
+                    json!({
+                        "id": agent["id"],
+                        "name": agent["name"],
+                        "allNodes": crate::service::policy(agent)["nodes"].is_null()
+                    })
                 })
                 .collect::<Vec<_>>()
                 .into();
@@ -386,7 +403,7 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
                     record["limits"] = resources;
                     record["accepting"] = request.accepting.into();
                     db.put("nodes", &record)?;
-                    db.audit("node.configured", &json!({"nodeId":node}))?;
+                    db.audit("node.configured", &json!({"nodeId": node}))?;
                     Ok(public(record))
                 })
                 .await
@@ -404,7 +421,7 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
             s.store
                 .set(
                     &format!("node-enrollment:{}", digest(&code)),
-                    json!({"name":name}),
+                    json!({"name": name}),
                     Some(expires),
                 )
                 .await?;
@@ -417,7 +434,7 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
                         format!("{}internal/nodes/install.sh", origin).replace('\'', "'\\''")
                     )
                 });
-            Ok(json!({"code":code,"expiresAt":expires,"installCommand":install}))
+            Ok(json!({"code": code,"expiresAt": expires,"installCommand": install}))
         }
         ("POST", ["nodes", node, "stale-disks", "delete"]) => {
             crate::validation::uuid(node)?;
@@ -446,10 +463,10 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
             s.store
                 .audit(
                     "node.stale-disks.deleted",
-                    json!({"nodeId":node,"freedMiB":freed,"failed":failed}),
+                    json!({"nodeId": node,"freedMiB": freed,"failed": failed}),
                 )
                 .await?;
-            Ok(json!({"freedMiB":freed,"failed":failed}))
+            Ok(json!({"freedMiB": freed,"failed": failed}))
         }
         ("PUT", ["nodes", node, "agents"]) => {
             #[derive(Deserialize)]
@@ -494,9 +511,9 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
                     }
                     db.audit(
                         "node.agents.configured",
-                        &json!({"nodeId":node,"agentIds":request.agent_ids}),
+                        &json!({"nodeId": node,"agentIds": request.agent_ids}),
                     )?;
-                    Ok(json!({"nodeId":node}))
+                    Ok(json!({"nodeId": node}))
                 })
                 .await
         }
@@ -527,7 +544,7 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
                         }
                     }
                     db.put("nodes", &record)?;
-                    db.audit("node.revoked", &json!({"nodeId":node}))?;
+                    db.audit("node.revoked", &json!({"nodeId": node}))?;
                     Ok(public(record))
                 })
                 .await
@@ -535,6 +552,7 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
         _ => Err(Error::new(404, "Not found")),
     }
 }
+
 pub async fn internal(State(app): State<App>, request: Request) -> Result<Json<Value>> {
     let input = Input::read(request).await?;
     let s = &app.service;
@@ -578,15 +596,39 @@ pub async fn internal(State(app): State<App>, request: Request) -> Result<Json<V
             let node_id = id();
             let credential = token();
             let token_key = format!("node-token:{}", digest(&credential));
-            let value = s.store.transaction(move |db| {
-                let invitation = db.kv(&key)?.ok_or_else(|| Error::new(401, "Invalid or expired enrollment code."))?;
-                db.delete(&key)?;
-                let node = json!({"id":node_id,"name":invitation["name"],"local":false,"accepting":false,"revoked":false,"tags":[],"systemTags":request.capabilities.tags(),"capabilities":request.capabilities.value(),"limits":request.capabilities.limits(),"storage":crate::storage::policy::Policy::default(),"runtimeId":runtime,"lastSeen":now(),"createdAt":now()});
-                db.put("nodes", &node)?;
-                db.set(&token_key, &json!(node_id), None)?;
-                db.audit("node.enrolled", &json!({"nodeId":node_id}))?;
-                Ok(json!({"nodeId":node_id,"token":credential,"heartbeatIntervalMs":10_000,"disconnectTimeoutMs":HEARTBEAT_TIMEOUT_MS}))
-            }).await?;
+            let value = s
+                .store
+                .transaction(move |db| {
+                    let invitation = db
+                        .kv(&key)?
+                        .ok_or_else(|| Error::new(401, "Invalid or expired enrollment code."))?;
+                    db.delete(&key)?;
+                    let node = json!({
+                        "id": node_id,
+                        "name": invitation["name"],
+                        "local": false,
+                        "accepting": false,
+                        "revoked": false,
+                        "tags": [],
+                        "systemTags": request.capabilities.tags(),
+                        "capabilities": request.capabilities.value(),
+                        "limits": request.capabilities.limits(),
+                        "storage": crate::storage::policy::Policy::default(),
+                        "runtimeId": runtime,
+                        "lastSeen": now(),
+                        "createdAt": now()
+                    });
+                    db.put("nodes", &node)?;
+                    db.set(&token_key, &json!(node_id), None)?;
+                    db.audit("node.enrolled", &json!({"nodeId": node_id}))?;
+                    Ok(json!({
+                        "nodeId": node_id,
+                        "token": credential,
+                        "heartbeatIntervalMs": 10_000,
+                        "disconnectTimeoutMs": HEARTBEAT_TIMEOUT_MS
+                    }))
+                })
+                .await?;
             Ok(Json(value))
         }
         "/internal/nodes/heartbeat" => {
@@ -611,34 +653,84 @@ pub async fn internal(State(app): State<App>, request: Request) -> Result<Json<V
                 .as_i64()
                 .unwrap_or(60)
                 * 1000;
-            let value = s.store.transaction(move |db| {
-                let node_id = db.kv(&key)?.and_then(|v| v.as_str().map(str::to_owned)).ok_or_else(|| Error::new(401, "Invalid node identity."))?;
-                let mut node = db.get("nodes", &node_id)?.filter(|v| v["revoked"] != true).ok_or_else(|| Error::new(401, "Invalid node identity."))?;
-                if let Some(runtime) = input.body.get("runtimeId") {
-                    node["runtimeId"] = name(runtime.as_str().unwrap_or(""))?.into();
-                }
-                node["runtimes"]=input.body["runtimes"].clone();
-                node["lastSeen"] = now().into();
-                if let Some(capabilities)=capabilities {node["capabilities"]=capabilities;}
-                node["storage"] = json!(crate::storage::policy::Policy::for_node(&node["storage"])?);
-                node["imageDigest"]=input.body["imageDigest"].clone();
-                node["executionReady"]=(input.body["executionReady"]==true && node["capabilities"]["fuse"]==true && input.body["dataRoot"]==expected_data && expected_image.as_ref().is_none_or(|image|node["imageDigest"]==*image || node["updateError"].is_string())).into();
-                db.put("nodes", &node)?;
-                let mut leases=Vec::new();
-                for mut attempt in db.list("node-attempts")? {
-                    if attempt["nodeId"]!=node_id || attempt["released"]==true {continue;}
-                    let run=db.run(crate::validation::text(&attempt,"runId"))?.unwrap_or_default();
-                    let checkpoint=db.kv(&format!("run-checkpoint:{}",crate::validation::text(&attempt,"runId")))?.unwrap_or_default();
-                    let agent=db.get("agents",crate::validation::text(&run["snapshot"]["agent"],"id"))?.unwrap_or_default();
-                    if run["status"]=="running" && run["cancelRequestedAt"].is_null() && checkpoint["runnerId"]==attempt["id"] && crate::service::allowed(&crate::service::policy(&agent)["nodes"],&node_id) {
-                        attempt["leaseExpiresAt"]=(now()+lease_ms).into();
-                        attempt["leaseDurationMs"]=attempt["leaseDurationMs"].as_i64().unwrap_or(0).max(lease_ms).into();
-                        db.put("node-attempts",&attempt)?;
-                        leases.push(json!({"id":attempt["id"],"remainingMs":lease_ms}));
+            let value = s
+                .store
+                .transaction(move |db| {
+                    let node_id = db
+                        .kv(&key)?
+                        .and_then(|v| v.as_str().map(str::to_owned))
+                        .ok_or_else(|| Error::new(401, "Invalid node identity."))?;
+                    let mut node = db
+                        .get("nodes", &node_id)?
+                        .filter(|v| v["revoked"] != true)
+                        .ok_or_else(|| Error::new(401, "Invalid node identity."))?;
+                    if let Some(runtime) = input.body.get("runtimeId") {
+                        node["runtimeId"] = name(runtime.as_str().unwrap_or(""))?.into();
                     }
-                }
-                Ok(json!({"nodeId":node_id,"accepting":node["accepting"],"limits":node["limits"],"leases":leases,"heartbeatIntervalMs":10_000,"disconnectTimeoutMs":HEARTBEAT_TIMEOUT_MS}))
-            }).await?;
+                    node["runtimes"] = input.body["runtimes"].clone();
+                    node["lastSeen"] = now().into();
+                    if let Some(capabilities) = capabilities {
+                        node["capabilities"] = capabilities;
+                    }
+                    node["storage"] =
+                        json!(crate::storage::policy::Policy::for_node(&node["storage"])?);
+                    node["imageDigest"] = input.body["imageDigest"].clone();
+                    node["executionReady"] = (input.body["executionReady"] == true
+                        && node["capabilities"]["fuse"] == true
+                        && input.body["dataRoot"] == expected_data
+                        && expected_image.as_ref().is_none_or(|image| {
+                            node["imageDigest"] == *image || node["updateError"].is_string()
+                        }))
+                    .into();
+                    db.put("nodes", &node)?;
+                    let mut leases = Vec::new();
+                    for mut attempt in db.list("node-attempts")? {
+                        if attempt["nodeId"] != node_id || attempt["released"] == true {
+                            continue;
+                        }
+                        let run = db
+                            .run(crate::validation::text(&attempt, "runId"))?
+                            .unwrap_or_default();
+                        let checkpoint = db
+                            .kv(&format!(
+                                "run-checkpoint:{}",
+                                crate::validation::text(&attempt, "runId")
+                            ))?
+                            .unwrap_or_default();
+                        let agent = db
+                            .get(
+                                "agents",
+                                crate::validation::text(&run["snapshot"]["agent"], "id"),
+                            )?
+                            .unwrap_or_default();
+                        if run["status"] == "running"
+                            && run["cancelRequestedAt"].is_null()
+                            && checkpoint["runnerId"] == attempt["id"]
+                            && crate::service::allowed(
+                                &crate::service::policy(&agent)["nodes"],
+                                &node_id,
+                            )
+                        {
+                            attempt["leaseExpiresAt"] = (now() + lease_ms).into();
+                            attempt["leaseDurationMs"] = attempt["leaseDurationMs"]
+                                .as_i64()
+                                .unwrap_or(0)
+                                .max(lease_ms)
+                                .into();
+                            db.put("node-attempts", &attempt)?;
+                            leases.push(json!({"id": attempt["id"],"remainingMs": lease_ms}));
+                        }
+                    }
+                    Ok(json!({
+                        "nodeId": node_id,
+                        "accepting": node["accepting"],
+                        "limits": node["limits"],
+                        "leases": leases,
+                        "heartbeatIntervalMs": 10_000,
+                        "disconnectTimeoutMs": HEARTBEAT_TIMEOUT_MS
+                    }))
+                })
+                .await?;
             for lease in value["leases"].as_array().into_iter().flatten() {
                 record_lease(
                     s,
@@ -672,10 +764,33 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
         return Ok(());
     }
     let detected: Capabilities = decode(capabilities.clone())?;
-    s.store.transaction(move |db| {
-        let mut record=db.get("nodes",LOCAL_NODE_ID)?.unwrap_or_else(||json!({"id":LOCAL_NODE_ID,"name":"Current runner","local":true,"revoked":false,"accepting":true,"tags":[],"createdAt":now(),"limits":detected.limits()}));
-        record["systemTags"]=detected.tags();record["runtimes"]=health["runtimes"].clone();record["capabilities"]=capabilities;record["runtimeId"]=health["runtimeId"].clone();record["storage"]=json!(crate::storage::policy::Policy::for_node(&record["storage"])?);record["executionReady"]=(health["status"]=="ok" && detected.fuse).into();record["lastSeen"]=now().into();db.put("nodes",&record)?;Ok(())
-    }).await
+    s.store
+        .transaction(move |db| {
+            let mut record = db.get("nodes", LOCAL_NODE_ID)?.unwrap_or_else(|| {
+                json!({
+                    "id": LOCAL_NODE_ID,
+                    "name": "Current runner",
+                    "local": true,
+                    "revoked": false,
+                    "accepting": true,
+                    "tags": [],
+                    "createdAt": now(),
+                    "limits": detected.limits()
+                })
+            });
+            record["systemTags"] = detected.tags();
+            record["runtimes"] = health["runtimes"].clone();
+            record["capabilities"] = capabilities;
+            record["runtimeId"] = health["runtimeId"].clone();
+            record["storage"] = json!(crate::storage::policy::Policy::for_node(
+                &record["storage"]
+            )?);
+            record["executionReady"] = (health["status"] == "ok" && detected.fuse).into();
+            record["lastSeen"] = now().into();
+            db.put("nodes", &record)?;
+            Ok(())
+        })
+        .await
 }
 
 /// Linux suspend time counts toward a remote execution lease.
@@ -699,8 +814,7 @@ pub async fn daemon(
     let connector_stop = stop.child_token();
     let mut connector =
         tokio::spawn(async move { connector::connect(&directory, connector_stop).await });
-    let (runner_first, result) =
-        tokio::select! {result=&mut runner=>(true,result),result=&mut connector=>(false,result)};
+    let (runner_first, result) = tokio::select! {result = &mut runner => (true,result),result = &mut connector => (false,result)};
     stop.cancel();
     if runner_first {
         let _ = connector.await;

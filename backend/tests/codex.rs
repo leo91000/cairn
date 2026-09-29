@@ -12,6 +12,7 @@ use leo_agent_manager::{
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tempfile::TempDir;
+
 fn config(root: &TempDir) -> Config {
     Config {
         data_dir: root.path().join("data"),
@@ -62,28 +63,69 @@ async fn long_chat_history_preserves_steered_messages_without_repeating_complete
     let home = config.home.join(".codex");
     std::fs::create_dir_all(&home).unwrap();
     let file = home.join("fixture-conversation.json");
-    let mut history = json!({"id":"fixture-chat","historyMode":"paginated","turns":[
-        {"id":"old","status":"completed","items":[
-            {"id":"u","type":"userMessage","clientId":"original","content":[{"type":"text","text":"Old request"}]},
-            {"id":"c","type":"commandExecution","aggregatedOutput":"x".repeat(2_100_000)},
-            {"id":"s","type":"userMessage","clientId":"steered","content":[{"type":"text","text":"Steer request"}]},
-            {"id":"a","type":"agentMessage","text":"Completed once"}
-        ]}
-    ]});
+    let mut history = json!({
+        "id": "fixture-chat",
+        "historyMode": "paginated",
+        "turns": [
+        {
+            "id": "old",
+            "status": "completed",
+            "items": [
+            {
+                "id": "u",
+                "type": "userMessage",
+                "clientId": "original",
+                "content": [{"type": "text","text": "Old request"}]
+            },
+            {"id": "c","type": "commandExecution","aggregatedOutput": "x".repeat(2_100_000)},
+            {
+                "id": "s",
+                "type": "userMessage",
+                "clientId": "steered",
+                "content": [{"type": "text","text": "Steer request"}]
+            },
+            {"id": "a","type": "agentMessage","text": "Completed once"}
+        ]
+        }
+    ]
+    });
     // Item pagination recovers a large turn without loading all tool output at once.
     for index in 0..16 {
-        history["turns"][0]["items"].as_array_mut().unwrap().insert(1, json!({"id":format!("command-{index}"),"type":"commandExecution","aggregatedOutput":"x".repeat(2_100_000)}));
+        history["turns"][0]["items"].as_array_mut().unwrap().insert(
+            1,
+            json!({
+                "id": format!("command-{index}"),
+                "type": "commandExecution",
+                "aggregatedOutput": "x".repeat(2_100_000)
+            }),
+        );
     }
     for index in 0..101 {
         history["turns"].as_array_mut().unwrap().insert(
             0,
-            json!({"id":format!("older-{index}"),"status":"completed","items":[]}),
+            json!({"id": format!("older-{index}"),"status": "completed","items": []}),
         );
     }
     std::fs::write(&file, history.to_string()).unwrap();
     for (message_id, expected_turns) in [("steered", 102), ("new-message", 103)] {
         let (events, mut receiver) = tokio::sync::mpsc::channel(64);
-        let plan = json!({"args":[],"cwd":root.path(),"model":"fixture","reasoning":"medium","sandbox":"yolo","sessionId":"fixture-chat","output":root.path().join("reply.md"),"inputDirectory":root.path(),"writableRoots":[],"execution":{"messageId":message_id,"text":"New request","attachments":[],"recovery":true}});
+        let plan = json!({
+            "args": [],
+            "cwd": root.path(),
+            "model": "fixture",
+            "reasoning": "medium",
+            "sandbox": "yolo",
+            "sessionId": "fixture-chat",
+            "output": root.path().join("reply.md"),
+            "inputDirectory": root.path(),
+            "writableRoots": [],
+            "execution": {
+                "messageId": message_id,
+                "text": "New request",
+                "attachments": [],
+                "recovery": true
+            }
+        });
         leo_agent_manager::chat_process::run(&config, &home, plan, events, Default::default())
             .await
             .unwrap();
@@ -123,13 +165,14 @@ async fn sign_in(mode: &str) -> (TempDir, Arc<Service>, String) {
     std::fs::create_dir_all(&home).unwrap();
     std::fs::write(
         home.join("fixture-login.json"),
-        json!({"mode":mode}).to_string(),
+        json!({"mode": mode}).to_string(),
     )
     .unwrap();
     let view = service.accounts.reconnect(&service, &id).await.unwrap();
     assert_eq!(view["provider"], "codex");
     (root, service, id)
 }
+
 async fn sign_in_until(service: &Service, condition: impl Fn(&Value) -> bool) -> Value {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
@@ -148,7 +191,14 @@ async fn sign_in_until(service: &Service, condition: impl Fn(&Value) -> bool) ->
 async fn oversized_mcp_frames_report_the_transport_limit_not_an_auth_failure() {
     let limit = 2_000_000;
     let mut command = tokio::process::Command::new("node");
-    command.args(["-e", &format!("process.stdin.once('data', () => process.stdout.write(JSON.stringify({{id:1,result:'x'.repeat({limit})}})+'\\n')); setInterval(()=>{{}},1000)")]);
+    command.args([
+        "-e",
+        &format!(
+            "process.stdin.once('data', () => \
+        process.stdout.write(JSON.stringify({{id:1,result:'x'.repeat({limit})}})+'\\n')); \
+        setInterval(()=>{{}},1000)"
+        ),
+    ]);
     let session = Session::spawn_with_protocol(command, true).await.unwrap();
     let error = session.rpc.request("large", json!({})).await.unwrap_err();
     assert!(
@@ -330,6 +380,7 @@ async fn account_sign_in_verifies_identity_captures_credentials_and_cleans_up() 
     );
     assert!(!service.accounts.busy(&service, &id).await.unwrap());
 }
+
 #[tokio::test]
 async fn models_are_paginated_cached_and_keep_last_known_options_when_codex_is_down() {
     let root = TempDir::new().unwrap();
@@ -388,7 +439,7 @@ async fn model_catalog_respects_enabled_accounts_and_routes_to_an_account_with_t
             .vault
             .set(
                 &format!("codex-account:{id}"),
-                &json!({"tokens":{"access_token":"synthetic","account_id":name}}),
+                &json!({"tokens": {"access_token": "synthetic","account_id": name}}),
             )
             .await
             .unwrap();
@@ -439,7 +490,7 @@ async fn model_catalog_respects_enabled_accounts_and_routes_to_an_account_with_t
     service.accounts.release(&lease).await.unwrap();
     service
         .accounts
-        .update(&service, &ids[1], &json!({"enabled":false}))
+        .update(&service, &ids[1], &json!({"enabled": false}))
         .await
         .unwrap();
     let catalog = service.models.list(&service).await.unwrap();
@@ -458,6 +509,7 @@ async fn model_catalog_respects_enabled_accounts_and_routes_to_an_account_with_t
             .is_empty()
     );
 }
+
 #[tokio::test]
 async fn native_rpc_runs_a_turn_and_resumes_its_persisted_thread() {
     let root = TempDir::new().unwrap();
@@ -468,11 +520,21 @@ async fn native_rpc_runs_a_turn_and_resumes_its_persisted_thread() {
         .await
         .unwrap();
     let started = session
-        .request("thread/start", json!({"cwd":root.path()}))
+        .request("thread/start", json!({"cwd": root.path()}))
         .await
         .unwrap();
     assert_eq!(started["thread"]["id"], "fixture-chat");
-    session.request("turn/start", json!({"threadId":"fixture-chat","input":[{"type":"text","text":"Check the workspace"}],"clientUserMessageId":"message-1"})).await.unwrap();
+    session
+        .request(
+            "turn/start",
+            json!({
+                "threadId": "fixture-chat",
+                "input": [{"type": "text","text": "Check the workspace"}],
+                "clientUserMessageId": "message-1"
+            }),
+        )
+        .await
+        .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let incoming = session.incoming.recv().await.unwrap();
@@ -488,13 +550,13 @@ async fn native_rpc_runs_a_turn_and_resumes_its_persisted_thread() {
         .await
         .unwrap();
     resumed
-        .request("thread/resume", json!({"threadId":"fixture-chat"}))
+        .request("thread/resume", json!({"threadId": "fixture-chat"}))
         .await
         .unwrap();
     let turns = resumed
         .request(
             "thread/turns/list",
-            json!({"threadId":"fixture-chat","limit":100}),
+            json!({"threadId": "fixture-chat","limit": 100}),
         )
         .await
         .unwrap();
@@ -502,6 +564,7 @@ async fn native_rpc_runs_a_turn_and_resumes_its_persisted_thread() {
     assert_eq!(turns["data"][0]["items"][0]["clientId"], "message-1");
     resumed.close().await;
 }
+
 #[tokio::test]
 async fn queued_reasoning_is_idempotent_editable_and_part_of_the_run_snapshot() {
     use leo_agent_manager::config::id;
@@ -511,8 +574,12 @@ async fn queued_reasoning_is_idempotent_editable_and_part_of_the_run_snapshot() 
     let chat = service.chat_create(json!({})).await.unwrap();
     let chat_id = chat["id"].as_str().unwrap();
     let message_id = id();
-    let mut message =
-        json!({"id":message_id,"text":"Review this","model":"fixture-deep","reasoning":"ultra"});
+    let mut message = json!({
+        "id": message_id,
+        "text": "Review this",
+        "model": "fixture-deep",
+        "reasoning": "ultra"
+    });
     let first = service.chat_send(chat_id, message.clone()).await.unwrap();
     assert_eq!(
         service.chat_send(chat_id, message.clone()).await.unwrap(),
@@ -544,12 +611,18 @@ async fn queued_reasoning_is_idempotent_editable_and_part_of_the_run_snapshot() 
     );
     assert_eq!(detail["run"]["snapshot"]["agent"]["reasoning"], "medium");
     assert_eq!(detail["run"]["snapshot"]["agent"]["model"], "fixture-deep");
-    let steer = json!({"id":id(),"text":"More detail","mode":"steer","reasoning":"ultra"});
+    let steer = json!({
+        "id": id(),
+        "text": "More detail",
+        "mode": "steer",
+        "reasoning": "ultra"
+    });
     assert_eq!(
         service.chat_send(chat_id, steer).await.unwrap_err().status,
         409
     );
 }
+
 #[tokio::test]
 async fn device_login_verifies_identity_then_leases_private_credentials() {
     let root = TempDir::new().unwrap();
@@ -603,9 +676,17 @@ async fn device_login_verifies_identity_then_leases_private_credentials() {
     service.accounts.remove(&service, id).await.unwrap();
     assert!(service.accounts.list(&service).await.unwrap().is_empty());
 }
+
 #[test]
 fn codex_usage_requires_observed_capacity_and_respects_model_limits() {
-    let before = json!({"ordinaryUsageAllowed":true,"rateLimits":{"primary":{"usedPercent":100,"resetsAt":1},"secondary":{"usedPercent":40}},"rateLimitsByLimitId":{"model":{"limitId":"special","normalModelSlug":"model-x","primary":{"usedPercent":95}}},"rateLimitResetCredits":{"availableCount":2}});
+    let before = json!({
+        "ordinaryUsageAllowed": true,
+        "rateLimits": {"primary": {"usedPercent": 100,"resetsAt": 1},"secondary": {"usedPercent": 40}},
+        "rateLimitsByLimitId": {
+            "model": {"limitId": "special","normalModelSlug": "model-x","primary": {"usedPercent": 95}}
+        },
+        "rateLimitResetCredits": {"availableCount": 2}
+    });
     assert_eq!(remaining(&normalize(&before), ""), Some(0.));
     assert_eq!(normalize(&before)["resets"]["available"], 2);
     let mut after = before.clone();
@@ -634,7 +715,9 @@ async fn parallel_runs_share_one_refresh_and_cannot_overwrite_or_reuse_released_
         .await
         .unwrap();
     let id = account["id"].as_str().unwrap();
-    service.vault.set(&format!("codex-account:{id}"), &json!({"tokens":{"access_token":"synthetic","refresh_token":"refresh","account_id":"shared"}})).await.unwrap();
+    service.vault.set(&format!("codex-account:{id}"), &json!({
+        "tokens": {"access_token": "synthetic","refresh_token": "refresh","account_id": "shared"}
+    })).await.unwrap();
     service.accounts.refresh(&service, id).await.unwrap();
     let first = service
         .accounts
@@ -709,7 +792,7 @@ async fn parallel_runs_share_one_refresh_and_cannot_overwrite_or_reuse_released_
     // A run can neither roll credentials back nor inject another identity.
     std::fs::write(
         first.home.join("auth.json"),
-        json!({"tokens":{"access_token":"stale","account_id":"intruder"}}).to_string(),
+        json!({"tokens": {"access_token": "stale","account_id": "intruder"}}).to_string(),
     )
     .unwrap();
     service.accounts.release(&first).await.unwrap();
@@ -722,7 +805,15 @@ async fn parallel_runs_share_one_refresh_and_cannot_overwrite_or_reuse_released_
     assert!(service.accounts.reconnect(&service, id).await.is_err());
     assert!(!second.home.join("auth.json").exists());
     let (events, mut receiver) = tokio::sync::mpsc::channel(32);
-    let plan = json!({"args":[],"cwd":root.path(),"sandbox":"yolo","output":root.path().join("reply.md"),"inputDirectory":root.path(),"writableRoots":[],"execution":{"messageId":"refresh-test","text":"fixture:auth-refresh","attachments":[]}});
+    let plan = json!({
+        "args": [],
+        "cwd": root.path(),
+        "sandbox": "yolo",
+        "output": root.path().join("reply.md"),
+        "inputDirectory": root.path(),
+        "writableRoots": [],
+        "execution": {"messageId": "refresh-test","text": "fixture:auth-refresh","attachments": []}
+    });
     leo_agent_manager::chat_process::run(
         &service.config,
         &second.home,
@@ -765,7 +856,7 @@ async fn parallel_capacity_prefers_usage_and_lowering_limits_does_not_stop_runs(
             .vault
             .set(
                 &format!("codex-account:{id}"),
-                &json!({"tokens":{"access_token":"synthetic","account_id":name}}),
+                &json!({"tokens": {"access_token": "synthetic","account_id": name}}),
             )
             .await
             .unwrap();
@@ -803,7 +894,7 @@ async fn parallel_capacity_prefers_usage_and_lowering_limits_does_not_stop_runs(
     assert_eq!(second.account_id, ids[0]);
     let view = service
         .accounts
-        .update(&service, &ids[0], &json!({"maxConcurrentRuns":1}))
+        .update(&service, &ids[0], &json!({"maxConcurrentRuns": 1}))
         .await
         .unwrap();
     assert_eq!(view["activeRunIds"].as_array().unwrap().len(), 2);
@@ -833,7 +924,7 @@ async fn parallel_capacity_prefers_usage_and_lowering_limits_does_not_stop_runs(
     }
     service
         .accounts
-        .update(&service, &ids[0], &json!({"maxConcurrentRuns":12}))
+        .update(&service, &ids[0], &json!({"maxConcurrentRuns": 12}))
         .await
         .unwrap();
     let mut leases = Vec::new();

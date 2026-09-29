@@ -11,8 +11,11 @@ use std::{
 /// Callers coordinate filesystem consistency before exporting a running disk.
 pub trait Disk: Send + Sync {
     fn size(&self) -> u64;
+
     fn read_at(&self, offset: u64, bytes: &mut [u8]) -> io::Result<()>;
+
     fn write_at(&self, offset: u64, bytes: &[u8]) -> io::Result<()>;
+
     fn sync(&self) -> io::Result<()>;
 }
 
@@ -33,6 +36,7 @@ pub struct LocalDisk {
     file: File,
     size: u64,
 }
+
 impl LocalDisk {
     pub fn open(path: &Path, writable: bool) -> io::Result<Self> {
         let file = OpenOptions::new().read(true).write(writable).open(path)?;
@@ -49,19 +53,23 @@ impl LocalDisk {
         })
     }
 }
+
 impl Disk for LocalDisk {
     fn size(&self) -> u64 {
         self.size
     }
+
     fn read_at(&self, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
         range(self.size, offset, bytes.len())?;
         self.file.read_exact_at(bytes, offset)
     }
+
     fn write_at(&self, offset: u64, bytes: &[u8]) -> io::Result<()> {
         range(self.size, offset, bytes.len())?;
         self.file.write_all_at(bytes, offset)?;
         self.file.sync_data()
     }
+
     fn sync(&self) -> io::Result<()> {
         self.file.sync_all()
     }

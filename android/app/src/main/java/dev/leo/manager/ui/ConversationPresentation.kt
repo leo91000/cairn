@@ -43,8 +43,10 @@ internal fun chatWaitNotice(run: Run?): ChatWaitNotice? {
 @Composable
 internal fun ChatWaitingNotice(notice: ChatWaitNotice, openConnections: () -> Unit) {
     Surface(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
-            .semantics { liveRegion = LiveRegionMode.Polite },
+        modifier =
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).semantics {
+                liveRegion = LiveRegionMode.Polite
+            },
         color = MaterialTheme.colorScheme.secondaryContainer,
         shape = MaterialTheme.shapes.medium,
     ) {
@@ -71,7 +73,8 @@ internal fun chatDelivery(
             .filter { it.type == "chat.user" }
             .mapNotNull { (it.payload?.get("messageId") as? JsonPrimitive)?.contentOrNull }
             .toSet()
-    val messages = chat?.messages.orEmpty().filter { it.status in setOf("queued", "sending") }.toMutableList()
+    val messages =
+        chat?.messages.orEmpty().filter { it.status in setOf("queued", "sending") }.toMutableList()
     if (outgoing != null && messages.none { it.id == outgoing.id }) messages.add(outgoing)
     val active = chat?.run?.active == true
     val canStart = chat?.paused != true && (chat?.run == null || chat.run.status == "succeeded")
@@ -94,8 +97,9 @@ internal fun chatDelivery(
                         message,
                         when {
                             chat?.run?.status == "queued" ->
-                                chatWaitNotice(chat.run)?.account?.let { "En attente d’un compte $it" }
-                                    ?: "En attente de l’agent…"
+                                chatWaitNotice(chat.run)?.account?.let {
+                                    "En attente d’un compte $it"
+                                } ?: "En attente de l’agent…"
                             starting -> "Démarrage de l’agent…"
                             steering -> "Transmission à l’agent…"
                             else -> "Envoi en cours…"
@@ -171,8 +175,8 @@ internal fun CompletionEvidence(outcome: TaskOutcome, agent: String) {
 }
 
 /**
- * One compact bar: back, who is working and on what, live status, then the few actions that
- * matter. Secondary information belongs in the details sheet.
+ * One compact bar: back, who is working and on what, live status, then the few actions that matter.
+ * Secondary information belongs in the details sheet.
  */
 @Composable
 internal fun ConversationHeader(
@@ -194,13 +198,20 @@ internal fun ConversationHeader(
                 ActionIcon("Retour", LeoIcons.Back, onClick = back)
                 Surface(
                     onClick = choose,
-                    modifier = Modifier.weight(1f).semantics { contentDescription = "Changer de conversation : $title" },
+                    modifier =
+                        Modifier.weight(1f).semantics {
+                            contentDescription = "Changer de conversation : $title"
+                        },
                     color = MaterialTheme.colorScheme.background,
                     shape = RoundedCornerShape(12.dp),
                 ) {
-                    Row(Modifier.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        Modifier.padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         // The comet ring turns while the agent is running this conversation.
-                        if (live != null) WorkingAvatar(agent, agentKey, 36.dp) else AgentAvatar(agent, agentKey, 36.dp)
+                        if (live != null) WorkingAvatar(agent, agentKey, 36.dp)
+                        else AgentAvatar(agent, agentKey, 36.dp)
                         Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
                             Text(

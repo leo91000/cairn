@@ -30,6 +30,7 @@ const groups = computed(() => (Object.keys(providers) as Provider[]).map((provid
 }))
 // A sign-in that is still pending or failed reopens its window, including after a reload.
 const signingIn = computed(() => adding.value !== undefined || ['pending', 'failed'].includes(accounts.signIn.value?.state ?? ''))
+
 async function reconnect(account: Account) {
   opened.value = undefined
   await accounts.reconnect(account.id)
@@ -44,7 +45,12 @@ async function reconnect(account: Account) {
         The accounts your agents run on, and the tools they can reach.
       </p>
     </div>
-    <UiButton variant="primary" :disabled="accounts.busy.value" aria-label="Add account" @click="adding = 'any'">
+    <UiButton
+      variant="primary"
+      :disabled="accounts.busy.value"
+      aria-label="Add account"
+      @click="adding = 'any'"
+    >
       <Icon :name="Plus" :size="16" /><span class="phone:hidden">Add account</span>
     </UiButton>
   </div>
@@ -59,7 +65,14 @@ async function reconnect(account: Account) {
       </h2>
       <span class="flex items-center gap-2 text-xs text-subtle">
         <span class="phone:hidden">New runs use the account with the most capacity left</span>
-        <button type="button" class="grid size-7 place-items-center rounded-full text-subtle hover:bg-hover hover:text-ink disabled:opacity-50" aria-label="Check usage now" title="Check usage now" :disabled="accounts.busy.value" @click="accounts.refresh()">
+        <button
+          type="button"
+          class="grid size-7 place-items-center rounded-full text-subtle hover:bg-hover hover:text-ink disabled:opacity-50"
+          aria-label="Check usage now"
+          title="Check usage now"
+          :disabled="accounts.busy.value"
+          @click="accounts.refresh()"
+        >
           <Icon :name="RefreshCw" :size="14" :class="{ 'animate-spin motion-reduce:animate-none': accounts.busy.value }" />
         </button>
       </span>
@@ -85,11 +98,23 @@ async function reconnect(account: Account) {
             </p>
           </div>
           <span v-if="group.items.length" class="text-xs text-muted phone:hidden">{{ group.available }} available</span>
-          <UiButton size="small" class="border-transparent text-muted" :disabled="accounts.busy.value" :aria-label="`Add ${providers[group.provider].label} account`" @click="adding = group.provider">
+          <UiButton
+            size="small"
+            class="border-transparent text-muted"
+            :disabled="accounts.busy.value"
+            :aria-label="`Add ${providers[group.provider].label} account`"
+            @click="adding = group.provider"
+          >
             <Icon :name="Plus" :size="14" /><span class="phone:hidden">Add</span>
           </UiButton>
         </header>
-        <AccountRow v-for="account in group.items" :key="account.id" :account="account" :selected="account.id === opened" @open="opened = account.id" />
+        <AccountRow
+          v-for="account in group.items"
+          :key="account.id"
+          :account="account"
+          :selected="account.id === opened"
+          @open="opened = account.id"
+        />
         <p v-if="!group.items.length" class="border-t border-line px-4.5 py-4 text-sm text-muted phone:px-4">
           No {{ providers[group.provider].label }} account yet.<template v-if="accounts.required.value.includes(group.provider)">
             {{ providers[group.provider].label }} runs wait until you add one.
@@ -109,6 +134,17 @@ async function reconnect(account: Account) {
     </div>
   </section>
 
-  <AccountDetail v-if="detail" :account="detail" :accounts="accounts" @close="opened = undefined" @reconnect="reconnect(detail)" />
-  <AccountSignIn v-if="signingIn" :accounts="accounts" :provider="adding === 'any' ? undefined : adding" @close="adding = undefined" />
+  <AccountDetail
+    v-if="detail"
+    :account="detail"
+    :accounts="accounts"
+    @close="opened = undefined"
+    @reconnect="reconnect(detail)"
+  />
+  <AccountSignIn
+    v-if="signingIn"
+    :accounts="accounts"
+    :provider="adding === 'any' ? undefined : adding"
+    @close="adding = undefined"
+  />
 </template>

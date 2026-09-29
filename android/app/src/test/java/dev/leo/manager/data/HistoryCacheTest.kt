@@ -23,7 +23,14 @@ class HistoryCacheTest {
     @Test
     fun `recent suffix survives on disk and records its backwards boundary`() = runBlocking {
         val events = (1L..250L).map { RunEvent(it, it, "chat.user", "Message $it") }
-        val original = CachedHistory(250, "v1:r:1", LiveState(), events, position = ReadingPosition(5, 10, false))
+        val original =
+            CachedHistory(
+                250,
+                "v1:r:1",
+                LiveState(),
+                events,
+                position = ReadingPosition(5, 10, false),
+            )
         val first = cache()
         first.save("window", original, true)
         val restored = cache().read("window")!!

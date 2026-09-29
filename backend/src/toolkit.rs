@@ -3,6 +3,7 @@ use crate::{
     process::{Environment, bounded_output, command},
 };
 use std::{path::Path, time::Duration};
+
 async fn copy_new(source: &Path, target: &Path, optional: bool) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mut source = match tokio::fs::File::open(source).await {
@@ -25,6 +26,7 @@ async fn copy_new(source: &Path, target: &Path, optional: bool) -> Result<()> {
     tokio::io::copy(&mut source, &mut target).await?;
     Ok(())
 }
+
 async fn link(source: &Path, target: &Path) -> Result<()> {
     match tokio::fs::symlink(source, target).await {
         Ok(()) => Ok(()),
@@ -32,6 +34,7 @@ async fn link(source: &Path, target: &Path) -> Result<()> {
         Err(e) => Err(e.into()),
     }
 }
+
 async fn names(path: &Path) -> Result<Vec<String>> {
     let mut entries = tokio::fs::read_dir(path).await?;
     let mut names = Vec::new();
@@ -46,6 +49,7 @@ async fn names(path: &Path) -> Result<Vec<String>> {
     }
     Ok(names)
 }
+
 async fn prune(path: &Path, directory: &Path) -> Result<()> {
     for name in names(path).await? {
         let file = path.join(name);
@@ -59,6 +63,7 @@ async fn prune(path: &Path, directory: &Path) -> Result<()> {
     }
     Ok(())
 }
+
 pub async fn environment(home: &Path, mut env: Environment) -> Result<Environment> {
     let Some(directory) = env.get("LEO_TOOLKIT_DIR").cloned() else {
         return Ok(env);

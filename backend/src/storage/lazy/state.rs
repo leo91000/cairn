@@ -1,18 +1,29 @@
 //! Durable connection context and accounting independent of the mounted view.
 use super::*;
+
 impl LazyDisk {
     pub fn performance(&self) -> Value {
         self.metrics.snapshot()
     }
+
     /// Private controller context, never included in exported recovery manifests.
     pub fn set_context(&self, value: &Value) -> io::Result<()> {
         let encoded = value.to_string();
         if encoded.len() > 16384 {
             return Err(failure("Disk connection context too large"));
         }
-        self.db.lock().map_err(failure)?.execute("INSERT INTO settings(key,value) VALUES ('context',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [encoded]).map_err(failure)?;
+        self.db
+            .lock()
+            .map_err(failure)?
+            .execute(
+                "INSERT INTO settings(key,value) VALUES ('context',?1) ON CONFLICT(key) DO \
+            UPDATE SET value=excluded.value",
+                [encoded],
+            )
+            .map_err(failure)?;
         Ok(())
     }
+
     pub fn context(directory: &Path) -> io::Result<Value> {
         let db = Connection::open_with_flags(
             directory.join("journal.sqlite"),
@@ -29,6 +40,7 @@ impl LazyDisk {
         }
         serde_json::from_str(&encoded).map_err(failure)
     }
+
     pub fn accounting(&self) -> io::Result<Value> {
         let db = self.db.lock().map_err(failure)?;
         let dirty: i64 = db
@@ -67,12 +79,17 @@ impl LazyDisk {
         let page_size: i64 = db
             .query_row("PRAGMA page_size", [], |r| r.get(0))
             .map_err(failure)?;
-        Ok(
-            serde_json::json!({"dirtyBytes":dirty,"dirtySince":since,"generation":generation,"published":published,
-                "journalBytes":pages * page_size,"journalFreeBytes":free * page_size}),
-        )
+        Ok(serde_json::json!({
+            "dirtyBytes": dirty,
+            "dirtySince": since,
+            "generation": generation,
+            "published": published,
+            "journalBytes": pages * page_size,
+            "journalFreeBytes": free * page_size
+        }))
     }
 }
+
 pub(super) fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

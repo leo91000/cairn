@@ -1,6 +1,7 @@
 use leo_agent_manager::{config::Config, mcp_client::Client, network, service::Service};
 use serde_json::json;
 use tempfile::TempDir;
+
 fn config(root: &TempDir) -> Config {
     Config {
         data_dir: root.path().join("data"),
@@ -36,7 +37,18 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
         .personal("History reader", vec!["read"])
         .await
         .unwrap();
-    let task = s.task(json!({"name":"History","agentId":leo_agent_manager::config::MAIN_AGENT_ID,"prompt":"Read history","worktree":false}),None).await.unwrap();
+    let task = s
+        .task(
+            json!({
+                "name": "History",
+                "agentId": leo_agent_manager::config::MAIN_AGENT_ID,
+                "prompt": "Read history",
+                "worktree": false
+            }),
+            None,
+        )
+        .await
+        .unwrap();
     let run = s
         .enqueue(task["id"].as_str().unwrap(), "manual", None)
         .await
@@ -44,18 +56,31 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
     let run_id = run["id"].as_str().unwrap();
     let output = "x".repeat(128 * 1024);
     for index in 0..40 {
-        s.store.event(run_id, "item.completed", "tool output", Some(json!({"item":{"id":index,"type":"command_execution","aggregated_output":output}}))).await.unwrap();
+        s.store
+            .event(
+                run_id,
+                "item.completed",
+                "tool output",
+                Some(json!({"item": {"id": index,"type": "command_execution","aggregated_output": output}})),
+            )
+            .await
+            .unwrap();
     }
     let http = reqwest::Client::new();
     let request = |name: &str, arguments: serde_json::Value| {
         http.post(format!("{origin}/mcp"))
-        .bearer_auth(token["token"].as_str().unwrap())
-        .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}}))
+            .bearer_auth(token["token"].as_str().unwrap())
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": name,"arguments": arguments}
+            }))
     };
     let mut after = 0;
     let mut seen = Vec::new();
     loop {
-        let bytes = request("get_run", json!({"runId":run_id,"after":after}))
+        let bytes = request("get_run", json!({"runId": run_id,"after": after}))
             .send()
             .await
             .unwrap()
@@ -89,7 +114,7 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
     // One event can exceed the transport ceiling on its own. Its original content
     // must remain available, including escaped characters and multi-byte Unicode.
     let large = "\0\"\\🦊é".repeat(250_000);
-    let payload = json!({"item":{"type":"agent_message","text":large}});
+    let payload = json!({"item": {"type": "agent_message","text": large}});
     s.store
         .event(
             run_id,
@@ -103,7 +128,7 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
         .event(run_id, "turn.completed", "Done", None)
         .await
         .unwrap();
-    let bytes = request("get_run", json!({"runId":run_id,"after":after}))
+    let bytes = request("get_run", json!({"runId": run_id,"after": after}))
         .send()
         .await
         .unwrap()
@@ -124,7 +149,7 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
     let mut digest = serde_json::Value::Null;
     let mut original = String::new();
     loop {
-        let mut arguments = json!({"runId":run_id,"eventId":event_id,"offset":offset});
+        let mut arguments = json!({"runId": run_id,"eventId": event_id,"offset": offset});
         if !digest.is_null() {
             arguments["sha256"] = digest.clone();
         }
@@ -152,32 +177,58 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
         serde_json::from_str::<serde_json::Value>(&original).unwrap()["payload"],
         payload
     );
-    let response: serde_json::Value = request("read_run_content", json!({"runId":run_id,"eventId":event_id,"offset":original.find('🦊').unwrap()+1,"sha256":digest}))
-        .send().await.unwrap().json().await.unwrap();
+    let response: serde_json::Value = request(
+        "read_run_content",
+        json!({
+            "runId": run_id,
+            "eventId": event_id,
+            "offset": original.find('🦊').unwrap()+1,
+            "sha256": digest
+        }),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
     assert_eq!(
         response["result"]["isError"], true,
         "offset inside UTF-8 must be rejected"
     );
-    let response: serde_json::Value =
-        request("get_run", json!({"runId":run_id,"after":page["nextAfter"]}))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+    let response: serde_json::Value = request(
+        "get_run",
+        json!({"runId": run_id,"after": page["nextAfter"]}),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
     let page = &response["result"]["structuredContent"]["result"];
     assert_eq!(page["events"][0]["type"], "turn.completed");
     assert_eq!(page["hasMore"], false);
 
-    let other_task = s.task(json!({"name":"Other history","agentId":leo_agent_manager::config::MAIN_AGENT_ID,"prompt":"Other run","worktree":false}),None).await.unwrap();
+    let other_task = s
+        .task(
+            json!({
+                "name": "Other history",
+                "agentId": leo_agent_manager::config::MAIN_AGENT_ID,
+                "prompt": "Other run",
+                "worktree": false
+            }),
+            None,
+        )
+        .await
+        .unwrap();
     let other_run = s
         .enqueue(other_task["id"].as_str().unwrap(), "manual", None)
         .await
         .unwrap();
     let response: serde_json::Value = request(
         "read_run_content",
-        json!({"runId":other_run["id"],"eventId":event_id,"offset":0}),
+        json!({"runId": other_run["id"],"eventId": event_id,"offset": 0}),
     )
     .send()
     .await
@@ -193,16 +244,19 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
     // Run metadata (for example a snapshot of many skills) needs the same escape
     // hatch. A changing run must never silently mix two versions across chunks.
     s.store
-        .patch_run(run_id, json!({"summary":"\0".repeat(800_000)}))
+        .patch_run(run_id, json!({"summary": "\0".repeat(800_000)}))
         .await
         .unwrap();
-    let bytes = request("get_run", json!({"runId":run_id,"after":page["nextAfter"]}))
-        .send()
-        .await
-        .unwrap()
-        .bytes()
-        .await
-        .unwrap();
+    let bytes = request(
+        "get_run",
+        json!({"runId": run_id,"after": page["nextAfter"]}),
+    )
+    .send()
+    .await
+    .unwrap()
+    .bytes()
+    .await
+    .unwrap();
     assert!(bytes.len() < 8 * 1024 * 1024);
     let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let empty = &response["result"]["structuredContent"]["result"];
@@ -214,7 +268,7 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
         true
     );
     let response: serde_json::Value =
-        request("read_run_content", json!({"runId":run_id,"offset":0}))
+        request("read_run_content", json!({"runId": run_id,"offset": 0}))
             .send()
             .await
             .unwrap()
@@ -224,12 +278,12 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
     let chunk = &response["result"]["structuredContent"]["result"];
     assert!(chunk["nextOffset"].as_u64().unwrap() > 0);
     s.store
-        .patch_run(run_id, json!({"summary":"Updated result"}))
+        .patch_run(run_id, json!({"summary": "Updated result"}))
         .await
         .unwrap();
     let response: serde_json::Value = request(
         "read_run_content",
-        json!({"runId":run_id,"offset":chunk["nextOffset"],"sha256":chunk["sha256"]}),
+        json!({"runId": run_id,"offset": chunk["nextOffset"],"sha256": chunk["sha256"]}),
     )
     .send()
     .await
@@ -243,6 +297,7 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
     );
     server.abort();
 }
+
 #[tokio::test]
 async fn stdio_discovers_and_calls_the_official_sdk_fixture() {
     let root = TempDir::new().unwrap();
@@ -250,7 +305,21 @@ async fn stdio_discovers_and_calls_the_official_sdk_fixture() {
     let s = Service::new(config(&root)).await.unwrap();
     let fixture =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/mcp.mjs");
-    let item = s.mcps.save(&s, json!({"name":"Command fixture","transport":"stdio","command":"node","args":[fixture],"env":{"TEST_PREFIX":"configured:"}}), None).await.unwrap();
+    let item = s
+        .mcps
+        .save(
+            &s,
+            json!({
+                "name": "Command fixture",
+                "transport": "stdio",
+                "command": "node",
+                "args": [fixture],
+                "env": {"TEST_PREFIX": "configured:"}
+            }),
+            None,
+        )
+        .await
+        .unwrap();
     let id = item["id"].as_str().unwrap();
     let tested = s.mcps.test(&s, id).await.unwrap();
     assert_eq!(tested["state"], "connected", "{tested}");
@@ -263,7 +332,7 @@ async fn stdio_discovers_and_calls_the_official_sdk_fixture() {
     let result = client
         .request(
             "tools/call",
-            json!({"name":"fixture_echo","arguments":{"message":"hello"}}),
+            json!({"name": "fixture_echo","arguments": {"message": "hello"}}),
         )
         .await
         .unwrap();
@@ -286,12 +355,19 @@ async fn legacy_stdio_servers_can_exit_on_the_modern_probe() {
     let root = TempDir::new().unwrap();
     std::fs::create_dir(root.path().join("home")).unwrap();
     let s = Service::new(config(&root)).await.unwrap();
-    let script = "const{createInterface}=require('node:readline');createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.method==='server/discover')process.exit(1);if(!r.id)return;const result=r.method==='initialize'?{protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:'legacy',version:'1'}}:{tools:[{name:'legacy_tool',inputSchema:{type:'object'}}]};console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});";
+    let script = "const{createInterface}=require('node:readline');createInterface({input:process.stdin}).on('line',line=>{const \
+        r=JSON.parse(line);if(r.method==='server/discover')process.exit(1);if(!r.id)return;const \
+        result=r.method==='initialize'?{protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:'legacy',version:'1'}}:{tools:[{name:'legacy_tool',inputSchema:{type:'object'}}]};console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));});";
     let item = s
         .mcps
         .save(
             &s,
-            json!({"name":"Legacy","transport":"stdio","command":"node","args":["-e",script]}),
+            json!({
+                "name": "Legacy",
+                "transport": "stdio",
+                "command": "node",
+                "args": ["-e",script]
+            }),
             None,
         )
         .await
@@ -301,6 +377,7 @@ async fn legacy_stdio_servers_can_exit_on_the_modern_probe() {
     assert_eq!(tools[0]["name"], "legacy_tool");
     client.close().await;
 }
+
 #[tokio::test]
 async fn network_guards_block_metadata_even_when_private_network_is_allowed() {
     for endpoint in [
@@ -363,15 +440,40 @@ async fn agents_manage_connections_through_the_self_gateway_without_deadlocks_or
         .personal("Self access", vec!["read", "manage", "run"])
         .await
         .unwrap();
-    let connection = s.mcps.save(&s,json!({"name":"Self","url":format!("{origin}/mcp"),"auth":"bearer","token":owner["token"],"allowPrivateNetwork":true}),None).await.unwrap();
-    let task = s.task(json!({"name":"Manage","agentId":leo_agent_manager::config::MAIN_AGENT_ID,"prompt":"Manage connections","worktree":false}),None).await.unwrap();
+    let connection = s
+        .mcps
+        .save(
+            &s,
+            json!({
+                "name": "Self",
+                "url": format!("{origin}/mcp"),
+                "auth": "bearer",
+                "token": owner["token"],
+                "allowPrivateNetwork": true
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let task = s
+        .task(
+            json!({
+                "name": "Manage",
+                "agentId": leo_agent_manager::config::MAIN_AGENT_ID,
+                "prompt": "Manage connections",
+                "worktree": false
+            }),
+            None,
+        )
+        .await
+        .unwrap();
     let run = s
         .enqueue(task["id"].as_str().unwrap(), "manual", None)
         .await
         .unwrap();
     let run_id = run["id"].as_str().unwrap();
     s.store
-        .patch_run(run_id, json!({"status":"running"}))
+        .patch_run(run_id, json!({"status": "running"}))
         .await
         .unwrap();
     let configuration = s.mcps.run_configuration(&s, &run).await.unwrap();
@@ -385,11 +487,19 @@ async fn agents_manage_connections_through_the_self_gateway_without_deadlocks_or
         .build()
         .unwrap();
     let request = |name: &str, arguments: serde_json::Value| {
-        http.post(&endpoint).bearer_auth(token).header("mcp-protocol-version","2025-11-25").json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}}))
+        http.post(&endpoint)
+            .bearer_auth(token)
+            .header("mcp-protocol-version", "2025-11-25")
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": name,"arguments": arguments}
+            }))
     };
     let created: serde_json::Value = request(
         "create_mcp",
-        json!({"name":"Created through agent","transport":"stdio","command":"node"}),
+        json!({"name": "Created through agent","transport": "stdio","command": "node"}),
     )
     .send()
     .await
@@ -399,7 +509,7 @@ async fn agents_manage_connections_through_the_self_gateway_without_deadlocks_or
     .unwrap();
     assert_ne!(created["result"]["isError"], true, "{created}");
     assert_eq!(s.mcps.list(&s).await.unwrap().len(), 2);
-    let recursive: serde_json::Value = request("test_mcp", json!({"id":connection["id"]}))
+    let recursive: serde_json::Value = request("test_mcp", json!({"id": connection["id"]}))
         .send()
         .await
         .unwrap()
@@ -418,6 +528,7 @@ async fn agents_manage_connections_through_the_self_gateway_without_deadlocks_or
     );
     server.abort();
 }
+
 #[tokio::test]
 async fn official_clients_negotiate_modern_and_legacy_protocols_and_enforce_scopes() {
     use tokio::io::AsyncWriteExt;
@@ -453,7 +564,7 @@ async fn official_clients_negotiate_modern_and_legacy_protocols_and_enforce_scop
         .stdin
         .take()
         .unwrap()
-        .write_all(json!({"url":url,"token":token}).to_string().as_bytes())
+        .write_all(json!({"url": url,"token": token}).to_string().as_bytes())
         .await
         .unwrap();
     let output = tokio::time::timeout(std::time::Duration::from_secs(20), child.wait_with_output())
@@ -468,6 +579,7 @@ async fn official_clients_negotiate_modern_and_legacy_protocols_and_enforce_scop
     assert_eq!(output.stdout, b"ok");
     server.abort();
 }
+
 #[tokio::test]
 async fn oauth_consent_pkce_callback_replay_and_refresh_use_the_existing_provider() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -490,7 +602,20 @@ async fn oauth_consent_pkce_callback_replay_and_refresh_use_the_existing_provide
     let origin = output.next_line().await.unwrap().unwrap();
     let root = TempDir::new().unwrap();
     let s = Service::new(config(&root)).await.unwrap();
-    let item = s.mcps.save(&s, json!({"name":"OAuth fixture","url":format!("{origin}/mcp"),"auth":"oauth","allowPrivateNetwork":true}), None).await.unwrap();
+    let item = s
+        .mcps
+        .save(
+            &s,
+            json!({
+                "name": "OAuth fixture",
+                "url": format!("{origin}/mcp"),
+                "auth": "oauth",
+                "allowPrivateNetwork": true
+            }),
+            None,
+        )
+        .await
+        .unwrap();
     let id = item["id"].as_str().unwrap();
     let consent = s.mcps.connect(&s, id, "fixture-session").await.unwrap();
     let http = reqwest::Client::builder()

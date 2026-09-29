@@ -2,7 +2,13 @@ import type { Page } from '@playwright/test'
 import type { Service } from '../legacy/server/service'
 import { execFileSync, spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  rm,
+  writeFile,
+} from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -64,6 +70,7 @@ export const test = base.extend<object, { workspace: Workspace }>({
       child.stderr.on('data', chunk => log += chunk)
       return child
     }
+
     let child = start()
     let closed = once(child, 'exit')
     const stop = async () => {
@@ -72,6 +79,7 @@ export const test = base.extend<object, { workspace: Workspace }>({
       await closed
       clearTimeout(force)
     }
+
     const ready = async () => {
       await expect.poll(async () => {
         if (child.exitCode !== null)
@@ -79,6 +87,7 @@ export const test = base.extend<object, { workspace: Workspace }>({
         return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
       }, { timeout: 15000 }).toBe(true)
     }
+
     let headers: Record<string, string> = { 'content-type': 'application/json' }
     const api = async (route: string, method = 'GET', body?: unknown) => {
       const response = await fetch(`${url}${route}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
@@ -88,6 +97,7 @@ export const test = base.extend<object, { workspace: Workspace }>({
         headers = { ...headers, 'cookie': response.headers.get('set-cookie')!.split(';')[0], 'x-csrf-token': result.csrf }
       return result
     }
+
     try {
       await ready()
       if (workerInfo.project.name !== 'journeys') {
@@ -95,22 +105,39 @@ export const test = base.extend<object, { workspace: Workspace }>({
         const agent = service.agent({ name: 'Release engineer' })
         const project = await service.project({ name: 'Design system', path: projectPath })
         await service.skills.save('review', '---\nname: review\ndescription: Review the project carefully\n---\nInspect the project and report checks.')
-        const task = service.task({ name: 'Weekly dependency review', prompt: 'Review dependencies and report the checks you ran. fixture:activity', agentId: agent.id, projectId: project.id, skills: ['global/review'], worktree: false, enabled: false, cron: '0 9 * * 1' })
+        const task = service.task({
+          name: 'Weekly dependency review',
+          prompt: 'Review dependencies and report the checks you ran. fixture:activity',
+          agentId: agent.id,
+          projectId: project.id,
+          skills: ['global/review'],
+          worktree: false,
+          enabled: false,
+          cron: '0 9 * * 1',
+        })
         const run = await service.enqueue(task.id)
         await expect.poll(() => service.store.run(run.id)?.status, { timeout: 10000 }).toBe('succeeded')
         service.task({ ...task, prompt: 'fixture:hang' }, task.id)
         const cancelled = await service.enqueue(task.id)
         await api(`/api/runs/${cancelled.id}/cancel`, 'POST')
       }
-      await use({ url, projectPath, service, api, restart: async () => {
-        await stop()
-        child = start()
-        closed = once(child, 'exit')
-        await ready()
-      }, setAccountUsage: async (id, value) => {
-        usage[id] = value
-        await writeFile(usageFile, JSON.stringify(usage))
-      } })
+
+      await use({
+        url,
+        projectPath,
+        service,
+        api,
+        restart: async () => {
+          await stop()
+          child = start()
+          closed = once(child, 'exit')
+          await ready()
+        },
+        setAccountUsage: async (id, value) => {
+          usage[id] = value
+          await writeFile(usageFile, JSON.stringify(usage))
+        },
+      })
     }
     finally {
       await stop()
@@ -135,6 +162,7 @@ export async function expectSingleScroll(page: Page) {
           nested.push(`${element.className} inside ${parent.className}`)
       }
     }
+
     return { root: document.documentElement.scrollHeight - innerHeight, horizontal: document.documentElement.scrollWidth - innerWidth, nested }
   })
   expect(report).toEqual({ root: 0, horizontal: 0, nested: [] })

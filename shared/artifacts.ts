@@ -47,6 +47,7 @@ export function latestArtifacts(items: Deliverable[]) {
     if ((latest.get(key)?.version ?? 0) < item.version)
       latest.set(key, item)
   }
+
   return [...latest.values()]
 }
 

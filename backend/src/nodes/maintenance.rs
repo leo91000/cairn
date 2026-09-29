@@ -31,10 +31,14 @@ pub fn release() -> Result<Value> {
     {
         return Err(Error::new(503, "Invalid master node image digest."));
     }
-    Ok(
-        json!({"image":image,"commit":std::env::var("APP_COMMIT").unwrap_or_else(|_|"development".into()),"protocol":2,"shutdownTimeoutSeconds":300}),
-    )
+    Ok(json!({
+        "image": image,
+        "commit": std::env::var("APP_COMMIT").unwrap_or_else(|_|"development".into()),
+        "protocol": 2,
+        "shutdownTimeoutSeconds": 300
+    }))
 }
+
 pub async fn downloads(State(app): State<App>, request: Request) -> Result<Response> {
     if request.method() != "GET" {
         return Err(Error::new(405, "Method not allowed."));
@@ -48,7 +52,7 @@ pub async fn downloads(State(app): State<App>, request: Request) -> Result<Respo
                     .store
                     .set(
                         &format!("node-runtime:{runtime}"),
-                        json!({"runtimeId":runtime,"image":value["image"]}),
+                        json!({"runtimeId": runtime,"image": value["image"]}),
                         None,
                     )
                     .await?;
@@ -79,12 +83,13 @@ pub async fn downloads(State(app): State<App>, request: Request) -> Result<Respo
         .body(Body::from(body))
         .map_err(Error::internal)
 }
+
 pub async fn request(s: &Service, node: &str, input: &Value) -> Result<Value> {
     match text(input, "action") {
         "status" => s.get("nodes", node).await,
-        "runtimes" => Ok(
-            json!({"runtimes":s.store.keys("node-runtime:").await?.into_iter().map(|(_,value)|value).collect::<Vec<_>>()}),
-        ),
+        "runtimes" => Ok(json!({
+            "runtimes": s.store.keys("node-runtime:").await?.into_iter().map(|(_,value)|value).collect::<Vec<_>>()
+        })),
         "complete" => {
             let node = node.to_owned();
             let image = text(input, "image").to_owned();
@@ -143,7 +148,13 @@ pub async fn request(s: &Service, node: &str, input: &Value) -> Result<Value> {
                     let result =
                         tokio::time::timeout(Duration::from_secs(timeout), drain(&service, &id))
                             .await;
-                    let error=match result {Ok(Ok(()))=>Value::Null,Ok(Err(error))=>error.message.into(),Err(_)=>"Preparation deadline reached; the node must stop its controller before updating.".into()};
+                    let error = match result {
+                        Ok(Ok(())) => Value::Null,
+                        Ok(Err(error)) => error.message.into(),
+                        Err(_) => "Preparation deadline reached; the node must stop its \
+                        controller before updating."
+                            .into(),
+                    };
                     let key = id.clone();
                     let _ = service
                         .store
@@ -161,11 +172,12 @@ pub async fn request(s: &Service, node: &str, input: &Value) -> Result<Value> {
                     service.node_maintenance_tasks.lock().await.remove(&id);
                 });
             }
-            Ok(json!({"maintenance":"draining"}))
+            Ok(json!({"maintenance": "draining"}))
         }
         _ => Err(Error::bad("Invalid maintenance action.")),
     }
 }
+
 async fn drain(s: &Service, node: &str) -> Result<()> {
     let mut failure = None;
     for attempt in s
@@ -185,7 +197,7 @@ async fn drain(s: &Service, node: &str) -> Result<()> {
             continue;
         }
         s.store
-            .patch_run(text(&run, "id"), json!({"nodeState":"updating"}))
+            .patch_run(text(&run, "id"), json!({"nodeState": "updating"}))
             .await?;
         s.store
             .event(

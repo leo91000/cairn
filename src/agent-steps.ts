@@ -29,13 +29,15 @@ export function agentSteps(artifacts: ActivityArtifact[]): AgentStep[] {
     const settledRead = (item?: ActivityArtifact) => item?.kind === 'read' && item.status !== 'error' && !isRunning(item)
     if (settledRead(artifact)) {
       let end = index
-      while (settledRead(artifacts[end + 1])) end++
+      while (settledRead(artifacts[end + 1]))
+        end++
       const group = artifacts.slice(index, end + 1)
       const files = [...new Set(group.flatMap(item => item.files.map(file => fileName(file.path))))]
       steps.push(step(group, group.length > 1 ? `Read ${files.length} files` : artifact.title, files.join(' · ')))
       index = end + 1
       continue
     }
+
     const firstLine = () => artifact.blocks.map(block => block.code).join('\n').split('\n').find(line => line.trim()) ?? ''
     const detail = artifact.kind === 'files'
       ? artifact.files.map(file => fileName(file.path)).join(' · ') || artifact.subtitle
@@ -46,6 +48,7 @@ export function agentSteps(artifacts: ActivityArtifact[]): AgentStep[] {
     steps.push(step([artifact], artifact.title, detail))
     index++
   }
+
   return steps
 }
 
@@ -74,5 +77,6 @@ export function actionSentence(artifacts: ActivityArtifact[]): string {
     const sentence = parts.join(', ')
     return sentence[0]!.toUpperCase() + sentence.slice(1)
   }
+
   return artifacts.some(item => item.kind === 'thinking') ? 'Thought it through' : 'Followed the run'
 }

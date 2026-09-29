@@ -30,11 +30,13 @@ async fn github(s: &Service, endpoint: &str) -> Result<Value> {
     if !output.success {
         return Err(Error::new(
             502,
-            "Could not access GitHub. Check the GitHub connection and repository permissions in Connections, then retry.",
+            "Could not access GitHub. Check the GitHub connection and repository \
+                permissions in Connections, then retry.",
         ));
     }
     serde_json::from_str(&output.stdout).map_err(|_| Error::new(502, "Invalid GitHub response."))
 }
+
 fn repository(raw: &str) -> Result<&str> {
     let parts = raw.split('/').collect::<Vec<_>>();
     if parts.len() != 2
@@ -52,9 +54,11 @@ fn repository(raw: &str) -> Result<&str> {
     }
     Ok(raw)
 }
+
 fn origin(repo: &str) -> String {
     format!("https://github.com/{repo}.git")
 }
+
 fn matches_origin(raw: &str, repo: &str) -> bool {
     let path = raw
         .strip_prefix("https://github.com/")
@@ -65,6 +69,7 @@ fn matches_origin(raw: &str, repo: &str) -> bool {
         .or_else(|| raw.strip_prefix("github.com:"));
     path.is_some_and(|path| path.trim_end_matches(".git").eq_ignore_ascii_case(repo))
 }
+
 async fn existing(s: &Service, repo: &str) -> Result<Option<Value>> {
     Ok(s.store
         .list("projects")
@@ -72,22 +77,46 @@ async fn existing(s: &Service, repo: &str) -> Result<Option<Value>> {
         .into_iter()
         .find(|p| matches_origin(text(p, "origin"), repo)))
 }
+
 pub async fn list(s: &Service, page: i64) -> Result<Value> {
     let values = github(s, &format!("user/repos?per_page=100&page={page}&sort=pushed&direction=desc&affiliation=owner,collaborator,organization_member")).await?;
     let values = values
         .as_array()
         .ok_or_else(|| Error::new(502, "Invalid GitHub repository list."))?;
     let projects = s.store.list("projects").await?;
-    let repos = values.iter().filter(|r| repository(text(r, "full_name")).is_ok()).map(|r| {
-        let full_name = text(r, "full_name");
-        json!({"fullName": full_name, "name": text(r,"name"), "description": text(r,"description"), "defaultBranch": text(r,"default_branch"), "private": r["private"] == true, "archived": r["archived"] == true,
-            "fork": r["fork"] == true, "owner": text(&r["owner"], "login"), "language": text(r, "language"), "stars": r["stargazers_count"].as_u64().unwrap_or(0), "pushedAt": text(r, "pushed_at"),
-            "imported": projects.iter().any(|p| matches_origin(text(p,"origin"), full_name))})
-    }).collect::<Vec<_>>();
-    Ok(
-        json!({"repositories": repos, "nextPage": if values.len() == 100 { Some(page + 1) } else { None }}),
-    )
+    let repos = values
+        .iter()
+        .filter(|r| repository(text(r, "full_name")).is_ok())
+        .map(|r| {
+            let full_name = text(r, "full_name");
+            json!({
+                "fullName": full_name,
+                "name": text(r, "name"),
+                "description": text(r, "description"),
+                "defaultBranch": text(r, "default_branch"),
+                "private": r["private"] == true,
+                "archived": r["archived"] == true,
+                "fork": r["fork"] == true,
+                "owner": text(&r["owner"], "login"),
+                "language": text(r, "language"),
+                "stars": r["stargazers_count"].as_u64().unwrap_or(0),
+                "pushedAt": text(r, "pushed_at"),
+                "imported": projects
+                    .iter()
+                    .any(|p| matches_origin(text(p, "origin"), full_name))
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "repositories": repos,
+        "nextPage": if values.len() == 100 {
+            Some(page + 1)
+        } else {
+            None
+        }
+    }))
 }
+
 pub async fn import(s: &Service, input: Value) -> Result<Value> {
     let repo = repository(text(&input, "repository"))?;
     // Repeat submissions return the registered project, including after a client timeout.
@@ -108,7 +137,16 @@ pub async fn import(s: &Service, input: Value) -> Result<Value> {
     let root = crate::skills::workspace(root, &s.config.workspace_roots).await?;
     let mut project = parse(
         "project",
-        json!({"name": input.get("name").unwrap_or(&metadata["name"]), "description": input.get("description").and_then(Value::as_str).unwrap_or_else(|| text(&metadata,"description")), "path": root, "baseBranch": branch, "sourceMode": "remote"}),
+        json!({
+            "name": input.get("name").unwrap_or(&metadata["name"]),
+            "description": input
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| text(&metadata, "description")),
+            "path": root,
+            "baseBranch": branch,
+            "sourceMode": "remote"
+        }),
     )?;
     let directory = tempfile::Builder::new()
         .prefix("github-")
@@ -125,6 +163,7 @@ pub async fn import(s: &Service, input: Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn identifies_existing_ssh_and_https_origins() {
         for raw in [
@@ -139,6 +178,7 @@ mod tests {
             "team/repo"
         ));
     }
+
     #[test]
     fn accepts_only_repository_coordinates() {
         for invalid in [

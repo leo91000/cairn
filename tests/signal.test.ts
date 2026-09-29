@@ -2,17 +2,71 @@ import type { ChatView } from '../shared/chats'
 import type { RunEvent, RunListItem, Task } from '../shared/contracts'
 import { describe, expect, it } from 'vitest'
 import { activityEntries } from '../src/activity'
-import { filOf, identityColor, liveElapsed, shortAge, workingStep } from '../src/signal'
+import {
+  filOf,
+  identityColor,
+  liveElapsed,
+  shortAge,
+  workingStep,
+} from '../src/signal'
 
 function chat(id: string, values: Partial<ChatView> = {}): ChatView {
-  return { id, title: id, agentId: 'main', projectId: null, runId: null, paused: false, createdAt: 1, updatedAt: 1, pendingQuestions: 0, agentName: 'Leo', projectName: null, status: 'idle', ...values }
+  return {
+    id,
+    title: id,
+    agentId: 'main',
+    projectId: null,
+    runId: null,
+    paused: false,
+    createdAt: 1,
+    updatedAt: 1,
+    pendingQuestions: 0,
+    agentName: 'Leo',
+    projectName: null,
+    status: 'idle',
+    ...values,
+  }
 }
+
 function task(id: string, values: Partial<Task> = {}): Task {
-  return { id, name: id, prompt: 'Do it', agentId: 'ops', projectId: null, skills: null, tags: [], cron: null, timezone: 'Europe/Paris', enabled: true, archived: false, worktree: true, createdAt: 1, nextRun: null, ...values }
+  return {
+    id,
+    name: id,
+    prompt: 'Do it',
+    agentId: 'ops',
+    projectId: null,
+    skills: null,
+    tags: [],
+    cron: null,
+    timezone: 'Europe/Paris',
+    enabled: true,
+    archived: false,
+    worktree: true,
+    createdAt: 1,
+    nextRun: null,
+    ...values,
+  }
 }
+
 function run(id: string, taskId: string, values: Partial<RunListItem> = {}): RunListItem {
-  return { id, taskId, projectId: null, status: 'succeeded', trigger: 'manual', createdAt: 1, startedAt: 1, finishedAt: 2, sessionId: null, workspace: null, usage: null, taskName: taskId, agentName: 'Ops', ...values }
+  return {
+    id,
+    taskId,
+    projectId: null,
+    status: 'succeeded',
+    trigger: 'manual',
+    createdAt: 1,
+    startedAt: 1,
+    finishedAt: 2,
+    sessionId: null,
+    workspace: null,
+    usage: null,
+    taskName: taskId,
+    agentName: 'Ops',
+    ...values,
+  }
 }
+
 function command(id: number, at: number, value: string, running = false): RunEvent {
   return {
     id,
@@ -20,10 +74,27 @@ function command(id: number, at: number, value: string, running = false): RunEve
     createdAt: at,
     type: running ? 'item.started' : 'item.completed',
     text: '',
-    payload: { item: { id: `tool-${id}`, type: 'command_execution', command: value, ...(running ? { status: 'in_progress' } : { exit_code: 0 }) } },
+    payload: {
+      item: {
+        id: `tool-${id}`,
+        type: 'command_execution',
+        command: value,
+        ...(running ? { status: 'in_progress' } : { exit_code: 0 }),
+      },
+    },
   }
 }
-const user = (id: number, at: number): RunEvent => ({ id, runId: 'chat', createdAt: at, type: 'chat.user', text: 'Check the tests', payload: { messageId: `m${id}`, text: 'Check the tests' } })
+
+function user(id: number, at: number): RunEvent {
+  return {
+    id,
+    runId: 'chat',
+    createdAt: at,
+    type: 'chat.user',
+    text: 'Check the tests',
+    payload: { messageId: `m${id}`, text: 'Check the tests' },
+  }
+}
 
 describe('the Fil', () => {
   it('puts what needs the user first, then live work, then recent conversations', () => {
@@ -46,8 +117,21 @@ describe('the Fil', () => {
     const fil = filOf([], [task('audit'), task('triage'), task('digest'), task('old', { archived: true }), task('never')], [
       run('audit-1', 'audit', { status: 'failed', createdAt: 10, error: 'Tests failed\nstack' }),
       run('audit-0', 'audit', { status: 'succeeded', createdAt: 5 }),
-      run('triage-1', 'triage', { status: 'running', createdAt: 12, startedAt: 12, finishedAt: null }),
-      run('digest-1', 'digest', { outcome: { status: 'blocked', reason: 'Needs a GitHub token', evidence: [], reportedAt: 3 }, createdAt: 3 }),
+      run('triage-1', 'triage', {
+        status: 'running',
+        createdAt: 12,
+        startedAt: 12,
+        finishedAt: null,
+      }),
+      run('digest-1', 'digest', {
+        outcome: {
+          status: 'blocked',
+          reason: 'Needs a GitHub token',
+          evidence: [],
+          reportedAt: 3,
+        },
+        createdAt: 3,
+      }),
       run('old-1', 'old', { status: 'failed' }),
       run('chat-1', 'digest', { status: 'failed', trigger: 'chat', createdAt: 99 }),
     ])

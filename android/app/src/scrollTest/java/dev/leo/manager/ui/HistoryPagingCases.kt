@@ -6,17 +6,17 @@ import androidx.compose.foundation.lazy.*
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.asAndroidBitmap
-import java.io.File
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.ComposeContentTestRule
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.unit.dp
 import dev.leo.manager.data.LiveSnapshot
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import org.junit.Assert.*
@@ -24,10 +24,13 @@ import org.junit.Rule
 import org.junit.Test
 
 /**
- * Inverted infinite scroll on the real lazy list, async Markdown renderer and production paging hook.
- * Pages are applied exactly as the app does: the older rows are prepended, nothing else is touched.
+ * Inverted infinite scroll on the real lazy list, async Markdown renderer and production paging
+ * hook. Pages are applied exactly as the app does: the older rows are prepended, nothing else is
+ * touched.
  */
-abstract class HistoryPagingCases(@get:Rule val compose: ComposeContentTestRule = createComposeRule()) {
+abstract class HistoryPagingCases(
+    @get:Rule val compose: ComposeContentTestRule = createComposeRule()
+) {
     private lateinit var list: LazyListState
     private lateinit var rendering: MarkdownRendering
     private lateinit var scope: CoroutineScope
@@ -42,13 +45,28 @@ abstract class HistoryPagingCases(@get:Rule val compose: ComposeContentTestRule 
     private var autoPage: Int? = null
     private var initialFirst: Pair<Any, Int>? = null
 
-    private fun start(index: Int = 0, offset: Int = 420, short: Boolean = false, expectLoading: Boolean = true) {
+    private fun start(
+        index: Int = 0,
+        offset: Int = 420,
+        short: Boolean = false,
+        expectLoading: Boolean = true,
+    ) {
         compose.setContent {
             list = rememberLazyListState()
             rendering = remember { MarkdownRendering() }
             scope = rememberCoroutineScope()
-            val live = LiveSnapshot(oldest = numbers.first().toLong(), hasOlder = hasOlder,
-                loadingOlder = loading, olderError = error, loadOlder = { requests++; error = null; loading = true })
+            val live =
+                LiveSnapshot(
+                    oldest = numbers.first().toLong(),
+                    hasOlder = hasOlder,
+                    loadingOlder = loading,
+                    olderError = error,
+                    loadOlder = {
+                        requests++
+                        error = null
+                        loading = true
+                    },
+                )
             val load = rememberHistoryPaging(live, list, ready)
             LaunchedEffect(loading) {
                 val size = autoPage
@@ -63,10 +81,20 @@ abstract class HistoryPagingCases(@get:Rule val compose: ComposeContentTestRule 
                 Surface(Modifier.fillMaxWidth().height(620.dp)) {
                     CompositionLocalProvider(LocalMarkdownRendering provides rendering) {
                         Box {
-                            LazyColumn(modifier = Modifier.fillMaxSize().testTag("paged-history"), state = list, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.Bottom)) {
+                            LazyColumn(
+                                modifier = Modifier.fillMaxSize().testTag("paged-history"),
+                                state = list,
+                                contentPadding = PaddingValues(16.dp),
+                                verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.Bottom),
+                            ) {
                                 items(numbers, key = { "message:$it" }) { number ->
                                     if (short) Text("Étape $number")
-                                    else Markdown((1..35).joinToString("\n\n") { "Message $number, paragraphe $it. Le lecteur doit garder exactement le même texte devant les yeux." })
+                                    else
+                                        Markdown(
+                                            (1..35).joinToString("\n\n") {
+                                                "Message $number, paragraphe $it. Le lecteur doit garder exactement le même texte devant les yeux."
+                                            }
+                                        )
                                 }
                             }
                             HistoryStatus(live, list, load)
@@ -75,9 +103,18 @@ abstract class HistoryPagingCases(@get:Rule val compose: ComposeContentTestRule 
                 }
             }
         }
-        compose.waitUntil(20000) { rendering.pending == 0 && list.layoutInfo.visibleItemsInfo.isNotEmpty() }
+        compose.waitUntil(20000) {
+            rendering.pending == 0 && list.layoutInfo.visibleItemsInfo.isNotEmpty()
+        }
         var positioned = false
-        compose.runOnIdle { scope.launch { list.scrollToItem(index, offset); rendering.awaitLayout(); list.scrollToItem(index, offset); positioned = true } }
+        compose.runOnIdle {
+            scope.launch {
+                list.scrollToItem(index, offset)
+                rendering.awaitLayout()
+                list.scrollToItem(index, offset)
+                positioned = true
+            }
+        }
         compose.waitUntil(20000) { positioned }
         compose.runOnIdle {
             initialFirst = list.layoutInfo.visibleItemsInfo.first().let { it.key to it.offset }
@@ -103,92 +140,147 @@ abstract class HistoryPagingCases(@get:Rule val compose: ComposeContentTestRule 
         val directory = System.getProperty("leo.screenshots.dir") ?: return
         File(directory).mkdirs()
         val bitmap = compose.onRoot().captureToImage().asAndroidBitmap()
-        File(directory, "$name.png").outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+        File(directory, "$name.png").outputStream().use {
+            bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+        }
     }
 
-    private fun offset(number: Int = 21) = list.layoutInfo.visibleItemsInfo.firstOrNull { it.key == "message:$number" }?.offset
+    private fun offset(number: Int = 21) =
+        list.layoutInfo.visibleItemsInfo.firstOrNull { it.key == "message:$number" }?.offset
 
-    @Test fun olderPageKeepsTheSameTextAtTheSamePixel() {
+    @Test
+    fun olderPageKeepsTheSameTextAtTheSamePixel() {
         start()
         val before = compose.runOnIdle { offset()!! }
         capture("before-page")
         applyPage(16, more = false)
         compose.runOnIdle {
             assertEquals("The older page must be attached", 25, list.layoutInfo.totalItemsCount)
-            assertEquals("Prepending must preserve the visible paragraph, not jump to a different message", before, offset())
+            assertEquals(
+                "Prepending must preserve the visible paragraph, not jump to a different message",
+                before,
+                offset(),
+            )
             assertEquals(1, requests)
         }
         capture("after-page")
     }
 
-    @Test fun pageArrivingAtTheVeryStartKeepsTheFirstParagraph() {
+    @Test
+    fun pageArrivingAtTheVeryStartKeepsTheFirstParagraph() {
         start(offset = 0)
-        compose.runOnIdle { assertFalse("The reader is at the start of the loaded history", list.canScrollBackward) }
+        compose.runOnIdle {
+            assertFalse("The reader is at the start of the loaded history", list.canScrollBackward)
+        }
         compose.onNodeWithText("Chargement des messages précédents…").assertIsDisplayed()
         val before = compose.runOnIdle { offset()!! }
         applyPage(16, more = false)
         compose.runOnIdle {
-            assertEquals("The first loaded paragraph must not be replaced by the new page", before, offset())
+            assertEquals(
+                "The first loaded paragraph must not be replaced by the new page",
+                before,
+                offset(),
+            )
             assertTrue("The new page is above the reader", list.canScrollBackward)
         }
         compose.onAllNodesWithText("Chargement des messages précédents…").assertCountEquals(0)
     }
 
-    @Test fun scrollingWhilePageLoadsKeepsTheLatestReadingPosition() {
+    @Test
+    fun scrollingWhilePageLoadsKeepsTheLatestReadingPosition() {
         start()
         var moved = false
-        compose.runOnIdle { scope.launch { list.scrollBy(-170f); moved = true } }
+        compose.runOnIdle {
+            scope.launch {
+                list.scrollBy(-170f)
+                moved = true
+            }
+        }
         compose.waitUntil(10000) { moved }
         val before = compose.runOnIdle { offset()!! }
         applyPage(16, more = false)
-        compose.runOnIdle { assertEquals("Loading must not undo scrolling performed while waiting", before, offset()) }
+        compose.runOnIdle {
+            assertEquals(
+                "Loading must not undo scrolling performed while waiting",
+                before,
+                offset(),
+            )
+        }
     }
 
-    @Test fun pageArrivingDuringAHeldDragKeepsTheTextAndTheGesture() {
+    @Test
+    fun pageArrivingDuringAHeldDragKeepsTheTextAndTheGesture() {
         start(offset = 100)
         val history = compose.onNodeWithTag("paged-history")
         history.performTouchInput {
             down(Offset(2f, 180f))
             moveBy(Offset(0f, 60f), delayMillis = 160)
         }
-        compose.runOnIdle { assertTrue("The finger must still be dragging", list.isScrollInProgress) }
+        compose.runOnIdle {
+            assertTrue("The finger must still be dragging", list.isScrollInProgress)
+        }
         val before = compose.runOnIdle { offset()!! }
         applyPage(16)
         compose.runOnIdle {
             assertTrue("The page must not cancel the finger's scroll", list.isScrollInProgress)
-            assertEquals("New history must not replace the text under the held finger", before, offset())
+            assertEquals(
+                "New history must not replace the text under the held finger",
+                before,
+                offset(),
+            )
         }
         history.performTouchInput { moveBy(Offset(0f, 48f), delayMillis = 160) }
         // Device input is dispatched asynchronously; await the MOVE's resulting layout.
         try {
             compose.waitUntil(5000) { (offset() ?: Int.MIN_VALUE) > before }
         } catch (failure: Throwable) {
-            throw AssertionError("The held MOVE was not applied: before=$before, after=${offset()}, " +
-                "scrolling=${list.isScrollInProgress}, visible=${list.layoutInfo.visibleItemsInfo.map { it.key to it.offset }}", failure)
+            throw AssertionError(
+                "The held MOVE was not applied: before=$before, after=${offset()}, " +
+                    "scrolling=${list.isScrollInProgress}, visible=${list.layoutInfo.visibleItemsInfo.map { it.key to it.offset }}",
+                failure,
+            )
         }
-        history.performTouchInput { advanceEventTime(200); up() }
+        history.performTouchInput {
+            advanceEventTime(200)
+            up()
+        }
         compose.waitForIdle()
     }
 
-    @Test fun shortRowsKeepLoadingUntilSeveralScreensAreBuffered() {
+    @Test
+    fun shortRowsKeepLoadingUntilSeveralScreensAreBuffered() {
         numbers = (971..1000).toList()
         autoPage = 10
         start(index = 29, offset = 0, short = true)
-        compose.waitUntil(20000) { !loading && list.distanceToStart() >= HISTORY_PREFETCH_SCREENS * list.layoutInfo.viewportSize.height }
+        compose.waitUntil(20000) {
+            !loading &&
+                list.distanceToStart() >=
+                    HISTORY_PREFETCH_SCREENS * list.layoutInfo.viewportSize.height
+        }
         compose.mainClock.advanceTimeBy(500)
         compose.waitForIdle()
         compose.runOnIdle {
             assertTrue("Folded pages that add little text must chain, got $requests", requests > 1)
-            assertTrue("Loading stops once enough history is buffered", hasOlder && numbers.size < 500)
+            assertTrue(
+                "Loading stops once enough history is buffered",
+                hasOlder && numbers.size < 500,
+            )
             val (key, offset) = initialFirst!!
-            assertEquals("The reader stays on the same row", offset, list.layoutInfo.visibleItemsInfo.first { it.key == key }.offset)
+            assertEquals(
+                "The reader stays on the same row",
+                offset,
+                list.layoutInfo.visibleItemsInfo.first { it.key == key }.offset,
+            )
         }
         val settled = compose.runOnIdle { requests }
         compose.mainClock.advanceTimeBy(1000)
-        compose.runOnIdle { assertEquals("No request while the reader does not move", settled, requests) }
+        compose.runOnIdle {
+            assertEquals("No request while the reader does not move", settled, requests)
+        }
     }
 
-    @Test fun shortHistoryThatDoesNotFillTheScreenStaysInPlace() {
+    @Test
+    fun shortHistoryThatDoesNotFillTheScreenStaysInPlace() {
         numbers = (991..1000).toList()
         autoPage = 10
         start(offset = 0, short = true)
@@ -197,35 +289,59 @@ abstract class HistoryPagingCases(@get:Rule val compose: ComposeContentTestRule 
         compose.waitForIdle()
         compose.runOnIdle {
             val (key, offset) = initialFirst!!
-            assertEquals("Older rows appear above a short history without moving it", offset,
-                list.layoutInfo.visibleItemsInfo.first { it.key == key }.offset)
+            assertEquals(
+                "Older rows appear above a short history without moving it",
+                offset,
+                list.layoutInfo.visibleItemsInfo.first { it.key == key }.offset,
+            )
         }
     }
 
-    @Test fun readingFarFromTheStartDoesNotLoad() {
+    @Test
+    fun readingFarFromTheStartDoesNotLoad() {
         start(index = 12, offset = 0, expectLoading = false)
         compose.mainClock.advanceTimeBy(300)
-        compose.runOnIdle { assertEquals("Twelve long messages above the reader are enough", 0, requests) }
+        compose.runOnIdle {
+            assertEquals("Twelve long messages above the reader are enough", 0, requests)
+        }
     }
 
-    @Test fun failedPageStopsAutomaticLoadingUntilRetry() {
+    @Test
+    fun failedPageStopsAutomaticLoadingUntilRetry() {
         start()
-        compose.runOnIdle { loading = false; error = "Historique indisponible. Réessayez." }
+        compose.runOnIdle {
+            loading = false
+            error = "Historique indisponible. Réessayez."
+        }
         compose.mainClock.advanceTimeBy(500)
         compose.waitForIdle()
         compose.runOnIdle { assertEquals("A failure must not loop", 1, requests) }
         compose.onNodeWithText("Réessayer").performClick()
-        compose.runOnIdle { assertEquals(2, requests); assertTrue(loading) }
+        compose.runOnIdle {
+            assertEquals(2, requests)
+            assertTrue(loading)
+        }
     }
 
-    @Test fun consecutivePagesKeepTheCurrentParagraphWithoutDuplicateRequests() {
+    @Test
+    fun consecutivePagesKeepTheCurrentParagraphWithoutDuplicateRequests() {
         start()
         val before = compose.runOnIdle { offset()!! }
         applyPage(16)
-        compose.runOnIdle { assertEquals(before, offset()); assertEquals(1, requests) }
+        compose.runOnIdle {
+            assertEquals(before, offset())
+            assertEquals(1, requests)
+        }
         // Five long messages are buffered above: reading on up approaches the start again.
         var moved = false
-        compose.runOnIdle { scope.launch { list.scrollToItem(0, 300); rendering.awaitLayout(); list.scrollToItem(0, 300); moved = true } }
+        compose.runOnIdle {
+            scope.launch {
+                list.scrollToItem(0, 300)
+                rendering.awaitLayout()
+                list.scrollToItem(0, 300)
+                moved = true
+            }
+        }
         compose.waitUntil(20000) { moved }
         compose.waitUntil(10000) { loading }
         val nextBefore = compose.runOnIdle { offset(16)!! }
@@ -236,10 +352,18 @@ abstract class HistoryPagingCases(@get:Rule val compose: ComposeContentTestRule 
         }
     }
 
-    @Test fun returningToTheLatestMessageWhileLoadingIsNotUndone() {
+    @Test
+    fun returningToTheLatestMessageWhileLoadingIsNotUndone() {
         start()
         var done = false
-        compose.runOnIdle { scope.launch { list.scrollToItem(19, 300); rendering.awaitLayout(); list.scrollToItem(19, 300); done = true } }
+        compose.runOnIdle {
+            scope.launch {
+                list.scrollToItem(19, 300)
+                rendering.awaitLayout()
+                list.scrollToItem(19, 300)
+                done = true
+            }
+        }
         compose.waitUntil(20000) { done }
         compose.waitForIdle()
         val before = compose.runOnIdle { offset(40)!! }

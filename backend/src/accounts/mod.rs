@@ -48,40 +48,57 @@ pub struct Lease {
 pub trait Driver: Send + Sync {
     /// Cleans up interrupted work and migrates state from earlier versions, once per start.
     async fn initialize(&self, s: &Service) -> Result<()>;
+
     /// Codex runs on the host's own login until a managed account is added.
     async fn managed(&self, s: &Service) -> Result<bool>;
+
     /// Records that an account was added, in the transaction that adds it.
     fn added(&self, _db: &mut crate::store::Db<'_>) -> Result<()> {
         Ok(())
     }
+
     /// Signs in with the official CLI inside `home`, publishing its link and code to `login`.
     async fn authorize(&self, s: &Service, home: &Path, login: &Login) -> Result<()>;
+
     /// Verifies the identity signed in within `home`, then keeps its credentials for `id`.
     /// Caller holds the selection and account locks.
     async fn adopt(&self, s: &Service, id: &str, home: &Path) -> Result<()>;
+
     /// Reads identity and usage into the record. `models` currently run on the account.
     /// Caller holds the account lock.
     async fn refresh(&self, s: &Service, id: &str, models: &[String]) -> Result<()>;
+
     async fn due(&self, s: &Service, account: &Value, attempted: i64) -> Result<bool>;
+
     /// How long usage stays current for scheduling and display.
     fn fresh_for(&self) -> i64;
+
     /// Codex never schedules on unknown usage; Claude Code's usage may be unavailable.
     fn requires_usage(&self) -> bool;
+
     async fn supports(&self, s: &Service, id: &str, model: &str) -> Result<bool>;
+
     /// The private home a run's CLI reads its credentials from.
     fn home(&self, s: &Service, run_id: &str) -> PathBuf;
+
     /// Prepares `home` for a lease. Refresh credentials never enter it.
     async fn prepare(&self, s: &Service, id: &str, home: &Path) -> Result<()>;
+
     /// Removes credentials a run may have left in `home`.
     async fn clear(&self, home: &Path) -> Result<()>;
+
     /// Removes credentials left in any home of a run interrupted by a restart.
     async fn recover(&self, s: &Service, run_id: &str) -> Result<()>;
+
     /// Answers a run's broker request with access-only credentials.
     async fn access(&self, s: &Service, lease: &Lease, request: &Value) -> Result<Value>;
+
     async fn redactions(&self, s: &Service, id: &str) -> Result<Vec<String>>;
+
     /// Deletes the credentials of a removed account.
     async fn forget(&self, s: &Service, id: &str) -> Result<()>;
 }
+
 impl Provider {
     pub fn driver(self) -> &'static dyn Driver {
         match self {
@@ -97,15 +114,18 @@ pub struct Login {
     pub stop: CancellationToken,
     codes: Mutex<mpsc::Receiver<String>>,
 }
+
 impl Login {
     pub fn update(&self, change: impl FnOnce(&mut Value)) {
         self.view.send_modify(change);
     }
+
     /// The next authorization code the user pastes, for CLIs that ask for one.
     pub async fn code(&self) -> Option<String> {
         self.codes.lock().await.recv().await
     }
 }
+
 struct SignIn {
     account_id: String,
     provider: Provider,
@@ -114,10 +134,12 @@ struct SignIn {
     complete: watch::Receiver<bool>,
     created: bool,
 }
+
 impl SignIn {
     fn busy(&self) -> bool {
         !*self.complete.borrow()
     }
+
     fn view(&self) -> Value {
         let mut view = self.login.view.borrow().clone();
         view["accountId"] = self.account_id.clone().into();
@@ -158,8 +180,25 @@ pub fn migrate(db: &mut crate::store::Db<'_>) -> Result<()> {
 
 /// A new account, before its first sign-in or import.
 pub(crate) fn record(provider: Provider, name: &str, state: &str) -> Value {
-    json!({"id":id(),"provider":provider,"name":name,"enabled":true,"email":null,"plan":null,"identity":null,"createdAt":now(),"checkedAt":null,"state":state,"error":"","usage":null,"lastUsedAt":null,"exhausted":null,"maxConcurrentRuns":PARALLEL_RUNS})
+    json!({
+        "id": id(),
+        "provider": provider,
+        "name": name,
+        "enabled": true,
+        "email": null,
+        "plan": null,
+        "identity": null,
+        "createdAt": now(),
+        "checkedAt": null,
+        "state": state,
+        "error": "",
+        "usage": null,
+        "lastUsedAt": null,
+        "exhausted": null,
+        "maxConcurrentRuns": PARALLEL_RUNS
+    })
 }
+
 /// Saves a signed-in account unless another account of its coding agent has the same identity.
 /// Both are checked and saved together, even when two sign-ins finish together.
 pub(crate) async fn claim(s: &Service, account: Value) -> Result<()> {
@@ -179,6 +218,7 @@ pub(crate) async fn claim(s: &Service, account: Value) -> Result<()> {
         })
         .await
 }
+
 /// A reconnection signed in with another identity than the account's own.
 pub(crate) fn different_account() -> Error {
     Error::new(
@@ -186,6 +226,7 @@ pub(crate) fn different_account() -> Error {
         "Sign-in belongs to a different account. Add it as a new account instead.",
     )
 }
+
 /// Clears exhaustion once usage read after it shows the account recovered; otherwise that
 /// usage becomes what the next reading is compared with. Without any usage to compare, a
 /// coding agent that can run on unknown usage tries the account again after `fresh_for`.
@@ -217,22 +258,26 @@ pub(crate) fn replenish(account: &mut Value, driver: &dyn Driver) {
         account["exhausted"]["usage"] = current.clone();
     }
 }
+
 fn fresh(account: &Value, driver: &dyn Driver) -> bool {
     account["usage"]["checkedAt"]
         .as_i64()
         .is_some_and(|at| now() - at <= driver.fresh_for())
 }
+
 /// Remaining capacity for `model`, or `None` when usage is unknown or out of date.
 fn capacity(account: &Value, driver: &dyn Driver, model: &str) -> Option<f64> {
     fresh(account, driver)
         .then(|| usage::remaining(&account["usage"], model))
         .flatten()
 }
+
 fn parallel_runs(account: &Value) -> usize {
     account["maxConcurrentRuns"]
         .as_u64()
         .unwrap_or(PARALLEL_RUNS) as usize
 }
+
 fn valid_name(name: &str) -> Result<&str> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 100 {
@@ -240,6 +285,7 @@ fn valid_name(name: &str) -> Result<&str> {
     }
     Ok(name)
 }
+
 pub(crate) async fn remove_file(path: &Path) -> Result<()> {
     match tokio::fs::remove_file(path).await {
         Ok(()) => Ok(()),
@@ -247,6 +293,7 @@ pub(crate) async fn remove_file(path: &Path) -> Result<()> {
         Err(e) => Err(e.into()),
     }
 }
+
 pub(crate) async fn remove_directory(path: &Path) -> Result<()> {
     match tokio::fs::remove_dir_all(path).await {
         Ok(()) => Ok(()),
@@ -284,6 +331,7 @@ impl Accounts {
             .await
             .map(|_| ())
     }
+
     pub async fn lock(&self, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
         self.locks
             .lock()
@@ -294,9 +342,11 @@ impl Accounts {
             .lock_owned()
             .await
     }
+
     pub async fn get(&self, s: &Service, id: &str) -> Result<Value> {
         required(s.store.get(KIND, id).await?, "Account not found.")
     }
+
     pub async fn records(&self, s: &Service, provider: Provider) -> Result<Vec<Value>> {
         Ok(s.store
             .list(KIND)
@@ -305,9 +355,11 @@ impl Accounts {
             .filter(|a| a["provider"] == provider.as_str())
             .collect())
     }
+
     pub async fn lease(&self, run_id: &str) -> Option<Lease> {
         self.leases.lock().await.get(run_id).cloned()
     }
+
     /// The account's leases, ordered by run.
     pub async fn active(&self, id: &str) -> Vec<Lease> {
         let mut leases = self
@@ -321,6 +373,7 @@ impl Accounts {
         leases.sort_by(|a, b| a.run_id.cmp(&b.run_id));
         leases
     }
+
     async fn recovering(&self, s: &Service, id: &str) -> Result<bool> {
         let id = id.to_owned();
         s.store
@@ -332,6 +385,7 @@ impl Accounts {
             })
             .await
     }
+
     /// Signing in, or recovering a run: nothing else may use the account's credentials.
     pub async fn busy(&self, s: &Service, id: &str) -> Result<bool> {
         Ok(self.connecting.lock().await.as_deref() == Some(id) || self.recovering(s, id).await?)
@@ -381,6 +435,7 @@ impl Accounts {
         });
         Ok(candidates)
     }
+
     pub async fn acquire(
         &self,
         s: &Service,
@@ -421,6 +476,7 @@ impl Accounts {
         s.store.put(KIND, account).await?;
         Ok(Some(lease))
     }
+
     /// Why no account can take a run now.
     async fn waiting(&self, s: &Service, provider: Provider) -> Result<Error> {
         let accounts = self.records(s, provider).await?;
@@ -452,6 +508,7 @@ impl Accounts {
         };
         Ok(Error::new(409, message))
     }
+
     /// Whether runs of `provider` wait for the user to connect, reconnect or resume an account.
     pub async fn needs_attention(&self, s: &Service, provider: Provider) -> Result<bool> {
         Ok(provider.driver().managed(s).await?
@@ -461,12 +518,14 @@ impl Accounts {
                 .iter()
                 .any(|a| a["state"] == "ready" && a["enabled"] == true))
     }
+
     pub async fn release(&self, lease: &Lease) -> Result<()> {
         let _guard = self.lock(&lease.account_id).await;
         let cleared = lease.provider.driver().clear(&lease.home).await;
         self.leases.lock().await.remove(&lease.run_id);
         cleared
     }
+
     /// Moves a lease to the home its run actually uses, such as inside an isolated workspace.
     pub async fn relocate(&self, s: &Service, lease: &mut Lease, home: &Path) -> Result<()> {
         let _guard = self.lock(&lease.account_id).await;
@@ -483,6 +542,7 @@ impl Accounts {
             .insert(lease.run_id.clone(), lease.clone());
         Ok(())
     }
+
     pub async fn recover_run(&self, s: &Service, run: &Value) -> Result<()> {
         let account = text(run, "accountId");
         let _guard = if account.is_empty() {
@@ -500,6 +560,7 @@ impl Accounts {
             .retain(|_, lease| lease.run_id != text(run, "id"));
         Ok(())
     }
+
     pub async fn access(&self, s: &Service, lease: &Lease, request: &Value) -> Result<Value> {
         if self
             .leases
@@ -512,6 +573,7 @@ impl Accounts {
         }
         lease.provider.driver().access(s, lease, request).await
     }
+
     pub async fn redactions(&self, s: &Service, lease: &Lease) -> Result<Vec<String>> {
         lease
             .provider
@@ -519,15 +581,16 @@ impl Accounts {
             .redactions(s, &lease.account_id)
             .await
     }
+
     pub async fn exhausted(&self, s: &Service, id: &str, model: &str) -> Result<()> {
         let _guard = self.lock(id).await;
         let (id, model) = (id.to_owned(), model.to_owned());
         s.store
             .transaction(move |db| {
                 let mut a = required(db.get(KIND, &id)?, "Account not found.")?;
-                a["exhausted"] = json!({"at":now(),"model":model,"usage":a["usage"]});
+                a["exhausted"] = json!({"at": now(),"model": model,"usage": a["usage"]});
                 db.put(KIND, &a)?;
-                db.audit("account.exhausted", &json!({"id":id}))
+                db.audit("account.exhausted", &json!({"id": id}))
             })
             .await
     }
@@ -558,6 +621,7 @@ impl Accounts {
         }
         Ok(())
     }
+
     pub async fn refresh(&self, s: &Service, id: &str) -> Result<()> {
         let _guard = self.lock(id).await;
         let Some(account) = s.store.get(KIND, id).await? else {
@@ -585,7 +649,7 @@ impl Accounts {
                     provider.label()
                 )
             };
-            merge(&mut account, &json!({"state":"error","error":message}));
+            merge(&mut account, &json!({"state": "error","error": message}));
             s.store.put(KIND, account).await?;
             return Ok(());
         }
@@ -621,6 +685,7 @@ impl Accounts {
             })
             .collect())
     }
+
     /// Every account, the sign-in in progress, and the coding agents whose runs wait for the
     /// user to connect, reconnect or resume an account.
     pub async fn overview(&self, s: &Service) -> Result<Value> {
@@ -630,10 +695,13 @@ impl Accounts {
                 required.push(provider);
             }
         }
-        Ok(
-            json!({"accounts":self.list(s).await?,"signIn":self.sign_in().await,"required":required}),
-        )
+        Ok(json!({
+            "accounts": self.list(s).await?,
+            "signIn": self.sign_in().await,
+            "required": required
+        }))
     }
+
     pub async fn sign_in(&self) -> Value {
         self.signing_in
             .lock()
@@ -667,6 +735,7 @@ impl Accounts {
             })
             .await
     }
+
     /// Adds an account and starts its sign-in.
     pub async fn add(&self, s: &Arc<Service>, provider: Provider, name: &str) -> Result<Value> {
         self.initialize(s).await?;
@@ -678,6 +747,7 @@ impl Accounts {
         let account = self.create(s, provider, name).await?;
         self.begin(s, &mut current, account).await
     }
+
     pub async fn reconnect(&self, s: &Arc<Service>, id: &str) -> Result<Value> {
         self.initialize(s).await?;
         let _selection = self.selection.lock().await;
@@ -694,6 +764,7 @@ impl Accounts {
         let account = self.get(s, id).await?;
         self.begin(s, &mut current, account).await
     }
+
     async fn begin(
         &self,
         s: &Arc<Service>,
@@ -706,9 +777,15 @@ impl Accounts {
         let home = s.config.data_dir.join("account-login").join(&id);
         private_dir(&home).await?;
         let (input, codes) = mpsc::channel(1);
-        let (view, _) = watch::channel(
-            json!({"state":"pending","phase":"starting","url":null,"code":null,"acceptsCode":false,"expiresAt":now()+SIGN_IN_MS,"error":null}),
-        );
+        let (view, _) = watch::channel(json!({
+            "state": "pending",
+            "phase": "starting",
+            "url": null,
+            "code": null,
+            "acceptsCode": false,
+            "expiresAt": now()+SIGN_IN_MS,
+            "error": null
+        }));
         let login = Arc::new(Login {
             view,
             stop: CancellationToken::new(),
@@ -784,6 +861,7 @@ impl Accounts {
         });
         Ok(view)
     }
+
     /// Cancels the current sign-in. An account that never finished signing in is removed.
     pub async fn cancel(&self, s: &Service) -> Result<()> {
         let Some(sign_in) = self.signing_in.lock().await.take() else {
@@ -806,6 +884,7 @@ impl Accounts {
         }
         Ok(())
     }
+
     pub async fn submit_code(&self, code: &str) -> Result<()> {
         let current = self.signing_in.lock().await;
         let sign_in = current
@@ -851,6 +930,7 @@ impl Accounts {
             .find(|a| a["id"] == id)
             .unwrap_or(Value::Null))
     }
+
     pub async fn remove(&self, s: &Service, id: &str) -> Result<()> {
         let _selection = self.selection.lock().await;
         let _guard = self.lock(id).await;
@@ -873,7 +953,7 @@ impl Accounts {
         s.store
             .transaction(move |db| {
                 db.remove(KIND, &id)?;
-                db.audit("account.removed", &json!({"id":id,"provider":provider}))
+                db.audit("account.removed", &json!({"id": id,"provider": provider}))
             })
             .await
     }
@@ -958,11 +1038,11 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 ));
             }
             accounts.submit_code(code).await?;
-            Ok(json!({"submitted":true}))
+            Ok(json!({"submitted": true}))
         }
         ("DELETE", ["sign-in"]) => {
             accounts.cancel(s).await?;
-            Ok(json!({"cancelled":true}))
+            Ok(json!({"cancelled": true}))
         }
         ("POST", [id, "sign-in"]) => {
             uuid(id)?;
@@ -975,7 +1055,7 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         ("DELETE", [id]) => {
             uuid(id)?;
             accounts.remove(s, id).await?;
-            Ok(json!({"deleted":true}))
+            Ok(json!({"deleted": true}))
         }
         _ => Err(Error::new(404, "Unknown account operation.")),
     }

@@ -139,7 +139,11 @@ fun ResourcesScreen(
 private fun AgentEditor(vm: LeoViewModel, state: Workspace, initial: Agent, close: () -> Unit) {
     var nodes by remember { mutableStateOf<List<ExecutionNode>>(emptyList()) }
     LaunchedEffect(initial.id) {
-        try { nodes = vm.api.get("/nodes") } catch (e: Exception) { vm.report(e) }
+        try {
+            nodes = vm.api.get("/nodes")
+        } catch (e: Exception) {
+            vm.report(e)
+        }
     }
     var form by rememberForm(initial)
     var timeout by rememberSaveable { mutableStateOf(initial.timeoutMinutes.toString()) }
@@ -213,19 +217,32 @@ private fun AgentEditor(vm: LeoViewModel, state: Workspace, initial: Agent, clos
             form = form.copy(access = form.access.copy(nodes = if (it) null else emptyList()))
         }
         if (form.access.nodes != null) {
-            val choices = listOf(LOCAL_NODE_ID to "Runner actuel") + nodes.filter { !it.local && !it.revoked }.map { it.id to it.name }
+            val choices =
+                listOf(LOCAL_NODE_ID to "Runner actuel") +
+                    nodes.filter { !it.local && !it.revoked }.map { it.id to it.name }
             choices.forEach { (id, name) ->
                 Toggle(name, id in form.access.nodes.orEmpty()) { enabled ->
                     val selected = form.access.nodes.orEmpty()
-                    form = form.copy(access = form.access.copy(nodes = if (enabled) selected + id else selected - id))
+                    form =
+                        form.copy(
+                            access =
+                                form.access.copy(
+                                    nodes = if (enabled) selected + id else selected - id
+                                )
+                        )
                 }
             }
         }
         Toggle("Limiter les ressources par conversation", form.access.maxResources != null) {
-            form = form.copy(access = form.access.copy(maxResources = if (it) DEFAULT_RESOURCES else null))
+            form =
+                form.copy(
+                    access = form.access.copy(maxResources = if (it) DEFAULT_RESOURCES else null)
+                )
         }
         form.access.maxResources?.let { limit ->
-            ResourceLimitFields(limit) { form = form.copy(access = form.access.copy(maxResources = it)) }
+            ResourceLimitFields(limit) {
+                form = form.copy(access = form.access.copy(maxResources = it))
+            }
         }
         Text("Accès de l’agent", style = MaterialTheme.typography.titleMedium)
         Choice(
@@ -382,7 +399,16 @@ private fun ProjectEditor(vm: LeoViewModel, state: Workspace, initial: Project, 
         save = {
             vm.perform {
                 if (github) {
-                    api.request("POST", "/projects/github", body("repository" to repository, "name" to form.name, "description" to form.description, "baseBranch" to form.baseBranch))
+                    api.request(
+                        "POST",
+                        "/projects/github",
+                        body(
+                            "repository" to repository,
+                            "name" to form.name,
+                            "description" to form.description,
+                            "baseBranch" to form.baseBranch,
+                        ),
+                    )
                     refresh()
                 } else save("projects", initial.id, wireJson.encodeToJsonElement(form))
                 close()
@@ -395,11 +421,23 @@ private fun ProjectEditor(vm: LeoViewModel, state: Workspace, initial: Project, 
                 form.baseBranch.isNotBlank(),
     ) {
         if (initial.id.isEmpty()) {
-            Choice("Ajouter depuis", mode, listOf("local" to "Dossier sur le serveur", "github" to "GitHub")) { if (!state.busy) mode = it }
-            if (github) GithubRepositoryPicker(vm.api, repository, !state.busy) {
-                repository = it.fullName
-                form = form.copy(name = it.name.take(100), description = it.description.take(500), baseBranch = it.defaultBranch)
+            Choice(
+                "Ajouter depuis",
+                mode,
+                listOf("local" to "Dossier sur le serveur", "github" to "GitHub"),
+            ) {
+                if (!state.busy) mode = it
             }
+            if (github)
+                GithubRepositoryPicker(vm.api, repository, !state.busy) {
+                    repository = it.fullName
+                    form =
+                        form.copy(
+                            name = it.name.take(100),
+                            description = it.description.take(500),
+                            baseBranch = it.defaultBranch,
+                        )
+                }
         }
         Field("Nom", form.name, { form = form.copy(name = it) })
         Field("Description", form.description, { form = form.copy(description = it) }, 3)
@@ -487,10 +525,41 @@ private fun ResourceLimitFields(limit: NodeResources, change: (NodeResources) ->
     var memory by remember { mutableStateOf(gib(limit.memoryMiB)) }
     var disk by remember { mutableStateOf(gib(limit.diskMiB)) }
     fun update() {
-        val value = cpu.toIntOrNull()?.takeIf { it > 0 }?.let { c -> mib(memory)?.takeIf { it >= 128 }?.let { m -> mib(disk)?.takeIf { it >= 128 }?.let { d -> NodeResources(c, m, d) } } }
+        val value =
+            cpu.toIntOrNull()
+                ?.takeIf { it > 0 }
+                ?.let { c ->
+                    mib(memory)
+                        ?.takeIf { it >= 128 }
+                        ?.let { m ->
+                            mib(disk)?.takeIf { it >= 128 }?.let { d -> NodeResources(c, m, d) }
+                        }
+                }
         if (value != null) change(value)
     }
-    Field("CPU maximum", cpu, { cpu = it; update() }, keyboardOptions = InputKeyboards.Number)
-    Field("RAM maximum (Gio)", memory, { memory = it; update() })
-    Field("Disque maximum (Gio)", disk, { disk = it; update() })
+    Field(
+        "CPU maximum",
+        cpu,
+        {
+            cpu = it
+            update()
+        },
+        keyboardOptions = InputKeyboards.Number,
+    )
+    Field(
+        "RAM maximum (Gio)",
+        memory,
+        {
+            memory = it
+            update()
+        },
+    )
+    Field(
+        "Disque maximum (Gio)",
+        disk,
+        {
+            disk = it
+            update()
+        },
+    )
 }

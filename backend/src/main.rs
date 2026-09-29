@@ -7,6 +7,7 @@ use leo_agent_manager::{
 use serde_json::Value;
 use std::{path::Path, process::ExitCode};
 use tokio_util::sync::CancellationToken;
+
 fn main() -> ExitCode {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.first().is_some_and(|a| a == "supervise") {
@@ -53,17 +54,17 @@ fn main() -> ExitCode {
         }
     }
 }
+
 async fn shutdown(stop: CancellationToken) {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("signal handler");
     tokio::select! {
-    _=terminate.recv()=>{
-    }
-    ,_=tokio::signal::ctrl_c()=>{
-    }
+        _ = terminate.recv() => {}
+        _ = tokio::signal::ctrl_c() => {}
     }
     stop.cancel();
 }
+
 async fn entry(args: Vec<String>) -> Result<i32> {
     let mode = args.first().map(String::as_str).unwrap_or("serve");
     if ["--version", "-V", "version"].contains(&mode) {
@@ -246,7 +247,8 @@ async fn entry(args: Vec<String>) -> Result<i32> {
                         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                         loop {
                             tokio::select! {
-                            _=s.shutdown.cancelled()=>break,_=timer.tick()=>{
+                                _ = s.shutdown.cancelled() => break,
+                                _ = timer.tick() => {
                             let result=if kind=="accounts"{
                             s.accounts.poll(&s,true).await}
                             else{
@@ -288,6 +290,7 @@ async fn entry(args: Vec<String>) -> Result<i32> {
         )),
     }
 }
+
 async fn chat(config: &Config, plan: Value, stop: CancellationToken) -> Result<i32> {
     use tokio::io::AsyncWriteExt;
     let home = std::env::var("CODEX_HOME").map_err(|_| Error::bad("Missing Codex home."))?;
@@ -312,16 +315,18 @@ async fn chat(config: &Config, plan: Value, stop: CancellationToken) -> Result<i
     if let Err(error) = &result {
         let _ = tx
             .send(serde_json::json!({
-            "type":"turn.failed","error":{
-            "message":error.message}
-            }
-            ))
+                "type": "turn.failed",
+                "error": {
+                    "message": error.message
+                }
+            }))
             .await;
     }
     drop(tx);
     output.await.map_err(Error::internal)??;
     Ok(if result.is_ok() { 0 } else { 1 })
 }
+
 async fn agent_command(
     mut command: tokio::process::Command,
     prompt: String,
@@ -340,17 +345,22 @@ async fn agent_command(
         let _ = stdin.write_all(prompt.as_bytes()).await;
     });
     let code = tokio::select! {
-    result=child.wait()=>result?.code().unwrap_or(1),_=stop.cancelled()=>{
-    unsafe{
-    libc::kill(-(pid as i32),libc::SIGTERM);
-    }
-    if tokio::time::timeout(std::time::Duration::from_secs(2),child.wait()).await.is_err(){
-    unsafe{
-    libc::kill(-(pid as i32),libc::SIGKILL);
-    }
-    let _=child.wait().await;
-    }
-    143}
+        result = child.wait() => result?.code().unwrap_or(1),
+        _ = stop.cancelled() => {
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGTERM);
+            }
+            if tokio::time::timeout(std::time::Duration::from_secs(2), child.wait())
+                .await
+                .is_err()
+            {
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGKILL);
+                }
+                let _ = child.wait().await;
+            }
+            143
+        }
     };
     unsafe {
         libc::kill(-(pid as i32), libc::SIGKILL);

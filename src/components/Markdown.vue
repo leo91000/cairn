@@ -2,7 +2,12 @@
 import type { Deliverable } from '../../shared/artifacts'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
-import { computed, defineAsyncComponent, onBeforeUnmount, ref } from 'vue'
+import {
+  computed,
+  defineAsyncComponent,
+  onBeforeUnmount,
+  ref,
+} from 'vue'
 import { artifactLink } from '../../shared/artifacts'
 import { api } from '../api'
 import { highlight } from '../highlight'
@@ -14,6 +19,7 @@ const loading = ref(false)
 const error = ref('')
 let request: AbortController | undefined
 onBeforeUnmount(() => request?.abort())
+
 async function openLink(event: MouseEvent) {
   if (event.defaultPrevented || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey)
     return
@@ -43,6 +49,7 @@ async function openLink(event: MouseEvent) {
       loading.value = false
   }
 }
+
 const html = computed(() => {
   const container = document.createElement('div')
   container.innerHTML = DOMPurify.sanitize(marked.parse(props.content, { async: false }) as string)
@@ -50,6 +57,7 @@ const html = computed(() => {
     const language = [...code.classList].find(name => name.startsWith('language-'))?.slice(9)
     code.innerHTML = highlight(code.textContent || '', language)
   }
+
   if (props.compactLinks) {
     // Reports often contain bare artifact paths. Link only this known route,
     // leaving existing links and code untouched, and retain the viewer handler.
@@ -59,6 +67,7 @@ const html = computed(() => {
       if (!walker.currentNode.parentElement?.closest('a, code, pre'))
         nodes.push(walker.currentNode as Text)
     }
+
     for (const node of nodes) {
       const matches = [...node.data.matchAll(/(?<![\w/])\/api\/runs\/[\w-]+\/artifacts\/[\w-]+/g)]
       if (!matches.length)
@@ -73,10 +82,12 @@ const html = computed(() => {
         fragment.append(link)
         offset = match.index + match[0].length
       }
+
       fragment.append(node.data.slice(offset))
       node.replaceWith(fragment)
     }
   }
+
   for (const link of container.querySelectorAll('a[href]')) {
     link.setAttribute('target', '_blank')
     link.setAttribute('rel', 'noopener noreferrer')
@@ -99,6 +110,7 @@ const html = computed(() => {
       catch { /* Keep the original label for malformed URLs. */ }
     }
   }
+
   return container.innerHTML
 })
 </script>
@@ -111,5 +123,11 @@ const html = computed(() => {
   <p v-if="error" role="alert" class="text-sm text-danger">
     {{ error }}
   </p>
-  <ArtifactViewer v-if="opening" :key="opening.id" :items="opening.items" :initial="opening.id" @close="opening = undefined" />
+  <ArtifactViewer
+    v-if="opening"
+    :key="opening.id"
+    :items="opening.items"
+    :initial="opening.id"
+    @close="opening = undefined"
+  />
 </template>

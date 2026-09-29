@@ -496,4 +496,7 @@ internal fun resultParts(source: String): List<ResultPart> {
 
 /** "Using Claude Code account: Studio" → ("Claude Code", "Studio"). */
 private fun accountUsed(text: String): Pair<String, String>? =
-    Regex("^Using (Codex|Claude Code) account: (.+)$").find(text)?.destructured?.let { (agent, name) -> agent to name.trim() }
+    Regex("^Using (Codex|Claude Code) account: (.+)$").find(text)?.destructured?.let { (agent, name)
+        ->
+        agent to name.trim()
+    }

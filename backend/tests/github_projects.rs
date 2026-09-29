@@ -69,6 +69,7 @@ esac
     .unwrap();
     (root, s)
 }
+
 #[tokio::test]
 async fn lists_imports_default_branch_and_reuses_existing_project() {
     let (_root, s) = fixture().await;
@@ -81,9 +82,14 @@ async fn lists_imports_default_branch_and_reuses_existing_project() {
     assert_eq!(page["repositories"][0]["fork"], true);
     assert_eq!(page["repositories"][0]["pushedAt"], "2026-09-01T10:00:00Z");
     assert_eq!(page["nextPage"], serde_json::Value::Null);
-    let project = github_projects::import(&s, json!({"repository":"fixture/repo"}))
-        .await
-        .unwrap();
+    let project = github_projects::import(
+        &s,
+        json!({
+            "repository": "fixture/repo"
+        }),
+    )
+    .await
+    .unwrap();
     assert_eq!(project["baseBranch"], "trunk");
     assert!(
         std::path::Path::new(project["path"].as_str().unwrap())
@@ -95,32 +101,51 @@ async fn lists_imports_default_branch_and_reuses_existing_project() {
         true
     );
     assert_eq!(
-        github_projects::import(&s, json!({"repository":"fixture/repo"}))
-            .await
-            .unwrap()["id"],
+        github_projects::import(
+            &s,
+            json!({
+                "repository": "fixture/repo"
+            })
+        )
+        .await
+        .unwrap()["id"],
         project["id"]
     );
     assert_eq!(s.store.list("projects").await.unwrap().len(), 1);
 }
+
 #[tokio::test]
 async fn failures_leave_no_project_or_partial_checkout_and_hide_cli_output() {
     let (root, s) = fixture().await;
-    let error = github_projects::import(&s, json!({"repository":"fixture/missing"}))
-        .await
-        .unwrap_err();
+    let error = github_projects::import(
+        &s,
+        json!({
+            "repository": "fixture/missing"
+        }),
+    )
+    .await
+    .unwrap_err();
     assert!(!error.message.contains("secret-must-not-leak"));
     assert!(
         github_projects::import(
             &s,
-            json!({"repository":"fixture/repo","baseBranch":"missing"})
+            json!({
+                "repository": "fixture/repo",
+                "baseBranch": "missing"
+            })
         )
         .await
         .is_err()
     );
     assert!(
-        github_projects::import(&s, json!({"repository":"../repo"}))
-            .await
-            .is_err()
+        github_projects::import(
+            &s,
+            json!({
+                "repository": "../repo"
+            })
+        )
+        .await
+        .is_err()
     );
     assert!(s.store.list("projects").await.unwrap().is_empty());
     assert!(!std::fs::read_dir(root.path()).unwrap().any(|p| {

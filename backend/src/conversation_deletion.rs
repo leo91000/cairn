@@ -16,6 +16,7 @@ async fn remove(path: &Path) -> Result<()> {
     }
     Ok(())
 }
+
 async fn disk(s: &Service, run: &str, action: &str, destination: Option<&str>) -> Result<()> {
     if run.is_empty() {
         return Ok(());
@@ -94,6 +95,7 @@ async fn disk(s: &Service, run: &str, action: &str, destination: Option<&str>) -
     }
     .await
 }
+
 /// Frees an old disk left on a node: the whole disk of a conversation that now runs
 /// elsewhere, or only the older copies kept beside a conversation's current disk.
 pub async fn discard_stale_disk(s: &Service, run: &str, node: &str, whole: bool) -> Result<()> {
@@ -115,6 +117,7 @@ pub async fn discard_stale_disk(s: &Service, run: &str, node: &str, whole: bool)
     }
     Ok(())
 }
+
 async fn delete_disks(s: &Service, run: &str) -> Result<()> {
     let volumes = s
         .store
@@ -131,6 +134,7 @@ async fn delete_disks(s: &Service, run: &str) -> Result<()> {
     }
     Ok(())
 }
+
 async fn detach_worktrees(s: &Service, chat: &Value) -> Result<()> {
     let run = if text(chat, "runId").is_empty() {
         Value::Null
@@ -208,6 +212,7 @@ async fn files(s: &Service, chat: &Value) -> Result<()> {
     }
     Ok(())
 }
+
 pub async fn purge(s: &Service, chat: Value) -> Result<()> {
     let _previews = crate::artifacts::preview::JOBS
         .acquire()
@@ -253,7 +258,7 @@ pub async fn purge(s: &Service, chat: Value) -> Result<()> {
             db.0.execute("DELETE FROM chat_messages WHERE chat_id=?", [&cid])?;
             db.0.execute("DELETE FROM runs WHERE id=?", [&run])?;
             db.remove("chats", &cid)?;
-            db.audit("chat.purged", &json!({"id":cid}))?;
+            db.audit("chat.purged", &json!({"id": cid}))?;
             Ok(())
         })
         .await

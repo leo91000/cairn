@@ -2,9 +2,20 @@ import type { RunEvent } from '../shared/contracts'
 import type { HistoryPage, LiveState } from '../shared/live'
 import type { ReadingPosition } from './history-cache'
 import type { LiveStatus } from './live-connection'
-import { computed, onScopeDispose, ref, watch } from 'vue'
+import {
+  computed,
+  onScopeDispose,
+  ref,
+  watch,
+} from 'vue'
 import { api, ApiError, state } from './api'
-import { cacheScope, clearHistoryCache, readHistory, removeHistory, writeHistory } from './history-cache'
+import {
+  cacheScope,
+  clearHistoryCache,
+  readHistory,
+  removeHistory,
+  writeHistory,
+} from './history-cache'
 import { liveConnection } from './live-connection'
 import { LiveEvents } from './live-events'
 
@@ -31,6 +42,7 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
   let persist: (() => void) | undefined
   let saveTimer: ReturnType<typeof setTimeout> | undefined
   let holdTimer: ReturnType<typeof setTimeout> | undefined
+
   function scheduleSave() {
     if (saveTimer !== undefined)
       return
@@ -39,17 +51,20 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
       persist?.()
     }, 500)
   }
+
   function savePosition(value: ReadingPosition, key?: string) {
     if (key && key !== path())
       return
     position.value = value
     scheduleSave()
   }
+
   function show(value: string) {
     clearTimeout(holdTimer)
     holdTimer = undefined
     shown.value = value
   }
+
   watch([path, () => state.authenticated && !state.signingOut, () => state.csrf], async ([value, enabled, csrf], previous) => {
     persist?.()
     const current = ++generation
@@ -69,6 +84,7 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
       events.value = []
       catchingUp.value = true
     }
+
     clearTimeout(holdTimer)
     if (options.hold && enabled && snapshot.value && previous?.[0] !== value && previous?.[1])
       holdTimer = setTimeout(clear, options.hold)
@@ -80,6 +96,7 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
       void clearHistoryCache()
       return
     }
+
     const scope = await cacheScope(csrf).catch(() => undefined)
     const cached = scope ? await readHistory(scope, value) : undefined
     if (disposed || current !== generation)
@@ -103,12 +120,24 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
       events.value = cached.events
       catchingUp.value = false
     }
+
     persist = () => {
       if (!scope || !complete || !detail || !history || current !== generation || !state.authenticated || state.signingOut)
         return
       storedPosition = position.value
-      void writeHistory(scope, value, { version: 1, cursor, history, state: detail, events: rows.slice(), oldest, hasOlder: hasOlder.value, savedAt: Date.now(), position: storedPosition })
+      void writeHistory(scope, value, {
+        version: 1,
+        cursor,
+        history,
+        state: detail,
+        events: rows.slice(),
+        oldest,
+        hasOlder: hasOlder.value,
+        savedAt: Date.now(),
+        position: storedPosition,
+      })
     }
+
     fetchOlder = async () => {
       if (!history || !hasOlder.value || loadingOlder.value)
         return
@@ -143,6 +172,7 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
           loadingOlder.value = false
       }
     }
+
     let checking = false
     connection = liveConnection(value, (batch, accepted) => {
       if (batch.state?.cacheRevision) {
@@ -154,6 +184,7 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
         }
         catch { void clearHistoryCache() }
       }
+
       const reset = batch.reset || (history && batch.history !== history)
         || (batch.state && detail?.run?.id !== batch.state.run?.id)
       if (reset) {
@@ -165,6 +196,7 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
         if (scope)
           void removeHistory(scope, value)
       }
+
       // Persist a complete snapshot only. An interrupted catch-up cannot corrupt it.
       const next = rows.slice()
       const candidate = accumulator.copy()
@@ -179,6 +211,7 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
         oldest = batch.oldest
         older = batch.hasOlder ?? false
       }
+
       complete = !batch.more
       if (complete) {
         show(value)
@@ -189,6 +222,7 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
         synced.value = true
         scheduleSave()
       }
+
       error.value = ''
     }, (connectionStatus) => {
       status.value = connectionStatus

@@ -34,6 +34,7 @@ test('both coding agents share one account list, detail panel and sign-in', asyn
     await page.setViewportSize({ width, height: 900 })
     await page.screenshot({ path: testInfo.outputPath(`claude-sign-in-${theme}-${width}.png`), animations: 'disabled' })
   }
+
   await page.setViewportSize({ width: 1440, height: 1000 })
   await dialog.getByLabel('Claude authorization code').fill('wrong')
   await dialog.getByRole('button', { name: 'Finish sign-in' }).click()
@@ -52,7 +53,12 @@ test('both coding agents share one account list, detail panel and sign-in', asyn
   const codex = page.getByRole('region', { name: 'Codex accounts' })
   await expect(codex.getByRole('button', { name: /^Work,/ })).toContainText('Next up')
   // A run holds a slot on the account with the most capacity, whose avatar shows the comet.
-  const task = await workspace.api('/api/tasks', 'POST', { name: 'Long review', prompt: 'fixture:chat-hang', agentId: '00000000-0000-4000-8000-000000000001', worktree: false })
+  const task = await workspace.api('/api/tasks', 'POST', {
+    name: 'Long review',
+    prompt: 'fixture:chat-hang',
+    agentId: '00000000-0000-4000-8000-000000000001',
+    worktree: false,
+  })
   const run = await workspace.api(`/api/tasks/${task.id}/run`, 'POST')
   await expect(codex.getByRole('button', { name: /^Work,/ })).toContainText('1 running', { timeout: 20000 })
   await expect(codex.getByRole('button', { name: /^Work,/ }).locator('.avatar-orbit')).toBeVisible()
@@ -129,12 +135,18 @@ test('a Codex reconnection shows its device code, survives a reload and can be c
     await page.setViewportSize({ width, height: 844 })
     await page.screenshot({ path: testInfo.outputPath(`codex-sign-in-${theme}-${width}.png`), animations: 'disabled' })
   }
+
   // Keep the provider fully synthetic, including clipboard permissions.
   await context.route('https://auth.openai.com/**', route => route.fulfill({ contentType: 'text/html', body: '<h1>Fixture verification page</h1>' }))
   await page.evaluate(() => {
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text: string) => {
-      document.documentElement.dataset.copiedCode = text
-    } } })
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: async (text: string) => {
+          document.documentElement.dataset.copiedCode = text
+        },
+      },
+    })
   })
   const popupPromise = page.waitForEvent('popup')
   await dialog.getByRole('link', { name: 'Copy code & open sign-in' }).click()
@@ -160,11 +172,69 @@ test('a Codex reconnection shows its device code, survives a reload and can be c
 
 test('statuses come from the server: stale, unknown and expired accounts stay understandable', async ({ page }) => {
   const now = Date.now()
-  const base = { enabled: true, plan: 'max', createdAt: now, checkedAt: now, lastUsedAt: null, maxConcurrentRuns: 4, activeRunIds: [], error: '', exhausted: false, resetsAt: null }
+  const base = {
+    enabled: true,
+    plan: 'max',
+    createdAt: now,
+    checkedAt: now,
+    lastUsedAt: null,
+    maxConcurrentRuns: 4,
+    activeRunIds: [],
+    error: '',
+    exhausted: false,
+    resetsAt: null,
+  }
   const accounts = [
-    { ...base, id: 'a', provider: 'claude', name: 'Stale', email: 'stale@example.test', state: 'ready', status: 'next', stale: true, remainingPercent: 0, usage: { allowed: true, checkedAt: now - 3600000, error: 'Claude Code usage is temporarily unavailable.', resets: null, windows: [{ id: 'five_hour', label: '5-hour window', usedPercent: 105, resetsAt: null, durationMins: 300, models: [] }] } },
-    { ...base, id: 'b', provider: 'claude', name: 'Unknown', email: 'unknown@example.test', state: 'ready', status: 'next', stale: true, remainingPercent: null, usage: null },
-    { ...base, id: 'c', provider: 'claude', name: 'Expired', email: 'expired@example.test', state: 'error', status: 'reconnect', stale: true, remainingPercent: null, usage: null, error: 'Reconnect this Claude account.' },
+    {
+      ...base,
+      id: 'a',
+      provider: 'claude',
+      name: 'Stale',
+      email: 'stale@example.test',
+      state: 'ready',
+      status: 'next',
+      stale: true,
+      remainingPercent: 0,
+      usage: {
+        allowed: true,
+        checkedAt: now - 3600000,
+        error: 'Claude Code usage is temporarily unavailable.',
+        resets: null,
+        windows: [{
+          id: 'five_hour',
+          label: '5-hour window',
+          usedPercent: 105,
+          resetsAt: null,
+          durationMins: 300,
+          models: [],
+        }],
+      },
+    },
+    {
+      ...base,
+      id: 'b',
+      provider: 'claude',
+      name: 'Unknown',
+      email: 'unknown@example.test',
+      state: 'ready',
+      status: 'next',
+      stale: true,
+      remainingPercent: null,
+      usage: null,
+    },
+    {
+      ...base,
+      id: 'c',
+      provider: 'claude',
+      name: 'Expired',
+      email: 'expired@example.test',
+      state: 'error',
+      status: 'reconnect',
+      stale: true,
+      remainingPercent: null,
+      usage: null,
+      error: 'Reconnect this Claude account.',
+    },
   ]
   await page.route('**/api/accounts', route => route.fulfill({ json: { accounts, signIn: null } }))
   await signIn(page)

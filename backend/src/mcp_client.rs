@@ -12,14 +12,17 @@ use reqwest::{
 };
 use serde_json::{Value, json};
 use std::{collections::HashSet, time::Duration};
+
 pub const MODERN: &str = "2026-07-28";
 const LEGACY: &str = "2025-11-25";
+
 pub struct Client {
     transport: Transport,
     pub capabilities: Value,
     protocol: String,
     sequence: u64,
 }
+
 enum Transport {
     Stdio(Session),
     Http {
@@ -29,6 +32,7 @@ enum Transport {
         session: Option<String>,
     },
 }
+
 impl Client {
     pub async fn connect(s: &Service, item: &Value) -> Result<Self> {
         let mut secrets = s.mcps.secrets(s, text(item, "id")).await?;
@@ -51,6 +55,7 @@ impl Client {
         }
         first
     }
+
     async fn open(s: &Service, item: &Value, secrets: &Value) -> Result<Self> {
         let transport = Self::transport(s, item, secrets).await?;
         let mut client = Self {
@@ -88,12 +93,13 @@ impl Client {
                     .request(
                         "initialize",
                         json!({
-                        "protocolVersion":LEGACY,"capabilities":{
-                        }
-                        ,"clientInfo":{
-                        "name":"leo-mcp-client","version":env!("CARGO_PKG_VERSION")}
-                        }
-                        ),
+                            "protocolVersion": LEGACY,
+                            "capabilities": {},
+                            "clientInfo": {
+                                "name": "leo-mcp-client",
+                                "version": env!("CARGO_PKG_VERSION")
+                            }
+                        }),
                     )
                     .await?;
                 let version = text(&result, "protocolVersion");
@@ -113,6 +119,7 @@ impl Client {
         }
         Ok(client)
     }
+
     async fn transport(s: &Service, item: &Value, secrets: &Value) -> Result<Transport> {
         Ok(if item["transport"] == "stdio" {
             let mut env = Environment::from([
@@ -156,6 +163,7 @@ impl Client {
             }
         })
     }
+
     pub async fn request(&mut self, method: &str, mut params: Value) -> Result<Value> {
         if !params.is_object() {
             params = json!({});
@@ -167,8 +175,9 @@ impl Client {
             }
             params["_meta"]["io.modelcontextprotocol/protocolVersion"] = MODERN.into();
             params["_meta"]["io.modelcontextprotocol/clientInfo"] = json!({
-            "name":"leo-mcp-client","version":env!("CARGO_PKG_VERSION")}
-            );
+                "name": "leo-mcp-client",
+                "version": env!("CARGO_PKG_VERSION")
+            });
             params["_meta"]["io.modelcontextprotocol/clientCapabilities"] = json!({});
         }
         match &mut self.transport {
@@ -182,8 +191,11 @@ impl Client {
                 self.sequence += 1;
                 let id = self.sequence;
                 let body = json!({
-                "jsonrpc":"2.0","id":id,"method":method,"params":params}
-                );
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": method,
+                    "params": params
+                });
                 let mut headers = headers(bearer, &self.protocol, session.as_deref())?;
                 if modern {
                     headers.insert(
@@ -253,6 +265,7 @@ impl Client {
             }
         }
     }
+
     async fn notify(&mut self, method: &str, params: Value) -> Result<()> {
         match &mut self.transport {
             Transport::Stdio(session) => session.rpc.notify(method, params).await,
@@ -267,8 +280,10 @@ impl Client {
                     Method::POST,
                     headers(bearer, &self.protocol, session.as_deref())?,
                     Some(serde_json::to_vec(&json!({
-                    "jsonrpc":"2.0","method":method,"params":params}
-                    ))?),
+                        "jsonrpc": "2.0",
+                        "method": method,
+                        "params": params
+                    }))?),
                     *allow_private,
                 )
                 .await?;
@@ -279,6 +294,7 @@ impl Client {
             }
         }
     }
+
     pub async fn discover(&mut self) -> Result<Vec<Value>> {
         if self.capabilities.get("tools").is_none() {
             return Ok(vec![]);
@@ -291,8 +307,8 @@ impl Client {
                 json!({})
             } else {
                 json!({
-                "cursor":cursor}
-                )
+                    "cursor": cursor
+                })
             };
             let page = self.request("tools/list", params).await?;
             tools.extend(
@@ -313,6 +329,7 @@ impl Client {
         }
         Ok(tools)
     }
+
     pub async fn close(self) {
         match self.transport {
             Transport::Stdio(session) => session.close().await,
@@ -334,6 +351,7 @@ impl Client {
         }
     }
 }
+
 fn headers(bearer: &str, version: &str, session: Option<&str>) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     headers.insert("content-type", HeaderValue::from_static("application/json"));
@@ -360,6 +378,7 @@ fn headers(bearer: &str, version: &str, session: Option<&str>) -> Result<HeaderM
     }
     Ok(headers)
 }
+
 pub fn sse_result(bytes: &[u8], id: &Value) -> Result<Value> {
     let data = String::from_utf8_lossy(bytes).replace("\r\n", "\n");
     for event in data.split("\n\n") {

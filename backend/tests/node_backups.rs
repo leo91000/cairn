@@ -1,5 +1,6 @@
 use leo_agent_manager::nodes::snapshots;
 use tempfile::TempDir;
+
 #[tokio::test]
 async fn incremental_snapshots_reuse_unchanged_blocks_and_restore_exact_bytes() {
     let root = TempDir::new().unwrap();
@@ -155,14 +156,15 @@ async fn exercise_vm_control(case: ControlScenario) {
     std::fs::create_dir_all(&disk).unwrap();
     std::fs::write(
         root.path().join(format!("{attempt}.vm.json")),
-        json!({"vmId":vm}).to_string(),
+        json!({"vmId": vm}).to_string(),
     )
     .unwrap();
     {
         use leo_agent_manager::storage::{LazyDisk, policy::Policy, remote::RemoteSource};
         let context = json!({
-            "master":"http://127.0.0.1:1/", "grant":"fixture",
-            "policy":Policy { reserve_mi_b:if emergency { 16 * 1024 * 1024 } else { 64 }, reserve_percent:1, ..Default::default() }
+            "master": "http://127.0.0.1:1/",
+            "grant": "fixture",
+            "policy": Policy { reserve_mi_b:if emergency { 16 * 1024 * 1024 } else { 64 }, reserve_percent:1, ..Default::default() }
         });
         let source = Arc::new(
             RemoteSource::new(
@@ -174,8 +176,12 @@ async fn exercise_vm_control(case: ControlScenario) {
         );
         let journal = LazyDisk::create(
             &disk.join("lazy"),
-            &json!({"version":1,"size":4096,"blockSize":4194304,
-                "blocks":[{"offset":0,"size":4096,"hash":null}]}),
+            &json!({
+                "version": 1,
+                "size": 4096,
+                "blockSize": 4194304,
+                "blocks": [{"offset": 0,"size": 4096,"hash": null}]
+            }),
             source,
         )
         .unwrap();
@@ -366,9 +372,18 @@ async fn restore_does_not_replace_a_journal_still_in_use() {
     std::fs::create_dir_all(&image).unwrap();
     std::fs::write(image.join("root.ext4"), []).unwrap();
     std::fs::write(image.join("vmlinux"), []).unwrap();
-    let manifest = json!({"version":1,"size":4096,"blockSize":4194304,"runtime":{"runtimeId":"fixture"},
-        "blocks":[{"offset":0,"size":4096,"hash":null}]});
-    let context = json!({"master":"http://127.0.0.1:1/","grant":"old-grant","policy":Policy {reserve_mi_b:64,reserve_percent:1,..Default::default()}});
+    let manifest = json!({
+        "version": 1,
+        "size": 4096,
+        "blockSize": 4194304,
+        "runtime": {"runtimeId": "fixture"},
+        "blocks": [{"offset": 0,"size": 4096,"hash": null}]
+    });
+    let context = json!({
+        "master": "http://127.0.0.1:1/",
+        "grant": "old-grant",
+        "policy": Policy {reserve_mi_b:64,reserve_percent:1,..Default::default()}
+    });
     let source = Arc::new(
         RemoteSource::new(
             &context,
@@ -382,8 +397,14 @@ async fn restore_does_not_replace_a_journal_still_in_use() {
     disk.write_at(0, b"OLD").unwrap();
     drop(disk);
     let old = runtime::load(&directory).await.unwrap();
-    let replacement = json!({"onDemand":true,"manifest":manifest,"backupId":id(),
-        "master":context["master"],"grant":"new-grant","policy":context["policy"]});
+    let replacement = json!({
+        "onDemand": true,
+        "manifest": manifest,
+        "backupId": id(),
+        "master": context["master"],
+        "grant": "new-grant",
+        "policy": context["policy"]
+    });
     let error = restore::controller(root.path(), &run, replacement.clone())
         .await
         .expect_err("an open journal must not be replaced");

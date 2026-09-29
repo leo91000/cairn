@@ -3,11 +3,17 @@ import http from 'node:http'
 
 export function dockerRequest(method: string, endpoint: string, body?: unknown) {
   return new Promise<http.IncomingMessage>((resolve, reject) => {
-    const request = http.request({ socketPath: '/var/run/docker.sock', path: endpoint, method, headers: body === undefined ? {} : { 'Content-Type': 'application/json' } }, (response) => {
+    const request = http.request({
+      socketPath: '/var/run/docker.sock',
+      path: endpoint,
+      method,
+      headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+    }, (response) => {
       if ((response.statusCode ?? 500) < 400) {
         resolve(response)
         return
       }
+
       response.resume()
       reject(Object.assign(new Error(`Runner container operation failed (${response.statusCode}).`), { statusCode: response.statusCode }))
     })
@@ -16,12 +22,15 @@ export function dockerRequest(method: string, endpoint: string, body?: unknown) 
     request.end(body === undefined ? undefined : JSON.stringify(body))
   })
 }
+
 export async function dockerJson(method: string, endpoint: string, body?: unknown) {
   const response = await dockerRequest(method, endpoint, body)
   let result = ''
-  for await (const chunk of response) result += chunk
+  for await (const chunk of response)
+    result += chunk
   return result ? JSON.parse(result) : {}
 }
+
 export async function* dockerOutput(stream: AsyncIterable<Uint8Array>) {
   let buffer = Buffer.alloc(0)
   for await (const chunk of stream) {

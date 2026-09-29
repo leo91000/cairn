@@ -17,8 +17,14 @@ async function main() {
   const run = (bin, args) => {
     process.stdout.write(`probe.command ${path.basename(bin)} ${bin === 'adb' ? args.slice(2, 5).join(' ') : ''}\n`)
     const timeout = bin !== 'adb' ? 1200000 : args.includes('uiautomator') ? 30000 : 120000
-    return execFileSync(bin, args, { env, encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'pipe'] })
+    return execFileSync(bin, args, {
+      env,
+      encoding: 'utf8',
+      timeout,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
   }
+
   run('cc', ['-Wall', '-Wextra', '-Werror', '-O2', 'nested-kvm.c', '-o', 'nested-kvm'])
   const nested = run('./nested-kvm', [])
   assert.match(nested, /KVM_RUN, rax=42, HLT/)
@@ -31,6 +37,7 @@ async function main() {
     assert.notEqual(previous.boot, boot)
     assert.equal(fs.statSync(path.join(env.ANDROID_HOME, 'cmdline-tools/latest/bin/sdkmanager')).mtimeMs, previous.sdkMtime)
   }
+
   const start = Date.now()
   process.stdout.write(run('leo-android', ['setup', '--accept-licenses', 'platforms;android-34', 'build-tools;34.0.0']))
   process.stdout.write(run('leo-android', ['emulator', 'start', api, ...(system === 'aosp' ? ['--aosp'] : []), '--accept-licenses']))
@@ -38,7 +45,12 @@ async function main() {
   assert.equal(device.state, 'ready')
   assert.equal(device.image || 'google-apis', system)
   assert.equal(device.acceleration, 'kvm', 'Android must use nested KVM, not software emulation')
-  process.stdout.write(`${JSON.stringify({ bootAndSetupMs: Date.now() - start, mode, api, system })}\n`)
+  process.stdout.write(`${JSON.stringify({
+    bootAndSetupMs: Date.now() - start,
+    mode,
+    api,
+    system,
+  })}\n`)
   const adb = args => run('adb', ['-s', 'emulator-5580', ...args])
   assert.equal(adb(['shell', 'getprop', 'sys.boot_completed']).trim(), '1')
   for (const setting of ['window_animation_scale', 'transition_animation_scale', 'animator_duration_scale'])
@@ -62,7 +74,9 @@ async function main() {
     adb(['install', '--no-incremental', '-r', 'probe.apk'])
     adb(['shell', 'pm', 'clear', 'com.leo.fixture'])
   }
+
   adb(['shell', 'am', 'start', '-W', '-n', 'com.leo.fixture/.MainActivity'])
+
   async function dump() {
     const deadline = Date.now() + 120000
     while (true) {
@@ -77,11 +91,14 @@ async function main() {
       }
     }
   }
+
   function tap(node) {
     const [x1, y1, x2, y2] = node.match(/bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/).slice(1).map(Number)
     adb(['shell', 'input', 'tap', `${Math.floor((x1 + x2) / 2)}`, `${Math.floor((y1 + y2) / 2)}`])
   }
+
   let systemWaits = 0
+
   async function screen() {
     while (true) {
       const xml = await dump()
@@ -96,6 +113,7 @@ async function main() {
       await sleep(2000)
     }
   }
+
   async function waitForScreen(matches) {
     const deadline = Date.now() + 120000
     let xml
@@ -105,14 +123,17 @@ async function main() {
         return xml
       await sleep(1000)
     } while (Date.now() < deadline)
+
     assert.fail(`Expected application view did not appear: ${xml}`)
   }
+
   if (mode === 'first') {
     const xml = await waitForScreen(xml => xml.includes('content-desc="Verify device"'))
     const node = xml.match(/<node[^>]*content-desc="Verify device"[^>]*>/)?.[0]
     assert.ok(node, xml)
     tap(node)
   }
+
   assert.match(await waitForScreen(xml => /Device test passed/i.test(xml)), /Device test passed/i)
   fs.writeFileSync('device.png', execFileSync('adb', ['-s', 'emulator-5580', 'exec-out', 'screencap', '-p'], { env, timeout: 30000 }))
   fs.writeFileSync(saved, JSON.stringify({ boot, sdkMtime: fs.statSync(path.join(env.ANDROID_HOME, 'cmdline-tools/latest/bin/sdkmanager')).mtimeMs }))
@@ -121,10 +142,12 @@ async function main() {
     assert.ok(i < 300)
     await sleep(100)
   }
+
   fs.rmSync(ack, { recursive: true })
   process.stdout.write(run('leo-android', ['emulator', 'stop']))
   process.stdout.write('probe.done\n')
 }
+
 main().catch((error) => {
   try {
     const env = JSON.parse(execFileSync('/usr/local/bin/leo', ['toolkit-env'], { encoding: 'utf8' }))
@@ -133,6 +156,7 @@ main().catch((error) => {
     process.stderr.write(`Android failure diagnostics:\n${logcat}\n`)
   }
   catch {}
+
   const log = '/home/node/.android/leo-emulator.log'
   if (fs.existsSync(log))
     process.stderr.write(`Emulator log:\n${fs.readFileSync(log, 'utf8').slice(-20000).replace(/^.*(?:adb public key|adb.pubkey).*$/gm, '<REDACTED>')}\n`)

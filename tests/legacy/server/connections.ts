@@ -23,6 +23,7 @@ export function deviceDetails(text: string) {
       ?? '',
   }
 }
+
 export class Connections {
   cache: { at: number, value: unknown } | undefined
   flow: DeviceFlow | undefined
@@ -86,6 +87,7 @@ export class Connections {
         }
       }
     }
+
     const value = await Promise.all([check('codex'), check('github')])
     this.cache = { at: Date.now(), value }
     return value
@@ -94,7 +96,12 @@ export class Connections {
   start(provider: 'codex' | 'github') {
     if (this.child)
       throw new AppError(409, 'A sign-in is already in progress.')
-    const flow: DeviceFlow = { provider, state: 'pending', url: '', code: '' }
+    const flow: DeviceFlow = {
+      provider,
+      state: 'pending',
+      url: '',
+      code: '',
+    }
     this.flow = flow
     const child = spawn(
       provider === 'codex' ? this.config.codexBin : this.config.ghBin,
@@ -123,6 +130,7 @@ export class Connections {
           this.flow.url = details.url
       }
     }
+
     child.stdout?.on('data', receive)
     child.stderr?.on('data', receive)
     child.stdin?.on('error', () => {})
@@ -140,9 +148,11 @@ export class Connections {
             = 'Sign-in did not complete. Retry or use the documented container login command.'
         }
       }
+
       this.child = undefined
       this.cache = undefined
     }
+
     child.once('error', () => finish(false))
     child.once('close', code => finish(code === 0))
     return this.flow

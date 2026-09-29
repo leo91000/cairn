@@ -1,18 +1,45 @@
 <script setup lang="ts">
 import type { CSSProperties } from 'vue'
 import type { Provider } from '../../shared/accounts'
-import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from 'vue'
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  ref,
+  useId,
+  watch,
+} from 'vue'
 import { providers as codingAgents } from '../../shared/accounts'
 import { effortLabel } from '../../shared/models'
 import { brands } from '../accounts'
-import { Check, ChevronDown, Info, LoaderCircle, RefreshCw, Search, X } from '../icons'
-import { claudeCatalog, modelCatalog as codexCatalog, loadClaudeModels, loadModels } from '../models'
+import {
+  Check,
+  ChevronDown,
+  Info,
+  LoaderCircle,
+  RefreshCw,
+  Search,
+  X,
+} from '../icons'
+import {
+  claudeCatalog,
+  modelCatalog as codexCatalog,
+  loadClaudeModels,
+  loadModels,
+} from '../models'
 import { iconButton } from '../ui'
 import Icon from './Icon.vue'
 
 // One menu for the coding agent, its model and the reasoning effort. Empty model and reasoning
 // values keep inheriting the agent's (or provider's) defaults.
-const props = withDefaults(defineProps<{ inherit?: boolean, defaultModel?: string, defaultReasoning?: string, disabled?: boolean, switching?: boolean, variant?: 'pill' | 'field' }>(), { defaultModel: '', defaultReasoning: '', variant: 'pill' })
+const props = withDefaults(defineProps<{
+  inherit?: boolean
+  defaultModel?: string
+  defaultReasoning?: string
+  disabled?: boolean
+  switching?: boolean
+  variant?: 'pill' | 'field'
+}>(), { defaultModel: '', defaultReasoning: '', variant: 'pill' })
 const provider = defineModel<Provider>('provider', { default: 'codex' })
 const model = defineModel<string>('model', { default: '' })
 const reasoning = defineModel<string>('reasoning', { default: '' })
@@ -56,8 +83,20 @@ const choices = computed(() => [
       : props.inherit ? 'Follow the agent’s model' : 'Follow provider settings'),
     recommended: !props.inherit && !!alias.value,
   },
-  ...models.value.map(item => ({ value: item.model, label: item.displayName || item.model, description: item.description, recommended: item.isDefault })),
-  ...(missing.value ? [{ value: model.value, label: model.value, description: 'Saved model · not in the current catalog', recommended: false }] : []),
+  ...models.value.map(item => ({
+    value: item.model,
+    label: item.displayName || item.model,
+    description: item.description,
+    recommended: item.isDefault,
+  })),
+  ...(missing.value
+    ? [{
+        value: model.value,
+        label: model.value,
+        description: 'Saved model · not in the current catalog',
+        recommended: false,
+      }]
+    : []),
 ])
 const efforts = computed(() => [...new Map((selected.value?.supportedReasoningEfforts ?? []).map(effort => [effort.reasoningEffort, effort])).values()]
   .sort((a, b) => (order.indexOf(a.reasoningEffort) + 1 || 99) - (order.indexOf(b.reasoningEffort) + 1 || 99)))
@@ -72,18 +111,21 @@ function chooseProvider(value: Provider) {
   reasoning.value = ''
   query.value = ''
 }
+
 function chooseModel(value: string) {
   if (value === model.value)
     return
   model.value = value
   reasoning.value = ''
 }
+
 function place() {
   const anchor = trigger.value?.getBoundingClientRect()
   if (!anchor || matchMedia('(width <= 640px)').matches) {
     position.value = {}
     return
   }
+
   const width = Math.min(Math.max(anchor.width, 400), innerWidth - 24)
   const left = Math.max(12, Math.min(anchor.left, innerWidth - width - 12))
   const above = anchor.top - 20
@@ -100,6 +142,7 @@ function place() {
     maxHeight: `${Math.min(640, upwards ? above : below)}px`,
   }
 }
+
 async function show() {
   if (props.disabled || open.value)
     return
@@ -112,6 +155,7 @@ async function show() {
   dialog.value?.querySelector('[data-model][aria-checked="true"]')?.scrollIntoView({ block: 'nearest' })
   addEventListener('resize', place)
 }
+
 function close() {
   if (!open.value)
     return
@@ -121,6 +165,7 @@ function close() {
   removeEventListener('resize', place)
   trigger.value?.focus({ preventScroll: true })
 }
+
 // The trigger names the model and effort in use, so it needs a catalog checked this session.
 // Later refreshes wait for the menu to open.
 watch(provider, () => {
@@ -157,7 +202,12 @@ onBeforeUnmount(() => removeEventListener('resize', place))
       <span class="min-w-0 truncate font-semibold text-ink">{{ modelLabel }}</span>
       <span v-if="effectiveEffort" class="flex shrink-0 items-center gap-1.5 text-muted phone:hidden"><span class="size-[3px] rounded-full bg-current" />{{ effortLabel(effectiveEffort) }}</span>
     </template>
-    <Icon :name="ChevronDown" :size="14" class="shrink-0 text-muted transition-transform" :class="{ 'rotate-180': open }" />
+    <Icon
+      :name="ChevronDown"
+      :size="14"
+      class="shrink-0 text-muted transition-transform"
+      :class="{ 'rotate-180': open }"
+    />
   </button>
   <Teleport to="body">
     <dialog
@@ -180,10 +230,22 @@ onBeforeUnmount(() => removeEventListener('resize', place))
               {{ variant === 'pill' ? 'Applies to the next message' : 'Default for this agent’s runs' }}
             </p>
           </div>
-          <button type="button" :class="iconButton" aria-label="Refresh models" title="Refresh models" :disabled="catalog.loading" @click="reload">
+          <button
+            type="button"
+            :class="iconButton"
+            aria-label="Refresh models"
+            title="Refresh models"
+            :disabled="catalog.loading"
+            @click="reload"
+          >
             <Icon :name="catalog.loading ? LoaderCircle : RefreshCw" :size="15" :class="{ 'animate-spin': catalog.loading }" />
           </button>
-          <button type="button" :class="iconButton" aria-label="Close" @click="close">
+          <button
+            type="button"
+            :class="iconButton"
+            aria-label="Close"
+            @click="close"
+          >
             <Icon :name="X" :size="16" />
           </button>
         </header>
@@ -223,11 +285,21 @@ onBeforeUnmount(() => removeEventListener('resize', place))
           </h3>
           <label v-if="visible.length > 6" class="flex items-center gap-2 rounded-lg bg-hover/60 px-3 text-muted focus-within:ring-2 focus-within:ring-accent/30">
             <Icon :name="Search" :size="14" /><span class="sr-only">Search models</span>
-            <input v-model="query" type="search" placeholder="Search models…" class="min-w-0 flex-1 border-0! bg-transparent! px-0! py-2! text-xs! shadow-none! outline-none!">
+            <input
+              v-model="query"
+              type="search"
+              placeholder="Search models…"
+              class="min-w-0 flex-1 border-0! bg-transparent! px-0! py-2! text-xs! shadow-none! outline-none!"
+            >
           </label>
           <p v-if="catalog.error" class="flex items-center justify-between gap-3 text-2xs text-muted" role="status">
             <span>{{ catalog.error }}</span>
-            <button type="button" class="shrink-0 text-accent underline" :disabled="catalog.loading" @click="reload">
+            <button
+              type="button"
+              class="shrink-0 text-accent underline"
+              :disabled="catalog.loading"
+              @click="reload"
+            >
               Retry
             </button>
           </p>
@@ -250,7 +322,12 @@ onBeforeUnmount(() => removeEventListener('resize', place))
                       <span class="text-sm font-semibold">{{ option.label }}</span>
                       <span v-if="option.recommended" class="rounded-full bg-accent/12 px-2 py-px text-3xs font-semibold text-accent">Recommended</span>
                     </span>
-                    <span v-if="option.description" :id="`${id}-${option.value || 'default'}-description`" class="text-2xs text-muted" :class="model === option.value ? 'line-clamp-4' : 'line-clamp-2'">{{ option.description }}</span>
+                    <span
+                      v-if="option.description"
+                      :id="`${id}-${option.value || 'default'}-description`"
+                      class="text-2xs text-muted"
+                      :class="model === option.value ? 'line-clamp-4' : 'line-clamp-2'"
+                    >{{ option.description }}</span>
                   </span>
                   <span class="grid size-5 shrink-0 place-items-center rounded-full" :class="model === option.value ? 'bg-accent text-raised' : 'border-[1.5px] border-control'">
                     <Icon v-if="model === option.value" :name="Check" :size="12" />
@@ -262,13 +339,36 @@ onBeforeUnmount(() => removeEventListener('resize', place))
                     <strong class="text-sm text-accent">{{ effortLabel(effectiveEffort) }}</strong>
                   </div>
                   <div class="flex flex-wrap gap-1.5" role="radiogroup" aria-label="Reasoning">
-                    <button type="button" role="radio" :aria-checked="!reasoning" class="effort-chip" :disabled="disabled" @click="reasoning = ''">
+                    <button
+                      type="button"
+                      role="radio"
+                      :aria-checked="!reasoning"
+                      class="effort-chip"
+                      :disabled="disabled"
+                      @click="reasoning = ''"
+                    >
                       <Icon v-if="!reasoning" :name="Check" :size="12" />{{ inherit && !model ? 'Agent' : 'Model' }} default{{ defaultEffort ? ` · ${effortLabel(defaultEffort)}` : '' }}
                     </button>
-                    <button v-for="effort in efforts" :key="effort.reasoningEffort" type="button" role="radio" :aria-checked="reasoning === effort.reasoningEffort" class="effort-chip" :disabled="disabled" @click="reasoning = effort.reasoningEffort">
+                    <button
+                      v-for="effort in efforts"
+                      :key="effort.reasoningEffort"
+                      type="button"
+                      role="radio"
+                      :aria-checked="reasoning === effort.reasoningEffort"
+                      class="effort-chip"
+                      :disabled="disabled"
+                      @click="reasoning = effort.reasoningEffort"
+                    >
                       {{ effortLabel(effort.reasoningEffort) }}
                     </button>
-                    <button v-if="unsupported" type="button" role="radio" aria-checked="true" class="effort-chip" disabled>
+                    <button
+                      v-if="unsupported"
+                      type="button"
+                      role="radio"
+                      aria-checked="true"
+                      class="effort-chip"
+                      disabled
+                    >
                       {{ effortLabel(reasoning) }}
                     </button>
                   </div>
@@ -294,7 +394,13 @@ onBeforeUnmount(() => removeEventListener('resize', place))
           <p v-else-if="query && !models.length" class="py-3 text-center text-xs text-muted">
             No models match “{{ query }}”.
           </p>
-          <label v-if="!catalog.loading && !catalog.models.length" class="text-2xs text-muted">Model name<input :value="model" maxlength="100" placeholder="Use the provider default" class="mt-1" @change="chooseModel(($event.target as HTMLInputElement).value.trim())"></label>
+          <label v-if="!catalog.loading && !catalog.models.length" class="text-2xs text-muted">Model name<input
+            :value="model"
+            maxlength="100"
+            placeholder="Use the provider default"
+            class="mt-1"
+            @change="chooseModel(($event.target as HTMLInputElement).value.trim())"
+          ></label>
         </section>
       </div>
     </dialog>

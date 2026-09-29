@@ -5,7 +5,13 @@ import type { ActivityEntry } from '../activity'
 import type { SendingMessage } from '../chat-delivery'
 import type { ReadingPosition } from '../history-cache'
 import { twMerge } from 'tailwind-merge'
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  ref,
+  watch,
+} from 'vue'
 import { latestArtifacts } from '../../shared/artifacts'
 import { activityEntries } from '../activity'
 import { deliveryEntries } from '../deliverables'
@@ -24,16 +30,45 @@ import Icon from './Icon.vue'
 import UiButton from './UiButton.vue'
 import WorkingIndicator from './WorkingIndicator.vue'
 
-const props = defineProps<{ events: RunEvent[], active: boolean, agent: string, agentId?: string, task: string, more: boolean, loading: boolean, trimmed: number, compactToolbar?: boolean, chat?: boolean, outcome?: TaskOutcome | null, deliverables?: Deliverable[], sending?: SendingMessage[], cacheKey?: string, position?: ReadingPosition, loadingOlder?: boolean, olderError?: string, skills?: string[] }>()
+const props = defineProps<{
+  events: RunEvent[]
+  active: boolean
+  agent: string
+  agentId?: string
+  task: string
+  more: boolean
+  loading: boolean
+  trimmed: number
+  compactToolbar?: boolean
+  chat?: boolean
+  outcome?: TaskOutcome | null
+  deliverables?: Deliverable[]
+  sending?: SendingMessage[]
+  cacheKey?: string
+  position?: ReadingPosition
+  loadingOlder?: boolean
+  olderError?: string
+  skills?: string[]
+}>()
 const emit = defineEmits<{ load: [], position: [value: ReadingPosition, key?: string] }>()
 const skillNames = computed(() => new Set(props.skills ?? []))
 const entries = computed(() => {
   const entries = activityEntries(props.events, props.chat)
   const acknowledged = new Set(props.events.filter(event => event.type === 'chat.user').map(event => event.payload?.messageId))
   for (const { message, label } of props.sending ?? []) {
-    if (!acknowledged.has(message.id))
-      entries.push({ kind: 'message', role: 'user', id: `sending:${message.id}`, time: message.createdAt, text: message.text, attachments: message.attachments, delivery: label })
+    if (!acknowledged.has(message.id)) {
+      entries.push({
+        kind: 'message',
+        role: 'user',
+        id: `sending:${message.id}`,
+        time: message.createdAt,
+        text: message.text,
+        attachments: message.attachments,
+        delivery: label,
+      })
+    }
   }
+
   return deliveryEntries(entries, props.deliverables ?? [])
 })
 const working = computed(() => workingStep(entries.value.filter((entry): entry is ActivityEntry => entry.kind !== 'deliverables'), props.agent, props.events[0]?.createdAt ?? null))
@@ -85,24 +120,29 @@ onBeforeUnmount(() => {
   if (pagingFrame !== undefined)
     cancelAnimationFrame(pagingFrame)
 })
+
 function jump() {
   scroller.value?.scrollTo({ top: scroller.value.scrollHeight })
 }
+
 function savePosition() {
   if (scroller.value)
     emit('position', { top: scroller.value.scrollTop, follow: follow.value }, props.cacheKey)
 }
+
 function followChanged() {
   if (follow.value)
     jump()
   savePosition()
 }
+
 function loadOlder() {
   if (!props.more || props.loading || props.loadingOlder || prependPending)
     return
   prependPending = true
   emit('load')
 }
+
 watch([() => props.events, () => props.loadingOlder], async () => {
   if (props.loadingOlder || !prependPending)
     return
@@ -117,10 +157,12 @@ watch([() => props.events, () => props.loadingOlder], async () => {
     else
       el.scrollTop = anchor.top + el.scrollHeight - anchor.height
   }
+
   prependPending = false
   savePosition()
   schedulePaging()
 })
+
 function schedulePaging() {
   if (pagingFrame !== undefined)
     return
@@ -136,7 +178,9 @@ function schedulePaging() {
       loadOlder()
   })
 }
+
 watch([entries, () => props.more, () => props.loading, () => props.olderError], schedulePaging, { flush: 'post' })
+
 function scrolled() {
   const el = scroller.value
   if (el && el.scrollHeight - el.scrollTop - el.clientHeight > 60)
@@ -144,6 +188,7 @@ function scrolled() {
   schedulePaging()
   savePosition()
 }
+
 watch([entries, () => props.outcome?.reportedAt, () => props.loading], async () => {
   if (!follow.value)
     return
@@ -151,6 +196,7 @@ watch([entries, () => props.outcome?.reportedAt, () => props.loading], async () 
   jump()
 })
 let fullscreenReturnFocus: HTMLElement | null = null
+
 async function enterFullscreen() {
   fullscreenReturnFocus = document.activeElement as HTMLElement | null
   viewer.value?.showModal()
@@ -160,6 +206,7 @@ async function enterFullscreen() {
   if (follow.value)
     jump()
 }
+
 async function exitFullscreen() {
   fullscreen.value = false
   await nextTick()
@@ -171,6 +218,7 @@ async function exitFullscreen() {
   else
     fullscreenReturnFocus?.focus()
 }
+
 onBeforeUnmount(() => viewer.value?.close())
 defineExpose({
   following: follow,
@@ -190,7 +238,12 @@ defineExpose({
 <template>
   <div class="activity-mount flex flex-1 min-h-0 flex-col">
     <Teleport to="body">
-      <dialog ref="viewer" class="activity-fullscreen fixed [inset:0] w-full max-w-none h-dvh max-h-none border-0 bg-raised text-ink p-0 m-0" aria-label="Fullscreen activity" @cancel.prevent="exitFullscreen">
+      <dialog
+        ref="viewer"
+        class="activity-fullscreen fixed [inset:0] w-full max-w-none h-dvh max-h-none border-0 bg-raised text-ink p-0 m-0"
+        aria-label="Fullscreen activity"
+        @cancel.prevent="exitFullscreen"
+      >
         <div ref="fullscreenHost" class="activity-fullscreen-host h-full rounded-[0]" />
       </dialog>
     </Teleport>
@@ -204,11 +257,23 @@ defineExpose({
             <button v-if="deliverables?.length" class="rounded-md px-2 py-2 text-xs text-muted hover:bg-hover hover:text-ink" @click="artifactViewer = ''">
               Files · {{ latestArtifacts(deliverables).length }}
             </button>
-            <button v-if="chat" :class="iconButton" aria-label="Follow output" :aria-pressed="follow" :title="follow ? 'Pause auto-scroll' : 'Follow latest output'" @click="follow = !follow; followChanged()">
+            <button
+              v-if="chat"
+              :class="iconButton"
+              aria-label="Follow output"
+              :aria-pressed="follow"
+              :title="follow ? 'Pause auto-scroll' : 'Follow latest output'"
+              @click="follow = !follow; followChanged()"
+            >
               <Icon :name="ArrowDown" :size="17" />
             </button>
             <label v-else class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input v-model="follow" type="checkbox" @change="followChanged">Follow output</label>
-            <button ref="fullscreenButton" :class="twMerge(iconButton, 'icon-button')" :aria-label="fullscreen ? 'Exit fullscreen' : 'Open activity fullscreen'" @click="fullscreen ? exitFullscreen() : enterFullscreen()">
+            <button
+              ref="fullscreenButton"
+              :class="twMerge(iconButton, 'icon-button')"
+              :aria-label="fullscreen ? 'Exit fullscreen' : 'Open activity fullscreen'"
+              @click="fullscreen ? exitFullscreen() : enterFullscreen()"
+            >
               <Icon v-if="fullscreen" :name="Minimize2" :size="19" /><Icon v-else :name="Maximize2" :size="19" />
             </button>
           </div>
@@ -223,7 +288,14 @@ defineExpose({
             </template>
             <span v-else>Loading history…</span>
           </div>
-          <div ref="scroller" class="activity-scroll flex flex-col flex-1 min-h-0 overflow-auto overscroll-contain [overflow-anchor:none] [scrollbar-width:thin] [scrollbar-color:var(--color-control)_transparent] focus-visible:outline-2 focus-visible:outline-offset-[-3px] focus-visible:outline-accent" tabindex="0" role="region" aria-label="Activity output" @scroll="scrolled">
+          <div
+            ref="scroller"
+            class="activity-scroll flex flex-col flex-1 min-h-0 overflow-auto overscroll-contain [overflow-anchor:none] [scrollbar-width:thin] [scrollbar-color:var(--color-control)_transparent] focus-visible:outline-2 focus-visible:outline-offset-[-3px] focus-visible:outline-accent"
+            tabindex="0"
+            role="region"
+            aria-label="Activity output"
+            @scroll="scrolled"
+          >
             <!-- As on Android, a short conversation sits at the bottom, next to the composer or the latest activity. -->
             <div ref="conversation" class="activity-conversation mt-auto w-full max-w-205 pt-5 pb-7 px-9 mx-auto my-0 phone:px-4 phone:py-6">
               <p v-if="trimmed" class="activity-retention text-2xs text-muted leading-[1.8]">
@@ -238,7 +310,12 @@ defineExpose({
                   <span class="sr-only">You</span>
                   <p class="whitespace-pre-wrap text-lg leading-normal">
                     <template v-for="(segment, index) in mentionSegments(entry.text, skillNames)" :key="index">
-                      <span v-if="segment.skill" class="rounded bg-accent/12 px-0.5 font-medium text-accent" :title="`Skill ${segment.skill}`" v-text="segment.text" /><span v-else v-text="segment.text" />
+                      <span
+                        v-if="segment.skill"
+                        class="rounded bg-accent/12 px-0.5 font-medium text-accent"
+                        :title="`Skill ${segment.skill}`"
+                        v-text="segment.text"
+                      /><span v-else v-text="segment.text" />
                     </template>
                   </p>
                   <ChatAttachments v-if="entry.attachments?.length" :attachments="entry.attachments" class="mt-3!" />
@@ -256,10 +333,20 @@ defineExpose({
                 </article>
                 <ChatNotice v-else-if="entry.kind === 'notice'" :notice="entry.artifact" />
                 <AgentActions v-else :artifacts="entry.artifacts" :active="active" />
-                <ChatOutcome v-if="visibleOutcome && entry.id === outcomeEntryId" :key="`${visibleOutcome.messageId}:${visibleOutcome.reportedAt}`" :outcome="visibleOutcome" :agent="agent" />
+                <ChatOutcome
+                  v-if="visibleOutcome && entry.id === outcomeEntryId"
+                  :key="`${visibleOutcome.messageId}:${visibleOutcome.reportedAt}`"
+                  :outcome="visibleOutcome"
+                  :agent="agent"
+                />
               </template>
 
-              <ChatOutcome v-if="visibleOutcome && !outcomeEntryId" :key="`${visibleOutcome.messageId}:${visibleOutcome.reportedAt}`" :outcome="visibleOutcome" :agent="agent" />
+              <ChatOutcome
+                v-if="visibleOutcome && !outcomeEntryId"
+                :key="`${visibleOutcome.messageId}:${visibleOutcome.reportedAt}`"
+                :outcome="visibleOutcome"
+                :agent="agent"
+              />
 
               <div v-if="active && !sending?.length && events.length" class="activity-working mt-4 mb-0.5">
                 <WorkingIndicator :step="working" />
@@ -276,5 +363,10 @@ defineExpose({
       </section>
     </Teleport>
   </div>
-  <ArtifactViewer v-if="artifactViewer !== null" :items="deliverables ?? []" :initial="artifactViewer" @close="artifactViewer = null" />
+  <ArtifactViewer
+    v-if="artifactViewer !== null"
+    :items="deliverables ?? []"
+    :initial="artifactViewer"
+    @close="artifactViewer = null"
+  />
 </template>

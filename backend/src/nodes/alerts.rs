@@ -39,7 +39,15 @@ pub async fn raise(s: &Service, run: &str, kind: &str, title: &str, body: &str) 
                     db.remove("node-alerts", text(&old, "id"))?;
                 }
             }
-            let alert = json!({"id":id(),"runId":run,"chatId":chat["id"],"kind":kind,"title":title,"body":body,"createdAt":now()});
+            let alert = json!({
+                "id": id(),
+                "runId": run,
+                "chatId": chat["id"],
+                "kind": kind,
+                "title": title,
+                "body": body,
+                "createdAt": now()
+            });
             db.put("node-alerts", &alert)?;
             crate::notifications::enqueue_alert(db, &alert)
         })

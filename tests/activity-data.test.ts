@@ -3,7 +3,13 @@ import { contentParts, dataTitle, statusTone } from '../src/activity-data'
 
 describe('structured activity content', () => {
   it('recognizes the workflow array and prefixed pull request output from historical messages', () => {
-    const runs = [{ id: 34375012123, head: 'f467d688', status: 'completed', conclusion: 'success', jobs: [{ name: 'native-quality', conclusion: 'success' }, { name: 'changeset-policy', conclusion: 'skipped' }] }]
+    const runs = [{
+      id: 34375012123,
+      head: 'f467d688',
+      status: 'completed',
+      conclusion: 'success',
+      jobs: [{ name: 'native-quality', conclusion: 'success' }, { name: 'changeset-policy', conclusion: 'skipped' }],
+    }]
     const parts = contentParts(JSON.stringify(runs))
     expect(parts).toEqual([{ kind: 'data', value: runs, source: JSON.stringify(runs) }])
     expect(dataTitle(runs)).toBe('Workflow checks')

@@ -26,7 +26,9 @@ fun ConnectionsScreen(vm: LeoViewModel, state: Workspace, openRun: (String) -> U
     fun show(next: AccountsView) {
         val previous = view?.signIn
         if (previous?.state == "pending" && next.signIn?.state == "complete") {
-            vm.notify("${next.accounts.find { it.id == next.signIn.accountId }?.name ?: "Compte"} connecté")
+            vm.notify(
+                "${next.accounts.find { it.id == next.signIn.accountId }?.name ?: "Compte"} connecté"
+            )
             addingAny = false
             adding = null
         }
@@ -47,19 +49,37 @@ fun ConnectionsScreen(vm: LeoViewModel, state: Workspace, openRun: (String) -> U
     }
     val accounts = view?.accounts.orEmpty()
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).testTag("connections")
-            .padding(horizontal = 16.dp).padding(top = 4.dp, bottom = 32.dp),
+        Modifier.fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .testTag("connections")
+            .padding(horizontal = 16.dp)
+            .padding(top = 4.dp, bottom = 32.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        ScreenTitle("Connexions", "Les comptes de vos agents et leurs outils.", Modifier.padding(start = 4.dp, bottom = 10.dp)) {
-            RoundAction("Ajouter un compte", LeoIcons.Plus, container = signal.ink, content = signal.onInk, outlined = false, enabled = !state.busy) {
+        ScreenTitle(
+            "Connexions",
+            "Les comptes de vos agents et leurs outils.",
+            Modifier.padding(start = 4.dp, bottom = 10.dp),
+        ) {
+            RoundAction(
+                "Ajouter un compte",
+                LeoIcons.Plus,
+                container = signal.ink,
+                content = signal.onInk,
+                outlined = false,
+                enabled = !state.busy,
+            ) {
                 vm.clearMessage()
                 addingAny = true
             }
         }
         Row(Modifier.padding(start = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Eyebrow("Agents de code", Modifier.weight(1f))
-            Text("Le plus de capacité passe en premier", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                "Le plus de capacité passe en premier",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             IconButton(
                 onClick = {
                     vm.perform {
@@ -69,13 +89,30 @@ fun ConnectionsScreen(vm: LeoViewModel, state: Workspace, openRun: (String) -> U
                 },
                 enabled = !state.busy && view != null,
                 modifier = Modifier.size(36.dp),
-            ) { Icon(LeoIcons.Retry, "Vérifier l’usage maintenant", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+            ) {
+                Icon(
+                    LeoIcons.Retry,
+                    "Vérifier l’usage maintenant",
+                    Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
         if (view == null) LinearProgressIndicator(Modifier.fillMaxWidth())
         else
             codingAgents.forEach { agent ->
                 val provider = agent.provider
-                CodingAgentCard(agent, accounts.filter { it.provider == provider }, provider in view?.required.orEmpty(), add = { vm.clearMessage(); adding = provider }) { opened = it.id }
+                CodingAgentCard(
+                    agent,
+                    accounts.filter { it.provider == provider },
+                    provider in view?.required.orEmpty(),
+                    add = {
+                        vm.clearMessage()
+                        adding = provider
+                    },
+                ) {
+                    opened = it.id
+                }
             }
         Eyebrow("Outils", Modifier.padding(start = 4.dp, top = 14.dp))
         SignalCard(Modifier.fillMaxWidth(), padding = PaddingValues(0.dp)) {
@@ -84,20 +121,25 @@ fun ConnectionsScreen(vm: LeoViewModel, state: Workspace, openRun: (String) -> U
             OnePasswordAccounts(vm, state)
         }
     }
-    accounts.find { it.id == opened }?.let { account ->
-        AccountSheet(
-            vm,
-            state,
-            account,
-            openRun,
-            reconnect = {
-                opened = null
-                vm.perform { api.request("POST", "/accounts/${segment(account.id)}/sign-in"); load() }
-            },
-            changed = { load() },
-            close = { opened = null },
-        )
-    }
+    accounts
+        .find { it.id == opened }
+        ?.let { account ->
+            AccountSheet(
+                vm,
+                state,
+                account,
+                openRun,
+                reconnect = {
+                    opened = null
+                    vm.perform {
+                        api.request("POST", "/accounts/${segment(account.id)}/sign-in")
+                        load()
+                    }
+                },
+                changed = { load() },
+                close = { opened = null },
+            )
+        }
     // A sign-in that is still pending or failed reopens its sheet, including after a restart.
     val flow = view?.signIn?.takeIf { it.state == "pending" || it.state == "failed" }
     if (addingAny || adding != null || flow != null)
@@ -113,7 +155,10 @@ private fun GithubConnection(vm: LeoViewModel, state: Workspace) {
     var github by remember { mutableStateOf<Connection?>(null) }
     var flow by remember { mutableStateOf<DeviceFlow?>(null) }
     suspend fun load(force: Boolean = false) {
-        github = vm.api.get<List<Connection>>("/connections" + if (force) "?refresh=true" else "").find { it.provider == "github" }
+        github =
+            vm.api.get<List<Connection>>("/connections" + if (force) "?refresh=true" else "").find {
+                it.provider == "github"
+            }
     }
     Poll("github", 3000) {
         try {
@@ -131,9 +176,13 @@ private fun GithubConnection(vm: LeoViewModel, state: Workspace) {
     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
-                Modifier.size(36.dp).clip(RoundedCornerShape(11.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
+                Modifier.size(36.dp)
+                    .clip(RoundedCornerShape(11.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentAlignment = Alignment.Center,
-            ) { Icon(LeoIcons.Plug, null, Modifier.size(18.dp)) }
+            ) {
+                Icon(LeoIcons.Plug, null, Modifier.size(18.dp))
+            }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text("GitHub", style = MaterialTheme.typography.titleSmall)
@@ -149,32 +198,72 @@ private fun GithubConnection(vm: LeoViewModel, state: Workspace) {
                 )
             }
             if (github?.connected == true)
-                Text("Connecté", style = MaterialTheme.typography.labelMedium, color = signal.success)
+                Text(
+                    "Connecté",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = signal.success,
+                )
             else
                 TextButton(
-                    onClick = { vm.perform { flow = api.send("POST", "/connections/login", body("provider" to "github")) } },
+                    onClick = {
+                        vm.perform {
+                            flow =
+                                api.send("POST", "/connections/login", body("provider" to "github"))
+                        }
+                    },
                     enabled = !state.busy && github?.installed == true && flow?.state != "pending",
-                ) { Text("Connecter") }
+                ) {
+                    Text("Connecter")
+                }
         }
-        flow?.takeIf { it.state != "complete" }?.let { current ->
-            Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
-                Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (current.state == "failed")
-                        Text(current.error ?: "Connexion échouée", color = MaterialTheme.colorScheme.error)
-                    else {
-                        Text("Ouvrez GitHub et saisissez ce code.", style = MaterialTheme.typography.bodyMedium)
-                        current.code?.takeIf { it.isNotBlank() }?.let {
-                            Code(it)
-                            CopyButton("Copier le code", it)
-                        } ?: Text("Le serveur prépare le code de connexion…", style = MaterialTheme.typography.bodySmall)
-                        current.url?.takeIf { it.isNotBlank() }?.let { ExternalButton("Ouvrir GitHub", it) }
-                        TextButton(
-                            onClick = { vm.perform { api.request("DELETE", "/connections/login"); flow = null } },
-                            enabled = !state.busy,
-                        ) { Text("Annuler la connexion") }
+        flow
+            ?.takeIf { it.state != "complete" }
+            ?.let { current ->
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainer,
+                ) {
+                    Column(
+                        Modifier.fillMaxWidth().padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        if (current.state == "failed")
+                            Text(
+                                current.error ?: "Connexion échouée",
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        else {
+                            Text(
+                                "Ouvrez GitHub et saisissez ce code.",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                            current.code
+                                ?.takeIf { it.isNotBlank() }
+                                ?.let {
+                                    Code(it)
+                                    CopyButton("Copier le code", it)
+                                }
+                                ?: Text(
+                                    "Le serveur prépare le code de connexion…",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            current.url
+                                ?.takeIf { it.isNotBlank() }
+                                ?.let { ExternalButton("Ouvrir GitHub", it) }
+                            TextButton(
+                                onClick = {
+                                    vm.perform {
+                                        api.request("DELETE", "/connections/login")
+                                        flow = null
+                                    }
+                                },
+                                enabled = !state.busy,
+                            ) {
+                                Text("Annuler la connexion")
+                            }
+                        }
                     }
                 }
             }
-        }
     }
 }

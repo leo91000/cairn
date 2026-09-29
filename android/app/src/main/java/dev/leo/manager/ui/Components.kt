@@ -27,12 +27,12 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.core.net.toUri
 import androidx.core.content.res.ResourcesCompat
-import dev.leo.manager.R
+import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
+import dev.leo.manager.R
 import dev.leo.manager.data.*
 import io.noties.markwon.Markwon
 import io.noties.markwon.ext.strikethrough.StrikethroughPlugin
@@ -152,10 +152,16 @@ fun Status(value: String) {
     val label = statusLabel(value)
     val (container, content) =
         when (value) {
-            "failed", "interrupted" -> signal.attentionSoft to signal.attention
-            "running", "queued" -> MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
+            "failed",
+            "interrupted" -> signal.attentionSoft to signal.attention
+            "running",
+            "queued" ->
+                MaterialTheme.colorScheme.primaryContainer to
+                    MaterialTheme.colorScheme.onPrimaryContainer
             "succeeded" -> signal.success.copy(alpha = 0.14f) to signal.success
-            else -> MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
+            else ->
+                MaterialTheme.colorScheme.surfaceVariant to
+                    MaterialTheme.colorScheme.onSurfaceVariant
         }
     Surface(color = container, shape = androidx.compose.foundation.shape.CircleShape) {
         Text(
@@ -324,10 +330,10 @@ fun Markdown(content: String) {
                                 val uri = link.toUri()
                                 if (uri.scheme in setOf("https", "http") && uri.host != null) {
                                     runCatching {
-                                            CustomTabsIntent.Builder()
-                                                .build()
-                                                .launchUrl(view.context, uri)
-                                        }
+                                        CustomTabsIntent.Builder()
+                                            .build()
+                                            .launchUrl(view.context, uri)
+                                    }
                                         .onFailure {
                                             android.widget.Toast.makeText(
                                                     view.context,
@@ -353,7 +359,8 @@ fun Markdown(content: String) {
     val renderer = remember(markwon) { MarkdownBlocks(markwon) }
     // A row scrolled into view must be measured at its real height at once: an estimated
     // placeholder resizes after rendering and moves the text the reader is looking at.
-    var rendered by remember(markwon) { mutableStateOf(content.takeIf { it.length <= MARKDOWN_SYNC_RENDER }) }
+    var rendered by
+        remember(markwon) { mutableStateOf(content.takeIf { it.length <= MARKDOWN_SYNC_RENDER }) }
     var blocks by remember(markwon) { mutableStateOf(rendered?.let(renderer::render).orEmpty()) }
     LaunchedEffect(markwon, rendering) {
         // Keep displaying the last complete render while working. Conflation applies
@@ -402,9 +409,10 @@ private fun MarkdownBlockView(
         with(androidx.compose.ui.platform.LocalDensity.current) {
             MaterialTheme.typography.bodyLarge.fontSize.toPx()
         }
-    val lineHeightPx = with(androidx.compose.ui.platform.LocalDensity.current) {
-        MaterialTheme.typography.bodyLarge.lineHeight.toPx()
-    }
+    val lineHeightPx =
+        with(androidx.compose.ui.platform.LocalDensity.current) {
+            MaterialTheme.typography.bodyLarge.lineHeight.toPx()
+        }
     AndroidView(
         factory = { context ->
             MarkdownTextView(context, copyText).apply {

@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
 fn config(root: &TempDir) -> Config {
     Config {
         data_dir: root.path().join("data"),
@@ -24,9 +25,26 @@ fn config(root: &TempDir) -> Config {
         runner_url: String::new(),
     }
 }
+
 fn plan(root: &TempDir, text: &str) -> Value {
-    json!({"execution":{"messageId":"original-message","text":text,"recovery":false},"instructions":"Test instructions","inputDirectory":root.path().join("inbox"),"output":root.path().join("result.md"),"cwd":root.path(),"model":"","reasoning":"medium","sandbox":"yolo","writableRoots":[],"args":[]})
+    json!({
+        "execution": {
+            "messageId": "original-message",
+            "text": text,
+            "recovery": false
+        },
+        "instructions": "Test instructions",
+        "inputDirectory": root.path().join("inbox"),
+        "output": root.path().join("result.md"),
+        "cwd": root.path(),
+        "model": "",
+        "reasoning": "medium",
+        "sandbox": "yolo",
+        "writableRoots": [],
+        "args": []
+    })
 }
+
 #[tokio::test]
 async fn model_and_reasoning_reach_codex_and_model_changes_resolve_the_new_default() {
     let root = TempDir::new().unwrap();
@@ -61,6 +79,7 @@ async fn model_and_reasoning_reach_codex_and_model_changes_resolve_the_new_defau
         assert_eq!(thread["turns"][index]["effort"], expected);
     }
 }
+
 #[tokio::test]
 async fn native_in_flight_question_accepts_answer_and_preserves_receipt() {
     let root = TempDir::new().unwrap();
@@ -82,7 +101,21 @@ async fn native_in_flight_question_accepts_answer_and_preserves_receipt() {
                 "chat.question" => {
                     question_id = event["question"]["id"].as_str().unwrap().to_owned();
                     assert_eq!(event["question"]["blocking"], false);
-                    atomic_write(&root.path().join("inbox/messages.json"), json!([{"id":"answer-message","questionId":question_id,"answers":{"direction":["Gradual rollout"]},"text":"My answer"}]).to_string().as_bytes()).await.unwrap();
+                    atomic_write(
+                        &root.path().join("inbox/messages.json"),
+                        json!([{
+                            "id": "answer-message",
+                            "questionId": question_id,
+                            "answers": {
+                                "direction": ["Gradual rollout"]
+                            },
+                            "text": "My answer"
+                        }])
+                        .to_string()
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
                 }
                 "chat.delivered" if event["messageId"] == "answer-message" => answer_receipts += 1,
                 "turn.completed" => completed = true,
@@ -98,6 +131,7 @@ async fn native_in_flight_question_accepts_answer_and_preserves_receipt() {
     assert_eq!(question_id.len(), 64);
     assert!(root.path().join("result.md").exists());
 }
+
 #[tokio::test]
 async fn replay_of_completed_turn_does_not_submit_the_instruction_again() {
     let root = TempDir::new().unwrap();
@@ -130,8 +164,16 @@ async fn images_and_files_reach_start_and_steer_as_readable_inputs() {
     let config = config(&root);
     let home = root.path().join("codex");
     std::fs::create_dir(&home).unwrap();
-    let image = json!({"id":"image-id","name":"design.png","kind":"image"});
-    let document = json!({"id":"file-id","name":"notes.md","kind":"file"});
+    let image = json!({
+        "id": "image-id",
+        "name": "design.png",
+        "kind": "image"
+    });
+    let document = json!({
+        "id": "file-id",
+        "name": "notes.md",
+        "kind": "file"
+    });
     for attachment in [&image, &document] {
         let path = root
             .path()
@@ -151,13 +193,26 @@ async fn images_and_files_reach_start_and_steer_as_readable_inputs() {
     let task = tokio::spawn(async move {
         chat_process::run(&config, &run_home, plan, tx, CancellationToken::new()).await
     });
-    tokio::time::timeout(std::time::Duration::from_secs(10),async {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
         while let Some(event) = rx.recv().await {
             if event["type"] == "chat.delivered" && event["messageId"] == "original-message" {
-                atomic_write(&root.path().join("inbox/messages.json"),json!([{"id":"steer-image","text":"finish now","attachments":[image,document]}]).to_string().as_bytes()).await.unwrap();
+                atomic_write(
+                    &root.path().join("inbox/messages.json"),
+                    json!([{
+                        "id": "steer-image",
+                        "text": "finish now",
+                        "attachments": [image, document]
+                    }])
+                    .to_string()
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
             }
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     task.await.unwrap().unwrap();
     let thread: Value =
         serde_json::from_slice(&std::fs::read(home.join("fixture-conversation.json")).unwrap())

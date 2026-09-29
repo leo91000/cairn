@@ -1,7 +1,18 @@
 import { readFileSync } from 'node:fs'
 import { createServer } from 'node:http'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { currentImage, deployUpdate, newer, toolkitUpdate } from '../scripts/cli-updates.mjs'
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+} from 'vitest'
+import {
+  currentImage,
+  deployUpdate,
+  newer,
+  toolkitUpdate,
+} from '../scripts/cli-updates.mjs'
 
 describe('cLI update deployment and rollback', () => {
   let server
@@ -22,10 +33,16 @@ describe('cLI update deployment and rollback', () => {
     releases = 0
     restarts = 0
     hideImage = false
-    plan = { image: previous, commit: 'same-application', previousRuntimeId: 'old-runtime', versions: { codex: '0.154.0', gh: '2.100.0' } }
+    plan = {
+      image: previous,
+      commit: 'same-application',
+      previousRuntimeId: 'old-runtime',
+      versions: { codex: '0.154.0', gh: '2.100.0' },
+    }
     server = createServer(async (request, response) => {
       let body = ''
-      for await (const chunk of request) body += chunk
+      for await (const chunk of request)
+        body += chunk
       const input = body ? JSON.parse(body) : null
       response.setHeader('content-type', 'application/json')
       if (request.url === '/internal/deployment-lease') {
@@ -57,7 +74,15 @@ describe('cLI update deployment and rollback', () => {
     })
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
     const origin = `http://127.0.0.1:${server.address().port}`
-    config = { coolifyUrl: origin, publicUrl: origin, serviceUuid: 'service', repository: 'owner/leo', token: 'test-token', maintenanceToken: 'test-maintenance', runtimeId: 'cli-123-1' }
+    config = {
+      coolifyUrl: origin,
+      publicUrl: origin,
+      serviceUuid: 'service',
+      repository: 'owner/leo',
+      token: 'test-token',
+      maintenanceToken: 'test-maintenance',
+      runtimeId: 'cli-123-1',
+    }
   })
   afterEach(async () => {
     server.closeAllConnections()

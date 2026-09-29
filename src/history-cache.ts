@@ -25,6 +25,7 @@ export async function cacheScope(session: string) {
   const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(session))
   return Array.from(new Uint8Array(bytes), n => n.toString(16).padStart(2, '0')).join('')
 }
+
 function valid(value: CachedHistory): boolean {
   return value?.version === 1 && typeof value.history === 'string' && value.history.startsWith('v1:')
     && Number.isSafeInteger(value.cursor) && value.cursor >= 0 && Array.isArray(value.events)
@@ -35,6 +36,7 @@ function valid(value: CachedHistory): boolean {
     && Number.isFinite(value.savedAt) && Date.now() - value.savedAt < TTL
     && value.events.every(e => !!e && typeof e.text === 'string' && Number.isSafeInteger(e.id) && e.id > 0 && e.id <= value.cursor && typeof e.type === 'string')
 }
+
 function db() {
   return new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open('leo-history-v1', 1)
@@ -43,6 +45,7 @@ function db() {
     request.onerror = () => reject(request.error)
   })
 }
+
 async function transaction<T>(mode: IDBTransactionMode, work: (store: IDBObjectStore, result: (value: T) => void) => void) {
   const database = await db()
   try {
@@ -58,10 +61,12 @@ async function transaction<T>(mode: IDBTransactionMode, work: (store: IDBObjectS
   }
   finally { database.close() }
 }
+
 function enqueue(work: () => Promise<void>) {
   serial = serial.then(work).catch(() => {}) // Storage denial/quota cannot break live messages.
   return serial
 }
+
 export async function readHistory(scope: string, path: string): Promise<CachedHistory | undefined> {
   const key = `${scope}:${path}`
   const current = epoch
@@ -77,6 +82,7 @@ export async function readHistory(scope: string, path: string): Promise<CachedHi
     }
     catch { /* Cache miss; the stream remains authoritative. */ }
   }
+
   if (current !== epoch || !value || !valid(value))
     return undefined
   memory.delete(key)
@@ -84,6 +90,7 @@ export async function readHistory(scope: string, path: string): Promise<CachedHi
   trimMemory()
   return structuredClone(value)
 }
+
 function trimMemory() {
   let total = 0
   for (const [index, [id, item]] of [...memory].reverse().entries()) {
@@ -92,6 +99,7 @@ function trimMemory() {
       memory.delete(id)
   }
 }
+
 export function writeHistory(scope: string, path: string, value: CachedHistory) {
   const key = `${scope}:${path}`
   const current = epoch
@@ -122,6 +130,7 @@ export function writeHistory(scope: string, path: string, value: CachedHistory) 
     })
   })
 }
+
 export function removeHistory(scope: string, path: string) {
   const key = `${scope}:${path}`
   memory.delete(key)
@@ -129,6 +138,7 @@ export function removeHistory(scope: string, path: string) {
     store.delete(key)
   }))
 }
+
 export function clearHistoryCache() {
   epoch++
   memory.clear()
@@ -148,9 +158,16 @@ export function recentHistory(value: CachedHistory): CachedHistory {
     size += bytes
     start--
   }
+
   if (!start)
     return value
   const oldest = ordered[start]?.id ?? value.cursor + 1
   const events = value.events.filter(e => e.id >= oldest)
-  return { ...value, events, oldest, hasOlder: true, position: undefined }
+  return {
+    ...value,
+    events,
+    oldest,
+    hasOlder: true,
+    position: undefined,
+  }
 }

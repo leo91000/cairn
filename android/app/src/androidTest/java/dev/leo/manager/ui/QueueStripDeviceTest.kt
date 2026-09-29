@@ -14,9 +14,14 @@ class QueueStripDeviceTest : QueueStripCases() {
         compose.waitForIdle()
         instrumentation.waitForIdleSync()
         android.os.SystemClock.sleep(500)
-        val directory = File(instrumentation.targetContext.filesDir, "queue-strip").apply { mkdirs() }
+        val directory =
+            File(instrumentation.targetContext.filesDir, "queue-strip").apply { mkdirs() }
         File(directory, "$name.png").outputStream().use {
-            check(instrumentation.uiAutomation.takeScreenshot().compress(Bitmap.CompressFormat.PNG, 100, it))
+            check(
+                instrumentation.uiAutomation
+                    .takeScreenshot()
+                    .compress(Bitmap.CompressFormat.PNG, 100, it)
+            )
         }
     }
 }

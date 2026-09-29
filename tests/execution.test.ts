@@ -1,16 +1,35 @@
 import { execFile } from 'node:child_process'
-import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import {
+  access,
+  mkdir,
+  readFile,
+  rm,
+  writeFile,
+} from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+} from 'vitest'
 import { fixture } from './helpers.ts'
 import { prepareExecution } from './legacy/server/execution.ts'
 
 const exec = promisify(execFile)
+
 async function git(directory: string, ...args: string[]) {
   const result = await exec('git', ['-C', directory, ...args], {
-    env: { ...process.env, GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.test', GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.test' },
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'Fixture',
+      GIT_AUTHOR_EMAIL: 'fixture@example.test',
+      GIT_COMMITTER_NAME: 'Fixture',
+      GIT_COMMITTER_EMAIL: 'fixture@example.test',
+    },
   })
   return result.stdout.trim()
 }
@@ -49,6 +68,7 @@ describe('isolated Git workspaces', () => {
       // Prove this is an incomplete object store, not merely a configured filter.
       expect(await git(ctx.projectPath, 'rev-list', '--objects', '--all', '--missing=print')).toMatch(/^\?/m)
     }
+
     const agent = ctx.service.agent({ name: 'Isolated', access: { skills: [], github: true } })
     const task = ctx.service.task({ ...ctx.task, agentId: agent.id, worktree: true })
     const run = await ctx.service.enqueue(task.id)

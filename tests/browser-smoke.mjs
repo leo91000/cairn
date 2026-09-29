@@ -35,6 +35,7 @@ async function main() {
     await rm(directory, { recursive: true, force: true })
   }
 }
+
 main().catch((error) => {
   console.error(error)
   process.exitCode = 1

@@ -24,6 +24,7 @@ for (const id of readdirSync(join(state, 'disks'))) {
     if (!chats.has(id))
       legacy.withoutChatBytes += bytes
   }
+
   const journal = join(directory, 'lazy', 'journal.sqlite')
   if (!existsSync(journal))
     continue
@@ -63,6 +64,7 @@ for (const id of readdirSync(join(state, 'disks'))) {
         }
       }
     }
+
     const run = runs.get(id)
     disks.push({
       id,
@@ -85,6 +87,7 @@ for (const id of readdirSync(join(state, 'disks'))) {
     disk.close()
   }
 }
+
 db.close()
 console.log(JSON.stringify({
   capturedAt: new Date().toISOString(),

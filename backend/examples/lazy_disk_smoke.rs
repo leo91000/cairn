@@ -23,6 +23,7 @@ struct Source {
     blocks: HashMap<String, (u64, usize)>,
     bytes: AtomicU64,
 }
+
 impl BlockSource for Source {
     fn fetch(&self, hash: &str) -> io::Result<Vec<u8>> {
         let (offset, size) = self
@@ -35,7 +36,9 @@ impl BlockSource for Source {
         Ok(bytes)
     }
 }
+
 struct Guest(Child);
+
 impl Drop for Guest {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -50,6 +53,7 @@ struct AssignedDisk {
     disk: Mutex<Option<Arc<LazyDisk>>>,
     premature_io: AtomicU64,
 }
+
 impl AssignedDisk {
     fn current(&self) -> io::Result<Arc<LazyDisk>> {
         if let Some(disk) = self
@@ -67,16 +71,20 @@ impl AssignedDisk {
         }
     }
 }
+
 impl Disk for AssignedDisk {
     fn size(&self) -> u64 {
         self.size
     }
+
     fn read_at(&self, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
         self.current()?.read_at(offset, bytes)
     }
+
     fn write_at(&self, offset: u64, bytes: &[u8]) -> io::Result<()> {
         self.current()?.write_at(offset, bytes)
     }
+
     fn sync(&self) -> io::Result<()> {
         self.current()?.sync()
     }
@@ -155,9 +163,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "disk/data.ext4"
     };
     let config = json!({
-        "boot-source":{"kernel_image_path":"vmlinux","boot_args":"console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/init"},
-        "drives":[{"drive_id":"root","path_on_host":"root.ext4","is_root_device":true,"is_read_only":true}, {"drive_id":"data","path_on_host":drive,"is_root_device":false,"is_read_only":false,"cache_type":"Writeback"}],
-        "machine-config":{"vcpu_count":1,"mem_size_mib":128,"smt":false}
+        "boot-source": {
+            "kernel_image_path": "vmlinux",
+            "boot_args": "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/init"
+        },
+        "drives": [{
+            "drive_id": "root",
+            "path_on_host": "root.ext4",
+            "is_root_device": true,
+            "is_read_only": true
+        }, {
+            "drive_id": "data",
+            "path_on_host": drive,
+            "is_root_device": false,
+            "is_read_only": false,
+            "cache_type": "Writeback"
+        }],
+        "machine-config": {"vcpu_count": 1,"mem_size_mib": 128,"smt": false}
     });
     std::fs::write(jail.join("config.json"), serde_json::to_vec(&config)?)?;
     std::os::unix::fs::chown(jail.join("config.json"), Some(40001), Some(40001))?;
@@ -263,10 +285,11 @@ fn patch_drive(socket: &Path) -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::net::UnixStream;
     let mut stream = UnixStream::connect(socket)?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    let body = json!({"drive_id":"data","path_on_host":"disk/data.ext4"}).to_string();
+    let body = json!({"drive_id": "data","path_on_host": "disk/data.ext4"}).to_string();
     write!(
         stream,
-        "PATCH /drives/data HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "PATCH /drives/data HTTP/1.1\r\nHost: localhost\r\nContent-Type: \
+            application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )?;
     let mut reader = BufReader::new(stream);
@@ -319,7 +342,18 @@ async fn cancelled_boot(assets: &Path) -> Result<(), Box<dyn std::error::Error>>
         }
     }
     let manifest = snapshots::index(&assets.join("data.ext4")).await?;
-    let context = json!({"master":"http://127.0.0.1:1/","grant":"unavailable-fixture","policy":{"enabled":true,"cacheMiB":8,"reserveMiB":64,"reservePercent":1,"backupSeconds":60,"maxDirtySeconds":300}});
+    let context = json!({
+        "master": "http://127.0.0.1:1/",
+        "grant": "unavailable-fixture",
+        "policy": {
+            "enabled": true,
+            "cacheMiB": 8,
+            "reserveMiB": 64,
+            "reservePercent": 1,
+            "backupSeconds": 60,
+            "maxDirtySeconds": 300
+        }
+    });
     let source = Arc::new(storage::remote::RemoteSource::new(
         &context,
         tokio::runtime::Handle::current(),
@@ -338,7 +372,7 @@ async fn cancelled_boot(assets: &Path) -> Result<(), Box<dyn std::error::Error>>
             directory,
             41,
             &stopping,
-            Some(&json!({"cpu":1,"memoryMiB":128,"diskMiB":256})),
+            Some(&json!({"cpu": 1,"memoryMiB": 128,"diskMiB": 256})),
         )
         .await
     });

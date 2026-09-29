@@ -8,7 +8,13 @@ test('OAuth navigation does not leave background polls running in the departing 
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
   try {
-    await workspace.api('/api/mcps', 'POST', { name: 'Slow OAuth', transport: 'http', url: `${provider.origin}/mcp`, auth: 'oauth', allowPrivateNetwork: true })
+    await workspace.api('/api/mcps', 'POST', {
+      name: 'Slow OAuth',
+      transport: 'http',
+      url: `${provider.origin}/mcp`,
+      auth: 'oauth',
+      allowPrivateNetwork: true,
+    })
     await page.goto('/mcps')
     await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
     await page.getByRole('button', { name: 'Sign in', exact: true }).click()
@@ -46,6 +52,7 @@ test('manages MCP connections, OAuth consent, tools and agent access on desktop 
         await page.screenshot({ path: testInfo.outputPath(`${theme}-${width}-oauth-editor.png`), animations: 'disabled' })
       }
     }
+
     await dialog.getByRole('button', { name: 'Save MCP' }).click()
     const card = page.locator('.mcp-card').filter({ hasText: 'Design workspace' })
     await card.getByRole('button', { name: 'Connect', exact: true }).click()
@@ -64,6 +71,7 @@ test('manages MCP connections, OAuth consent, tools and agent access on desktop 
         await page.screenshot({ path: testInfo.outputPath(`${theme}-${width}-connections.png`), animations: 'disabled' })
       }
     }
+
     await card.getByRole('button', { name: /Browse tools/ }).click()
     await page.screenshot({ path: testInfo.outputPath('dark-mobile-tools.png'), animations: 'disabled' })
     await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()

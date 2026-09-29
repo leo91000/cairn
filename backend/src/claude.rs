@@ -13,6 +13,7 @@ use std::{path::Path, time::Duration};
 use tokio::io::AsyncWriteExt;
 
 pub const CATALOG: &str = "claude-models";
+
 /// The CLI's environment with `directory` as its home, without any inherited credentials.
 pub fn environment(config: &Config, directory: &Path) -> Environment {
     let mut env = std::env::vars().collect::<Environment>();
@@ -21,6 +22,7 @@ pub fn environment(config: &Config, directory: &Path) -> Environment {
     configure(&mut env, directory);
     env
 }
+
 /// Points the CLI at `directory` for its state and credentials, without inherited credentials,
 /// updates or browser launches.
 pub fn configure(env: &mut Environment, directory: &Path) {
@@ -32,6 +34,7 @@ pub fn configure(env: &mut Environment, directory: &Path) {
     env.insert("DISABLE_AUTOUPDATER".into(), "1".into());
     env.insert("BROWSER".into(), "true".into());
 }
+
 /// Subscription runs never use API keys, cloud providers or alternate OAuth overrides.
 fn sanitize(env: &mut Environment) {
     for key in [
@@ -53,6 +56,7 @@ fn sanitize(env: &mut Environment) {
         env.remove(key);
     }
 }
+
 pub fn validate_agent(agent: &Value) -> Result<()> {
     if Provider::of_agent(agent) == Provider::Claude {
         if !["", "low", "medium", "high", "xhigh", "max"].contains(&text(agent, "reasoning")) {
@@ -64,11 +68,31 @@ pub fn validate_agent(agent: &Value) -> Result<()> {
     }
     Ok(())
 }
+
 /// Aliases offered before any account has listed its models.
 pub fn models() -> Value {
-    let rows = [("sonnet", "Sonnet"), ("opus", "Opus"), ("haiku", "Haiku")].iter().map(|(model, name)| json!({"model":model,"displayName":name,"description":"Claude Code alias · connect to load account capabilities","hidden":false,"isDefault":false,"defaultReasoningEffort":"","supportedReasoningEfforts":[]})).collect::<Vec<_>>();
-    json!({"models":rows,"checkedAt":null,"stale":true,"error":"Connect a Claude Code account to load available models and effort levels."})
+    let rows = [("sonnet", "Sonnet"), ("opus", "Opus"), ("haiku", "Haiku")]
+        .iter()
+        .map(|(model, name)| {
+            json!({
+                "model": model,
+                "displayName": name,
+                "description": "Claude Code alias · connect to load account capabilities",
+                "hidden": false,
+                "isDefault": false,
+                "defaultReasoningEffort": "",
+                "supportedReasoningEfforts": []
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "models": rows,
+        "checkedAt": null,
+        "stale": true,
+        "error": "Connect a Claude Code account to load available models and effort levels."
+    })
 }
+
 /// Queries the CLI's control protocol on account `id`. Metadata queries never submit a user
 /// message or start a model turn. Caller holds the account lock.
 pub async fn query_metadata(s: &Service, id: &str, request: Option<Value>) -> Result<Value> {
@@ -126,7 +150,7 @@ pub async fn query_metadata(s: &Service, id: &str, request: Option<Value>) -> Re
                 return Err(Error::new(502, "Claude Code could not load account data. Check the connection and CLI version."));
             }
             if expected == "initialize" && let Some(request) = &request {
-                let message = json!({"type":"control_request","request_id":"metadata","request":request});
+                let message = json!({"type": "control_request","request_id": "metadata","request": request});
                 stdin.write_all(format!("{message}\n").as_bytes()).await?;
                 expected = "metadata";
                 continue;
@@ -149,6 +173,7 @@ pub async fn query_metadata(s: &Service, id: &str, request: Option<Value>) -> Re
     drain.abort();
     result
 }
+
 // Claude Code caches its account's model catalog. Unlike the initialize response, it names the
 // model behind each alias and marks the default effort. A missing cache only hides those details.
 async fn cached_catalog(directory: &Path) -> Vec<Value> {
@@ -173,6 +198,7 @@ async fn cached_catalog(directory: &Path) -> Vec<Value> {
     }
     newest.1
 }
+
 // Applied whenever the catalog is served, including one stored while runs blocked refreshes.
 fn present(catalog: &mut Value, cached: &[Value]) {
     for row in catalog["models"].as_array_mut().into_iter().flatten() {
@@ -219,16 +245,44 @@ fn present(catalog: &mut Value, cached: &[Value]) {
         }
     }
 }
+
 async fn discover_models(s: &Service, id: &str) -> Result<Value> {
     let value = query_metadata(s, id, None).await?;
     let rows = value["models"]
         .as_array()
         .ok_or_else(|| Error::new(502, "Update Claude Code to load its model catalog."))?;
-    let models = rows.iter().filter(|row| !text(row, "value").is_empty()).map(|row| json!({"model":row["value"],"resolvedModel":text(row,"resolvedModel"),"displayName":row["displayName"],"description":row["description"],"hidden":false,"isDefault":row["value"]=="default","defaultReasoningEffort":"","supportedReasoningEfforts":row["supportedEffortLevels"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|effort|json!({"reasoningEffort":effort,"description":""})).collect::<Vec<_>>()})).collect::<Vec<_>>();
+    let models = rows
+        .iter()
+        .filter(|row| !text(row, "value").is_empty())
+        .map(|row| {
+            json!({
+                "model": row["value"],
+                "resolvedModel": text(row,"resolvedModel"),
+                "displayName": row["displayName"],
+                "description": row["description"],
+                "hidden": false,
+                "isDefault": row["value"]=="default",
+                "defaultReasoningEffort": "",
+                "supportedReasoningEfforts": row["supportedEffortLevels"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(|effort| json!({"reasoningEffort": effort, "description": ""}))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect::<Vec<_>>();
     if models.is_empty() {
         return Err(Error::new(502, "Claude Code returned no available models."));
     }
-    Ok(json!({"models":models,"source":id,"checkedAt":now(),"stale":false,"error":""}))
+    Ok(json!({
+        "models": models,
+        "source": id,
+        "checkedAt": now(),
+        "stale": false,
+        "error": ""
+    }))
 }
 
 pub async fn model_catalog(s: &Service) -> Result<Value> {
@@ -242,6 +296,7 @@ pub async fn model_catalog(s: &Service) -> Result<Value> {
     present(&mut catalog, &cached);
     Ok(catalog)
 }
+
 async fn stored_catalog(s: &Service) -> Result<Value> {
     let mut cached = s.store.kv(CATALOG).await?.unwrap_or_else(models);
     if cached["checkedAt"]

@@ -25,6 +25,7 @@ pub struct Broker {
     stop: CancellationToken,
     path: PathBuf,
 }
+
 impl Drop for Broker {
     fn drop(&mut self) {
         self.stop.cancel();
@@ -70,7 +71,9 @@ async fn respond(s: &Service, lease: &Lease, stream: UnixStream) -> Result<()> {
         .map_err(|_| Error::bad("Account request timed out."))??;
     // Neither provider errors nor credentials enter events or logs.
     let response = s.accounts.access(s, lease, &request).await.unwrap_or_else(|_| {
-        json!({"error":"Account authentication is unavailable. Reconnect the account after its runs finish."})
+        json!({
+            "error": "Account authentication is unavailable. Reconnect the account after its runs finish."
+        })
     });
     let mut bytes = serde_json::to_vec(&response)?;
     bytes.push(b'\n');

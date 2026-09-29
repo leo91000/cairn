@@ -1,6 +1,7 @@
 use crate::error::{Error, Result};
 use serde_json::Value;
 use std::{collections::HashMap, sync::LazyLock};
+
 static SCHEMAS: LazyLock<Value> = LazyLock::new(|| {
     let mut schemas: Value =
         serde_json::from_str(include_str!("../schemas/inputs.json")).expect("checked schemas");
@@ -11,6 +12,7 @@ static SCHEMAS: LazyLock<Value> = LazyLock::new(|| {
     }
     schemas
 });
+
 static VALIDATORS: LazyLock<HashMap<String, jsonschema::Validator>> = LazyLock::new(|| {
     SCHEMAS
         .as_object()
@@ -27,6 +29,7 @@ static VALIDATORS: LazyLock<HashMap<String, jsonschema::Validator>> = LazyLock::
         })
         .collect()
 });
+
 fn defaults(value: &mut Value, schema: &Value) {
     if let Some(alternatives) = schema["anyOf"].as_array() {
         for branch in alternatives {
@@ -63,6 +66,7 @@ fn defaults(value: &mut Value, schema: &Value) {
         }
     }
 }
+
 pub fn parse(kind: &str, mut value: Value) -> Result<Value> {
     let schema = SCHEMAS
         .get(kind)
@@ -126,9 +130,11 @@ pub fn parse(kind: &str, mut value: Value) -> Result<Value> {
     }
     Ok(value)
 }
+
 pub fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or("")
 }
+
 pub fn uuid(value: &str) -> Result<()> {
     uuid::Uuid::parse_str(value)
         .map(|_| ())

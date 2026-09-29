@@ -6,14 +6,14 @@ import android.view.ViewGroup
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.LocalActivity
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.Density
-import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
 import androidx.test.core.app.ApplicationProvider
 import dev.leo.manager.data.*
 import java.io.File
@@ -110,23 +110,57 @@ class NativeParityPreviewTest {
                     run = run.copy(trigger = "chat"),
                     updatedAt = now,
                 )
-            val files = if (compact) listOf(
-                Deliverable("report", "run", key = "report", messageId = "reply",
-                    title = "Compte rendu de la version", name = "rapport.md", kind = "markdown",
-                    mediaType = "text/markdown", size = 12288, createdAt = now, group = "Rapports"),
-                Deliverable("notes", "run", key = "notes", messageId = "reply",
-                    title = "Notes de validation", name = "validation.md", kind = "markdown",
-                    mediaType = "text/markdown", size = 8192, createdAt = now, group = "Rapports"),
-                Deliverable("changes", "run", key = "changes", messageId = "reply",
-                    title = "Détails des modifications", name = "modifications.md", kind = "markdown",
-                    mediaType = "text/markdown", size = 4096, createdAt = now, group = "Rapports"),
-            ) else emptyList()
-            val reply = if (compact)
-                "La nouvelle interface est prête. **La lecture est plus légère** : les messages gardent leur place et les fichiers prennent moins de hauteur.\n\n" +
-                    "Les détails restent accessibles au toucher, sans encombrer la conversation."
-            else
-                "La nouvelle interface est prête.\n\n- Navigation compacte et explicite\n- Détails disponibles à la demande\n- Plus de place pour la conversation\n\nLes longues adresses restent lisibles : https://example.test/" +
-                    "une-longue-adresse-".repeat(7)
+            val files =
+                if (compact)
+                    listOf(
+                        Deliverable(
+                            "report",
+                            "run",
+                            key = "report",
+                            messageId = "reply",
+                            title = "Compte rendu de la version",
+                            name = "rapport.md",
+                            kind = "markdown",
+                            mediaType = "text/markdown",
+                            size = 12288,
+                            createdAt = now,
+                            group = "Rapports",
+                        ),
+                        Deliverable(
+                            "notes",
+                            "run",
+                            key = "notes",
+                            messageId = "reply",
+                            title = "Notes de validation",
+                            name = "validation.md",
+                            kind = "markdown",
+                            mediaType = "text/markdown",
+                            size = 8192,
+                            createdAt = now,
+                            group = "Rapports",
+                        ),
+                        Deliverable(
+                            "changes",
+                            "run",
+                            key = "changes",
+                            messageId = "reply",
+                            title = "Détails des modifications",
+                            name = "modifications.md",
+                            kind = "markdown",
+                            mediaType = "text/markdown",
+                            size = 4096,
+                            createdAt = now,
+                            group = "Rapports",
+                        ),
+                    )
+                else emptyList()
+            val reply =
+                if (compact)
+                    "La nouvelle interface est prête. **La lecture est plus légère** : les messages gardent leur place et les fichiers prennent moins de hauteur.\n\n" +
+                        "Les détails restent accessibles au toucher, sans encombrer la conversation."
+                else
+                    "La nouvelle interface est prête.\n\n- Navigation compacte et explicite\n- Détails disponibles à la demande\n- Plus de place pour la conversation\n\nLes longues adresses restent lisibles : https://example.test/" +
+                        "une-longue-adresse-".repeat(7)
             val events =
                 listOf(
                     RunEvent(1, now - 60000, "chat.user", "Peux-tu simplifier cette interface ?"),
@@ -161,7 +195,8 @@ class NativeParityPreviewTest {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         if (request.path!!.startsWith("/api/runs/run/artifacts/"))
-                            return MockResponse().setHeader("Content-Type", "text/markdown")
+                            return MockResponse()
+                                .setHeader("Content-Type", "text/markdown")
                                 .setBody("# Compte rendu\n\nLa revue est terminée.")
                         val body =
                             when (request.path!!.substringBefore('?')) {
@@ -214,7 +249,10 @@ class NativeParityPreviewTest {
                     vm.connect(server.url("/").toString())
                 }
                 val density = LocalDensity.current
-                CompositionLocalProvider(LocalDensity provides Density(density.density, if (largeText) 1.3f else density.fontScale)) {
+                CompositionLocalProvider(
+                    LocalDensity provides
+                        Density(density.density, if (largeText) 1.3f else density.fontScale)
+                ) {
                     LeoTheme("dark") { LeoApp(vm = vm) }
                 }
             }
@@ -229,25 +267,41 @@ class NativeParityPreviewTest {
                     awaitMarkdown(activity, "La nouvelle interface")
                     if (compact) {
                         val composer = compose.onNodeWithTag("conversation-composer")
-                        // Message field plus one toolbar holding attach, agent/model/effort and send.
-                        composer.assertIsDisplayed().assertCompactHeight(if (largeText) 136.dp else 112.dp)
-                        compose.onNodeWithTag("model-picker").assertIsDisplayed()
+                        // Message field plus one toolbar holding attach, agent/model/effort and
+                        // send.
+                        composer
+                            .assertIsDisplayed()
+                            .assertCompactHeight(if (largeText) 136.dp else 112.dp)
+                        compose
+                            .onNodeWithTag("model-picker")
+                            .assertIsDisplayed()
                             .assert(hasContentDescription("Codex", substring = true))
-                        compose.onNodeWithTag("conversation-header").assertCompactHeight(if (largeText) 80.dp else 64.dp)
-                        compose.onNodeWithTag("conversation-files")
-                            .assertIsDisplayed().assertCompactHeight(if (largeText) 116.dp else 88.dp)
-                        val sendBounds = compose.onNodeWithTag("conversation-send").getUnclippedBoundsInRoot()
+                        compose
+                            .onNodeWithTag("conversation-header")
+                            .assertCompactHeight(if (largeText) 80.dp else 64.dp)
+                        compose
+                            .onNodeWithTag("conversation-files")
+                            .assertIsDisplayed()
+                            .assertCompactHeight(if (largeText) 116.dp else 88.dp)
+                        val sendBounds =
+                            compose.onNodeWithTag("conversation-send").getUnclippedBoundsInRoot()
                         org.junit.Assert.assertEquals(48.dp, sendBounds.bottom - sendBounds.top)
                         org.junit.Assert.assertEquals(48.dp, sendBounds.right - sendBounds.left)
-                        val faceBounds = compose.onNodeWithTag("conversation-send-face", useUnmergedTree = true)
-                            .getUnclippedBoundsInRoot()
+                        val faceBounds =
+                            compose
+                                .onNodeWithTag("conversation-send-face", useUnmergedTree = true)
+                                .getUnclippedBoundsInRoot()
                         org.junit.Assert.assertEquals(40.dp, faceBounds.bottom - faceBounds.top)
                         org.junit.Assert.assertEquals(40.dp, faceBounds.right - faceBounds.left)
                         val name = if (largeText) "fil-phone-large-text" else "fil-phone-density"
                         capture(name)
-                        // Compact presentation must retain access to every file and the native viewer.
+                        // Compact presentation must retain access to every file and the native
+                        // viewer.
                         compose.onNodeWithTag("conversation-files").performScrollToIndex(2)
-                        compose.onNodeWithText("Détails des modifications").assertIsDisplayed().performClick()
+                        compose
+                            .onNodeWithText("Détails des modifications")
+                            .assertIsDisplayed()
+                            .performClick()
                         waitText("modifications.md")
                         compose.onNodeWithText("Version 1").assertExists()
                         return
@@ -260,7 +314,11 @@ class NativeParityPreviewTest {
                     waitDescription("Missions")
                 }
                 // Phone dock tabs are named by their icon; the large-window rail shows its labels.
-                compose.onAllNodes((hasContentDescription("Missions") or hasText("Missions")) and hasClickAction())
+                compose
+                    .onAllNodes(
+                        (hasContentDescription("Missions") or hasText("Missions")) and
+                            hasClickAction()
+                    )
                     .onFirst()
                     .performClick()
                 waitText(task.name)
@@ -276,7 +334,10 @@ class NativeParityPreviewTest {
                     compose.onNodeWithText(task.name).performClick()
                     compose.onNodeWithTag("mission-sheet").assertIsDisplayed()
                     compose.waitUntil(15000) {
-                        compose.onAllNodesWithText("100 % de réussite").fetchSemanticsNodes().isNotEmpty()
+                        compose
+                            .onAllNodesWithText("100 % de réussite")
+                            .fetchSemanticsNodes()
+                            .isNotEmpty()
                     }
                     compose.onNodeWithText("Lancer maintenant").assertIsDisplayed()
                     capture("mission-sheet-phone-dark")
@@ -299,12 +360,18 @@ class NativeParityPreviewTest {
     private fun SemanticsNodeInteraction.assertCompactHeight(maximum: androidx.compose.ui.unit.Dp) {
         val bounds = getUnclippedBoundsInRoot()
         val measured = bounds.bottom - bounds.top
-        org.junit.Assert.assertTrue("Expected height <= $maximum, measured $measured", measured <= maximum)
+        org.junit.Assert.assertTrue(
+            "Expected height <= $maximum, measured $measured",
+            measured <= maximum,
+        )
     }
 
     private fun waitDescription(value: String, substring: Boolean = false) {
         compose.waitUntil(15000) {
-            compose.onAllNodesWithContentDescription(value, substring = substring).fetchSemanticsNodes().isNotEmpty()
+            compose
+                .onAllNodesWithContentDescription(value, substring = substring)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
         }
     }
 

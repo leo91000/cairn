@@ -144,10 +144,7 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                             )
                         )
                     when (path) {
-                        "/api/chats/stream" ->
-                            return stream(
-                                LiveState(chats = chats)
-                            )
+                        "/api/chats/stream" -> return stream(LiveState(chats = chats))
                         "/api/runs/run/stream" -> return stream(LiveState(run = run))
                     }
                     val body =
@@ -255,7 +252,9 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                 compose.onNodeWithText("Tâche terminée").performScrollTo()
                 compose.onNodeWithText("Détails").performClick()
                 capture("chat-evidence-dark")
-                compose.onNode(hasContentDescription("Changer de conversation", substring = true)).performClick()
+                compose
+                    .onNode(hasContentDescription("Changer de conversation", substring = true))
+                    .performClick()
                 compose.waitUntil(15000) {
                     compose
                         .onAllNodesWithText("Préparer la prochaine version")
@@ -266,14 +265,26 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                 compose.onNodeWithText("Rechercher une conversation").performTextInput("prochaine")
                 // Removed LazyColumn rows can retain semantics during their exit animation.
                 compose.waitUntil(10000) {
-                    compose.onAllNodesWithText("Explorer les résultats").fetchSemanticsNodes().isEmpty()
+                    compose
+                        .onAllNodesWithText("Explorer les résultats")
+                        .fetchSemanticsNodes()
+                        .isEmpty()
                 }
                 compose.onNodeWithText("Explorer les résultats").assertDoesNotExist()
                 compose.onNodeWithText("Préparer la prochaine version").performClick()
                 compose.waitUntil(30000) {
-                    compose.onAllNodesWithText("Rechercher une conversation").fetchSemanticsNodes().isEmpty() &&
-                        compose.onAllNodesWithText("Préparer la prochaine version").fetchSemanticsNodes().isNotEmpty() &&
-                        compose.onAllNodesWithText("Tâche terminée").fetchSemanticsNodes().isNotEmpty()
+                    compose
+                        .onAllNodesWithText("Rechercher une conversation")
+                        .fetchSemanticsNodes()
+                        .isEmpty() &&
+                        compose
+                            .onAllNodesWithText("Préparer la prochaine version")
+                            .fetchSemanticsNodes()
+                            .isNotEmpty() &&
+                        compose
+                            .onAllNodesWithText("Tâche terminée")
+                            .fetchSemanticsNodes()
+                            .isNotEmpty()
                 }
                 compose.runOnIdle {
                     dark = false
@@ -305,8 +316,10 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                 compose.onNodeWithContentDescription("Options de la conversation").performClick()
                 compose.onNodeWithText("Plein écran").performClick()
                 compose.waitUntil(10000) {
-                    compose.onAllNodesWithContentDescription("Quitter le plein écran")
-                        .fetchSemanticsNodes().isNotEmpty()
+                    compose
+                        .onAllNodesWithContentDescription("Quitter le plein écran")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
                 }
                 compose.onNode(hasSetTextAction()).assertDoesNotExist()
                 capture("chat-fullscreen-light")
@@ -330,7 +343,10 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
             val vm = fixture(server)
             compose.setContent { LeoTheme("dark") { LeoApp(vm = vm) } }
             compose.waitUntil(30000) {
-                compose.onAllNodesWithContentDescription("Missions").fetchSemanticsNodes().isNotEmpty()
+                compose
+                    .onAllNodesWithContentDescription("Missions")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
             }
             compose.onNodeWithContentDescription("Missions").performClick()
             compose.waitUntil(30000) {
@@ -354,7 +370,10 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
             val vm = fixture(server)
             compose.setContent { LeoTheme("dark") { LeoApp(vm = vm) } }
             compose.waitUntil(30000) {
-                compose.onAllNodesWithContentDescription("Missions").fetchSemanticsNodes().isNotEmpty()
+                compose
+                    .onAllNodesWithContentDescription("Missions")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
             }
             compose.onNodeWithContentDescription("Missions").performClick()
             compose.waitUntil(30000) {
@@ -363,7 +382,11 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
             compose.onNodeWithText("Chaque lundi · 09:00", substring = true).assertExists()
             capture("missions-dark")
             val width =
-                InstrumentationRegistry.getInstrumentation().targetContext.resources.configuration.screenWidthDp
+                InstrumentationRegistry.getInstrumentation()
+                    .targetContext
+                    .resources
+                    .configuration
+                    .screenWidthDp
             if (width < 840) {
                 compose.onNodeWithText(task.name).performClick()
                 compose.onNodeWithTag("mission-sheet").assertIsDisplayed()
@@ -372,7 +395,10 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                 compose.onAllNodesWithText("100 % de réussite").fetchSemanticsNodes().isNotEmpty()
             }
             capture("mission-details-dark")
-            compose.onNodeWithContentDescription("Modifier la mission").performScrollTo().performClick()
+            compose
+                .onNodeWithContentDescription("Modifier la mission")
+                .performScrollTo()
+                .performClick()
             compose.onNodeWithText("Enregistrer").assertIsEnabled()
             capture("mission-editor-dark")
             vm.api.closeStreams()

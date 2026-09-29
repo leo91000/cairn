@@ -2,8 +2,8 @@ package dev.leo.manager.ui
 
 import android.app.Application
 import androidx.compose.runtime.*
-import androidx.compose.ui.test.*
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
@@ -25,41 +25,62 @@ import org.robolectric.annotation.Config
 class OnePasswordJourneyTest {
     @get:Rule val compose = createComposeRule()
 
-    @Before fun initializeWork() {
+    @Before
+    fun initializeWork() {
         WorkManagerTestInitHelper.initializeTestWorkManager(
             ApplicationProvider.getApplicationContext<Application>(),
             Configuration.Builder().setExecutor(SynchronousExecutor()).build(),
         )
     }
-    @After fun closeWork() { WorkManagerTestInitHelper.closeWorkDatabase() }
 
-    @Test fun `editing access preserves the saved token and sends explicit grants`() {
+    @After
+    fun closeWork() {
+        WorkManagerTestInitHelper.closeWorkDatabase()
+    }
+
+    @Test
+    fun `editing access preserves the saved token and sends explicit grants`() {
         journey(OnePasswordAccount(id = "account", name = "Production"), false)
     }
-    @Test fun `creation masks token input and starts without grants`() {
+
+    @Test
+    fun `creation masks token input and starts without grants`() {
         journey(OnePasswordAccount(), true)
     }
+
     private fun journey(initial: OnePasswordAccount, creating: Boolean) {
         MockWebServer().use { server ->
             val saved = CopyOnWriteArrayList<String>()
-            server.dispatcher = object : Dispatcher() {
-                override fun dispatch(request: RecordedRequest): MockResponse {
-                    val result = when (request.path) {
-                        "/api/session" -> """{"authenticated":true,"csrf":"fixture-csrf"}"""
-                        "/api/agents" -> wireJson.encodeToString(listOf(Agent(id = MAIN_AGENT_ID, name = "Leo")))
-                        "/api/onepassword", "/api/onepassword/account" -> {
-                            if (request.getHeader("X-CSRF-Token") != "fixture-csrf") return MockResponse().setResponseCode(403)
-                            saved += request.body.readUtf8()
-                            "{}"
-                        }
-                        "/api/overview", "/api/codex/models" -> "{}"
-                        else -> "[]"
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val result =
+                            when (request.path) {
+                                "/api/session" -> """{"authenticated":true,"csrf":"fixture-csrf"}"""
+                                "/api/agents" ->
+                                    wireJson.encodeToString(
+                                        listOf(Agent(id = MAIN_AGENT_ID, name = "Leo"))
+                                    )
+                                "/api/onepassword",
+                                "/api/onepassword/account" -> {
+                                    if (request.getHeader("X-CSRF-Token") != "fixture-csrf")
+                                        return MockResponse().setResponseCode(403)
+                                    saved += request.body.readUtf8()
+                                    "{}"
+                                }
+                                "/api/overview",
+                                "/api/codex/models" -> "{}"
+                                else -> "[]"
+                            }
+                        return MockResponse().setBody(result)
                     }
-                    return MockResponse().setBody(result)
                 }
-            }
             server.start()
-            val vm = LeoViewModel(ApplicationProvider.getApplicationContext<Application>(), MemoryVault())
+            val vm =
+                LeoViewModel(
+                    ApplicationProvider.getApplicationContext<Application>(),
+                    MemoryVault(),
+                )
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()
                 LaunchedEffect(Unit) {
@@ -67,15 +88,22 @@ class OnePasswordJourneyTest {
                     vm.connect(server.url("/").toString())
                 }
                 LeoTheme {
-                    if (state.agents.isNotEmpty()) OnePasswordEditor(vm, state, initial, close = {}) {}
+                    if (state.agents.isNotEmpty())
+                        OnePasswordEditor(vm, state, initial, close = {}) {}
                 }
             }
-            compose.waitUntil(10000) { compose.onAllNodesWithText("Nom").fetchSemanticsNodes().isNotEmpty() }
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Nom").fetchSemanticsNodes().isNotEmpty()
+            }
             compose.onNodeWithText("Nom").performTextReplacement("Secrets")
             if (creating) {
                 compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
-                compose.onNodeWithText("Token de compte de service").performTextInput("ops_android_fixture")
-                compose.onNode(SemanticsMatcher.keyIsDefined(SemanticsProperties.Password)).assertExists()
+                compose
+                    .onNodeWithText("Token de compte de service")
+                    .performTextInput("ops_android_fixture")
+                compose
+                    .onNode(SemanticsMatcher.keyIsDefined(SemanticsProperties.Password))
+                    .assertExists()
             } else {
                 compose.onNodeWithText("Leo").performScrollTo().performClick()
             }

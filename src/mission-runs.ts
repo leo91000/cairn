@@ -1,5 +1,10 @@
 import type { RunListItem } from '../shared/contracts'
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import {
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from 'vue'
 import { api, state } from './api'
 
 // Recent mission runs shared by the Fil, the palette and the shell badges: one slow poll while any
@@ -35,10 +40,12 @@ export function useMissionRuns({ eager = true } = {}) {
     if (Date.now() - fetchedAt > 5000)
       void refreshMissionRuns()
   }
+
   const start = () => {
     clearTimeout(first)
     first = setTimeout(load, eager ? 0 : 3000)
   }
+
   const stop = watch(() => state.authenticated, signedIn => signedIn && start())
   onMounted(() => {
     start()

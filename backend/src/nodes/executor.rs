@@ -7,11 +7,13 @@ use serde_json::{Value, json};
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+
 #[derive(Default)]
 pub struct Executor {
     attempts: Mutex<HashMap<String, CancellationToken>>,
     preparation: Mutex<()>,
 }
+
 impl Executor {
     pub async fn prepare(
         self: &Arc<Self>,
@@ -51,7 +53,7 @@ impl Executor {
             master,
             token,
             attempt,
-            json!({"kind":"initial"}),
+            json!({"kind": "initial"}),
             &root,
         )
         .await?;
@@ -83,7 +85,7 @@ impl Executor {
                 controller.trim_end_matches('/')
             ))
             .bearer_auth(credential)
-            .json(&json!({"remainingMs":remaining}))
+            .json(&json!({"remainingMs": remaining}))
             .timeout(Duration::from_secs(3))
             .send()
             .await
@@ -143,7 +145,7 @@ impl Executor {
                             &master,
                             &token,
                             &attempt,
-                            json!({"kind":"inbox"}),
+                            json!({"kind": "inbox"}),
                             &root.join("chat-input"),
                         )
                         .await?;
@@ -151,17 +153,22 @@ impl Executor {
                     }
                     Ok::<_, Error>(())
                 };
-                tokio::select! {_=stop.cancelled()=>break,_=tokio::time::timeout(Duration::from_secs(10),operation)=>{}}
-                tokio::select! {_=stop.cancelled()=>break,_=tokio::time::sleep(Duration::from_secs(1))=>{}}
+                tokio::select! {
+                    _ = stop.cancelled() => break,
+                    _ = tokio::time::timeout(Duration::from_secs(10),operation) => {}
+                }
+                tokio::select! {_ = stop.cancelled() => break,_ = tokio::time::sleep(Duration::from_secs(1)) => {}}
             }
         });
         Ok(())
     }
+
     pub async fn stop(&self, attempt: &str) {
         if let Some(stop) = self.attempts.lock().await.remove(attempt) {
             stop.cancel();
         }
     }
+
     pub async fn close(&self) -> Vec<String> {
         let mut attempts = self.attempts.lock().await;
         let ids = attempts.keys().cloned().collect();
@@ -170,6 +177,7 @@ impl Executor {
         }
         ids
     }
+
     pub async fn before(
         &self,
         client: &reqwest::Client,
@@ -197,7 +205,7 @@ impl Executor {
                 master,
                 token,
                 attempt,
-                json!({"kind":"project","projectId":project}),
+                json!({"kind": "project","projectId": project}),
                 &target,
             )
             .await?;
@@ -209,6 +217,7 @@ impl Executor {
         }
         Ok(())
     }
+
     pub async fn result(
         client: &reqwest::Client,
         master: &url::Url,
@@ -230,7 +239,7 @@ impl Executor {
                 token,
                 attempt,
                 "result",
-                &json!({"result":result}),
+                &json!({"result": result}),
             )
             .await?;
         }

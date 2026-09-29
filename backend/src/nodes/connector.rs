@@ -16,6 +16,7 @@ struct Identity {
     node_id: String,
     token: String,
 }
+
 pub(crate) fn master(input: &str) -> Result<url::Url> {
     let value = url::Url::parse(input).map_err(|_| Error::bad("Invalid master URL."))?;
     let loopback = value.host_str().is_some_and(|host| {
@@ -37,6 +38,7 @@ pub(crate) fn master(input: &str) -> Result<url::Url> {
     }
     Ok(value)
 }
+
 fn client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -44,9 +46,11 @@ fn client() -> Result<reqwest::Client> {
         .build()
         .map_err(Error::internal)
 }
+
 fn runtime() -> String {
     std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| format!("leo-{}", env!("CARGO_PKG_VERSION")))
 }
+
 pub fn capabilities(path: &Path) -> Result<Value> {
     if std::env::consts::OS != "linux" || std::env::consts::ARCH != "x86_64" {
         return Err(Error::bad("Nodes require Linux x86-64."));
@@ -85,10 +89,18 @@ pub fn capabilities(path: &Path) -> Result<Value> {
     let stat = unsafe { stat.assume_init() };
     let disk =
         (stat.f_bavail as u128 * stat.f_frsize as u128 / 1_048_576).min(u64::MAX as u128) as u64;
-    Ok(
-        json!({"os":"linux","arch":"x86_64","kvm":kvm,"fuse":std::fs::OpenOptions::new().read(true).write(true).open("/dev/fuse").is_ok(),"cpu":std::thread::available_parallelism()?.get(),"memoryMiB":memory,"diskMiB":disk,"diskTotalMiB":(stat.f_blocks as u128 * stat.f_frsize as u128 / 1_048_576).min(u64::MAX as u128) as u64}),
-    )
+    Ok(json!({
+        "os": "linux",
+        "arch": "x86_64",
+        "kvm": kvm,
+        "fuse": std::fs::OpenOptions::new().read(true).write(true).open("/dev/fuse").is_ok(),
+        "cpu": std::thread::available_parallelism()?.get(),
+        "memoryMiB": memory,
+        "diskMiB": disk,
+        "diskTotalMiB": (stat.f_blocks as u128 * stat.f_frsize as u128 / 1_048_576).min(u64::MAX as u128) as u64
+    }))
 }
+
 pub async fn enroll(origin: &str, directory: &Path) -> Result<()> {
     let origin = master(origin)?;
     private_dir(directory).await?;
@@ -107,19 +119,53 @@ pub async fn enroll(origin: &str, directory: &Path) -> Result<()> {
         })?;
     let result: Result<()> = async {
         let code = crate::process::read_bounded(tokio::io::stdin(), 256).await?;
-        let code = std::str::from_utf8(&code).map_err(|_| Error::bad("Invalid enrollment code."))?.trim();
-        let response = client()?.post(origin.join("internal/nodes/enroll").map_err(Error::internal)?)
-            .json(&json!({"code":code,"name":"Linux node","protocol":1,"capabilities":capabilities(directory)?,"runtimeId":runtime()})).send().await.map_err(|_|Error::new(503,"Cannot reach the master."))?;
-        if !response.status().is_success() { return Err(Error::new(response.status().as_u16(),"Node enrollment was rejected. Check the code and master version.")); }
-        let value: Value = response.json().await.map_err(|_|Error::bad("Invalid enrollment response."))?;
-        let node_id = value["nodeId"].as_str().ok_or_else(||Error::bad("Missing node identity."))?;
+        let code = std::str::from_utf8(&code)
+            .map_err(|_| Error::bad("Invalid enrollment code."))?
+            .trim();
+        let response = client()?
+            .post(
+                origin
+                    .join("internal/nodes/enroll")
+                    .map_err(Error::internal)?,
+            )
+            .json(&json!({
+                "code": code,
+                "name": "Linux node",
+                "protocol": 1,
+                "capabilities": capabilities(directory)?,
+                "runtimeId": runtime()
+            }))
+            .send()
+            .await
+            .map_err(|_| Error::new(503, "Cannot reach the master."))?;
+        if !response.status().is_success() {
+            return Err(Error::new(
+                response.status().as_u16(),
+                "Node enrollment was rejected. Check the code and master version.",
+            ));
+        }
+        let value: Value = response
+            .json()
+            .await
+            .map_err(|_| Error::bad("Invalid enrollment response."))?;
+        let node_id = value["nodeId"]
+            .as_str()
+            .ok_or_else(|| Error::bad("Missing node identity."))?;
         crate::validation::uuid(node_id)?;
-        let token = value["token"].as_str().filter(|v|v.len()==43).ok_or_else(||Error::bad("Missing node credential."))?;
-        let identity = Identity { master:origin.to_string(),node_id:node_id.into(),token:token.into() };
+        let token = value["token"]
+            .as_str()
+            .filter(|v| v.len() == 43)
+            .ok_or_else(|| Error::bad("Missing node credential."))?;
+        let identity = Identity {
+            master: origin.to_string(),
+            node_id: node_id.into(),
+            token: token.into(),
+        };
         file.write_all(&serde_json::to_vec(&identity)?).await?;
         file.sync_all().await?;
         Ok(())
-    }.await;
+    }
+    .await;
     if result.is_err() {
         let _ = tokio::fs::remove_file(identity_path).await;
     }
@@ -127,6 +173,7 @@ pub async fn enroll(origin: &str, directory: &Path) -> Result<()> {
     println!("Node enrolled. Identity stored privately; no execution has been started.");
     Ok(())
 }
+
 pub async fn connect(directory: &Path, stop: CancellationToken) -> Result<()> {
     let identity: Identity =
         serde_json::from_slice(&tokio::fs::read(directory.join("identity.json")).await?)?;
@@ -151,8 +198,12 @@ pub async fn connect(directory: &Path, stop: CancellationToken) -> Result<()> {
     };
     if let Some(mut task) = relay {
         let result = tokio::select! {
-            result=heartbeat(&client,&origin,&identity,&stop)=>result,
-            result=&mut task=>return match result {Ok(Ok(()))=>Err(Error::new(503,"Execution relay stopped.")),Ok(Err(error))=>Err(error),Err(_)=>Err(Error::new(503,"Execution relay failed."))}
+            result = heartbeat(&client, &origin, &identity, &stop) => result,
+            result = &mut task => return match result {
+                Ok(Ok(())) => Err(Error::new(503, "Execution relay stopped.")),
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err(Error::new(503, "Execution relay failed.")),
+            }
         };
         relay_stop.cancel();
         let _ = task.await;
@@ -161,6 +212,7 @@ pub async fn connect(directory: &Path, stop: CancellationToken) -> Result<()> {
         heartbeat(&client, &origin, &identity, &stop).await
     }
 }
+
 async fn heartbeat(
     client: &reqwest::Client,
     origin: &url::Url,
@@ -192,7 +244,14 @@ async fn heartbeat(
                     .map_err(Error::internal)?,
             )
             .bearer_auth(&identity.token)
-            .json(&json!({"imageDigest":std::env::var("LEO_NODE_IMAGE").ok(),"runtimeId":health["runtimeId"].as_str().map(str::to_owned).unwrap_or_else(runtime),"executionReady":ready,"dataRoot":health["dataRoot"],"capabilities":health["capabilities"],"runtimes":health["runtimes"]}))
+            .json(&json!({
+                "imageDigest": std::env::var("LEO_NODE_IMAGE").ok(),
+                "runtimeId": health["runtimeId"].as_str().map(str::to_owned).unwrap_or_else(runtime),
+                "executionReady": ready,
+                "dataRoot": health["dataRoot"],
+                "capabilities": health["capabilities"],
+                "runtimes": health["runtimes"]
+            }))
             .send();
         let result =
             tokio::select! { _ = stop.cancelled() => return Ok(()), value = request => value };
@@ -230,7 +289,7 @@ async fn heartbeat(
                                     crate::validation::text(lease, "id")
                                 ))
                                 .bearer_auth(&credential)
-                                .json(&json!({"remainingMs":remaining}))
+                                .json(&json!({"remainingMs": remaining}))
                                 .timeout(Duration::from_secs(3))
                                 .send()
                                 .await;
@@ -240,6 +299,9 @@ async fn heartbeat(
             }
             _ => tracing::warn!("Node heartbeat failed; retrying without starting work."),
         }
-        tokio::select! { _ = stop.cancelled() => return Ok(()), _ = tokio::time::sleep(Duration::from_secs(3)) => {} }
+        tokio::select! {
+            _ = stop.cancelled() => return Ok(()),
+            _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+        }
     }
 }

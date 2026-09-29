@@ -23,6 +23,7 @@ async function recordFrames(page: Page) {
       if (w.__frames.length < 120)
         requestAnimationFrame(sample)
     }
+
     requestAnimationFrame(sample)
   })
 }
@@ -61,8 +62,15 @@ test('switching conversations is seamless', async ({ page, workspace }) => {
     }
     summaries.push(summary)
   }
+
   for (const summary of summaries) {
-    expect(summary).toMatchObject({ loadingFrames: 0, emptyTitleFrames: 0, noMessageFrames: 0, filRemounted: false, composerRemounted: false })
+    expect(summary).toMatchObject({
+      loadingFrames: 0,
+      emptyTitleFrames: 0,
+      noMessageFrames: 0,
+      filRemounted: false,
+      composerRemounted: false,
+    })
     expect(summary.minFilItems).toBeGreaterThan(0)
   }
 })

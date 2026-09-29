@@ -6,6 +6,7 @@ use crate::{
 };
 use serde_json::Value;
 use std::path::Path;
+
 pub async fn prepare(
     directory: &Path,
     size: u64,
@@ -151,7 +152,11 @@ mod tests {
     async fn interrupted_resize_restarts_from_the_original_journal() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("disks/conversation");
-        let context = json!({"master":"http://127.0.0.1:1/","grant":"fixture","policy":super::super::policy::Policy {reserve_mi_b:64,reserve_percent:1,..Default::default()}});
+        let context = json!({
+            "master": "http://127.0.0.1:1/",
+            "grant": "fixture",
+            "policy": super::super::policy::Policy {reserve_mi_b:64,reserve_percent:1,..Default::default()}
+        });
         let stop = CancellationToken::new();
         prepare(&directory, 128 * 1024 * 1024, &context, &stop)
             .await

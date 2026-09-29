@@ -77,12 +77,14 @@ pnpm dev
 ```
 
 `pnpm install` installs a pre-commit hook that runs `pnpm lint:fix` across the
-full project, including `cargo fmt --all` for Rust. If auto-fixes change tracked
+full Rust/web project, including rustfmt and Rust declaration spacing. Staged
+Kotlin changes also run the Android formatter. If auto-fixes change tracked
 files, review and stage those fixes, then retry the commit; the hook does not
 stage files automatically. It then runs `cargo check` and Clippy with the locked
 dependencies across every workspace member and target, including tests and
 examples. Lint errors, compiler errors, and Clippy warnings block the commit.
 Run `pnpm prepare` to reinstall the hook.
+See [formatting and readability](docs/FORMATTING.md) for setup, commands, and CI checks.
 
 The UI is at `http://localhost:5178`; the backend is at `http://localhost:4310`.
 The UI uses Tailwind CSS and Egoist's Iconify plugin. See the
@@ -103,6 +105,7 @@ pnpm test:e2e                    # Full browser journeys against the Rust backen
 pnpm build:backend               # Optimized native production binary
 node --import tsx scripts/benchmark-backend.mjs # Node/Rust comparison
 pnpm lint:fix                    # ESLint fixes and Rust formatting
+pnpm format:android              # Kotlin and Gradle Kotlin formatting (requires JDK)
 ```
 
 Use `pnpm test:backend` inside a coding-agent environment: the test launcher clears

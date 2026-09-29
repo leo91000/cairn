@@ -11,9 +11,11 @@ const name = `leo-smoke-${randomUUID().slice(0, 8)}`
 const volumes = ['data', 'home', 'workspaces'].map(
   suffix => `${name}-${suffix}`,
 )
+
 function docker(...args) {
   return exec('docker', ['--context', 'default', ...args], { timeout: args[0] === 'run' ? 180000 : 60000 })
 }
+
 async function main() {
   try {
     await docker(
@@ -36,6 +38,7 @@ async function main() {
     )
     const { stdout } = await docker('port', name, '4310/tcp')
     let url = `http://${stdout.trim()}`
+
     async function ready() {
       for (let i = 0; i < 60; i++) {
         if (
@@ -45,16 +48,20 @@ async function main() {
         ) {
           return
         }
+
         await setTimeout(200)
       }
+
       throw new Error('Container did not become healthy')
     }
+
     await ready()
     const healthDeadline = Date.now() + 15000
     while ((await docker('inspect', '--format', '{{.State.Health.Status}}', name)).stdout.trim() !== 'healthy') {
       assert.ok(Date.now() < healthDeadline, 'Docker health check did not become healthy promptly')
       await setTimeout(200)
     }
+
     const claudeVersion = (await docker('exec', name, 'claude', '--version')).stdout.trim()
     assert.match(claudeVersion, /^2\.1\.280\b/, 'official Claude Code CLI is installed')
     const health = await fetch(`${url}/health`)
@@ -103,6 +110,7 @@ async function main() {
       const result = await exec('docker', ['--context', 'default', 'exec', name, '/usr/local/bin/node', '--input-type=module', '-e', toolkitProbe], { timeout: 240000, maxBuffer: 1024 * 1024 })
       process.stdout.write(result.stdout)
     }
+
     const browserProbe = await readFile(new URL('./browser-smoke.mjs', import.meta.url), 'utf8')
     const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
     const browsers = await exec('docker', ['--context', 'default', 'exec', name, 'node', '--input-type=module', '-e', browserProbe, packageJson.devDependencies['@playwright/test']], { timeout: 240000, maxBuffer: 1024 * 1024 })
@@ -133,6 +141,7 @@ async function main() {
     await docker('volume', 'rm', ...volumes).catch(() => {})
   }
 }
+
 main().catch((error) => {
   console.error(error)
   process.exitCode = 1

@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import type { Deliverable } from '../../shared/artifacts'
 import { artifactUrl, fileSize } from '../../shared/artifacts'
-import { ChevronRight, FileCode, FileText, Play } from '../icons'
+import {
+  ChevronRight,
+  FileCode,
+  FileText,
+  Play,
+} from '../icons'
 import Icon from './Icon.vue'
 
 // The transcript is a reader, not a file gallery: one compact rail of rows, as on Android.
@@ -15,7 +20,13 @@ defineEmits<{ open: [item: Deliverable] }>()
     <li v-for="item in items" :key="item.id" class="w-70 max-w-full shrink-0 snap-start">
       <button class="flex min-h-18 w-full items-center gap-2.5 border-y border-line py-2.5 text-left hover:bg-hover/40 focus-visible:outline-2 focus-visible:outline-accent" :aria-label="`Open ${item.title}`" @click="$emit('open', item)">
         <span class="relative grid size-11 shrink-0 place-items-center overflow-hidden rounded-md bg-surface text-accent">
-          <img v-if="item.previewStatus === 'ready' || item.kind === 'image'" :src="artifactUrl(item, item.previewStatus === 'ready' ? 'preview' : undefined)" alt="" loading="lazy" class="size-full object-cover">
+          <img
+            v-if="item.previewStatus === 'ready' || item.kind === 'image'"
+            :src="artifactUrl(item, item.previewStatus === 'ready' ? 'preview' : undefined)"
+            alt=""
+            loading="lazy"
+            class="size-full object-cover"
+          >
           <Icon v-else :name="item.kind === 'code' ? FileCode : item.kind === 'video' || item.kind === 'audio' ? Play : FileText" :size="22" />
         </span>
         <span class="min-w-0 flex-1">

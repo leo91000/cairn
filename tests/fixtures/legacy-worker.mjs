@@ -11,6 +11,7 @@ async function main() {
     await app.close()
   })
 }
+
 main().catch(() => {
   process.exitCode = 1
 })

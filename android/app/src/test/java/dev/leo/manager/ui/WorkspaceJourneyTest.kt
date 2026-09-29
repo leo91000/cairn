@@ -245,7 +245,10 @@ class WorkspaceJourneyTest {
             compose.onNodeWithText("Mot de passe").performTextInput("test-only-password")
             compose.onNodeWithText("Se connecter").performClick()
             compose.waitUntil(10000) {
-                compose.onAllNodesWithContentDescription("Missions").fetchSemanticsNodes().isNotEmpty()
+                compose
+                    .onAllNodesWithContentDescription("Missions")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
             }
             screenshot("overview")
             compose.onNodeWithContentDescription("Missions").performClick()
@@ -263,7 +266,10 @@ class WorkspaceJourneyTest {
             compose.onNodeWithText("Enregistrer").performClick()
             // The saved mission opens in its sheet, ready to run.
             compose.waitUntil(10000) {
-                compose.onAllNodesWithText("Lancer maintenant").fetchSemanticsNodes().isNotEmpty() &&
+                compose
+                    .onAllNodesWithText("Lancer maintenant")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty() &&
                     !vm.state.value.busy &&
                     vm.state.value.tasks.any { it.id == "task" }
             }
@@ -284,22 +290,31 @@ class WorkspaceJourneyTest {
                 compose.onAllNodesWithTag("agent-working").fetchSemanticsNodes().isNotEmpty()
             }
             // The indicator names the command still running in the fixture.
-            compose.onNodeWithTag("agent-working")
+            compose
+                .onNodeWithTag("agent-working")
                 .assert(hasContentDescription("Exécuter les tests : ./gradlew testDebugUnitTest"))
             // The running command is carried by the indicator; the actions keep the finished steps.
-            compose.onNodeWithTag("agent-actions").assert(hasText("Suivi de l’exécution")).performClick()
+            compose
+                .onNodeWithTag("agent-actions")
+                .assert(hasText("Suivi de l’exécution"))
+                .performClick()
             compose.onNodeWithText("Exécuter les tests").assertDoesNotExist()
             compose.onNodeWithText("Travail commencé").performClick()
             compose.onNodeWithTag("agent-step-sheet").assertExists()
             compose.onNodeWithText("Le worker démarre la mission").assertExists()
             compose.onNodeWithContentDescription("Fermer").performClick()
-            compose.waitUntil(10000) { compose.onAllNodesWithTag("agent-step-sheet").fetchSemanticsNodes().isEmpty() }
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithTag("agent-step-sheet").fetchSemanticsNodes().isEmpty()
+            }
             compose.onNodeWithTag("agent-actions").performClick()
             assertTrue(mutations.any { it.first == "/api/tasks/task/run" })
             screenshot("run")
             compose.onNodeWithContentDescription("Retour").performClick()
             compose.waitUntil(10000) {
-                compose.onAllNodesWithContentDescription("Atelier").fetchSemanticsNodes().isNotEmpty()
+                compose
+                    .onAllNodesWithContentDescription("Atelier")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
             }
             compose.onNodeWithContentDescription("Atelier").performClick()
             compose.onNodeWithText("Paramètres et accès").performScrollTo().performClick()

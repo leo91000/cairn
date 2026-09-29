@@ -16,6 +16,7 @@ function jsonEnd(source: string, start: number) {
         quoted = false
       continue
     }
+
     if (char === '"') {
       quoted = true
     }
@@ -29,6 +30,7 @@ function jsonEnd(source: string, start: number) {
         return index + 1
     }
   }
+
   return -1
 }
 
@@ -56,8 +58,10 @@ export function contentParts(source: string): ContentPart[] {
           parts.push({ kind: 'incomplete', source: unfinished[1] })
           cursor = source.length
         }
+
         break
       }
+
       const fenced = source.slice(index + marker.length, end)
       const match = marker.length >= 3 && fenced.match(/^(?:json)?[ \t]*\n([\s\S]*)$/i)
       if (match) {
@@ -79,9 +83,11 @@ export function contentParts(source: string): ContentPart[] {
           }
         }
       }
+
       index = end + marker.length
       continue
     }
+
     if ((source[index] === '{' || source[index] === '[') && (index === 0 || /[\s:]/.test(source[index - 1]))) {
       const end = jsonEnd(source, index)
       if (end > index) {
@@ -98,9 +104,11 @@ export function contentParts(source: string): ContentPart[] {
           }
         }
         catch { /* Ordinary prose may contain braces. */ }
+
         index = end
         continue
       }
+
       // A streaming/truncated object should never expose a nested fragment as complete.
       if (end < 0 && /^[[{]\s*["[{]/.test(source.slice(index))) {
         if (end === -1) {
@@ -109,11 +117,14 @@ export function contentParts(source: string): ContentPart[] {
           parts.push({ kind: 'incomplete', source: source.slice(index) })
           cursor = source.length
         }
+
         break
       }
     }
+
     index++
   }
+
   if (cursor < source.length)
     parts.push({ kind: 'text', text: source.slice(cursor) })
   return parts.length ? parts : [{ kind: 'text', text: source }]
@@ -132,12 +143,15 @@ export function outputSummary(source: string) {
     return { title: 'Incomplete result', subtitle: 'The saved JSON ends before the result is complete' }
   return { title: 'Recorded output', subtitle: source.split('\n').find(line => line.trim())?.slice(0, 180) || 'No output recorded' }
 }
+
 export function fieldLabel(key: string) {
   return key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]/g, ' ').replace(/^./, char => char.toUpperCase())
 }
+
 export function dataObject(value: DataValue): value is { [key: string]: DataValue } {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
+
 export function dataSummary(value: DataValue): string {
   if (Array.isArray(value))
     return `${value.length.toLocaleString()} ${value.length === 1 ? 'item' : 'items'}`
@@ -145,6 +159,7 @@ export function dataSummary(value: DataValue): string {
     const count = Object.keys(value).length
     return `${count} ${count === 1 ? 'field' : 'fields'}`
   }
+
   if (value === null)
     return 'Not set'
   if (value === '')
@@ -153,20 +168,24 @@ export function dataSummary(value: DataValue): string {
     return value ? 'Yes' : 'No'
   return `${value}`
 }
+
 export function dataTitle(value: DataValue) {
   if (Array.isArray(value)) {
     if (value.length && value.every(item => dataObject(item) && Array.isArray(item.jobs)))
       return 'Workflow checks'
     return 'Results'
   }
+
   if (dataObject(value)) {
     if (Array.isArray(value.jobs))
       return 'Workflow checks'
     if (Array.isArray(value.files) && ('headRefOid' in value || 'baseRefOid' in value))
       return 'Pull request details'
   }
+
   return 'Structured result'
 }
+
 export function statusTone(key: string, value: DataValue) {
   if (!['status', 'conclusion', 'state'].includes(key.toLowerCase()) || typeof value !== 'string')
     return ''

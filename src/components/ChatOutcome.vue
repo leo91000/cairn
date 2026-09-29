@@ -1,7 +1,13 @@
 <script setup lang="ts">
 import type { TaskOutcome } from '../../shared/contracts'
 import { computed, ref, useId } from 'vue'
-import { Check, ChevronDown, CircleAlert, FileText, Info } from '../icons'
+import {
+  Check,
+  ChevronDown,
+  CircleAlert,
+  FileText,
+  Info,
+} from '../icons'
 import Icon from './Icon.vue'
 import Markdown from './Markdown.vue'
 
@@ -19,7 +25,12 @@ const labels = { completed: 'Task completed', blocked: 'Blocked', needs_input: '
         <Icon :name="attention ? CircleAlert : Check" :size="14" />{{ labels[outcome.status] }}
       </span>
       <span class="text-subtle" aria-hidden="true">·</span>
-      <button class="inline-flex min-h-8 items-center gap-1.5 rounded-sm text-muted hover:text-ink phone:min-h-11" :aria-expanded="expanded" :aria-controls="evidenceId" @click="expanded = !expanded">
+      <button
+        class="inline-flex min-h-8 items-center gap-1.5 rounded-sm text-muted hover:text-ink phone:min-h-11"
+        :aria-expanded="expanded"
+        :aria-controls="evidenceId"
+        @click="expanded = !expanded"
+      >
         {{ expanded ? 'Hide' : 'View' }} {{ outcome.evidence.length ? 'evidence' : 'details' }}
         <Icon :name="ChevronDown" :size="13" :class="expanded ? 'rotate-180' : ''" />
       </button>
@@ -27,7 +38,12 @@ const labels = { completed: 'Task completed', blocked: 'Blocked', needs_input: '
     <div v-if="attention" class="outcome-content mt-2 text-ink">
       <Markdown :content="outcome.reason" />
     </div>
-    <div v-if="expanded" :id="evidenceId" class="mt-3 max-w-prose border-l-2 pl-4" :class="attention ? 'border-warning/40' : 'border-accent/40'">
+    <div
+      v-if="expanded"
+      :id="evidenceId"
+      class="mt-3 max-w-prose border-l-2 pl-4"
+      :class="attention ? 'border-warning/40' : 'border-accent/40'"
+    >
       <div v-if="!attention" class="outcome-content mb-3 text-muted">
         <Markdown :content="outcome.reason" />
       </div>

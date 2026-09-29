@@ -46,7 +46,9 @@ import kotlinx.serialization.json.put
 /** The app-wide snackbar, so screens can offer an undo without owning a Scaffold. */
 internal val LocalSnackbar = staticCompositionLocalOf<SnackbarHostState?> { null }
 
-/** Conversations hidden while their deletion is pending or done, and the action that trashes one. */
+/**
+ * Conversations hidden while their deletion is pending or done, and the action that trashes one.
+ */
 internal class ConversationTrash(val hidden: Set<String>, val trash: (String) -> Unit)
 
 /**
@@ -81,7 +83,12 @@ internal fun rememberConversationTrash(
         if (snackbar != null)
             scope.launch {
                 snackbar.currentSnackbarData?.dismiss()
-                val result = snackbar.showSnackbar("Conversation supprimée", "Annuler", duration = SnackbarDuration.Short)
+                val result =
+                    snackbar.showSnackbar(
+                        "Conversation supprimée",
+                        "Annuler",
+                        duration = SnackbarDuration.Short,
+                    )
                 if (result == SnackbarResult.ActionPerformed) restore(id)
             }
     }
@@ -89,7 +96,11 @@ internal fun rememberConversationTrash(
         hidden = hidden + id
         vm.viewModelScope.launch {
             try {
-                vm.api.request("DELETE", "/chats/${segment(id)}", buildJsonObject { put("confirm", false) })
+                vm.api.request(
+                    "DELETE",
+                    "/chats/${segment(id)}",
+                    buildJsonObject { put("confirm", false) },
+                )
                 vm.historyCache.clear()
                 trashed(id)
             } catch (e: Exception) {
@@ -106,14 +117,19 @@ internal fun rememberConversationTrash(
         Confirm(
             "Arrêter et supprimer ?",
             "Le travail sera arrêté et les envois annulés. La conversation restera récupérable pendant 30 jours.",
-            state.busy, state.error,
+            state.busy,
+            state.error,
             {
                 confirming = null
                 hidden = hidden - id
             },
         ) {
             vm.perform {
-                api.request("DELETE", "/chats/${segment(id)}", buildJsonObject { put("confirm", true) })
+                api.request(
+                    "DELETE",
+                    "/chats/${segment(id)}",
+                    buildJsonObject { put("confirm", true) },
+                )
                 historyCache.clear()
                 trashed(id)
             }
@@ -141,23 +157,40 @@ internal fun SwipeToTrashRow(
     var offset by remember { mutableFloatStateOf(0f) }
     fun armed() = width > 0 && offset <= -width * COMMIT_FRACTION
     val armed = armed()
-    LaunchedEffect(armed) { if (armed) haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate) }
-    val backdrop by animateColorAsState(if (armed) colors.error else colors.errorContainer, label = "trash-backdrop")
-    val iconScale by animateFloatAsState(
-        if (armed) 1.25f else 0.85f,
-        spring(Spring.DampingRatioMediumBouncy),
-        label = "trash-icon",
-    )
+    LaunchedEffect(armed) {
+        if (armed) haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
+    }
+    val backdrop by
+        animateColorAsState(
+            if (armed) colors.error else colors.errorContainer,
+            label = "trash-backdrop",
+        )
+    val iconScale by
+        animateFloatAsState(
+            if (armed) 1.25f else 0.85f,
+            spring(Spring.DampingRatioMediumBouncy),
+            label = "trash-icon",
+        )
     Box(
         Modifier.fillMaxWidth()
             .onSizeChanged { width = it.width }
             .clip(RoundedCornerShape(16.dp))
             .semantics {
-                if (enabled) customActions = listOf(CustomAccessibilityAction("Supprimer") { onTrash(); true })
+                if (enabled)
+                    customActions =
+                        listOf(
+                            CustomAccessibilityAction("Supprimer") {
+                                onTrash()
+                                true
+                            }
+                        )
             }
     ) {
         if (offset < 0f)
-            Box(Modifier.matchParentSize().background(backdrop).padding(end = 28.dp), contentAlignment = Alignment.CenterEnd) {
+            Box(
+                Modifier.matchParentSize().background(backdrop).padding(end = 28.dp),
+                contentAlignment = Alignment.CenterEnd,
+            ) {
                 Icon(
                     Icons.Default.Delete,
                     null,
@@ -167,9 +200,14 @@ internal fun SwipeToTrashRow(
             }
         content(
             Modifier.offset { IntOffset(offset.roundToInt(), 0) }
-                .then(if (offset < 0f) Modifier.background(colors.surfaceContainerHigh) else Modifier)
+                .then(
+                    if (offset < 0f) Modifier.background(colors.surfaceContainerHigh) else Modifier
+                )
                 .draggable(
-                    state = rememberDraggableState { offset = (offset + it).coerceIn(-width.toFloat(), 0f) },
+                    state =
+                        rememberDraggableState {
+                            offset = (offset + it).coerceIn(-width.toFloat(), 0f)
+                        },
                     orientation = Orientation.Horizontal,
                     enabled = enabled,
                     onDragStopped = { velocity ->
@@ -178,8 +216,11 @@ internal fun SwipeToTrashRow(
                             offset,
                             if (commit) -width.toFloat() else 0f,
                             velocity,
-                            if (commit) tween(160) else spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessMedium),
-                        ) { value, _ -> offset = value }
+                            if (commit) tween(160)
+                            else spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessMedium),
+                        ) { value, _ ->
+                            offset = value
+                        }
                         if (commit) onTrash()
                     },
                 )
@@ -187,7 +228,10 @@ internal fun SwipeToTrashRow(
     }
 }
 
-/** A swipe only reveals the explicit action; swiping right closes it. Used where removal must stay deliberate. */
+/**
+ * A swipe only reveals the explicit action; swiping right closes it. Used where removal must stay
+ * deliberate.
+ */
 @Composable
 internal fun SwipeToRevealRow(
     enabled: Boolean = true,
@@ -201,7 +245,10 @@ internal fun SwipeToRevealRow(
     val threshold = with(LocalDensity.current) { 32.dp.toPx() }
     Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))) {
         if (revealed && enabled)
-            TextButton(onClick = onDelete, modifier = Modifier.align(Alignment.CenterEnd).width(104.dp)) {
+            TextButton(
+                onClick = onDelete,
+                modifier = Modifier.align(Alignment.CenterEnd).width(104.dp),
+            ) {
                 Text(label, color = MaterialTheme.colorScheme.error)
             }
         content(

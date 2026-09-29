@@ -1,6 +1,7 @@
 use super::*;
 use std::process::Stdio;
 use tokio::process::Command;
+
 pub(crate) static JOBS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 fn command(program: &str) -> Command {
@@ -28,6 +29,7 @@ fn command(program: &str) -> Command {
     }
     cmd
 }
+
 pub async fn prepare(s: Service, mut artifact: Value) -> Result<()> {
     if artifact["previewStatus"] != "pending" {
         return Ok(());

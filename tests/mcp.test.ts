@@ -6,7 +6,13 @@ import {
   Client,
   StreamableHTTPClientTransport,
 } from '@modelcontextprotocol/client'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+} from 'vitest'
 import { fixture } from './helpers.ts'
 import { mcpProvider } from './mcp-provider.ts'
 
@@ -27,6 +33,7 @@ describe('stateless MCP over real HTTP', () => {
     await Promise.all(clients.splice(0).map(client => client.close()))
     await ctx.dispose()
   })
+
   async function connect(scopes: string[], protocolVersion = '2026-07-28') {
     const { token } = ctx.auth.personal('SDK test', scopes)
     const client = new Client(
@@ -85,7 +92,13 @@ describe('stateless MCP over real HTTP', () => {
     const { client } = await connect(['read', 'manage'])
     const created = await client.callTool({
       name: 'create_mcp',
-      arguments: { name: 'Command tools', transport: 'stdio', command: process.execPath, args: [path.resolve('tests/fixtures/mcp.mjs')], env: { TEST_PREFIX: 'private-command-prefix' } },
+      arguments: {
+        name: 'Command tools',
+        transport: 'stdio',
+        command: process.execPath,
+        args: [path.resolve('tests/fixtures/mcp.mjs')],
+        env: { TEST_PREFIX: 'private-command-prefix' },
+      },
     })
     expect(created.isError).not.toBe(true)
     expect(JSON.stringify(created)).not.toContain('private-command-prefix')
@@ -121,7 +134,15 @@ describe('stateless MCP over real HTTP', () => {
     const provider = await mcpProvider()
     try {
       const { client } = await connect(['read', 'manage'])
-      const result = await client.callTool({ name: 'create_mcp', arguments: { name: 'OAuth tools', url: `${provider.origin}/mcp`, auth: 'oauth', allowPrivateNetwork: true } })
+      const result = await client.callTool({
+        name: 'create_mcp',
+        arguments: {
+          name: 'OAuth tools',
+          url: `${provider.origin}/mcp`,
+          auth: 'oauth',
+          allowPrivateNetwork: true,
+        },
+      })
       expect(result.isError).not.toBe(true)
       const item = toolResult<McpView>(result)
       expect(provider.exchanges).toBe(0)
@@ -146,7 +167,12 @@ describe('stateless MCP over real HTTP', () => {
 
   it('requires manage scope for every MCP mutation and command discovery', async () => {
     const { client } = await connect(['read', 'run'])
-    const item = await ctx.service.mcps.save({ name: 'Protected', transport: 'stdio', command: 'does-not-exist', env: { PRIVATE_TOKEN: 'private-token-value' } })
+    const item = await ctx.service.mcps.save({
+      name: 'Protected',
+      transport: 'stdio',
+      command: 'does-not-exist',
+      env: { PRIVATE_TOKEN: 'private-token-value' },
+    })
     const tools = await client.listTools()
     for (const [name, args] of [
       ['create_mcp', { name: 'Forbidden', transport: 'stdio', command: 'node' }],
@@ -161,6 +187,7 @@ describe('stateless MCP over real HTTP', () => {
       expect(denied._meta).toHaveProperty('mcp/www_authenticate')
       expect(tools.tools.find(tool => tool.name === name)?.annotations?.readOnlyHint).toBe(false)
     }
+
     expect(ctx.service.mcps.get(item.id)).toMatchObject({ state: 'untested', revision: 1 })
     expect(ctx.service.mcps.secrets(item.id).env?.PRIVATE_TOKEN).toBe('private-token-value')
     expect(ctx.service.store.get('agents', ctx.agent.id)).toEqual(ctx.agent)
@@ -174,7 +201,13 @@ describe('stateless MCP over real HTTP', () => {
     ctx.service.config.publicUrl = address
     ctx.auth.publicUrl = address
     const { token } = ctx.auth.personal('Self connection', ['read', 'manage'])
-    const self = await ctx.service.mcps.save({ name: 'Self', url: `${address}/mcp?source=self-test`, auth: 'bearer', token, allowPrivateNetwork: true })
+    const self = await ctx.service.mcps.save({
+      name: 'Self',
+      url: `${address}/mcp?source=self-test`,
+      auth: 'bearer',
+      token,
+      allowPrivateNetwork: true,
+    })
     const run = await ctx.service.enqueue(ctx.task.id)
     ctx.service.store.updateRun(run.id, { status: 'running' })
     const config = ctx.service.mcps.runConfiguration(run)
@@ -193,6 +226,7 @@ describe('stateless MCP over real HTTP', () => {
       expect(result.isError, name).toBe(true)
       expect(JSON.stringify(result)).toContain('self-connection is serving an active request')
     }
+
     expect(toolResult(await client.callTool({ name: 'delete_mcp', arguments: { id: created.id } }))).toEqual({ deleted: true })
     expect(ctx.service.mcps.get(self.id)).toMatchObject({ revision: 1 })
     expect((await ctx.service.mcps.test(self.id)).state).toBe('connected')

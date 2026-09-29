@@ -14,12 +14,14 @@ function context(digest) {
     throw new Error('An immutable image digest is required')
   return `nested-android/intel/${digest.slice(7)}`
 }
+
 function reportUrl(value) {
   const url = new URL(value)
   if (url.protocol !== 'https:' || url.username || url.password)
     throw new Error('Evidence must have a durable HTTPS report URL')
   return url.href
 }
+
 export function evidenceStatus(evidence, url) {
   if (evidence.schema !== 1 || !repositoryPattern.test(evidence.repository || '') || !sha.test(evidence.commit || '')
     || evidence.cpuVendor !== 'GenuineIntel' || evidence.api !== '34' || evidence.system !== 'aosp'
@@ -27,12 +29,24 @@ export function evidenceStatus(evidence, url) {
     || evidence.results.some(result => result.status !== 'passed')) {
     throw new Error('Incomplete Intel Android boot, interaction and restart evidence')
   }
+
   const prefix = `ghcr.io/${evidence.repository.toLowerCase()}@`
   if (!evidence.image?.startsWith(prefix))
     throw new Error('Evidence image does not belong to this repository')
-  return { state: 'success', context: context(evidence.image.slice(prefix.length)), description: 'Intel KVM: Android 34 AOSP boot, interaction and restart passed', target_url: reportUrl(url) }
+  return {
+    state: 'success',
+    context: context(evidence.image.slice(prefix.length)),
+    description: 'Intel KVM: Android 34 AOSP boot, interaction and restart passed',
+    target_url: reportUrl(url),
+  }
 }
-export async function waitForValidation(config, { statuses, sleep: pause = sleep, now = Date.now, timeoutMs = 40 * 60 * 1000 } = {}) {
+
+export async function waitForValidation(config, {
+  statuses,
+  sleep: pause = sleep,
+  now = Date.now,
+  timeoutMs = 40 * 60 * 1000,
+} = {}) {
   if (!repositoryPattern.test(config.repository || '') || !sha.test(config.commit || '') || !config.validator)
     throw new Error('Repository, exact commit and trusted validator are required')
   const expected = context(config.digest)
@@ -50,8 +64,10 @@ export async function waitForValidation(config, { statuses, sleep: pause = sleep
         return status
       }
     }
+
     await pause(15000)
   }
+
   throw new Error(`Timed out waiting for Intel qualification of ${config.commit} / ${config.digest}`)
 }
 
@@ -72,7 +88,12 @@ if (import.meta.main) {
     const digest = process.env.IMAGE_DIGEST
     const validator = process.env.NESTED_KVM_VALIDATOR || repository?.split('/')[0]
     console.log(`Waiting for Intel qualification: ${commit} / ${digest}; validator ${validator}`)
-    const status = await waitForValidation({ repository, commit, digest, validator }, {
+    const status = await waitForValidation({
+      repository,
+      commit,
+      digest,
+      validator,
+    }, {
       statuses: async () => (await gh(['api', '--paginate', '--slurp', `repos/${repository}/commits/${commit}/statuses?per_page=100`])).flat(),
     })
     if (process.env.GITHUB_OUTPUT)

@@ -22,8 +22,10 @@ export function skillName(name: string) {
       'Use a skill name with lowercase letters, numbers, and hyphens.',
     )
   }
+
   return name
 }
+
 export function parseSkill(content: string) {
   if (content.length > 100000)
     throw new AppError(400, 'Skill is too large (maximum 100 KB).')
@@ -34,6 +36,7 @@ export function parseSkill(content: string) {
       'SKILL.md needs YAML frontmatter with name and description.',
     )
   }
+
   let data
   try {
     data = YAML.parse(match[1])
@@ -41,6 +44,7 @@ export function parseSkill(content: string) {
   catch {
     throw new AppError(400, 'Invalid YAML frontmatter.')
   }
+
   if (
     !data
     || typeof data.name !== 'string'
@@ -52,9 +56,11 @@ export function parseSkill(content: string) {
       'Add a name and description to the skill frontmatter.',
     )
   }
+
   skillName(data.name)
   return { name: data.name, description: data.description }
 }
+
 export async function boundedPath(
   root: string,
   relative: string,
@@ -68,6 +74,7 @@ export async function boundedPath(
   ) {
     throw new AppError(400, 'Invalid file path.')
   }
+
   const base = await realpath(root)
   const target = path.resolve(base, relative)
   let resolved: string
@@ -82,10 +89,12 @@ export async function boundedPath(
       path.basename(target),
     )
   }
+
   if (!resolved.startsWith(base + path.sep))
     throw new AppError(400, 'File path escapes its skill directory.')
   return resolved
 }
+
 export class Skills {
   constructor(
     public home: string,
@@ -112,6 +121,7 @@ export class Skills {
         )
       }
     }
+
     return current
   }
 
@@ -167,6 +177,7 @@ export class Skills {
         })
       }
     }
+
     return result.sort((a, b) => a.name.localeCompare(b.name))
   }
 
@@ -179,6 +190,7 @@ export class Skills {
         'Frontmatter name must match the skill directory.',
       )
     }
+
     const root = await this.root(projectPath)
     await mkdir(root, { recursive: true, mode: 0o700 })
     const directory = await boundedPath(root, name, { missing: true })
@@ -220,6 +232,7 @@ export class Skills {
         }
       }
     }
+
     await visit('')
     return result
   }
@@ -246,6 +259,7 @@ export class Skills {
       ) {
         throw new AppError(400, 'Invalid file path.')
       }
+
       let directory = root
       for (const part of file.split('/').slice(0, -1)) {
         directory = await boundedPath(directory, part, { missing: true })
@@ -254,6 +268,7 @@ export class Skills {
         await boundedPath(root, path.relative(root, directory))
       }
     }
+
     const target = await boundedPath(root, file, {
       missing: content !== undefined,
     })
@@ -262,6 +277,7 @@ export class Skills {
         throw new AppError(400, 'File is too large.')
       return readFile(target, 'utf8')
     }
+
     if (content.length > 100000)
       throw new AppError(400, 'File is too large.')
     if (file === 'SKILL.md')

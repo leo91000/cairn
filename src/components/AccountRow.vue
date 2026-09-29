@@ -33,7 +33,12 @@ const note = computed(() => {
     @click="$emit('open')"
   >
     <span class="flex min-w-0 items-center gap-3">
-      <AgentAvatar :name="account.name" :identity="account.id" :size="36" :working="running > 0" />
+      <AgentAvatar
+        :name="account.name"
+        :identity="account.id"
+        :size="36"
+        :working="running > 0"
+      />
       <span class="min-w-0">
         <span class="flex min-w-0 items-center gap-2">
           <span class="truncate text-[14px] font-semibold">{{ account.name }}</span>
@@ -52,7 +57,12 @@ const note = computed(() => {
     <span v-else class="truncate text-xs text-muted phone:hidden">{{ note }}</span>
     <span class="flex flex-col gap-1 text-[11.5px] text-muted phone:hidden">
       <span v-if="account.maxConcurrentRuns <= 8" class="inline-flex items-center gap-[3px]" :aria-label="`${running} of ${account.maxConcurrentRuns} parallel runs`">
-        <span v-for="slot in account.maxConcurrentRuns" :key="slot" class="size-[7px] rounded-full" :class="slot <= running ? 'bg-accent ring-3 ring-accent/15' : 'bg-hover ring-1 ring-line'" />
+        <span
+          v-for="slot in account.maxConcurrentRuns"
+          :key="slot"
+          class="size-[7px] rounded-full"
+          :class="slot <= running ? 'bg-accent ring-3 ring-accent/15' : 'bg-hover ring-1 ring-line'"
+        />
       </span>
       <span v-else class="tabular-nums">{{ running }} / {{ account.maxConcurrentRuns }}</span>
       <span v-if="running">{{ running }} running</span>

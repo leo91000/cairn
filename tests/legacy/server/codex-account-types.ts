@@ -27,7 +27,15 @@ export interface AccountLimits {
   accountId?: string | null
   rateLimits: UsageBucket
   rateLimitsByLimitId?: Record<string, UsageBucket> | null
-  rateLimitResetCredits?: { availableCount: number, credits?: Array<{ id: string, resetType: string, status: string, expiresAt: number | null }> | null } | null
+  rateLimitResetCredits?: {
+    availableCount: number
+    credits?: Array<{
+      id: string
+      resetType: string
+      status: string
+      expiresAt: number | null
+    }> | null
+  } | null
 }
 export interface CodexAccount {
   name: string

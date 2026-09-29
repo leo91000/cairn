@@ -1,8 +1,22 @@
 <script setup lang="ts">
 import type { ChatView } from '../../shared/chats'
-import { computed, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
+import {
+  computed,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  useId,
+  watch,
+} from 'vue'
 import { api, ApiError } from '../api'
-import { Clock, MessageCircle, MoreHorizontal, Plus, Search, X } from '../icons'
+import {
+  Clock,
+  MessageCircle,
+  MoreHorizontal,
+  Plus,
+  Search,
+  X,
+} from '../icons'
 import { iconButton } from '../ui'
 import Icon from './Icon.vue'
 import Modal from './Modal.vue'
@@ -20,6 +34,7 @@ const confirmation = ref<ChatView>()
 const deleting = ref(false)
 const conversations = computed(() => view.value === 'active' ? props.chats : other.value)
 let request = 0
+
 async function load() {
   const sequence = ++request
   error.value = ''
@@ -27,6 +42,7 @@ async function load() {
     loading.value = false
     return
   }
+
   loading.value = true
   try {
     const result = await api<ChatView[]>(`/chats?view=${view.value}`)
@@ -42,7 +58,9 @@ async function load() {
       loading.value = false
   }
 }
+
 watch([view, () => props.chats], load)
+
 async function remove(chat: ChatView, confirm = false) {
   if (deleting.value)
     return
@@ -57,10 +75,12 @@ async function remove(chat: ChatView, confirm = false) {
   catch (e) {
     if (e instanceof ApiError && e.status === 409 && !confirm)
       confirmation.value = chat
-    else error.value = (e as Error).message
+    else
+      error.value = (e as Error).message
   }
   finally { deleting.value = false }
 }
+
 const titleId = useId()
 const previous = document.activeElement as HTMLElement | null
 const groups = computed(() => {
@@ -75,6 +95,7 @@ const groups = computed(() => {
     { title: 'Earlier', chats: filtered.filter(chat => chat.updatedAt < +yesterday) },
   ].map(group => ({ ...group, chats: group.chats.toSorted((a, b) => b.updatedAt - a.updatedAt) })).filter(group => group.chats.length)
 })
+
 function position() {
   const bounds = props.anchor?.getBoundingClientRect()
   if (!dialog.value || !bounds)
@@ -82,6 +103,7 @@ function position() {
   dialog.value.style.setProperty('--switcher-left', `${Math.max(14, Math.min(bounds.left, window.innerWidth - 394))}px`)
   dialog.value.style.setProperty('--switcher-top', `${bounds.bottom + 12}px`)
 }
+
 onMounted(() => {
   position()
   dialog.value?.showModal()
@@ -93,6 +115,7 @@ onBeforeUnmount(() => {
   const target = props.anchor ?? previous
   target?.focus()
 })
+
 function time(timestamp: number) {
   const date = new Date(timestamp)
   return date.toLocaleDateString() === new Date().toLocaleDateString()
@@ -103,7 +126,13 @@ function time(timestamp: number) {
 
 <template>
   <Teleport to="body">
-    <dialog ref="dialog" class="chat-switcher" :aria-labelledby="titleId" @cancel.prevent="emit('close')" @click="event => { if (event.target === dialog) emit('close') }">
+    <dialog
+      ref="dialog"
+      class="chat-switcher"
+      :aria-labelledby="titleId"
+      @cancel.prevent="emit('close')"
+      @click="event => { if (event.target === dialog) emit('close') }"
+    >
       <div class="switcher-content flex min-h-0 flex-col p-5 phone:p-4">
         <div aria-hidden="true" class="mx-auto mb-4 hidden h-1 w-9 shrink-0 rounded-full bg-muted/40 phone:block" />
         <header class="mb-4 flex shrink-0 items-center justify-between gap-3">
@@ -135,7 +164,14 @@ function time(timestamp: number) {
         </p>
         <label class="relative mb-4 block shrink-0">
           <Icon :name="Search" :size="16" class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
-          <input v-model="query" type="search" autofocus aria-label="Search conversations" placeholder="Search conversations…" class="pl-10! text-sm! phone:text-base!">
+          <input
+            v-model="query"
+            type="search"
+            autofocus
+            aria-label="Search conversations"
+            placeholder="Search conversations…"
+            class="pl-10! text-sm! phone:text-base!"
+          >
         </label>
         <nav aria-label="Recent conversations" class="min-h-0 flex-1 overflow-auto overscroll-contain px-1 [scrollbar-width:thin]">
           <p v-if="!conversations.length && !loading" class="px-2 py-6 text-center text-xs text-muted">
@@ -149,7 +185,13 @@ function time(timestamp: number) {
               {{ group.title }}
             </h3>
             <div v-for="chat in group.chats" :key="chat.id" class="flex items-start gap-1">
-              <RouterLink :to="`/chats/${chat.id}`" :aria-current="chat.id === selected ? 'page' : undefined" class="conversation-choice mb-1 min-w-0 flex flex-1 gap-3 rounded-lg border border-transparent px-3 py-3 hover:bg-hover" :class="chat.id === selected ? 'border-accent/25! bg-accent/10' : ''" @click="emit('close')">
+              <RouterLink
+                :to="`/chats/${chat.id}`"
+                :aria-current="chat.id === selected ? 'page' : undefined"
+                class="conversation-choice mb-1 min-w-0 flex flex-1 gap-3 rounded-lg border border-transparent px-3 py-3 hover:bg-hover"
+                :class="chat.id === selected ? 'border-accent/25! bg-accent/10' : ''"
+                @click="emit('close')"
+              >
                 <div class="min-w-0 flex-1">
                   <span class="line-clamp-2 text-xs font-semibold leading-relaxed wrap-anywhere">{{ chat.title }}</span>
                   <span class="mt-1.5 block text-[11px] leading-relaxed text-muted wrap-anywhere">{{ chat.agentName }}<template v-if="chat.projectName"> · {{ chat.projectName }}</template></span>

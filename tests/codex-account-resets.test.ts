@@ -1,5 +1,12 @@
 import path from 'node:path'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
 import { accountFixture, limits } from './codex-account-fixture'
 import { fixture } from './helpers'
 import { CodexAccounts } from './legacy/server/codex-accounts'
@@ -20,12 +27,35 @@ describe('automatic banked resets', () => {
   it('redeems at 2% while idle and selects the earliest-expiring usable credit', async () => {
     const account = data.seed('Idle', {
       ...banked(),
-      rateLimitResetCredits: { availableCount: 3, credits: [
-        { id: 'later', status: 'available', resetType: 'codexRateLimits', expiresAt: Date.now() / 1000 + 86400 },
-        { id: 'expired', status: 'available', resetType: 'codexRateLimits', expiresAt: 1 },
-        { id: 'used', status: 'redeemed', resetType: 'codexRateLimits', expiresAt: Date.now() / 1000 + 10 },
-        { id: 'soon', status: 'available', resetType: 'codexRateLimits', expiresAt: Date.now() / 1000 + 3600 },
-      ] },
+      rateLimitResetCredits: {
+        availableCount: 3,
+        credits: [
+          {
+            id: 'later',
+            status: 'available',
+            resetType: 'codexRateLimits',
+            expiresAt: Date.now() / 1000 + 86400,
+          },
+          {
+            id: 'expired',
+            status: 'available',
+            resetType: 'codexRateLimits',
+            expiresAt: 1,
+          },
+          {
+            id: 'used',
+            status: 'redeemed',
+            resetType: 'codexRateLimits',
+            expiresAt: Date.now() / 1000 + 10,
+          },
+          {
+            id: 'soon',
+            status: 'available',
+            resetType: 'codexRateLimits',
+            expiresAt: Date.now() / 1000 + 3600,
+          },
+        ],
+      },
     })
     data.consume.set(account.id, () => {
       data.responses.set(account.id, banked(0, 0, 2))
@@ -187,6 +217,7 @@ describe('automatic banked resets', () => {
         await vi.advanceTimersByTimeAsync(15000)
         await data.pool.poll(true)
       }
+
       expect(refresh.mock.calls.filter(([id]) => id === healthy.id)).toHaveLength(1)
     }
     finally {

@@ -6,7 +6,16 @@ import { expect, expectSingleScroll, test } from './fixtures'
 // A failed mission needs the user; a hanging conversation keeps an agent working.
 async function seed(workspace: Workspace) {
   const agent = workspace.service.agent({ name: 'Ops' })
-  const task = workspace.service.task({ name: 'Nightly security audit', prompt: 'Audit dependencies. fixture:fail', agentId: agent.id, projectId: null, skills: null, worktree: false, enabled: false, cron: null })
+  const task = workspace.service.task({
+    name: 'Nightly security audit',
+    prompt: 'Audit dependencies. fixture:fail',
+    agentId: agent.id,
+    projectId: null,
+    skills: null,
+    worktree: false,
+    enabled: false,
+    cron: null,
+  })
   const run = await workspace.service.enqueue(task.id)
   await expect.poll(() => workspace.service.store.run(run.id)?.status, { timeout: 30000 }).toBe('failed')
   const chat = await workspace.api('/api/chats', 'POST', {})
@@ -14,6 +23,7 @@ async function seed(workspace: Workspace) {
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('running')
   return { chat, run }
 }
+
 async function signIn(page: Page) {
   await page.goto('/')
   await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
@@ -21,6 +31,7 @@ async function signIn(page: Page) {
   // Password verification in the native debug backend can take several seconds.
   await expect(page.getByRole('heading', { name: 'Fil', exact: true }).first()).toBeVisible({ timeout: 30000 })
 }
+
 async function capture(page: Page, testInfo: TestInfo, name: string) {
   await page.evaluate(() => document.fonts.ready)
   await page.screenshot({ path: testInfo.outputPath(`${name}.png`) })

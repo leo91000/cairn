@@ -10,6 +10,7 @@ use std::{
     sync::{Mutex, MutexGuard, OnceLock},
     time::{Duration, Instant, SystemTime},
 };
+
 static EVICTION: Mutex<()> = Mutex::new(());
 const RECONCILE_AFTER: Duration = Duration::from_secs(60);
 
@@ -19,6 +20,7 @@ struct Index {
     oldest: BTreeSet<(SystemTime, PathBuf)>,
     scanned_at: Instant,
 }
+
 impl Index {
     fn scan(state: &Path) -> io::Result<Self> {
         let mut index = Self {
@@ -56,24 +58,28 @@ impl Index {
         }
         Ok(index)
     }
+
     fn insert(&mut self, path: PathBuf, size: u64, modified: SystemTime) {
         self.remove(&path);
         self.bytes = self.bytes.saturating_add(size);
         self.oldest.insert((modified, path.clone()));
         self.files.insert(path, (size, modified));
     }
+
     fn remove(&mut self, path: &Path) -> Option<u64> {
         let (size, modified) = self.files.remove(path)?;
         self.oldest.remove(&(modified, path.to_owned()));
         self.bytes = self.bytes.saturating_sub(size);
         Some(size)
     }
+
     fn touch(&mut self, path: &Path, modified: SystemTime) {
         if let Some(size) = self.remove(path) {
             self.insert(path.to_owned(), size, modified);
         }
     }
 }
+
 fn indexes() -> &'static Mutex<HashMap<PathBuf, Index>> {
     static INDEXES: OnceLock<Mutex<HashMap<PathBuf, Index>>> = OnceLock::new();
     INDEXES.get_or_init(Default::default)
@@ -84,6 +90,7 @@ pub(crate) struct Reservation {
     _admission: MutexGuard<'static, ()>,
     state: PathBuf,
 }
+
 impl Reservation {
     pub(crate) fn filled(&self, path: &Path, size: u64) -> io::Result<()> {
         let modified = std::fs::metadata(path)?
@@ -153,6 +160,7 @@ pub(super) fn retire(
 pub fn make_room(state: &Path, policy: &Policy, incoming: u64) -> io::Result<bool> {
     Ok(reserve(state, policy, incoming)?.is_some())
 }
+
 pub(crate) fn reserve(
     state: &Path,
     policy: &Policy,
@@ -168,10 +176,12 @@ pub(crate) fn reserve(
         Ok(None)
     }
 }
+
 /// Shared admission for clean fills and durable writes on this controller.
 pub(crate) fn admission() -> io::Result<MutexGuard<'static, ()>> {
     EVICTION.lock().map_err(|e| io::Error::other(e.to_string()))
 }
+
 fn evict(state: &Path, policy: &Policy, incoming: u64, reconcile: bool) -> io::Result<bool> {
     let mut indexes = indexes()
         .lock()
@@ -246,6 +256,7 @@ pub fn maintain(state: &Path, policy: &Policy) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     #[ignore = "explicit large-cache admission benchmark"]
     fn large_clean_cache_admission_performance() {

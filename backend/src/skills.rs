@@ -12,8 +12,10 @@ use tokio::{
     fs,
     io::{AsyncReadExt, AsyncWriteExt},
 };
+
 static NAME: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^[a-z0-9][a-z0-9-]{0,63}$").unwrap());
+
 pub fn name(value: &str) -> Result<()> {
     if !NAME.is_match(value) {
         return Err(Error::bad(
@@ -22,11 +24,14 @@ pub fn name(value: &str) -> Result<()> {
     }
     Ok(())
 }
+
 static CODE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"(?s)```.*?```|`[^`\n]*`").unwrap());
+
 static MENTION: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"(?:^|[^A-Za-z0-9_$\\])\$([a-z0-9][a-z0-9-]{0,63})").unwrap()
 });
+
 /// Skill names invoked as `$name` outside code, in first-mention order.
 /// The web and Android composers highlight the same tokens.
 pub fn mentions(text: &str, names: &[&str]) -> Vec<String> {
@@ -46,6 +51,7 @@ pub fn mentions(text: &str, names: &[&str]) -> Vec<String> {
     }
     found
 }
+
 pub fn parse(content: &str) -> Result<Value> {
     if content.len() > 100000 {
         return Err(Error::bad("Skill is too large (maximum 100 KB)."));
@@ -72,9 +78,11 @@ pub fn parse(content: &str) -> Result<Value> {
     }
     name(text(&data, "name"))?;
     Ok(json!({
-    "name":data["name"],"description":data["description"]}
-    ))
+        "name": data["name"],
+        "description": data["description"]
+    }))
 }
+
 pub fn relative(value: &str) -> Result<()> {
     if Path::new(value).is_absolute()
         || value.contains('\0')
@@ -86,6 +94,7 @@ pub fn relative(value: &str) -> Result<()> {
     }
     Ok(())
 }
+
 pub async fn bounded(root: &Path, relative_path: &str, missing: bool) -> Result<PathBuf> {
     relative(relative_path)?;
     let base = fs::canonicalize(root).await?;
@@ -104,6 +113,7 @@ pub async fn bounded(root: &Path, relative_path: &str, missing: bool) -> Result<
     }
     Ok(resolved)
 }
+
 pub async fn workspace(path: &Path, roots: &[PathBuf]) -> Result<PathBuf> {
     let actual = fs::canonicalize(path)
         .await
@@ -124,12 +134,14 @@ pub async fn workspace(path: &Path, roots: &[PathBuf]) -> Result<PathBuf> {
         "Project must be inside a configured workspace root.",
     ))
 }
+
 pub async fn private_dir(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::create_dir_all(path).await?;
     fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).await?;
     Ok(())
 }
+
 pub async fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let temporary = path.with_file_name(format!(".{}.tmp", crate::config::id()));
     let mut file = fs::OpenOptions::new()
@@ -144,6 +156,7 @@ pub async fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     fs::rename(&temporary, path).await?;
     Ok(())
 }
+
 pub async fn small_file(path: &Path) -> Result<String> {
     let mut file = fs::OpenOptions::new()
         .read(true)
@@ -157,10 +170,12 @@ pub async fn small_file(path: &Path) -> Result<String> {
     }
     String::from_utf8(bytes).map_err(|_| Error::bad("File must contain UTF-8 text."))
 }
+
 #[derive(Clone)]
 pub struct Skills {
     pub config: Config,
 }
+
 impl Skills {
     pub async fn root(&self, project: Option<&Path>) -> Result<PathBuf> {
         let mut current = if let Some(project) = project {
@@ -184,6 +199,7 @@ impl Skills {
         }
         Ok(current)
     }
+
     pub async fn list(&self, scope: &str, project: Option<&Path>) -> Result<Vec<Value>> {
         let root = self.root(project).await?;
         let mut entries = fs::read_dir(&root).await?;
@@ -194,8 +210,13 @@ impl Skills {
             }
             let filename = entry.file_name().to_string_lossy().into_owned();
             let mut value = json!({
-            "name":filename,"description":"Invalid skill","scope":scope,"path":root.join(&filename).join("SKILL.md"),"content":"","valid":false}
-            );
+                "name": filename,
+                "description": "Invalid skill",
+                "scope": scope,
+                "path": root.join(&filename).join("SKILL.md"),
+                "content": "",
+                "valid": false
+            });
             let read = async {
                 name(&filename)?;
                 let path = bounded(&root, &format!("{filename}/SKILL.md"), false).await?;
@@ -226,6 +247,7 @@ impl Skills {
         result.sort_by(|a, b| text(a, "name").cmp(text(b, "name")));
         Ok(result)
     }
+
     pub async fn save(&self, skill: &str, content: &str, project: Option<&Path>) -> Result<Value> {
         name(skill)?;
         let parsed = parse(content)?;
@@ -241,12 +263,14 @@ impl Skills {
         atomic_write(&file, content.as_bytes()).await?;
         Ok(parsed)
     }
+
     pub async fn remove(&self, skill: &str, project: Option<&Path>) -> Result<()> {
         name(skill)?;
         let directory = bounded(&self.root(project).await?, skill, false).await?;
         fs::remove_dir_all(directory).await?;
         Ok(())
     }
+
     pub async fn files(&self, skill: &str, project: Option<&Path>) -> Result<Vec<String>> {
         name(skill)?;
         let root = bounded(&self.root(project).await?, skill, false).await?;
@@ -275,6 +299,7 @@ impl Skills {
         }
         Ok(result)
     }
+
     pub async fn file(
         &self,
         skill: &str,
@@ -306,8 +331,8 @@ impl Skills {
         let target = bounded(&root, file, content.is_some()).await?;
         let Some(content) = content else {
             return Ok(json!({
-            "content":small_file(&target).await?}
-            ));
+                "content": small_file(&target).await?
+            }));
         };
         if content.len() > 100000 {
             return Err(Error::bad("File is too large."));
@@ -317,7 +342,7 @@ impl Skills {
         }
         atomic_write(&target, content.as_bytes()).await?;
         Ok(json!({
-        "saved":true}
-        ))
+            "saved": true
+        }))
     }
 }

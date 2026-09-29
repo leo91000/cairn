@@ -5,16 +5,23 @@ use crate::{
     validation::text,
 };
 use serde_json::{Value, json};
+
 pub async fn new_disk(s: &Service, run: &Value, node: &str) -> Result<String> {
     let token = crate::auth::token();
     s.store
         .put(
             "node-disk-grants",
-            json!({"id":crate::auth::digest(&token),"runId":run["id"],"nodeId":node,"backups":[]}),
+            json!({
+                "id": crate::auth::digest(&token),
+                "runId": run["id"],
+                "nodeId": node,
+                "backups": []
+            }),
         )
         .await?;
     Ok(token)
 }
+
 pub async fn issue(s: &Service, run: &Value, node: &str, backup: &Value) -> Result<String> {
     if backup["destination"] != "s3" {
         return Err(Error::new(
@@ -23,9 +30,20 @@ pub async fn issue(s: &Service, run: &Value, node: &str, backup: &Value) -> Resu
         ));
     }
     let token = crate::auth::token();
-    s.store.put("node-disk-grants",json!({"id":crate::auth::digest(&token),"runId":run["id"],"nodeId":node,"backups":[backup["id"]]})).await?;
+    s.store
+        .put(
+            "node-disk-grants",
+            json!({
+                "id": crate::auth::digest(&token),
+                "runId": run["id"],
+                "nodeId": node,
+                "backups": [backup["id"]]
+            }),
+        )
+        .await?;
     Ok(token)
 }
+
 pub async fn authorize(s: &Service, credential: &str) -> Result<Option<Value>> {
     let grant = s
         .store
@@ -50,14 +68,17 @@ pub async fn authorize(s: &Service, credential: &str) -> Result<Option<Value>> {
     }
     Ok(Some(grant))
 }
+
 /// Before committing the local journal, authorize the candidate beside its old base.
 pub async fn extend(s: &Service, grant_id: &str, backup: &Value) -> Result<()> {
     update(s, grant_id, backup, false).await
 }
+
 /// Retire only this disk instance's old base; stale disks retain their own pins.
 pub async fn acknowledged(s: &Service, grant_id: &str, backup: &Value) -> Result<()> {
     update(s, grant_id, backup, true).await
 }
+
 async fn update(s: &Service, grant_id: &str, backup: &Value, acknowledged: bool) -> Result<()> {
     let (grant_id, backup) = (grant_id.to_owned(), backup.clone());
     s.store
@@ -110,7 +131,7 @@ async fn update(s: &Service, grant_id: &str, backup: &Value, acknowledged: bool)
                     ids.push(backup["id"].clone());
                 }
                 if !pending.iter().any(|point| point["id"] == backup["id"]) {
-                    pending.push(json!({"id":backup["id"],"generation":generation}));
+                    pending.push(json!({"id": backup["id"],"generation": generation}));
                 }
             }
             grant["pending"] = json!(pending);
@@ -119,6 +140,7 @@ async fn update(s: &Service, grant_id: &str, backup: &Value, acknowledged: bool)
         })
         .await
 }
+
 pub async fn pinned(s: &Service, run: &str) -> Result<std::collections::HashSet<String>> {
     Ok(s.store
         .list("node-disk-grants")

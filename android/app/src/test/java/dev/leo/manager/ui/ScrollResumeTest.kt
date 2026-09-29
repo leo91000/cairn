@@ -90,8 +90,10 @@ class ScrollResumeTest {
                     object : Dispatcher() {
                         override fun dispatch(request: RecordedRequest): MockResponse {
                             if (request.requestUrl?.encodedPath == "/api/chats/stream") {
-                                // Navigation subscribes to the list independently of this history stream.
-                                return MockResponse().setHeader("Content-Type", "text/event-stream")
+                                // Navigation subscribes to the list independently of this history
+                                // stream.
+                                return MockResponse()
+                                    .setHeader("Content-Type", "text/event-stream")
                                     .setBody(": keepalive\n\n".repeat(10000))
                                     .throttleBody(13, 1, TimeUnit.SECONDS)
                             }
@@ -189,17 +191,43 @@ class ScrollResumeTest {
                     requests[1],
                 )
                 // A reader who scrolled upward must stay at the same offset on resume.
-                val composerTop = compose.onNodeWithTag("conversation-composer").fetchSemanticsNode().boundsInRoot.top
-                compose.onNode(hasScrollAction() and hasTestTag("conversation-history")).performTouchInput { swipeDown() }
+                val composerTop =
+                    compose
+                        .onNodeWithTag("conversation-composer")
+                        .fetchSemanticsNode()
+                        .boundsInRoot
+                        .top
+                compose
+                    .onNode(hasScrollAction() and hasTestTag("conversation-history"))
+                    .performTouchInput { swipeDown() }
                 compose.waitForIdle()
                 compose.onNodeWithContentDescription("Derniers messages").assertExists()
-                val viewport = compose.onNodeWithTag("conversation-history").fetchSemanticsNode().boundsInRoot
-                val arrow = compose.onNodeWithContentDescription("Derniers messages").fetchSemanticsNode().boundsInRoot
-                assertTrue("The latest-message control floats centred above the composer", arrow.bottom <= viewport.bottom &&
-                    arrow.top >= viewport.bottom - 72f && arrow.bottom <= composerTop &&
-                    kotlin.math.abs((arrow.left + arrow.right) / 2 - (viewport.left + viewport.right) / 2) < 1f)
-                assertEquals("Showing the overlay does not move the composer", composerTop,
-                    compose.onNodeWithTag("conversation-composer").fetchSemanticsNode().boundsInRoot.top, 0.1f)
+                val viewport =
+                    compose.onNodeWithTag("conversation-history").fetchSemanticsNode().boundsInRoot
+                val arrow =
+                    compose
+                        .onNodeWithContentDescription("Derniers messages")
+                        .fetchSemanticsNode()
+                        .boundsInRoot
+                assertTrue(
+                    "The latest-message control floats centred above the composer",
+                    arrow.bottom <= viewport.bottom &&
+                        arrow.top >= viewport.bottom - 72f &&
+                        arrow.bottom <= composerTop &&
+                        kotlin.math.abs(
+                            (arrow.left + arrow.right) / 2 - (viewport.left + viewport.right) / 2
+                        ) < 1f,
+                )
+                assertEquals(
+                    "Showing the overlay does not move the composer",
+                    composerTop,
+                    compose
+                        .onNodeWithTag("conversation-composer")
+                        .fetchSemanticsNode()
+                        .boundsInRoot
+                        .top,
+                    0.1f,
+                )
                 fun position() =
                     compose
                         .onNode(hasScrollAction() and hasTestTag("conversation-history"))
@@ -239,13 +267,22 @@ class ScrollResumeTest {
                 )
                 // Keep a real drag active long enough for the fade-out to finish.
                 val history = compose.onNodeWithTag("conversation-history")
-                history.performTouchInput { down(center); moveBy(Offset(0f, 80f), delayMillis = 200) }
+                history.performTouchInput {
+                    down(center)
+                    moveBy(Offset(0f, 80f), delayMillis = 200)
+                }
                 compose.mainClock.advanceTimeBy(250)
                 compose.waitForIdle()
                 compose.onNodeWithContentDescription("Derniers messages").assertDoesNotExist()
-                history.performTouchInput { advanceEventTime(200); up() }
+                history.performTouchInput {
+                    advanceEventTime(200)
+                    up()
+                }
                 compose.waitForIdle()
-                compose.onNodeWithContentDescription("Derniers messages").assertIsDisplayed().performClick()
+                compose
+                    .onNodeWithContentDescription("Derniers messages")
+                    .assertIsDisplayed()
+                    .performClick()
                 waitLast()
                 compose.onNodeWithContentDescription("Derniers messages").assertDoesNotExist()
                 compose.runOnIdle {

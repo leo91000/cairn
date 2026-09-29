@@ -12,8 +12,16 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36], qualifiers = "w412dp-h915dp-mdpi")
 class ImagePasteTest : ImagePasteCases() {
-    @Before fun setup() {
-        WorkManagerTestInitHelper.initializeTestWorkManager(ApplicationProvider.getApplicationContext<Application>(), Configuration.Builder().setExecutor(SynchronousExecutor()).build())
+    @Before
+    fun setup() {
+        WorkManagerTestInitHelper.initializeTestWorkManager(
+            ApplicationProvider.getApplicationContext<Application>(),
+            Configuration.Builder().setExecutor(SynchronousExecutor()).build(),
+        )
     }
-    @After fun cleanup() { WorkManagerTestInitHelper.closeWorkDatabase() }
+
+    @After
+    fun cleanup() {
+        WorkManagerTestInitHelper.closeWorkDatabase()
+    }
 }

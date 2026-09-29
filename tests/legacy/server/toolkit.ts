@@ -1,6 +1,14 @@
 import { execFile } from 'node:child_process'
 import { constants } from 'node:fs'
-import { access, copyFile, mkdir, readdir, readlink, rm, symlink } from 'node:fs/promises'
+import {
+  access,
+  copyFile,
+  mkdir,
+  readdir,
+  readlink,
+  rm,
+  symlink,
+} from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 import { promisify } from 'node:util'
@@ -21,12 +29,14 @@ export async function toolkitEnvironment(home: string, base: NodeJS.ProcessEnv =
         throw error
     })
   }
+
   const link = async (source: string, target: string) => {
     await symlink(source, target).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== 'EEXIST')
         throw error
     })
   }
+
   // A replacement image may no longer contain an intermediate tool version.
   // Remove only dangling links to our image, so that version can be installed locally.
   const prune = async (folder: string) => {
@@ -39,6 +49,7 @@ export async function toolkitEnvironment(home: string, base: NodeJS.ProcessEnv =
       }
     }
   }
+
   await prune(path.join(rustup, 'toolchains'))
   const installs = path.join(home, '.local/share/mise/installs')
   // These backends discover idiomatic version files from the install registry.
@@ -58,6 +69,7 @@ export async function toolkitEnvironment(home: string, base: NodeJS.ProcessEnv =
       await link(path.join(source, version), path.join(target, version))
     }
   }
+
   const shims = path.join(home, '.local/share/mise/shims')
   await mkdir(shims, { recursive: true })
   for (const name of await readdir('/usr/local/share/mise/shims'))
@@ -81,6 +93,7 @@ export async function toolkitEnvironment(home: string, base: NodeJS.ProcessEnv =
       await link(path.join(cargo, 'bin/rustup'), target)
     }
   }
+
   const settings = path.join(rustup, 'settings.toml')
   if (!await access(settings).then(() => true).catch(() => false)) {
     await copyFile(path.join(directory, 'rustup/settings.toml'), settings, constants.COPYFILE_EXCL).catch((error: NodeJS.ErrnoException) => {
@@ -88,6 +101,7 @@ export async function toolkitEnvironment(home: string, base: NodeJS.ProcessEnv =
         throw error
     })
   }
+
   const env = {
     ...base,
     HOME: home,

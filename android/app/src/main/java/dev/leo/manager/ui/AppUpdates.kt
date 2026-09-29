@@ -36,20 +36,34 @@ fun AppUpdatePrompt(vm: UpdateViewModel) {
                 if (state.ready != null) {
                     Text("La mise à jour est prête à être installée.")
                     if (!context.packageManager.canRequestPackageInstalls())
-                        Text("Autorisez Leo à installer des applications dans les paramètres Android, puis revenez ici et touchez Installer.")
+                        Text(
+                            "Autorisez Leo à installer des applications dans les paramètres Android, puis revenez ici et touchez Installer."
+                        )
                 }
                 state.message?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
         },
         confirmButton = {
-            TextButton(enabled = !state.downloading && !state.installing, onClick = {
-                if (state.ready == null) vm.download()
-                else if (!context.packageManager.canRequestPackageInstalls()) {
-                    try {
-                        context.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}")))
-                    } catch (e: Exception) { vm.report(e) }
-                } else vm.install(context::startActivity)
-            }) { Text(if (state.ready == null) "Télécharger" else "Installer") }
+            TextButton(
+                enabled = !state.downloading && !state.installing,
+                onClick = {
+                    if (state.ready == null) vm.download()
+                    else if (!context.packageManager.canRequestPackageInstalls()) {
+                        try {
+                            context.startActivity(
+                                Intent(
+                                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                    Uri.parse("package:${context.packageName}"),
+                                )
+                            )
+                        } catch (e: Exception) {
+                            vm.report(e)
+                        }
+                    } else vm.install(context::startActivity)
+                },
+            ) {
+                Text(if (state.ready == null) "Télécharger" else "Installer")
+            }
         },
         dismissButton = { TextButton(onClick = vm::dismiss) { Text("Plus tard") } },
     )
@@ -64,9 +78,14 @@ fun AppUpdateSettings() {
         Text("Application Android ${BuildConfig.VERSION_NAME}")
         Text("Les nouvelles versions sont recherchées automatiquement à l’ouverture.")
         if (state.available != null) {
-            TextButton(onClick = vm::show) { Text("Voir la mise à jour ${state.available!!.versionName}") }
+            TextButton(onClick = vm::show) {
+                Text("Voir la mise à jour ${state.available!!.versionName}")
+            }
         }
-        OutlinedButton(onClick = { vm.check(manual = true) }, enabled = !state.checking && !state.downloading) {
+        OutlinedButton(
+            onClick = { vm.check(manual = true) },
+            enabled = !state.checking && !state.downloading,
+        ) {
             Text(if (state.checking) "Vérification…" else "Rechercher une mise à jour")
         }
         state.message?.let { Text(it) }

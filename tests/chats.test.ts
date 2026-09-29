@@ -2,7 +2,13 @@ import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+} from 'vitest'
 import { MAIN_AGENT_ID } from '../shared/constants.ts'
 import { accountFixture } from './codex-account-fixture.ts'
 import { fixture } from './helpers.ts'
@@ -34,10 +40,12 @@ describe('interactive chats', () => {
     }, { timeout: 10000 }).toBe('delivered')
     return id
   }
+
   const finish = async (id: string) => {
     await expect.poll(() => ctx.service.store.run(id)?.status, { timeout: 10000 }).toBe('succeeded')
     await expect.poll(() => (restarted ?? ctx.worker).active.has(id)).toBe(false)
   }
+
   it('defaults project chat to Main agent, validates access, and keeps chats out of tasks', () => {
     const chat = ctx.service.chats.create({ projectId: ctx.project.id })
     expect(chat.agentId).toBe(MAIN_AGENT_ID)
@@ -50,7 +58,15 @@ describe('interactive chats', () => {
     const chat = ctx.service.chats.create({})
     const input = { id: randomUUID(), text: 'First draft' }
     expect((await ctx.app.inject({ method: 'POST', url: `/api/chats/${chat.id}/messages`, payload: input })).statusCode).toBe(401)
-    for (let n = 0; n < 2; n++) expect((await ctx.app.inject({ method: 'POST', url: `/api/chats/${chat.id}/messages`, headers, payload: input })).statusCode).toBe(200)
+    for (let n = 0; n < 2; n++) {
+      expect((await ctx.app.inject({
+        method: 'POST',
+        url: `/api/chats/${chat.id}/messages`,
+        headers,
+        payload: input,
+      })).statusCode).toBe(200)
+    }
+
     expect(ctx.service.store.chatMessages(chat.id)).toHaveLength(1)
     ctx.service.chats.edit(chat.id, input.id, { text: 'Updated', mode: 'queue' })
     expect(ctx.service.chats.detail(chat.id).messages[0].text).toBe('Updated')
@@ -63,7 +79,12 @@ describe('interactive chats', () => {
     const id = await running(chat.id)
     const workspace = ctx.service.store.run(id)!.workspace
     const queued = send(chat.id, 'Then add a test plan')
-    expect(() => ctx.service.chats.send(chat.id, { id: randomUUID(), text: 'Switch now', mode: 'steer', model: 'different-model' })).toThrow('next turn')
+    expect(() => ctx.service.chats.send(chat.id, {
+      id: randomUUID(),
+      text: 'Switch now',
+      mode: 'steer',
+      model: 'different-model',
+    })).toThrow('next turn')
     expect(() => ctx.service.chats.edit(chat.id, queued.id, { ...queued, mode: 'steer', model: 'different-model' })).toThrow('next turn')
     const steer = send(chat.id, 'Focus on accessibility, finish now', 'steer')
     await ctx.worker.tick()
@@ -129,7 +150,16 @@ describe('interactive chats', () => {
     accounts.seed('Chat account')
     const broker = await runnerProvider(ctx.service.config.dataDir)
     ctx.service.config.runnerUrl = broker.url
-    const agent = ctx.service.agent({ name: 'Restricted chat', access: { projects: [ctx.project.id], github: false, sandbox: 'read-only', skills: [], mcps: [] } })
+    const agent = ctx.service.agent({
+      name: 'Restricted chat',
+      access: {
+        projects: [ctx.project.id],
+        github: false,
+        sandbox: 'read-only',
+        skills: [],
+        mcps: [],
+      },
+    })
     try {
       const chat = ctx.service.chats.create({ agentId: agent.id, projectId: ctx.project.id })
       send(chat.id, 'Review this workspace')
@@ -187,8 +217,18 @@ describe('interactive chats', () => {
     const input = { id: randomUUID(), answers: { direction: ['Keep the current layout for now.'] } }
     const headers = await ctx.login()
     expect((await ctx.app.inject({ method: 'POST', url: `/api/chats/${chat.id}/questions/${question.id}/answer`, payload: input })).statusCode).toBe(401)
-    expect((await ctx.app.inject({ method: 'POST', url: `/api/chats/${chat.id}/questions/${question.id}/answer`, headers, payload: { ...input, answers: {} } })).statusCode).toBe(400)
-    expect((await ctx.app.inject({ method: 'POST', url: `/api/chats/${chat.id}/questions/${question.id}/answer`, headers, payload: input })).statusCode).toBe(200)
+    expect((await ctx.app.inject({
+      method: 'POST',
+      url: `/api/chats/${chat.id}/questions/${question.id}/answer`,
+      headers,
+      payload: { ...input, answers: {} },
+    })).statusCode).toBe(400)
+    expect((await ctx.app.inject({
+      method: 'POST',
+      url: `/api/chats/${chat.id}/questions/${question.id}/answer`,
+      headers,
+      payload: input,
+    })).statusCode).toBe(200)
     await ctx.worker.tick()
     await finish(runId)
     expect(ctx.service.questions.list(chat.id)[0].status).toBe('answered')

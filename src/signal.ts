@@ -8,9 +8,11 @@ const identityColors = ['#4545EF', '#D9542F', '#B23F8C', '#12806F', '#8A5A12', '
 /** A deterministic colour per agent or project, matching Android's `String.hashCode`. */
 export function identityColor(key: string) {
   let hash = 0
-  for (const char of key) hash = (Math.imul(hash, 31) + char.charCodeAt(0)) | 0
+  for (const char of key)
+    hash = (Math.imul(hash, 31) + char.charCodeAt(0)) | 0
   return identityColors[((hash % identityColors.length) + identityColors.length) % identityColors.length]
 }
+
 export const initial = (name: string) => name.trim().match(/[\p{L}\p{N}]/u)?.[0]?.toUpperCase() ?? '?'
 
 export type FilKind = 'question' | 'failed' | 'failed-mission' | 'review' | 'running' | 'queued' | 'paused' | 'recent'
@@ -43,7 +45,16 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[]): Fi
   for (const chat of chats) {
     if (chat.lifecycle && chat.lifecycle !== 'active')
       continue
-    const base = { key: `chat:${chat.id}`, title: chat.title || 'New conversation', agent: chat.agentName, agentKey: chat.agentId, project: chat.projectName, at: chat.updatedAt, to: `/chats/${chat.id}`, chatId: chat.id }
+    const base = {
+      key: `chat:${chat.id}`,
+      title: chat.title || 'New conversation',
+      agent: chat.agentName,
+      agentKey: chat.agentId,
+      project: chat.projectName,
+      at: chat.updatedAt,
+      to: `/chats/${chat.id}`,
+      chatId: chat.id,
+    }
     if (chat.pendingQuestions > 0)
       forYou.push({ ...base, kind: 'question', subtitle: chat.pendingQuestions > 1 ? `${chat.pendingQuestions} questions need your answer` : 'Needs your answer' })
     else if (chat.status === 'failed' || chat.status === 'interrupted')
@@ -57,6 +68,7 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[]): Fi
     else
       recent.push({ ...base, kind: 'recent', subtitle: [chat.agentName, chat.projectName].filter(Boolean).join(' · ') })
   }
+
   const latest = new Map<string, RunListItem>()
   for (const run of runs) {
     if (run.trigger === 'chat')
@@ -65,11 +77,21 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[]): Fi
     if (!current || run.createdAt > current.createdAt)
       latest.set(run.taskId, run)
   }
+
   for (const task of tasks) {
     const run = latest.get(task.id)
     if (task.archived || !run)
       continue
-    const base = { key: `task:${task.id}`, title: task.name, agent: run.agentName, agentKey: task.agentId, project: null, at: run.finishedAt ?? run.startedAt ?? run.createdAt, to: `/runs/${run.id}`, taskId: task.id }
+    const base = {
+      key: `task:${task.id}`,
+      title: task.name,
+      agent: run.agentName,
+      agentKey: task.agentId,
+      project: null,
+      at: run.finishedAt ?? run.startedAt ?? run.createdAt,
+      to: `/runs/${run.id}`,
+      taskId: task.id,
+    }
     if (run.status === 'running' || run.status === 'queued')
       live.push({ ...base, kind: run.status === 'running' ? 'running' : 'queued', subtitle: run.status === 'running' ? 'Mission running' : 'Mission waiting for a runner' })
     else if (run.status === 'failed' || run.status === 'interrupted')
@@ -77,6 +99,7 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[]): Fi
     else if (run.status === 'succeeded' && run.outcome && run.outcome.status !== 'completed')
       forYou.push({ ...base, kind: 'review', subtitle: `${outcomeLabels[run.outcome.status]} · ${run.outcome.reason}` })
   }
+
   const newest = (a: FilItem, b: FilItem) => b.at - a.at
   return { forYou: forYou.sort(newest), live: live.sort(newest), recent: recent.sort(newest) }
 }

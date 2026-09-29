@@ -15,9 +15,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
@@ -129,7 +129,9 @@ fun highlightSkills(text: String, names: Set<String>, style: SpanStyle): Annotat
 class SkillMentionHighlight(private val names: Set<String>, private val style: SpanStyle) :
     OutputTransformation {
     override fun TextFieldBuffer.transformOutput() {
-        mentionRanges(asCharSequence().toString(), names).forEach { addStyle(style, it.first, it.last + 1) }
+        mentionRanges(asCharSequence().toString(), names).forEach {
+            addStyle(style, it.first, it.last + 1)
+        }
     }
 
     override fun equals(other: Any?) =
@@ -163,8 +165,9 @@ fun SkillSuggestions(
         )
         if (skills.isEmpty()) {
             Column(
-                Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)
-                    .semantics { liveRegion = LiveRegionMode.Polite },
+                Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp).semantics {
+                    liveRegion = LiveRegionMode.Polite
+                },
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 Text(
@@ -179,67 +182,76 @@ fun SkillSuggestions(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-        } else LazyColumn(Modifier.heightIn(max = 232.dp)) {
-            items(skills, key = { it.name }) { skill ->
-                Row(
-                    Modifier.fillMaxWidth()
-                        .heightIn(min = 56.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .clickable(role = Role.Button, onClickLabel = "Insérer le skill") { pick(skill) }
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
-                        .testTag("skill-suggestion-${skill.name}"),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    Surface(
-                        Modifier.size(32.dp),
-                        shape = RoundedCornerShape(8.dp),
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
-                        contentColor = MaterialTheme.colorScheme.primary,
+        } else
+            LazyColumn(Modifier.heightIn(max = 232.dp)) {
+                items(skills, key = { it.name }) { skill ->
+                    Row(
+                        Modifier.fillMaxWidth()
+                            .heightIn(min = 56.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable(role = Role.Button, onClickLabel = "Insérer le skill") {
+                                pick(skill)
+                            }
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                            .testTag("skill-suggestion-${skill.name}"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(LeoIcons.Book, null, Modifier.size(18.dp))
-                        }
-                    }
-                    Column(Modifier.weight(1f)) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        Surface(
+                            Modifier.size(32.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                            contentColor = MaterialTheme.colorScheme.primary,
                         ) {
-                            Text(
-                                matchedName(skill.name, query),
-                                Modifier.weight(1f, fill = false),
-                                style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Surface(
-                                shape = RoundedCornerShape(4.dp),
-                                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                            ) {
-                                Text(
-                                    scopeLabel(skill.scope),
-                                    Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                )
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(LeoIcons.Book, null, Modifier.size(18.dp))
                             }
                         }
-                        if (skill.description.isNotBlank())
-                            Text(
-                                skill.description,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                        Column(Modifier.weight(1f)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Text(
+                                    matchedName(skill.name, query),
+                                    Modifier.weight(1f, fill = false),
+                                    style =
+                                        MaterialTheme.typography.bodyMedium.copy(
+                                            fontFamily = FontFamily.Monospace
+                                        ),
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Surface(
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                ) {
+                                    Text(
+                                        scopeLabel(skill.scope),
+                                        Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                    )
+                                }
+                            }
+                            if (skill.description.isNotBlank())
+                                Text(
+                                    skill.description,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                        }
                     }
                 }
             }
-        }
-        HorizontalDivider(Modifier.padding(top = 4.dp), color = MaterialTheme.colorScheme.outlineVariant)
+        HorizontalDivider(
+            Modifier.padding(top = 4.dp),
+            color = MaterialTheme.colorScheme.outlineVariant,
+        )
     }
 }
 

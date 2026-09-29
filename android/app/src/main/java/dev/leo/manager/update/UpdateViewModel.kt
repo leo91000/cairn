@@ -38,8 +38,15 @@ class UpdateViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             try {
                 val update = client.check()
-                mutable.update { it.copy(available = update, ready = if (it.available == update) it.ready else null,
-                    showDialog = update != null, message = if (manual && update == null) "L’application est à jour." else null) }
+                mutable.update {
+                    it.copy(
+                        available = update,
+                        ready = if (it.available == update) it.ready else null,
+                        showDialog = update != null,
+                        message =
+                            if (manual && update == null) "L’application est à jour." else null,
+                    )
+                }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 lastCheck = null
@@ -50,9 +57,17 @@ class UpdateViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun dismiss() { mutable.update { it.copy(showDialog = false) } }
-    fun show() { mutable.update { it.copy(showDialog = true) } }
-    fun report(e: Exception) { mutable.update { it.copy(message = e.message ?: "Mise à jour impossible. Réessayez.") } }
+    fun dismiss() {
+        mutable.update { it.copy(showDialog = false) }
+    }
+
+    fun show() {
+        mutable.update { it.copy(showDialog = true) }
+    }
+
+    fun report(e: Exception) {
+        mutable.update { it.copy(message = e.message ?: "Mise à jour impossible. Réessayez.") }
+    }
 
     fun download() {
         val update = mutable.value.available ?: return
@@ -60,7 +75,10 @@ class UpdateViewModel(application: Application) : AndroidViewModel(application) 
         mutable.update { it.copy(downloading = true, progress = 0, message = null) }
         viewModelScope.launch {
             try {
-                val file = client.download(update) { progress -> mutable.update { it.copy(progress = progress) } }
+                val file =
+                    client.download(update) { progress ->
+                        mutable.update { it.copy(progress = progress) }
+                    }
                 mutable.update { it.copy(ready = file) }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e

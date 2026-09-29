@@ -15,8 +15,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
 /**
- * An overlay keeps the reading viewport and composer stable when follow is paused.
- * It sits centred at the bottom of the history, right above the composer.
+ * An overlay keeps the reading viewport and composer stable when follow is paused. It sits centred
+ * at the bottom of the history, right above the composer.
  */
 @Composable
 internal fun BoxScope.HistoryBottomButton(
@@ -25,9 +25,10 @@ internal fun BoxScope.HistoryBottomButton(
     label: String,
     onClick: () -> Unit,
 ) {
-    val visible by remember(list, following) {
-        derivedStateOf { !following && list.canScrollForward && !list.isScrollInProgress }
-    }
+    val visible by
+        remember(list, following) {
+            derivedStateOf { !following && list.canScrollForward && !list.isScrollInProgress }
+        }
     AnimatedVisibility(
         visible = visible,
         modifier = Modifier.align(Alignment.BottomCenter).padding(8.dp),

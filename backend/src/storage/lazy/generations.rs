@@ -1,6 +1,7 @@
 //! Sealing is local and short; reconstruction and remote publication happen later.
 use super::*;
 use std::collections::BTreeSet;
+
 impl LazyDisk {
     /// The caller freezes the guest filesystem and drains guest I/O before sealing.
     pub fn seal(&self) -> io::Result<i64> {
@@ -19,6 +20,7 @@ impl LazyDisk {
         tx.commit().map_err(failure)?;
         Ok(generation)
     }
+
     pub fn capture(&self, generation: i64) -> io::Result<Value> {
         let timing = crate::performance::Operation::new(
             "journal_capture",
@@ -81,6 +83,7 @@ impl LazyDisk {
         timing.finish();
         Ok(manifest)
     }
+
     pub fn captured_block(&self, generation: i64, hash: &str) -> io::Result<Vec<u8>> {
         let _publication = self.publication.read().map_err(failure)?;
         let manifest: String = self
@@ -114,6 +117,7 @@ impl LazyDisk {
         }
         Ok(bytes)
     }
+
     /// Call only after the master has durably published every dependency and
     /// authorized reads of the new base. Completion drains readers of the old base.
     pub fn commit_published(&self, generation: i64, backup_id: &str) -> io::Result<()> {
@@ -132,7 +136,7 @@ impl LazyDisk {
             )
             .optional()
             .map_err(failure)?;
-        let receipt = serde_json::json!({"generation":generation,"backupId":backup_id});
+        let receipt = serde_json::json!({"generation": generation,"backupId": backup_id});
         if previous
             .as_ref()
             .is_some_and(|p| serde_json::from_str::<Value>(p).is_ok_and(|p| p == receipt))
@@ -158,7 +162,12 @@ impl LazyDisk {
             .map_err(failure)?;
         tx.execute("DELETE FROM sealed WHERE generation<=?1", [generation])
             .map_err(failure)?;
-        tx.execute("INSERT INTO settings(key,value) VALUES ('published',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[receipt.to_string()]).map_err(failure)?;
+        tx.execute(
+            "INSERT INTO settings(key,value) VALUES ('published',?1) ON CONFLICT(key) \
+            DO UPDATE SET value=excluded.value",
+            [receipt.to_string()],
+        )
+        .map_err(failure)?;
         tx.commit().map_err(failure)?;
         *base = next_base.clone();
         timing.next("reclaim");

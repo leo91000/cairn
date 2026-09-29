@@ -3,11 +3,11 @@ package dev.leo.manager.ui
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
-import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.*
+import androidx.compose.ui.unit.dp
 import dev.leo.manager.data.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -37,16 +37,48 @@ class ModelPickerTest : ModelPickerCases() {
         val codex =
             ModelCatalog(
                 listOf(
-                    CodexModel("gpt-6-sol", "GPT-6 Sol", "Le plus capable pour le code complexe.", isDefault = true, defaultReasoningEffort = "medium", supportedReasoningEfforts = efforts),
-                    CodexModel("gpt-6-luna", "GPT-6 Luna", "Rapide et économique pour les tâches courantes.", defaultReasoningEffort = "low", supportedReasoningEfforts = efforts),
+                    CodexModel(
+                        "gpt-6-sol",
+                        "GPT-6 Sol",
+                        "Le plus capable pour le code complexe.",
+                        isDefault = true,
+                        defaultReasoningEffort = "medium",
+                        supportedReasoningEfforts = efforts,
+                    ),
+                    CodexModel(
+                        "gpt-6-luna",
+                        "GPT-6 Luna",
+                        "Rapide et économique pour les tâches courantes.",
+                        defaultReasoningEffort = "low",
+                        supportedReasoningEfforts = efforts,
+                    ),
                 )
             )
         val claude =
             ModelCatalog(
                 listOf(
-                    CodexModel("default", "Par défaut", "Modèle recommandé pour votre abonnement.", isDefault = true, defaultReasoningEffort = "high", supportedReasoningEfforts = efforts),
-                    CodexModel("opus", "Opus", "Pour les travaux les plus exigeants.", defaultReasoningEffort = "high", supportedReasoningEfforts = efforts),
-                    CodexModel("sonnet", "Sonnet", "Équilibre entre vitesse et qualité.", defaultReasoningEffort = "medium", supportedReasoningEfforts = efforts),
+                    CodexModel(
+                        "default",
+                        "Par défaut",
+                        "Modèle recommandé pour votre abonnement.",
+                        isDefault = true,
+                        defaultReasoningEffort = "high",
+                        supportedReasoningEfforts = efforts,
+                    ),
+                    CodexModel(
+                        "opus",
+                        "Opus",
+                        "Pour les travaux les plus exigeants.",
+                        defaultReasoningEffort = "high",
+                        supportedReasoningEfforts = efforts,
+                    ),
+                    CodexModel(
+                        "sonnet",
+                        "Sonnet",
+                        "Équilibre entre vitesse et qualité.",
+                        defaultReasoningEffort = "medium",
+                        supportedReasoningEfforts = efforts,
+                    ),
                 )
             )
         var theme by mutableStateOf("light")
@@ -64,9 +96,16 @@ class ModelPickerTest : ModelPickerCases() {
                             "gpt-6-sol",
                             inherit = true,
                             provider = provider,
-                            changeProvider = { provider = it; model = ""; reasoning = "" },
+                            changeProvider = {
+                                provider = it
+                                model = ""
+                                reasoning = ""
+                            },
                             switching = provider == "claude",
-                        ) { m, r -> model = m; reasoning = r }
+                        ) { m, r ->
+                            model = m
+                            reasoning = r
+                        }
                     }
                 }
             }

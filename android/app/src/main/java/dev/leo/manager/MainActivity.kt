@@ -13,13 +13,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import dev.leo.manager.update.UpdateViewModel
-import dev.leo.manager.ui.LocalAppUpdates
-import dev.leo.manager.ui.AppUpdatePrompt
 import dev.leo.manager.data.LeoViewModel
+import dev.leo.manager.ui.AppUpdatePrompt
 import dev.leo.manager.ui.LeoApp
 import dev.leo.manager.ui.LeoTheme
+import dev.leo.manager.ui.LocalAppUpdates
 import dev.leo.manager.ui.leoDarkTheme
+import dev.leo.manager.update.UpdateViewModel
 
 class MainActivity : ComponentActivity() {
     private var targetChat by mutableStateOf("")
