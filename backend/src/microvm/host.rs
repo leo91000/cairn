@@ -44,7 +44,9 @@ pub async fn command(binary: &str, args: &[&str]) -> Result<()> {
         .map_err(|_| {
             Error::unavailable(format!("VM infrastructure operation timed out: {binary}"))
         })??;
-    if !result.status.success() {
+    // e2fsck returns 1 when it successfully corrected filesystem errors.
+    let corrected = binary == "e2fsck" && result.status.code() == Some(1);
+    if !result.status.success() && !corrected {
         tracing::warn!(
             binary,
             detail = %String::from_utf8_lossy(&result.stderr),

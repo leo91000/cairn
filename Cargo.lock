@@ -2489,7 +2489,7 @@ dependencies = [
 
 [[package]]
 name = "leo-agent-manager"
-version = "0.45.2"
+version = "0.45.3"
 dependencies = [
  "aes-gcm 0.10.3",
  "async-trait",
