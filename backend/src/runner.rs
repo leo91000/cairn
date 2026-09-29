@@ -789,8 +789,12 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
                         if done {
                             return None;
                         }
-                        if let Ok(code) =
-                            tokio::fs::read_to_string(broker.state.join(format!("{id}.exit"))).await
+                        // The exit marker is durable before attempt cleanup. Do not
+                        // invite a resume while start() would still reject its workspace.
+                        if !broker.active.lock().await.contains_key(&id)
+                            && let Ok(code) =
+                                tokio::fs::read_to_string(broker.state.join(format!("{id}.exit")))
+                                    .await
                         {
                             return Some((
                                 Ok::<_, std::io::Error>(Bytes::from(
@@ -989,6 +993,82 @@ async fn snapshot_baseline(request: axum::extract::Request) -> Result<Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn wait_does_not_report_completion_until_the_attempt_is_released() {
+        use tower::ServiceExt;
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let state = root.path().join("state");
+        private_dir(&data).await.unwrap();
+        private_dir(&state).await.unwrap();
+        std::fs::write(data.join("runner-secret"), "fixture").unwrap();
+        let stop = CancellationToken::new();
+        let pool =
+            crate::microvm::pool::Pool::new(state.clone(), root.path().into(), stop.clone(), 1)
+                .await
+                .unwrap();
+        let broker = Broker {
+            data,
+            state: state.clone(),
+            pool,
+            active: Default::default(),
+            stop,
+            leases: Default::default(),
+        };
+        let id = crate::config::id();
+        let (_done, receiver) = watch::channel(false);
+        broker.active.lock().await.insert(
+            id.clone(),
+            Attempt {
+                stop: CancellationToken::new(),
+                done: receiver,
+                socket: Default::default(),
+                plan: json!({"runId":crate::config::id()}),
+                imports: Default::default(),
+                control: Default::default(),
+            },
+        );
+        // Execution writes its exit marker before asynchronous attempt cleanup.
+        // A caller may resume this workspace as soon as /wait returns its status.
+        std::fs::write(state.join(format!("{id}.exit")), "0").unwrap();
+        let app = Router::new()
+            .fallback(any(handler))
+            .with_state(broker.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/runs/{id}/wait"))
+                    .header("authorization", "Bearer fixture")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let mut body = response.into_body().into_data_stream();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), body.next())
+                .await
+                .is_err(),
+            "completion must not escape while the previous attempt still owns the workspace"
+        );
+        broker.active.lock().await.remove(&id);
+        let bytes = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut bytes = Vec::new();
+            while let Some(chunk) = body.next().await {
+                bytes.extend_from_slice(&chunk.unwrap());
+            }
+            bytes
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap(),
+            json!({"StatusCode":0})
+        );
+    }
+
     #[tokio::test]
     async fn snapshot_during_startup_is_deferred_without_touching_the_disk() {
         use tower::ServiceExt;
