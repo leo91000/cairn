@@ -8,6 +8,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 import { setTimeout as sleep } from 'node:timers/promises'
+import { prepareStorageOrigin } from './runner-storage-smoke.mjs'
 
 async function main() {
   const image = process.argv[2] || 'leo-audit:test'
@@ -54,13 +55,14 @@ async function main() {
     await writeFile(path.join(root, 'data/runner-secret'), 'fixture-android-token')
     await writeFile(path.join(source, 'workspace/probe.mjs'), await readFile(new URL('./fixtures/android-device-probe.mjs', import.meta.url)))
     await writeFile(path.join(source, 'workspace/nested-kvm.c'), await readFile(new URL('./fixtures/nested-kvm.c', import.meta.url)))
-    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'].flatMap(cap => ['--cap-add', cap]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '7g', '--cpus', '3', '--entrypoint', '/usr/local/bin/leo', image, 'runner-broker')
+    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'].flatMap(cap => ['--cap-add', cap]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/net/tun', '--device', '/dev/fuse', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '7g', '--cpus', '3', '--entrypoint', '/usr/local/bin/leo', image, 'runner-broker')
     url = `http://${docker('port', name, '4311/tcp')}`
     await until(() => fetch(`${url}/health`).then(r => r.ok).catch(() => false))
+    const { storage } = await prepareStorageOrigin({ root, docker, name, api })
     for (const mode of ['first', 'resume']) {
       const id = randomUUID()
       const ackId = randomUUID()
-      const plan = { id, runId, expires: Date.now() + 1800000, sandbox: 'yolo', cwd: `${runRoot}/workspace`, command: ['/usr/local/bin/node', `${runRoot}/workspace/probe.mjs`, mode, ackId, process.env.ANDROID_TEST_API || '34', process.env.ANDROID_TEST_SYSTEM || 'google-apis'], chat: { output: `${runRoot}/output/result.md` }, imports: ['workspace', 'home', 'output'].map(dir => ({ source: `${runRoot}/${dir}`, target: dir === 'home' ? '/home/node' : `${runRoot}/${dir}`, readOnly: false })) }
+      const plan = { id, runId, storage, expires: Date.now() + 1800000, sandbox: 'yolo', cwd: `${runRoot}/workspace`, command: ['/usr/local/bin/node', `${runRoot}/workspace/probe.mjs`, mode, ackId, process.env.ANDROID_TEST_API || '34', process.env.ANDROID_TEST_SYSTEM || 'google-apis'], chat: { output: `${runRoot}/output/result.md` }, imports: ['workspace', 'home', 'output'].map(dir => ({ source: `${runRoot}/${dir}`, target: dir === 'home' ? '/home/node' : `${runRoot}/${dir}`, readOnly: false })) }
       await writeFile(path.join(root, 'data/runner-plans', `${id}.json`), JSON.stringify(plan))
       const started = Date.now()
       await api(`/runs/${id}`, 'POST')
