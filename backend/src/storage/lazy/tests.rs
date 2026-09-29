@@ -13,18 +13,23 @@ struct Source {
     reads: AtomicUsize,
 }
 
+/// A single-block manifest; a `null` hash is an empty (zero) block.
+fn single_block(size: u64, block_size: u64, hash: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "version": 1,
+        "size": size,
+        "blockSize": block_size,
+        "blocks": [{ "offset": 0, "size": size, "hash": hash }]
+    })
+}
+
 #[test]
 fn published_journal_reclaims_disk_space() {
     let root = tempfile::tempdir().unwrap();
     let source = Arc::new(Source {
         reads: AtomicUsize::new(0),
     });
-    let manifest = serde_json::json!({
-        "version": 1,
-        "size": BLOCK,
-        "blockSize": BLOCK,
-        "blocks": [{"offset": 0,"size": BLOCK,"hash": null}]
-    });
+    let manifest = single_block(BLOCK, BLOCK, &serde_json::Value::Null);
     let disk = LazyDisk::create(root.path(), &manifest, source).unwrap();
     disk.write_at(0, &vec![7; BLOCK as usize]).unwrap();
     disk.sync().unwrap();
@@ -65,10 +70,12 @@ fn publication_retires_obsolete_clean_cache_without_evicting_current_blocks() {
     let hash = block_digest(&vec![7; BLOCK as usize]);
     let manifest = serde_json::json!({
         "version": 1,
-        "size": 2*BLOCK,
+        "size": 2 * BLOCK,
         "blockSize": BLOCK,
-        "blocks": [{"offset": 0,"size": BLOCK,"hash": hash},
-                  {"offset": BLOCK,"size": BLOCK,"hash": null}]
+        "blocks": [
+            { "offset": 0, "size": BLOCK, "hash": hash },
+            { "offset": BLOCK, "size": BLOCK, "hash": null }
+        ]
     });
     let disk = LazyDisk::create(&directory, &manifest, source).unwrap();
     disk.read_at(0, &mut [0]).unwrap();
@@ -106,12 +113,7 @@ fn legacy_journal_conversion_waits_for_all_unpublished_writes() {
     let source = Arc::new(Source {
         reads: AtomicUsize::new(0),
     });
-    let manifest = serde_json::json!({
-        "version": 1,
-        "size": BLOCK,
-        "blockSize": BLOCK,
-        "blocks": [{"offset": 0,"size": BLOCK,"hash": null}]
-    });
+    let manifest = single_block(BLOCK, BLOCK, &serde_json::Value::Null);
     let disk = LazyDisk::create(root.path(), &manifest, source.clone()).unwrap();
     disk.write_at(0, &vec![7; BLOCK as usize]).unwrap();
     drop(disk);
@@ -185,12 +187,7 @@ fn node_cache_evicts_the_oldest_clean_block_after_a_verified_read() {
         let hash = hex::encode(Sha256::digest(&bytes));
         blocks.insert(hash.clone(), bytes);
         let directory = root.path().join("disks").join(name).join("lazy");
-        let manifest = serde_json::json!({
-            "version": 1,
-            "size": 4194304,
-            "blockSize": 4194304,
-            "blocks": [{"offset": 0,"size": 4194304,"hash": hash}]
-        });
+        let manifest = single_block(4194304, 4194304, &hash.as_str().into());
         disks.push((directory, manifest, hash, value));
     }
     let source = Arc::new(Blocks(blocks));
@@ -220,12 +217,7 @@ fn node_cache_evicts_the_oldest_clean_block_after_a_verified_read() {
 fn acknowledged_write_survives_killing_the_storage_process() {
     use std::io::BufRead;
     let root = tempfile::tempdir().unwrap();
-    let manifest = serde_json::json!({
-        "version": 1,
-        "size": 4096,
-        "blockSize": 4194304,
-        "blocks": [{"offset": 0,"size": 4096,"hash": null}]
-    });
+    let manifest = single_block(4096, 4194304, &serde_json::Value::Null);
     drop(
         LazyDisk::create(
             root.path(),
@@ -291,12 +283,7 @@ fn journal_integrity_covers_the_write_location() {
     let source = Arc::new(Source {
         reads: AtomicUsize::new(0),
     });
-    let manifest = serde_json::json!({
-        "version": 1,
-        "size": 4096,
-        "blockSize": 4194304,
-        "blocks": [{"offset": 0,"size": 4096,"hash": null}]
-    });
+    let manifest = single_block(4096, 4194304, &serde_json::Value::Null);
     let disk = LazyDisk::create(root.path(), &manifest, source.clone()).unwrap();
     disk.write_at(3, b"retained").unwrap();
     drop(disk);
@@ -324,12 +311,7 @@ fn unavailable_or_corrupt_base_never_becomes_a_zero_block() {
     }
     let root = tempfile::tempdir().unwrap();
     let hash = hex::encode(Sha256::digest(vec![8; 4 * 1024 * 1024]));
-    let manifest = serde_json::json!({
-        "version": 1,
-        "size": 4194304,
-        "blockSize": 4194304,
-        "blocks": [{"offset": 0,"size": 4194304,"hash": hash}]
-    });
+    let manifest = single_block(4194304, 4194304, &hash.as_str().into());
     let disk = LazyDisk::create(root.path(), &manifest, Arc::new(Missing)).unwrap();
     assert_eq!(
         disk.read_at(0, &mut [0; 8]).unwrap_err().kind(),
@@ -360,13 +342,8 @@ fn sealed_generation_excludes_later_writes_and_publication_preserves_them() {
         }
     }
     let root = tempfile::tempdir().unwrap();
-    let source = Arc::new(Remote(Default::default()));
-    let initial = serde_json::json!({
-        "version": 1,
-        "size": 4096,
-        "blockSize": 4194304,
-        "blocks": [{"offset": 0,"size": 4096,"hash": null}]
-    });
+    let source = Arc::new(Remote(std::sync::Mutex::default()));
+    let initial = single_block(4096, 4194304, &serde_json::Value::Null);
     let disk = LazyDisk::create(root.path(), &initial, source.clone()).unwrap();
     disk.write_at(7, b"before").unwrap();
     let generation = disk.seal().unwrap();
@@ -397,12 +374,7 @@ fn partial_write_is_durable_without_fetching_its_remote_base() {
         reads: AtomicUsize::new(0),
     });
     let hash = hex::encode(Sha256::digest(vec![7; 4 * 1024 * 1024]));
-    let manifest = serde_json::json!({
-        "version": 1,
-        "size": 4194304,
-        "blockSize": 4194304,
-        "blocks": [{"offset": 0,"size": 4194304,"hash": hash}]
-    });
+    let manifest = single_block(4194304, 4194304, &hash.as_str().into());
     let disk = LazyDisk::create(root.path(), &manifest, source.clone()).unwrap();
     disk.write_at(123, b"retained").unwrap();
     assert_eq!(source.reads.load(Ordering::SeqCst), 0);
@@ -430,12 +402,7 @@ fn journal_io_performance() {
     use std::time::Instant;
     let root = tempfile::tempdir().unwrap();
     let size = 4 * 1024 * 1024;
-    let manifest = serde_json::json!({
-        "version": 1,
-        "size": size,
-        "blockSize": size,
-        "blocks": [{"offset": 0,"size": size,"hash": null}]
-    });
+    let manifest = single_block(size, size, &serde_json::Value::Null);
     let disk = LazyDisk::create(
         root.path(),
         &manifest,
@@ -464,19 +431,18 @@ fn journal_io_performance() {
     let sync_ms = started.elapsed().as_secs_f64() * 1000.0 / 10.0;
     println!(
         "STORAGE_PERF {}",
-        serde_json::json!({"write128x4kMs":write_ms,"read4MiBMs":read_ms,"syncMs":sync_ms})
+        serde_json::json!({
+            "write128x4kMs": write_ms,
+            "read4MiBMs": read_ms,
+            "syncMs": sync_ms
+        })
     );
 }
 
 #[test]
 fn overlapping_journal_writes_preserve_latest_bytes_and_zero_gaps() {
     let root = tempfile::tempdir().unwrap();
-    let manifest = serde_json::json!({
-        "version": 1,
-        "size": 4096,
-        "blockSize": 4194304,
-        "blocks": [{"offset": 0,"size": 4096,"hash": null}]
-    });
+    let manifest = single_block(4096, 4194304, &serde_json::Value::Null);
     let disk = LazyDisk::create(
         root.path(),
         &manifest,
@@ -539,8 +505,7 @@ fn concurrent_cold_reads_share_one_verified_transfer() {
         calls: AtomicUsize::new(0),
     });
     let hash = block_digest(&vec![7; BLOCK as usize]);
-    let manifest = serde_json::json!({"version":1,"size":BLOCK,"blockSize":BLOCK,
-        "blocks":[{"offset":0,"size":BLOCK,"hash":hash}]});
+    let manifest = single_block(BLOCK, BLOCK, &hash.into());
     let disk = Arc::new(LazyDisk::create(root.path(), &manifest, source.clone()).unwrap());
     let gate = Arc::new(std::sync::Barrier::new(8));
     std::thread::scope(|scope| {
@@ -589,8 +554,15 @@ fn distinct_cold_blocks_still_download_concurrently() {
         gate: gate.clone(),
         first: first.clone(),
     });
-    let manifest = serde_json::json!({"version":1,"size":2*BLOCK,"blockSize":BLOCK,
-        "blocks":[{"offset":0,"size":BLOCK,"hash":first}, {"offset":BLOCK,"size":BLOCK,"hash":second}]});
+    let manifest = serde_json::json!({
+        "version": 1,
+        "size": 2 * BLOCK,
+        "blockSize": BLOCK,
+        "blocks": [
+            { "offset": 0, "size": BLOCK, "hash": first },
+            { "offset": BLOCK, "size": BLOCK, "hash": second }
+        ]
+    });
     let disk = Arc::new(LazyDisk::create(root.path(), &manifest, source).unwrap());
     std::thread::scope(|scope| {
         for (offset, expected) in [(0, 7), (BLOCK, 9)] {

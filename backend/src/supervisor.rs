@@ -14,6 +14,9 @@ use tokio::{
     process::Child,
 };
 
+/// Exit code reported when the supervised command is stopped before it finishes.
+const STOPPED: i32 = 143;
+
 pub struct Supervised {
     pub child: Child,
     control: UnixStream,
@@ -114,11 +117,11 @@ pub async fn entry(binary: &str, args: &[String]) -> Result<i32> {
         read = control.read_line(&mut start) => {
             read?;
             if start != "start\n" {
-                return Ok(143);
+                return Ok(STOPPED);
             }
         }
-        _ = terminate.recv() => return Ok(143),
-        _ = interrupt.recv() => return Ok(143),
+        _ = terminate.recv() => return Ok(STOPPED),
+        _ = interrupt.recv() => return Ok(STOPPED),
     }
     let mut child = tokio::process::Command::new(binary)
         .args(args)
@@ -128,33 +131,32 @@ pub async fn entry(binary: &str, args: &[String]) -> Result<i32> {
         .process_group(0)
         .kill_on_drop(true)
         .spawn()
-        .map_err(|_| Error::new(503, "Unable to start the run process."))?;
+        .map_err(|_| Error::unavailable("Unable to start the run process."))?;
     let pid = child.id().unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let input = tokio::spawn(async move {
         let _ = tokio::io::copy(&mut tokio::io::stdin(), &mut stdin).await;
     });
     let mut byte = [0; 1];
-    let result = tokio::select! {
+    let exited = tokio::select! {
         result = child.wait() => Some(result?),
         _ = control.read(&mut byte) => None,
         _ = terminate.recv() => None,
         _ = interrupt.recv() => None,
     };
     signal_group(pid, libc::SIGTERM);
-    let status = if let Some(status) = result {
-        status
-    } else {
-        match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
+    let status = match exited {
+        Some(status) => status,
+        None => match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
             Ok(result) => result?,
             Err(_) => {
                 signal_group(pid, libc::SIGKILL);
                 child.wait().await?
             }
-        }
+        },
     };
     // Reap a command's remaining background descendants before closing output.
     signal_group(pid, libc::SIGKILL);
     input.abort();
-    Ok(status.code().unwrap_or(143))
+    Ok(status.code().unwrap_or(STOPPED))
 }

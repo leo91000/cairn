@@ -6,6 +6,7 @@ use crate::{
     service::Service,
     validation::text,
 };
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashSet},
@@ -23,7 +24,65 @@ pub struct Models {
 pub async fn discover(session: &mut Session) -> Result<Value> {
     tokio::time::timeout(Duration::from_secs(20), discover_pages(session))
         .await
-        .unwrap_or_else(|_| Err(Error::new(504, "Codex model discovery timed out.")))
+        .unwrap_or_else(|_| Err(Error::gateway_timeout("Codex model discovery timed out.")))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReasoningEffort {
+    reasoning_effort: Value,
+    description: String,
+}
+
+/// One row of the cached Codex catalog, `codex-models:{account}`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexModel {
+    model: String,
+    display_name: String,
+    description: String,
+    hidden: bool,
+    is_default: bool,
+    default_reasoning_effort: String,
+    supported_reasoning_efforts: Vec<ReasoningEffort>,
+}
+
+fn valid_effort(effort: &str) -> bool {
+    !effort.is_empty()
+        && effort.len() <= 40
+        && effort
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+fn parse_model(row: &Value) -> Result<CodexModel> {
+    let model = text(row, "model");
+    let Some(efforts) = row["supportedReasoningEfforts"].as_array() else {
+        return Err(Error::bad_gateway("Codex returned an invalid model."));
+    };
+    if model.is_empty() || model.len() > 120 {
+        return Err(Error::bad_gateway("Codex returned an invalid model."));
+    }
+    let display_name = match text(row, "displayName") {
+        "" => model,
+        name => name,
+    };
+    Ok(CodexModel {
+        model: model.to_owned(),
+        display_name: display_name.to_owned(),
+        description: text(row, "description").to_owned(),
+        hidden: row["hidden"] == true,
+        is_default: row["isDefault"] == true,
+        default_reasoning_effort: text(row, "defaultReasoningEffort").to_owned(),
+        supported_reasoning_efforts: efforts
+            .iter()
+            .filter(|e| valid_effort(text(e, "reasoningEffort")))
+            .map(|e| ReasoningEffort {
+                reasoning_effort: e["reasoningEffort"].clone(),
+                description: text(e, "description").to_owned(),
+            })
+            .collect(),
+    })
 }
 
 async fn discover_pages(session: &mut Session) -> Result<Value> {
@@ -43,58 +102,24 @@ async fn discover_pages(session: &mut Session) -> Result<Value> {
             .await?;
         let rows = page["data"]
             .as_array()
-            .ok_or_else(|| Error::new(502, "Codex returned an invalid model list."))?;
+            .ok_or_else(|| Error::bad_gateway("Codex returned an invalid model list."))?;
         for row in rows {
-            let model = text(row, "model");
-            if model.is_empty() || model.len() > 120 || !row["supportedReasoningEfforts"].is_array()
-            {
-                return Err(Error::new(502, "Codex returned an invalid model."));
-            }
-            let efforts = row["supportedReasoningEfforts"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|e| {
-                    let effort = text(e, "reasoningEffort");
-                    !effort.is_empty()
-                        && effort.len() <= 40
-                        && effort.bytes().all(|b| {
-                            b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-'
-                        })
-                })
-                .map(|e| {
-                    json!({
-                        "reasoningEffort": e["reasoningEffort"],
-                        "description": text(e, "description")
-                    })
-                })
-                .collect::<Vec<_>>();
-            models.insert(
-                model.to_owned(),
-                json!({
-                    "model": model,
-                    "displayName": if text(row, "displayName").is_empty() {
-                        model
-                    } else {
-                        text(row, "displayName")
-                    },
-                    "description": text(row, "description"),
-                    "hidden": row["hidden"] == true,
-                    "isDefault": row["isDefault"] == true,
-                    "defaultReasoningEffort": text(row, "defaultReasoningEffort"),
-                    "supportedReasoningEfforts": efforts
-                }),
-            );
+            let model = parse_model(row)?;
+            models.insert(model.model.clone(), model);
         }
         cursor = page["nextCursor"].clone();
         if cursor.is_null() {
-            return Ok(models.into_values().collect::<Vec<_>>().into());
+            return Ok(serde_json::to_value(
+                models.into_values().collect::<Vec<_>>(),
+            )?);
         }
         if !cursor.is_string() || !seen.insert(cursor.to_string()) {
             break;
         }
     }
-    Err(Error::new(502, "Codex model pagination did not complete."))
+    Err(Error::bad_gateway(
+        "Codex model pagination did not complete.",
+    ))
 }
 
 fn due(cached: &Value) -> bool {
@@ -128,6 +153,31 @@ pub async fn refresh_from_session(s: &Service, source: &str, session: &mut Sessi
     Ok(())
 }
 
+/// Combines one model listed by several accounts: only effort levels supported by
+/// every account, hidden only when hidden everywhere, default when default anywhere.
+fn intersect(existing: &mut Value, model: &Value) {
+    let supported = model["supportedReasoningEfforts"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if let Some(efforts) = existing["supportedReasoningEfforts"].as_array_mut() {
+        efforts.retain(|e| {
+            supported
+                .iter()
+                .any(|other| other["reasoningEffort"] == e["reasoningEffort"])
+        });
+    }
+    existing["hidden"] = (existing["hidden"] == true && model["hidden"] == true).into();
+    existing["isDefault"] = (existing["isDefault"] == true || model["isDefault"] == true).into();
+}
+
+async fn discover_local(s: &Service) -> Result<Value> {
+    let mut session = Session::codex(&s.config, &s.config.home.join(".codex"), &[], None).await?;
+    let result = discover(&mut session).await;
+    session.close().await;
+    result
+}
+
 impl Models {
     pub async fn list(&self, s: &Service) -> Result<Value> {
         // Deduplicate simultaneous editor/chat requests, with a short retry backoff.
@@ -153,15 +203,7 @@ impl Models {
             let mut cached = s.store.kv(&key).await?.unwrap_or(Value::Null);
             if due(&cached) {
                 let result = if source.is_empty() {
-                    async {
-                        let mut session =
-                            Session::codex(&s.config, &s.config.home.join(".codex"), &[], None)
-                                .await?;
-                        let result = discover(&mut session).await;
-                        session.close().await;
-                        result
-                    }
-                    .await
+                    discover_local(s).await
                 } else {
                     crate::accounts::codex::discover_models(s, source).await
                 };
@@ -174,24 +216,11 @@ impl Models {
             }
             for model in cached["models"].as_array().into_iter().flatten() {
                 let name = text(model, "model").to_owned();
-                if let Some(existing) = models.get_mut(&name) {
-                    // Only offer effort levels supported by every account exposing this model.
-                    existing["supportedReasoningEfforts"]
-                        .as_array_mut()
-                        .unwrap()
-                        .retain(|e| {
-                            model["supportedReasoningEfforts"]
-                                .as_array()
-                                .unwrap()
-                                .iter()
-                                .any(|other| other["reasoningEffort"] == e["reasoningEffort"])
-                        });
-                    existing["hidden"] =
-                        (existing["hidden"] == true && model["hidden"] == true).into();
-                    existing["isDefault"] =
-                        (existing["isDefault"] == true || model["isDefault"] == true).into();
-                } else {
-                    models.insert(name, model.clone());
+                match models.get_mut(&name) {
+                    Some(existing) => intersect(existing, model),
+                    None => {
+                        models.insert(name, model.clone());
+                    }
                 }
             }
         }
@@ -209,7 +238,7 @@ impl Models {
             "models": models,
             "checkedAt": checked_at,
             "stale": stale,
-            "error": error
+            "error": error,
         }))
     }
 }
@@ -306,20 +335,20 @@ mod tests {
             "checkedAt": now(),
             "models": [
                 {
-                "model": "default-model",
-                "isDefault": true,
-                "defaultReasoningEffort": "high",
-                "supportedReasoningEfforts": [{
-                    "reasoningEffort": "high"
-                }]
-            },
+                    "model": "default-model",
+                    "isDefault": true,
+                    "defaultReasoningEffort": "high",
+                    "supportedReasoningEfforts": [{
+                        "reasoningEffort": "high"
+                    }]
+                },
                 {
-                "model": "fast-model",
-                "defaultReasoningEffort": "low",
-                "supportedReasoningEfforts": [{
-                    "reasoningEffort": "low"
-                }]
-            }
+                    "model": "fast-model",
+                    "defaultReasoningEffort": "low",
+                    "supportedReasoningEfforts": [{
+                        "reasoningEffort": "low"
+                    }]
+                }
             ]
         });
         assert_eq!(defaults(&cached, ""), Some(("default-model", "high")));

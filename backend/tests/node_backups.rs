@@ -1,5 +1,38 @@
-use leo_agent_manager::nodes::snapshots;
+use leo_agent_manager::{
+    auth,
+    config::id,
+    nodes::{checkpoint, restore, snapshots},
+    storage::{Disk, LazyDisk, policy::Policy, remote::RemoteSource, runtime},
+};
+use serde_json::{Value, json};
+use std::{
+    io::{Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use tempfile::TempDir;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    net::{UnixListener, UnixStream},
+    task::JoinHandle,
+};
+use tokio_util::sync::CancellationToken;
+
+const MIB: u64 = 1024 * 1024;
+
+/// The manifest of a 4 KiB disk that was never written.
+static EMPTY_DISK: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "version": 1,
+        "size": 4096,
+        "blockSize": 4_194_304,
+        "blocks": [{ "offset": 0, "size": 4096, "hash": null }],
+    })
+});
 
 #[tokio::test]
 async fn incremental_snapshots_reuse_unchanged_blocks_and_restore_exact_bytes() {
@@ -39,8 +72,6 @@ async fn incremental_snapshots_reuse_unchanged_blocks_and_restore_exact_bytes() 
 
 #[tokio::test]
 async fn holes_are_indexed_as_zero_blocks_without_reading_them() {
-    use std::io::{Seek, SeekFrom, Write};
-    const MIB: u64 = 1024 * 1024;
     let root = TempDir::new().unwrap();
     let disk = root.path().join("disk");
     // A 1 GiB sparse disk with data in two places, like a mostly empty VM disk.
@@ -81,16 +112,7 @@ async fn holes_are_indexed_as_zero_blocks_without_reading_them() {
     );
 }
 
-#[tokio::test]
-async fn an_on_demand_lost_pause_acknowledgement_resumes_and_thaws_before_returning_error() {
-    exercise_vm_control(ControlScenario::DemandCapture).await;
-}
-
-#[tokio::test]
-async fn an_emergency_capture_with_unknown_pause_state_stops_the_attempt() {
-    exercise_vm_control(ControlScenario::EmergencyCapture).await;
-}
-
+/// How a VM controller command is exercised, and which acknowledgement is lost.
 #[derive(Clone, Copy)]
 enum ControlScenario {
     DemandCapture,
@@ -99,6 +121,43 @@ enum ControlScenario {
     MonitorResume,
     MonitorStarting,
     MonitorHealthy,
+}
+
+impl ControlScenario {
+    /// Whether the disk is below its reserve, so the VM must be paused.
+    fn emergency(self) -> bool {
+        matches!(
+            self,
+            Self::EmergencyCapture
+                | Self::MonitorPause
+                | Self::MonitorStarting
+                | Self::MonitorHealthy
+        )
+    }
+
+    /// Whether the VM starts paused, so the lost acknowledgement is a resume.
+    fn resume_ack(self) -> bool {
+        matches!(self, Self::MonitorResume)
+    }
+
+    fn lose_ack(self) -> bool {
+        !matches!(self, Self::MonitorHealthy)
+    }
+
+    /// Whether the storage monitor, rather than a capture, drives the VM.
+    fn monitor(self) -> bool {
+        !matches!(self, Self::DemandCapture | Self::EmergencyCapture)
+    }
+}
+
+#[tokio::test]
+async fn an_on_demand_lost_pause_acknowledgement_resumes_and_thaws_before_returning_error() {
+    exercise_vm_control(ControlScenario::DemandCapture).await;
+}
+
+#[tokio::test]
+async fn an_emergency_capture_with_unknown_pause_state_stops_the_attempt() {
+    exercise_vm_control(ControlScenario::EmergencyCapture).await;
 }
 
 #[tokio::test]
@@ -121,118 +180,81 @@ async fn monitor_applies_and_releases_pressure_with_acknowledged_commands() {
     exercise_vm_control(ControlScenario::MonitorHealthy).await;
 }
 
-async fn exercise_vm_control(case: ControlScenario) {
-    let emergency = matches!(
-        case,
-        ControlScenario::EmergencyCapture
-            | ControlScenario::MonitorPause
-            | ControlScenario::MonitorStarting
-            | ControlScenario::MonitorHealthy
-    );
-    let resume_ack = matches!(case, ControlScenario::MonitorResume);
-    let lose_ack = !matches!(case, ControlScenario::MonitorHealthy);
-    let monitor = matches!(
-        case,
-        ControlScenario::MonitorPause
-            | ControlScenario::MonitorResume
-            | ControlScenario::MonitorStarting
-            | ControlScenario::MonitorHealthy
-    );
-    use leo_agent_manager::{config::id, nodes::checkpoint};
-    use serde_json::json;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
-    use tokio::{
-        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-        net::UnixListener,
-    };
-    let root = tempfile::TempDir::new().unwrap();
-    let run = id();
-    let attempt = id();
-    let vm = id();
-    let disk = root.path().join("disks").join(&run);
-    std::fs::create_dir_all(&disk).unwrap();
-    std::fs::write(
-        root.path().join(format!("{attempt}.vm.json")),
-        json!({"vmId": vm}).to_string(),
-    )
-    .unwrap();
-    {
-        use leo_agent_manager::storage::{LazyDisk, policy::Policy, remote::RemoteSource};
-        let context = json!({
-            "master": "http://127.0.0.1:1/",
-            "grant": "fixture",
-            "policy": Policy { reserve_mi_b:if emergency { 16 * 1024 * 1024 } else { 64 }, reserve_percent:1, ..Default::default() }
-        });
-        let source = Arc::new(
-            RemoteSource::new(
-                &context,
-                tokio::runtime::Handle::current(),
-                Default::default(),
-            )
-            .unwrap(),
-        );
-        let journal = LazyDisk::create(
-            &disk.join("lazy"),
-            &json!({
-                "version": 1,
-                "size": 4096,
-                "blockSize": 4194304,
-                "blocks": [{"offset": 0,"size": 4096,"hash": null}]
-            }),
-            source,
-        )
-        .unwrap();
-        journal.set_context(&context).unwrap();
+fn reserve(reserve_mi_b: u64) -> Policy {
+    Policy {
+        reserve_mi_b,
+        reserve_percent: 1,
+        ..Policy::default()
     }
-    let api = root.path().join("jails/firecracker").join(vm).join("root");
-    std::fs::create_dir_all(&api).unwrap();
-    let controller = UnixListener::bind(api.join("api.sock")).unwrap();
-    let paused = Arc::new(AtomicBool::new(resume_ack));
-    let state = paused.clone();
-    let controller_task = tokio::spawn(async move {
+}
+
+/// Creates a lazily restored disk whose reserve is exhausted in an `emergency`.
+fn create_lazy_disk(disk: &Path, emergency: bool) {
+    let policy = reserve(if emergency { 16 * 1024 * 1024 } else { 64 });
+    let context = json!({ "master": "http://127.0.0.1:1/", "grant": "fixture", "policy": policy });
+    let source = Arc::new(
+        RemoteSource::new(
+            &context,
+            tokio::runtime::Handle::current(),
+            CancellationToken::default(),
+        )
+        .unwrap(),
+    );
+    let journal = LazyDisk::create(&disk.join("lazy"), &EMPTY_DISK, source).unwrap();
+    journal.set_context(&context).unwrap();
+}
+
+/// Serves the Firecracker API: records the requested VM state, and never
+/// acknowledges the command whose acknowledgement the scenario loses.
+fn spawn_firecracker_api(
+    controller: UnixListener,
+    paused: Arc<AtomicBool>,
+    case: ControlScenario,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
         loop {
             let (socket, _) = controller.accept().await.unwrap();
-            let state = state.clone();
+            let paused = paused.clone();
             tokio::spawn(async move {
                 let mut socket = BufReader::new(socket);
-                let mut line = String::new();
-                let mut size = 0;
-                loop {
-                    line.clear();
-                    socket.read_line(&mut line).await.unwrap();
-                    if line == "\r\n" {
-                        break;
-                    }
-                    if let Some(n) = line.strip_prefix("Content-Length: ") {
-                        size = n.trim().parse().unwrap();
-                    }
-                }
-                let mut body = vec![0; size];
-                tokio::io::AsyncReadExt::read_exact(&mut socket, &mut body)
-                    .await
-                    .unwrap();
-                let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let body = read_http_body(&mut socket).await;
+                let value: Value = serde_json::from_slice(&body).unwrap();
                 let pause = value["state"] == "Paused";
-                state.store(pause, Ordering::SeqCst);
-                if lose_ack && pause != resume_ack {
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                } else {
-                    let _ = socket
-                        .get_mut()
-                        .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
-                        .await;
+                paused.store(pause, Ordering::SeqCst);
+                if case.lose_ack() && pause != case.resume_ack() {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    return;
                 }
+                let _ = socket
+                    .get_mut()
+                    .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                    .await;
             });
         }
-    });
-    let guest_path = root.path().join("guest.sock");
-    let guest = UnixListener::bind(&guest_path).unwrap();
-    let thawed = Arc::new(AtomicBool::new(false));
-    let thaw = thawed.clone();
-    let guest_task = tokio::spawn(async move {
+    })
+}
+
+async fn read_http_body(socket: &mut BufReader<UnixStream>) -> Vec<u8> {
+    let mut line = String::new();
+    let mut size = 0;
+    loop {
+        line.clear();
+        socket.read_line(&mut line).await.unwrap();
+        if line == "\r\n" {
+            break;
+        }
+        if let Some(n) = line.strip_prefix("Content-Length: ") {
+            size = n.trim().parse().unwrap();
+        }
+    }
+    let mut body = vec![0; size];
+    socket.read_exact(&mut body).await.unwrap();
+    body
+}
+
+/// Serves the guest agent, which records whether it was asked to thaw.
+fn spawn_guest_agent(guest: UnixListener, thawed: Arc<AtomicBool>) -> JoinHandle<()> {
+    tokio::spawn(async move {
         loop {
             let (socket, _) = guest.accept().await.unwrap();
             let mut socket = BufReader::new(socket);
@@ -241,9 +263,9 @@ async fn exercise_vm_control(case: ControlScenario) {
             socket.get_mut().write_all(b"OK 5200\n").await.unwrap();
             line.clear();
             socket.read_line(&mut line).await.unwrap();
-            let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let value: Value = serde_json::from_str(&line).unwrap();
             if value["op"] == "thaw" {
-                thaw.store(true, Ordering::SeqCst);
+                thawed.store(true, Ordering::SeqCst);
             }
             socket
                 .get_mut()
@@ -251,92 +273,102 @@ async fn exercise_vm_control(case: ControlScenario) {
                 .await
                 .unwrap();
         }
-    });
-    let stop = tokio_util::sync::CancellationToken::new();
-    if monitor {
-        use leo_agent_manager::storage::{Disk, runtime};
-        let volume = runtime::load(&disk).await.unwrap();
-        volume.disk.write_at(0, b"unsaved").unwrap();
-        volume.set_paused(resume_ack);
-        if matches!(case, ControlScenario::MonitorStarting) {
-            std::fs::remove_file(root.path().join(format!("{attempt}.vm.json"))).unwrap();
-        }
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            volume.enforce_limits(root.path(), &attempt, &stop),
-        )
-        .await
-        .unwrap();
-        match case {
-            ControlScenario::MonitorStarting => {
-                result.unwrap();
-                assert!(!stop.is_cancelled());
-                assert!(!paused.load(Ordering::SeqCst));
-                assert!(!volume.paused());
-            }
-            ControlScenario::MonitorHealthy => {
-                result.unwrap();
-                assert!(volume.paused());
-                assert!(paused.load(Ordering::SeqCst));
-                std::fs::write(
-                    root.path().join("storage-policy.json"),
-                    serde_json::to_vec(&leo_agent_manager::storage::policy::Policy {
-                        reserve_mi_b: 64,
-                        reserve_percent: 1,
-                        ..Default::default()
-                    })
-                    .unwrap(),
-                )
-                .unwrap();
-                volume
-                    .enforce_limits(root.path(), &attempt, &stop)
-                    .await
-                    .unwrap();
-                assert!(!volume.paused());
-                assert!(!paused.load(Ordering::SeqCst));
-                assert!(!stop.is_cancelled());
-                assert!(!volume.stop.is_cancelled());
-            }
-            _ => {
-                assert!(result.is_err());
-                assert_eq!(
-                    paused.load(Ordering::SeqCst),
-                    !resume_ack,
-                    "the VM applied the command even though its acknowledgement was lost"
-                );
-                assert!(
-                    stop.is_cancelled(),
-                    "an ambiguous monitor command must stop execution"
-                );
-                assert!(
-                    volume.stop.is_cancelled(),
-                    "blocked disk reads must be released for shutdown"
-                );
-            }
-        }
-        controller_task.abort();
-        guest_task.abort();
-        let mut saved = [0; 7];
-        volume.read_at(0, &mut saved).unwrap();
-        assert_eq!(&saved, b"unsaved");
-        return;
+    })
+}
+
+/// The storage monitor enforces the reserve through the Firecracker API.
+async fn check_monitor(
+    case: ControlScenario,
+    root: &Path,
+    disk: &Path,
+    attempt: &str,
+    paused: &AtomicBool,
+) {
+    let stop = CancellationToken::new();
+    let volume = runtime::load(disk).await.unwrap();
+    volume.disk.write_at(0, b"unsaved").unwrap();
+    volume.set_paused(case.resume_ack());
+    if matches!(case, ControlScenario::MonitorStarting) {
+        std::fs::remove_file(root.join(format!("{attempt}.vm.json"))).unwrap();
     }
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        Duration::from_secs(5),
+        volume.enforce_limits(root, attempt, &stop),
+    )
+    .await
+    .unwrap();
+    match case {
+        ControlScenario::MonitorStarting => {
+            result.unwrap();
+            assert!(!stop.is_cancelled());
+            assert!(!paused.load(Ordering::SeqCst));
+            assert!(!volume.paused());
+        }
+        ControlScenario::MonitorHealthy => {
+            result.unwrap();
+            assert!(volume.paused());
+            assert!(paused.load(Ordering::SeqCst));
+            std::fs::write(
+                root.join("storage-policy.json"),
+                serde_json::to_vec(&reserve(64)).unwrap(),
+            )
+            .unwrap();
+            volume.enforce_limits(root, attempt, &stop).await.unwrap();
+            assert!(!volume.paused());
+            assert!(!paused.load(Ordering::SeqCst));
+            assert!(!stop.is_cancelled());
+            assert!(!volume.stop.is_cancelled());
+        }
+        _ => {
+            assert!(result.is_err());
+            assert_eq!(
+                paused.load(Ordering::SeqCst),
+                !case.resume_ack(),
+                "the VM applied the command even though its acknowledgement was lost"
+            );
+            assert!(
+                stop.is_cancelled(),
+                "an ambiguous monitor command must stop execution"
+            );
+            assert!(
+                volume.stop.is_cancelled(),
+                "blocked disk reads must be released for shutdown"
+            );
+        }
+    }
+    let mut saved = [0; 7];
+    volume.read_at(0, &mut saved).unwrap();
+    assert_eq!(&saved, b"unsaved");
+}
+
+/// A capture pauses the VM and freezes the guest; a lost acknowledgement
+/// must either stop an emergency attempt or resume and thaw an on-demand one.
+async fn check_capture(
+    case: ControlScenario,
+    root: &Path,
+    run: &str,
+    attempt: &str,
+    guest: PathBuf,
+    paused: &AtomicBool,
+    thawed: &AtomicBool,
+) {
+    let stop = CancellationToken::new();
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
         checkpoint::capture(
-            root.path(),
-            &run,
-            Some(guest_path),
+            root,
+            run,
+            Some(guest),
             Arc::new(tokio::sync::Mutex::new(())),
             stop.clone(),
-            &attempt,
+            attempt,
             None,
         ),
     )
     .await
     .unwrap();
     assert!(result.is_err());
-    if emergency {
+    if case.emergency() {
         assert!(
             stop.is_cancelled(),
             "an unconfirmed emergency pause must stop execution"
@@ -347,20 +379,51 @@ async fn exercise_vm_control(case: ControlScenario) {
         assert!(thawed.load(Ordering::SeqCst));
         assert!(!stop.is_cancelled());
     }
+}
+
+async fn exercise_vm_control(case: ControlScenario) {
+    let root = TempDir::new().unwrap();
+    let (run, attempt, vm) = (id(), id(), id());
+    let disk = root.path().join("disks").join(&run);
+    std::fs::create_dir_all(&disk).unwrap();
+    std::fs::write(
+        root.path().join(format!("{attempt}.vm.json")),
+        json!({ "vmId": vm }).to_string(),
+    )
+    .unwrap();
+    create_lazy_disk(&disk, case.emergency());
+    let api = root.path().join("jails/firecracker").join(vm).join("root");
+    std::fs::create_dir_all(&api).unwrap();
+    let paused = Arc::new(AtomicBool::new(case.resume_ack()));
+    let controller_task = spawn_firecracker_api(
+        UnixListener::bind(api.join("api.sock")).unwrap(),
+        paused.clone(),
+        case,
+    );
+    let guest_path = root.path().join("guest.sock");
+    let thawed = Arc::new(AtomicBool::new(false));
+    let guest_task = spawn_guest_agent(UnixListener::bind(&guest_path).unwrap(), thawed.clone());
+    if case.monitor() {
+        check_monitor(case, root.path(), &disk, &attempt, &paused).await;
+    } else {
+        check_capture(
+            case,
+            root.path(),
+            &run,
+            &attempt,
+            guest_path,
+            &paused,
+            &thawed,
+        )
+        .await;
+    }
     controller_task.abort();
     guest_task.abort();
 }
 
 #[tokio::test]
 async fn restore_does_not_replace_a_journal_still_in_use() {
-    use leo_agent_manager::{
-        config::id,
-        nodes::restore,
-        storage::{Disk, LazyDisk, policy::Policy, remote::RemoteSource, runtime},
-    };
-    use serde_json::json;
-    use std::sync::Arc;
-    if !std::path::Path::new("/dev/fuse").exists() {
+    if !Path::new("/dev/fuse").exists() {
         eprintln!("skipping on-demand controller restore: /dev/fuse is unavailable");
         return;
     }
@@ -372,23 +435,18 @@ async fn restore_does_not_replace_a_journal_still_in_use() {
     std::fs::create_dir_all(&image).unwrap();
     std::fs::write(image.join("root.ext4"), []).unwrap();
     std::fs::write(image.join("vmlinux"), []).unwrap();
-    let manifest = json!({
-        "version": 1,
-        "size": 4096,
-        "blockSize": 4194304,
-        "runtime": {"runtimeId": "fixture"},
-        "blocks": [{"offset": 0,"size": 4096,"hash": null}]
-    });
+    let mut manifest = EMPTY_DISK.clone();
+    manifest["runtime"] = json!({ "runtimeId": "fixture" });
     let context = json!({
         "master": "http://127.0.0.1:1/",
         "grant": "old-grant",
-        "policy": Policy {reserve_mi_b:64,reserve_percent:1,..Default::default()}
+        "policy": reserve(64),
     });
     let source = Arc::new(
         RemoteSource::new(
             &context,
             tokio::runtime::Handle::current(),
-            Default::default(),
+            CancellationToken::default(),
         )
         .unwrap(),
     );
@@ -403,7 +461,7 @@ async fn restore_does_not_replace_a_journal_still_in_use() {
         "backupId": id(),
         "master": context["master"],
         "grant": "new-grant",
-        "policy": context["policy"]
+        "policy": context["policy"],
     });
     let error = restore::controller(root.path(), &run, replacement.clone())
         .await
@@ -420,8 +478,5 @@ async fn restore_does_not_replace_a_journal_still_in_use() {
     let restored = runtime::load(&directory).await.unwrap();
     restored.read_at(0, &mut bytes).unwrap();
     assert_eq!(bytes, [0; 3]);
-    assert_eq!(
-        restored.source.grant_id(),
-        leo_agent_manager::auth::digest("new-grant")
-    );
+    assert_eq!(restored.source.grant_id(), auth::digest("new-grant"));
 }

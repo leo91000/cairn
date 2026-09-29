@@ -85,3 +85,13 @@ aws-sdk-s3 = "1.150.0"
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = [ "util" ] }
+
+[lints.clippy]
+default_trait_access = "warn"
+ignored_unit_patterns = "warn"
+items_after_statements = "warn"
+manual_let_else = "warn"
+map_unwrap_or = "warn"
+needless_pass_by_value = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"

@@ -7,6 +7,7 @@ use crate::{
     service::Service,
     skills::private_dir,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -20,6 +21,17 @@ use tokio_util::sync::CancellationToken;
 
 pub const SOCKET: &str = "leo-auth.sock";
 const LIMIT: usize = 128_000;
+
+/// What a run asks its broker for. Claude Code runs always ask for current credentials.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Request {
+    /// Codex: the run's access token was rejected. Rotate it unless another run already did.
+    #[serde(default)]
+    pub refresh: bool,
+    /// Codex: a digest of the access token the run holds.
+    #[serde(default)]
+    pub previous: String,
+}
 
 pub struct Broker {
     stop: CancellationToken,
@@ -50,8 +62,8 @@ pub async fn serve(s: &Service, lease: &Lease) -> Result<Broker> {
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                _ = stopping.cancelled() => break,
-                _ = service.shutdown.cancelled() => break,
+                () = stopping.cancelled() => break,
+                () = service.shutdown.cancelled() => break,
                 accepted = listener.accept() => {
                     let Ok((stream, _)) = accepted else { break };
                     // One request at a time per run. Never cancel a token rotation between
@@ -103,7 +115,7 @@ async fn line(stream: &mut BufReader<UnixStream>) -> Result<Value> {
 }
 
 /// The run side: one request, one response.
-pub async fn request(socket: &Path, request: &Value, timeout: Duration) -> Result<Value> {
+pub async fn request(socket: &Path, request: &impl Serialize, timeout: Duration) -> Result<Value> {
     tokio::time::timeout(timeout, async {
         let mut stream = UnixStream::connect(socket).await?;
         let mut bytes = serde_json::to_vec(request)?;
@@ -112,12 +124,10 @@ pub async fn request(socket: &Path, request: &Value, timeout: Duration) -> Resul
         line(&mut BufReader::new(stream)).await
     })
     .await
-    .map_err(|_| Error::new(503, "Account authentication timed out."))?
+    .map_err(|_| Error::unavailable("Account authentication timed out."))?
 }
 
 /// The socket a run reaches its broker through: inside a microVM it is mapped elsewhere.
 pub fn socket(home: &Path) -> PathBuf {
-    std::env::var_os("LEO_AUTH_SOCKET")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(SOCKET))
+    std::env::var_os("LEO_AUTH_SOCKET").map_or_else(|| home.join(SOCKET), PathBuf::from)
 }

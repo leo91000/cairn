@@ -3,6 +3,7 @@ use crate::{
     error::{Error, Result, required},
 };
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
     path::Path,
@@ -120,9 +121,9 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             let _ = reply.send(f(&mut Db(connection)));
         }))
         .await
-        .map_err(|_| Error::new(503, "Database is closing."))?;
+        .map_err(|_| Error::unavailable("Database is closing."))?;
         rx.await
-            .map_err(|_| Error::new(503, "Database operation stopped."))?
+            .map_err(|_| Error::unavailable("Database operation stopped."))?
     }
 
     pub async fn read<T: Send + 'static>(
@@ -171,8 +172,17 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
     }
 
     pub async fn get(&self, kind: &str, id: &str) -> Result<Option<Value>> {
+        self.get_as(kind, id).await
+    }
+
+    /// Typed variant of [`Store::get`].
+    pub async fn get_as<T: DeserializeOwned + Send + 'static>(
+        &self,
+        kind: &str,
+        id: &str,
+    ) -> Result<Option<T>> {
         let (kind, id) = (kind.to_owned(), id.to_owned());
-        self.read(move |db| db.get(&kind, &id)).await
+        self.read(move |db| db.get_as(&kind, &id)).await
     }
 
     pub async fn list(&self, kind: &str) -> Result<Vec<Value>> {
@@ -186,13 +196,40 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
     }
 
     pub async fn kv(&self, key: &str) -> Result<Option<Value>> {
+        self.kv_as(key).await
+    }
+
+    /// Typed variant of [`Store::kv`].
+    pub async fn kv_as<T: DeserializeOwned + Send + 'static>(
+        &self,
+        key: &str,
+    ) -> Result<Option<T>> {
         let key = key.to_owned();
-        self.read(move |db| db.kv(&key)).await
+        self.read(move |db| db.kv_as(&key)).await
     }
 
     pub async fn set(&self, key: &str, value: Value, expires: Option<i64>) -> Result<()> {
+        self.set_as(key, value, expires).await
+    }
+
+    /// Typed variant of [`Store::set`].
+    pub async fn set_as<T: Serialize + Send + 'static>(
+        &self,
+        key: &str,
+        value: T,
+        expires: Option<i64>,
+    ) -> Result<()> {
         let key = key.to_owned();
-        self.write(move |db| db.set(&key, &value, expires)).await
+        self.write(move |db| db.set_as(&key, &value, expires)).await
+    }
+
+    /// Typed variant of [`Store::keys`].
+    pub async fn keys_as<T: DeserializeOwned + Send + 'static>(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<(String, T)>> {
+        let prefix = prefix.to_owned();
+        self.read(move |db| db.keys_as(&prefix)).await
     }
 
     pub async fn delete(&self, key: &str) -> Result<()> {
@@ -249,11 +286,41 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
     }
 }
 
+/// Run list projection: drops the heavy snapshot and summary, keeps display names.
+pub const RUN_SUMMARY: &str = "json_set(
+    json_remove(data,'$.snapshot','$.summary'),
+    '$.taskName',json_extract(data,'$.snapshot.task.name'),
+    '$.agentName',json_extract(data,'$.snapshot.agent.name')
+)";
+
 // Database transactions and statement caches stay on their owning database thread.
 pub struct Db<'a>(pub &'a Connection);
 
 impl Db<'_> {
+    /// First column of at most one row, decoded from its JSON text.
+    fn json_row<T: DeserializeOwned>(
+        &self,
+        sql: &str,
+        parameters: impl rusqlite::Params,
+    ) -> Result<Option<T>> {
+        self.0
+            .prepare_cached(sql)?
+            .query_row(parameters, |row| row.get::<_, String>(0))
+            .optional()?
+            .map(|data| Ok(serde_json::from_str(&data)?))
+            .transpose()
+    }
+
     pub fn json_rows(&self, sql: &str, parameters: impl rusqlite::Params) -> Result<Vec<Value>> {
+        self.json_rows_as(sql, parameters)
+    }
+
+    /// Typed variant of [`Db::json_rows`].
+    pub fn json_rows_as<T: DeserializeOwned>(
+        &self,
+        sql: &str,
+        parameters: impl rusqlite::Params,
+    ) -> Result<Vec<T>> {
         let mut stmt = self.0.prepare_cached(sql)?;
         let rows = stmt.query_map(parameters, |row| row.get::<_, String>(0))?;
         rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
@@ -274,19 +341,22 @@ impl Db<'_> {
     }
 
     pub fn get(&self, kind: &str, id: &str) -> Result<Option<Value>> {
-        self.0
-            .prepare_cached("SELECT data FROM records WHERE kind=? AND id=?")?
-            .query_row(params![kind, id], |r| r.get::<_, String>(0))
-            .optional()?
-            .map(|s| Ok(serde_json::from_str(&s)?))
-            .transpose()
+        self.get_as(kind, id)
+    }
+
+    /// Typed variant of [`Db::get`].
+    pub fn get_as<T: DeserializeOwned>(&self, kind: &str, id: &str) -> Result<Option<T>> {
+        self.json_row(
+            "SELECT data FROM records WHERE kind=? AND id=?",
+            params![kind, id],
+        )
     }
 
     pub fn put(&self, kind: &str, value: &Value) -> Result<Value> {
         self.0
             .prepare_cached(
-                "INSERT INTO records VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET \
-            data=excluded.data,updated_at=excluded.updated_at",
+                "INSERT INTO records VALUES(?,?,?,?)
+                 ON CONFLICT(id) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at",
             )?
             .execute(params![
                 value["id"].as_str(),
@@ -305,21 +375,34 @@ impl Db<'_> {
     }
 
     pub fn kv(&self, key: &str) -> Result<Option<Value>> {
-        self.0
-            .prepare_cached("SELECT data FROM kv WHERE key=? AND (expires IS NULL OR expires>?)")?
-            .query_row(params![key, now()], |r| r.get::<_, String>(0))
-            .optional()?
-            .map(|s| Ok(serde_json::from_str(&s)?))
-            .transpose()
+        self.kv_as(key)
+    }
+
+    /// Typed variant of [`Db::kv`].
+    pub fn kv_as<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
+        self.json_row(
+            "SELECT data FROM kv WHERE key=? AND (expires IS NULL OR expires>?)",
+            params![key, now()],
+        )
     }
 
     pub fn set(&self, key: &str, value: &Value, expires: Option<i64>) -> Result<()> {
+        self.set_as(key, value, expires)
+    }
+
+    /// Typed variant of [`Db::set`].
+    pub fn set_as<T: Serialize + ?Sized>(
+        &self,
+        key: &str,
+        value: &T,
+        expires: Option<i64>,
+    ) -> Result<()> {
         self.0
             .prepare_cached(
-                "INSERT INTO kv VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET \
-            data=excluded.data,expires=excluded.expires",
+                "INSERT INTO kv VALUES(?,?,?)
+                 ON CONFLICT(key) DO UPDATE SET data=excluded.data,expires=excluded.expires",
             )?
-            .execute(params![key, value.to_string(), expires])?;
+            .execute(params![key, serde_json::to_string(value)?, expires])?;
         Ok(())
     }
 
@@ -331,6 +414,11 @@ impl Db<'_> {
     }
 
     pub fn keys(&self, prefix: &str) -> Result<Vec<(String, Value)>> {
+        self.keys_as(prefix)
+    }
+
+    /// Typed variant of [`Db::keys`].
+    pub fn keys_as<T: DeserializeOwned>(&self, prefix: &str) -> Result<Vec<(String, T)>> {
         let mut stmt = self.0.prepare_cached(
             "SELECT key,data FROM kv WHERE key>=?1 AND key<?2 AND (expires IS NULL OR expires>?3)",
         )?;
@@ -345,12 +433,7 @@ impl Db<'_> {
     }
 
     pub fn run(&self, id: &str) -> Result<Option<Value>> {
-        self.0
-            .prepare_cached("SELECT data FROM runs WHERE id=?")?
-            .query_row([id], |r| r.get::<_, String>(0))
-            .optional()?
-            .map(|s| Ok(serde_json::from_str(&s)?))
-            .transpose()
+        self.json_row("SELECT data FROM runs WHERE id=?", [id])
     }
 
     pub fn add_run(&self, run: &Value, dedupe: Option<&str>) -> Result<Value> {
@@ -420,15 +503,13 @@ impl Db<'_> {
         offset: i64,
         full: bool,
     ) -> (String, Vec<rusqlite::types::Value>) {
-        let fields = if full {
-            "data"
-        } else {
-            "json_set(json_remove(data,'$.snapshot','$.summary'),'$.taskName',json_extract(data,'$.snapshot.task.name'),'$.agentName',json_extract(data,'$.snapshot.agent.name'))"
-        };
+        let fields = if full { "data" } else { RUN_SUMMARY };
         let mut filters = vec![
-            "NOT EXISTS (SELECT 1 FROM records c WHERE c.kind='chats' AND \
-                json_extract(c.data,'$.runId')=runs.id AND \
-                COALESCE(json_extract(c.data,'$.lifecycle'),'active')<>'active')",
+            "NOT EXISTS (
+               SELECT 1 FROM records c
+               WHERE c.kind='chats' AND json_extract(c.data,'$.runId')=runs.id
+                 AND COALESCE(json_extract(c.data,'$.lifecycle'),'active')<>'active'
+             )",
         ];
         let mut values: Vec<rusqlite::types::Value> = Vec::new();
         if let Some(status) = status {
@@ -439,31 +520,26 @@ impl Db<'_> {
             filters.push("task_id=?");
             values.push(task.to_owned().into());
         }
-        let clause = if filters.is_empty() {
-            String::new()
-        } else {
-            format!(" WHERE {}", filters.join(" AND "))
-        };
         values.push(limit.into());
         values.push(offset.into());
+        let clause = filters.join(" AND ");
         (
             format!(
-                "SELECT {fields} FROM runs{clause} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?"
+                "SELECT {fields} FROM runs WHERE {clause} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?"
             ),
             values,
         )
     }
 
     pub fn stats(&self) -> Result<Value> {
-        let mut counts = json!({});
         let mut stmt = self
             .0
             .prepare_cached("SELECT status,COUNT(*) FROM runs GROUP BY status")?;
-        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
-            let (k, v) = row?;
-            counts[k] = v.into();
-        }
-        Ok(counts)
+        let counts = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+            .map(|row| row.map(|(status, count)| (status, Value::from(count))))
+            .collect::<std::result::Result<serde_json::Map<_, _>, _>>()?;
+        Ok(counts.into())
     }
 
     pub fn event(&self, run: &str, kind: &str, text: &str, payload: Option<&Value>) -> Result<()> {
@@ -483,9 +559,10 @@ impl Db<'_> {
         if self.0.last_insert_rowid() % 256 == 0 {
             self.0
                 .prepare_cached(
-                    "DELETE FROM events WHERE run_id=?1 AND id<(SELECT \
-                COALESCE(MAX(id),0)-10000 FROM events WHERE run_id=?1) AND run_id IN(SELECT \
-                id FROM runs WHERE json_extract(data,'$.trigger')!='chat')",
+                    "DELETE FROM events
+                     WHERE run_id=?1
+                       AND id<(SELECT COALESCE(MAX(id),0)-10000 FROM events WHERE run_id=?1)
+                       AND run_id IN (SELECT id FROM runs WHERE json_extract(data,'$.trigger')!='chat')",
                 )?
                 .execute([run])?;
         }
@@ -495,11 +572,22 @@ impl Db<'_> {
     /// Repair completed chats whose answer survived only in the run summary.
     /// Match within the latest user turn so repeated answers in later turns survive.
     pub(crate) fn restore_chat_summaries(&self) -> Result<()> {
-        let summaries = self.json_rows(
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Summary {
+            id: String,
+            summary: String,
+            finished_at: Option<i64>,
+        }
+        let summaries: Vec<Summary> = self.json_rows_as(
             "SELECT json_object('id',r.id,'summary',json_extract(r.data,'$.summary'),
                 'finishedAt',json_extract(r.data,'$.finishedAt')) FROM runs r
              WHERE r.status='succeeded' AND json_extract(r.data,'$.trigger')='chat'
-               AND NOT EXISTS (SELECT 1 FROM records c WHERE c.kind='chats' AND json_extract(c.data,'$.runId')=r.id AND COALESCE(json_extract(c.data,'$.lifecycle'),'active')!='active')
+               AND NOT EXISTS (
+                 SELECT 1 FROM records c
+                 WHERE c.kind='chats' AND json_extract(c.data,'$.runId')=r.id
+                   AND COALESCE(json_extract(c.data,'$.lifecycle'),'active')!='active'
+               )
                AND length(trim(COALESCE(json_extract(r.data,'$.summary'),''),char(9)||char(10)||char(13)||' '))>0
                AND NOT EXISTS (
                  SELECT 1 FROM events e WHERE e.run_id=r.id
@@ -511,25 +599,24 @@ impl Db<'_> {
                )",
             [],
         )?;
-        for run in summaries {
-            let id = run["id"].as_str().unwrap();
-            let summary = run["summary"].as_str().unwrap();
-            let finished = run["finishedAt"].as_i64().unwrap_or_else(now);
-            self.event(
-                id,
-                "item.completed",
-                summary,
-                Some(&json!({
-                    "type": "item.completed",
-                    "item": {
-                        "id": format!("recovered-summary:{id}:{finished}"),
-                        "type": "agent_message",
-                        "phase": "final",
-                        "text": summary,
-                        "recovered": true
-                    }
-                })),
-            )?;
+        for Summary {
+            id,
+            summary,
+            finished_at,
+        } in summaries
+        {
+            let finished = finished_at.unwrap_or_else(now);
+            let payload = json!({
+                "type": "item.completed",
+                "item": {
+                    "id": format!("recovered-summary:{id}:{finished}"),
+                    "type": "agent_message",
+                    "phase": "final",
+                    "text": summary,
+                    "recovered": true,
+                },
+            });
+            self.event(&id, "item.completed", &summary, Some(&payload))?;
             self.0.execute(
                 "UPDATE events SET created_at=? WHERE id=?",
                 params![finished, self.0.last_insert_rowid()],
@@ -632,7 +719,7 @@ WHERE e.run_id=? AND e.id<? AND (
             .prepare_cached("SELECT 1 FROM runs WHERE id=?")?
             .exists([id])?;
         if !exists {
-            return Err(Error::new(404, "Run not found."));
+            return Err(Error::not_found("Run not found."));
         }
         Ok(())
     }
@@ -647,8 +734,8 @@ WHERE e.run_id=? AND e.id<? AND (
     pub fn put_message(&self, message: &Value) -> Result<Value> {
         self.0
             .prepare_cached(
-                "INSERT INTO chat_messages VALUES(?,?,?,?) ON \
-            CONFLICT(id) DO UPDATE SET data=excluded.data",
+                "INSERT INTO chat_messages VALUES(?,?,?,?)
+                 ON CONFLICT(id) DO UPDATE SET data=excluded.data",
             )?
             .execute(params![
                 message["id"].as_str(),
@@ -667,6 +754,8 @@ WHERE e.run_id=? AND e.id<? AND (
     }
 }
 
+/// Shallow merge: every top-level key of `patch` replaces the key in `value`
+/// (a `null` is written, nested objects are replaced whole); other keys stay.
 pub fn merge(value: &mut Value, patch: &Value) {
     if let (Some(target), Some(patch)) = (value.as_object_mut(), patch.as_object()) {
         target.extend(patch.clone());

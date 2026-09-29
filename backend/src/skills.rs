@@ -3,6 +3,7 @@ use crate::{
     error::{Error, Result},
     validation::text,
 };
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -52,14 +53,20 @@ pub fn mentions(text: &str, names: &[&str]) -> Vec<String> {
     found
 }
 
-pub fn parse(content: &str) -> Result<Value> {
+/// SKILL.md frontmatter.
+#[derive(Serialize)]
+struct Metadata {
+    name: String,
+    description: String,
+}
+
+fn metadata(content: &str) -> Result<Metadata> {
     if content.len() > 100000 {
         return Err(Error::bad("Skill is too large (maximum 100 KB)."));
     }
+    let missing = || Error::bad("SKILL.md needs YAML frontmatter with name and description.");
     let normalized = content.replace("\r\n", "\n");
-    let body = normalized
-        .strip_prefix("---\n")
-        .ok_or_else(|| Error::bad("SKILL.md needs YAML frontmatter with name and description."))?;
+    let body = normalized.strip_prefix("---\n").ok_or_else(missing)?;
     let end = body
         .match_indices("\n---")
         .find(|(index, _)| {
@@ -67,20 +74,56 @@ pub fn parse(content: &str) -> Result<Value> {
             rest.is_empty() || rest.starts_with('\n')
         })
         .map(|(index, _)| index)
-        .ok_or_else(|| Error::bad("SKILL.md needs YAML frontmatter with name and description."))?;
-    let front = &body[..end];
-    let data: Value =
-        serde_yaml_ng::from_str(front).map_err(|_| Error::bad("Invalid YAML frontmatter."))?;
-    if !data["name"].is_string() || text(&data, "description").trim().is_empty() {
+        .ok_or_else(missing)?;
+    let data: Value = serde_yaml_ng::from_str(&body[..end])
+        .map_err(|_| Error::bad("Invalid YAML frontmatter."))?;
+    let description = text(&data, "description");
+    if !data["name"].is_string() || description.trim().is_empty() {
         return Err(Error::bad(
             "Add a name and description to the skill frontmatter.",
         ));
     }
-    name(text(&data, "name"))?;
-    Ok(json!({
-        "name": data["name"],
-        "description": data["description"]
-    }))
+    let name_value = text(&data, "name");
+    name(name_value)?;
+    Ok(Metadata {
+        name: name_value.to_owned(),
+        description: description.to_owned(),
+    })
+}
+
+pub fn parse(content: &str) -> Result<Value> {
+    Ok(serde_json::to_value(metadata(content)?)?)
+}
+
+/// A skill directory as listed to the owner, including invalid ones.
+#[derive(Serialize)]
+struct Listing<'a> {
+    name: String,
+    description: String,
+    scope: &'a str,
+    path: String,
+    content: String,
+    valid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl Listing<'_> {
+    fn read(&mut self, directory: &str, path: &Path, content: String) {
+        self.path = path.to_string_lossy().into_owned();
+        match metadata(&content) {
+            Ok(parsed) => {
+                self.valid = parsed.name == directory;
+                if !self.valid {
+                    self.error = Some("Name differs from directory".into());
+                }
+                self.name = parsed.name;
+                self.description = parsed.description;
+            }
+            Err(error) => self.error = Some(error.message),
+        }
+        self.content = content;
+    }
 }
 
 pub fn relative(value: &str) -> Result<()> {
@@ -186,7 +229,7 @@ impl Skills {
         for segment in [".agents", "skills"] {
             current.push(segment);
             match fs::create_dir(&current).await {
-                Ok(_) => {}
+                Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(error.into()),
             };
@@ -203,55 +246,49 @@ impl Skills {
     pub async fn list(&self, scope: &str, project: Option<&Path>) -> Result<Vec<Value>> {
         let root = self.root(project).await?;
         let mut entries = fs::read_dir(&root).await?;
-        let mut result = Vec::new();
+        let mut listings = Vec::new();
         while let Some(entry) = entries.next_entry().await? {
             if !entry.file_type().await?.is_dir() {
                 continue;
             }
-            let filename = entry.file_name().to_string_lossy().into_owned();
-            let mut value = json!({
-                "name": filename,
-                "description": "Invalid skill",
-                "scope": scope,
-                "path": root.join(&filename).join("SKILL.md"),
-                "content": "",
-                "valid": false
-            });
+            let directory = entry.file_name().to_string_lossy().into_owned();
+            let mut listing = Listing {
+                name: directory.clone(),
+                description: "Invalid skill".into(),
+                scope,
+                path: root
+                    .join(&directory)
+                    .join("SKILL.md")
+                    .to_string_lossy()
+                    .into_owned(),
+                content: String::new(),
+                valid: false,
+                error: None,
+            };
             let read = async {
-                name(&filename)?;
-                let path = bounded(&root, &format!("{filename}/SKILL.md"), false).await?;
+                name(&directory)?;
+                let path = bounded(&root, &format!("{directory}/SKILL.md"), false).await?;
                 let content = small_file(&path).await?;
                 Ok::<_, Error>((path, content))
             }
             .await;
             match read {
-                Ok((path, content)) => {
-                    value["path"] = path.to_string_lossy().into_owned().into();
-                    value["content"] = content.clone().into();
-                    match parse(&content) {
-                        Ok(parsed) => {
-                            value["name"] = parsed["name"].clone();
-                            value["description"] = parsed["description"].clone();
-                            value["valid"] = (parsed["name"] == filename).into();
-                            if parsed["name"] != filename {
-                                value["error"] = "Name differs from directory".into();
-                            }
-                        }
-                        Err(error) => value["error"] = error.message.into(),
-                    }
-                }
-                Err(error) => value["error"] = error.message.into(),
-            };
-            result.push(value);
+                Ok((path, content)) => listing.read(&directory, &path, content),
+                Err(error) => listing.error = Some(error.message),
+            }
+            listings.push(listing);
         }
-        result.sort_by(|a, b| text(a, "name").cmp(text(b, "name")));
-        Ok(result)
+        listings.sort_by(|a, b| a.name.cmp(&b.name));
+        listings
+            .into_iter()
+            .map(|listing| Ok(serde_json::to_value(listing)?))
+            .collect()
     }
 
     pub async fn save(&self, skill: &str, content: &str, project: Option<&Path>) -> Result<Value> {
         name(skill)?;
-        let parsed = parse(content)?;
-        if parsed["name"] != skill {
+        let parsed = metadata(content)?;
+        if parsed.name != skill {
             return Err(Error::bad(
                 "Frontmatter name must match the skill directory.",
             ));
@@ -261,7 +298,7 @@ impl Skills {
         private_dir(&directory).await?;
         let file = bounded(&root, &format!("{skill}/SKILL.md"), true).await?;
         atomic_write(&file, content.as_bytes()).await?;
-        Ok(parsed)
+        Ok(serde_json::to_value(parsed)?)
     }
 
     pub async fn remove(&self, skill: &str, project: Option<&Path>) -> Result<()> {
@@ -330,9 +367,7 @@ impl Skills {
         }
         let target = bounded(&root, file, content.is_some()).await?;
         let Some(content) = content else {
-            return Ok(json!({
-                "content": small_file(&target).await?
-            }));
+            return Ok(json!({ "content": small_file(&target).await? }));
         };
         if content.len() > 100000 {
             return Err(Error::bad("File is too large."));
@@ -341,8 +376,6 @@ impl Skills {
             return self.save(skill, content, project).await;
         }
         atomic_write(&target, content.as_bytes()).await?;
-        Ok(json!({
-            "saved": true
-        }))
+        Ok(json!({ "saved": true }))
     }
 }

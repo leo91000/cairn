@@ -31,35 +31,34 @@ pub fn redact(text: &str, secrets: &[String]) -> String {
     text
 }
 
+/// Keys whose values are credentials, compared case-insensitively.
+const CREDENTIAL_KEYS: [&str; 11] = [
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "openai_api_key",
+    "codex_api_key",
+    "op_service_account_token",
+    "anthropic_api_key",
+    "anthropic_auth_token",
+    "claude_code_oauth_token",
+    "accesstoken",
+    "refreshtoken",
+];
+
 pub fn payload(value: &Value, secrets: &[String]) -> Value {
     match value {
         Value::String(s) => redact(s, secrets).into(),
         Value::Array(a) => a.iter().map(|v| payload(v, secrets)).collect(),
         Value::Object(o) => Value::Object(
             o.iter()
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        if [
-                            "access_token",
-                            "refresh_token",
-                            "id_token",
-                            "openai_api_key",
-                            "codex_api_key",
-                            "op_service_account_token",
-                            "anthropic_api_key",
-                            "anthropic_auth_token",
-                            "claude_code_oauth_token",
-                            "accesstoken",
-                            "refreshtoken",
-                        ]
-                        .contains(&k.to_lowercase().as_str())
-                        {
-                            "[redacted]".into()
-                        } else {
-                            payload(v, secrets)
-                        },
-                    )
+                .map(|(key, value)| {
+                    let value = if CREDENTIAL_KEYS.contains(&key.to_lowercase().as_str()) {
+                        "[redacted]".into()
+                    } else {
+                        payload(value, secrets)
+                    };
+                    (key.clone(), value)
                 })
                 .collect(),
         ),
@@ -189,31 +188,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
     };
     let projects = crate::project_workspaces::catalog(run)
         .iter()
-        .map(|project| {
-            let path = run["workspaces"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|w| w["projectId"] == project["id"])
-                .map(|w| text(w, "path"))
-                .unwrap_or("");
-            if !path.is_empty() {
-                format!(
-                    "- {} ({}): {path}",
-                    text(project, "name"),
-                    text(project, "id")
-                )
-            } else if run["isolated"] == true {
-                format!(
-                    "- {} ({}): not loaded; call leo_workspace.open_project \
-                    with this projectId when needed.",
-                    text(project, "name"),
-                    text(project, "id")
-                )
-            } else {
-                format!("- {}: {}", text(project, "name"), text(project, "path"))
-            }
-        })
+        .map(|project| project_line(run, project))
         .collect::<Vec<_>>()
         .join("\n");
     let skills = run["snapshot"]["skills"]
@@ -261,6 +236,26 @@ pub fn prompt(run: &Value, chat: bool) -> String {
     )
 }
 
+fn project_line(run: &Value, project: &Value) -> String {
+    let (name, id) = (text(project, "name"), text(project, "id"));
+    let path = run["workspaces"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|w| w["projectId"] == project["id"])
+        .map_or("", |w| text(w, "path"));
+    if !path.is_empty() {
+        format!("- {name} ({id}): {path}")
+    } else if run["isolated"] == true {
+        format!(
+            "- {name} ({id}): not loaded; call leo_workspace.open_project \
+            with this projectId when needed."
+        )
+    } else {
+        format!("- {name}: {}", text(project, "path"))
+    }
+}
+
 pub fn chat_plan(
     run: &Value,
     prepared: &Value,
@@ -291,26 +286,27 @@ pub fn chat_plan(
             .flatten()
             .map(|w| text(w, "path").into()),
     );
+    let input_directory = if prepared["isolated"] == true {
+        Path::new("/run/leo-chat").to_owned()
+    } else {
+        directory.join("chat-input")
+    };
+    let agent = &run["snapshot"]["agent"];
     let mut plan = json!({
         "provider": crate::provider::Provider::of_run(run),
         "claudeMcps": mcp["claudeMcps"],
         "claudeDeniedTools": mcp["claudeDeniedTools"],
         "execution": run["chatExecution"],
-        "instructions": prompt(&context,true),
-        "inputDirectory": if prepared["isolated"]==true{
-    Path::new("/run/leo-chat").to_owned()}
-    else{
-    directory.join("chat-input")}
-    ,
+        "instructions": prompt(&context, true),
+        "inputDirectory": input_directory,
         "output": prepared["output"],
         "cwd": prepared["cwd"],
-        "model": run["snapshot"]["agent"]["model"],
-        "reasoning": run["snapshot"]["agent"]["reasoning"],
-        "sandbox": policy(&run["snapshot"]["agent"])["sandbox"],
+        "model": agent["model"],
+        "reasoning": agent["reasoning"],
+        "sandbox": policy(agent)["sandbox"],
         "writableRoots": roots,
-        "args": mcp["args"]
-    }
-    );
+        "args": mcp["args"],
+    });
     if let Some(session) = session {
         plan["sessionId"] = session.into();
     }

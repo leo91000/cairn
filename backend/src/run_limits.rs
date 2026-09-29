@@ -14,7 +14,10 @@ pub(crate) fn budget_ms(agent: &Value) -> Option<i64> {
 pub(crate) async fn wait_until(deadline: Option<i64>) {
     match deadline {
         Some(deadline) => {
-            tokio::time::sleep(Duration::from_millis((deadline - now()).max(0) as u64)).await;
+            tokio::time::sleep(Duration::from_millis(
+                (deadline - now()).max(0).unsigned_abs(),
+            ))
+            .await;
         }
         None => std::future::pending::<()>().await,
     }

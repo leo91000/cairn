@@ -3,6 +3,7 @@
 use crate::{
     error::{Error, Result},
     service::Service,
+    storage::metrics::Counter,
 };
 use serde_json::{Value, json};
 use std::{
@@ -36,9 +37,9 @@ pub struct HotS3 {
     reads: Semaphore,
     writes: Semaphore,
     pending: Mutex<HashMap<ReadKey, Weak<PendingRead>>>,
-    get_metrics: crate::storage::metrics::Counter,
-    put_metrics: crate::storage::metrics::Counter,
-    purge_metrics: crate::storage::metrics::Counter,
+    get_metrics: Counter,
+    put_metrics: Counter,
+    purge_metrics: Counter,
 }
 
 impl HotS3 {
@@ -48,9 +49,9 @@ impl HotS3 {
             reads: Semaphore::new(8),
             writes: Semaphore::new(HOT_WRITE_CONCURRENCY),
             pending: Mutex::new(HashMap::new()),
-            get_metrics: Default::default(),
-            put_metrics: Default::default(),
-            purge_metrics: Default::default(),
+            get_metrics: Counter::default(),
+            put_metrics: Counter::default(),
+            purge_metrics: Counter::default(),
         }
     }
 
@@ -123,15 +124,46 @@ pub struct Storage {
 }
 
 fn setting(config: &Value, suffix: &str, key: &str) -> String {
-    std::env::var(format!("STORAGE_S3_{suffix}"))
-        .ok()
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            std::env::var(format!("ARCHIVE_S3_{suffix}"))
-                .ok()
-                .filter(|v| !v.is_empty())
-        })
+    non_empty_env(&format!("STORAGE_S3_{suffix}"))
+        .or_else(|| non_empty_env(&format!("ARCHIVE_S3_{suffix}")))
         .unwrap_or_else(|| config[key].as_str().unwrap_or("").into())
+}
+
+fn non_empty_env(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+/// Missing blocks conflict; other client errors are permanent refusals; the rest retry.
+fn read_error(
+    error: &aws_sdk_s3::error::SdkError<
+        aws_sdk_s3::operation::get_object::GetObjectError,
+        aws_sdk_s3::config::http::HttpResponse,
+    >,
+) -> Error {
+    use aws_sdk_s3::error::ProvideErrorMetadata;
+    let status = error
+        .raw_response()
+        .map(|response| response.status().as_u16());
+    let service_error = error.as_service_error();
+    let missing = service_error
+        .is_some_and(aws_sdk_s3::operation::get_object::GetObjectError::is_no_such_key)
+        || status == Some(404);
+    if missing {
+        return Error::conflict("Remote recovery block is missing.");
+    }
+    let client_error =
+        status.is_some_and(|status| (400..500).contains(&status) && !matches!(status, 408 | 429));
+    let throttled = matches!(
+        service_error.and_then(ProvideErrorMetadata::code),
+        Some("RequestTimeout" | "RequestTimeoutException" | "SlowDown" | "Throttling")
+    );
+    if client_error && !throttled {
+        return Error::new(
+            424,
+            "Recovery storage rejected the read; check its access and configuration.",
+        );
+    }
+    Error::unavailable("Recovery storage unavailable; the read will retry.")
 }
 
 impl Storage {
@@ -153,15 +185,13 @@ impl Storage {
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
         {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "Configure a valid STORAGE_S3_BUCKET on the server.",
             ));
         }
         let endpoint = setting(&config, "ENDPOINT", "endpoint");
         if !endpoint.is_empty() && !endpoint.starts_with("https://") {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "STORAGE_S3_ENDPOINT must be an https:// URL.",
             ));
         }
@@ -169,24 +199,25 @@ impl Storage {
             bucket,
             binary: config["awsBinary"].as_str().unwrap_or("aws").into(),
             endpoint: Some(endpoint).filter(|e| !e.is_empty()),
-            region: {
-                let configured = setting(&config, "REGION", "region");
-                if configured.is_empty() {
-                    std::env::var("AWS_REGION")
-                        .ok()
-                        .filter(|value| !value.is_empty())
-                        .or_else(|| {
-                            std::env::var("AWS_DEFAULT_REGION")
-                                .ok()
-                                .filter(|value| !value.is_empty())
-                        })
-                        .unwrap_or_default()
-                } else {
-                    configured
-                }
-            },
+            region: Some(setting(&config, "REGION", "region"))
+                .filter(|region| !region.is_empty())
+                .or_else(|| non_empty_env("AWS_REGION"))
+                .or_else(|| non_empty_env("AWS_DEFAULT_REGION"))
+                .unwrap_or_default(),
             hot: s.hot_s3.clone(),
         })
+    }
+
+    /// `s3api <operation> --bucket <bucket> <arguments...>` for the AWS CLI.
+    fn s3api(&self, operation: &str, arguments: &[&str]) -> Vec<String> {
+        let mut args = vec![
+            "s3api".to_owned(),
+            operation.to_owned(),
+            "--bucket".to_owned(),
+            self.bucket.clone(),
+        ];
+        args.extend(arguments.iter().map(|&argument| argument.to_owned()));
+        args
     }
 
     async fn call(&self, args: Vec<String>) -> Result<Value> {
@@ -210,16 +241,15 @@ impl Storage {
         }
         let output = tokio::time::timeout(Duration::from_secs(7200), command.output())
             .await
-            .map_err(|_| Error::new(503, "Object storage operation timed out; it will retry."))?
-            .map_err(|_| Error::new(503, "Unable to start the server's AWS CLI."))?;
+            .map_err(|_| Error::unavailable("Object storage operation timed out; it will retry."))?
+            .map_err(|_| Error::unavailable("Unable to start the server's AWS CLI."))?;
         if !output.status.success()
             && missing.is_some_and(|code| String::from_utf8_lossy(&output.stderr).contains(code))
         {
             return Ok(Value::Null);
         }
         if !output.status.success() {
-            return Err(Error::new(
-                503,
+            return Err(Error::unavailable(
                 "Object storage operation failed; local data is retained and the operation will retry.",
             ));
         }
@@ -227,18 +257,13 @@ impl Storage {
             return Ok(Value::Null);
         }
         serde_json::from_slice(&output.stdout)
-            .map_err(|_| Error::new(503, "Invalid response from object storage."))
+            .map_err(|_| Error::unavailable("Invalid response from object storage."))
     }
 
     pub async fn validate(&self) -> Result<()> {
         let block = self
             .optional(
-                vec![
-                    "s3api".into(),
-                    "get-public-access-block".into(),
-                    "--bucket".into(),
-                    self.bucket.clone(),
-                ],
+                self.s3api("get-public-access-block", &[]),
                 Some("NotImplemented"),
             )
             .await?;
@@ -259,12 +284,7 @@ impl Storage {
         }
         let lifecycle = self
             .optional(
-                vec![
-                    "s3api".into(),
-                    "get-bucket-lifecycle-configuration".into(),
-                    "--bucket".into(),
-                    self.bucket.clone(),
-                ],
+                self.s3api("get-bucket-lifecycle-configuration", &[]),
                 Some("NoSuchLifecycleConfiguration"),
             )
             .await?;
@@ -280,12 +300,7 @@ impl Storage {
         }
         let lock = self
             .optional(
-                vec![
-                    "s3api".into(),
-                    "get-object-lock-configuration".into(),
-                    "--bucket".into(),
-                    self.bucket.clone(),
-                ],
+                self.s3api("get-object-lock-configuration", &[]),
                 Some("ObjectLockConfigurationNotFoundError"),
             )
             .await?;
@@ -295,26 +310,13 @@ impl Storage {
                     bucket without Object Lock.",
             ));
         }
-        self.call(vec![
-            "s3api".into(),
-            "head-bucket".into(),
-            "--bucket".into(),
-            self.bucket.clone(),
-        ])
-        .await?;
+        self.call(self.s3api("head-bucket", &[])).await?;
         Ok(())
     }
 
     /// Providers without public access blocks (OVHcloud) must show a private ACL and no bucket policy.
     async fn validate_private(&self) -> Result<()> {
-        let acl = self
-            .call(vec![
-                "s3api".into(),
-                "get-bucket-acl".into(),
-                "--bucket".into(),
-                self.bucket.clone(),
-            ])
-            .await?;
+        let acl = self.call(self.s3api("get-bucket-acl", &[])).await?;
         if acl["Grants"].as_array().into_iter().flatten().any(|grant| {
             let uri = grant["Grantee"]["URI"].as_str().unwrap_or("");
             uri.ends_with("/AllUsers") || uri.ends_with("/AuthenticatedUsers")
@@ -325,12 +327,7 @@ impl Storage {
         }
         let policy = self
             .optional(
-                vec![
-                    "s3api".into(),
-                    "get-bucket-policy".into(),
-                    "--bucket".into(),
-                    self.bucket.clone(),
-                ],
+                self.s3api("get-bucket-policy", &[]),
                 Some("NoSuchBucketPolicy"),
             )
             .await;
@@ -367,7 +364,7 @@ impl Storage {
             .send()
             .await
             .map_err(|_| {
-                Error::new(503, "Recovery block upload failed; local data is retained.")
+                Error::unavailable("Recovery block upload failed; local data is retained.")
             })?;
         sample.finish(bytes.len());
         self.verify_bytes(key, &bytes).await
@@ -438,26 +435,7 @@ impl Storage {
                 .key(key)
                 .send()
                 .await
-                .map_err(|error| {
-                    use aws_sdk_s3::error::ProvideErrorMetadata;
-                    let status = error.raw_response().map(|response| response.status().as_u16());
-                    let code = error.as_service_error().and_then(|error| error.code());
-                    if error
-                        .as_service_error()
-                        .is_some_and(|error| error.is_no_such_key())
-                        || error
-                            .raw_response()
-                            .is_some_and(|response| response.status().as_u16() == 404)
-                    {
-                        Error::new(409, "Remote recovery block is missing.")
-                    } else if status.is_some_and(|status| (400..500).contains(&status) && !matches!(status, 408 | 429))
-                        && !matches!(code, Some("RequestTimeout" | "RequestTimeoutException" | "SlowDown" | "Throttling"))
-                    {
-                        Error::new(424, "Recovery storage rejected the read; check its access and configuration.")
-                    } else {
-                        Error::new(503, "Recovery storage unavailable; the read will retry.")
-                    }
-                })?;
+                .map_err(|error| read_error(&error))?;
             if output
                 .content_length()
                 .is_some_and(|length| length < 0 || length as u64 > limit)
@@ -468,10 +446,7 @@ impl Storage {
             let mut bytes = Vec::with_capacity(capacity.min(limit) as usize);
             let mut body = output.body;
             while let Some(chunk) = body.try_next().await.map_err(|_| {
-                Error::new(
-                    503,
-                    "Recovery block transfer interrupted; the read will retry.",
-                )
+                Error::unavailable("Recovery block transfer interrupted; the read will retry.")
             })? {
                 if chunk.len() as u64 > limit.saturating_sub(bytes.len() as u64) {
                     return Err(Error::bad("Remote block exceeds the transfer limit."));
@@ -482,10 +457,7 @@ impl Storage {
         })
         .await
         .map_err(|_| {
-            Error::new(
-                503,
-                "Recovery block transfer timed out; the read will retry.",
-            )
+            Error::unavailable("Recovery block transfer timed out; the read will retry.")
         })??;
         sample.finish(bytes.len());
         Ok(bytes)
@@ -495,8 +467,8 @@ impl Storage {
     /// Exact-key filtering prevents a prefix match from deleting a sibling object.
     /// Publication uses PutObject only, so this path has no multipart uploads to abort.
     pub async fn purge_key(&self, key: &str) -> Result<()> {
-        let sample = self.hot.purge_metrics.start();
         use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+        let sample = self.hot.purge_metrics.start();
         let client = self
             .hot
             .client(self.endpoint.as_deref(), &self.region)
@@ -510,8 +482,7 @@ impl Storage {
                 .send()
                 .await
                 .map_err(|_| {
-                    Error::new(
-                        503,
+                    Error::unavailable(
                         "Cannot list obsolete disk object versions; cleanup will retry.",
                     )
                 })?;
@@ -554,14 +525,12 @@ impl Storage {
                     .send()
                     .await
                     .map_err(|_| {
-                        Error::new(
-                            503,
+                        Error::unavailable(
                             "Cannot delete obsolete disk object; cleanup will retry.",
                         )
                     })?;
                 if !result.errors().is_empty() {
-                    return Err(Error::new(
-                        503,
+                    return Err(Error::unavailable(
                         "Some obsolete disk versions could not be deleted; cleanup will retry.",
                     ));
                 }
@@ -573,14 +542,7 @@ impl Storage {
 
     pub async fn purge(&self, prefix: &str) -> Result<()> {
         let listed = self
-            .call(vec![
-                "s3api".into(),
-                "list-object-versions".into(),
-                "--bucket".into(),
-                self.bucket.clone(),
-                "--prefix".into(),
-                prefix.into(),
-            ])
+            .call(self.s3api("list-object-versions", &["--prefix", prefix]))
             .await?;
         for item in listed["Versions"]
             .as_array()
@@ -592,43 +554,34 @@ impl Storage {
                 .as_str()
                 .filter(|k| k.starts_with(prefix))
                 .ok_or_else(|| Error::internal("Unexpected storage key"))?;
-            self.call(vec![
-                "s3api".into(),
-                "delete-object".into(),
-                "--bucket".into(),
-                self.bucket.clone(),
-                "--key".into(),
-                key.into(),
-                "--version-id".into(),
-                item["VersionId"].as_str().unwrap_or("null").into(),
-            ])
+            self.call(self.s3api(
+                "delete-object",
+                &[
+                    "--key",
+                    key,
+                    "--version-id",
+                    item["VersionId"].as_str().unwrap_or("null"),
+                ],
+            ))
             .await?;
         }
         let uploads = self
-            .call(vec![
-                "s3api".into(),
-                "list-multipart-uploads".into(),
-                "--bucket".into(),
-                self.bucket.clone(),
-                "--prefix".into(),
-                prefix.into(),
-            ])
+            .call(self.s3api("list-multipart-uploads", &["--prefix", prefix]))
             .await?;
         for item in uploads["Uploads"].as_array().into_iter().flatten() {
             let key = item["Key"]
                 .as_str()
                 .filter(|k| k.starts_with(prefix))
                 .ok_or_else(|| Error::internal("Unexpected storage upload"))?;
-            self.call(vec![
-                "s3api".into(),
-                "abort-multipart-upload".into(),
-                "--bucket".into(),
-                self.bucket.clone(),
-                "--key".into(),
-                key.into(),
-                "--upload-id".into(),
-                item["UploadId"].as_str().unwrap_or("").into(),
-            ])
+            self.call(self.s3api(
+                "abort-multipart-upload",
+                &[
+                    "--key",
+                    key,
+                    "--upload-id",
+                    item["UploadId"].as_str().unwrap_or(""),
+                ],
+            ))
             .await?;
         }
         self.call(vec![

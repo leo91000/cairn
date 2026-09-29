@@ -24,7 +24,7 @@ pub fn exclusive(path: &Path, busy: &str) -> Result<Guard> {
         .mode(0o600)
         .open(path)?;
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err(Error::new(409, busy));
+        return Err(Error::conflict(busy));
     }
     Ok(Guard(file))
 }

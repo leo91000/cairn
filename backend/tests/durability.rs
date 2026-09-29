@@ -1,31 +1,48 @@
+mod common;
+
 use leo_agent_manager::{
     auth::{Auth, digest},
     config::{Config, MAIN_AGENT_ID, id, now},
-    service::Service,
+    error::{Error, Result},
+    execution,
+    run_status::RunStatus,
+    service::{self, Service},
     store::Store,
     validation::parse,
     vault::Vault,
 };
 use serde_json::{Value, json};
+use std::path::Path;
 use tempfile::TempDir;
 
+const COMPLETE: &str = "The requested work is complete.";
+
 fn config(root: &TempDir) -> Config {
-    Config {
-        data_dir: root.path().join("data"),
-        home: root.path().join("home"),
-        workspace_roots: vec![root.path().to_owned()],
-        public_url: "http://localhost:4310".into(),
-        host: "127.0.0.1".into(),
-        port: 0,
-        setup_token: "fixture".into(),
-        codex_bin: "codex".into(),
-        claude_bin: "claude".into(),
-        gh_bin: "gh".into(),
-        concurrency: 1,
-        logger: false,
-        worker_enabled: false,
-        runner_url: String::new(),
-    }
+    common::config(root.path())
+}
+
+/// A finished chat run of case `index`, whose summary may be missing from its events.
+fn summarized_run(index: usize, run: &str) -> Value {
+    let status = match index {
+        3 => RunStatus::Running,
+        4 => RunStatus::Failed,
+        _ => RunStatus::Succeeded,
+    };
+    let summary = match index {
+        5 => "x".repeat(100_000),
+        6 => " \n\t".into(),
+        _ => COMPLETE.into(),
+    };
+    json!({
+        "id": run,
+        "taskId": id(),
+        "projectId": null,
+        "status": status,
+        "createdAt": 1,
+        "finishedAt": 2,
+        "trigger": "chat",
+        "summary": summary,
+    })
 }
 
 #[tokio::test]
@@ -39,57 +56,19 @@ async fn restart_restores_missing_chat_summaries_once_without_repeating_existing
         .store
         .transaction(move |db| {
             for (index, run_id) in fixtures.iter().enumerate() {
-                let status = match index {
-                    3 => "running",
-                    4 => "failed",
-                    _ => "succeeded",
-                };
-                db.add_run(
-                    &json!({
-                        "id": run_id,
-                        "taskId": id(),
-                        "projectId": null,
-                        "status": status,
-                        "createdAt": 1,
-                        "finishedAt": 2,
-                        "trigger": "chat",
-                        "summary": if index == 5 {
-                            "x".repeat(100000)
-                        } else if index == 6 {
-                            " \n\t".into()
-                        } else {
-                            "The requested work is complete.".into()
-                        }
-                    }),
-                    None,
-                )?;
+                db.add_run(&summarized_run(index, run_id), None)?;
                 if index == 1 || index == 2 {
-                    db.event(
-                        run_id,
-                        "item.completed",
-                        "The requested work is complete.",
-                        Some(&json!({
-                            "type": "item.completed",
-                            "item": {
-                                "id": "existing",
-                                "type": "agent_message",
-                                "text": "The requested work is complete.\n"
-                            }
-                        })),
-                    )?;
+                    let existing = json!({
+                        "type": "item.completed",
+                        "item": { "id": "existing", "type": "agent_message", "text": format!("{COMPLETE}\n") },
+                    });
+                    db.event(run_id, "item.completed", COMPLETE, Some(&existing))?;
                 }
                 if index == 5 {
-                    db.event(
-                        run_id,
-                        "item.completed",
-                        "",
-                        Some(&json!({
-                            "item": {
-                                "type": "agent_message",
-                                "text": "x".repeat(100001)
-                            }
-                        })),
-                    )?;
+                    let longer = json!({
+                        "item": { "type": "agent_message", "text": "x".repeat(100_001) },
+                    });
+                    db.event(run_id, "item.completed", "", Some(&longer))?;
                 }
                 if index == 2 {
                     db.event(run_id, "chat.user", "Check again", None)?;
@@ -132,16 +111,17 @@ fn weekly_schedules_and_dst_transitions_match_the_existing_scheduler() {
         ["0 0 29 2 *", "UTC", "2026-01-01T00:00:00Z"],
         ["15 4 1 * MON", "UTC", "2026-09-11T08:00:00Z"]
     ]);
-    let script = "import{CronExpressionParser}from'cron-parser';console.log(JSON.stringify(JSON.parse(process.argv[1]).map(([cron,tz,date])=>{const \
-        p=CronExpressionParser.parse(cron,{tz,currentDate:new Date(date)});return \
-        Array.from({length:5},()=>p.next().getTime())})))";
+    let script = r"
+import { CronExpressionParser } from 'cron-parser';
+const cases = JSON.parse(process.argv[1]).map(([cron, tz, date]) => {
+    const parsed = CronExpressionParser.parse(cron, { tz, currentDate: new Date(date) });
+    return Array.from({ length: 5 }, () => parsed.next().getTime());
+});
+console.log(JSON.stringify(cases));
+";
     let output = std::process::Command::new("node")
         .args(["--input-type=module", "-e", script, &cases.to_string()])
-        .current_dir(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap(),
-        )
+        .current_dir(common::repository())
         .output()
         .unwrap();
     assert!(
@@ -155,7 +135,7 @@ fn weekly_schedules_and_dst_transitions_match_the_existing_scheduler() {
             .unwrap()
             .timestamp_millis();
         assert_eq!(
-            leo_agent_manager::service::next_occurrences(
+            service::next_occurrences(
                 case[0].as_str().unwrap(),
                 case[1].as_str().unwrap(),
                 time,
@@ -175,91 +155,45 @@ async fn restricted_agents_cannot_escalate_projects_skills_or_the_main_policy() 
     tokio::fs::create_dir(&config.home).await.unwrap();
     let s = Service::new(config).await.unwrap();
     let project = s
-        .project(
-            json!({
-                "name": "Allowed",
-                "path": root.path()
-            }),
-            None,
-        )
+        .project(json!({ "name": "Allowed", "path": root.path() }), None)
         .await
         .unwrap();
-    let agent = s
-        .agent(
-            json!({
-                "name": "Restricted",
-                "access": {
-                    "projects": [project["id"]],
-                    "skills": [],
-                    "mcps": [],
-                    "github": false,
-                    "sandbox": "read-only"
-                }
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    assert!(leo_agent_manager::service::isolated(&agent));
-    assert!(
-        s.agent(
-            json!({
-                "name": "Escalation",
-                "access": {
-                    "projects": [],
-                    "github": true
-                }
-            }),
-            None
-        )
-        .await
-        .is_err()
-    );
-    assert!(
-        s.agent(
-            json!({
-                "name": "Main",
-                "access": {
-                    "projects": [],
-                    "github": false
-                }
-            }),
-            Some(MAIN_AGENT_ID)
-        )
-        .await
-        .is_err()
-    );
-    assert!(
-        s.task(
-            json!({
-                "name": "Foreign",
-                "agentId": agent["id"],
-                "projectId": id(),
-                "prompt": "no"
-            }),
-            None
-        )
-        .await
-        .is_err()
-    );
-    let task = s
-        .task(
-            json!({
-                "name": "Allowed",
-                "agentId": agent["id"],
-                "prompt": "inspect",
-                "worktree": false
-            }),
-            None,
-        )
-        .await
-        .unwrap();
+    let restricted = json!({
+        "name": "Restricted",
+        "access": {
+            "projects": [project["id"]],
+            "skills": [],
+            "mcps": [],
+            "github": false,
+            "sandbox": "read-only",
+        },
+    });
+    let agent = s.agent(restricted, None).await.unwrap();
+    assert!(service::isolated(&agent));
+    let escalation = json!({ "name": "Escalation", "access": { "projects": [], "github": true } });
+    assert!(s.agent(escalation, None).await.is_err());
+    let main = json!({ "name": "Main", "access": { "projects": [], "github": false } });
+    assert!(s.agent(main, Some(MAIN_AGENT_ID)).await.is_err());
+    let foreign = json!({
+        "name": "Foreign",
+        "agentId": agent["id"],
+        "projectId": id(),
+        "prompt": "no",
+    });
+    assert!(s.task(foreign, None).await.is_err());
+    let allowed = json!({
+        "name": "Allowed",
+        "agentId": agent["id"],
+        "prompt": "inspect",
+        "worktree": false,
+    });
+    let task = s.task(allowed, None).await.unwrap();
     let run = s
         .enqueue(task["id"].as_str().unwrap(), "manual", None)
         .await
         .unwrap();
     assert!(
-        leo_agent_manager::execution::prepare(&run, &s.config, None, None, None)
+        execution::prepare(&run, &s.config, None, None, None)
             .await
             .is_err(),
         "Restricted execution must never fall back without a runner"
@@ -274,15 +208,9 @@ async fn restricted_agents_cannot_escalate_projects_skills_or_the_main_policy() 
     let link = root.path().join("escape");
     std::os::unix::fs::symlink(outside.path(), &link).unwrap();
     assert!(
-        s.project(
-            json!({
-                "name": "Escape",
-                "path": link
-            }),
-            None
-        )
-        .await
-        .is_err()
+        s.project(json!({ "name": "Escape", "path": link }), None)
+            .await
+            .is_err()
     );
 }
 
@@ -308,10 +236,10 @@ async fn writes_serialize_and_failed_transactions_roll_back() {
         job.await.unwrap();
     }
     assert_eq!(store.kv("counter").await.unwrap(), Some(json!(100)));
-    let result: leo_agent_manager::error::Result<()> = store
+    let result: Result<()> = store
         .transaction(|db| {
             db.set("counter", &json!(0), None)?;
-            Err(leo_agent_manager::error::Error::bad("rollback"))
+            Err(Error::bad("rollback"))
         })
         .await;
     assert!(result.is_err());
@@ -325,7 +253,16 @@ async fn vault_accepts_node_ciphertext_and_authentication_rejects_tampering() {
     let root = TempDir::new().unwrap();
     let store = Store::open(root.path()).unwrap();
     // This fixture is generated by Node's existing AES-GCM format, not by Rust.
-    let script = r#"const{createCipheriv}=require('node:crypto');const{writeFileSync}=require('node:fs');const key=Buffer.alloc(32,7);writeFileSync(process.argv[1]+'/mcp-encryption-key',key);const cipher=createCipheriv('aes-256-gcm',key,Buffer.alloc(12,9));cipher.setAAD(Buffer.from('fixture'));const data=Buffer.concat([cipher.update(JSON.stringify({token:'test-only'})),cipher.final()]);process.stdout.write(Buffer.concat([Buffer.alloc(12,9),cipher.getAuthTag(),data]).toString('base64'));"#;
+    let script = r"
+const { createCipheriv } = require('node:crypto');
+const { writeFileSync } = require('node:fs');
+const key = Buffer.alloc(32, 7);
+writeFileSync(process.argv[1] + '/mcp-encryption-key', key);
+const cipher = createCipheriv('aes-256-gcm', key, Buffer.alloc(12, 9));
+cipher.setAAD(Buffer.from('fixture'));
+const data = Buffer.concat([cipher.update(JSON.stringify({ token: 'test-only' })), cipher.final()]);
+process.stdout.write(Buffer.concat([Buffer.alloc(12, 9), cipher.getAuthTag(), data]).toString('base64'));
+";
     let output = std::process::Command::new("node")
         .args(["-e", script, root.path().to_str().unwrap()])
         .output()
@@ -335,9 +272,7 @@ async fn vault_accepts_node_ciphertext_and_authentication_rejects_tampering() {
     let ciphertext = Value::String(String::from_utf8(output.stdout).unwrap());
     assert_eq!(
         vault.decrypt("fixture", &ciphertext).unwrap(),
-        json!({
-            "token": "test-only"
-        })
+        json!({ "token": "test-only" })
     );
     assert!(vault.decrypt("another-record", &ciphertext).is_err());
     let mut encoded = ciphertext.as_str().unwrap().as_bytes().to_vec();
@@ -390,10 +325,7 @@ async fn passwords_and_sessions_remain_compatible_with_node() {
     store
         .set(
             "admin",
-            json!({
-                "salt": "salt-string",
-                "hash": String::from_utf8(output.stdout).unwrap()
-            }),
+            json!({ "salt": "salt-string", "hash": String::from_utf8(output.stdout).unwrap() }),
             None,
         )
         .await
@@ -410,25 +342,25 @@ async fn passwords_and_sessions_remain_compatible_with_node() {
     assert!(auth.read(token).await.unwrap().is_none());
 }
 
+const CALLBACK: &str = "http://localhost:9999/callback";
+
 #[tokio::test]
 async fn refresh_rotation_and_reuse_revoke_the_entire_family() {
     let root = TempDir::new().unwrap();
     let store = Store::open(root.path()).unwrap();
     let auth = Auth::new(store, "http://localhost:4310".into());
     let client = auth
-        .register(json!({
-            "redirect_uris": ["http://localhost:9999/callback"]
-        }))
+        .register(json!({ "redirect_uris": [CALLBACK] }))
         .await
         .unwrap();
     let verifier = "a".repeat(43);
     let authorization = json!({
         "client_id": client["client_id"],
-        "redirect_uri": "http://localhost:9999/callback",
+        "redirect_uri": CALLBACK,
         "response_type": "code",
         "code_challenge_method": "S256",
         "code_challenge": digest(&verifier),
-        "scope": "read run"
+        "scope": "read run",
     });
     let redirect = url::Url::parse(&auth.consent(authorization, true).await.unwrap()).unwrap();
     let code = redirect
@@ -437,39 +369,26 @@ async fn refresh_rotation_and_reuse_revoke_the_entire_family() {
         .unwrap()
         .1
         .into_owned();
-    let grant = auth
-        .exchange(json!({
-            "grant_type": "authorization_code",
-            "client_id": client["client_id"],
-            "redirect_uri": "http://localhost:9999/callback",
-            "code": code,
-            "code_verifier": verifier
-        }))
-        .await
-        .unwrap();
+    let exchange = json!({
+        "grant_type": "authorization_code",
+        "client_id": client["client_id"],
+        "redirect_uri": CALLBACK,
+        "code": code,
+        "code_verifier": verifier,
+    });
+    let grant = auth.exchange(exchange).await.unwrap();
     let refresh = json!({
         "grant_type": "refresh_token",
         "client_id": client["client_id"],
         "refresh_token": grant["refresh_token"],
-        "scope": "read"
+        "scope": "read",
     });
     let rotated = auth.exchange(refresh.clone()).await.unwrap();
-    assert!(
-        auth.verify(rotated["access_token"].as_str().unwrap(), Some("read"))
-            .await
-            .is_ok()
-    );
-    assert!(
-        auth.verify(rotated["access_token"].as_str().unwrap(), Some("run"))
-            .await
-            .is_err()
-    );
+    let rotated = rotated["access_token"].as_str().unwrap();
+    assert!(auth.verify(rotated, Some("read")).await.is_ok());
+    assert!(auth.verify(rotated, Some("run")).await.is_err());
     assert!(auth.exchange(refresh).await.is_err());
-    assert!(
-        auth.verify(rotated["access_token"].as_str().unwrap(), None)
-            .await
-            .is_err()
-    );
+    assert!(auth.verify(rotated, None).await.is_err());
     assert!(
         auth.verify(grant["access_token"].as_str().unwrap(), None)
             .await
@@ -479,41 +398,21 @@ async fn refresh_rotation_and_reuse_revoke_the_entire_family() {
 
 #[test]
 fn schemas_apply_defaults_but_reject_ambiguous_questions_and_bad_mcp() {
-    let agent = parse(
-        "agent",
-        json!({
-            "name": " Alice ",
-            "unknown": true
-        }),
-    )
-    .unwrap();
+    let agent = parse("agent", json!({ "name": " Alice ", "unknown": true })).unwrap();
     assert_eq!(agent["name"], "Alice");
     assert!(agent.get("unknown").is_none());
     assert_eq!(agent["access"]["sandbox"], "yolo");
     assert!(
         parse(
             "questions",
-            json!([
-                {
-                    "id": "q",
-                    "title": "One"
-                },
-                {
-                    "id": "q",
-                    "title": "Two"
-                }
-            ])
+            json!([{ "id": "q", "title": "One" }, { "id": "q", "title": "Two" }])
         )
         .is_err()
     );
     assert!(
         parse(
             "mcp",
-            json!({
-                "name": "Bad",
-                "transport": "http",
-                "url": "https://secret@example.com/mcp"
-            })
+            json!({ "name": "Bad", "transport": "http", "url": "https://secret@example.com/mcp" })
         )
         .is_err()
     );
@@ -525,17 +424,11 @@ async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
     let config = config(&root);
     let service = Service::new(config.clone()).await.unwrap();
     let chat = service
-        .chat_create(json!({
-            "agentId": MAIN_AGENT_ID
-        }))
+        .chat_create(json!({ "agentId": MAIN_AGENT_ID }))
         .await
         .unwrap();
     let chat_id = chat["id"].as_str().unwrap();
-    let message = json!({
-        "id": id(),
-        "text": "Investigate this",
-        "mode": "queue"
-    });
+    let message = json!({ "id": id(), "text": "Investigate this", "mode": "queue" });
     let (a, b) = tokio::join!(
         service.chat_send(chat_id, message.clone()),
         service.chat_send(chat_id, message.clone())
@@ -549,33 +442,19 @@ async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
         "id": run_id,
         "taskId": chat_id,
         "projectId": null,
-        "status": "running",
+        "status": RunStatus::Running,
         "createdAt": now(),
-        "trigger": "chat"
+        "trigger": "chat",
     });
-    service
-        .store
-        .write(move |db| db.add_run(&run, None))
-        .await
-        .unwrap();
+    common::add_run(&service.store, &run).await;
     let question = json!({
         "id": "a".repeat(64),
         "blocking": false,
-        "fields": [{
-            "id": "choice",
-            "title": "Which approach?",
-            "secret": true
-        }]
+        "fields": [{ "id": "choice", "title": "Which approach?", "secret": true }],
     });
     service
         .store
-        .set(
-            "push-device:fixture",
-            json!({
-                "createdAt": now()
-            }),
-            None,
-        )
+        .set("push-device:fixture", json!({ "createdAt": now() }), None)
         .await
         .unwrap();
     service
@@ -588,12 +467,7 @@ async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
         .unwrap();
     assert_eq!(service.store.keys("push-outbox:").await.unwrap().len(), 1);
     let question_id = question["id"].as_str().unwrap();
-    let answer = json!({
-        "id": id(),
-        "answers": {
-            "choice": ["A private answer"]
-        }
-    });
+    let answer = json!({ "id": id(), "answers": { "choice": ["A private answer"] } });
     let (a, b) = tokio::join!(
         service.question_answer(chat_id, question_id, answer.clone()),
         service.question_answer(chat_id, question_id, answer.clone())
@@ -624,6 +498,22 @@ async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
     );
 }
 
+/// Runs `git` in `directory` and returns its trimmed output.
+fn git(directory: &Path, args: &[&str]) -> String {
+    let result = std::process::Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    String::from_utf8_lossy(&result.stdout).trim().to_owned()
+}
+
 #[tokio::test]
 async fn microvm_migration_preserves_linked_worktree_commits_and_uncommitted_changes() {
     let root = TempDir::new().unwrap();
@@ -632,20 +522,6 @@ async fn microvm_migration_preserves_linked_worktree_commits_and_uncommitted_cha
     tokio::fs::create_dir(&config.home).await.unwrap();
     let repo = root.path().join("repository");
     let old = root.path().join("old-worktree");
-    let git = |directory: &std::path::Path, args: &[&str]| {
-        let result = std::process::Command::new("git")
-            .arg("-C")
-            .arg(directory)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            result.status.success(),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-        String::from_utf8_lossy(&result.stdout).trim().to_owned()
-    };
     tokio::fs::create_dir(&repo).await.unwrap();
     git(&repo, &["init", "-b", "main"]);
     git(&repo, &["config", "user.name", "Fixture"]);
@@ -672,27 +548,18 @@ async fn microvm_migration_preserves_linked_worktree_commits_and_uncommitted_cha
     let s = Service::new(config).await.unwrap();
     let project = s
         .project(
-            json!({
-                "name": "Fixture",
-                "path": repo,
-                "baseBranch": "main"
-            }),
+            json!({ "name": "Fixture", "path": repo, "baseBranch": "main" }),
             None,
         )
         .await
         .unwrap();
-    let task = s
-        .task(
-            json!({
-                "name": "Migrate",
-                "agentId": MAIN_AGENT_ID,
-                "projectId": project["id"],
-                "prompt": "inspect"
-            }),
-            None,
-        )
-        .await
-        .unwrap();
+    let task = json!({
+        "name": "Migrate",
+        "agentId": MAIN_AGENT_ID,
+        "projectId": project["id"],
+        "prompt": "inspect",
+    });
+    let task = s.task(task, None).await.unwrap();
     let run = s
         .enqueue(task["id"].as_str().unwrap(), "manual", None)
         .await
@@ -714,16 +581,12 @@ async fn microvm_migration_preserves_linked_worktree_commits_and_uncommitted_cha
         .unwrap();
     let prepared = json!({
         "isolated": false,
-        "workspaces": [{
-            "projectId": project["id"],
-            "path": old,
-            "kind": "worktree"
-        }]
+        "workspaces": [{ "projectId": project["id"], "path": old, "kind": "worktree" }],
     });
-    let migrated = leo_agent_manager::execution::restore(&run, prepared, &s.config, None)
+    let migrated = execution::restore(&run, prepared, &s.config, None)
         .await
         .unwrap();
-    let target = std::path::Path::new(migrated["workspaces"][0]["path"].as_str().unwrap());
+    let target = Path::new(migrated["workspaces"][0]["path"].as_str().unwrap());
     assert!(target.join(".git").is_dir());
     assert_eq!(git(target, &["rev-parse", "HEAD"]), head);
     assert_eq!(git(target, &["branch", "--show-current"]), "feat/saved");

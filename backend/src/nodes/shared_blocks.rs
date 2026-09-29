@@ -7,6 +7,7 @@ use crate::{
     store::Db,
     validation::text,
 };
+use futures_util::{StreamExt, stream};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -40,7 +41,11 @@ pub fn key(hash: &str, object: &str) -> String {
 }
 
 fn location(point: &Value) -> Value {
-    json!({"destination":"s3", "bucket":point["bucket"], "endpoint":point["endpoint"]})
+    json!({
+        "destination": "s3",
+        "bucket": point["bucket"],
+        "endpoint": point["endpoint"]
+    })
 }
 
 /// One transaction and cached statements for the entire candidate manifest. Only
@@ -57,7 +62,10 @@ pub(crate) fn reserve(db: &Db<'_>, point: &Value, manifest: &mut Value) -> Resul
     let mut lookup = db.0.prepare_cached(
         "SELECT id,size FROM shared_objects WHERE destination=?1 AND hash=?2 AND state='ready'",
     )?;
-    let mut insert = db.0.prepare_cached("INSERT INTO shared_objects(id,destination,hash,size,location,state) VALUES(?1,?2,?3,?4,?5,'pending')")?;
+    let mut insert = db.0.prepare_cached(
+        "INSERT INTO shared_objects(id,destination,hash,size,location,state)
+         VALUES(?1,?2,?3,?4,?5,'pending')",
+    )?;
     let mut reference =
         db.0.prepare_cached("INSERT INTO shared_references VALUES(?1,?2)")?;
     let mut revive = db.0.prepare_cached(
@@ -117,7 +125,11 @@ pub(crate) fn reserve(db: &Db<'_>, point: &Value, manifest: &mut Value) -> Resul
 /// may race to upload a previously unseen hash; atomically choose the first ready
 /// incarnation and retire duplicate uploads before publishing their manifests.
 pub(crate) fn complete_uploads(db: &Db<'_>, publication: &str, manifest: &mut Value) -> Result<()> {
-    let mut pending = db.0.prepare_cached("SELECT o.id,o.destination,o.hash,o.size FROM shared_objects o JOIN shared_references r ON r.object=o.id WHERE r.publication=?1 AND o.state='pending'")?;
+    let mut pending = db.0.prepare_cached(
+        "SELECT o.id,o.destination,o.hash,o.size FROM shared_objects o
+         JOIN shared_references r ON r.object=o.id
+         WHERE r.publication=?1 AND o.state='pending'",
+    )?;
     let objects = pending
         .query_map([publication], |row| {
             Ok((
@@ -177,10 +189,14 @@ pub(crate) fn complete_uploads(db: &Db<'_>, publication: &str, manifest: &mut Va
 }
 
 pub(crate) fn verified(db: &Db<'_>, publication: &str) -> Result<()> {
-    let invalid: bool = db.0.query_row("SELECT EXISTS(SELECT 1 FROM shared_references r JOIN shared_objects o ON o.id=r.object WHERE r.publication=?1 AND o.state<>'ready')",[publication],|r|r.get(0))?;
+    let invalid: bool = db.0.query_row(
+        "SELECT EXISTS(SELECT 1 FROM shared_references r JOIN shared_objects o ON o.id=r.object
+         WHERE r.publication=?1 AND o.state<>'ready')",
+        [publication],
+        |r| r.get(0),
+    )?;
     if invalid {
-        return Err(Error::new(
-            409,
+        return Err(Error::conflict(
             "A shared block was invalidated during publication.",
         ));
     }
@@ -191,7 +207,13 @@ pub(crate) fn verified(db: &Db<'_>, publication: &str) -> Result<()> {
 pub(crate) fn release(db: &Db<'_>, publication: &str) -> Result<()> {
     // Mark only this publication's objects. A concurrent/new reference clears the
     // timestamp in reserve, in the same SQLite serialization order as GC claims.
-    db.0.execute("UPDATE shared_objects SET unused_at=?2 WHERE id IN (SELECT object FROM shared_references WHERE publication=?1) AND NOT EXISTS (SELECT 1 FROM shared_references r WHERE r.object=shared_objects.id AND r.publication<>?1)",params![publication,now()])?;
+    db.0.execute(
+        "UPDATE shared_objects SET unused_at=?2
+         WHERE id IN (SELECT object FROM shared_references WHERE publication=?1)
+         AND NOT EXISTS (SELECT 1 FROM shared_references r
+                         WHERE r.object=shared_objects.id AND r.publication<>?1)",
+        params![publication, now()],
+    )?;
     db.0.execute("DELETE FROM shared_publications WHERE id=?1", [publication])?;
     Ok(())
 }
@@ -247,7 +269,12 @@ struct Deletion {
 }
 
 fn claim(db: &Db<'_>, cutoff: i64) -> Result<Vec<Deletion>> {
-    let mut stmt=db.0.prepare_cached("SELECT id,hash,location FROM shared_objects WHERE unused_at<=?1 AND retry_at<=?3 AND NOT EXISTS (SELECT 1 FROM shared_references WHERE object=shared_objects.id) ORDER BY retry_at,unused_at LIMIT ?2")?;
+    let mut stmt = db.0.prepare_cached(
+        "SELECT id,hash,location FROM shared_objects
+         WHERE unused_at<=?1 AND retry_at<=?3
+         AND NOT EXISTS (SELECT 1 FROM shared_references WHERE object=shared_objects.id)
+         ORDER BY retry_at,unused_at LIMIT ?2",
+    )?;
     let rows = stmt
         .query_map(params![cutoff, BATCH, now()], |r| {
             Ok((
@@ -308,9 +335,17 @@ pub async fn collect(s: &Service) -> Result<usize> {
     };
     // Empty maintenance must not publish a database-change notification to every
     // subscribed UI. Recheck eligibility transactionally in claim after this hint.
-    let due=s.store.read(|db| {
-        Ok(db.0.query_row("SELECT EXISTS(SELECT 1 FROM shared_objects WHERE unused_at<=?1 AND retry_at<=?2) OR EXISTS(SELECT 1 FROM remote_deletions WHERE retry_at<=?2)",params![now()-GRACE_MS,now()],|r|r.get::<_,bool>(0))?)
-    }).await?;
+    let due = s
+        .store
+        .read(|db| {
+            Ok(db.0.query_row(
+                "SELECT EXISTS(SELECT 1 FROM shared_objects WHERE unused_at<=?1 AND retry_at<=?2)
+                 OR EXISTS(SELECT 1 FROM remote_deletions WHERE retry_at<=?2)",
+                params![now() - GRACE_MS, now()],
+                |r| r.get::<_, bool>(0),
+            )?)
+        })
+        .await?;
     if !due {
         return Ok(0);
     }
@@ -318,7 +353,6 @@ pub async fn collect(s: &Service) -> Result<usize> {
         .store
         .transaction(|db| claim(db, now() - GRACE_MS))
         .await?;
-    use futures_util::{StreamExt, stream};
     let mut pending = stream::iter(deletions.into_iter().map(|deletion| {
         let storage = super::publication::storage_for(s, &deletion.location);
         async move {
@@ -345,12 +379,22 @@ pub async fn collect(s: &Service) -> Result<usize> {
         }
     }
     let count = completed.len();
-    s.store.transaction(move |db| {
-        for d in completed {
-            if d.shared {db.0.execute("DELETE FROM shared_objects WHERE id=?1 AND state='deleting' AND NOT EXISTS (SELECT 1 FROM shared_references WHERE object=?1)",[d.id])?;}
-            else {db.0.execute("DELETE FROM remote_deletions WHERE id=?1",[d.id])?;}
-        }Ok(())
-    }).await?;
+    s.store
+        .transaction(move |db| {
+            for deletion in completed {
+                if deletion.shared {
+                    db.0.execute(
+                        "DELETE FROM shared_objects WHERE id=?1 AND state='deleting'
+                         AND NOT EXISTS (SELECT 1 FROM shared_references WHERE object=?1)",
+                        [deletion.id],
+                    )?;
+                } else {
+                    db.0.execute("DELETE FROM remote_deletions WHERE id=?1", [deletion.id])?;
+                }
+            }
+            Ok(())
+        })
+        .await?;
     if let Some(error) = failure {
         return Err(error);
     }
@@ -361,9 +405,12 @@ pub(crate) async fn maintain(s: Arc<Service>) {
     let mut timer = tokio::time::interval(Duration::from_secs(5));
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        tokio::select! {_ = s.shutdown.cancelled()=>return, _=timer.tick()=>{}}
+        tokio::select! {
+            () = s.shutdown.cancelled() => return,
+            _ = timer.tick() => {}
+        }
         if let Err(error) = collect(&s).await {
-            tracing::warn!(message=%error.message,"Shared block cleanup will retry");
+            tracing::warn!(message = %error.message, "Shared block cleanup will retry");
         }
     }
 }
@@ -375,11 +422,20 @@ mod tests {
     use tempfile::TempDir;
 
     fn point(run: &str, bucket: &str) -> Value {
-        json!({"id":id(),"runId":run,"bucket":bucket,"endpoint":null})
+        json!({
+            "id": id(),
+            "runId": run,
+            "bucket": bucket,
+            "endpoint": null
+        })
     }
 
     fn manifest(hashes: &[&str]) -> Value {
-        json!({"blocks":hashes.iter().map(|h|json!({"hash":h,"size":4096})).collect::<Vec<_>>()})
+        let blocks = hashes
+            .iter()
+            .map(|hash| json!({ "hash": hash, "size": 4096 }))
+            .collect::<Vec<_>>();
+        json!({ "blocks": blocks })
     }
 
     async fn reserve_point(store: &Store, point: &Value, hashes: &[&str]) -> Vec<Object> {
@@ -612,7 +668,7 @@ mod tests {
                 for i in 0..64 {
                     queue(
                         db,
-                        &json!({"bucket":"bucket"}),
+                        &json!({ "bucket": "bucket" }),
                         &format!("legacy-{i}"),
                         false,
                     )?;

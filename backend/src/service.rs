@@ -2,8 +2,9 @@ use crate::{
     auth::Auth,
     config::{Config, MAIN_AGENT_ID, id, now},
     error::{Error, Result, required},
+    run_status::RunStatus,
     skills::Skills,
-    store::{Store, merge},
+    store::{Db, Store, merge},
     validation::{parse, text},
     vault::Vault,
 };
@@ -56,24 +57,24 @@ impl Service {
         let store = Store::open(&config.data_dir)?;
         let vault = Vault::new(store.clone(), &config.data_dir)?;
         let service = Arc::new(Self {
-            node_maintenance_tasks: Default::default(),
-            node_lease_deadlines: Default::default(),
+            node_maintenance_tasks: Arc::default(),
+            node_lease_deadlines: Arc::default(),
             started: tokio::time::Instant::now(),
-            node_backup_operation: Default::default(),
-            node_backup_lock: Default::default(),
-            shared_block_collection: Default::default(),
-            node_transport: Default::default(),
-            avatars: Default::default(),
-            artifacts: Default::default(),
-            worker: Default::default(),
-            mcps: Default::default(),
-            projects: Default::default(),
-            accounts: Default::default(),
-            models: Default::default(),
-            connections: Default::default(),
-            notifications: Default::default(),
-            conversation_storage_lock: Default::default(),
-            attachment_upload: Default::default(),
+            node_backup_operation: Arc::default(),
+            node_backup_lock: Arc::default(),
+            shared_block_collection: Arc::default(),
+            node_transport: Arc::default(),
+            avatars: Arc::default(),
+            artifacts: Arc::default(),
+            worker: Arc::default(),
+            mcps: Arc::default(),
+            projects: Arc::default(),
+            accounts: Arc::default(),
+            models: Arc::default(),
+            connections: Arc::default(),
+            notifications: crate::notifications::Notifications::default(),
+            conversation_storage_lock: Arc::default(),
+            attachment_upload: Arc::default(),
             auth: Auth::new(store.clone(), config.public_url.clone()),
             skills: Skills {
                 config: config.clone(),
@@ -89,47 +90,49 @@ impl Service {
             vault,
             shutdown: CancellationToken::new(),
         });
-        for mut agent in service.store.list("agents").await? {
-            if agent["access"].get("mcps").is_none() || agent["access"].get("nodes").is_none() {
-                agent["access"] = policy(&agent);
-                service.store.put("agents", agent).await?;
-            }
-        }
-        if service.store.get("agents", MAIN_AGENT_ID).await?.is_none() {
-            let mut agent = parse(
-                "agent",
-                json!({
-                    "name": "Main agent",
-                    "description": "Your default agent, with access to every registered project, skill, and shared connection."
-                }
-                ),
-            )?;
-            agent["id"] = MAIN_AGENT_ID.into();
-            agent["createdAt"] = now().into();
-            service.store.put("agents", agent).await?;
-        }
-        // Migrate the built-in agent's old default once; preserve custom limits and
-        // any later choice to explicitly restore a two-hour budget.
-        service
-            .store
-            .transaction(|db| {
-                let key = "migration:main-agent-unlimited";
-                if db.kv(key)?.is_none() {
-                    if let Some(mut agent) = db.get("agents", MAIN_AGENT_ID)?
-                        && agent["timeoutMinutes"] == 120
-                    {
-                        agent["timeoutMinutes"] = 0.into();
-                        db.put("agents", &agent)?;
-                    }
-                    db.set(key, &json!(true), None)?;
-                }
-                Ok(())
-            })
-            .await?;
+        service.migrate_agents().await?;
         service.store.transaction(crate::accounts::migrate).await?;
         service.avatars.recover(&service).await?;
         tokio::spawn(crate::artifacts::preview::recover(service.clone()));
         Ok(service)
+    }
+
+    async fn migrate_agents(&self) -> Result<()> {
+        for mut agent in self.store.list("agents").await? {
+            if agent["access"].get("mcps").is_none() || agent["access"].get("nodes").is_none() {
+                agent["access"] = policy(&agent);
+                self.store.put("agents", agent).await?;
+            }
+        }
+        if self.store.get("agents", MAIN_AGENT_ID).await?.is_none() {
+            let mut agent = parse(
+                "agent",
+                json!({
+                    "name": "Main agent",
+                    "description": "Your default agent, with access to every registered project, skill, and shared connection.",
+                }),
+            )?;
+            agent["id"] = MAIN_AGENT_ID.into();
+            agent["createdAt"] = now().into();
+            self.store.put("agents", agent).await?;
+        }
+        // Migrate the built-in agent's old default once; preserve custom limits and
+        // any later choice to explicitly restore a two-hour budget.
+        self.store
+            .transaction(|db| {
+                let key = "migration:main-agent-unlimited";
+                if db.kv(key)?.is_some() {
+                    return Ok(());
+                }
+                if let Some(mut agent) = db.get("agents", MAIN_AGENT_ID)?
+                    && agent["timeoutMinutes"] == 120
+                {
+                    agent["timeoutMinutes"] = 0.into();
+                    db.put("agents", &agent)?;
+                }
+                db.set(key, &json!(true), None)
+            })
+            .await
     }
 
     pub async fn get(&self, kind: &str, id: &str) -> Result<Value> {
@@ -141,105 +144,25 @@ impl Service {
         mut input: Value,
         existing_id: Option<&str>,
     ) -> Result<Value> {
-        let existing = if let Some(id) = existing_id {
-            Some(self.get("agents", id).await?)
-        } else {
-            None
+        let existing = match existing_id {
+            Some(id) => Some(self.get("agents", id).await?),
+            None => None,
         };
-        if input.get("access").is_none()
-            && let Some(existing) = &existing
-        {
-            input["access"] = policy(existing);
-        }
-        if input.get("provider").is_none()
-            && let Some(existing) = &existing
-        {
-            input["provider"] = crate::provider::Provider::of_agent(existing)
-                .as_str()
-                .into();
-        }
-        // Older clients submit the other access axes without knowing about nodes.
-        if input["access"].is_object()
-            && input["access"].get("nodes").is_none()
-            && let Some(existing) = &existing
-        {
-            input["access"]["nodes"] = policy(existing)["nodes"].clone();
-        }
-        if input["access"].is_object()
-            && input["access"].get("maxResources").is_none()
-            && let Some(existing) = &existing
-        {
-            input["access"]["maxResources"] = policy(existing)["maxResources"].clone();
+        if let Some(existing) = &existing {
+            inherit_agent_settings(&mut input, existing);
         }
         let mut agent = parse("agent", input)?;
         crate::claude::validate_agent(&agent)?;
-        agent["id"] = existing_id.map(str::to_owned).unwrap_or_else(id).into();
+        agent["id"] = existing_id.map_or_else(id, str::to_owned).into();
         agent["createdAt"] = existing
             .as_ref()
-            .map(|v| v["createdAt"].clone())
-            .unwrap_or_else(|| now().into());
+            .map_or_else(|| now().into(), |v| v["createdAt"].clone());
         let access = policy(&agent);
-        if !access["projects"].is_null() && access["github"] == true {
-            return Err(Error::bad(
-                "Shared GitHub credentials require access to all projects. Disable the \
-                    GitHub connection for an agent with selected projects.",
-            ));
-        }
-        if agent["id"] == MAIN_AGENT_ID
-            && (!access["projects"].is_null()
-                || !access["skills"].is_null()
-                || access["github"] != true
-                || !access["mcps"].is_null()
-                || access["mcpTools"]
-                    .as_object()
-                    .is_some_and(|v| !v.is_empty()))
-        {
-            return Err(Error::bad(
-                "The main agent always has access to all resources. Create another agent for restricted access.",
-            ));
-        }
-        for kind in ["projects", "mcps"] {
-            for value in access[kind].as_array().into_iter().flatten() {
-                self.get(kind, value.as_str().unwrap_or("")).await?;
-            }
-        }
-        if let Some(tools) = access["mcpTools"].as_object() {
-            for key in tools.keys() {
-                self.get("mcps", key).await?;
-                if !allowed(&access["mcps"], key) {
-                    return Err(Error::bad(
-                        "Tool permissions require access to the MCP connection.",
-                    ));
-                }
-            }
-        }
+        validate_access(&agent, &access)?;
+        self.require_access_targets(&access).await?;
         let agent = self
             .store
-            .transaction(move |db| {
-                // Serialize grants with revocation; a concurrent editor must never
-                // restore a grant that the revocation transaction just removed.
-                for node in access["nodes"].as_array().into_iter().flatten() {
-                    if node != crate::nodes::LOCAL_NODE_ID {
-                        let record = required(
-                            db.get("nodes", node.as_str().unwrap_or(""))?,
-                            "Node not found",
-                        )?;
-                        if record["revoked"] == true {
-                            return Err(Error::bad("A revoked node cannot be authorized."));
-                        }
-                    }
-                }
-                // Read the latest portrait inside the save transaction: editing an agent
-                // must not overwrite an upload or background generation that just finished.
-                if let Some(existing) = db.get("agents", text(&agent, "id"))?
-                    && let Some(avatar) = existing.get("avatar")
-                {
-                    agent["avatar"] = avatar.clone();
-                }
-                db.put("agents", &agent)?;
-                db.audit("agent.saved", &json!({"id": agent["id"]}))?;
-                Ok(agent)
-            })
+            .transaction(move |db| save_agent(db, agent, &access))
             .await?;
         if existing_id.is_none() && self.avatars.configured(self).await? {
             // Creation remains successful even when portrait scheduling fails.
@@ -252,6 +175,27 @@ impl Service {
         Ok(agent)
     }
 
+    /// Every project, MCP connection and tool permission must reference an existing record.
+    async fn require_access_targets(&self, access: &Value) -> Result<()> {
+        for kind in ["projects", "mcps"] {
+            for value in access[kind].as_array().into_iter().flatten() {
+                self.get(kind, value.as_str().unwrap_or("")).await?;
+            }
+        }
+        let Some(tools) = access["mcpTools"].as_object() else {
+            return Ok(());
+        };
+        for key in tools.keys() {
+            self.get("mcps", key).await?;
+            if !allowed(&access["mcps"], key) {
+                return Err(Error::bad(
+                    "Tool permissions require access to the MCP connection.",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub async fn project(&self, input: Value, existing: Option<&str>) -> Result<Value> {
         let mut project = parse("project", input)?;
         let actual = crate::skills::workspace(
@@ -259,35 +203,14 @@ impl Service {
             &self.config.workspace_roots,
         )
         .await?;
-        let previous = if let Some(id) = existing {
-            Some(self.get("projects", id).await?)
-        } else {
-            None
+        let previous = match existing {
+            Some(id) => Some(self.get("projects", id).await?),
+            None => None,
         };
-        let args = [
-            "-C",
-            actual.to_str().unwrap_or(""),
-            "config",
-            "--get",
-            "remote.origin.url",
-        ]
-        .map(str::to_owned);
-        let origin = crate::process::bounded_output(
-            crate::process::command("git", &args, &std::env::vars().collect(), None),
-            std::time::Duration::from_secs(3),
-            8000,
-        )
-        .await
-        .ok()
-        .filter(|output| output.success)
-        .map(|output| output.stdout.trim().to_owned())
-        .unwrap_or_default();
-        project["origin"] = normalize_origin(&origin).into();
+        project["origin"] = normalize_origin(&git_origin(&actual).await).into();
         project["path"] = actual.to_string_lossy().into_owned().into();
-        project["id"] = existing.map(str::to_owned).unwrap_or_else(id).into();
-        project["createdAt"] = previous
-            .map(|v| v["createdAt"].clone())
-            .unwrap_or_else(|| now().into());
+        project["id"] = existing.map_or_else(id, str::to_owned).into();
+        project["createdAt"] = previous.map_or_else(|| now().into(), |v| v["createdAt"].clone());
         self.store.save("projects", project, "project.saved").await
     }
 
@@ -298,18 +221,19 @@ impl Service {
         if let Some(cron) = task["cron"].as_str() {
             next_occurrences(cron, text(&task, "timezone"), now(), 1)?;
         }
-        task["id"] = existing.map(str::to_owned).unwrap_or_else(id).into();
+        task["id"] = existing.map_or_else(id, str::to_owned).into();
         task["createdAt"] = if let Some(id) = existing {
             self.get("tasks", id).await?["createdAt"].clone()
         } else {
             now().into()
         };
-        task["nextRun"] =
-            if task["enabled"] == true && task["archived"] != true && task["cron"].is_string() {
-                next_occurrences(text(&task, "cron"), text(&task, "timezone"), now(), 1)?[0].into()
-            } else {
-                Value::Null
-            };
+        let scheduled =
+            task["enabled"] == true && task["archived"] != true && task["cron"].is_string();
+        task["nextRun"] = if scheduled {
+            next_occurrences(text(&task, "cron"), text(&task, "timezone"), now(), 1)?[0].into()
+        } else {
+            Value::Null
+        };
         self.store.save("tasks", task, "task.saved").await
     }
 
@@ -318,68 +242,12 @@ impl Service {
         self.store
             .transaction(move |db| {
                 required(db.get(&kind, &id)?, "Record not found")?;
-                if kind == "agents" && id == MAIN_AGENT_ID {
-                    return Err(Error::new(409, "The main agent cannot be removed."));
-                }
-                if kind == "projects"
-                    && db.list("agents")?.iter().any(|a| {
-                        !policy(a)["projects"].is_null() && allowed(&policy(a)["projects"], &id)
-                    })
-                {
-                    return Err(Error::new(
-                        409,
-                        "This project is assigned to an agent. Update the agent first.",
-                    ));
-                }
-                if kind != "tasks"
-                    && db.list("tasks")?.iter().any(|t| {
-                        t[if kind == "agents" {
-                            "agentId"
-                        } else {
-                            "projectId"
-                        }] == id
-                    })
-                {
-                    return Err(Error::new(
-                        409,
-                        "This item is used by a task. Update or remove that task first.",
-                    ));
-                }
-                if db.active()?.iter().any(|r| match kind.as_str() {
-                    "tasks" => r["taskId"] == id,
-                    "projects" => {
-                        run_projects(r).iter().any(|p| p["id"] == id)
-                            || r["workspaces"]
-                                .as_array()
-                                .into_iter()
-                                .flatten()
-                                .any(|w| w["projectId"] == id)
-                    }
-                    _ => r["snapshot"]["agent"]["id"] == id,
-                }) {
-                    return Err(Error::new(
-                        409,
-                        "This item has active work. Cancel or wait for the run first.",
-                    ));
-                }
+                ensure_removable(db, &kind, &id)?;
                 if kind == "agents" {
-                    db.delete(&format!("agent-github:{id}"))?;
-                    db.delete(&format!("agent-avatar:{id}"))?;
-                    for mut account in db.list("onepassword")? {
-                        if let Some(agents) = account["agentIds"].as_array_mut() {
-                            agents.retain(|agent| agent != &id);
-                        }
-                        db.put("onepassword", &account)?;
-                    }
+                    forget_agent(db, &id)?;
                 }
                 db.remove(&kind, &id)?;
-                db.audit(
-                    &format!("{kind}.deleted"),
-                    &json!({
-                        "id": id
-                    }
-                    ),
-                )
+                db.audit(&format!("{kind}.deleted"), &json!({ "id": id }))
             })
             .await
     }
@@ -399,26 +267,21 @@ impl Service {
                 );
             }
         }
-        available.retain(|s| {
-            allowed(
-                &access["skills"],
-                &format!("{}/{}", text(s, "scope"), text(s, "name")),
-            )
-        });
+        available.retain(|s| allowed(&access["skills"], &skill_key(s)));
         Ok(available)
     }
 
     pub async fn snapshot(&self, task: Value, trigger: &str) -> Result<Value> {
         if task["archived"] == true {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "Restore this archived task before running it.",
             ));
         }
         let agent = self.get("agents", text(&task, "agentId")).await?;
         let all_projects = self.store.list("projects").await?;
         let projects = task_projects(&agent, &task, &all_projects)?;
-        let available_projects = task_projects(&agent, &json!({"projectId": null}), &all_projects)?;
+        let available_projects =
+            task_projects(&agent, &json!({ "projectId": null }), &all_projects)?;
         let project = if projects.len() == 1 {
             projects[0].clone()
         } else {
@@ -434,33 +297,39 @@ impl Service {
             available
                 .iter()
                 .filter(|s| s["valid"] == true)
-                .map(|s| format!("{}/{}", text(s, "scope"), text(s, "name")).into())
+                .map(|s| skill_key(s).into())
                 .collect()
         });
+        let access = policy(&agent);
         let mut skills = Vec::new();
         for key in keys {
             let key = key.as_str().unwrap_or("");
-            if !allowed(&policy(&agent)["skills"], key) {
+            if !allowed(&access["skills"], key) {
                 return Err(Error::bad(format!("Skill outside agent access: {key}")));
             }
-            let s = available
+            let skill = available
                 .iter()
-                .find(|s| {
-                    format!("{}/{}", text(s, "scope"), text(s, "name")) == key && s["valid"] == true
-                })
+                .find(|s| skill_key(s) == key && s["valid"] == true)
                 .ok_or_else(|| Error::bad(format!("Skill unavailable or invalid: {key}")))?;
             skills.push(json!({
-                "name": s["name"],
-                "path": s["path"],
-                "content": s["content"]
-            }
-            ));
+                "name": skill["name"],
+                "path": skill["path"],
+                "content": skill["content"],
+            }));
         }
+        let snapshot = json!({
+            "task": task,
+            "agent": agent,
+            "project": project,
+            "projects": projects,
+            "availableProjects": available_projects,
+            "skills": skills,
+        });
         Ok(json!({
             "id": id(),
             "taskId": task["id"],
             "projectId": project["id"],
-            "status": "queued",
+            "status": RunStatus::Queued,
             "trigger": trigger,
             "createdAt": now(),
             "startedAt": null,
@@ -469,16 +338,8 @@ impl Service {
             "sessionId": null,
             "workspace": null,
             "usage": null,
-            "snapshot": {
-                "task": task,
-                "agent": agent,
-                "project": project,
-                "projects": projects,
-                "availableProjects": available_projects,
-                "skills": skills
-            }
-        }
-        ))
+            "snapshot": snapshot,
+        }))
     }
 
     pub async fn enqueue(
@@ -496,15 +357,12 @@ impl Service {
             .transaction(move |db| {
                 db.add_run(&run, dedupe.as_deref())?;
                 db.event(text(&run, "id"), "status", "Queued", None)?;
-                db.audit(
-                    "run.queued",
-                    &json!({
-                        "id": run["id"],
-                        "taskId": run["taskId"],
-                        "trigger": run["trigger"]
-                    }
-                    ),
-                )?;
+                let detail = json!({
+                    "id": run["id"],
+                    "taskId": run["taskId"],
+                    "trigger": run["trigger"],
+                });
+                db.audit("run.queued", &detail)?;
                 Ok(run)
             })
             .await?;
@@ -514,11 +372,7 @@ impl Service {
 
     pub async fn schedule(&self) -> Result<()> {
         for task in self.store.list("tasks").await? {
-            if task["enabled"] != true
-                || task["archived"] == true
-                || task["cron"].is_null()
-                || task["nextRun"].as_i64().is_none_or(|time| time > now())
-            {
+            if !schedule_due(&task) {
                 continue;
             }
             if let Err(error) = self
@@ -530,16 +384,11 @@ impl Service {
                 .await
                 && error.status != 409
             {
-                self.store
-                    .audit(
-                        "schedule.failed",
-                        json!({
-                            "taskId": task["id"],
-                            "error": error.message
-                        }
-                        ),
-                    )
-                    .await?;
+                let detail = json!({
+                    "taskId": task["id"],
+                    "error": error.message
+                });
+                self.store.audit("schedule.failed", detail).await?;
             }
             let next = next_occurrences(text(&task, "cron"), text(&task, "timezone"), now(), 1)?[0];
             self.store
@@ -558,29 +407,189 @@ impl Service {
     }
 }
 
+fn schedule_due(task: &Value) -> bool {
+    task["enabled"] == true
+        && task["archived"] != true
+        && !task["cron"].is_null()
+        && task["nextRun"].as_i64().is_some_and(|time| time <= now())
+}
+
+fn skill_key(skill: &Value) -> String {
+    format!("{}/{}", text(skill, "scope"), text(skill, "name"))
+}
+
+async fn git_origin(path: &Path) -> String {
+    let args = [
+        "-C",
+        path.to_str().unwrap_or(""),
+        "config",
+        "--get",
+        "remote.origin.url",
+    ]
+    .map(str::to_owned);
+    crate::process::bounded_output(
+        crate::process::command("git", &args, &std::env::vars().collect(), None),
+        std::time::Duration::from_secs(3),
+        8000,
+    )
+    .await
+    .ok()
+    .filter(|output| output.success)
+    .map(|output| output.stdout.trim().to_owned())
+    .unwrap_or_default()
+}
+
+fn uses_project(run: &Value, id: &str) -> bool {
+    run_projects(run).iter().any(|p| p["id"] == id)
+        || run["workspaces"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|w| w["projectId"] == id)
+}
+
+/// Refuses to remove a record still referenced by an agent, a task or active work.
+fn ensure_removable(db: &Db<'_>, kind: &str, id: &str) -> Result<()> {
+    if kind == "agents" && id == MAIN_AGENT_ID {
+        return Err(Error::conflict("The main agent cannot be removed."));
+    }
+    let assigned = |agent: &Value| {
+        let projects = &policy(agent)["projects"];
+        !projects.is_null() && allowed(projects, id)
+    };
+    if kind == "projects" && db.list("agents")?.iter().any(assigned) {
+        return Err(Error::conflict(
+            "This project is assigned to an agent. Update the agent first.",
+        ));
+    }
+    let task_field = if kind == "agents" {
+        "agentId"
+    } else {
+        "projectId"
+    };
+    if kind != "tasks" && db.list("tasks")?.iter().any(|t| t[task_field] == id) {
+        return Err(Error::conflict(
+            "This item is used by a task. Update or remove that task first.",
+        ));
+    }
+    let busy = db.active()?.iter().any(|run| match kind {
+        "tasks" => run["taskId"] == id,
+        "projects" => uses_project(run, id),
+        _ => run["snapshot"]["agent"]["id"] == id,
+    });
+    if busy {
+        return Err(Error::conflict(
+            "This item has active work. Cancel or wait for the run first.",
+        ));
+    }
+    Ok(())
+}
+
+/// Drops an agent's credentials, portrait and 1Password assignments.
+fn forget_agent(db: &Db<'_>, id: &str) -> Result<()> {
+    db.delete(&format!("agent-github:{id}"))?;
+    db.delete(&format!("agent-avatar:{id}"))?;
+    for mut account in db.list("onepassword")? {
+        if let Some(agents) = account["agentIds"].as_array_mut() {
+            agents.retain(|agent| agent != id);
+        }
+        db.put("onepassword", &account)?;
+    }
+    Ok(())
+}
+
+/// Older clients omit settings they do not know about; keep the saved ones.
+fn inherit_agent_settings(input: &mut Value, existing: &Value) {
+    if input.get("access").is_none() {
+        input["access"] = policy(existing);
+    }
+    if input.get("provider").is_none() {
+        input["provider"] = crate::provider::Provider::of_agent(existing)
+            .as_str()
+            .into();
+    }
+    if !input["access"].is_object() {
+        return;
+    }
+    for key in ["nodes", "maxResources"] {
+        if input["access"].get(key).is_none() {
+            input["access"][key] = policy(existing)[key].clone();
+        }
+    }
+}
+
+fn restricted(access: &Value) -> bool {
+    !access["projects"].is_null()
+        || !access["skills"].is_null()
+        || access["github"] != true
+        || !access["mcps"].is_null()
+        || access["mcpTools"]
+            .as_object()
+            .is_some_and(|tools| !tools.is_empty())
+}
+
+fn validate_access(agent: &Value, access: &Value) -> Result<()> {
+    if !access["projects"].is_null() && access["github"] == true {
+        return Err(Error::bad(
+            "Shared GitHub credentials require access to all projects. Disable the GitHub connection for an agent with selected projects.",
+        ));
+    }
+    if agent["id"] == MAIN_AGENT_ID && restricted(access) {
+        return Err(Error::bad(
+            "The main agent always has access to all resources. Create another agent for restricted access.",
+        ));
+    }
+    Ok(())
+}
+
+fn save_agent(db: &Db<'_>, mut agent: Value, access: &Value) -> Result<Value> {
+    // Serialize grants with revocation; a concurrent editor must never
+    // restore a grant that the revocation transaction just removed.
+    for node in access["nodes"].as_array().into_iter().flatten() {
+        if node == crate::nodes::LOCAL_NODE_ID {
+            continue;
+        }
+        let record = required(
+            db.get("nodes", node.as_str().unwrap_or(""))?,
+            "Node not found",
+        )?;
+        if record["revoked"] == true {
+            return Err(Error::bad("A revoked node cannot be authorized."));
+        }
+    }
+    // Read the latest portrait inside the save transaction: editing an agent
+    // must not overwrite an upload or background generation that just finished.
+    if let Some(existing) = db.get("agents", text(&agent, "id"))?
+        && let Some(avatar) = existing.get("avatar")
+    {
+        agent["avatar"] = avatar.clone();
+    }
+    db.put("agents", &agent)?;
+    db.audit("agent.saved", &json!({ "id": agent["id"] }))?;
+    Ok(agent)
+}
+
 pub fn policy(agent: &Value) -> Value {
     let mut value = json!({
         "projects": null,
         "skills": null,
         "mcps": null,
-        "mcpTools": {
-    }
-    ,
+        "mcpTools": {},
         "github": true,
         "sandbox": "yolo",
         "nodes": [crate::nodes::LOCAL_NODE_ID],
-        "maxResources": null
-    }
-    );
+        "maxResources": null,
+    });
     merge(&mut value, &agent["access"]);
-    if agent["id"] != MAIN_AGENT_ID
+    // Agents restricted before MCP permissions existed get no MCP connection.
+    let legacy_restricted = agent["id"] != MAIN_AGENT_ID
         && agent["access"].is_object()
         && agent["access"].get("mcps").is_none()
         && (!value["projects"].is_null()
             || !value["skills"].is_null()
             || value["github"] != true
-            || value["sandbox"] != "yolo")
-    {
+            || value["sandbox"] != "yolo");
+    if legacy_restricted {
         value["mcps"] = json!([]);
     }
     value

@@ -1,7 +1,7 @@
 //! Controller-owned mounted disks. One live journal per conversation directory.
 use super::{Disk, LazyDisk, policy::Policy, remote::RemoteSource};
 use crate::error::{Error, Result};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     collections::HashMap,
     io,
@@ -62,7 +62,7 @@ pub fn open(directory: &Path) -> Result<Arc<Volume>> {
                 return Ok(volume);
             }
         }
-        Some(Entry::Replacing) => return Err(Error::new(409, "Disk replacement is in progress.")),
+        Some(Entry::Replacing) => return Err(Error::conflict("Disk replacement is in progress.")),
         None => {}
     }
     let root = directory.join("lazy");
@@ -110,10 +110,10 @@ pub async fn replacement(directory: &Path) -> Result<Replacement> {
         let mut registry = registry().lock().map_err(Error::internal)?;
         match registry.get(&directory) {
             Some(Entry::Replacing) => {
-                return Err(Error::new(409, "Disk replacement is in progress."));
+                return Err(Error::conflict("Disk replacement is in progress."));
             }
             Some(Entry::Open(volume)) if volume.strong_count() > 0 => {
-                return Err(Error::new(409, "Disk is still in use; retry restoration."));
+                return Err(Error::conflict("Disk is still in use; retry restoration."));
             }
             _ => {}
         }
@@ -229,8 +229,10 @@ impl Volume {
             return Ok(());
         }
         let blocked = tokio::select! {
-            _ = stop.cancelled() => return Err(Error::new(409, "Execution stopped.")),
-            value = tokio::time::timeout(Duration::from_secs(1), self.needs_pause()) => value.ok().and_then(std::result::Result::ok).unwrap_or(true),
+            () = stop.cancelled() => return Err(Error::conflict("Execution stopped.")),
+            value = tokio::time::timeout(Duration::from_secs(1), self.needs_pause()) => {
+                value.ok().and_then(std::result::Result::ok).unwrap_or(true)
+            }
         };
         if blocked != self.paused() {
             tracing::info!(target: "leo_performance", operation = "storage_backpressure", id = attempt, paused = blocked);
@@ -302,7 +304,7 @@ impl Volume {
         };
         status["mode"] = "on-demand".into();
         status["grantId"] = self.source.grant_id().into();
-        status["waitingFor"] = json!(reason);
+        status["waitingFor"] = reason.into();
         status["freeBytes"] = free.into();
         status["reserveBytes"] = policy.reserve(total).into();
         status["backupSeconds"] = policy.backup_seconds.into();
@@ -399,7 +401,7 @@ pub async fn materialize(directory: &Path, stop: &CancellationToken) -> Result<(
     let disk = volume.disk.clone();
     let writer = tokio::task::spawn_blocking(move || super::export(disk.as_ref(), &copy));
     tokio::select! {
-        _ = stop.cancelled() => { return Err(Error::new(409, "Disk materialization cancelled.")); },
+        () = stop.cancelled() => return Err(Error::conflict("Disk materialization cancelled.")),
         result = writer => result.map_err(Error::internal)??,
     }
     drop(cancel_reads);
@@ -415,6 +417,7 @@ pub async fn materialize(directory: &Path, stop: &CancellationToken) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[tokio::test]
     async fn missing_remote_block_requires_resolution_and_preserves_local_work() {
@@ -449,7 +452,11 @@ mod tests {
             reserve_percent: 1,
             ..Default::default()
         };
-        let context = json!({"master": origin,"grant": "fixture","policy": policy});
+        let context = json!({
+            "master": origin,
+            "grant": "fixture",
+            "policy": policy
+        });
         let source = Arc::new(
             RemoteSource::new(
                 &context,
@@ -543,7 +550,11 @@ mod tests {
             reserve_mi_b: 16 * 1024 * 1024,
             ..Default::default()
         };
-        let context = json!({"master": "http://127.0.0.1:1/","grant": "test","policy": policy});
+        let context = json!({
+            "master": "http://127.0.0.1:1/",
+            "grant": "test",
+            "policy": policy
+        });
         let source = Arc::new(
             RemoteSource::new(
                 &context,

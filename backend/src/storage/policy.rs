@@ -52,7 +52,7 @@ impl Policy {
         let value = if value.is_object() {
             value.clone()
         } else {
-            serde_json::json!({})
+            serde_json::Value::Object(serde_json::Map::new())
         };
         let policy: Self = serde_json::from_value(value)
             .map_err(|_| Error::bad("Invalid node storage limits."))?;

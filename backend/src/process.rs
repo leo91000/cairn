@@ -59,7 +59,7 @@ pub async fn bounded_output(
 ) -> Result<Output> {
     let mut child = command
         .spawn()
-        .map_err(|_| Error::new(503, "Unable to start the requested executable."))?;
+        .map_err(|_| Error::unavailable("Unable to start the requested executable."))?;
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     let operation = async {
@@ -80,7 +80,7 @@ pub async fn bounded_output(
             let _ = child.kill().await;
             match result {
                 Ok(Err(error)) => Err(error),
-                _ => Err(Error::new(504, "The executable timed out.")),
+                _ => Err(Error::gateway_timeout("The executable timed out.")),
             }
         }
     }
@@ -93,8 +93,7 @@ pub async fn read_bounded(reader: impl AsyncRead + Unpin, limit: usize) -> Resul
         .read_to_end(&mut bytes)
         .await?;
     if bytes.len() > limit {
-        return Err(Error::new(
-            502,
+        return Err(Error::bad_gateway(
             "Executable output exceeded the supported limit.",
         ));
     }

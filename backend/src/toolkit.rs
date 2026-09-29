@@ -2,7 +2,12 @@ use crate::{
     error::{Error, Result},
     process::{Environment, bounded_output, command},
 };
-use std::{path::Path, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+const MISE_INSTALLS: &str = "/usr/local/share/mise/installs";
 
 async fn copy_new(source: &Path, target: &Path, optional: bool) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -54,7 +59,7 @@ async fn prune(path: &Path, directory: &Path) -> Result<()> {
     for name in names(path).await? {
         let file = path.join(name);
         if let Ok(target) = tokio::fs::read_link(&file).await
-            && (target.starts_with("/usr/local/share/mise/installs")
+            && (target.starts_with(MISE_INSTALLS)
                 || target.starts_with(directory.join("rustup/toolchains")))
             && !tokio::fs::try_exists(&file).await?
         {
@@ -64,13 +69,17 @@ async fn prune(path: &Path, directory: &Path) -> Result<()> {
     Ok(())
 }
 
-pub async fn environment(home: &Path, mut env: Environment) -> Result<Environment> {
-    let Some(directory) = env.get("LEO_TOOLKIT_DIR").cloned() else {
-        return Ok(env);
-    };
-    let directory = Path::new(&directory);
-    let rustup = home.join(".rustup");
-    let cargo = home.join(".cargo");
+/// Runtime versions provided by the image: exact `x.y.z` releases and Temurin JDKs.
+fn linkable_version(tool: &str, version: &str) -> bool {
+    let parts = version.split('.').collect::<Vec<_>>();
+    let exact = parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    (tool == "java" && version.starts_with("temurin-")) || exact
+}
+
+async fn link_rust(directory: &Path, rustup: &Path, cargo: &Path) -> Result<()> {
     for path in [
         rustup.join("toolchains"),
         cargo.join("bin"),
@@ -88,10 +97,13 @@ pub async fn environment(home: &Path, mut env: Environment) -> Result<Environmen
         )
         .await?;
     }
-    prune(&rustup.join("toolchains"), directory).await?;
+    prune(&rustup.join("toolchains"), directory).await
+}
+
+async fn link_mise(home: &Path, directory: &Path) -> Result<PathBuf> {
     let installs = home.join(".local/share/mise/installs");
     for tool in ["node", "pnpm", "python", "go", "rust", "java"] {
-        let source = Path::new("/usr/local/share/mise/installs").join(tool);
+        let source = Path::new(MISE_INSTALLS).join(tool);
         let target = installs.join(tool);
         tokio::fs::create_dir_all(&target).await?;
         prune(&target, directory).await?;
@@ -102,13 +114,7 @@ pub async fn environment(home: &Path, mut env: Environment) -> Result<Environmen
         )
         .await?;
         for version in names(&source).await? {
-            let parts = version.split('.').collect::<Vec<_>>();
-            if tool == "java" && version.starts_with("temurin-")
-                || parts.len() == 3
-                    && parts
-                        .iter()
-                        .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
-            {
+            if linkable_version(tool, &version) {
                 link(&source.join(&version), &target.join(version)).await?;
             }
         }
@@ -118,6 +124,10 @@ pub async fn environment(home: &Path, mut env: Environment) -> Result<Environmen
     for name in names(Path::new("/usr/local/share/mise/shims")).await? {
         link(Path::new("/usr/local/bin/mise"), &shims.join(name)).await?;
     }
+    Ok(shims)
+}
+
+async fn link_toolchains(directory: &Path, rustup: &Path, cargo: &Path) -> Result<()> {
     for name in names(&directory.join("rustup/toolchains")).await? {
         link(
             &directory.join("rustup/toolchains").join(&name),
@@ -144,46 +154,54 @@ pub async fn environment(home: &Path, mut env: Environment) -> Result<Environmen
         &rustup.join("settings.toml"),
         false,
     )
-    .await?;
-    env.insert(
-        "ANDROID_HOME".into(),
-        home.join(".local/share/android/sdk")
-            .to_string_lossy()
-            .into_owned(),
+    .await
+}
+
+fn insert_path(env: &mut Environment, key: &str, path: &Path) {
+    env.insert(key.into(), path.to_string_lossy().into_owned());
+}
+
+/// Links the image's shared toolchains into `home` and returns an environment using them.
+pub async fn environment(home: &Path, mut env: Environment) -> Result<Environment> {
+    let Some(directory) = env.get("LEO_TOOLKIT_DIR").cloned() else {
+        return Ok(env);
+    };
+    let directory = Path::new(&directory);
+    let rustup = home.join(".rustup");
+    let cargo = home.join(".cargo");
+    link_rust(directory, &rustup, &cargo).await?;
+    let shims = link_mise(home, directory).await?;
+    link_toolchains(directory, &rustup, &cargo).await?;
+    insert_path(
+        &mut env,
+        "ANDROID_HOME",
+        &home.join(".local/share/android/sdk"),
     );
-    env.insert(
-        "ANDROID_USER_HOME".into(),
-        home.join(".android").to_string_lossy().into_owned(),
+    insert_path(&mut env, "ANDROID_USER_HOME", &home.join(".android"));
+    insert_path(&mut env, "GRADLE_USER_HOME", &home.join(".gradle"));
+    insert_path(&mut env, "HOME", home);
+    insert_path(&mut env, "RUSTUP_HOME", &rustup);
+    insert_path(&mut env, "CARGO_HOME", &cargo);
+    let inherited = env
+        .get("PATH")
+        .map_or("/usr/local/bin:/usr/bin:/bin", String::as_str);
+    let path = format!(
+        "{}:/usr/local/share/mise/shims:{}:{}/.local/share/android/sdk/platform-tools:{}/.local/share/android/sdk/cmdline-tools/latest/bin:{inherited}",
+        shims.display(),
+        cargo.join("bin").display(),
+        home.display(),
+        home.display(),
     );
-    env.insert(
-        "GRADLE_USER_HOME".into(),
-        home.join(".gradle").to_string_lossy().into_owned(),
-    );
-    env.insert("HOME".into(), home.to_string_lossy().into_owned());
-    env.insert("RUSTUP_HOME".into(), rustup.to_string_lossy().into_owned());
-    env.insert("CARGO_HOME".into(), cargo.to_string_lossy().into_owned());
-    env.insert(
-        "PATH".into(),
-        format!(
-            "{}:/usr/local/share/mise/shims:{}:{}/.local/share/android/sdk/platform-tools:{}/.local/share/android/sdk/cmdline-tools/latest/bin:{}",
-            shims.display(),
-            cargo.join("bin").display(),
-            home.display(),
-            home.display(),
-            env.get("PATH")
-                .map(String::as_str)
-                .unwrap_or("/usr/local/bin:/usr/bin:/bin")
-        ),
-    );
+    env.insert("PATH".into(), path);
     for args in [vec!["reshim".into()], vec!["env".into(), "--json".into()]] {
         let output = bounded_output(
             command("/usr/local/bin/mise", &args, &env, Some(Path::new("/tmp"))),
             Duration::from_secs(30),
-            100000,
+            100_000,
         )
         .await?;
         if !output.success {
-            return Err(Error::new(503, "Unable to prepare the agent toolkit."));
+            return Err(Error::unavailable("Unable to prepare the agent toolkit."));
         }
     }
     Ok(env)

@@ -13,7 +13,8 @@ use axum::{
     http::{HeaderValue, header},
     response::{IntoResponse, Response},
 };
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
@@ -24,6 +25,7 @@ use tokio::io::AsyncReadExt;
 
 pub const MAX_FILE: usize = 10 * 1024 * 1024;
 const MAX_MESSAGE: u64 = 40 * 1024 * 1024;
+const MAX_CHAT: u64 = 200 * 1024 * 1024;
 
 fn key(chat: &str, id: &str) -> String {
     format!("chat-attachment:{chat}:{id}")
@@ -102,15 +104,47 @@ pub fn message(db: &Db<'_>, chat: &str, value: &mut Value) -> Result<()> {
     Ok(())
 }
 
+fn attachments_of(message: &Value) -> &[Value] {
+    message["attachments"].as_array().map_or(&[], Vec::as_slice)
+}
+
 pub fn same(a: &Value, b: &Value) -> bool {
-    a["attachments"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-        == b["attachments"]
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+    attachments_of(a) == attachments_of(b)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum AttachmentKind {
+    Image,
+    File,
+}
+
+/// An uploaded chat file (`chat-attachment:{chat}:{id}`). Messages embed copies.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Attachment {
+    id: String,
+    chat_id: String,
+    name: String,
+    size: u64,
+    media_type: String,
+    kind: AttachmentKind,
+    digest: String,
+    created_at: i64,
+}
+
+impl Attachment {
+    fn content_disposition(&self) -> String {
+        let encoded: String = url::form_urlencoded::byte_serialize(self.name.as_bytes()).collect();
+        let disposition = match self.kind {
+            AttachmentKind::Image => "inline",
+            AttachmentKind::File => "attachment",
+        };
+        format!(
+            "{disposition}; filename*=UTF-8''{}",
+            encoded.replace('+', "%20")
+        )
+    }
 }
 
 impl Service {
@@ -131,126 +165,120 @@ impl Service {
         uuid(chat)?;
         uuid(id)?;
         crate::conversation_lifecycle::require_active(&self.get("chats", chat).await?)?;
-        let k = key(chat, id);
         match request.method().as_str() {
-            "PUT" => {
-                let _guard = self.attachment_upload.lock().await;
-                let query: HashMap<String, String> =
-                    serde_urlencoded::from_str(request.uri().query().unwrap_or(""))
-                        .map_err(|_| Error::bad("Invalid file name."))?;
-                let name = query
-                    .get("name")
-                    .filter(|s| !s.trim().is_empty() && s.len() <= 1000)
-                    .ok_or_else(|| Error::bad("A file name is required."))?;
-                let name = filename(name);
-                let bytes = tokio::time::timeout(
-                    Duration::from_secs(30),
-                    to_bytes(request.into_body(), MAX_FILE),
-                )
-                .await
-                .map_err(|_| Error::new(408, "Upload timed out."))?
-                .map_err(|_| Error::new(413, "Files must be 10 MB or smaller."))?;
-                let digest = hex::encode(Sha256::digest(&bytes));
-                if let Some(existing) = self.store.kv(&k).await? {
-                    if existing["digest"] != digest || existing["name"] != name {
-                        return Err(Error::new(
-                            409,
-                            "This attachment identifier has already been used.",
-                        ));
-                    }
-                    return Ok(Json(existing).into_response());
-                }
-                let prefix = format!("chat-attachment:{chat}:");
-                let used = self
-                    .store
-                    .read(move |db| {
-                        Ok(db
-                            .keys(&prefix)?
-                            .iter()
-                            .map(|(_, v)| v["size"].as_u64().unwrap_or(0))
-                            .sum::<u64>())
-                    })
-                    .await?;
-                if used + bytes.len() as u64 > 200 * 1024 * 1024 {
-                    return Err(Error::new(
-                        413,
-                        "This chat has reached its 200 MB attachment limit. Start a new chat.",
-                    ));
-                }
-                let media_type = media(&bytes);
-                let attachment = json!({
-                    "id": id,
-                    "chatId": chat,
-                    "name": name,
-                    "size": bytes.len(),
-                    "mediaType": media_type,
-                    "kind": if media_type.starts_with("image/") {
-                        "image"
-                    } else {
-                        "file"
-                    },
-                    "digest": digest,
-                    "createdAt": now(),
-                });
-                let path = self.attachment_path(chat, id);
-                private_dir(path.parent().unwrap()).await?;
-                atomic_write(&path, &bytes).await?;
-                let chat_id = chat.to_owned();
-                let saved = attachment.clone();
-                let commit = self
-                    .store
-                    .transaction(move |db| {
-                        let chat = required(db.get("chats", &chat_id)?, "Chat not found")?;
-                        crate::conversation_lifecycle::require_active(&chat)?;
-                        db.set(&k, &saved, None)
-                    })
-                    .await;
-                if let Err(error) = commit {
-                    let _ = tokio::fs::remove_file(&path).await;
-                    return Err(error);
-                }
-                Ok(Json(attachment).into_response())
-            }
-            "GET" => {
-                let attachment = required(self.store.kv(&k).await?, "Attachment not found")?;
-                let file = tokio::fs::OpenOptions::new()
-                    .read(true)
-                    .custom_flags(libc::O_NOFOLLOW)
-                    .open(self.attachment_path(chat, id))
-                    .await?;
-                let mut response = Body::from_stream(tokio_util::io::ReaderStream::new(
-                    file.take(MAX_FILE as u64),
-                ))
-                .into_response();
-                response.headers_mut().insert(
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_str(text(&attachment, "mediaType"))
-                        .map_err(Error::internal)?,
-                );
-                let encoded: String =
-                    url::form_urlencoded::byte_serialize(text(&attachment, "name").as_bytes())
-                        .collect();
-                let disposition = if attachment["kind"] == "image" {
-                    "inline"
-                } else {
-                    "attachment"
-                };
-                response.headers_mut().insert(
-                    header::CONTENT_DISPOSITION,
-                    HeaderValue::from_str(&format!(
-                        "{disposition}; filename*=UTF-8''{}",
-                        encoded.replace('+', "%20")
-                    ))
-                    .map_err(Error::internal)?,
-                );
-                response.headers_mut().insert(
-                    header::CONTENT_SECURITY_POLICY,
-                    HeaderValue::from_static("default-src 'none'; sandbox"),
-                );
-                Ok(response)
-            }
-            _ => Err(Error::new(405, "Method not allowed.")),
+            "PUT" => self.upload_attachment(chat, id, request).await,
+            "GET" => self.download_attachment(chat, id).await,
+            _ => Err(Error::method_not_allowed("Method not allowed.")),
         }
+    }
+
+    async fn upload_attachment(&self, chat: &str, id: &str, request: Request) -> Result<Response> {
+        let _guard = self.attachment_upload.lock().await;
+        let query: HashMap<String, String> =
+            serde_urlencoded::from_str(request.uri().query().unwrap_or(""))
+                .map_err(|_| Error::bad("Invalid file name."))?;
+        let name = query
+            .get("name")
+            .filter(|s| !s.trim().is_empty() && s.len() <= 1000)
+            .ok_or_else(|| Error::bad("A file name is required."))?;
+        let name = filename(name);
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(30),
+            to_bytes(request.into_body(), MAX_FILE),
+        )
+        .await
+        .map_err(|_| Error::timeout("Upload timed out."))?
+        .map_err(|_| Error::too_large("Files must be 10 MB or smaller."))?;
+        let digest = hex::encode(Sha256::digest(&bytes));
+        let k = key(chat, id);
+        if let Some(existing) = self.store.kv(&k).await? {
+            if existing["digest"] != digest || existing["name"] != name {
+                return Err(Error::conflict(
+                    "This attachment identifier has already been used.",
+                ));
+            }
+            return Ok(Json(existing).into_response());
+        }
+        let prefix = format!("chat-attachment:{chat}:");
+        let used = self
+            .store
+            .read(move |db| {
+                Ok(db
+                    .keys(&prefix)?
+                    .iter()
+                    .map(|(_, v)| v["size"].as_u64().unwrap_or(0))
+                    .sum::<u64>())
+            })
+            .await?;
+        if used + bytes.len() as u64 > MAX_CHAT {
+            return Err(Error::too_large(
+                "This chat has reached its 200 MB attachment limit. Start a new chat.",
+            ));
+        }
+        let media_type = media(&bytes);
+        let kind = if media_type.starts_with("image/") {
+            AttachmentKind::Image
+        } else {
+            AttachmentKind::File
+        };
+        let attachment = serde_json::to_value(Attachment {
+            id: id.to_owned(),
+            chat_id: chat.to_owned(),
+            name,
+            size: bytes.len() as u64,
+            media_type: media_type.to_owned(),
+            kind,
+            digest,
+            created_at: now(),
+        })?;
+        let path = self.attachment_path(chat, id);
+        private_dir(path.parent().unwrap()).await?;
+        atomic_write(&path, &bytes).await?;
+        let chat_id = chat.to_owned();
+        let saved = attachment.clone();
+        let commit = self
+            .store
+            .transaction(move |db| {
+                let chat = required(db.get("chats", &chat_id)?, "Chat not found")?;
+                crate::conversation_lifecycle::require_active(&chat)?;
+                db.set(&k, &saved, None)
+            })
+            .await;
+        if let Err(error) = commit {
+            if let Err(cleanup) = tokio::fs::remove_file(&path).await {
+                tracing::warn!(error = %cleanup, "could not remove an uncommitted attachment");
+            }
+            return Err(error);
+        }
+        Ok(Json(attachment).into_response())
+    }
+
+    async fn download_attachment(&self, chat: &str, id: &str) -> Result<Response> {
+        let attachment = required(self.store.kv(&key(chat, id)).await?, "Attachment not found")?;
+        let attachment = Attachment::deserialize(&attachment)?;
+        let file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(self.attachment_path(chat, id))
+            .await?;
+        let body = Body::from_stream(tokio_util::io::ReaderStream::new(
+            file.take(MAX_FILE as u64),
+        ));
+        let mut response = body.into_response();
+        let headers = response.headers_mut();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_str(&attachment.media_type).map_err(Error::internal)?,
+        );
+        headers.insert(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_str(&attachment.content_disposition()).map_err(Error::internal)?,
+        );
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("default-src 'none'; sandbox"),
+        );
+        Ok(response)
     }
 
     pub async fn prepare_chat_files(&self, run_id: &str, attachments: &Value) -> Result<()> {
@@ -298,34 +326,43 @@ impl Service {
     }
 }
 
+/// A Codex user input item.
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum InputItem {
+    Text {
+        text: String,
+        text_elements: [(); 0],
+    },
+    LocalImage {
+        path: PathBuf,
+    },
+}
+
+impl InputItem {
+    fn text(text: String) -> Self {
+        Self::Text {
+            text,
+            text_elements: [],
+        }
+    }
+}
+
 pub fn input(message: &str, attachments: &Value, directory: &Path) -> Value {
-    let mut content = vec![json!({
-        "type": "text",
-        "text": message,
-        "text_elements": [],
-    })];
+    let mut content = vec![InputItem::text(message.to_owned())];
     for attachment in attachments.as_array().into_iter().flatten() {
+        let name = text(attachment, "name");
         let path = directory
             .join("attachments")
             .join(text(attachment, "id"))
-            .join(filename(text(attachment, "name")));
-        content.push(json!({
-            "type": "text",
-            "text": format!(
-                "Attached file: {}\nLocal path: {}",
-                text(attachment, "name"),
-                path.display()
-            ),
-            "text_elements": [],
-        }));
+            .join(filename(name));
+        let description = format!("Attached file: {name}\nLocal path: {}", path.display());
+        content.push(InputItem::text(description));
         if attachment["kind"] == "image" {
-            content.push(json!({
-                "type": "localImage",
-                "path": path,
-            }));
+            content.push(InputItem::LocalImage { path });
         }
     }
-    content.into()
+    serde_json::to_value(content).expect("attachment paths are UTF-8")
 }
 
 #[cfg(test)]

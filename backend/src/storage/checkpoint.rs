@@ -28,14 +28,13 @@ pub async fn capture(
     timing.next("control_lock");
     let guard = control.lock().await;
     if stop.is_cancelled() {
-        return Err(Error::new(409, "VM stopped during capture."));
+        return Err(Error::conflict("VM stopped during capture."));
     }
     let waiting = volume.inspect().await?["waitingFor"]
         .as_str()
         .map(str::to_owned);
     if waiting.as_deref() == Some("storage-unavailable") {
-        return Err(Error::new(
-            503,
+        return Err(Error::unavailable(
             "Waiting for storage before capturing the disk.",
         ));
     }
@@ -47,11 +46,11 @@ pub async fn capture(
         if !emergency {
             let reply = tokio::time::timeout(
                 Duration::from_secs(30),
-                host::guest_request(socket, &json!({"op": "freeze"})),
+                host::guest_request(socket, &json!({ "op": "freeze" })),
             )
             .await;
             frozen = true;
-            if !matches!(&reply,Ok(Ok(value)) if value["ok"]==true) {
+            if !matches!(&reply, Ok(Ok(value)) if value["ok"] == true) {
                 // A freeze can itself wait on a disk write blocked by reserve.
                 // Seal a crash-consistent prefix so publication can free the
                 // journal, then the ordered guest thaw can complete afterwards.
@@ -76,11 +75,7 @@ pub async fn capture(
             drop(guard);
             if frozen {
                 if emergency {
-                    let socket = socket.clone();
-                    let stop = stop.clone();
-                    tokio::spawn(async move {
-                        let _ = thaw(&socket, &stop).await;
-                    });
+                    thaw_later(socket, &stop);
                 } else {
                     let _ = thaw(socket, &stop).await;
                 }
@@ -105,11 +100,7 @@ pub async fn capture(
     timing.next("thaw");
     if frozen {
         if emergency {
-            let socket = socket.as_ref().unwrap().clone();
-            let stop = stop.clone();
-            tokio::spawn(async move {
-                let _ = thaw(&socket, &stop).await;
-            });
+            thaw_later(socket.as_ref().unwrap(), &stop);
         } else {
             thaw(socket.as_ref().unwrap(), &stop).await?;
         }
@@ -128,8 +119,10 @@ pub async fn capture(
     let indexed_at = std::time::Instant::now();
     let disk = volume.disk.clone();
     let mut manifest = tokio::select! {
-        _ = stop.cancelled() => return Err(Error::new(409, "Disk capture stopped.")),
-        result = tokio::task::spawn_blocking(move || disk.capture(generation)) => result.map_err(Error::internal)??,
+        () = stop.cancelled() => return Err(Error::conflict("Disk capture stopped.")),
+        result = tokio::task::spawn_blocking(move || disk.capture(generation)) => {
+            result.map_err(Error::internal)??
+        }
     };
     manifest["indexMs"] = (indexed_at.elapsed().as_millis() as u64).into();
     manifest["pauseMs"] = pause_ms;
@@ -140,25 +133,52 @@ pub async fn capture(
     manifest["consistency"] = if emergency { "crash" } else { "filesystem" }.into();
     manifest["generation"] = generation.into();
     manifest["onDemand"] = true.into();
+
+    let id = write_snapshot(state, run, &manifest).await?;
+    timing.finish();
+    Ok(json!({
+        "id": id,
+        "manifest": manifest,
+        "grantId": volume.source.grant_id()
+    }))
+}
+
+async fn write_snapshot(state: &Path, run: &str, manifest: &Value) -> Result<String> {
     let id = crate::config::id();
     let snapshot = state.join("snapshots").join(&id);
     crate::skills::private_dir(&snapshot).await?;
     atomic_write(&snapshot.join("run"), run.as_bytes()).await?;
     atomic_write(
         &snapshot.join("manifest.json"),
-        &serde_json::to_vec(&manifest)?,
+        &serde_json::to_vec(manifest)?,
     )
     .await?;
-    timing.finish();
-    Ok(json!({"id": id,"manifest": manifest,"grantId": volume.source.grant_id()}))
+    Ok(id)
+}
+
+/// Thaws without blocking the capture; it only fails once the VM is stopped.
+fn thaw_later(socket: &Path, stop: &CancellationToken) {
+    let socket = socket.to_owned();
+    let stop = stop.clone();
+    tokio::spawn(async move {
+        let _ = thaw(&socket, &stop).await;
+    });
 }
 
 async fn thaw(socket: &Path, stop: &CancellationToken) -> Result<()> {
-    let request = json!({"op": "thaw"});
+    let request = json!({ "op": "thaw" });
     loop {
+        let reply = tokio::time::timeout(
+            Duration::from_secs(5),
+            host::guest_request(socket, &request),
+        );
         tokio::select! {
-            _ = stop.cancelled() => return Err(Error::new(409,"VM stopped during capture.")),
-            result = tokio::time::timeout(Duration::from_secs(5),host::guest_request(socket,&request)) => if matches!(result,Ok(Ok(value)) if value["ok"]==true){return Ok(());}
+            () = stop.cancelled() => return Err(Error::conflict("VM stopped during capture.")),
+            result = reply => {
+                if matches!(result, Ok(Ok(value)) if value["ok"] == true) {
+                    return Ok(());
+                }
+            }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

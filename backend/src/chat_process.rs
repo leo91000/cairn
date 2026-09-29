@@ -1,3 +1,4 @@
+//! Adapter for conversations on the Codex app-server.
 use crate::{
     auth::hex_digest,
     config::Config,
@@ -6,7 +7,8 @@ use crate::{
     skills::atomic_write,
     validation::{parse, text},
 };
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_json::{Map, Value, json};
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
@@ -15,6 +17,11 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+const STOPPED: &str = "Conversation stopped.";
+const MAX_MESSAGE: usize = 5_000_000;
+const MAX_INBOX: usize = 2_000_000;
+
+/// A Codex thread item as a chat item: snake_case names, as the conversation events use.
 pub fn chat_item(mut item: Value) -> Value {
     let kind = match text(&item, "type") {
         "agentMessage" => "agent_message",
@@ -57,6 +64,80 @@ pub fn chat_item(mut item: Value) -> Value {
     item
 }
 
+/// `thread/start` and `thread/resume`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadParams<'a> {
+    cwd: &'a Value,
+    approval_policy: &'static str,
+    sandbox: &'a str,
+    developer_instructions: &'a Value,
+    config: ThreadConfig<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<&'a Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_id: Option<&'a Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exclude_turns: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct ThreadConfig<'a> {
+    #[serde(rename = "features.default_mode_request_user_input")]
+    request_user_input: bool,
+    sandbox_workspace_write: WorkspaceWrite<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_reasoning_effort: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct WorkspaceWrite<'a> {
+    network_access: bool,
+    writable_roots: &'a Value,
+}
+
+/// `turn/start`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TurnParams<'a> {
+    thread_id: &'a str,
+    input: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_user_message_id: Option<&'a Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<&'a Value>,
+}
+
+/// The plan's model, unless it leaves the choice to Codex.
+fn model(plan: &Value) -> Option<&Value> {
+    (!text(plan, "model").is_empty()).then(|| &plan["model"])
+}
+
+fn inbox(plan: &Value) -> &Path {
+    Path::new(text(plan, "inputDirectory"))
+}
+
+/// Protects against a server that keeps answering with cursors it already gave.
+struct Cursors {
+    seen: HashSet<String>,
+    limit: usize,
+}
+
+impl Cursors {
+    fn new(limit: usize) -> Self {
+        Self {
+            seen: HashSet::new(),
+            limit,
+        }
+    }
+
+    fn fresh(&mut self, cursor: &Value) -> bool {
+        self.seen.insert(cursor.to_string()) && self.seen.len() <= self.limit
+    }
+}
+
 struct Question {
     request_id: Value,
     message_id: Option<String>,
@@ -81,24 +162,21 @@ impl Chat {
         self.events
             .send(value)
             .await
-            .map_err(|_| Error::new(503, "Conversation output stopped."))
+            .map_err(|_| Error::unavailable("Conversation output stopped."))
     }
 
     async fn acknowledge(&mut self, id: &str) -> Result<()> {
         if self.seen.insert(id.to_owned()) {
-            self.emit(json!({
-                "type": "chat.delivered",
-                "messageId": id
-            }))
-            .await?;
+            self.emit(json!({ "type": "chat.delivered", "messageId": id }))
+                .await?;
         }
         Ok(())
     }
 
     async fn item(&mut self, item: Value, kind: &str) -> Result<()> {
-        if item["type"] == "functionCallOutput"
-            && ["request_user_input", "request_user_input_async"].contains(&text(&item, "name"))
-        {
+        let user_input_result = item["type"] == "functionCallOutput"
+            && ["request_user_input", "request_user_input_async"].contains(&text(&item, "name"));
+        if user_input_result {
             return Ok(());
         }
         if item["type"] == "userMessage" {
@@ -111,49 +189,120 @@ impl Chat {
             if !text(&item, "text").is_empty() {
                 self.last_message = text(&item, "text").to_owned();
             }
-            if kind == "item.completed"
-                && let Some(questions) = item["questions"].as_array()
-            {
-                let fields = questions
-                    .iter()
-                    .enumerate()
-                    .map(|(i, q)| {
-                        json!({
-                            "id": i.to_string(),
-                            "title": q["title"],
-                            "options": q["options"]
-                                .as_array()
-                                .into_iter()
-                                .flatten()
-                                .map(|label| json!({
-                                "label": label
-                            }))
-                                .collect::<Vec<_>>()
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                if let Ok(fields) = parse("questions", fields.into()) {
-                    self.emit(json!({
-                        "type": "chat.question",
-                        "question": {
-                            "id": hex_digest(&format!(
-                                "{}:{}",
-                                self.thread,
-                                text(&item, "id")
-                            )),
-                            "blocking": false,
-                            "fields": fields
-                        }
-                    }))
-                    .await?;
-                }
+            if kind == "item.completed" {
+                self.ask_in_message(&item).await?;
             }
         }
+        self.emit(json!({ "type": kind, "item": chat_item(item) }))
+            .await
+    }
+
+    /// Questions an agent message asks, shown without blocking the conversation.
+    async fn ask_in_message(&self, item: &Value) -> Result<()> {
+        let Some(questions) = item["questions"].as_array() else {
+            return Ok(());
+        };
+        let fields = questions
+            .iter()
+            .enumerate()
+            .map(|(index, question)| {
+                let options = question["options"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|label| json!({ "label": label }))
+                    .collect::<Vec<_>>();
+                json!({ "id": index.to_string(), "title": question["title"], "options": options })
+            })
+            .collect::<Vec<_>>();
+        let Ok(fields) = parse("questions", fields.into()) else {
+            return Ok(());
+        };
+        let id = hex_digest(&format!("{}:{}", self.thread, text(item, "id")));
         self.emit(json!({
-            "type": kind,
-            "item": chat_item(item)
+            "type": "chat.question",
+            "question": { "id": id, "blocking": false, "fields": fields },
         }))
         .await
+    }
+
+    /// `item/tool/requestUserInput`: a question the user answers through the inbox.
+    async fn request_user_input(&mut self, request_id: Value, params: &Value) -> Result<()> {
+        let ours = !text(params, "itemId").is_empty()
+            && (self.thread.is_empty() || params["threadId"] == self.thread.as_str());
+        if !ours {
+            return self.session.rpc.reject(request_id).await;
+        }
+        let fields = params["questions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|question| {
+                json!({
+                    "id": question["id"],
+                    "title": question["question"],
+                    "secret": question["isSecret"].as_bool().unwrap_or(false),
+                    "options": question["options"].as_array().cloned().unwrap_or_default(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let Ok(fields) = parse("questions", fields.into()) else {
+            return self.session.rpc.reject(request_id).await;
+        };
+        let thread = if self.thread.is_empty() {
+            text(params, "threadId")
+        } else {
+            &self.thread
+        };
+        let id = hex_digest(&format!("{thread}:{}", text(params, "itemId")));
+        self.questions.insert(
+            id.clone(),
+            Question {
+                request_id,
+                message_id: None,
+            },
+        );
+        self.emit(json!({
+            "type": "chat.question",
+            "question": { "id": id, "blocking": params["isBlocking"] != false, "fields": fields },
+        }))
+        .await
+    }
+
+    /// `serverRequest/resolved`: closes the questions of a request that no longer waits.
+    async fn resolved(&mut self, params: &Value) -> Result<()> {
+        let ids = self
+            .questions
+            .iter()
+            .filter(|(_, q)| q.request_id == params["requestId"])
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in ids {
+            let question = self.questions.remove(&id).unwrap();
+            if let Some(message) = question.message_id {
+                self.acknowledge(&message).await?;
+            }
+            self.emit(json!({ "type": "chat.question.closed", "questionId": id }))
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn message_delta(&mut self, params: &Value) -> Result<()> {
+        let delta = text(params, "delta");
+        let value = self
+            .texts
+            .entry(text(params, "itemId").to_owned())
+            .or_default();
+        if value.len() + delta.len() > MAX_MESSAGE {
+            return Err(Error::bad_gateway(
+                "Conversation output exceeded the supported limit.",
+            ));
+        }
+        value.push_str(delta);
+        let item = json!({ "id": params["itemId"], "type": "agent_message", "text": value });
+        self.emit(json!({ "type": "item.updated", "item": item }))
+            .await
     }
 
     async fn incoming(&mut self, incoming: Incoming) -> Result<()> {
@@ -162,111 +311,28 @@ impl Chat {
         }
         let params = incoming.params;
         if let Some(request_id) = incoming.id {
-            if incoming.method == "item/tool/requestUserInput"
-                && !text(&params, "itemId").is_empty()
-                && (self.thread.is_empty() || params["threadId"] == self.thread)
-            {
-                let fields = params["questions"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|q| {
-                        json!({
-                            "id": q["id"],
-                            "title": q["question"],
-                            "secret": q["isSecret"].as_bool().unwrap_or(false),
-                            "options": q["options"].as_array().cloned().unwrap_or_default()
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                if let Ok(fields) = parse("questions", fields.into()) {
-                    let thread = if self.thread.is_empty() {
-                        text(&params, "threadId")
-                    } else {
-                        &self.thread
-                    };
-                    let id = hex_digest(&format!("{thread}:{}", text(&params, "itemId")));
-                    self.questions.insert(
-                        id.clone(),
-                        Question {
-                            request_id,
-                            message_id: None,
-                        },
-                    );
-                    return self
-                        .emit(json!({
-                            "type": "chat.question",
-                            "question": {
-                                "id": id,
-                                "blocking": params["isBlocking"] != false,
-                                "fields": fields
-                            }
-                        }))
-                        .await;
-                }
+            if incoming.method == "item/tool/requestUserInput" {
+                return self.request_user_input(request_id, &params).await;
             }
             return self.session.rpc.reject(request_id).await;
         }
-        if params["threadId"].is_string()
+        let other_thread = params["threadId"].is_string()
             && !self.thread.is_empty()
-            && params["threadId"] != self.thread
-        {
+            && params["threadId"] != self.thread.as_str();
+        if other_thread {
             return Ok(());
         }
         match incoming.method.as_str() {
-            "serverRequest/resolved" => {
-                let ids = self
-                    .questions
-                    .iter()
-                    .filter(|(_, q)| q.request_id == params["requestId"])
-                    .map(|(id, _)| id.clone())
-                    .collect::<Vec<_>>();
-                for id in ids {
-                    let question = self.questions.remove(&id).unwrap();
-                    if let Some(message) = question.message_id {
-                        self.acknowledge(&message).await?;
-                    }
-                    self.emit(json!({
-                        "type": "chat.question.closed",
-                        "questionId": id
-                    }))
-                    .await?;
-                }
-            }
+            "serverRequest/resolved" => self.resolved(&params).await?,
             "turn/started" => {
                 self.turn = text(&params["turn"], "id").to_owned();
-                self.emit(json!({
-                    "type": "turn.started"
-                }))
-                .await?;
+                self.emit(json!({ "type": "turn.started" })).await?;
             }
             "item/started" | "item/completed" => {
-                self.item(params["item"].clone(), &incoming.method.replace('/', "."))
-                    .await?
+                let kind = incoming.method.replace('/', ".");
+                self.item(params["item"].clone(), &kind).await?;
             }
-            "item/agentMessage/delta" => {
-                let value = self
-                    .texts
-                    .entry(text(&params, "itemId").to_owned())
-                    .or_default();
-                if value.len() + text(&params, "delta").len() > 5_000_000 {
-                    return Err(Error::new(
-                        502,
-                        "Conversation output exceeded the supported limit.",
-                    ));
-                }
-                value.push_str(text(&params, "delta"));
-                let value = value.clone();
-                self.emit(json!({
-                    "type": "item.updated",
-                    "item": {
-                        "id": params["itemId"],
-                        "type": "agent_message",
-                        "text": value
-                    }
-                }))
-                .await?;
-            }
+            "item/agentMessage/delta" => self.message_delta(&params).await?,
             "turn/completed" => self.completed = Some(params["turn"].clone()),
             _ => {}
         }
@@ -279,9 +345,7 @@ impl Chat {
         tokio::pin!(request);
         loop {
             tokio::select! {
-                _ = self.cancel.cancelled() => {
-                    return Err(Error::new(409, "Conversation stopped."));
-                }
+                () = self.cancel.cancelled() => return Err(Error::conflict(STOPPED)),
                 result = &mut request => return result,
                 incoming = self.session.incoming.recv() => {
                     let Some(incoming) = incoming else {
@@ -293,196 +357,194 @@ impl Chat {
         }
     }
 
-    async fn execute(&mut self, plan: &Value) -> Result<()> {
-        let mut effort = text(plan, "reasoning").to_owned();
-        if effort.is_empty() {
-            // A resumed thread can retain the previous model's effort. Resolve the
-            // new model default explicitly instead of accidentally inheriting it.
-            if let Ok(models) = crate::models::discover(&mut self.session).await
-                && let Some(model) = models.as_array().into_iter().flatten().find(|m| {
-                    if text(plan, "model").is_empty() {
-                        m["isDefault"] == true
-                    } else {
-                        m["model"] == plan["model"]
-                    }
-                })
-            {
-                effort = text(model, "defaultReasoningEffort").to_owned();
-            }
-        }
-        let mut settings = json!({
-            "cwd": plan["cwd"],
-            "approvalPolicy": "never",
-            "sandbox": if plan["sandbox"] == "yolo" {
-                "danger-full-access"
-            } else {
-                text(plan, "sandbox")
-            },
-            "developerInstructions": plan["instructions"],
-            "config": {
-                "features.default_mode_request_user_input": true,
-                "sandbox_workspace_write": {
-                    "network_access": true,
-                    "writable_roots": plan["writableRoots"]
-                }
-            }
-        });
+    /// The reasoning effort to run with. A resumed thread can retain the previous model's
+    /// effort, so the new model's default is resolved explicitly instead of inherited.
+    async fn effort(&mut self, plan: &Value) -> String {
+        let effort = text(plan, "reasoning");
         if !effort.is_empty() {
-            settings["config"]["model_reasoning_effort"] = effort.clone().into();
+            return effort.to_owned();
         }
-        if !text(plan, "model").is_empty() {
-            settings["model"] = plan["model"].clone();
-        }
-        let resume = plan["sessionId"].is_string();
-        if resume {
-            settings["threadId"] = plan["sessionId"].clone();
-            settings["excludeTurns"] = true.into();
-        }
-        let result = self
-            .request(
-                if resume {
-                    "thread/resume"
-                } else {
-                    "thread/start"
+        let Ok(models) = crate::models::discover(&mut self.session).await else {
+            return String::new();
+        };
+        let chosen = models
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|m| match model(plan) {
+                Some(model) => m["model"] == *model,
+                None => m["isDefault"] == true,
+            });
+        chosen.map_or_else(String::new, |m| {
+            text(m, "defaultReasoningEffort").to_owned()
+        })
+    }
+
+    async fn open_thread(&mut self, plan: &Value, effort: &str, resume: bool) -> Result<Value> {
+        let sandbox = if plan["sandbox"] == "yolo" {
+            "danger-full-access"
+        } else {
+            text(plan, "sandbox")
+        };
+        let params = ThreadParams {
+            cwd: &plan["cwd"],
+            approval_policy: "never",
+            sandbox,
+            developer_instructions: &plan["instructions"],
+            config: ThreadConfig {
+                request_user_input: true,
+                sandbox_workspace_write: WorkspaceWrite {
+                    network_access: true,
+                    writable_roots: &plan["writableRoots"],
                 },
-                settings,
-            )
-            .await?;
+                model_reasoning_effort: (!effort.is_empty()).then_some(effort),
+            },
+            model: model(plan),
+            thread_id: resume.then(|| &plan["sessionId"]),
+            exclude_turns: resume.then_some(true),
+        };
+        let method = if resume {
+            "thread/resume"
+        } else {
+            "thread/start"
+        };
+        let result = self.request(method, serde_json::to_value(params)?).await?;
         self.thread = text(&result["thread"], "id").to_owned();
         if self.thread.is_empty() {
-            return Err(Error::new(502, "Codex returned an invalid conversation."));
+            return Err(Error::bad_gateway(
+                "Codex returned an invalid conversation.",
+            ));
         }
-        self.emit(json!({
-            "type": "chat.question.closed"
-        }))
-        .await?;
-        self.emit(json!({
-            "type": "thread.started",
-            "thread_id": self.thread
-        }))
-        .await?;
-        let mut turns = result["thread"]["turns"]
+        self.emit(json!({ "type": "chat.question.closed" })).await?;
+        self.emit(json!({ "type": "thread.started", "thread_id": self.thread }))
+            .await?;
+        Ok(result)
+    }
+
+    /// Every turn of a paginated thread, newest first, without its items.
+    async fn list_turns(&mut self) -> Result<Vec<Value>> {
+        let mut turns = Vec::new();
+        let mut cursor = Value::Null;
+        let mut cursors = Cursors::new(1000);
+        loop {
+            let mut params = json!({
+                "threadId": self.thread,
+                "limit": 100,
+                "itemsView": "notLoaded",
+                "sortDirection": "desc",
+            });
+            if !cursor.is_null() {
+                params["cursor"] = cursor;
+            }
+            let page = self.request("thread/turns/list", params).await?;
+            let data = page["data"].as_array().cloned().ok_or_else(|| {
+                Error::bad_gateway("Codex returned invalid conversation history.")
+            })?;
+            turns.extend(data);
+            cursor = page["nextCursor"].clone();
+            if cursor.is_null() {
+                return Ok(turns);
+            }
+            if !cursors.fresh(&cursor) {
+                return Err(Error::bad_gateway(
+                    "Codex returned invalid conversation pagination.",
+                ));
+            }
+        }
+    }
+
+    // Read individual items, not full turns: one turn can contain megabytes of command
+    // output. Summary view omits steered user messages, whose client IDs are necessary to
+    // avoid delivering them twice after restart.
+    async fn load_items(&mut self, turns: &mut Vec<Value>) -> Result<()> {
+        let mut indices: HashMap<String, usize> = turns
+            .iter()
+            .enumerate()
+            .map(|(index, turn)| (text(turn, "id").to_owned(), index))
+            .collect();
+        let mut cursor = Value::Null;
+        let mut cursors = Cursors::new(100_000);
+        let mut previous_item_turn = None;
+        loop {
+            let params = json!({
+                "threadId": self.thread,
+                "limit": 1,
+                "sortDirection": "asc",
+                "cursor": cursor,
+            });
+            let page = self.request("thread/items/list", params).await?;
+            let entries = page["data"]
+                .as_array()
+                .ok_or_else(|| Error::bad_gateway("Codex returned invalid conversation items."))?;
+            for entry in entries {
+                let turn_id = entry["turnId"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .ok_or_else(|| {
+                        Error::bad_gateway("Codex returned an invalid conversation turn.")
+                    })?;
+                let index = if let Some(index) = indices.get(turn_id) {
+                    *index
+                } else {
+                    // After interruption, persisted items can outlive their turn metadata.
+                    // Recover receipts without assuming completion. Items arrive oldest
+                    // first; turns are stored newest first.
+                    let index = previous_item_turn.unwrap_or(turns.len());
+                    for position in indices.values_mut() {
+                        if *position >= index {
+                            *position += 1;
+                        }
+                    }
+                    let recovered = json!({
+                        "id": turn_id,
+                        "status": "interrupted",
+                        "items": [],
+                    });
+                    turns.insert(index, recovered);
+                    indices.insert(turn_id.to_owned(), index);
+                    index
+                };
+                previous_item_turn = Some(index);
+
+                keep_item(&mut turns[index], &entry["item"])?;
+            }
+            cursor = page["nextCursor"].clone();
+            if cursor.is_null() {
+                return Ok(());
+            }
+            if !cursors.fresh(&cursor) {
+                return Err(Error::bad_gateway(
+                    "Codex returned invalid conversation item pagination.",
+                ));
+            }
+        }
+    }
+
+    /// The turns of the thread, with the items needed to settle the request.
+    async fn history(&mut self, result: &Value, resume: bool) -> Result<(Vec<Value>, bool)> {
+        let turns = result["thread"]["turns"]
             .as_array()
             .cloned()
             .unwrap_or_default();
         let paginated = result["thread"]["historyMode"] == "paginated";
         if resume && paginated {
-            turns.clear();
-            let mut cursor = Value::Null;
-            let mut cursors = HashSet::new();
-            loop {
-                let mut params = json!({
-                    "threadId": self.thread,
-                    "limit": 100,
-                    "itemsView": "notLoaded",
-                    "sortDirection": "desc"
-                });
-                if !cursor.is_null() {
-                    params["cursor"] = cursor;
-                }
-                let page = self.request("thread/turns/list", params).await?;
-                turns.extend(page["data"].as_array().cloned().ok_or_else(|| {
-                    Error::new(502, "Codex returned invalid conversation history.")
-                })?);
-                cursor = page["nextCursor"].clone();
-                if cursor.is_null() {
-                    break;
-                }
-                if !cursors.insert(cursor.to_string()) || cursors.len() > 1000 {
-                    return Err(Error::new(
-                        502,
-                        "Codex returned invalid conversation pagination.",
-                    ));
-                }
-            }
-            // Read individual items, not full turns: one turn can contain megabytes
-            // of command output. Summary view omits steered user messages, whose
-            // client IDs are necessary to avoid delivering them twice after restart.
-            let mut indices: HashMap<String, usize> = turns
-                .iter()
-                .enumerate()
-                .map(|(index, turn)| (text(turn, "id").to_owned(), index))
-                .collect();
-            let mut cursor = Value::Null;
-            let mut cursors = HashSet::new();
-            let mut previous_item_turn = None;
-            loop {
-                let page = self
-                    .request(
-                        "thread/items/list",
-                        json!({
-                            "threadId": self.thread,
-                            "limit": 1,
-                            "sortDirection": "asc",
-                            "cursor": cursor
-                        }),
-                    )
-                    .await?;
-                let entries = page["data"]
-                    .as_array()
-                    .ok_or_else(|| Error::new(502, "Codex returned invalid conversation items."))?;
-                for entry in entries {
-                    let turn_id = entry["turnId"]
-                        .as_str()
-                        .filter(|id| !id.is_empty())
-                        .ok_or_else(|| {
-                            Error::new(502, "Codex returned an invalid conversation turn.")
-                        })?;
-                    let index = if let Some(index) = indices.get(turn_id) {
-                        *index
-                    } else {
-                        // After interruption, persisted items can outlive their turn
-                        // metadata. Recover receipts without assuming completion.
-                        // Items arrive oldest first; turns are stored newest first.
-                        let index = previous_item_turn.unwrap_or(turns.len());
-                        for position in indices.values_mut() {
-                            if *position >= index {
-                                *position += 1;
-                            }
-                        }
-                        turns.insert(
-                            index,
-                            json!({"id":turn_id,"status":"interrupted","items":[]}),
-                        );
-                        indices.insert(turn_id.to_owned(), index);
-                        index
-                    };
-                    previous_item_turn = Some(index);
-                    let item = &entry["item"];
-                    let items = turns[index]["items"].as_array_mut().ok_or_else(|| {
-                        Error::new(502, "Codex returned invalid conversation history.")
-                    })?;
-                    match text(item, "type") {
-                        "userMessage" => items.push(json!({
-                            "type": "userMessage",
-                            "clientId": item["clientId"]
-                        })),
-                        "agentMessage" => {
-                            // Only the final answer is needed to settle a completed
-                            // turn. Its tools are already in our durable event log.
-                            items.retain(|item| item["type"] != "agentMessage");
-                            items.push(item.clone());
-                        }
-                        _ => {}
-                    }
-                }
-                cursor = page["nextCursor"].clone();
-                if cursor.is_null() {
-                    break;
-                }
-                if !cursors.insert(cursor.to_string()) || cursors.len() > 100_000 {
-                    return Err(Error::new(
-                        502,
-                        "Codex returned invalid conversation item pagination.",
-                    ));
-                }
-            }
-        } else if resume && turns.is_empty() {
-            return Err(Error::new(
-                502,
+            let mut turns = self.list_turns().await?;
+            self.load_items(&mut turns).await?;
+            return Ok((turns, true));
+        }
+        if resume && turns.is_empty() {
+            return Err(Error::bad_gateway(
                 "Update Codex to resume conversations with paginated history.",
             ));
         }
+        Ok((turns, paginated))
+    }
+
+    async fn execute(&mut self, plan: &Value) -> Result<()> {
+        let effort = self.effort(plan).await;
+        let resume = plan["sessionId"].is_string();
+        let result = self.open_thread(plan, &effort, resume).await?;
+        let (turns, paginated) = self.history(&result, resume).await?;
         for turn in &turns {
             for item in turn["items"].as_array().into_iter().flatten() {
                 if item["type"] == "userMessage"
@@ -492,12 +554,11 @@ impl Chat {
                 }
             }
         }
+        let message_id = &plan["execution"]["messageId"];
         let accepted = turns.iter().rev().find(|t| {
-            t["items"].as_array().is_some_and(|items| {
-                items
-                    .iter()
-                    .any(|i| i["clientId"] == plan["execution"]["messageId"])
-            })
+            t["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|i| i["clientId"] == *message_id))
         });
         let previous = if accepted.is_some() && plan["execution"]["recovery"] == true {
             if paginated {
@@ -518,44 +579,42 @@ impl Chat {
                 return self.finish(plan).await;
             }
         }
-        let message = if previous.is_some() {
+        self.start_turn(plan, &effort, previous.is_some()).await?;
+        self.wait(plan).await
+    }
+
+    async fn start_turn(&mut self, plan: &Value, effort: &str, continuing: bool) -> Result<()> {
+        let message = if continuing {
             format!(
-                "Continue the interrupted conversation from its last completed step. Preserve completed \
-                    work and verify external effects before repeating any action. The pending user request \
-                    is:\n{}",
+                "Continue the interrupted conversation from its last completed step. Preserve completed work and verify external effects before repeating any action. The pending user request is:\n{}",
                 text(&plan["execution"], "text")
             )
         } else {
             crate::chats::execution_text(plan)
         };
-        let mut params = json!({
-            "threadId": self.thread,
-            "input": crate::attachments::input(
-                &message,
-                &plan["execution"]["attachments"],
-                Path::new(text(plan, "inputDirectory"))
-            )
-        });
-        if !effort.is_empty() {
-            params["effort"] = effort.into();
-        }
-        if previous.is_none() {
-            params["clientUserMessageId"] = plan["execution"]["messageId"].clone();
-        }
-        if !text(plan, "model").is_empty() {
-            params["model"] = plan["model"].clone();
-        }
+        let input =
+            crate::attachments::input(&message, &plan["execution"]["attachments"], inbox(plan));
+        let params = TurnParams {
+            thread_id: &self.thread,
+            input,
+            effort: (!effort.is_empty()).then_some(effort),
+            client_user_message_id: (!continuing).then(|| &plan["execution"]["messageId"]),
+            model: model(plan),
+        };
+        let params = serde_json::to_value(params)?;
         let started = self.request("turn/start", params).await?;
         self.turn = text(&started["turn"], "id").to_owned();
         self.acknowledge(text(&plan["execution"], "messageId"))
-            .await?;
+            .await
+    }
+
+    /// Steers the turn with the user's new messages until it completes.
+    async fn wait(&mut self, plan: &Value) -> Result<()> {
         let mut interval = tokio::time::interval(Duration::from_millis(250));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         while self.completed.is_none() {
             tokio::select! {
-                _ = self.cancel.cancelled() => {
-                    return Err(Error::new(409, "Conversation stopped."));
-                }
+                () = self.cancel.cancelled() => return Err(Error::conflict(STOPPED)),
                 incoming = self.session.incoming.recv() => {
                     let Some(incoming) = incoming else {
                         return Err(self.session.rpc.failure().await);
@@ -567,27 +626,22 @@ impl Chat {
         }
         let turn = self.completed.take().unwrap();
         if turn["status"] != "completed" {
-            self.emit(json!({
-                "type": "turn.failed",
-                "error": turn.get("error").cloned().unwrap_or_else(|| json!(
-                    {
-                    "message": "Conversation interrupted."
-                }
-                ))
-            }))
-            .await?;
-            return Err(Error::new(409, "Conversation interrupted."));
+            let error = turn
+                .get("error")
+                .cloned()
+                .unwrap_or_else(|| json!({ "message": "Conversation interrupted." }));
+            self.emit(json!({ "type": "turn.failed", "error": error }))
+                .await?;
+            return Err(Error::conflict("Conversation interrupted."));
         }
         self.finish(plan).await
     }
 
     async fn steer(&mut self, plan: &Value) -> Result<()> {
-        let Ok(bytes) =
-            tokio::fs::read(Path::new(text(plan, "inputDirectory")).join("messages.json")).await
-        else {
+        let Ok(bytes) = tokio::fs::read(inbox(plan).join("messages.json")).await else {
             return Ok(());
         };
-        if bytes.len() > 2_000_000 {
+        if bytes.len() > MAX_INBOX {
             return Err(Error::bad("Chat inbox is too large."));
         }
         let Ok(messages) = serde_json::from_slice::<Vec<Value>>(&bytes) else {
@@ -605,33 +659,27 @@ impl Chat {
                 && let Some(answers) = message["answers"].as_object()
             {
                 question.message_id = Some(id.to_owned());
-                let result = json!({
-                    "answers": answers
-                        .iter()
-                        .map(|(id, answers)| (
-                            id.clone(),
-                            json!({
-                        "answers": answers
-                    })
-                        ))
-                        .collect::<serde_json::Map<_,
-                    _>>()
-                });
+                let answers = answers
+                    .iter()
+                    .map(|(id, answers)| (id.clone(), json!({ "answers": answers })))
+                    .collect::<Map<_, _>>();
+                let request_id = question.request_id.clone();
                 self.session
                     .rpc
-                    .reply(question.request_id.clone(), result)
+                    .reply(request_id, json!({ "answers": answers }))
                     .await?;
                 continue;
             }
+            let input = crate::attachments::input(
+                text(&message, "text"),
+                &message["attachments"],
+                inbox(plan),
+            );
             let params = json!({
                 "threadId": self.thread,
                 "expectedTurnId": self.turn,
                 "clientUserMessageId": id,
-                "input": crate::attachments::input(
-                    text(&message, "text"),
-                    &message["attachments"],
-                    Path::new(text(plan, "inputDirectory"))
-                )
+                "input": input,
             });
             if self.request("turn/steer", params).await.is_err() {
                 break;
@@ -647,11 +695,28 @@ impl Chat {
             self.last_message.as_bytes(),
         )
         .await?;
-        self.emit(json!({
-            "type": "turn.completed"
-        }))
-        .await
+        self.emit(json!({ "type": "turn.completed" })).await
     }
+}
+
+/// Keeps what settling a turn needs from one of its items.
+fn keep_item(turn: &mut Value, item: &Value) -> Result<()> {
+    let items = turn["items"]
+        .as_array_mut()
+        .ok_or_else(|| Error::bad_gateway("Codex returned invalid conversation history."))?;
+    match text(item, "type") {
+        "userMessage" => {
+            items.push(json!({ "type": "userMessage", "clientId": item["clientId"] }));
+        }
+        "agentMessage" => {
+            // Only the final answer is needed to settle a completed turn. Its tools are
+            // already in our durable event log.
+            items.retain(|item| item["type"] != "agentMessage");
+            items.push(item.clone());
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 pub async fn run(
@@ -673,8 +738,7 @@ pub async fn run(
     let mut auth = crate::accounts::codex::Client::new(home);
     if home.join("leo-managed-auth").exists() && auth.is_none() {
         session.close().await;
-        return Err(Error::new(
-            503,
+        return Err(Error::unavailable(
             "Account authentication service is unavailable.",
         ));
     }

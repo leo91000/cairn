@@ -25,8 +25,8 @@ pub struct Coordination {
 impl Default for Coordination {
     fn default() -> Self {
         Self {
-            disks: Default::default(),
-            cache: Default::default(),
+            disks: Mutex::default(),
+            cache: Arc::default(),
             transfers: Arc::new(Semaphore::new(SYNC_CONCURRENCY)),
         }
     }

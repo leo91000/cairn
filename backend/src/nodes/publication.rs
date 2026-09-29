@@ -1,23 +1,48 @@
 //! Publish the current disk to S3, then collect unreachable generations.
 //! New publications share immutable objects; existing run-scoped objects remain readable.
+//! Persisted record and object names remain compatible with existing disks.
 use super::{shared_blocks, snapshots};
 use crate::{
     config::{id, now},
     error::{Error, Result},
+    object_storage::Storage,
+    performance::Operation,
+    run_status::RunStatus,
     service::Service,
     validation::text,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
+use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
+use tokio::task::{AbortHandle, JoinSet};
 
 // Versioned binary blocks avoid both JSON/base64 layers used by legacy records.
 const BINARY_BLOCK_HEADER: &[u8] = b"LEOBLK\x01\0";
+
+const MIB: u64 = 1024 * 1024;
+
+const DEFAULT_BUDGET_MIB: u64 = 102_400;
+
+const CLEANUP_INTERVAL_MS: i64 = 60_000;
+
+const S3: &str = "s3";
+
+/// `blockFormat` of publications whose blocks are shared objects. Legacy points have none.
+const SHARED_V1: &str = "shared-v1";
+
+/// Conversations the scheduler may publish: running ones, and completed on-demand
+/// disks that still have unpublished writes or an unfinished publication.
+const SYNC_CANDIDATES: &str = "SELECT data FROM runs WHERE status='running' OR (status='succeeded'
+             AND json_extract(data,'$.storage.mode')='on-demand'
+             AND (json_extract(data,'$.storage.dirtyBytes')>0
+                  OR json_extract(data,'$.backup.status') IN ('pending','saving','error')))";
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
@@ -35,7 +60,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             interval_seconds: 60,
-            budget_mi_b: 102400,
+            budget_mi_b: DEFAULT_BUDGET_MIB,
             disconnect_timeout_seconds: 60,
             shutdown_timeout_seconds: 300,
             max_capacity_wait_seconds: 3600,
@@ -71,6 +96,18 @@ pub async fn settings(s: &Service) -> Result<Value> {
     Ok(value)
 }
 
+/// How long an execution may continue without hearing from its master.
+pub(crate) async fn lease_ms(s: &Service) -> Result<u64> {
+    Ok(settings(s).await?["disconnectTimeoutSeconds"]
+        .as_u64()
+        .unwrap_or(60)
+        * 1000)
+}
+
+fn budget_bytes(settings: &Value) -> u64 {
+    settings["budgetMiB"].as_u64().unwrap_or(DEFAULT_BUDGET_MIB) * MIB
+}
+
 pub async fn configure(s: &Service, input: Value) -> Result<Value> {
     let settings: Settings =
         serde_json::from_value(input).map_err(|e| Error::bad(e.to_string()))?;
@@ -93,6 +130,70 @@ fn key(run: &str, hash: &str) -> String {
     format!("node-backups/{run}/blocks/{hash}")
 }
 
+fn manifest_key(run: &str, point: &str) -> String {
+    format!("node-backups/{run}/{point}.json")
+}
+
+/// Whether a publication (or receipt location) is stored in S3.
+pub(crate) fn in_s3(point: &Value) -> bool {
+    point["destination"] == S3
+}
+
+fn shared_format(point: &Value) -> bool {
+    point["blockFormat"] == SHARED_V1
+}
+
+/// Where an S3 copy lives. Receipt names hash this exact shape.
+fn s3_location(bucket: impl Serialize, endpoint: impl Serialize) -> Value {
+    json!({
+        "destination": S3,
+        "bucket": bucket,
+        "endpoint": endpoint
+    })
+}
+
+/// The bucket and endpoint of a point, as queued for remote deletion.
+fn deletion_location(point: &Value) -> Value {
+    json!({
+        "bucket": point["bucket"],
+        "endpoint": point["endpoint"]
+    })
+}
+
+/// Progress of the latest publication, persisted in `run.backup.status`.
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum BackupStatus {
+    Pending,
+    Saving,
+    Ready,
+    Error,
+}
+
+impl BackupStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Saving => "saving",
+            Self::Ready => "ready",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// The run's pointer to its current published disk (`run.backup`).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PublishedPointer<'a> {
+    pub id: &'a Value,
+    pub snapshot_id: &'a Value,
+    pub captured_at: &'a Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uploaded_bytes: Option<u64>,
+    pub status: BackupStatus,
+    pub error: Option<String>,
+}
+
 pub async fn capture(s: &Service, run: &Value) -> Result<Value> {
     // Cancellation of an HTTP caller must not drop the operation lock while its
     // PUTs are still executing. The owned task finishes publication or recovery
@@ -105,212 +206,97 @@ pub async fn capture(s: &Service, run: &Value) -> Result<Value> {
 
 async fn capture_owned(s: &Service, run: &Value) -> Result<Value> {
     let result = Box::pin(publish(s, run)).await;
-    tracing::info!(target: "leo_performance", operation = "s3_totals", id = text(run, "id"),
-        success = result.is_ok(), metrics = %s.hot_s3.performance());
+    tracing::info!(
+        target: "leo_performance",
+        operation = "s3_totals",
+        id = text(run, "id"),
+        success = result.is_ok(),
+        metrics = %s.hot_s3.performance()
+    );
+
     // A capture continuing from a baseline may rely on blocks the master no longer
-    // holds: forget the baseline so the next capture copies the whole disk.
-    if result.as_ref().is_err_and(|error| error.status != 425)
+    // holds: forget the baseline so the next capture copies the whole disk. A VM that
+    // is not ready yet (425) keeps its baseline.
+    let failed = result.as_ref().is_err_and(|error| error.status != 425);
+    if failed
         && run["backup"]["snapshotId"].is_string()
+        && let Err(error) = forget_baseline(s, text(run, "id")).await
     {
-        let _ = forget_baseline(s, text(run, "id")).await;
+        tracing::warn!(error = %error, "failed to forget the publication baseline");
     }
     result
 }
 
 async fn forget_baseline(s: &Service, run_id: &str) -> Result<()> {
-    update_status(s, run_id, json!({"snapshotId": null})).await
+    update_status(s, run_id, json!({ "snapshotId": null })).await
+}
+
+/// One publication of a node snapshot, from block upload to the run's new pointer.
+struct Publication<'a> {
+    s: &'a Service,
+    run: &'a Value,
+    run_id: &'a str,
+    attempt: &'a str,
+    node: &'a Value,
+    storage: &'a Storage,
+    base: &'a str,
+    credential: &'a str,
+    snapshot: &'a Value,
+    snapshot_id: &'a str,
+    budget: u64,
+}
+
+/// The durable upload intent of a publication and the shared objects it reserved.
+struct Intent {
+    backup_id: String,
+    path: PathBuf,
+    value: Value,
+    manifest: Value,
+    objects: Vec<shared_blocks::Object>,
 }
 
 async fn publish(s: &Service, run: &Value) -> Result<Value> {
-    let mut timing =
-        crate::performance::Operation::new("disk_publication", text(run, "id"), "queue");
     let run_id = text(run, "id");
+    let mut timing = Operation::new("disk_publication", run_id, "queue");
     crate::validation::uuid(run_id)?;
     let _operation = s.node_backup_operation.lock(run_id).await;
     let _transfer = s.node_backup_operation.transfer().await;
+
     timing.next("collect_before");
-    let checkpoint = s
-        .store
-        .kv(&format!("run-checkpoint:{run_id}"))
-        .await?
-        .unwrap_or_default();
+    let checkpoint = super::checkpoint(s, run_id).await?;
     let attempt = text(&checkpoint, "runnerId");
     crate::validation::uuid(attempt)?;
     let settings = settings(s).await?;
-    let storage = crate::object_storage::Storage::configured(s)?;
+    let storage = Storage::configured(s)?;
     collect_unused(s, run_id).await?;
+
     timing.next("snapshot");
     let base = super::transport::url(s, run_id).await?;
-    let credential = crate::execution::secret(&s.config.data_dir, "runner-secret").await?;
-    let capture_path = if run["status"] != "running" || run["moveRequest"]["idle"] == true {
-        format!("{base}/disks/{run_id}/snapshot")
-    } else {
-        format!("{base}/runs/{attempt}/snapshot")
-    };
-    let response = s
-        .http
-        .post(capture_path)
-        .bearer_auth(&credential)
-        // The node copies only blocks written since this published point if it still tracks it.
-        .json(&json!({"baseline": run["backup"]["snapshotId"]}))
-        .timeout(Duration::from_secs(300))
-        .send()
-        .await
-        .map_err(|_| Error::new(503, "Snapshot capture interrupted."))?;
-    if response.status() == reqwest::StatusCode::CONFLICT {
-        // Startup, shutdown and an overlapping capture are temporary ownership
-        // conflicts. Keep them distinct from broken storage or S3 configuration.
-        return Err(Error::new(
-            425,
-            "Waiting for the VM to be ready for synchronization.",
-        ));
-    }
-    if !response.status().is_success() {
-        return Err(Error::new(503, "Unable to capture a coherent VM snapshot."));
-    }
-    let snapshot: Value = response.json().await.map_err(Error::internal)?;
+    let credential = super::runner_secret(s).await?;
+    let snapshot = request_snapshot(s, run, &base, attempt, &credential).await?;
+
     timing.next("prepare_upload");
     let snapshot_id = text(&snapshot, "id");
     crate::validation::uuid(snapshot_id)?;
-    let result = async {
-        let mut manifest = snapshot["manifest"].clone();
-        snapshots::validate(&manifest)?;
-        let directory = root(s, run_id);
-        crate::skills::private_dir(&directory.join("blocks")).await?;
-        let mut uploaded = 0u64;
-        let admission = s.node_backup_lock.lock().await;
-        let occupied = used(s).await?;
-        let budget = settings["budgetMiB"].as_u64().unwrap_or(102400) * 1024 * 1024;
-        // Durable upload intent: the complete block inventory exists before any PUT.
-        // A restart can collect an interrupted first publication without S3 bucket scans.
-        let backup_id = id();
-        let mut value = json!({
-            "id": backup_id,
-            "snapshotId": snapshot_id,
-            "runId": run_id,
-            "nodeId": checkpoint["nodeId"],
-            "createdAt": now(),
-            "capturedAt": manifest["capturedAt"],
-            "diskGeneration": manifest["generation"],
-            "sessionId": run["sessionId"],
-            "destination": "s3",
-            "bucket": storage.bucket,
-            "endpoint": storage.endpoint,
-            "uploadedBytes": 0,
-            "pauseMs": manifest["pauseMs"],
-            "indexMs": manifest["indexMs"],
-            "localBytesRead": manifest["localBytesRead"],
-            "incremental": manifest["incremental"],
-            "blockFormat": "shared-v1"
-        });
-        let point = value.clone();
-        let (reserved_manifest, objects) = s.store.transaction(move |db| {
-            let objects = shared_blocks::reserve(db, &point, &mut manifest)?;
-            Ok((manifest, objects))
-        }).await?;
-        let manifest = reserved_manifest;
-        value["manifest"] = s.vault.encrypt(&format!("backup:{backup_id}"), &manifest)?;
-        let path = directory.join(format!("{backup_id}.json"));
-        let intent = serde_json::to_vec(&value)?;
-        if occupied.saturating_add(intent.len() as u64) > budget {
-            return Err(Error::new(
-                507,
-                "Publication cache budget exhausted; the current disk remains available.",
-            ));
-        }
-        crate::skills::atomic_write(&path, &intent).await?;
-        // Persist the rename and newly created run/root directories before remote writes.
-        for parent in directory.ancestors().take(3) {
-            tokio::fs::File::open(parent).await?.sync_all().await?;
-        }
-        drop(admission);
-        timing.next("transfer_blocks");
-        // The common all-reused path never loads other manifests. Incremental
-        // snapshots may omit old blocks, which migrate directly from S3.
-        let sources = if manifest["incremental"] == true && objects.iter().any(|object| !object.ready) {
-            source_blocks(s, run_id).await?
-        } else { HashMap::new() };
-        let missing = objects.iter().filter(|object| !object.ready && !sources.contains_key(&object.hash)).map(|object|(object.hash.clone(),object.size)).collect();
-        let mut reads = snapshots::Fetch::new(s.http.clone(), format!("{base}/snapshots/{snapshot_id}"), credential.clone(), missing);
-        let mut uploads = tokio::task::JoinSet::<Result<()>>::new();
-        let transfer = async {
-            for object in &objects {
-                if object.ready { continue; }
-                let bytes = source_block(s, object, &sources, &mut reads).await?;
-                let scope = shared_blocks::key(&object.hash, &object.id);
-                let vault = s.vault.clone();
-                let encryption_scope = scope.clone();
-                let encoded = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
-                    let mut encoded = BINARY_BLOCK_HEADER.to_vec();
-                    encoded.extend(vault.encrypt_bytes(&encryption_scope, &bytes)?);
-                    Ok(encoded)
-                }).await.map_err(Error::internal)??;
-                let destination = storage.clone();
-                uploads.spawn(async move { destination.upload_bytes(encoded, &scope).await });
-                uploaded += object.size;
-                if uploads.len() >= crate::object_storage::HOT_WRITE_CONCURRENCY {
-                    uploads.join_next().await.unwrap().map_err(Error::internal)??;
-                }
-            }
-            Ok::<(),Error>(())
-        }.await;
-        // On failure, finish every already-started PUT before the operation lock
-        // can be released and its pending references retired by another capture.
-        let mut upload_result = transfer;
-        while let Some(upload) = uploads.join_next().await {
-            if let Err(error) = upload.map_err(Error::internal).and_then(|r| r) { upload_result = Err(error); }
-        }
-        upload_result?;
-        tracing::info!(target: "leo_performance", operation = "disk_publication", id = run_id, uploaded_bytes = uploaded, referenced_blocks = objects.len(), reused_blocks = objects.iter().filter(|o| o.ready).count());
-        timing.next("publish_manifest");
-        let publication = backup_id.clone();
-        let manifest = s.store.transaction(move |db| {
-            let mut manifest = manifest;
-            shared_blocks::complete_uploads(db, &publication, &mut manifest)?;
-            Ok(manifest)
-        }).await?;
-        value["manifest"] = s.vault.encrypt(&format!("backup:{backup_id}"), &manifest)?;
-        value["uploadedBytes"]=uploaded.into();
-        crate::skills::atomic_write(&path,&serde_json::to_vec(&value)?).await?;
-        upload_verified(&storage,&path,&format!("node-backups/{run_id}/{backup_id}.json")).await?;
-        let patch=json!({
-            "backup": {
-                "id": backup_id,
-                "snapshotId": snapshot_id,
-                "capturedAt": manifest["capturedAt"],
-                "uploadedBytes": uploaded,
-                "status": "ready",
-                "error": null
-            }
-        });
-        let (owner_run,owner_attempt,owner_node,point)=(run_id.to_owned(),attempt.to_owned(),checkpoint["nodeId"].clone(),value.clone());
-        s.store.transaction(move |db| {
-            let current=db.kv(&format!("run-checkpoint:{owner_run}"))?.unwrap_or_default();
-            if current["runnerId"]!=owner_attempt || current["nodeId"]!=owner_node {return Err(Error::new(409,"Disk owner changed during publication."));}
-            shared_blocks::verified(db, text(&point,"id"))?;
-            db.put("node-backups",&point)?;db.patch_run(&owner_run,&patch)?;Ok(())
-        }).await?;
-        timing.next("acknowledge_journal");
-        if manifest["onDemand"]==true {
-            super::disk_grants::extend(s,text(&snapshot,"grantId"),&value).await?;
-            let response=s.http.post(format!("{base}/disks/{run_id}/published")).bearer_auth(&credential).json(&json!({
-                "generation": manifest["generation"],
-                "backupId": backup_id,
-                "grantId": snapshot["grantId"]
-            })).timeout(Duration::from_secs(120)).send().await.map_err(|_|Error::new(503,"Disk publication acknowledgement interrupted."))?;
-            if !response.status().is_success(){return Err(Error::new(503,"Node could not acknowledge the published disk."));}
-            super::disk_grants::acknowledged(s,text(&snapshot,"grantId"),&value).await?;
-            // Completed runs leave the active-run monitor. Read back the final
-            // journal counters so their UI does not retain an old dirty count.
-            let _ = super::storage::refresh(s, run).await;
-        }
-        timing.next("collect_after");
-        collect_unused(s,run_id).await?;
-        Ok(public(value))
-    }.await;
+    let publication = Publication {
+        s,
+        run,
+        run_id,
+        attempt,
+        node: &checkpoint["nodeId"],
+        storage: &storage,
+        base: &base,
+        credential: &credential,
+        snapshot: &snapshot,
+        snapshot_id,
+        budget: budget_bytes(&settings),
+    };
+    let result = publication.run(&mut timing).await;
+
     if result.is_ok() {
         timing.next("discard_snapshot");
     }
+    // Best effort: the node replaces a leftover capture of this run on its next snapshot.
     let _ = s
         .http
         .delete(format!("{base}/snapshots/{snapshot_id}/discard"))
@@ -324,17 +310,320 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
     result
 }
 
-type Sources = HashMap<String, (std::sync::Arc<Value>, Value)>;
+async fn request_snapshot(
+    s: &Service,
+    run: &Value,
+    base: &str,
+    attempt: &str,
+    credential: &str,
+) -> Result<Value> {
+    let run_id = text(run, "id");
+    let stopped = run["status"] != RunStatus::Running || run["moveRequest"]["idle"] == true;
+    let capture_path = if stopped {
+        format!("{base}/disks/{run_id}/snapshot")
+    } else {
+        format!("{base}/runs/{attempt}/snapshot")
+    };
+    let response = s
+        .http
+        .post(capture_path)
+        .bearer_auth(credential)
+        // The node copies only blocks written since this published point if it still tracks it.
+        .json(&json!({ "baseline": run["backup"]["snapshotId"] }))
+        .timeout(Duration::from_secs(300))
+        .send()
+        .await
+        .map_err(|_| Error::unavailable("Snapshot capture interrupted."))?;
+    if response.status() == reqwest::StatusCode::CONFLICT {
+        // Startup, shutdown and an overlapping capture are temporary ownership
+        // conflicts. Keep them distinct from broken storage or S3 configuration.
+        return Err(Error::new(
+            425,
+            "Waiting for the VM to be ready for synchronization.",
+        ));
+    }
+    if !response.status().is_success() {
+        return Err(Error::unavailable(
+            "Unable to capture a coherent VM snapshot.",
+        ));
+    }
+    response.json().await.map_err(Error::internal)
+}
+
+impl Publication<'_> {
+    async fn run(&self, timing: &mut Operation) -> Result<Value> {
+        let s = self.s;
+        let manifest = self.snapshot["manifest"].clone();
+        snapshots::validate(&manifest)?;
+        let directory = root(s, self.run_id);
+        crate::skills::private_dir(&directory.join("blocks")).await?;
+        let mut intent = self.write_intent(&directory, manifest).await?;
+
+        timing.next("transfer_blocks");
+        let uploaded = self
+            .transfer_blocks(&intent.manifest, &intent.objects)
+            .await?;
+
+        timing.next("publish_manifest");
+        self.publish_manifest(&mut intent, uploaded).await?;
+        self.commit(&intent, uploaded).await?;
+
+        timing.next("acknowledge_journal");
+        if intent.manifest["onDemand"] == true {
+            self.acknowledge(&intent.value, &intent.manifest).await?;
+            // Completed runs leave the active-run monitor. Read back the final
+            // journal counters so their UI does not retain an old dirty count.
+            let _ = super::storage::refresh(s, self.run).await;
+        }
+
+        timing.next("collect_after");
+        collect_unused(s, self.run_id).await?;
+        Ok(public(intent.value))
+    }
+
+    /// Durable upload intent: the complete block inventory exists before any PUT.
+    /// A restart can collect an interrupted first publication without S3 bucket scans.
+    async fn write_intent(&self, directory: &Path, mut manifest: Value) -> Result<Intent> {
+        let s = self.s;
+        let admission = s.node_backup_lock.lock().await;
+        let occupied = used(s).await?;
+        let backup_id = id();
+        let mut value = json!({
+            "id": backup_id,
+            "snapshotId": self.snapshot_id,
+            "runId": self.run_id,
+            "nodeId": self.node,
+            "createdAt": now(),
+            "capturedAt": manifest["capturedAt"],
+            "diskGeneration": manifest["generation"],
+            "sessionId": self.run["sessionId"],
+            "destination": S3,
+            "bucket": self.storage.bucket,
+            "endpoint": self.storage.endpoint,
+            "uploadedBytes": 0,
+            "pauseMs": manifest["pauseMs"],
+            "indexMs": manifest["indexMs"],
+            "localBytesRead": manifest["localBytesRead"],
+            "incremental": manifest["incremental"],
+            "blockFormat": SHARED_V1
+        });
+
+        let point = value.clone();
+        let (manifest, objects) = s
+            .store
+            .transaction(move |db| {
+                let objects = shared_blocks::reserve(db, &point, &mut manifest)?;
+                Ok((manifest, objects))
+            })
+            .await?;
+        value["manifest"] = s.vault.encrypt(&format!("backup:{backup_id}"), &manifest)?;
+
+        let path = directory.join(format!("{backup_id}.json"));
+        let intent = serde_json::to_vec(&value)?;
+        if occupied.saturating_add(intent.len() as u64) > self.budget {
+            return Err(Error::new(
+                507,
+                "Publication cache budget exhausted; the current disk remains available.",
+            ));
+        }
+        crate::skills::atomic_write(&path, &intent).await?;
+        // Persist the rename and newly created run/root directories before remote writes.
+        for parent in directory.ancestors().take(3) {
+            tokio::fs::File::open(parent).await?.sync_all().await?;
+        }
+        drop(admission);
+
+        Ok(Intent {
+            backup_id,
+            path,
+            value,
+            manifest,
+            objects,
+        })
+    }
+
+    /// Uploads every reserved object not yet in S3 and returns the bytes uploaded.
+    async fn transfer_blocks(
+        &self,
+        manifest: &Value,
+        objects: &[shared_blocks::Object],
+    ) -> Result<u64> {
+        // The common all-reused path never loads other manifests. Incremental
+        // snapshots may omit old blocks, which migrate directly from S3.
+        let needs_upload = objects.iter().any(|object| !object.ready);
+        let sources = if manifest["incremental"] == true && needs_upload {
+            source_blocks(self.s, self.run_id).await?
+        } else {
+            HashMap::new()
+        };
+        let missing = objects
+            .iter()
+            .filter(|object| !object.ready && !sources.contains_key(&object.hash))
+            .map(|object| (object.hash.clone(), object.size))
+            .collect();
+        let mut reads = snapshots::Fetch::new(
+            self.s.http.clone(),
+            format!("{}/snapshots/{}", self.base, self.snapshot_id),
+            self.credential.to_owned(),
+            missing,
+        );
+
+        let mut uploads = JoinSet::<Result<()>>::new();
+        let transfer = self
+            .start_uploads(objects, &sources, &mut reads, &mut uploads)
+            .await;
+        // On failure, finish every already-started PUT before the operation lock
+        // can be released and its pending references retired by another capture.
+        let mut result = transfer;
+        while let Some(upload) = uploads.join_next().await {
+            if let Err(error) = upload.map_err(Error::internal).and_then(|upload| upload) {
+                result = Err(error);
+            }
+        }
+        let uploaded = result?;
+
+        tracing::info!(
+            target: "leo_performance",
+            operation = "disk_publication",
+            id = self.run_id,
+            uploaded_bytes = uploaded,
+            referenced_blocks = objects.len(),
+            reused_blocks = objects.iter().filter(|o| o.ready).count()
+        );
+        Ok(uploaded)
+    }
+
+    /// Encrypts and queues each missing object, keeping a bounded number of PUTs in flight.
+    async fn start_uploads(
+        &self,
+        objects: &[shared_blocks::Object],
+        sources: &Sources,
+        reads: &mut snapshots::Fetch,
+        uploads: &mut JoinSet<Result<()>>,
+    ) -> Result<u64> {
+        let mut uploaded = 0u64;
+        for object in objects.iter().filter(|object| !object.ready) {
+            let bytes = source_block(self.s, object, sources, reads).await?;
+            let scope = shared_blocks::key(&object.hash, &object.id);
+            let encoded = encrypt_block(self.s, scope.clone(), bytes).await?;
+            let destination = self.storage.clone();
+            uploads.spawn(async move { destination.upload_bytes(encoded, &scope).await });
+            uploaded += object.size;
+            if uploads.len() >= crate::object_storage::HOT_WRITE_CONCURRENCY {
+                uploads
+                    .join_next()
+                    .await
+                    .unwrap()
+                    .map_err(Error::internal)??;
+            }
+        }
+        Ok(uploaded)
+    }
+
+    /// Settles duplicate uploads, then writes the final manifest locally and to S3.
+    async fn publish_manifest(&self, intent: &mut Intent, uploaded: u64) -> Result<()> {
+        let s = self.s;
+        let publication = intent.backup_id.clone();
+        let mut manifest = std::mem::take(&mut intent.manifest);
+        intent.manifest = s
+            .store
+            .transaction(move |db| {
+                shared_blocks::complete_uploads(db, &publication, &mut manifest)?;
+                Ok(manifest)
+            })
+            .await?;
+
+        let scope = format!("backup:{}", intent.backup_id);
+        intent.value["manifest"] = s.vault.encrypt(&scope, &intent.manifest)?;
+        intent.value["uploadedBytes"] = uploaded.into();
+        crate::skills::atomic_write(&intent.path, &serde_json::to_vec(&intent.value)?).await?;
+        self.storage
+            .upload_file_verified(&intent.path, &manifest_key(self.run_id, &intent.backup_id))
+            .await
+    }
+
+    /// Records the point and moves the run's pointer, unless the disk changed owner meanwhile.
+    async fn commit(&self, intent: &Intent, uploaded: u64) -> Result<()> {
+        let pointer = PublishedPointer {
+            id: &intent.value["id"],
+            snapshot_id: &intent.value["snapshotId"],
+            captured_at: &intent.manifest["capturedAt"],
+            uploaded_bytes: Some(uploaded),
+            status: BackupStatus::Ready,
+            error: None,
+        };
+        let patch = json!({ "backup": pointer });
+        let run = self.run_id.to_owned();
+        let attempt = self.attempt.to_owned();
+        let node = self.node.clone();
+        let point = intent.value.clone();
+        self.s
+            .store
+            .transaction(move |db| {
+                let current = super::db_checkpoint(db, &run)?;
+                if current["runnerId"] != attempt || current["nodeId"] != node {
+                    return Err(Error::conflict("Disk owner changed during publication."));
+                }
+                shared_blocks::verified(db, text(&point, "id"))?;
+                db.put("node-backups", &point)?;
+                db.patch_run(&run, &patch)?;
+                Ok(())
+            })
+            .await
+    }
+
+    /// An on-demand disk keeps reading its old base until the node confirms the new one.
+    async fn acknowledge(&self, point: &Value, manifest: &Value) -> Result<()> {
+        let grant = text(self.snapshot, "grantId");
+        super::disk_grants::extend(self.s, grant, point).await?;
+        let body = json!({
+            "generation": manifest["generation"],
+            "backupId": point["id"],
+            "grantId": self.snapshot["grantId"]
+        });
+        let response = self
+            .s
+            .http
+            .post(format!("{}/disks/{}/published", self.base, self.run_id))
+            .bearer_auth(self.credential)
+            .json(&body)
+            .timeout(Duration::from_secs(120))
+            .send()
+            .await
+            .map_err(|_| Error::unavailable("Disk publication acknowledgement interrupted."))?;
+        if !response.status().is_success() {
+            return Err(Error::unavailable(
+                "Node could not acknowledge the published disk.",
+            ));
+        }
+        super::disk_grants::acknowledged(self.s, grant, point).await
+    }
+}
+
+async fn encrypt_block(s: &Service, scope: String, bytes: Vec<u8>) -> Result<Vec<u8>> {
+    let vault = s.vault.clone();
+    tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+        let mut encoded = BINARY_BLOCK_HEADER.to_vec();
+        encoded.extend(vault.encrypt_bytes(&scope, &bytes)?);
+        Ok(encoded)
+    })
+    .await
+    .map_err(Error::internal)?
+}
+
+/// Blocks of this run's earlier publications, by hash, with the point that holds them.
+type Sources = HashMap<String, (Arc<Value>, Value)>;
 
 async fn source_blocks(s: &Service, run: &str) -> Result<Sources> {
     let mut index = HashMap::new();
     for point in s.store.node_backups_for_run(run).await? {
-        if let Ok(manifest) = manifest(s, &point).await {
-            let point = std::sync::Arc::new(point);
-            for block in manifest["blocks"].as_array().unwrap() {
-                if let Some(hash) = block["hash"].as_str() {
-                    index.insert(hash.to_owned(), (point.clone(), block.clone()));
-                }
+        let Ok(manifest) = manifest(s, &point).await else {
+            continue;
+        };
+        let point = Arc::new(point);
+        for block in manifest["blocks"].as_array().into_iter().flatten() {
+            if let Some(hash) = block["hash"].as_str() {
+                index.insert(hash.to_owned(), (point.clone(), block.clone()));
             }
         }
     }
@@ -358,16 +647,23 @@ async fn source_block(
     Ok(bytes)
 }
 
-fn receipt(file: &std::path::Path, location: &Value) -> Result<PathBuf> {
-    let location = json!({
-        "destination": "s3",
-        "bucket": location["bucket"],
-        "endpoint": location["endpoint"]
-    });
+fn receipt(file: &Path, location: &Value) -> Result<PathBuf> {
+    let location = s3_location(&location["bucket"], &location["endpoint"]);
     Ok(file.with_extension(format!(
         "s3-{}",
         hex::encode(Sha256::digest(serde_json::to_vec(&location)?))
     )))
+}
+
+/// The S3 location recorded by a receipt, or the bucket named in its file name.
+async fn receipt_location(path: &Path, bucket: &str) -> Result<Value> {
+    let bytes = tokio::fs::read(path).await?;
+    Ok(serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+        json!({
+            "destination": S3,
+            "bucket": bucket
+        })
+    }))
 }
 
 pub fn public(mut value: Value) -> Value {
@@ -381,8 +677,8 @@ pub async fn manifest(s: &Service, backup: &Value) -> Result<Value> {
         &backup["manifest"],
     )?;
     snapshots::validate(&value)?;
-    if backup["blockFormat"] == "shared-v1" {
-        for block in value["blocks"].as_array().unwrap() {
+    if shared_format(backup) {
+        for block in value["blocks"].as_array().into_iter().flatten() {
             if block["hash"].is_string() {
                 crate::validation::uuid(text(block, "object"))?;
             }
@@ -397,17 +693,13 @@ pub async fn read_block(s: &Service, backup: &Value, hash: &str) -> Result<Vec<u
     if !snapshots::valid_hash(hash) {
         return Err(Error::bad("Invalid backup block."));
     }
-    if backup["blockFormat"] == "shared-v1" {
-        let manifest = manifest(s, backup).await?;
-        let block = manifest["blocks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|b| b["hash"] == hash)
-            .ok_or_else(|| Error::new(403, "Block outside disk scope."))?;
-        return read_manifest_block(s, backup, block).await;
+    if !shared_format(backup) {
+        return read_legacy_block(s, backup, hash).await;
     }
-    read_legacy_block(s, backup, hash).await
+    let manifest = manifest(s, backup).await?;
+    let block = snapshots::find_block(&manifest, hash)
+        .ok_or_else(|| Error::forbidden("Block outside disk scope."))?;
+    read_manifest_block(s, backup, block).await
 }
 
 /// The authorized read handler already has this authenticated manifest block.
@@ -418,7 +710,7 @@ pub(crate) async fn read_manifest_block(
     block: &Value,
 ) -> Result<Vec<u8>> {
     let hash = text(block, "hash");
-    if backup["blockFormat"] != "shared-v1" {
+    if !shared_format(backup) {
         return read_legacy_block(s, backup, hash).await;
     }
     let object = text(block, "object");
@@ -426,6 +718,7 @@ pub(crate) async fn read_manifest_block(
     if !snapshots::valid_hash(hash) {
         return Err(Error::bad("Invalid backup block."));
     }
+
     let scope = shared_blocks::key(hash, object);
     let storage = storage_for(s, backup)?;
     let result = async {
@@ -434,7 +727,7 @@ pub(crate) async fn read_manifest_block(
             .await?;
         let bytes = decode_scoped_block(s, &scope, hash, encoded).await?;
         if Some(bytes.len() as u64) != block["size"].as_u64() {
-            return Err(Error::new(409, "Recovery block size mismatch."));
+            return Err(Error::conflict("Recovery block size mismatch."));
         }
         Ok(bytes)
     }
@@ -458,42 +751,38 @@ async fn read_legacy_block(s: &Service, backup: &Value, hash: &str) -> Result<Ve
             Err(error) => {
                 // A failed restore must not leave known-bad bytes in the cache.
                 tokio::fs::remove_file(&path).await?;
-                if backup["destination"] != "s3" {
+                if !in_s3(backup) {
                     forget_baseline(s, run).await?;
                     return Err(error);
                 }
             }
         }
     }
-    if backup["destination"] != "s3" {
+    if !in_s3(backup) {
         forget_baseline(s, run).await?;
-        return Err(Error::new(503, "Local recovery block is missing."));
+        return Err(Error::unavailable("Local recovery block is missing."));
     }
+
     let storage = storage_for(s, backup)?;
     crate::skills::private_dir(path.parent().unwrap()).await?;
     let recovered = async {
         let encoded = storage
             .download_bytes(&key(run, hash), snapshots::BLOCK * 3 + 4096)
             .await?;
-        let bytes = decode_block(s, run, hash, encoded.clone()).await?;
-        Ok::<_, Error>((encoded, bytes))
+        decode_block(s, run, hash, encoded).await
     }
     .await;
-    let (_, bytes) = match recovered {
-        Ok(recovered) => recovered,
-        Err(error) => {
-            // An outage or access refusal says nothing about the integrity of a verified copy.
-            if matches!(error.status, 400 | 409) {
-                let mark = receipt(&path, backup)?;
-                if mark.exists() {
-                    tokio::fs::remove_file(mark).await?;
-                }
-                forget_baseline(s, run).await?;
-            }
-            return Err(error);
+    if let Err(error) = &recovered
+        && matches!(error.status, 400 | 409)
+    {
+        // An outage or access refusal says nothing about the integrity of a verified copy.
+        let mark = receipt(&path, backup)?;
+        if mark.exists() {
+            tokio::fs::remove_file(mark).await?;
         }
-    };
-    Ok(bytes)
+        forget_baseline(s, run).await?;
+    }
+    recovered
 }
 
 async fn decode_block(s: &Service, run: &str, hash: &str, encoded: Vec<u8>) -> Result<Vec<u8>> {
@@ -529,7 +818,7 @@ async fn decode_scoped_block(
     .map_err(Error::internal)?
     // Decoding has no network or filesystem effects. Invalid envelopes,
     // authentication failures and digest mismatches all require repair.
-    .map_err(|_| Error::new(409, "Recovery block integrity check failed."))
+    .map_err(|_| Error::conflict("Recovery block integrity check failed."))
 }
 
 /// The local controller owns the configured node cache. Retire duplicate S3
@@ -539,7 +828,7 @@ pub async fn maintain_local_cache(s: &Service) -> Result<()> {
         return Ok(());
     };
     let _guard = s.node_backup_lock.lock().await;
-    let budget = settings(s).await?["budgetMiB"].as_u64().unwrap_or(102400) * 1048576;
+    let budget = budget_bytes(&settings(s).await?);
     make_room(s, used(s).await?, 0, budget).await?;
     Ok(())
 }
@@ -563,38 +852,8 @@ async fn make_room(s: &Service, mut occupied: u64, incoming: u64, budget: u64) -
                 .saturating_add(incoming.saturating_mul(3))
                 .saturating_sub(crate::storage::policy::space(&s.config.data_dir)?.1),
         );
-    let mut candidates = Vec::new();
-    let root = s.config.data_dir.join("node-backups");
-    if root.exists() {
-        let mut runs = tokio::fs::read_dir(root).await?;
-        while let Some(run) = runs.next_entry().await? {
-            if !run.file_type().await?.is_dir() {
-                continue;
-            }
-            let blocks = run.path().join("blocks");
-            if !blocks.exists() {
-                continue;
-            }
-            let mut entries = tokio::fs::read_dir(&blocks).await?;
-            while let Some(entry) = entries.next_entry().await? {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                let Some((hash, _)) = name.split_once(".s3-") else {
-                    continue;
-                };
-                if !snapshots::valid_hash(hash) {
-                    continue;
-                }
-                let file = blocks.join(hash);
-                if let Ok(meta) = tokio::fs::metadata(&file).await {
-                    candidates.push((
-                        file,
-                        meta.len(),
-                        meta.modified().unwrap_or(std::time::UNIX_EPOCH),
-                    ));
-                }
-            }
-        }
-    }
+
+    let mut candidates = evictable_blocks(s).await?;
     candidates.sort_by_key(|v| v.2);
     let mut removed = 0;
     for (file, size, _) in candidates {
@@ -604,10 +863,11 @@ async fn make_room(s: &Service, mut occupied: u64, incoming: u64, budget: u64) -
             occupied = occupied.saturating_sub(size);
         }
     }
+
     if removed < required
         && (occupied.saturating_add(incoming) > budget
             || crate::storage::policy::space(&s.config.data_dir)?.1
-                < incoming.saturating_mul(3).saturating_add(32 * 1024 * 1024))
+                < incoming.saturating_mul(3).saturating_add(32 * MIB))
     {
         return Err(Error::new(
             507,
@@ -615,6 +875,41 @@ async fn make_room(s: &Service, mut occupied: u64, incoming: u64, budget: u64) -
         ));
     }
     Ok(occupied)
+}
+
+/// Cached blocks with an S3 receipt, with their size and modification time.
+async fn evictable_blocks(s: &Service) -> Result<Vec<(PathBuf, u64, std::time::SystemTime)>> {
+    let mut candidates = Vec::new();
+    let root = s.config.data_dir.join("node-backups");
+    if !root.exists() {
+        return Ok(candidates);
+    }
+    let mut runs = tokio::fs::read_dir(root).await?;
+    while let Some(run) = runs.next_entry().await? {
+        if !run.file_type().await?.is_dir() {
+            continue;
+        }
+        let blocks = run.path().join("blocks");
+        if !blocks.exists() {
+            continue;
+        }
+        let mut entries = tokio::fs::read_dir(&blocks).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some((hash, _)) = name.split_once(".s3-") else {
+                continue;
+            };
+            if !snapshots::valid_hash(hash) {
+                continue;
+            }
+            let file = blocks.join(hash);
+            if let Ok(meta) = tokio::fs::metadata(&file).await {
+                let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                candidates.push((file, meta.len(), modified));
+            }
+        }
+    }
+    Ok(candidates)
 }
 
 async fn used(s: &Service) -> Result<u64> {
@@ -652,22 +947,24 @@ pub async fn collect(s: &Service, run: &str) -> Result<()> {
     collect_unused(s, run).await
 }
 
-async fn collect_unused(s: &Service, run: &str) -> Result<()> {
-    let mut timing = crate::performance::Operation::new("disk_collection", run, "reader_lock");
-    let _readers = s.node_backup_operation.drain(run).await;
-    timing.next("inventory");
-    let pinned = super::disk_grants::pinned(s, run).await?;
+/// Publications a run still depends on, and the legacy blocks they reference.
+struct Retained {
+    points: Vec<Value>,
+    keep: HashSet<String>,
+    needed: HashSet<String>,
+}
+
+/// Decided while holding the cache lock. `None` defers cleanup.
+async fn retained(s: &Service, run: &str) -> Result<Option<Retained>> {
+    let mut keep = super::disk_grants::pinned(s, run).await?;
     let _guard = s.node_backup_lock.lock().await;
     let points = s.store.node_backups_for_run(run).await?;
     let current = s.store.run(run).await?;
-    let mut needed = HashSet::new();
-    let mut keep = pinned;
     // The publication pointer is authoritative even if timestamps are equal or clocks regress.
     if let Some(head) = current["backup"]["id"].as_str() {
         keep.insert(head.to_owned());
     } else if !points.is_empty() {
-        return Err(Error::new(
-            409,
+        return Err(Error::conflict(
             "Published disk pointer missing; cleanup deferred.",
         ));
     }
@@ -678,40 +975,66 @@ async fn collect_unused(s: &Service, run: &str) -> Result<()> {
         .iter()
         .any(|id| !points.iter().any(|point| point["id"] == *id))
     {
-        return Err(Error::new(
-            409,
+        return Err(Error::conflict(
             "A referenced disk manifest is missing; cleanup deferred.",
         ));
     }
-    for point in points.iter().filter(|p| keep.contains(text(p, "id"))) {
-        if point["blockFormat"] == "shared-v1" {
-            continue;
-        }
+
+    let mut needed = HashSet::new();
+    let retained_legacy = points
+        .iter()
+        .filter(|point| keep.contains(text(point, "id")) && !shared_format(point));
+    for point in retained_legacy {
         // A damaged retained manifest must not prevent creating a fresh good point,
         // nor cause dependencies we cannot identify to be deleted.
         let Ok(manifest) = manifest(s, point).await else {
-            return Ok(());
+            return Ok(None);
         };
-        for block in manifest["blocks"].as_array().unwrap() {
-            if let Some(hash) = block["hash"].as_str() {
-                needed.insert(hash.to_owned());
-            }
-        }
+        needed.extend(snapshots::hashes(&manifest).map(str::to_owned));
     }
+    Ok(Some(Retained {
+        points,
+        keep,
+        needed,
+    }))
+}
+
+async fn collect_unused(s: &Service, run: &str) -> Result<()> {
+    let mut timing = Operation::new("disk_collection", run, "reader_lock");
+    let readers = s.node_backup_operation.drain(run).await;
+
+    timing.next("inventory");
+    let Some(retained) = retained(s, run).await? else {
+        return Ok(());
+    };
+
     // Drain readers only through metadata retirement. Filesystem maintenance and
     // remote deletion must not hold the disk-reader lock.
-    drop(_guard);
     timing.next("retire_objects");
-    for point in points.iter().filter(|p| !keep.contains(text(p, "id"))) {
+    retire_points(s, run, &retained).await?;
+    drop(readers);
+
+    queue_abandoned_intents(s, run, &retained).await?;
+    queue_unneeded_blocks(s, run, &retained.needed).await?;
+    let run = run.to_owned();
+    let keep = retained.keep;
+    s.store
+        .transaction(move |db| shared_blocks::release_run(db, &run, &keep))
+        .await?;
+    timing.finish();
+    Ok(())
+}
+
+/// Removes superseded publications and releases their shared objects.
+async fn retire_points(s: &Service, run: &str, retained: &Retained) -> Result<()> {
+    let superseded = retained
+        .points
+        .iter()
+        .filter(|point| !retained.keep.contains(text(point, "id")));
+    for point in superseded {
         let point_id = text(point, "id").to_owned();
-        if point["destination"] == "s3" && !root(s, run).join(format!("{point_id}.json")).exists() {
-            queue_deletion(
-                s,
-                point,
-                &format!("node-backups/{run}/{}.json", text(point, "id")),
-                false,
-            )
-            .await?;
+        if in_s3(point) && !root(s, run).join(format!("{point_id}.json")).exists() {
+            queue_deletion(s, point, &manifest_key(run, &point_id), false).await?;
         }
         s.store
             .transaction(move |db| {
@@ -720,88 +1043,108 @@ async fn collect_unused(s: &Service, run: &str) -> Result<()> {
             })
             .await?;
     }
-    drop(_readers);
-    // Local manifests also serve as upload intents. They precede every remote write,
-    // including first publication, and remain discoverable if the DB commit never happened.
-    if root(s, run).exists() {
-        let mut entries = tokio::fs::read_dir(root(s, run)).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let Some(point_id) = name.strip_suffix(".json") else {
-                continue;
-            };
-            if crate::validation::uuid(point_id).is_err() || keep.contains(point_id) {
-                continue;
-            }
-            let point: Value = serde_json::from_slice(&tokio::fs::read(entry.path()).await?)?;
-            if point["id"] != point_id || point["runId"] != run {
-                return Err(Error::bad(
-                    "Invalid publication upload inventory; cleanup deferred.",
-                ));
-            }
-            if point["destination"] == "s3" {
-                let mut keys = vec![format!("node-backups/{run}/{point_id}.json")];
-                if point["blockFormat"].is_null() {
-                    let manifest = manifest(s, &point).await?;
-                    let hashes = manifest["blocks"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .filter_map(|block| block["hash"].as_str())
-                        .collect::<HashSet<_>>();
-                    for hash in hashes {
-                        if !needed.contains(hash)
-                            && !receipt(&root(s, run).join("blocks").join(hash), &point)?.exists()
-                        {
-                            keys.push(key(run, hash));
-                        }
+    Ok(())
+}
+
+/// The publication id of a local `{id}.json` manifest.
+fn intent_id(entry: &tokio::fs::DirEntry) -> Option<String> {
+    let name = entry.file_name().to_string_lossy().into_owned();
+    let id = name.strip_suffix(".json")?;
+    crate::validation::uuid(id).ok()?;
+    Some(id.to_owned())
+}
+
+async fn read_intent(path: &Path, id: &str, run: &str, deferred: &str) -> Result<Value> {
+    let point: Value = serde_json::from_slice(&tokio::fs::read(path).await?)?;
+    if point["id"] != id || point["runId"] != run {
+        return Err(Error::bad(format!(
+            "Invalid publication upload inventory; {deferred} deferred."
+        )));
+    }
+    Ok(point)
+}
+
+/// Local manifests also serve as upload intents. They precede every remote write,
+/// including first publication, and remain discoverable if the DB commit never happened.
+async fn queue_abandoned_intents(s: &Service, run: &str, retained: &Retained) -> Result<()> {
+    let directory = root(s, run);
+    if !directory.exists() {
+        return Ok(());
+    }
+    let mut entries = tokio::fs::read_dir(&directory).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let Some(point_id) = intent_id(&entry) else {
+            continue;
+        };
+        if retained.keep.contains(&point_id) {
+            continue;
+        }
+        let point = read_intent(&entry.path(), &point_id, run, "cleanup").await?;
+        if in_s3(&point) {
+            let keys = abandoned_keys(s, run, &point, &retained.needed).await?;
+            let location = deletion_location(&point);
+            s.store
+                .transaction(move |db| {
+                    for key in keys {
+                        shared_blocks::queue(db, &location, &key, false)?;
                     }
-                }
-                let location = json!({"bucket":point["bucket"],"endpoint":point["endpoint"]});
-                s.store
-                    .transaction(move |db| {
-                        for key in keys {
-                            shared_blocks::queue(db, &location, &key, false)?;
-                        }
-                        Ok(())
-                    })
-                    .await?;
-            }
-            tokio::fs::remove_file(entry.path()).await?;
+                    Ok(())
+                })
+                .await?;
         }
+        tokio::fs::remove_file(entry.path()).await?;
     }
+    Ok(())
+}
+
+/// Remote objects an abandoned intent may have written: its manifest and, for a
+/// legacy point, run-scoped blocks that nothing retained needs.
+async fn abandoned_keys(
+    s: &Service,
+    run: &str,
+    point: &Value,
+    needed: &HashSet<String>,
+) -> Result<Vec<String>> {
+    let mut keys = vec![manifest_key(run, text(point, "id"))];
+    if !point["blockFormat"].is_null() {
+        return Ok(keys);
+    }
+    let manifest = manifest(s, point).await?;
     let blocks = root(s, run).join("blocks");
-    if blocks.exists() {
-        let mut entries = tokio::fs::read_dir(&blocks).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let hash = name.split('.').next().unwrap_or("");
-            if !snapshots::valid_hash(hash) || needed.contains(hash) {
-                continue;
-            }
-            if let Some((_, bucket)) = name.split_once(".s3-") {
-                let location = serde_json::from_slice(&tokio::fs::read(entry.path()).await?)
-                    .unwrap_or_else(|_| json!({"destination": "s3","bucket": bucket}));
-                queue_deletion(s, &location, &key(run, hash), false).await?;
-            }
-            tokio::fs::remove_file(entry.path()).await?;
+    for hash in snapshots::hashes(&manifest).collect::<HashSet<_>>() {
+        if !needed.contains(hash) && !receipt(&blocks.join(hash), point)?.exists() {
+            keys.push(key(run, hash));
         }
     }
-    let run = run.to_owned();
-    s.store
-        .transaction(move |db| shared_blocks::release_run(db, &run, &keep))
-        .await?;
-    timing.finish();
+    Ok(keys)
+}
+
+async fn queue_unneeded_blocks(s: &Service, run: &str, needed: &HashSet<String>) -> Result<()> {
+    let blocks = root(s, run).join("blocks");
+    if !blocks.exists() {
+        return Ok(());
+    }
+    let mut entries = tokio::fs::read_dir(&blocks).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let hash = name.split('.').next().unwrap_or("");
+        if !snapshots::valid_hash(hash) || needed.contains(hash) {
+            continue;
+        }
+        if let Some((_, bucket)) = name.split_once(".s3-") {
+            let location = receipt_location(&entry.path(), bucket).await?;
+            queue_deletion(s, &location, &key(run, hash), false).await?;
+        }
+        tokio::fs::remove_file(entry.path()).await?;
+    }
     Ok(())
 }
 
 async fn queue_deletion(s: &Service, point: &Value, key: &str, prefix: bool) -> Result<()> {
-    let (point, key) = (
-        json!({"bucket":point["bucket"],"endpoint":point["endpoint"]}),
-        key.to_owned(),
-    );
+    let location = deletion_location(point);
+    let key = key.to_owned();
     s.store
-        .transaction(move |db| shared_blocks::queue(db, &point, &key, prefix))
+        .transaction(move |db| shared_blocks::queue(db, &location, &key, prefix))
         .await
 }
 
@@ -814,39 +1157,53 @@ pub async fn attempt(s: &Service, run: &Value) {
     if !protected(run) {
         return;
     }
-    let _ = update_status(s, text(run, "id"), json!({"status": "saving"})).await;
-    if let Err(error) = capture(s, run).await {
-        if error.status == 425 {
-            let _ = update_status(
-                s,
-                text(run, "id"),
-                json!({"status": "pending","error": null}),
-            )
-            .await;
-            return;
+    let run_id = text(run, "id");
+    if let Err(error) = update_status(s, run_id, json!({ "status": BackupStatus::Saving })).await {
+        tracing::warn!(error = %error, "failed to record synchronization start");
+    }
+    let Err(error) = capture(s, run).await else {
+        return;
+    };
+
+    if error.status == 425 {
+        let pending = json!({
+            "status": BackupStatus::Pending,
+            "error": null
+        });
+        if let Err(error) = update_status(s, run_id, pending).await {
+            tracing::warn!(error = %error, "failed to record pending synchronization");
         }
-        // Nothing to save yet, or an older guest image whose limitation is shown in the conversation.
-        if error.status != 409 && error.status != 412 {
-            let _ = super::alerts::raise(
-                s,
-                text(run, "id"),
-                "backup-failed",
-                "S3 synchronization failed",
-                &format!(
-                    "The current disk could not be synchronized: {}",
-                    error.message
-                ),
-            )
-            .await;
-        }
-        // Publication may have committed before its controller acknowledgement failed.
-        // Patch the current state transactionally, never overwrite it with the caller's old pointer.
-        let _ = update_status(
+        return;
+    }
+
+    // Nothing to save yet, or an older guest image whose limitation is shown in the conversation.
+    if error.status != 409 && error.status != 412 {
+        let body = format!(
+            "The current disk could not be synchronized: {}",
+            error.message
+        );
+        let raised = super::alerts::raise(
             s,
-            text(run, "id"),
-            json!({"status": "error","error": error.message,"snapshotId": null}),
+            run_id,
+            "backup-failed",
+            "S3 synchronization failed",
+            &body,
         )
         .await;
+        if let Err(error) = raised {
+            tracing::warn!(error = %error, "failed to raise synchronization alert");
+        }
+    }
+
+    // Publication may have committed before its controller acknowledgement failed.
+    // Patch the current state transactionally, never overwrite it with the caller's old pointer.
+    let failure = json!({
+        "status": BackupStatus::Error,
+        "error": error.message,
+        "snapshotId": null
+    });
+    if let Err(error) = update_status(s, run_id, failure).await {
+        tracing::warn!(error = %error, "failed to record synchronization failure");
     }
 }
 
@@ -856,10 +1213,10 @@ async fn update_status(s: &Service, run: &str, patch: Value) -> Result<()> {
         .transaction(move |db| {
             let current = db
                 .run(&run)?
-                .ok_or_else(|| Error::new(404, "Conversation missing."))?;
+                .ok_or_else(|| Error::not_found("Conversation missing."))?;
             let mut status = current["backup"].as_object().cloned().unwrap_or_default();
             status.extend(patch.as_object().unwrap().clone());
-            db.patch_run(&run, &json!({"backup": status}))?;
+            db.patch_run(&run, &json!({ "backup": status }))?;
             Ok(())
         })
         .await
@@ -897,119 +1254,153 @@ async fn collection_runs(s: &Service) -> Result<HashSet<String>> {
     Ok(runs)
 }
 
-pub async fn maintain(s: std::sync::Arc<Service>) {
-    let mut last = std::collections::HashMap::<String, i64>::new();
-    let mut last_cleanup = 0;
-    let mut tasks = tokio::task::JoinSet::new();
-    let mut active = HashMap::<String, tokio::task::AbortHandle>::new();
-    let mut cleanup = HashSet::new();
+pub async fn maintain(s: Arc<Service>) {
+    let mut scheduler = Scheduler {
+        s,
+        last: HashMap::new(),
+        last_cleanup: 0,
+        tasks: JoinSet::new(),
+        active: HashMap::new(),
+        cleanup: HashSet::new(),
+    };
     loop {
         tokio::select! {
-            _ = s.shutdown.cancelled() => break,
-            _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+            () = scheduler.s.shutdown.cancelled() => break,
+            () = tokio::time::sleep(Duration::from_secs(5)) => {}
         }
-        while tasks.try_join_next().is_some() {}
-        active.retain(|_, task| !task.is_finished());
-        if now() - last_cleanup >= 60_000 {
-            last_cleanup = now();
-            if let Ok(runs) = collection_runs(&s).await {
-                cleanup.extend(runs);
-            }
+        scheduler.reap();
+        scheduler.queue_cleanups().await;
+        scheduler.start_publications().await;
+        scheduler.start_cleanups();
+    }
+}
+
+/// Background publications and cleanups, bounded by the synchronization slots and
+/// never more than one task per conversation.
+struct Scheduler {
+    s: Arc<Service>,
+    last: HashMap<String, i64>,
+    last_cleanup: i64,
+    tasks: JoinSet<()>,
+    active: HashMap<String, AbortHandle>,
+    cleanup: HashSet<String>,
+}
+
+impl Scheduler {
+    fn reap(&mut self) {
+        while self.tasks.try_join_next().is_some() {}
+        self.active.retain(|_, task| !task.is_finished());
+    }
+
+    async fn queue_cleanups(&mut self) {
+        if now() - self.last_cleanup < CLEANUP_INTERVAL_MS {
+            return;
         }
-        let settings = settings(&s).await.unwrap_or_default();
+        self.last_cleanup = now();
+        if let Ok(runs) = collection_runs(&self.s).await {
+            self.cleanup.extend(runs);
+        }
+    }
+
+    async fn start_publications(&mut self) {
+        let settings = settings(&self.s).await.unwrap_or_default();
         let interval = settings["intervalSeconds"].as_i64().unwrap_or(60) * 1000;
-        if let Ok(mut runs) = s
+        let candidates = self
+            .s
             .store
-            .read(|db| {
-                db.json_rows(
-                    "SELECT data FROM runs WHERE status='running' OR (status='succeeded'
-             AND json_extract(data,'$.storage.mode')='on-demand'
-             AND (json_extract(data,'$.storage.dirtyBytes')>0
-                  OR json_extract(data,'$.backup.status') IN ('pending','saving','error')))",
-                    [],
-                )
-            })
-            .await
-        {
-            // Oldest scheduling time first, so a busy early row cannot starve
-            // conversations beyond the bounded worker slots.
-            runs.sort_by_key(|run| last.get(text(run, "id")).copied().unwrap_or(0));
-            for run in runs {
-                if tasks.len() >= super::coordination::SYNC_CONCURRENCY {
-                    break;
-                }
-                let id = text(&run, "id");
-                if active.contains_key(id)
-                    || !protected(&run)
-                    || run["isolated"] != true
-                    || (!run["sessionId"].is_string() && run["storage"]["mode"] != "on-demand")
-                    || run["moveRequest"].is_object()
-                    || (run["storage"]["mode"] == "on-demand"
-                        && run["storage"]["dirtyBytes"] == 0
-                        && run["backup"]["status"] == "ready")
-                    || now() - last.get(id).copied().unwrap_or(0)
-                        < run["storage"]["backupSeconds"]
-                            .as_i64()
-                            .map(|v| v * 1000)
-                            .unwrap_or(interval)
-                {
-                    continue;
-                }
-                let run_id = id.to_owned();
-                if s.store
-                    .read(move |db| crate::conversation_lifecycle::require_active_run(db, &run_id))
-                    .await
-                    .is_err()
-                {
-                    continue;
-                }
-                last.insert(id.into(), now());
-                cleanup.remove(id);
-                let run_id = id.to_owned();
-                let s = s.clone();
-                let task = tasks.spawn(async move {
-                    attempt(&s, &run).await;
-                });
-                active.insert(run_id, task);
+            .read(|db| db.json_rows(SYNC_CANDIDATES, []))
+            .await;
+        let Ok(mut runs) = candidates else {
+            return;
+        };
+
+        // Oldest scheduling time first, so a busy early row cannot starve
+        // conversations beyond the bounded worker slots.
+        runs.sort_by_key(|run| self.last.get(text(run, "id")).copied().unwrap_or(0));
+        for run in runs {
+            if self.tasks.len() >= super::coordination::SYNC_CONCURRENCY {
+                break;
             }
+            let id = text(&run, "id");
+            let since = now() - self.last.get(id).copied().unwrap_or(0);
+            if self.active.contains_key(id) || !publication_due(&run, since, interval) {
+                continue;
+            }
+            let run_id = id.to_owned();
+            let still_active = self
+                .s
+                .store
+                .read(move |db| crate::conversation_lifecycle::require_active_run(db, &run_id))
+                .await
+                .is_ok();
+            if !still_active {
+                continue;
+            }
+
+            let run_id = id.to_owned();
+            self.last.insert(run_id.clone(), now());
+            self.cleanup.remove(&run_id);
+            let s = self.s.clone();
+            let task = self.tasks.spawn(async move {
+                attempt(&s, &run).await;
+            });
+            self.active.insert(run_id, task);
         }
-        let remaining = super::coordination::SYNC_CONCURRENCY.saturating_sub(tasks.len());
-        let ready: Vec<_> = cleanup
+    }
+
+    fn start_cleanups(&mut self) {
+        let remaining = super::coordination::SYNC_CONCURRENCY.saturating_sub(self.tasks.len());
+        let ready: Vec<_> = self
+            .cleanup
             .iter()
-            .filter(|run| !active.contains_key(*run))
+            .filter(|run| !self.active.contains_key(*run))
             .take(remaining)
             .cloned()
             .collect();
         for run in ready {
-            cleanup.remove(&run);
+            self.cleanup.remove(&run);
             let run_id = run.clone();
-            let s = s.clone();
-            let task = tasks.spawn(async move {
-                if let Err(error) = collect(&s, &run).await {
-                    let _ = s
-                        .store
-                        .audit(
-                            "disk.cleanup_failed",
-                            json!({
-                                "runId": run, "message": error.message
-                            }),
-                        )
-                        .await;
+            let s = self.s.clone();
+            let task = self.tasks.spawn(async move {
+                let Err(error) = collect(&s, &run).await else {
+                    return;
+                };
+                let detail = json!({
+                    "runId": run,
+                    "message": error.message
+                });
+                if let Err(error) = s.store.audit("disk.cleanup_failed", detail).await {
+                    tracing::warn!(error = %error, "failed to audit disk cleanup failure");
                 }
             });
-            active.insert(run_id, task);
+            self.active.insert(run_id, task);
         }
     }
 }
 
-pub(crate) fn storage_for(s: &Service, backup: &Value) -> Result<crate::object_storage::Storage> {
-    if backup["destination"] != "s3" {
-        return Err(Error::new(503, "Local recovery block is missing."));
+/// An isolated conversation publishes periodically while it has something new.
+fn publication_due(run: &Value, since_last_ms: i64, default_interval_ms: i64) -> bool {
+    let on_demand = run["storage"]["mode"] == super::ON_DEMAND;
+    let synchronized = on_demand
+        && run["storage"]["dirtyBytes"] == 0
+        && run["backup"]["status"] == BackupStatus::Ready.as_str();
+    let interval = run["storage"]["backupSeconds"]
+        .as_i64()
+        .map_or(default_interval_ms, |seconds| seconds * 1000);
+    protected(run)
+        && (run["sessionId"].is_string() || on_demand)
+        && !run["moveRequest"].is_object()
+        && !synchronized
+        && since_last_ms >= interval
+}
+
+pub(crate) fn storage_for(s: &Service, backup: &Value) -> Result<Storage> {
+    if !in_s3(backup) {
+        return Err(Error::unavailable("Local recovery block is missing."));
     }
-    let mut storage = crate::object_storage::Storage::configured(s)?;
+    let mut storage = Storage::configured(s)?;
     if storage.endpoint.as_deref() != backup["endpoint"].as_str() {
-        return Err(Error::new(
-            409,
+        return Err(Error::conflict(
             "This recovery point belongs to a different S3 endpoint. Restore its \
                 storage configuration before accessing it.",
         ));
@@ -1026,14 +1417,6 @@ pub(crate) fn storage_for(s: &Service, backup: &Value) -> Result<crate::object_s
     Ok(storage)
 }
 
-async fn upload_verified(
-    storage: &crate::object_storage::Storage,
-    path: &std::path::Path,
-    key: &str,
-) -> Result<()> {
-    storage.upload_file_verified(path, key).await
-}
-
 /// Retire a conversation's recovery references and durably queue remote reclamation.
 pub async fn purge(s: &Service, run: &str) -> Result<()> {
     if run.is_empty() {
@@ -1045,43 +1428,11 @@ pub async fn purge(s: &Service, run: &str) -> Result<()> {
     let points = s.store.node_backups_for_run(run).await?;
     let mut locations = points
         .iter()
-        .filter(|p| p["destination"] == "s3")
+        .filter(|p| in_s3(p))
         .cloned()
         .collect::<Vec<_>>();
-    if root(s, run).exists() {
-        let mut entries = tokio::fs::read_dir(root(s, run)).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let Some(id) = name.strip_suffix(".json") else {
-                continue;
-            };
-            if crate::validation::uuid(id).is_err() {
-                continue;
-            }
-            let point: Value = serde_json::from_slice(&tokio::fs::read(entry.path()).await?)?;
-            if point["id"] != id || point["runId"] != run {
-                return Err(Error::bad(
-                    "Invalid publication upload inventory; purge deferred.",
-                ));
-            }
-            if point["destination"] == "s3" {
-                locations.push(point);
-            }
-        }
-    }
-    let blocks = root(s, run).join("blocks");
-    if blocks.exists() {
-        let mut entries = tokio::fs::read_dir(&blocks).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if let Some((_, bucket)) = name.split_once(".s3-") {
-                locations.push(
-                    serde_json::from_slice(&tokio::fs::read(entry.path()).await?)
-                        .unwrap_or_else(|_| json!({"destination": "s3","bucket": bucket})),
-                );
-            }
-        }
-    }
+    locations.extend(local_locations(s, run).await?);
+
     let mut deleted = HashSet::new();
     for location in locations {
         let storage = storage_for(s, &location)?;
@@ -1095,6 +1446,7 @@ pub async fn purge(s: &Service, run: &str) -> Result<()> {
     }
     // Old installations may still hold metadata from the removed periodic audit.
     s.store.delete(&format!("node-backup-audit:{run}")).await?;
+
     let run = run.to_owned();
     s.store
         .transaction(move |db| {
@@ -1110,4 +1462,33 @@ pub async fn purge(s: &Service, run: &str) -> Result<()> {
             Ok(())
         })
         .await
+}
+
+/// S3 locations known only from local upload intents and block receipts.
+async fn local_locations(s: &Service, run: &str) -> Result<Vec<Value>> {
+    let mut locations = Vec::new();
+    let directory = root(s, run);
+    if directory.exists() {
+        let mut entries = tokio::fs::read_dir(&directory).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let Some(id) = intent_id(&entry) else {
+                continue;
+            };
+            let point = read_intent(&entry.path(), &id, run, "purge").await?;
+            if in_s3(&point) {
+                locations.push(point);
+            }
+        }
+    }
+    let blocks = directory.join("blocks");
+    if blocks.exists() {
+        let mut entries = tokio::fs::read_dir(&blocks).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some((_, bucket)) = name.split_once(".s3-") {
+                locations.push(receipt_location(&entry.path(), bucket).await?);
+            }
+        }
+    }
+    Ok(locations)
 }
