@@ -46,6 +46,7 @@ data class ExecutionNode(
     val maintenanceError: String? = null,
     val agents: List<NodeAgent> = emptyList(),
     val staleDisks: StaleDisks = StaleDisks(),
+    val storage: NodeStoragePolicy? = null,
 )
 
 /** Disk kept on a node that no conversation needs there any more. */
@@ -154,4 +155,29 @@ fun nodeDiagnostics(node: ExecutionNode, now: Long = System.currentTimeMillis())
             "Nouveaux travaux suspendus sur cette machine (Configurer → Accepter de nouveaux travaux)."
     if (node.agents.isEmpty()) reasons += "Aucun agent ne peut encore utiliser cette machine."
     return reasons
+}
+
+@Serializable
+data class RunStorage(
+    val mode: String = "",
+    val localBytes: Long? = null,
+    val dirtyBytes: Long? = null,
+    val dirtySince: Long? = null,
+    val waitingFor: String? = null,
+)
+
+@Serializable
+data class NodeStoragePolicy(
+    val cacheMiB: Long = 102400,
+    val reserveMiB: Long = 10240,
+    val reservePercent: Int = 5,
+    val backupSeconds: Long = 60,
+    val maxDirtySeconds: Long = 300,
+)
+
+fun formatBytes(bytes: Long): String {
+    val mib = bytes / 1048576.0
+    val value = if (mib < 1024) mib else mib / 1024
+    val amount = if (value % 1.0 == 0.0) value.toLong().toString() else "%.1f".format(java.util.Locale.FRANCE, value)
+    return "$amount "+ if (mib < 1024) "Mio" else "Gio"
 }

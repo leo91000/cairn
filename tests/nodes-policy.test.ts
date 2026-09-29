@@ -2,6 +2,7 @@ import type { ExecutionNode } from '../shared/nodes'
 import { expect, it } from 'vitest'
 import { agentInput, agentUpdate } from '../shared/contracts'
 import {
+  formatBytes,
   formatMiB,
   LOCAL_NODE_ID,
   nodeDiagnostics,
@@ -19,6 +20,9 @@ it('formats node sizes, recovery ages and blocking reasons for people', () => {
   expect(formatMiB(512)).toBe('512 MiB')
   expect(formatMiB(32768)).toBe('32 GiB')
   expect(formatMiB(15872)).toBe('15.5 GiB')
+  expect(formatBytes(191_392_768)).toBe('182.5 MiB')
+  expect(formatBytes(183_890_000)).toBe('175.4 MiB')
+  expect(formatBytes(4_294_967_296)).toBe('4 GiB')
   expect(relativeAge(0, 30_000)).toBe('less than a minute ago')
   expect(relativeAge(0, 3 * 60_000)).toBe('3 min ago')
   expect(relativeAge(0, 5 * 3_600_000)).toBe('5 h ago')

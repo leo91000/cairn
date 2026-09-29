@@ -4,6 +4,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.unit.dp
 import dev.leo.manager.data.*
 import java.util.Date
 import kotlinx.serialization.json.buildJsonArray
@@ -17,6 +19,8 @@ private const val UNINSTALL_COMMAND =
 @Composable
 fun NodesScreen(vm: LeoViewModel, state: Workspace) {
     var nodes by remember { mutableStateOf<List<ExecutionNode>>(emptyList()) }
+    var adding by remember { mutableStateOf(false) }
+    var storage by remember { mutableStateOf<ExecutionNode?>(null) }
     var name by remember { mutableStateOf("") }
     // Never persist enrollment secrets in saved instance state.
     var enrollment by remember { mutableStateOf<NodeEnrollment?>(null) }
@@ -36,6 +40,7 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
             .firstOrNull { !it.local && !it.revoked && it.id !in knownBeforeEnrollment }
             ?.let {
                 enrollment = null
+                adding = false
                 vm.notify("${it.name} est connectée")
                 granting = it
             }
@@ -53,8 +58,120 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
             "Nodes",
             "Vos machines Linux de confiance. Chaque conversation y tourne dans sa propre VM Firecracker. Le GPU n’est pas encore disponible.",
         )
-        Panel {
-            Text("Ajouter une machine", style = MaterialTheme.typography.titleMedium)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("${nodes.count { !it.revoked }} machines", Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            FilledTonalButton(onClick = { adding = true }) { Text("Ajouter une machine") }
+        }
+        nodes
+            .filter { showRevoked || !it.revoked }
+            .forEach { node ->
+                Panel {
+                    Text(node.name, style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        when (node.status) {
+                            "online" -> "Connectée"
+                            "offline" -> "Déconnectée"
+                            "revoked" -> "Révoquée"
+                            "local" -> "Runner du master"
+                            else -> node.status
+                        }
+                    )
+                    if (node.revoked) {
+                        Text(
+                            "Cette machine n’a plus accès. Réinscrivez-la avec un nouveau code pour la reconnecter."
+                        )
+                        return@Panel
+                    }
+                    val available = node.available ?: node.limits
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        NodeCapacity("CPU libres", available.cpu.toString(), "sur ${node.limits.cpu}", Modifier.weight(1f))
+                        NodeCapacity("RAM libre", formatMiB(available.memoryMiB), "sur ${formatMiB(node.limits.memoryMiB)}", Modifier.weight(1f))
+                        NodeCapacity("Disque libre", formatMiB(available.diskMiB), "sur ${formatMiB(node.limits.diskMiB)}", Modifier.weight(1f))
+                    }
+                    if (node.agents.isNotEmpty())
+                        Text(
+                            "Utilisée par ${node.agents.joinToString(", ") { if (it.allNodes) "${it.name} (toutes les nodes)" else it.name }}"
+                        )
+                    if (node.staleDisks.count > 0)
+                        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                            Text(
+                                "Anciens disques : ${formatMiB(node.staleDisks.diskMiB)} (${node.staleDisks.count} conversation${if (node.staleDisks.count > 1) "s" else ""})",
+                                Modifier.weight(1f),
+                            )
+                            TextButton(onClick = { cleaning = node }) { Text("Libérer") }
+                        }
+                    node.maintenance?.let {
+                        Text(
+                            if (it == "draining")
+                                "Mise en pause et sauvegarde des conversations pour une mise à jour"
+                            else "Prête à redémarrer pour la mise à jour"
+                        )
+                        node.maintenanceError?.let { message ->
+                            Text(message, color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                    nodeDiagnostics(node).forEach {
+                        Text("• $it", color = MaterialTheme.colorScheme.error)
+                    }
+                    if (node.tags.isNotEmpty()) Text(node.tags.joinToString(" · "))
+                    var technical by remember(node.id) { mutableStateOf(false) }
+                    TextButton(onClick = { technical = !technical }) { Text(if (technical) "Masquer les détails" else "Détails techniques") }
+                    if (technical) {
+                        Text("Détecté : ${node.capabilities.cpu} CPU · ${formatMiB(node.capabilities.memoryMiB)} RAM · ${formatMiB(node.capabilities.diskMiB)} disque · KVM ${if (node.capabilities.kvm) "disponible" else "indisponible"}", style = MaterialTheme.typography.bodySmall)
+                        node.reserved?.let { Text("Réservé : ${formatResources(it)}", style = MaterialTheme.typography.bodySmall) }
+                    if (node.systemTags.isNotEmpty())
+                        Text(
+                            "Tags détectés : ${node.systemTags.joinToString(" · ")}",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    node.lastSeen?.let {
+                        Text(
+                            "Dernier contact : ${Date(it)}",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    node.imageDigest?.let {
+                        Text("Version : $it", style = MaterialTheme.typography.bodySmall)
+                    }
+                    }
+                    HorizontalDivider()
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (node.agents.isEmpty())
+                            Button(onClick = { granting = node }) { Text("Choisir les agents") }
+                        else TextButton(onClick = { granting = node }) { Text("Agents") }
+                        TextButton(onClick = { editing = node }) { Text("Configurer") }
+                        TextButton(onClick = { storage = node }) { Text("Stockage") }
+                        if (!node.local)
+                            TextButton(onClick = { revoking = node }) { Text("Révoquer") }
+                    }
+                }
+            }
+        if (revoked.isNotEmpty())
+            TextButton(onClick = { showRevoked = !showRevoked }) {
+                Text(
+                    if (showRevoked) "Masquer les machines révoquées"
+                    else "Afficher les machines révoquées (${revoked.size})"
+                )
+            }
+        TextButton(onClick = { advanced = !advanced }) {
+            Text(
+                if (advanced) "Masquer les réglages avancés"
+                else "Avancé : synchronisation et délais"
+            )
+        }
+        if (advanced)
+            Panel {
+                Text(
+                    "Fréquence de synchronisation S3 des disques et délais avant mise en pause. Les valeurs par défaut conviennent à la plupart des installations.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                TextButton(onClick = { vm.perform { recovery = api.get("/nodes/settings") } }) {
+                    Text("Configurer la synchronisation")
+                }
+            }
+    }
+    if (adding) DetailSheet("Ajouter une machine", { adding = false }) {
+            Text("Connectez une machine Linux, puis choisissez les agents autorisés.", style = MaterialTheme.typography.bodyMedium)
             Field("Nom de la machine", name, { name = it })
             Button(
                 enabled = !state.busy && name.isNotBlank(),
@@ -97,113 +214,9 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
                     "3. Cette page détecte la machine dès qu’elle se connecte et demande quels agents peuvent l’utiliser.",
                     style = MaterialTheme.typography.bodySmall,
                 )
-                TextButton(onClick = { enrollment = null }) { Text("Masquer") }
+                TextButton(onClick = { enrollment = null; adding = false }) { Text("Masquer") }
             }
         }
-        nodes
-            .filter { showRevoked || !it.revoked }
-            .forEach { node ->
-                Panel {
-                    Text(node.name, style = MaterialTheme.typography.titleLarge)
-                    Text(
-                        when (node.status) {
-                            "online" -> "Connectée"
-                            "offline" -> "Déconnectée"
-                            "revoked" -> "Révoquée"
-                            "local" -> "Runner du master"
-                            else -> node.status
-                        }
-                    )
-                    if (node.revoked) {
-                        Text(
-                            "Cette machine n’a plus accès. Réinscrivez-la avec un nouveau code pour la reconnecter."
-                        )
-                        return@Panel
-                    }
-                    Text("Disponible : ${formatResources(node.available ?: node.limits)}")
-                    Text(
-                        "Autorisé : ${formatResources(node.limits)}" +
-                            (node.reserved?.let { " · réservé : ${formatResources(it)}" } ?: ""),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Text(
-                        "Détecté : ${node.capabilities.cpu} CPU · ${formatMiB(node.capabilities.memoryMiB)} RAM · ${formatMiB(node.capabilities.diskMiB)} disque · KVM ${if (node.capabilities.kvm) "disponible" else "indisponible"}",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    if (node.agents.isNotEmpty())
-                        Text(
-                            "Utilisée par ${node.agents.joinToString(", ") { if (it.allNodes) "${it.name} (toutes les nodes)" else it.name }}"
-                        )
-                    if (node.staleDisks.count > 0)
-                        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                            Text(
-                                "Anciens disques : ${formatMiB(node.staleDisks.diskMiB)} (${node.staleDisks.count} conversation${if (node.staleDisks.count > 1) "s" else ""})",
-                                Modifier.weight(1f),
-                            )
-                            TextButton(onClick = { cleaning = node }) { Text("Libérer") }
-                        }
-                    node.maintenance?.let {
-                        Text(
-                            if (it == "draining")
-                                "Mise en pause et sauvegarde des conversations pour une mise à jour"
-                            else "Prête à redémarrer pour la mise à jour"
-                        )
-                        node.maintenanceError?.let { message ->
-                            Text(message, color = MaterialTheme.colorScheme.error)
-                        }
-                    }
-                    nodeDiagnostics(node).forEach {
-                        Text("• $it", color = MaterialTheme.colorScheme.error)
-                    }
-                    if (node.tags.isNotEmpty()) Text(node.tags.joinToString(" · "))
-                    if (node.systemTags.isNotEmpty())
-                        Text(
-                            "Tags détectés : ${node.systemTags.joinToString(" · ")}",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    node.lastSeen?.let {
-                        Text(
-                            "Dernier contact : ${Date(it)}",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                    node.imageDigest?.let {
-                        Text("Version : $it", style = MaterialTheme.typography.bodySmall)
-                    }
-                    Row {
-                        if (node.agents.isEmpty())
-                            Button(onClick = { granting = node }) { Text("Choisir les agents") }
-                        else TextButton(onClick = { granting = node }) { Text("Agents") }
-                        TextButton(onClick = { editing = node }) { Text("Configurer") }
-                        if (!node.local)
-                            TextButton(onClick = { revoking = node }) { Text("Révoquer") }
-                    }
-                }
-            }
-        if (revoked.isNotEmpty())
-            TextButton(onClick = { showRevoked = !showRevoked }) {
-                Text(
-                    if (showRevoked) "Masquer les machines révoquées"
-                    else "Afficher les machines révoquées (${revoked.size})"
-                )
-            }
-        TextButton(onClick = { advanced = !advanced }) {
-            Text(
-                if (advanced) "Masquer les réglages avancés"
-                else "Avancé : synchronisation et délais"
-            )
-        }
-        if (advanced)
-            Panel {
-                Text(
-                    "Fréquence de synchronisation S3 des disques et délais avant mise en pause. Les valeurs par défaut conviennent à la plupart des installations.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                TextButton(onClick = { vm.perform { recovery = api.get("/nodes/settings") } }) {
-                    Text("Configurer la synchronisation")
-                }
-            }
-    }
     recovery?.let { settings ->
         RecoveryEditor(settings, state, { recovery = null }) { value ->
             vm.perform {
@@ -213,6 +226,15 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
                     wireJson.encodeToJsonElement(value.copy(s3Configured = null)),
                 )
                 recovery = null
+            }
+        }
+    }
+    storage?.let { node ->
+        NodeStorageEditor(node, state, { storage = null }) { policy ->
+            vm.perform {
+                api.request("PUT", "/nodes/${node.id}/storage", wireJson.encodeToJsonElement(policy))
+                storage = null
+                load()
             }
         }
     }
@@ -321,12 +343,14 @@ private fun AgentGrants(
         Text(
             "Les agents choisis peuvent exécuter des conversations sur cette machine. Un tag ou une capacité ne donne jamais d’accès à lui seul."
         )
+        Panel {
         state.agents.forEach { agent ->
             if (agent.id in everywhere) Text("${agent.name} (autorisé sur toutes les nodes)")
             else
                 Toggle(agent.name, agent.id in selected) {
                     if (!state.busy) selected = if (it) selected + agent.id else selected - agent.id
                 }
+        }
         }
     }
 }
@@ -368,8 +392,14 @@ private fun NodeEditor(
             )
         },
     ) {
+        Heading(node.name, "Identité et capacité de cette machine")
+        Panel {
+        Text("Identité", style = MaterialTheme.typography.titleSmall)
         Field("Nom", name, { name = it }, enabled = !state.busy)
         Field("Tags séparés par des virgules", tags, { tags = it }, enabled = !state.busy)
+        }
+        Panel {
+        Text("Ressources autorisées", style = MaterialTheme.typography.titleSmall)
         Field("Plafond CPU", cpu, { cpu = it }, enabled = !state.busy)
         Field("Plafond RAM (Gio)", memory, { memory = it }, enabled = !state.busy)
         Field("Plafond disque (Gio)", disk, { disk = it }, enabled = !state.busy)
@@ -377,6 +407,7 @@ private fun NodeEditor(
             "Détecté sur cette machine : ${node.capabilities.cpu} CPU · ${formatMiB(node.capabilities.memoryMiB)} RAM · ${formatMiB(node.capabilities.diskMiB)} disque.",
             style = MaterialTheme.typography.bodySmall,
         )
+        }
         Toggle("Accepter de nouveaux travaux", accepting, { if (!state.busy) accepting = it })
     }
 }
@@ -432,6 +463,8 @@ private fun RecoveryEditor(
                 "Configurez S3 sur le serveur pour synchroniser les disques.",
                 style = MaterialTheme.typography.bodySmall,
             )
+        Panel {
+        Text("Fréquence et délais", style = MaterialTheme.typography.titleSmall)
         Field("Intervalle (secondes)", interval, { interval = it }, enabled = !state.busy)
         Field(
             "Suspension après déconnexion (secondes)",
@@ -452,6 +485,46 @@ private fun RecoveryEditor(
             { budget = it },
             enabled = !state.busy,
         )
+        }
         Text("Une capture peut dépasser l’intervalle. Le cache de publication utilise ce budget.")
+    }
+}
+
+@Composable
+private fun NodeCapacity(label: String, value: String, limit: String, modifier: Modifier) {
+    Surface(modifier, shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(value, style = MaterialTheme.typography.titleMedium)
+            Text(limit, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun NodeStorageEditor(node: ExecutionNode, state: Workspace, dismiss: () -> Unit, save: (NodeStoragePolicy) -> Unit) {
+    val policy = node.storage ?: NodeStoragePolicy()
+    var cache by remember { mutableStateOf(policy.cacheMiB.toString()) }
+    var reserve by remember { mutableStateOf(policy.reserveMiB.toString()) }
+    var percent by remember { mutableStateOf(policy.reservePercent.toString()) }
+    var interval by remember { mutableStateOf(policy.backupSeconds.toString()) }
+    var dirty by remember { mutableStateOf(policy.maxDirtySeconds.toString()) }
+    Editor("Stockage · ${node.name}", state.busy, state.error, close = dismiss,
+        valid = cache.toLongOrNull() in 0L..16777216L && reserve.toLongOrNull() in 64L..16777216L && percent.toIntOrNull() in 1..50 && interval.toLongOrNull() in 5L..3600L && dirty.toLongOrNull() in (interval.toLongOrNull() ?: 5L)..86400L,
+        save = { save(NodeStoragePolicy(cache.toLong(), reserve.toLong(), percent.toInt(), interval.toLong(), dirty.toLong())) }) {
+        Text("Les fichiers sont sauvegardés sur S3 et chargés à la demande. Libérer le cache ne ferme pas les conversations.")
+        Panel {
+            Text("Disque local", style = MaterialTheme.typography.titleSmall)
+            Field("Cache propre (Mio)", cache, { cache = it }, enabled = !state.busy, keyboardOptions = InputKeyboards.Number)
+            Field("Espace libre minimum (Mio)", reserve, { reserve = it }, enabled = !state.busy, keyboardOptions = InputKeyboards.Number)
+            Field("Espace libre minimum (%)", percent, { percent = it }, enabled = !state.busy, keyboardOptions = InputKeyboards.Number)
+            Text("La plus grande réserve s’applique. Le travail non synchronisé reste local.", style = MaterialTheme.typography.bodySmall)
+        }
+        Panel {
+            Text("Synchronisation", style = MaterialTheme.typography.titleSmall)
+            Field("Synchroniser toutes les (secondes)", interval, { interval = it }, enabled = !state.busy, keyboardOptions = InputKeyboards.Number)
+            Field("Suspendre après (secondes)", dirty, { dirty = it }, enabled = !state.busy, keyboardOptions = InputKeyboards.Number)
+            Text("Suspend les exécutions si leurs modifications restent non synchronisées trop longtemps.", style = MaterialTheme.typography.bodySmall)
+        }
     }
 }

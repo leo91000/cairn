@@ -1,6 +1,10 @@
 package dev.leo.manager.ui
 
+import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.*
+import androidx.compose.ui.Modifier
 import androidx.compose.runtime.*
 import dev.leo.manager.data.*
 import kotlinx.coroutines.delay
@@ -29,6 +33,11 @@ private val nodeStates =
 
 @Composable
 fun NodePlacement(vm: LeoViewModel, run: Run) {
+    var expanded by remember(run.id) { mutableStateOf(false) }
+    var moving by remember(run.id) { mutableStateOf(false) }
+    var loaded by remember(run.id) { mutableStateOf(false) }
+    var savedMode by remember(run.id) { mutableStateOf("automatic") }
+    var savedNode by remember(run.id) { mutableStateOf("") }
     var placement by remember(run.id) { mutableStateOf(Placement()) }
     var mode by remember(run.id) { mutableStateOf("automatic") }
     var selected by remember(run.id) { mutableStateOf(run.nodeId.orEmpty()) }
@@ -37,9 +46,9 @@ fun NodePlacement(vm: LeoViewModel, run: Run) {
     var cpu by remember(run.id) { mutableStateOf(initial.cpu.toString()) }
     var memory by remember(run.id) { mutableStateOf(gib(initial.memoryMiB)) }
     var disk by remember(run.id) { mutableStateOf(gib(initial.diskMiB)) }
-    var busy by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var saved by remember { mutableStateOf<String?>(null) }
+    var busy by remember(run.id) { mutableStateOf(false) }
+    var error by remember(run.id) { mutableStateOf<String?>(null) }
+    var saved by remember(run.id) { mutableStateOf<String?>(null) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(run.id) {
         try {
@@ -48,6 +57,9 @@ fun NodePlacement(vm: LeoViewModel, run: Run) {
                 if (placement.pinnedNodeId != null) "fixed"
                 else if (placement.preferredNodeId != null) "preferred" else "automatic"
             selected = placement.pinnedNodeId ?: placement.preferredNodeId ?: run.nodeId.orEmpty()
+            savedMode = mode
+            savedNode = selected
+            loaded = true
             destination = placement.nodes.firstOrNull { it.id != run.nodeId }?.id.orEmpty()
         } catch (e: Exception) {
             error = e.message
@@ -69,30 +81,11 @@ fun NodePlacement(vm: LeoViewModel, run: Run) {
             run.movementError != null ||
             run.restoredAt != null ||
             run.capacityWaitUntil != null ||
-            run.backup?.error != null
+            run.backup?.error != null || run.storage?.mode == "on-demand" || error != null
     if (!relevant) return
     val current =
         placement.nodes.find { it.id == run.nodeId }?.name
             ?: if (run.nodeId == LOCAL_NODE_ID) "Runner du master" else "Node inconnue"
-    Text(
-        "Node : $current" +
-            (run.resources?.let { " · ${it.cpu} CPU · ${formatMiB(it.memoryMiB)} RAM" } ?: "")
-    )
-    run.nodeState?.let { Text(nodeStates[it] ?: it) }
-    run.backup?.capturedAt?.let {
-        Text(
-            "Dernière synchronisation : ${relativeAge(it, now)}. Les modifications récentes peuvent être en attente de synchronisation."
-        )
-    }
-    run.backup?.error?.let {
-        Text("Synchronisation : $it", color = MaterialTheme.colorScheme.error)
-    }
-    run.restoredAt?.let {
-        Text("Reprise depuis un point du ${date(it)} ; le chat plus récent reste visible.")
-    }
-    run.capacityWaitUntil?.let { Text("Attente de capacité jusqu’à ${date(it)}") }
-    if (run.pinnedNodeId != null) Text("Node fixe : aucune bascule automatique ailleurs.")
-    run.movementError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     fun request(block: suspend LeoViewModel.() -> Unit, done: String) {
         busy = true
         error = null
@@ -108,27 +101,75 @@ fun NodePlacement(vm: LeoViewModel, run: Run) {
             }
         }
     }
+    val dirty = run.storage?.dirtyBytes ?: 0L
+    val failed = run.backup?.error != null || run.movementError != null || run.storage?.waitingFor == "integrity"
+    val pending = dirty > 0 || run.backup?.status == "saving" || run.storage?.waitingFor != null
+    val sync = when {
+        run.movementError != null -> "Déplacement en échec"
+        run.backup?.error != null -> "Synchronisation en échec"
+        run.storage?.waitingFor != null -> storageState(run.storage.waitingFor)
+        run.nodeState != null -> nodeStates[run.nodeState] ?: run.nodeState
+        run.capacityWaitUntil != null -> "En attente de capacité"
+        run.backup?.status == "saving" -> "Synchronisation…"
+        dirty > 0 -> "${formatBytes(dirty)} non synchronisés"
+        run.backup?.capturedAt != null -> "Synchronisé ${relativeAge(run.backup.capturedAt, now)}"
+        else -> "Pas encore synchronisé"
+    }
+    val tone = when {
+        failed -> MaterialTheme.colorScheme.error
+        pending -> signal.warning
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    OutlinedCard(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
+        ListItem(
+            headlineContent = { Text("Node : $current", style = MaterialTheme.typography.titleSmall) },
+            supportingContent = { Column {
+                run.resources?.let { Text("${it.cpu} CPU · ${formatMiB(it.memoryMiB)} RAM") }
+                Text(sync, color = tone, style = MaterialTheme.typography.bodySmall)
+            } },
+            trailingContent = { Icon(Icons.Default.Info, "Détails d’exécution") },
+        )
+    }
+    if (expanded) DetailSheet("Node d’exécution", { expanded = false }) {
+        Text(current, style = MaterialTheme.typography.titleMedium)
+        run.resources?.let { Text("${it.cpu} CPU · ${formatMiB(it.memoryMiB)} RAM", style = MaterialTheme.typography.bodySmall) }
+        if (run.storage?.mode == "on-demand") Text("Fichiers chargés à la demande", style = MaterialTheme.typography.bodySmall)
+        Panel {
+            Text("Synchronisation", style = MaterialTheme.typography.titleSmall)
+            Text(sync, color = tone)
+            run.storage?.localBytes?.let { local ->
+                LinearProgressIndicator(
+                    progress = { if (local > 0) ((local - dirty).coerceAtLeast(0).toFloat() / local).coerceIn(0f, 1f) else 0f },
+                    modifier = Modifier.fillMaxWidth(),
+                    trackColor = if (dirty > 0) tone else MaterialTheme.colorScheme.surfaceVariant,
+                )
+                Text("${formatBytes(local)} sur cette node · ${formatBytes(dirty)} non synchronisés", style = MaterialTheme.typography.bodySmall)
+            }
+            if (dirty > 0) Text("Ces changements existent uniquement sur cette node" + (run.storage?.dirtySince?.let { " (${relativeAge(it, now)})" } ?: "") + ".", style = MaterialTheme.typography.bodySmall)
+            run.backup?.capturedAt?.let { Text("Dernière synchronisation : ${relativeAge(it, now)}", style = MaterialTheme.typography.bodySmall) }
+            run.backup?.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            run.movementError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            run.restoredAt?.let { Text("Reprise depuis un point du ${date(it)} ; le chat plus récent reste visible.") }
+            run.capacityWaitUntil?.let { Text("Attente de capacité jusqu’à ${date(it)}") }
+        }
+        if (savedMode == "fixed") Text("Node fixe : aucune bascule automatique ailleurs.", style = MaterialTheme.typography.bodySmall)
     Text("Où elle tournera la prochaine fois", style = MaterialTheme.typography.titleSmall)
-    Choice(
-        "Placement",
-        mode,
-        listOf(
-            "automatic" to "Automatique",
-            "preferred" to "Préférer une node",
-            "fixed" to "Fixer à une node",
-        ),
-    ) {
-        if (!busy) mode = it
+    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+        listOf("automatic" to "Automatique", "preferred" to "Préférer", "fixed" to "Fixer").forEachIndexed { index, (value, label) ->
+            SegmentedButton(selected = mode == value, onClick = { mode = value }, enabled = loaded && !busy, shape = SegmentedButtonDefaults.itemShape(index, 3)) { Text(label) }
+        }
     }
     if (mode != "automatic")
         Choice("Node", selected, placement.nodes.map { it.id to it.name }) {
             if (!busy) selected = it
         }
     TextButton(
-        enabled = !busy && (mode == "automatic" || selected.isNotEmpty()),
+        enabled = loaded && !busy && (mode != savedMode || (mode != "automatic" && selected != savedNode)) && (mode == "automatic" || selected.isNotEmpty()),
         onClick = {
             request(
                 {
+                    val requestedMode = mode
+                    val requestedNode = selected
                     api.request(
                         "PUT",
                         "/nodes/placement/${run.id}",
@@ -143,6 +184,8 @@ fun NodePlacement(vm: LeoViewModel, run: Run) {
                             )
                         },
                     )
+                    savedMode = requestedMode
+                    savedNode = requestedNode
                 },
                 "Préférence enregistrée. Elle s’applique au prochain démarrage ou à la prochaine reprise.",
             )
@@ -151,12 +194,20 @@ fun NodePlacement(vm: LeoViewModel, run: Run) {
         Text("Enregistrer la préférence")
     }
     Text(
-        "Automatique choisit la node autorisée qui a le plus de CPU et de RAM libres. Une préférence autorise la reprise ailleurs ; une node fixe attend cette machine. Cela ne déplace pas la conversation maintenant.",
+        when(mode) {
+            "preferred" -> "Utilise cette node si elle est disponible, sinon reprend ailleurs."
+            "fixed" -> "Attend cette machine, sans bascule automatique."
+            else -> "Choisit la node autorisée avec le plus de CPU et de RAM libres."
+        } + " Cela ne déplace pas la conversation maintenant.",
         style = MaterialTheme.typography.bodySmall,
     )
     val others = placement.nodes.filter { it.id != run.nodeId }
-    if (others.isNotEmpty()) {
-        Text("Déplacer vers une autre node", style = MaterialTheme.typography.titleSmall)
+    if (others.isNotEmpty()) OutlinedButton(onClick = { moving = true }) { Text("Déplacer…") }
+    saved?.let { Text(it) }
+    error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+    }
+    val others = placement.nodes.filter { it.id != run.nodeId }
+    if (moving) DetailSheet("Déplacer vers une autre node", { moving = false }) {
         Choice("Destination", destination, others.map { it.id to it.name }) {
             if (!busy) destination = it
         }
@@ -173,7 +224,7 @@ fun NodePlacement(vm: LeoViewModel, run: Run) {
             enabled =
                 !busy &&
                     destination.isNotEmpty() &&
-                    resources != null &&
+                    resources != null && resources.memoryMiB >= 128 && resources.diskMiB >= initial.diskMiB &&
                     run.status in listOf("running", "succeeded") &&
                     run.sessionId != null &&
                     run.nodeState == null,
@@ -201,7 +252,15 @@ fun NodePlacement(vm: LeoViewModel, run: Run) {
             "Réserve la destination, suspend la conversation, transfère son environnement puis la reprend là-bas. Les commandes en cours sont interrompues. Le disque ne peut pas rétrécir.",
             style = MaterialTheme.typography.bodySmall,
         )
-    }
     saved?.let { Text(it) }
     error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+    }
+}
+
+private fun storageState(state: String): String = when (state) {
+    "storage-unavailable" -> "En attente du stockage"
+    "disk-space" -> "En pause : espace disque insuffisant"
+    "backup-lag" -> "En pause pendant la synchronisation"
+    "integrity" -> "Le disque nécessite une vérification"
+    else -> state
 }
