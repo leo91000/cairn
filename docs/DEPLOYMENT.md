@@ -144,6 +144,12 @@ manager data mount remains read-only in the runner. Unsupported custom Compose
 layouts stop deployment with an error instead of silently losing stop markers.
 For an existing Firecracker runner, deployments preserve the configured memory,
 CPU and process budgets, along with the manager's global concurrency setting.
+It also sets the manager's `LEO_NODE_IMAGE` from `LEO_IMAGE` in older Compose
+definitions and checks that the new master advertises the deployed digest to
+remote nodes. Each remote supervisor then downloads that image, drains its runs,
+and updates independently; the deployment check does not wait for every remote
+node to finish. Production still needs working S3 credentials and `/dev/fuse`
+on each node host.
 
 To release the current main commit, choose an unused version tag:
 

@@ -94,13 +94,42 @@ export function nativeRunnerCompose(compose) {
 }
 
 // Preserve Coolify's generated names, labels, networks and environment expressions.
-// Only the execution infrastructure changes when upgrading from container runners.
+// Upgrade the execution infrastructure and the manager's approved node image.
 export function firecrackerRunnerCompose(compose) {
   const normalized = nativeRunnerCompose(compose)
   const document = parseDocument(normalized)
   let changed = normalized !== compose
   if (document.errors.length)
     throw new Error('Cannot migrate invalid service Compose.')
+  const managerEnvironment = document.getIn(['services', 'manager', 'environment'])
+  if (!managerEnvironment || typeof managerEnvironment.toJSON !== 'function' || typeof managerEnvironment.set !== 'function')
+    throw new Error('Manager environment not found.')
+  // Older Coolify services predate remote nodes. Their manager must advertise the
+  // same immutable image digest that the release workflow assigns to LEO_IMAGE.
+  // eslint-disable-next-line no-template-curly-in-string -- Compose must resolve the release image at deployment time.
+  const nodeImage = '${LEO_IMAGE:-}'
+  const environment = managerEnvironment.toJSON()
+  if (Array.isArray(environment)) {
+    const entry = `LEO_NODE_IMAGE=${nodeImage}`
+    const index = environment.findIndex(value => typeof value === 'string' && value.startsWith('LEO_NODE_IMAGE='))
+    if (index < 0) {
+      managerEnvironment.add(entry)
+      changed = true
+    }
+    else if (environment[index] !== entry) {
+      managerEnvironment.set(index, entry)
+      changed = true
+    }
+  }
+  else if (environment && typeof environment === 'object') {
+    if (managerEnvironment.get('LEO_NODE_IMAGE') !== nodeImage) {
+      managerEnvironment.set('LEO_NODE_IMAGE', nodeImage)
+      changed = true
+    }
+  }
+  else {
+    throw new Error('Manager environment must be a mapping or list.')
+  }
   const runner = document.getIn(['services', 'runner'])
   if (!runner || typeof runner.set !== 'function')
     throw new Error('Runner service not found.')
@@ -111,10 +140,9 @@ export function firecrackerRunnerCompose(compose) {
   const state = mounts.find(mount => typeof mount === 'string' && /:\/runner-state(?::ro|:rw)?$/.test(mount))
   if (!data || !state)
     throw new Error('Runner data and persistent disk storage are required.')
-  const managerEnvironment = document.getIn(['services', 'manager', 'environment'])?.toJSON()
-  const configuredConcurrency = Array.isArray(managerEnvironment)
-    ? managerEnvironment.find(value => typeof value === 'string' && value.startsWith('CONCURRENCY='))?.slice('CONCURRENCY='.length)
-    : managerEnvironment?.CONCURRENCY
+  const configuredConcurrency = Array.isArray(environment)
+    ? environment.find(value => typeof value === 'string' && value.startsWith('CONCURRENCY='))?.slice('CONCURRENCY='.length)
+    : environment.CONCURRENCY
   // eslint-disable-next-line no-template-curly-in-string -- Preserve the Compose environment expression.
   const concurrency = configuredConcurrency ?? '${CONCURRENCY:-4}'
   const alreadyUsesVms = runner.get('devices')?.toJSON()?.some(device => typeof device === 'string' && device.split(':')[0] === '/dev/kvm')
