@@ -521,3 +521,93 @@ fn read_includes_the_end_of_a_maximum_size_journal_write() {
     disk.read_at(MAX_IO as u64 - 1, &mut read).unwrap();
     assert_eq!(read, [42, 0]);
 }
+
+#[test]
+fn concurrent_cold_reads_share_one_verified_transfer() {
+    struct SlowSource {
+        calls: AtomicUsize,
+    }
+    impl BlockSource for SlowSource {
+        fn fetch(&self, _: &str) -> io::Result<Vec<u8>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            Ok(vec![7; BLOCK as usize])
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let source = Arc::new(SlowSource {
+        calls: AtomicUsize::new(0),
+    });
+    let hash = block_digest(&vec![7; BLOCK as usize]);
+    let manifest = serde_json::json!({"version":1,"size":BLOCK,"blockSize":BLOCK,
+        "blocks":[{"offset":0,"size":BLOCK,"hash":hash}]});
+    let disk = Arc::new(LazyDisk::create(root.path(), &manifest, source.clone()).unwrap());
+    let gate = Arc::new(std::sync::Barrier::new(8));
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            let (disk, gate) = (disk.clone(), gate.clone());
+            scope.spawn(move || {
+                gate.wait();
+                let mut bytes = [0; 4096];
+                disk.read_at(0, &mut bytes).unwrap();
+                assert_eq!(bytes, [7; 4096]);
+            });
+        }
+    });
+    assert_eq!(
+        source.calls.load(Ordering::SeqCst),
+        1,
+        "overlapping FUSE reads must share their cold block"
+    );
+}
+
+#[test]
+fn distinct_cold_blocks_still_download_concurrently() {
+    struct GatedSource {
+        entered: std::sync::mpsc::Sender<String>,
+        gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
+        first: String,
+    }
+    impl BlockSource for GatedSource {
+        fn fetch(&self, hash: &str) -> io::Result<Vec<u8>> {
+            self.entered.send(hash.into()).unwrap();
+            let (lock, wake) = &*self.gate;
+            let mut ready = lock.lock().unwrap();
+            while !*ready {
+                ready = wake.wait(ready).unwrap();
+            }
+            Ok(vec![if hash == self.first { 7 } else { 9 }; BLOCK as usize])
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let first = block_digest(&vec![7; BLOCK as usize]);
+    let second = block_digest(&vec![9; BLOCK as usize]);
+    let (entered, arrivals) = std::sync::mpsc::channel();
+    let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    let source = Arc::new(GatedSource {
+        entered,
+        gate: gate.clone(),
+        first: first.clone(),
+    });
+    let manifest = serde_json::json!({"version":1,"size":2*BLOCK,"blockSize":BLOCK,
+        "blocks":[{"offset":0,"size":BLOCK,"hash":first}, {"offset":BLOCK,"size":BLOCK,"hash":second}]});
+    let disk = Arc::new(LazyDisk::create(root.path(), &manifest, source).unwrap());
+    std::thread::scope(|scope| {
+        for (offset, expected) in [(0, 7), (BLOCK, 9)] {
+            let disk = disk.clone();
+            scope.spawn(move || {
+                let mut bytes = [0; 4096];
+                disk.read_at(offset, &mut bytes).unwrap();
+                assert_eq!(bytes, [expected; 4096]);
+            });
+        }
+        let a = arrivals.recv_timeout(std::time::Duration::from_secs(1));
+        let b = arrivals.recv_timeout(std::time::Duration::from_secs(1));
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        assert_ne!(
+            a.unwrap(),
+            b.expect("a different block must not wait for this transfer")
+        );
+    });
+}

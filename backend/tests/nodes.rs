@@ -1899,13 +1899,16 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
     let snapshot = id();
     let state = Arc::new(tokio::sync::Mutex::new(manifest));
     let corrupt = Arc::new(AtomicBool::new(false));
+    let batched = Arc::new(AtomicBool::new(false));
     let fixture = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let controller = fixture.local_addr().unwrap();
     let (disk, data, bad) = (source.clone(), state.clone(), corrupt.clone());
+    let batches = batched.clone();
     let controller_app = axum::Router::new().fallback(axum::routing::any(
         move |request: axum::extract::Request| {
             let (disk, data, bad, snapshot) =
                 (disk.clone(), data.clone(), bad.clone(), snapshot.clone());
+            let batches = batches.clone();
             async move {
                 assert_eq!(
                     request.headers()["authorization"],
@@ -1919,6 +1922,26 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
                         json!({"id": snapshot,"manifest": data.lock().await.clone()}),
                     )
                     .into_response();
+                }
+                if request.uri().path().ends_with("/blocks") {
+                    batches.store(true, Ordering::SeqCst);
+                    let body = axum::body::to_bytes(request.into_body(), 4096)
+                        .await
+                        .unwrap();
+                    let batch: Value = serde_json::from_slice(&body).unwrap();
+                    let manifest = data.lock().await;
+                    let mut bytes = Vec::new();
+                    for hash in batch["hashes"].as_array().unwrap() {
+                        bytes.extend(
+                            snapshots::block(&disk, &manifest, hash.as_str().unwrap())
+                                .await
+                                .unwrap(),
+                        );
+                    }
+                    if bad.load(Ordering::SeqCst) {
+                        bytes[0] ^= 255;
+                    }
+                    return bytes.into_response();
                 }
                 let hash = request.uri().path().rsplit('/').next().unwrap();
                 let mut bytes = snapshots::block(&disk, &*data.lock().await, hash)
@@ -1976,6 +1999,10 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         assert_eq!(status, 200, "{value}");
     }
     let first = publication::capture(&owner.service, &record).await.unwrap();
+    assert!(
+        batched.load(Ordering::SeqCst),
+        "remote publication must exercise batching"
+    );
     assert_eq!(first["uploadedBytes"], 4 * 1024 * 1024 + 128);
     let retained = owner
         .service
@@ -2861,6 +2888,15 @@ async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_
                             tokio::fs::remove_dir_all(directory).await.unwrap();
                             return axum::Json(json!({"ok": true})).into_response();
                         }
+                        if request.method() == "POST" && parts[3] == "blocks" {
+                            let body = to_bytes(request.into_body(), 4096).await.unwrap();
+                            let value: Value = serde_json::from_slice(&body).unwrap();
+                            let hashes = serde_json::from_value(value["hashes"].clone()).unwrap();
+                            let (length, body) =
+                                snapshots::served_batch(&directory, hashes).await.unwrap();
+                            return ([("content-length", length.to_string())], body)
+                                .into_response();
+                        }
                         return snapshots::served(&directory, parts[3])
                             .await
                             .unwrap()
@@ -3506,6 +3542,9 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
                     .into_response();
             }
             let hash = path.rsplit('/').next().unwrap();
+            if request.method() != "GET" {
+                return axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response();
+            }
             reads.fetch_add(1, Ordering::SeqCst);
             snapshots::block(&source, &data, hash)
                 .await
@@ -4204,6 +4243,9 @@ async fn interrupted_first_publication_is_collected_after_restart_without_anothe
                     wait.notified().await;
                     return axum::Json(json!({"id": id(),"manifest": data})).into_response();
                 }
+                if request.method() != "GET" {
+                    return axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response();
+                }
                 snapshots::block(
                     &disk,
                     &data,
@@ -4329,4 +4371,159 @@ async fn interrupted_first_publication_is_collected_after_restart_without_anothe
         );
         server.abort();
     }
+}
+
+#[tokio::test]
+async fn stalled_sync_does_not_block_other_conversations_and_same_disk_stays_fenced() {
+    use leo_agent_manager::{
+        config::id,
+        nodes::{LOCAL_NODE_ID, moves, publication},
+    };
+    use std::{sync::Arc, time::Duration};
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (signal, wait) = (entered.clone(), release.clone());
+    let app = axum::Router::new().fallback(move || {
+        let (signal, wait) = (signal.clone(), wait.clone());
+        async move {
+            signal.notify_one();
+            wait.notified().await;
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let owner = Owner::with_runner("localhost:4310".into(), url).await;
+    std::fs::write(
+        owner.service.config.data_dir.join("storage-s3.json"),
+        json!({"bucket":"fixture-never-contacted"}).to_string(),
+    )
+    .unwrap();
+    let (first, second) = (id(), id());
+    for run in [&first, &second] {
+        let record = json!({"id":run,"taskId":run,"createdAt":0,"status":"succeeded","nodeId":LOCAL_NODE_ID});
+        owner
+            .service
+            .store
+            .write(move |db| db.add_run(&record, None))
+            .await
+            .unwrap();
+        owner
+            .service
+            .store
+            .set(
+                &format!("run-checkpoint:{run}"),
+                json!({"nodeId":LOCAL_NODE_ID,"runnerId":id()}),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    let s = owner.service.clone();
+    let record = s.store.run(&first).await.unwrap();
+    let pending = tokio::spawn(async move { publication::capture(&s, &record).await });
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    let unrelated = tokio::time::timeout(
+        Duration::from_millis(500),
+        moves::latest(&owner.service, &second),
+    )
+    .await;
+    let same = tokio::time::timeout(
+        Duration::from_millis(50),
+        moves::latest(&owner.service, &first),
+    )
+    .await;
+    release.notify_one();
+    assert!(pending.await.unwrap().is_err());
+    server.abort();
+    assert!(
+        unrelated
+            .expect("another conversation must not wait for this transfer")
+            .unwrap()
+            .is_none()
+    );
+    assert!(same.is_err(), "the same disk must remain fenced");
+}
+
+#[tokio::test]
+async fn synchronization_scheduler_starts_two_disks_and_leaves_the_third_queued() {
+    use leo_agent_manager::{
+        config::id,
+        nodes::{LOCAL_NODE_ID, publication},
+    };
+    use std::{sync::Arc, time::Duration};
+    let (entered, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let wait = release.clone();
+    let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
+        let (entered, wait) = (entered.clone(), wait.clone());
+        async move {
+            entered.send(request.uri().path().to_owned()).unwrap();
+            wait.acquire().await.unwrap().forget();
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let owner = Owner::with_runner("localhost:4310".into(), url).await;
+    std::fs::write(
+        owner.service.config.data_dir.join("storage-s3.json"),
+        json!({"bucket":"fixture-never-contacted"}).to_string(),
+    )
+    .unwrap();
+    for _ in 0..3 {
+        let run = id();
+        let record = json!({"id":run,"taskId":run,"createdAt":0,"status":"succeeded",
+            "nodeId":LOCAL_NODE_ID,"isolated":true,"sessionId":"fixture",
+            "storage":{"mode":"on-demand","dirtyBytes":4096}});
+        owner
+            .service
+            .store
+            .write(move |db| db.add_run(&record, None))
+            .await
+            .unwrap();
+        owner
+            .service
+            .store
+            .set(
+                &format!("run-checkpoint:{run}"),
+                json!({"nodeId":LOCAL_NODE_ID,"runnerId":id()}),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    let scheduler = tokio::spawn(publication::maintain(owner.service.clone()));
+    let first = tokio::time::timeout(Duration::from_secs(8), requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(2), requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(first, second);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), requests.recv())
+            .await
+            .is_err()
+    );
+    release.add_permits(1);
+    let third = tokio::time::timeout(Duration::from_secs(8), requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(third, first);
+    assert_ne!(third, second);
+    owner.service.shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(2), scheduler)
+        .await
+        .unwrap()
+        .unwrap();
+    release.add_permits(3);
+    server.abort();
 }

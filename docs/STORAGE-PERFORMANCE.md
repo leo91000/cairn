@@ -23,7 +23,7 @@ set, include `leo_performance=info` to enable the timing events. No diagnostics 
 sent to an external telemetry service. Logs contain operation names, run/VM IDs,
 durations and counters, never credentials, object keys or conversation content.
 
-Manager `disk_publication` phases distinguish the global publication queue,
+Manager `disk_publication` phases distinguish the publication queue,
 cleanup, snapshot reconstruction, block transfers, manifest publication and the
 journal acknowledgement. `disk_collection` distinguishes reader-lock contention
 from remote deletion. `s3_totals` reports cumulative GET, PUT and exact-key purge
@@ -90,3 +90,65 @@ these obsolete cache files after draining old-base readers. It keeps current-bas
 cache blocks and updates the node cache index under its admission lock. Dirty
 journals never participate in this eviction. Cleanup failures are logged without
 invalidating an already durable publication.
+
+## Batched snapshot reads
+
+Stopped conversations do not retain an open journal. Previously every requested
+4 MiB block reopened the journal and verified all outstanding writes. A publication
+now requests up to eight missing blocks at once; the runner owns one journal for
+that response and streams blocks individually. The relay also streams this route.
+The response is bounded to 32 MiB, with at most one 4 MiB reconstruction buffer at
+a time on the runner. Existing transport buffers and manager upload concurrency
+remain unchanged. Disconnecting cancels stopped reads; a mounted VM's shared
+journal remains usable. Generation checks and end-to-end block hashes still apply.
+
+Older runners return 404/405 for the new route; older relays translate unsupported
+operations to 503. These responses trigger one fallback to individual reads for
+that publication. Truncated, oversized or corrupt successful responses fail the
+publication. No writes are acknowledged until the normal durable S3 publication
+and verification complete.
+
+A local Firecracker comparison used a 128 MiB random-write fixture and fetched
+the same eight 4 MiB blocks before and after stopping the VM. With the same
+unoptimized candidate binary, stopped individual reads took 24.554 s in total;
+a single batch took 3.435 s including client hash verification (7.15x faster).
+Running reads took 0.434 s individually and 0.191 s batched. These are local
+controller timings without S3, not production startup/shutdown estimates. The
+unoptimized build makes absolute timings unsuitable for comparison with release
+builds. The deterministic regression checks journal identity across streamed
+blocks, cancellation, mounted-reader survival and preservation of newer writes.
+
+This reduces stopped-publication overhead. Cold S3 fetch latency and guest boot
+remain separate costs.
+
+## Independent synchronization and shared cold reads
+
+Synchronization, moves and deletion now serialize per conversation. A stalled
+transfer no longer owns a manager-wide operation lock. Two synchronizations may
+run at once, with the existing global limit of four S3 block uploads. Background
+work uses two slots and schedules the least recently attempted conversations
+first; slow cleanup cannot hold up the entire scheduler. Local cache admission
+remains serialized, and cache eviction excludes disk mutations.
+
+Collection drains readers of the affected conversation only. A read acquires its
+conversation guard before rechecking authorization, so deletion cannot bypass
+the reader fence. Versions still in use stay protected; this adds no archives or
+restoration history. Tests hold a controller response open to verify independent
+progress, same-disk exclusion, bounded scheduling and cancellation.
+
+Concurrent reads of the same cold block share one verified transfer and cache
+fill. Different hashes still download concurrently. A reproducer with eight
+overlapping reads made eight transfers before this change and one afterward.
+`performance.coalescedReads` counts reads served from memory after waiting behind
+another reader of that block. No speculative prefetch is enabled, so this change
+does not download additional blocks or increase the configured cache budget.
+
+The real Firecracker storage suite passed with the candidate controller: the
+cold-restored fixture needed four of thirteen published blocks before becoming
+usable. Cancellation during an origin outage, preservation of local writes and
+resumption after disk pressure also passed. The loopback fixture is not a
+production S3 latency benchmark.
+
+An optimized SHA-256 comparison on this host took about 399 ms/GiB for the
+existing implementation and 397–407 ms/GiB for the proposed alternative. The
+alternative was discarded because it did not improve optimized performance.

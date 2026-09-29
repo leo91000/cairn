@@ -34,6 +34,7 @@ pub struct LazyDisk {
     base: Mutex<Arc<Value>>,
     source: Arc<dyn BlockSource>,
     cache: Mutex<()>,
+    fetching: Mutex<std::collections::HashMap<String, std::sync::Weak<Mutex<()>>>>,
     memory: Mutex<std::collections::VecDeque<(String, Arc<Vec<u8>>)>>,
     publication: RwLock<()>,
     _lock: File,
@@ -222,6 +223,7 @@ impl LazyDisk {
             base: Mutex::new(Arc::new(manifest)),
             source,
             cache: Mutex::new(()),
+            fetching: Default::default(),
             memory: Mutex::new(Default::default()),
             publication: RwLock::new(()),
             _lock: lock,
@@ -317,6 +319,29 @@ impl LazyDisk {
             .as_str()
             .ok_or_else(|| failure("Missing base block hash"))?;
         if let Some(bytes) = self.cached(hash)? {
+            self.metrics
+                .memory_hits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Ok(bytes);
+        }
+        // Concurrent FUSE readers and snapshot reconstruction may need the same
+        // cold block. Hold only its lock across I/O; unrelated blocks stay parallel.
+        let fetching = {
+            let mut pending = self.fetching.lock().map_err(failure)?;
+            if let Some(lock) = pending.get(hash).and_then(std::sync::Weak::upgrade) {
+                lock
+            } else {
+                pending.retain(|_, lock| lock.strong_count() > 0);
+                let lock = Arc::new(Mutex::new(()));
+                pending.insert(hash.to_owned(), Arc::downgrade(&lock));
+                lock
+            }
+        };
+        let _fetching = fetching.lock().map_err(failure)?;
+        if let Some(bytes) = self.cached(hash)? {
+            self.metrics
+                .coalesced_reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.metrics
                 .memory_hits
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

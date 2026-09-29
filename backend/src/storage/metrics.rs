@@ -77,6 +77,7 @@ pub(super) struct Metrics {
     pub syncs: Counter,
     pub remote: Counter,
     pub memory_hits: AtomicU64,
+    pub coalesced_reads: AtomicU64,
     pub disk_hits: AtomicU64,
     pub journal_rows: AtomicU64,
 }
@@ -89,6 +90,7 @@ impl Metrics {
             "sync": self.syncs.snapshot(),
             "remoteFetch": self.remote.snapshot(),
             "memoryHits": self.memory_hits.load(Relaxed),
+            "coalescedReads": self.coalesced_reads.load(Relaxed),
             "diskHits": self.disk_hits.load(Relaxed),
             "journalRows": self.journal_rows.load(Relaxed)
         })

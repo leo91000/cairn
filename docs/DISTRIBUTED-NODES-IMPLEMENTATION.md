@@ -47,9 +47,9 @@ has not been merged, deployed or released.
   invalidates the incremental baseline so the next full capture can repair
   current blocks.
   An unavailable or corrupt S3 copy also loses its upload receipt. Damage can
-  remain undetected until a restore needs the block. The existing global
-  operation lock still serializes publication, restoration, moves and purge
-  across conversations.
+  remain undetected until a restore needs the block. Publication, restoration,
+  moves and purge serialize per conversation. Two publications can progress
+  concurrently, while cache admission and eviction retain their shared guards.
   The node's separate dm-era tracking survives reboots but expires a baseline
   after 24 hours, forcing a full local disk copy and index. Previously received
   blocks are still reused by the master, so this does not resend the whole disk.

@@ -482,6 +482,21 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
             tokio::fs::remove_dir_all(directory).await?;
             return Ok(Json(json!({"ok": true})).into_response());
         }
+        if request.method() == "POST" && *hash == "blocks" {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Batch {
+                hashes: Vec<String>,
+            }
+            let body = axum::body::to_bytes(request.into_body(), 4096)
+                .await
+                .map_err(|_| Error::bad("Invalid snapshot block batch."))?;
+            let batch: Batch = serde_json::from_slice(&body)
+                .map_err(|_| Error::bad("Invalid snapshot block batch."))?;
+            let (length, body) =
+                crate::nodes::snapshots::served_batch(&directory, batch.hashes).await?;
+            return Ok(([("content-length", length.to_string())], body).into_response());
+        }
         if request.method() != "GET" {
             return Err(Error::new(405, "Method not allowed."));
         }
@@ -1024,6 +1039,131 @@ async fn snapshot_baseline(request: axum::extract::Request) -> Result<Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn snapshot_batch_reuses_one_journal_and_releases_the_stopped_disk() {
+        use crate::storage::Disk;
+        use tower::ServiceExt;
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let state = root.path().join("state");
+        private_dir(&data).await.unwrap();
+        private_dir(&state).await.unwrap();
+        std::fs::write(data.join("runner-secret"), "fixture").unwrap();
+        let stop = CancellationToken::new();
+        let pool =
+            crate::microvm::pool::Pool::new(state.clone(), root.path().into(), stop.clone(), 1)
+                .await
+                .unwrap();
+        let broker = Broker {
+            data,
+            state: state.clone(),
+            pool,
+            active: Default::default(),
+            stop,
+            leases: Default::default(),
+        };
+        let run = crate::config::id();
+        let snapshot = crate::config::id();
+        let directory = state.join("disks").join(&run);
+        let block = crate::nodes::snapshots::BLOCK;
+        let base = json!({"version":1,"size":block+1024,"blockSize":block,
+            "blocks":[{"offset":0,"size":block,"hash":null},{"offset":block,"size":1024,"hash":null}]});
+        let disk = crate::storage::runtime::create(
+            &directory.join("lazy"),
+            &base,
+            &json!({"master":"http://127.0.0.1:9/","grant":"fixture"}),
+        )
+        .await
+        .unwrap();
+        disk.write_at(0, &vec![7; block as usize]).unwrap();
+        disk.write_at(block, &[9; 1024]).unwrap();
+        let generation = disk.seal().unwrap();
+        let mut manifest = disk.capture(generation).unwrap();
+        manifest["onDemand"] = true.into();
+        manifest["generation"] = generation.into();
+        // A later unpublished write must not replace data from the captured generation.
+        disk.write_at(0, &[3; 4096]).unwrap();
+        drop(disk);
+        let captured = state.join("snapshots").join(&snapshot);
+        private_dir(&captured).await.unwrap();
+        std::fs::write(captured.join("run"), run).unwrap();
+        std::fs::write(captured.join("manifest.json"), manifest.to_string()).unwrap();
+        let hashes: Vec<_> = manifest["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["hash"].clone())
+            .collect();
+        let app = Router::new().fallback(any(handler)).with_state(broker);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/snapshots/{snapshot}/blocks"))
+                    .header("authorization", "Bearer fixture")
+                    .body(Body::from(json!({"hashes":hashes}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let mut stream = response.into_body().into_data_stream();
+        assert_eq!(
+            stream.next().await.unwrap().unwrap().as_ref(),
+            vec![7; block as usize]
+        );
+        let opened = crate::storage::runtime::load(&directory).await.unwrap();
+        let cancellation = opened.stop.clone();
+        let identity = Arc::downgrade(&opened);
+        drop(opened);
+        assert_eq!(stream.next().await.unwrap().unwrap().as_ref(), &[9; 1024]);
+        assert!(Arc::ptr_eq(
+            &identity.upgrade().unwrap(),
+            &crate::storage::runtime::load(&directory).await.unwrap()
+        ));
+        assert!(stream.next().await.is_none());
+        assert!(cancellation.is_cancelled());
+        assert!(identity.upgrade().is_none());
+        let reopened = crate::storage::runtime::load(&directory).await.unwrap();
+        let mut bytes = [0; 4096];
+        reopened.disk.read_at(0, &mut bytes).unwrap();
+        assert_eq!(bytes, [3; 4096]);
+        drop(reopened);
+
+        let request = || {
+            Request::builder()
+                .method("POST")
+                .uri(format!("/snapshots/{snapshot}/blocks"))
+                .header("authorization", "Bearer fixture")
+                .body(Body::from(json!({"hashes":hashes}).to_string()))
+                .unwrap()
+        };
+        let response = app.clone().oneshot(request()).await.unwrap();
+        let mut stream = response.into_body().into_data_stream();
+        stream.next().await.unwrap().unwrap();
+        let cancellation = crate::storage::runtime::load(&directory)
+            .await
+            .unwrap()
+            .stop
+            .clone();
+        drop(stream);
+        assert!(
+            cancellation.is_cancelled(),
+            "disconnect must cancel stopped reads"
+        );
+        assert!(crate::storage::runtime::live(&directory).is_none());
+
+        // The same response must not cancel a mounted VM's shared volume.
+        let _owner = crate::file_lock::exclusive(&directory.join("lock"), "busy").unwrap();
+        let mounted = crate::storage::runtime::load(&directory).await.unwrap();
+        let response = app.oneshot(request()).await.unwrap();
+        let mut stream = response.into_body().into_data_stream();
+        stream.next().await.unwrap().unwrap();
+        drop(stream);
+        assert!(!mounted.stop.is_cancelled());
+    }
 
     #[tokio::test]
     async fn wait_does_not_report_completion_until_the_attempt_is_released() {
