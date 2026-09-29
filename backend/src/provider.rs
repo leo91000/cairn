@@ -62,11 +62,11 @@ mod tests {
     fn agents_without_a_provider_run_on_codex() {
         assert_eq!(Provider::of_agent(&json!({})), Provider::Codex);
         assert_eq!(
-            Provider::of_agent(&json!({"provider":"claude"})),
+            Provider::of_agent(&json!({ "provider": "claude" })),
             Provider::Claude
         );
         assert_eq!(
-            Provider::of_run(&json!({"snapshot":{"agent":{"provider":"codex"}}})),
+            Provider::of_run(&json!({ "snapshot": { "agent": { "provider": "codex" } } })),
             Provider::Codex
         );
         assert!(Provider::parse("gemini").is_err());

@@ -1,5 +1,6 @@
 //! Bounded, versioned control messages. Guest messages never select host paths.
 use crate::error::{Error, Result};
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio::io::{
     AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
@@ -54,7 +55,15 @@ pub async fn read(reader: &mut (impl AsyncBufRead + Unpin)) -> Result<Option<Val
     }
 }
 
-pub async fn write(writer: &mut (impl AsyncWrite + Unpin), value: &Value) -> Result<()> {
+/// Interprets a received message, reporting a malformed one as `message`.
+pub fn decode<T: DeserializeOwned>(value: Value, message: &str) -> Result<T> {
+    serde_json::from_value(value).map_err(|_| Error::bad(message))
+}
+
+pub async fn write(
+    writer: &mut (impl AsyncWrite + Unpin),
+    value: &(impl Serialize + ?Sized),
+) -> Result<()> {
     let mut bytes = serde_json::to_vec(value)?;
     if bytes.len() >= MAX_MESSAGE {
         return Err(Error::bad("VM message exceeds limit."));
@@ -106,14 +115,9 @@ mod tests {
         let mut encoded = Vec::new();
         write_chunk(&mut encoded, b"archive\0\n{}").await.unwrap();
         write_chunk(&mut encoded, &[]).await.unwrap();
-        write(
-            &mut encoded,
-            &serde_json::json!({
-                "ok": true
-            }),
-        )
-        .await
-        .unwrap();
+        write(&mut encoded, &serde_json::json!({ "ok": true }))
+            .await
+            .unwrap();
         let (mut sender, receiver) = tokio::io::duplex(5);
         let writing = async move {
             for chunk in encoded.chunks(3) {

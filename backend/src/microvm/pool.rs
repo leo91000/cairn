@@ -1,11 +1,10 @@
 //! Bounded execution slots; each reservation boots its own S3-backed VM.
-use super::host::Vm;
+use super::{host::Vm, plan::Plan};
 use crate::{
     error::{Error, Result},
     skills::private_dir,
-    validation::text,
 };
-use serde_json::{Value, json};
+use serde::Serialize;
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::{Mutex, OnceCell};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -29,6 +28,19 @@ impl Slots {
         Some(index + 1)
     }
 }
+
+/// Slot usage reported by the controller health endpoint.
+#[derive(Debug, Serialize)]
+pub struct Health {
+    pub capacity: usize,
+    pub occupied: usize,
+    /// Always 0 and false: VMs are booted per reservation, never pre-warmed.
+    pub ready: usize,
+    pub preparing: bool,
+}
+
+/// Disk size used when a plan carries no placement resources.
+const DEFAULT_DISK_MIB: u64 = 32768;
 
 pub struct Reservation {
     pool: Arc<Pool>,
@@ -72,14 +84,14 @@ impl Pool {
         }))
     }
 
-    pub async fn health(&self) -> Value {
+    pub async fn health(&self) -> Health {
         let slots = self.slots.lock().await;
-        json!({
-            "capacity": self.capacity,
-            "occupied": slots.occupied.iter().filter(|v| **v).count(),
-            "ready": 0,
-            "preparing": false
-        })
+        Health {
+            capacity: self.capacity,
+            occupied: slots.occupied.iter().filter(|v| **v).count(),
+            ready: 0,
+            preparing: false,
+        }
     }
 
     pub async fn reserve(self: &Arc<Self>, _run_id: &str) -> Result<Reservation> {
@@ -107,11 +119,11 @@ impl Pool {
 impl Reservation {
     pub async fn execute(
         mut self,
-        plan: Value,
+        plan: Plan,
         socket: Arc<OnceCell<PathBuf>>,
         stop: CancellationToken,
     ) -> Result<i32> {
-        let disk = self.pool.state.join("disks").join(text(&plan, "runId"));
+        let disk = self.pool.state.join("disks").join(plan.run_id());
         if stop.is_cancelled() {
             self.finish().await;
             return Ok(143);
@@ -119,16 +131,19 @@ impl Reservation {
         let operation = async {
             let mut timing = crate::performance::Operation::new(
                 "conversation_start",
-                text(&plan, "runId"),
+                plan.run_id(),
                 "prepare_disk",
             );
-            if !plan["storage"].is_object() {
+            if !plan.storage().is_object() {
                 return Err(Error::conflict(
                     "S3-backed storage is required for VM execution.",
                 ));
             }
-            let size = plan["resources"]["diskMiB"].as_u64().unwrap_or(32768) * 1024 * 1024;
-            crate::storage::bootstrap::prepare(&disk, size, &plan["storage"], &stop).await?;
+            let disk_mib = plan.as_value()["resources"]["diskMiB"]
+                .as_u64()
+                .unwrap_or(DEFAULT_DISK_MIB);
+            let size = disk_mib * 1024 * 1024;
+            crate::storage::bootstrap::prepare(&disk, size, plan.storage(), &stop).await?;
             timing.next("boot_vm");
             self.vm = Some(
                 Vm::boot(
@@ -137,11 +152,12 @@ impl Reservation {
                     disk,
                     self.slot,
                     &stop,
-                    plan.get("resources"),
+                    plan.resources(),
                 )
                 .await?,
             );
             let vm = self.vm.as_mut().unwrap();
+            // Only this reservation initializes the attempt socket.
             let _ = socket.set(vm.socket.clone());
             timing.finish();
             vm.execute(&plan, &self.pool.state, stop.clone()).await
@@ -199,19 +215,21 @@ mod tests {
         .unwrap();
         let stop = CancellationToken::new();
         let reservation = pool.reserve("run").await.unwrap();
+
         // Rejecting an invalid plan reaches the same completion/cleanup path as
         // a guest returning its exit status, without requiring KVM in this test.
-        assert!(
-            reservation
-                .execute(json!({"runId":"run"}), Default::default(), stop.clone())
-                .await
-                .is_err()
-        );
+        let plan = Plan::new(serde_json::json!({
+            "runId": "run"
+        }));
+        let result = reservation
+            .execute(plan, Arc::default(), stop.clone())
+            .await;
+        assert!(result.is_err());
         assert!(
             stop.is_cancelled(),
             "captures must not retry a finished VM's deleted socket"
         );
-        assert_eq!(pool.health().await["occupied"], 0);
+        assert_eq!(pool.health().await.occupied, 0);
     }
 
     #[tokio::test]
@@ -222,27 +240,27 @@ mod tests {
             .await
             .unwrap();
         let mut reservations = Vec::new();
-        assert_eq!(pool.health().await["capacity"], 12);
+        assert_eq!(pool.health().await.capacity, 12);
         for _ in 0..12 {
             reservations.push(pool.reserve("run").await.unwrap());
         }
-        assert_eq!(pool.health().await["occupied"], 12);
+        assert_eq!(pool.health().await.occupied, 12);
         assert!(pool.reserve("run").await.is_err());
         drop(reservations.pop());
         tokio::time::timeout(Duration::from_secs(1), async {
-            while pool.health().await["occupied"] == 12 {
+            while pool.health().await.occupied == 12 {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .unwrap();
         reservations.push(pool.reserve("run").await.unwrap());
-        assert_eq!(pool.health().await["occupied"], 12);
+        assert_eq!(pool.health().await.occupied, 12);
         stop.cancel();
         assert!(pool.reserve("run").await.is_err());
         drop(reservations);
         pool.drain().await;
-        assert_eq!(pool.health().await["occupied"], 0);
+        assert_eq!(pool.health().await.occupied, 0);
     }
 
     #[tokio::test]
@@ -265,7 +283,7 @@ mod tests {
         }
         drop(reservations);
         pool.drain().await;
-        assert_eq!(pool.health().await["occupied"], 0);
+        assert_eq!(pool.health().await.occupied, 0);
         assert!(
             Pool::new(
                 root.path().into(),
@@ -304,6 +322,6 @@ mod tests {
                 .unwrap(),
             b"saved"
         );
-        assert_eq!(pool.health().await["occupied"], 0);
+        assert_eq!(pool.health().await.occupied, 0);
     }
 }

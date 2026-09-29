@@ -2,23 +2,37 @@
 use crate::{
     error::{Error, Result},
     skills::atomic_write,
-    validation::text,
 };
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
 use std::{
     os::unix::fs::DirBuilderExt,
     path::{Path, PathBuf},
 };
 use tokio::process::Command;
 
-fn record(target: &Path) -> PathBuf {
-    Path::new("/var/lib/leo/projects").join(crate::auth::hex_digest(&target.to_string_lossy()))
+const RECORDS: &str = "/var/lib/leo/projects";
+
+/// Persisted mount of a published project, replayed after every guest boot.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Record {
+    #[serde(default)]
+    path: PathBuf,
+    /// Private data directory behind a restricted project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<PathBuf>,
+    #[serde(default)]
+    read_only: bool,
 }
 
-async fn save(value: &Value) -> Result<()> {
-    let path = record(Path::new(text(value, "path")));
+fn record_file(target: &Path) -> PathBuf {
+    Path::new(RECORDS).join(crate::auth::hex_digest(&target.to_string_lossy()))
+}
+
+async fn save(record: &Record) -> Result<()> {
+    let path = record_file(&record.path);
     tokio::fs::create_dir_all(path.parent().unwrap()).await?;
-    atomic_write(&path, &serde_json::to_vec(value)?).await
+    atomic_write(&path, &serde_json::to_vec(record)?).await
 }
 
 /// `source` is complete data inside a root-owned 0700 parent. The guest cannot
@@ -26,39 +40,53 @@ async fn save(value: &Value) -> Result<()> {
 pub async fn publish(source: &Path, target: &Path, restricted: bool) -> Result<()> {
     if !restricted {
         tokio::fs::rename(source, target).await?;
-        return save(&json!({"path": target,"readOnly": false})).await;
+        let record = Record {
+            path: target.to_owned(),
+            source: None,
+            read_only: false,
+        };
+        return save(&record).await;
     }
-    let value = json!({"path": target,"source": source,"readOnly": true});
+    let record = Record {
+        path: target.to_owned(),
+        source: Some(source.to_owned()),
+        read_only: true,
+    };
     // A reboot at any subsequent point can reconstruct the published mount.
-    save(&value).await?;
-    apply(&value).await
+    save(&record).await?;
+    apply(&record).await
 }
 
 pub async fn reopen(target: &Path, restricted: bool) -> Result<bool> {
-    let mut value = match tokio::fs::read(record(target)).await {
-        Ok(bytes) => serde_json::from_slice::<Value>(&bytes)?,
+    let mut record = match tokio::fs::read(record_file(target)).await {
+        Ok(bytes) => serde_json::from_slice::<Record>(&bytes)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             if !target.exists() {
                 return Ok(false);
             }
-            json!({"path": target})
+            Record {
+                path: target.to_owned(),
+                source: None,
+                read_only: false,
+            }
         }
         Err(error) => return Err(error.into()),
     };
-    value["readOnly"] = restricted.into();
-    save(&value).await?;
-    apply(&value).await?;
+    record.read_only = restricted;
+    save(&record).await?;
+    apply(&record).await?;
     Ok(true)
 }
 
 pub async fn restore() -> Result<()> {
-    let directory = Path::new("/var/lib/leo/projects");
-    if directory.exists() {
-        let mut entries = tokio::fs::read_dir(directory).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let value: Value = serde_json::from_slice(&tokio::fs::read(entry.path()).await?)?;
-            apply(&value).await?;
-        }
+    let directory = Path::new(RECORDS);
+    if !directory.exists() {
+        return Ok(());
+    }
+    let mut entries = tokio::fs::read_dir(directory).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let record: Record = serde_json::from_slice(&tokio::fs::read(entry.path()).await?)?;
+        apply(&record).await?;
     }
     Ok(())
 }
@@ -73,15 +101,13 @@ async fn mounted(target: &Path) -> Result<bool> {
 }
 
 async fn policy(target: &Path, restricted: bool) -> Result<()> {
+    let options = if restricted {
+        "remount,bind,ro"
+    } else {
+        "remount,bind,rw"
+    };
     if !Command::new("mount")
-        .args([
-            "-o",
-            if restricted {
-                "remount,bind,ro"
-            } else {
-                "remount,bind,rw"
-            },
-        ])
+        .args(["-o", options])
         .arg(target)
         .status()
         .await?
@@ -106,11 +132,10 @@ async fn bind(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn apply(value: &Value) -> Result<()> {
-    let target = Path::new(text(value, "path"));
-    let restricted = value["readOnly"] == true;
-    if let Some(source) = value["source"].as_str() {
-        let source = Path::new(source);
+async fn apply(record: &Record) -> Result<()> {
+    let target = record.path.as_path();
+    let restricted = record.read_only;
+    if let Some(source) = &record.source {
         if !source.is_dir() {
             return Err(Error::bad("Retained project data is unavailable."));
         }
