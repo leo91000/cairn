@@ -2,6 +2,7 @@
 use crate::{
     error::{Error, Result},
     service::Service,
+    store::Db,
     validation::text,
 };
 use serde_json::{Value, json};
@@ -15,6 +16,28 @@ async fn remove(path: &Path) -> Result<()> {
         Err(e) => return Err(e.into()),
     }
     Ok(())
+}
+
+/// Forgets disk grants a node reported retired, or every grant when the disk is gone.
+async fn forget_disk_grants(
+    s: &Service,
+    run: &str,
+    node: &str,
+    all: bool,
+    retired: Vec<Value>,
+) -> Result<()> {
+    let (run, node) = (run.to_owned(), node.to_owned());
+    s.store
+        .transaction(move |db| {
+            for grant in db.list("node-disk-grants")? {
+                let owned = grant["runId"] == run && grant["nodeId"] == node;
+                if owned && (all || retired.contains(&grant["id"])) {
+                    db.remove("node-disk-grants", text(&grant, "id"))?;
+                }
+            }
+            Ok(())
+        })
+        .await
 }
 
 async fn disk(s: &Service, run: &str, action: &str, destination: Option<&str>) -> Result<()> {
@@ -44,55 +67,36 @@ async fn disk(s: &Service, run: &str, action: &str, destination: Option<&str>) -
     let node = destination
         .or(checkpoint["nodeId"].as_str())
         .unwrap_or(crate::nodes::LOCAL_NODE_ID);
-    async {
-        let response = s
-            .http
-            .post(format!("{base}/disks/{run}/{action}"))
-            .bearer_auth(&credential)
-            .json(&json!({}))
-            .timeout(std::time::Duration::from_secs(7200))
-            .send()
-            .await
-            .map_err(|_| Error::unavailable("Workspace transfer interrupted."))?;
-        if !response.status().is_success() {
-            return Err(Error::unavailable(
-                "Workspace transfer failed or the agent has not stopped yet.",
-            ));
-        }
-        let value: Value = response.json().await.map_err(Error::internal)?;
-        if action == "delete" || action == "prune" {
-            let (run, node, all, retired) = (
-                run.to_owned(),
-                node.to_owned(),
-                action == "delete",
-                value["retiredGrants"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default(),
-            );
-            s.store
-                .transaction(move |db| {
-                    for grant in db.list("node-disk-grants")? {
-                        if grant["runId"] == run
-                            && grant["nodeId"] == node
-                            && (all || retired.contains(&grant["id"]))
-                        {
-                            db.remove("node-disk-grants", text(&grant, "id"))?;
-                        }
-                    }
-                    Ok(())
-                })
-                .await?;
-        }
-        if action == "delete" {
-            let id = format!("{run}:{}", node);
-            s.store
-                .write(move |db| db.remove("node-volumes", &id))
-                .await?;
-        }
-        Ok(())
+    let response = s
+        .http
+        .post(format!("{base}/disks/{run}/{action}"))
+        .bearer_auth(&credential)
+        .json(&json!({}))
+        .timeout(std::time::Duration::from_secs(7200))
+        .send()
+        .await
+        .map_err(|_| Error::unavailable("Workspace transfer interrupted."))?;
+    if !response.status().is_success() {
+        return Err(Error::unavailable(
+            "Workspace transfer failed or the agent has not stopped yet.",
+        ));
     }
-    .await
+    let value: Value = response.json().await.map_err(Error::internal)?;
+    let deleted = action == "delete";
+    if deleted || action == "prune" {
+        let retired = value["retiredGrants"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        forget_disk_grants(s, run, node, deleted, retired).await?;
+    }
+    if deleted {
+        let id = format!("{run}:{node}");
+        s.store
+            .write(move |db| db.remove("node-volumes", &id))
+            .await?;
+    }
+    Ok(())
 }
 
 /// Frees an old disk left on a node: the whole disk of a conversation that now runs
@@ -134,22 +138,43 @@ async fn delete_disks(s: &Service, run: &str) -> Result<()> {
     Ok(())
 }
 
+async fn remove_worktree(project: &Path, target: &Path) -> Result<()> {
+    let status = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(project)
+        .args(["worktree", "remove", "--force", "--"])
+        .arg(target)
+        .env_clear()
+        .envs(std::env::vars().filter(|(key, _)| !crate::process::storage_key(key)))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .status()
+        .await?;
+    if !status.success() {
+        return Err(Error::unavailable(
+            "Unable to detach a conversation worktree; cleanup will retry.",
+        ));
+    }
+    Ok(())
+}
+
+fn array(value: &Value) -> Vec<Value> {
+    value.as_array().cloned().unwrap_or_default()
+}
+
 async fn detach_worktrees(s: &Service, chat: &Value) -> Result<()> {
-    let run = if text(chat, "runId").is_empty() {
+    let run_id = text(chat, "runId");
+    let run = if run_id.is_empty() {
         Value::Null
     } else {
-        s.store.run(text(chat, "runId")).await?
+        s.store.run(run_id).await?
     };
-    let root = s.config.data_dir.join("runs").join(text(chat, "runId"));
-    let mut workspaces = chat["legacyWorkspaces"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    workspaces.extend(run["workspaces"].as_array().into_iter().flatten().cloned());
-    let mut projects = chat["legacyProjects"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let root = s.config.data_dir.join("runs").join(run_id);
+    let mut workspaces = array(&chat["legacyWorkspaces"]);
+    workspaces.extend(array(&run["workspaces"]));
+    let mut projects = array(&chat["legacyProjects"]);
     projects.extend(crate::service::run_projects(&run));
     for workspace in workspaces.iter().filter(|w| w["kind"] == "worktree") {
         let target = Path::new(text(workspace, "path"));
@@ -159,28 +184,12 @@ async fn detach_worktrees(s: &Service, chat: &Value) -> Result<()> {
         if !target.starts_with(&root) || tokio::fs::canonicalize(target).await? != target {
             return Err(Error::bad("Invalid conversation worktree path."));
         }
-        if let Some(project) = projects.iter().find(|p| p["id"] == workspace["projectId"]) {
-            let project_path = Path::new(text(project, "path"));
-            if project_path.is_dir() {
-                let status = tokio::process::Command::new("git")
-                    .arg("-C")
-                    .arg(project_path)
-                    .args(["worktree", "remove", "--force", "--"])
-                    .arg(target)
-                    .env_clear()
-                    .envs(std::env::vars().filter(|(key, _)| !crate::process::storage_key(key)))
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .kill_on_drop(true)
-                    .status()
-                    .await?;
-                if !status.success() {
-                    return Err(Error::unavailable(
-                        "Unable to detach a conversation worktree; cleanup will retry.",
-                    ));
-                }
-            }
+        let Some(project) = projects.iter().find(|p| p["id"] == workspace["projectId"]) else {
+            continue;
+        };
+        let project = Path::new(text(project, "path"));
+        if project.is_dir() {
+            remove_worktree(project, target).await?;
         }
     }
     Ok(())
@@ -200,15 +209,48 @@ async fn files(s: &Service, chat: &Value) -> Result<()> {
     )
     .await?;
     for (_, artifact) in s.store.keys(&format!("artifact:{run}:")).await? {
-        {
-            let id = text(&artifact, "id");
-            crate::validation::uuid(id)?;
-            for name in [id.to_owned(), format!("{id}.jpg")] {
-                remove(&s.config.data_dir.join("artifacts").join(name)).await?;
-            }
+        let id = text(&artifact, "id");
+        crate::validation::uuid(id)?;
+        for name in [id.to_owned(), format!("{id}.jpg")] {
+            remove(&s.config.data_dir.join("artifacts").join(name)).await?;
         }
     }
     Ok(())
+}
+
+/// Deletes every record of a conversation and its run, including share tokens.
+fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
+    for prefix in [
+        format!("artifact:{run}:"),
+        crate::chats::question_prefix(cid),
+        format!("chat-attachment:{cid}:"),
+    ] {
+        for (key, value) in db.keys(&prefix)? {
+            if let Some(token) = value["publicToken"].as_str() {
+                db.delete(&format!("artifact-share:{token}"))?;
+            }
+            db.delete(&key)?;
+        }
+    }
+    for key in [
+        format!("run-checkpoint:{run}"),
+        format!("chat-error:{cid}"),
+        format!("chat-title-pending:{cid}"),
+        format!("chat-title-checked:{cid}"),
+    ] {
+        db.delete(&key)?;
+    }
+    for prefix in ["push-outbox:", "mcp-grant:"] {
+        for (key, value) in db.keys(prefix)? {
+            if value["runId"] == run || value["chatId"] == cid {
+                db.delete(&key)?;
+            }
+        }
+    }
+    db.0.execute("DELETE FROM chat_messages WHERE chat_id=?", [cid])?;
+    db.0.execute("DELETE FROM runs WHERE id=?", [run])?;
+    db.remove("chats", cid)?;
+    db.audit("chat.purged", &json!({ "id": cid }))
 }
 
 pub async fn purge(s: &Service, chat: Value) -> Result<()> {
@@ -224,40 +266,5 @@ pub async fn purge(s: &Service, chat: Value) -> Result<()> {
     delete_disks(s, &run).await?;
     crate::nodes::publication::purge(s, &run).await?;
     files(s, &chat).await?;
-    s.store
-        .transaction(move |db| {
-            for prefix in [
-                format!("artifact:{run}:"),
-                format!("chat-question:{cid}:"),
-                format!("chat-attachment:{cid}:"),
-            ] {
-                for (key, value) in db.keys(&prefix)? {
-                    if let Some(token) = value["publicToken"].as_str() {
-                        db.delete(&format!("artifact-share:{token}"))?;
-                    }
-                    db.delete(&key)?;
-                }
-            }
-            for key in [
-                format!("run-checkpoint:{run}"),
-                format!("chat-error:{cid}"),
-                format!("chat-title-pending:{cid}"),
-                format!("chat-title-checked:{cid}"),
-            ] {
-                db.delete(&key)?;
-            }
-            for prefix in ["push-outbox:", "mcp-grant:"] {
-                for (key, value) in db.keys(prefix)? {
-                    if value["runId"] == run || value["chatId"] == cid {
-                        db.delete(&key)?;
-                    }
-                }
-            }
-            db.0.execute("DELETE FROM chat_messages WHERE chat_id=?", [&cid])?;
-            db.0.execute("DELETE FROM runs WHERE id=?", [&run])?;
-            db.remove("chats", &cid)?;
-            db.audit("chat.purged", &json!({"id": cid}))?;
-            Ok(())
-        })
-        .await
+    s.store.transaction(move |db| forget(db, &cid, &run)).await
 }

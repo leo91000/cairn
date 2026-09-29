@@ -19,27 +19,27 @@ impl TextDeltas {
                 if event["type"] == "turn.started" {
                     self.0.clear();
                 }
-                let item = &event["payload"]["item"];
-                if item["type"] != "agent_message" {
-                    return Ok(event);
-                }
-                let id = text(item, "id").to_owned();
-                let Some(content) = item["text"].as_str().filter(|_| !id.is_empty()) else {
-                    return Ok(event);
-                };
-                let content = content.to_owned();
-                if let Some(previous) = self.0.insert(id, content.clone())
-                    && let Some(suffix) = content.strip_prefix(&previous)
-                {
-                    event["payload"]["item"]
-                        .as_object_mut()
-                        .unwrap()
-                        .remove("text");
-                    event["payload"]["item"]["delta"] = suffix.into();
+                if let Some(suffix) = self.suffix(&event["payload"]["item"]) {
+                    if let Some(item) = event["payload"]["item"].as_object_mut() {
+                        item.remove("text");
+                        item.insert("delta".into(), suffix.into());
+                    }
                     event["text"] = Value::String(String::new());
                 }
                 Ok(event)
             })
             .collect()
+    }
+
+    /// Remembers an agent message snapshot and returns what it appends to the
+    /// previous snapshot of the same message, if it only appends.
+    fn suffix(&mut self, item: &Value) -> Option<String> {
+        if item["type"] != "agent_message" {
+            return None;
+        }
+        let id = text(item, "id");
+        let content = item["text"].as_str().filter(|_| !id.is_empty())?;
+        let previous = self.0.insert(id.to_owned(), content.to_owned())?;
+        content.strip_prefix(&previous).map(str::to_owned)
     }
 }

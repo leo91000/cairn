@@ -26,17 +26,18 @@ impl Config {
     pub fn load() -> Result<Self> {
         let cwd = env::current_dir()?;
         let get = |key, default: &str| env::var(key).unwrap_or_else(|_| default.to_owned());
+        let home = get("AGENT_HOME", &get("HOME", "/home/node"));
+        let roots = get("WORKSPACE_ROOTS", &cwd.to_string_lossy());
+        let port = get("PORT", "4310")
+            .parse::<u16>()
+            .map_err(|_| Error::bad("PORT must be a valid port number."))?;
         let mut value = serde_json::json!({
             "dataDir": get("DATA_DIR", ".data"),
-            "home": get("AGENT_HOME", &get("HOME", "/home/node")),
-            "workspaceRoots": get("WORKSPACE_ROOTS", &cwd.to_string_lossy())
-                .split(':')
-                .collect::<Vec<_>>(),
+            "home": home,
+            "workspaceRoots": roots.split(':').collect::<Vec<_>>(),
             "publicUrl": get("PUBLIC_URL", "http://localhost:4310"),
             "host": get("HOST", "127.0.0.1"),
-            "port": get("PORT", "4310")
-                .parse::<u16>()
-                .map_err(|_| Error::bad("PORT must be a valid port number."))?,
+            "port": port,
             "setupToken": get("SETUP_TOKEN", ""),
             "codexBin": get("CODEX_BIN", "codex"),
             "claudeBin": get("CLAUDE_BIN", "claude"),
@@ -44,16 +45,15 @@ impl Config {
             "concurrency": concurrency()?,
             "logger": get("NODE_ENV", "") != "test",
             "workerEnabled": get("WORKER_ENABLED", "true") != "false",
-            "runnerUrl": get("RUNNER_URL", "")
+            "runnerUrl": get("RUNNER_URL", ""),
         });
+        // A JSON file may override any of these settings.
         if let Ok(file) = env::var("LEO_CONFIG") {
             let overrides: serde_json::Value = serde_json::from_slice(&std::fs::read(file)?)?;
-            value.as_object_mut().unwrap().extend(
-                overrides
-                    .as_object()
-                    .ok_or_else(|| Error::bad("Invalid configuration"))?
-                    .clone(),
-            );
+            if !overrides.is_object() {
+                return Err(Error::bad("Invalid configuration"));
+            }
+            crate::store::merge(&mut value, &overrides);
         }
         let mut config: Self = serde_json::from_value(value)?;
         if config.concurrency == 0 {

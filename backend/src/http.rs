@@ -15,6 +15,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::any,
 };
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -49,7 +50,7 @@ pub async fn router(service: Arc<Service>) -> Result<Router> {
         service,
         maintenance,
         toolkit,
-        limits: Default::default(),
+        limits: Arc::default(),
     };
     Ok(Router::new()
         .route("/health", any(health))
@@ -116,8 +117,7 @@ async fn security(State(app): State<App>, mut request: Request, next: Next) -> R
     let peer = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .map(|peer| peer.0.ip())
-        .unwrap_or(IpAddr::from([127, 0, 0, 1]));
+        .map_or(IpAddr::from([127, 0, 0, 1]), |peer| peer.0.ip());
     let head = request.method() == "HEAD";
     let outcome = check_security(
         &app,
@@ -154,25 +154,7 @@ async fn security(State(app): State<App>, mut request: Request, next: Next) -> R
                 .insert(name, HeaderValue::from_static(value));
         }
     }
-    let cache = if path.starts_with("/api/")
-        || path == "/mcp"
-        || path == "/mcp-workspace"
-        || path.starts_with("/mcp-gateway/")
-        || path.starts_with("/oauth/")
-        || path.starts_with("/internal/")
-        || path == "/health"
-    {
-        "no-store"
-    } else if response
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .is_some_and(|v| v.to_str().unwrap_or("").starts_with("text/html"))
-        || ["/theme.js", "/sw.js", "/manifest.webmanifest"].contains(&path.as_str())
-    {
-        "no-cache"
-    } else {
-        "public, max-age=3600"
-    };
+    let cache = cache_policy(&path, &response);
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
@@ -180,6 +162,87 @@ async fn security(State(app): State<App>, mut request: Request, next: Next) -> R
         *response.body_mut() = Body::empty();
     }
     response
+}
+fn is_dynamic(path: &str) -> bool {
+    path.starts_with("/api/")
+        || path == "/mcp"
+        || path == "/mcp-workspace"
+        || path.starts_with("/mcp-gateway/")
+        || path.starts_with("/oauth/")
+        || path.starts_with("/internal/")
+        || path == "/health"
+}
+/// Dynamic responses are never cached; the app shell revalidates; assets are cached.
+fn cache_policy(path: &str, response: &Response) -> &'static str {
+    if is_dynamic(path) {
+        return "no-store";
+    }
+    let html = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .is_some_and(|v| v.to_str().unwrap_or("").starts_with("text/html"));
+    if html || ["/theme.js", "/sw.js", "/manifest.webmanifest"].contains(&path) {
+        return "no-cache";
+    }
+    "public, max-age=3600"
+}
+fn is_node_traffic(path: &str) -> bool {
+    path.starts_with("/internal/nodes/")
+        || path.starts_with("/internal/execution/")
+        || path.starts_with("/internal/node-restore/")
+        || path.starts_with("/internal/node-workspace/")
+}
+/// Requests per minute shared by every path of a peer: `(bucket, limit)`.
+fn general_limit(path: &str) -> (&'static str, u32) {
+    if is_node_traffic(path) {
+        ("nodes", 100_000)
+    } else if path.starts_with("/mcp-gateway/") {
+        ("", 600)
+    } else {
+        ("", 300)
+    }
+}
+/// Stricter limits on credential endpoints: `(limit, window in ms)`.
+fn endpoint_limit(path: &str) -> Option<(u32, i64)> {
+    match path {
+        "/api/setup" => Some((5, 60_000)),
+        "/api/login" => Some((10, 60_000)),
+        "/oauth/register" => Some((10, 3_600_000)),
+        _ => None,
+    }
+}
+fn too_many_requests() -> Error {
+    Error::too_many_requests("Too many requests. Try again later.")
+}
+fn rate_limit(app: &App, peer: IpAddr, path: &str) -> Result<()> {
+    let mut limits = app.limits.lock().unwrap();
+    // Expiration also bounds memory used by unauthenticated clients.
+    if limits.len() > 10000 {
+        limits.retain(|_, (expires, _)| *expires > now());
+        if limits.len() > 10000 {
+            return Err(too_many_requests());
+        }
+    }
+    let (bucket, max) = general_limit(path);
+    let buckets = std::iter::once((bucket, max, 60_000))
+        .chain(endpoint_limit(path).map(|(max, window)| (path, max, window)));
+    for (key, max, window) in buckets {
+        let entry = limits
+            .entry((peer, key.to_owned()))
+            .or_insert((now() + window, 0));
+        if entry.0 <= now() {
+            *entry = (now() + window, 0);
+        }
+        entry.1 += 1;
+        if entry.1 > max {
+            return Err(too_many_requests());
+        }
+    }
+    Ok(())
+}
+fn development_origin(origin: &str) -> bool {
+    std::env::var("NODE_ENV").unwrap_or_default() != "production"
+        && ["http://localhost:5178", "http://127.0.0.1:5178"].contains(&origin)
 }
 
 async fn check_security(
@@ -209,67 +272,11 @@ async fn check_security(
     if !public_artifact
         && !requested.is_empty()
         && requested != app.service.config.public_url
-        && !(std::env::var("NODE_ENV").unwrap_or_default() != "production"
-            && ["http://localhost:5178", "http://127.0.0.1:5178"].contains(&requested))
+        && !development_origin(requested)
     {
         return Err(Error::forbidden("Unexpected origin."));
     }
-    let specific = match path {
-        "/api/setup" => Some((5, 60000)),
-        "/api/login" => Some((10, 60000)),
-        "/oauth/register" => Some((10, 3600000)),
-        _ => None,
-    };
-    {
-        let mut limits = app.limits.lock().unwrap();
-        // Expiration also bounds memory used by unauthenticated clients.
-        if limits.len() > 10000 {
-            limits.retain(|_, (expires, _)| *expires > now());
-            if limits.len() > 10000 {
-                return Err(Error::too_many_requests(
-                    "Too many requests. Try again later.",
-                ));
-            }
-        }
-        for (key, max, window) in std::iter::once((
-            if path.starts_with("/internal/nodes/")
-                || path.starts_with("/internal/execution/")
-                || path.starts_with("/internal/node-restore/")
-                || path.starts_with("/internal/node-workspace/")
-            {
-                "nodes"
-            } else {
-                ""
-            },
-            if path.starts_with("/internal/nodes/")
-                || path.starts_with("/internal/execution/")
-                || path.starts_with("/internal/node-restore/")
-                || path.starts_with("/internal/node-workspace/")
-            {
-                100000
-            } else if path.starts_with("/mcp-gateway/") {
-                600
-            } else {
-                300
-            },
-            60000,
-        ))
-        .chain(specific.map(|(max, window)| (path, max, window)))
-        {
-            let entry = limits
-                .entry((peer, key.to_owned()))
-                .or_insert((now() + window, 0));
-            if entry.0 <= now() {
-                *entry = (now() + window, 0);
-            }
-            entry.1 += 1;
-            if entry.1 > max {
-                return Err(Error::too_many_requests(
-                    "Too many requests. Try again later.",
-                ));
-            }
-        }
-    }
+    rate_limit(app, peer, path)?;
     if !public_artifact
         && path.starts_with("/api/")
         && !["/api/session", "/api/setup", "/api/login"].contains(&path)
@@ -369,88 +376,107 @@ impl Input {
             .ok_or_else(|| Error::bad(format!("{name}: expected a boolean")))
     }
 }
-
-fn session_response(app: &App, session: Value) -> Response {
+fn session_response(app: &App, session: &Value) -> Response {
+    let secure = if app.service.config.public_url.starts_with("https:") {
+        "; Secure"
+    } else {
+        ""
+    };
     let cookie = format!(
-        "leo_session={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800{}",
-        text(&session, "value"),
-        if app.service.config.public_url.starts_with("https:") {
-            "; Secure"
-        } else {
-            ""
-        }
+        "leo_session={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800{secure}",
+        text(session, "value"),
     );
-    let mut response = Json(json!({
-        "authenticated": true,
-        "csrf": session["csrf"],
-    }))
-    .into_response();
+    let mut response =
+        Json(json!({ "authenticated": true, "csrf": session["csrf"] })).into_response();
     response
         .headers_mut()
         .insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
     response
 }
-
+#[derive(Serialize)]
+struct Execution {
+    backend: &'static str,
+    ready: bool,
+}
+#[derive(Serialize)]
+struct Tools {
+    codex: Option<String>,
+    gh: Option<String>,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Health<'a> {
+    status: &'static str,
+    commit: String,
+    runtime_id: String,
+    base_image: Option<String>,
+    tools: Tools,
+    toolkit: &'a Value,
+    execution: Execution,
+    active_runs: usize,
+    maintenance: bool,
+}
+fn env(key: &str) -> Option<String> {
+    std::env::var(key).ok()
+}
+/// The Firecracker runner is ready when it reports this release's runtime.
+async fn runner_ready(app: &App) -> bool {
+    let response = app
+        .service
+        .http
+        .get(format!("{}/health", app.service.config.runner_url))
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await;
+    let Ok(response) = response else {
+        return false;
+    };
+    if !response.status().is_success() {
+        return false;
+    }
+    let Ok(health) = response.json::<Value>().await else {
+        return false;
+    };
+    let runtime = env("APP_RUNTIME_ID").unwrap_or_else(|| "development".into());
+    health["backend"] == "firecracker" && health["status"] == "ok" && health["runtimeId"] == runtime
+}
 async fn health(State(app): State<App>, request: Request) -> Result<Response> {
     if !["GET", "HEAD"].contains(&request.method().as_str()) {
         return Err(Error::method_not_allowed("Method not allowed."));
     }
-    let env = |key: &str| std::env::var(key).ok();
     let commit = env("APP_COMMIT").unwrap_or_else(|| "development".into());
-    let active = app.service.worker.active.lock().await.len();
+    let active_runs = app.service.worker.active.lock().await.len();
     let execution = if app.service.config.runner_url.is_empty() {
-        json!({
-            "backend": "local",
-            "ready": true,
-        })
-    } else {
-        let health = async {
-            let response = app
-                .service
-                .http
-                .get(format!("{}/health", app.service.config.runner_url))
-                .timeout(std::time::Duration::from_secs(2))
-                .send()
-                .await
-                .ok()?;
-            if !response.status().is_success() {
-                return None;
-            }
-            response.json::<Value>().await.ok()
+        Execution {
+            backend: "local",
+            ready: true,
         }
-        .await;
-        json!({
-            "backend": "firecracker",
-            "ready": health.as_ref().is_some_and(|h| {
-                h["backend"] == "firecracker"
-                    && h["status"] == "ok"
-                    && h["runtimeId"]
-                        == env("APP_RUNTIME_ID").unwrap_or_else(|| "development".into())
-            }),
-        })
+    } else {
+        Execution {
+            backend: "firecracker",
+            ready: runner_ready(&app).await,
+        }
     };
-    Ok((
-        if execution["ready"] == true {
-            StatusCode::OK
-        } else {
-            StatusCode::SERVICE_UNAVAILABLE
+    let status = if execution.ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    let body = Health {
+        status: "ok",
+        runtime_id: env("APP_RUNTIME_ID").unwrap_or_else(|| commit.clone()),
+        commit,
+        base_image: env("APP_BASE_IMAGE"),
+        tools: Tools {
+            codex: env("APP_CODEX_VERSION"),
+            gh: env("APP_GH_VERSION"),
         },
-        Json(json!({
-            "status": "ok",
-            "commit": commit,
-            "runtimeId": env("APP_RUNTIME_ID").unwrap_or(commit),
-            "baseImage": env("APP_BASE_IMAGE"),
-            "tools": {
-                "codex": env("APP_CODEX_VERSION"),
-                "gh": env("APP_GH_VERSION"),
-            },
-            "toolkit": app.toolkit,
-            "execution": execution,
-            "activeRuns": active,
-            "maintenance": app.service.store.kv("deployment-lease").await?.is_some(),
-        })),
-    )
-        .into_response())
+        toolkit: &app.toolkit,
+        execution,
+        active_runs,
+        maintenance: app.service.store.kv("deployment-lease").await?.is_some(),
+    };
+    Ok((status, Json(body)).into_response())
 }
 
 async fn lease(State(app): State<App>, request: Request) -> Result<Json<Value>> {
@@ -474,61 +500,71 @@ async fn lease(State(app): State<App>, request: Request) -> Result<Json<Value>> 
             .await?,
     ))
 }
-
-async fn api(State(app): State<App>, request: Request) -> Result<Response> {
-    let path = request.uri().path().to_owned();
+/// A request left for the next router stage.
+enum Route {
+    Done(Response),
+    Next(Request),
+}
+/// Routes that read the raw request body or stream their response.
+async fn raw_route(app: &App, path: &str, request: Request) -> Result<Route> {
+    let s = &app.service;
     let segments: Vec<_> = path.split('/').collect();
-    if let ["", "api", "agents", agent, "avatar"] = segments.as_slice() {
-        return crate::agent_avatars::http(&app.service, agent, request).await;
-    }
-    if let ["", "api", "public", "artifacts", token] = segments.as_slice() {
-        return crate::artifacts::sharing::http(&app.service, token, request).await;
-    }
-    if let ["", "api", "runs", run, ..] = segments.as_slice() {
-        let run = (*run).to_owned();
-        app.service
-            .store
-            .read(move |db| crate::conversation_lifecycle::require_active_run(db, &run))
-            .await?;
-    }
-    if let ["", "api", "runs", run, "artifacts", artifact, "visibility"] = segments.as_slice() {
-        if request.method() != "PUT" {
-            return Err(Error::method_not_allowed("Method not allowed."));
+    let response = match segments.as_slice() {
+        ["", "api", "agents", agent, "avatar"] => {
+            crate::agent_avatars::http(s, agent, request).await?
         }
-        let input = Input::read(request).await?;
-        return Ok(Json(
-            crate::artifacts::sharing::set(
-                &app.service,
-                run,
-                artifact,
-                crate::artifacts::sharing::visibility(&input.body)?,
-                None,
-            )
-            .await?,
-        )
-        .into_response());
-    }
-    if let ["", "api", "runs", run, "artifacts", rest @ ..] = segments.as_slice()
-        && rest.len() <= 1
-    {
-        return crate::artifacts::http(&app.service, run, rest.first().copied(), request).await;
-    }
-    if let ["", "api", "chats", chat, "attachments", id] =
-        path.split('/').collect::<Vec<_>>().as_slice()
-    {
-        return app.service.attachment_http(chat, id, request).await;
-    }
-    if path == "/api/chats/stream" {
-        let input = Input::read(request).await?;
-        return crate::live::http(app.service.clone(), "chats", "", input).await;
-    }
-    if let ["", "api", scope @ ("chats" | "runs"), id, "stream"] = segments.as_slice() {
-        let input = Input::read(request).await?;
-        return crate::live::http(app.service.clone(), scope, id, input).await;
+        ["", "api", "public", "artifacts", token] => {
+            crate::artifacts::sharing::http(s, token, request).await?
+        }
+        ["", "api", "runs", run, rest @ ..] => {
+            let active = (*run).to_owned();
+            s.store
+                .read(move |db| crate::conversation_lifecycle::require_active_run(db, &active))
+                .await?;
+            match rest {
+                ["artifacts", artifact, "visibility"] => {
+                    set_artifact_visibility(s, run, artifact, request).await?
+                }
+                ["artifacts", rest @ ..] if rest.len() <= 1 => {
+                    crate::artifacts::http(s, run, rest.first().copied(), request).await?
+                }
+                ["stream"] => {
+                    crate::live::http(s.clone(), "runs", run, Input::read(request).await?).await?
+                }
+                _ => return Ok(Route::Next(request)),
+            }
+        }
+        ["", "api", "chats", chat, "attachments", id] => {
+            s.attachment_http(chat, id, request).await?
+        }
+        ["", "api", "chats", "stream"] => {
+            crate::live::http(s.clone(), "chats", "", Input::read(request).await?).await?
+        }
+        ["", "api", "chats", id, "stream"] => {
+            crate::live::http(s.clone(), "chats", id, Input::read(request).await?).await?
+        }
+        _ => return Ok(Route::Next(request)),
+    };
+    Ok(Route::Done(response))
+}
+async fn set_artifact_visibility(
+    s: &Service,
+    run: &str,
+    artifact: &str,
+    request: Request,
+) -> Result<Response> {
+    if request.method() != "PUT" {
+        return Err(Error::method_not_allowed("Method not allowed."));
     }
     let input = Input::read(request).await?;
+    let visibility = crate::artifacts::sharing::visibility(&input.body)?;
+    let result = crate::artifacts::sharing::set(s, run, artifact, visibility, None).await?;
+    Ok(Json(result).into_response())
+}
+/// Sign-in routes, reachable without a session.
+async fn session_route(app: &App, input: &Input) -> Result<Option<Response>> {
     let s = &app.service;
-    match (input.method.as_str(), input.path.as_str()) {
+    let response = match (input.method.as_str(), input.path.as_str()) {
         ("GET", "/api/session") => {
             let session = s.auth.read(&cookie(&input.headers)).await?;
             let mut result = json!({
@@ -538,7 +574,7 @@ async fn api(State(app): State<App>, request: Request) -> Result<Response> {
             if let Some(session) = session {
                 result["csrf"] = session["csrf"].clone();
             }
-            return Ok(Json(result).into_response());
+            Json(result).into_response()
         }
         ("POST", "/api/setup") => {
             let token = input.string("setupToken", 200)?;
@@ -547,72 +583,97 @@ async fn api(State(app): State<App>, request: Request) -> Result<Response> {
             }
             s.auth.setup(input.string("password", 200)?).await?;
             s.store.audit("admin.setup", json!({})).await?;
-            return Ok(session_response(&app, s.auth.session().await?));
+            session_response(app, &s.auth.session().await?)
         }
         ("POST", "/api/login") => {
-            return Ok(session_response(
-                &app,
-                s.auth.login(input.string("password", 200)?).await?,
-            ));
+            let session = s.auth.login(input.string("password", 200)?).await?;
+            session_response(app, &session)
         }
         ("POST", "/api/logout") => {
             s.auth.logout(&cookie(&input.headers)).await?;
-            let mut response = Json(json!({
-                "ok": true,
-            }))
-            .into_response();
+            let mut response = Json(json!({ "ok": true })).into_response();
             response.headers_mut().insert(
                 header::SET_COOKIE,
                 HeaderValue::from_static("leo_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"),
             );
-            return Ok(response);
+            response
         }
-        _ => {}
+        _ => return Ok(None),
+    };
+    Ok(Some(response))
+}
+fn json_bytes(bytes: Vec<u8>) -> Response {
+    ([(header::CONTENT_TYPE, "application/json")], bytes).into_response()
+}
+/// Large run listings, serialized from stored JSON without building `Value` trees.
+async fn run_pages(s: &Service, input: &Input) -> Result<Option<Response>> {
+    if input.method != "GET" {
+        return Ok(None);
     }
-    if input.method == "GET" && input.path == "/api/runs" {
-        let (limit, offset) = (
-            input.number("limit", 40, 1, 100)?,
-            input.number("offset", 0, 0, i64::MAX)?,
-        );
+    if input.path == "/api/runs" {
+        let limit = input.number("limit", 40, 1, 100)?;
+        let offset = input.number("offset", 0, 0, i64::MAX)?;
         let status = input.query.get("status").cloned();
         let task = input.query.get("taskId").cloned();
         let bytes = s
             .store
             .read(move |db| {
-                Ok(serde_json::to_vec(&db.run_page(
-                    status.as_deref(),
-                    task.as_deref(),
-                    limit,
-                    offset,
-                )?)?)
+                let page = db.run_page(status.as_deref(), task.as_deref(), limit, offset)?;
+                Ok(serde_json::to_vec(&page)?)
             })
             .await?;
-        return Ok(([(header::CONTENT_TYPE, "application/json")], bytes).into_response());
+        return Ok(Some(json_bytes(bytes)));
     }
-    if input.method == "GET"
-        && let Some(id) = input
-            .path
-            .strip_prefix("/api/runs/")
-            .and_then(|path| path.strip_suffix("/events"))
-        && !id.contains('/')
-    {
-        let (after, limit) = (
-            input.number("after", 0, 0, i64::MAX)?,
-            input.number("limit", 100, 1, 500)?,
-        );
-        let id = id.to_owned();
-        let bytes = s
-            .store
-            .read(move |db| {
-                db.require_run(&id)?;
-                Ok(serde_json::to_vec(&db.event_page(&id, after, limit)?)?)
-            })
-            .await?;
-        return Ok(([(header::CONTENT_TYPE, "application/json")], bytes).into_response());
+    let Some(id) = input
+        .path
+        .strip_prefix("/api/runs/")
+        .and_then(|path| path.strip_suffix("/events"))
+        .filter(|id| !id.contains('/'))
+    else {
+        return Ok(None);
+    };
+    let after = input.number("after", 0, 0, i64::MAX)?;
+    let limit = input.number("limit", 100, 1, 500)?;
+    let id = id.to_owned();
+    let bytes = s
+        .store
+        .read(move |db| {
+            db.require_run(&id)?;
+            Ok(serde_json::to_vec(&db.event_page(&id, after, limit)?)?)
+        })
+        .await?;
+    Ok(Some(json_bytes(bytes)))
+}
+async fn api(State(app): State<App>, request: Request) -> Result<Response> {
+    let path = request.uri().path().to_owned();
+    let request = match raw_route(&app, &path, request).await? {
+        Route::Done(response) => return Ok(response),
+        Route::Next(request) => request,
+    };
+    let input = Input::read(request).await?;
+    if let Some(response) = session_route(&app, &input).await? {
+        return Ok(response);
+    }
+    let s = &app.service;
+    if let Some(response) = run_pages(s, &input).await? {
+        return Ok(response);
     }
     Ok(Json(crate::api::dispatch(s, &input).await?).into_response())
 }
-
+/// Shown in the browser tab after the Android app captured an MCP OAuth callback.
+fn native_callback_page() -> Response {
+    let headers = [
+        (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+        (header::CACHE_CONTROL, "no-store"),
+        (header::REFERRER_POLICY, "no-referrer"),
+        (
+            header::CONTENT_SECURITY_POLICY,
+            "default-src 'none'; frame-ancestors 'none'",
+        ),
+    ];
+    let page = "<!doctype html><html lang=fr><meta name=viewport content='width=device-width,initial-scale=1'><title>Leo</title><h1>Revenez dans Leo</h1><p>Fermez cet onglet pour terminer la connexion dans l’application Android.</p></html>";
+    (headers, page).into_response()
+}
 async fn oauth(State(app): State<App>, request: Request) -> Result<Response> {
     let input = Input::read(request).await?;
     let auth = &app.service.auth;
@@ -623,22 +684,7 @@ async fn oauth(State(app): State<App>, request: Request) -> Result<Response> {
             .capture_native_callback(&app.service, &input.query)
             .await?
         {
-            return Ok((
-                [
-                    (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-                    (header::CACHE_CONTROL, "no-store"),
-                    (header::REFERRER_POLICY, "no-referrer"),
-                    (
-                        header::CONTENT_SECURITY_POLICY,
-                        "default-src 'none'; frame-ancestors 'none'",
-                    ),
-                ],
-                "<!doctype html><html lang=fr><meta name=viewport \
-                content='width=device-width,initial-scale=1'><title>Leo</title><h1>Revenez dans \
-                Leo</h1><p>Fermez cet onglet pour terminer la connexion dans l’application \
-                Android.</p></html>",
-            )
-                .into_response());
+            return Ok(native_callback_page());
         }
         let result = if let Some(session) = auth.read(&cookie(&input.headers)).await? {
             app.service
@@ -690,12 +736,13 @@ async fn metadata(State(app): State<App>, request: Request) -> Result<Json<Value
         return Err(Error::method_not_allowed("Method not allowed."));
     }
     let url = &app.service.config.public_url;
+    let scopes = ["read", "run", "manage"];
     match request.uri().path() {
         "/.well-known/oauth-protected-resource" | "/.well-known/oauth-protected-resource/mcp" => {
             Ok(Json(json!({
                 "resource": format!("{url}/mcp"),
                 "authorization_servers": [url],
-                "scopes_supported": ["read", "run", "manage"],
+                "scopes_supported": scopes,
                 "bearer_methods_supported": ["header"],
                 "resource_name": "Leo Agent Manager",
             })))
@@ -710,7 +757,7 @@ async fn metadata(State(app): State<App>, request: Request) -> Result<Json<Value
             "grant_types_supported": ["authorization_code", "refresh_token"],
             "code_challenge_methods_supported": ["S256"],
             "token_endpoint_auth_methods_supported": ["none"],
-            "scopes_supported": ["read", "run", "manage"],
+            "scopes_supported": scopes,
         }))),
         _ => Err(Error::not_found("Not found")),
     }

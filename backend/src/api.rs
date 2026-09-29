@@ -3,22 +3,35 @@ use crate::{
     error::{Error, Result},
     http::Input,
     service::{Service, next_occurrences},
+    store::RUN_SUMMARY,
     validation::text,
 };
 use serde_json::{Value, json};
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+type Route<'a> = (&'a str, &'a [&'a str]);
+
+fn under(path: &str, prefix: &str) -> bool {
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
 
 pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
-    if input.path == "/api/nodes" || input.path.starts_with("/api/nodes/") {
+    if under(&input.path, "/api/nodes") {
         return crate::nodes::admin(s, input).await;
     }
-    if input.path == "/api/accounts" || input.path.starts_with("/api/accounts/") {
+    if under(&input.path, "/api/accounts") {
         return crate::accounts::routes(s, input).await;
     }
-    if input.path == "/api/onepassword" || input.path.starts_with("/api/onepassword/") {
+    if under(&input.path, "/api/onepassword") {
         return crate::onepassword::routes(s, input).await;
     }
-    if input.path == "/api/mcps" || input.path.starts_with("/api/mcps/") {
+    if under(&input.path, "/api/mcps") {
         return crate::mcp_server::routes(s, input).await;
     }
     if let Some(result) = crate::worker::routes(s, input).await {
@@ -29,174 +42,243 @@ pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
         .trim_start_matches("/api/")
         .split('/')
         .collect::<Vec<_>>();
-    match (input.method.as_str(), segments.as_slice()) {
-        ("GET", ["github", "repositories"]) => crate::github_projects::list(s, input.number("page", 1, 1, 10000)?).await,
+    let route = (input.method.as_str(), segments.as_slice());
+    if let Some(result) = record_routes(s, input, route).await? {
+        return Ok(result);
+    }
+    if let Some(result) = run_routes(s, input, route).await? {
+        return Ok(result);
+    }
+    if let Some(result) = chat_routes(s, input, route).await? {
+        return Ok(result);
+    }
+    if let Some(result) = skill_routes(s, input, route).await? {
+        return Ok(result);
+    }
+    if let Some(result) = connection_routes(s, input, route).await? {
+        return Ok(result);
+    }
+    if let Some(result) = settings_routes(s, input, route).await? {
+        return Ok(result);
+    }
+    Err(Error::not_found("Not found"))
+}
+
+async fn overview(s: &Service) -> Result<Value> {
+    let concurrency = s.config.concurrency;
+    s.store
+        .read(move |db| {
+            Ok(json!({
+                "counts": db.stats()?,
+                "agents": db.list("agents")?.len(),
+                "projects": db.list("projects")?.len(),
+                "tasks": db.list("tasks")?,
+                "runs": db.runs(None, None, 8, 0, false)?,
+                "concurrency": concurrency,
+            }))
+        })
+        .await
+}
+
+/// Agents, projects, tasks and their scheduling.
+async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result<Option<Value>> {
+    let result = match route {
+        ("GET", ["github", "repositories"]) => {
+            crate::github_projects::list(s, input.number("page", 1, 1, 10000)?).await?
+        }
         ("POST", ["projects", "github"]) => {
             static IMPORT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-            let _guard = IMPORT.try_lock().map_err(|_| Error::conflict("A GitHub import is already running. Retry shortly."))?;
-            crate::github_projects::import(s, input.body.clone()).await
+            let _guard = IMPORT.try_lock().map_err(|_| {
+                Error::conflict("A GitHub import is already running. Retry shortly.")
+            })?;
+            crate::github_projects::import(s, input.body.clone()).await?
         }
-        ("GET", ["overview"]) => {
-            let concurrency = s.config.concurrency;
-            s.store
-                .read(move |db| {
-                    Ok(json!({
-                        "counts": db.stats()?,
-                        "agents": db.list("agents")?.len(),
-                        "projects": db.list("projects")?.len(),
-                        "tasks": db.list("tasks")?,
-                        "runs": db.runs(None,None,8,0,false)?,
-                        "concurrency": concurrency
-                    }
-                    ))
-                })
-                .await
+        ("GET", ["overview"]) => overview(s).await?,
+        ("GET", ["agent-avatars"]) => json!({ "configured": s.avatars.configured(s).await? }),
+        ("POST", ["agents", id, "avatar", "generate"]) => s.avatars.generate(s, id).await?,
+        ("GET", [kind @ ("agents" | "projects" | "tasks")]) => s.store.list(kind).await?.into(),
+        ("POST", [kind @ ("agents" | "projects" | "tasks")]) => {
+            save(s, kind, input.body.clone(), None).await?
         }
-        ("GET", ["agent-avatars"]) => Ok(json!({"configured": s.avatars.configured(s).await?})),
-        ("POST", ["agents", id, "avatar", "generate"]) => s.avatars.generate(s, id).await,
-        ("GET", [kind @ ("agents" | "projects" | "tasks")]) => Ok(s.store.list(kind).await?.into()),
-        ("POST", [kind @ ("agents" | "projects" | "tasks")]) => save(s, kind, input.body.clone(), None).await,
-        ("PUT", [kind @ ("agents" | "projects" | "tasks"), id]) => save(s, kind, input.body.clone(), Some(id)).await,
+        ("PUT", [kind @ ("agents" | "projects" | "tasks"), id]) => {
+            save(s, kind, input.body.clone(), Some(id)).await?
+        }
         ("DELETE", [kind @ ("agents" | "projects" | "tasks"), id]) => {
             s.remove(kind, id).await?;
-            Ok(json!({
-                "deleted": true
-            }
-            ))
+            json!({ "deleted": true })
         }
-        ("POST", ["tasks", id, "run"]) => s.enqueue(id, "manual", None).await,
-        ("POST", ["schedule", "preview"]) => Ok(json!({
-            "occurrences": next_occurrences(input.string("cron",500)?,input.string("timezone",100)?,now(),3)?
+        ("POST", ["tasks", id, "run"]) => s.enqueue(id, "manual", None).await?,
+        ("POST", ["schedule", "preview"]) => {
+            let occurrences = next_occurrences(
+                input.string("cron", 500)?,
+                input.string("timezone", 100)?,
+                now(),
+                3,
+            )?;
+            json!({ "occurrences": occurrences })
         }
-        )),
-        ("GET", ["tasks", "activity"]) => s.store.read(|db| Ok(db.json_rows("SELECT \
-            json_set(json_remove(data,'$.snapshot','$.summary'),'$.taskName',json_extract(data,'$.snapshot.task.name'),'$.agentName',json_extract(data,'$.snapshot.agent.name')) \
-            FROM runs WHERE id IN (SELECT (SELECT id FROM runs WHERE task_id=records.id \
-            ORDER BY created_at DESC,id DESC LIMIT 1) FROM records WHERE kind='tasks') \
-            ORDER BY created_at DESC,id DESC", [])?.into())).await,
+        ("GET", ["tasks", "activity"]) => task_activity(s).await?,
+        _ => return Ok(None),
+    };
+    Ok(Some(result))
+}
+
+/// The latest run of every task.
+async fn task_activity(s: &Service) -> Result<Value> {
+    let query = format!(
+        "SELECT {RUN_SUMMARY} FROM runs
+         WHERE id IN (
+           SELECT (SELECT id FROM runs WHERE task_id=records.id ORDER BY created_at DESC,id DESC LIMIT 1)
+           FROM records WHERE kind='tasks'
+         )
+         ORDER BY created_at DESC,id DESC"
+    );
+    s.store
+        .read(move |db| Ok(db.json_rows(&query, [])?.into()))
+        .await
+}
+
+async fn run_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result<Option<Value>> {
+    let result = match route {
         ("GET", ["runs"]) => {
-            let (limit, offset) = (input.number("limit", 40, 1, 100)?, input.number("offset", 0, 0, i64::MAX)?);
+            let limit = input.number("limit", 40, 1, 100)?;
+            let offset = input.number("offset", 0, 0, i64::MAX)?;
             let status = input.query.get("status").cloned();
             let task = input.query.get("taskId").cloned();
-            s.store.read(move |db| Ok(db.runs(status.as_deref(), task.as_deref(), limit, offset, false)?.into())).await
+            s.store
+                .read(move |db| {
+                    let runs = db.runs(status.as_deref(), task.as_deref(), limit, offset, false)?;
+                    Ok(runs.into())
+                })
+                .await?
         }
-        ("GET", [kind @ ("chats" | "runs"), id, "history"]) => crate::live::history(s, kind, id, input).await,
-        ("GET", ["runs", id]) => s.store.run(id).await,
+        ("GET", [kind @ ("chats" | "runs"), id, "history"]) => {
+            crate::live::history(s, kind, id, input).await?
+        }
+        ("GET", ["runs", id]) => s.store.run(id).await?,
         ("GET", ["runs", id, "events"]) => {
             s.store.run(id).await?;
-            let (after, limit) = (input.number("after", 0, 0, i64::MAX)?, input.number("limit", 100, 1, 500)?);
+            let after = input.number("after", 0, 0, i64::MAX)?;
+            let limit = input.number("limit", 100, 1, 500)?;
             let id = (*id).to_owned();
-            s.store.read(move |db| Ok(db.events(&id, after, limit)?.into())).await
+            s.store
+                .read(move |db| Ok(db.events(&id, after, limit)?.into()))
+                .await?
         }
         ("POST", ["runs", id, "retry"]) => {
             let run = s.store.run(id).await?;
-            s.enqueue(text(&run, "taskId"), "retry", None).await
+            s.enqueue(text(&run, "taskId"), "retry", None).await?
         }
-        ("GET", ["codex", "models"]) => s.models.list(s).await,
-        ("GET", ["chats"]) => Ok(s.chat_list_view(input.query.get("view").map(String::as_str).unwrap_or("active")).await?.into()),
-        ("DELETE", ["chats", id]) => s.chat_trash(id, input.body["confirm"] == true).await,
-        ("POST", ["chats", id, "new-session"]) => s.chat_new_session(id, input.body["confirm"] == true).await,
-        ("POST", ["chats", id, "restore"]) => s.chat_restore(id).await,
-        ("POST", ["chats"]) => s.chat_create(input.body.clone()).await,
-        ("GET", ["chats", id]) => {
-            let mut detail = s.chat_detail(id).await?;
-            let private = detail["questions"]
+        ("GET", ["codex", "models"]) => s.models.list(s).await?,
+        _ => return Ok(None),
+    };
+    Ok(Some(result))
+}
+
+/// Queued messages only, with answers to secret questions redacted.
+async fn chat_detail(s: &Service, id: &str) -> Result<Value> {
+    let mut detail = s.chat_detail(id).await?;
+    let private = detail["questions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|q| {
+            q["fields"]
                 .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|q| {
-                    q["fields"]
-                        .as_array()
-                        .is_some_and(|fields| fields.iter().any(|f| f["secret"] == true))
-                })
-                .map(|q| q["id"].clone())
-                .collect::<Vec<_>>();
-            detail["messages"]
-                .as_array_mut()
-                .unwrap()
-                .retain(|m| m["status"] != "delivered");
-            for message in detail["messages"].as_array_mut().unwrap() {
-                if private.contains(&message["questionId"]) {
-                    message["text"] = "Private answer".into();
-                    message.as_object_mut().unwrap().remove("answers");
+                .is_some_and(|fields| fields.iter().any(|f| f["secret"] == true))
+        })
+        .map(|q| q["id"].clone())
+        .collect::<Vec<_>>();
+    if let Some(messages) = detail["messages"].as_array_mut() {
+        messages.retain(|m| m["status"] != crate::chats::MessageStatus::Delivered);
+        for message in messages {
+            if private.contains(&message["questionId"]) {
+                message["text"] = "Private answer".into();
+                if let Some(message) = message.as_object_mut() {
+                    message.remove("answers");
                 }
             }
-            detail["error"] = if crate::conversation_lifecycle::state(&detail) == "active" {
-                s.store
-                    .kv(&format!("chat-error:{id}"))
-                    .await?
-                    .unwrap_or(Value::Null)
-            } else {
-                Value::Null
-            };
-            Ok(detail)
         }
-        ("POST", ["chats", id, "messages"]) => s.chat_send(id, input.body.clone()).await,
-        ("PUT", ["chats", id, "messages", message]) => s.chat_edit(id, message, Some(input.body.clone())).await,
-        ("DELETE", ["chats", id, "messages", message]) => s.chat_edit(id, message, None).await,
-        ("POST", ["chats", id, "questions", question, "answer"]) => s.question_answer(id, question, input.body.clone()).await,
-        ("GET", ["notifications"]) => s.notifications.configuration(s).await,
-        ("POST", ["notifications", "subscriptions"]) => s.notifications.subscribe(s, input.body.clone()).await,
+    }
+    detail["error"] = if crate::conversation_lifecycle::is_active(&detail) {
+        s.store
+            .kv(&format!("chat-error:{id}"))
+            .await?
+            .unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+    Ok(detail)
+}
+
+async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result<Option<Value>> {
+    let confirmed = input.body["confirm"] == true;
+    let result = match route {
+        ("GET", ["chats"]) => {
+            let view = input.query.get("view").map_or("active", String::as_str);
+            s.chat_list_view(view).await?.into()
+        }
+        ("DELETE", ["chats", id]) => s.chat_trash(id, confirmed).await?,
+        ("POST", ["chats", id, "new-session"]) => s.chat_new_session(id, confirmed).await?,
+        ("POST", ["chats", id, "restore"]) => s.chat_restore(id).await?,
+        ("POST", ["chats"]) => s.chat_create(input.body.clone()).await?,
+        ("GET", ["chats", id]) => chat_detail(s, id).await?,
+        ("POST", ["chats", id, "messages"]) => s.chat_send(id, input.body.clone()).await?,
+        ("PUT", ["chats", id, "messages", message]) => {
+            s.chat_edit(id, message, Some(input.body.clone())).await?
+        }
+        ("DELETE", ["chats", id, "messages", message]) => s.chat_edit(id, message, None).await?,
+        ("POST", ["chats", id, "questions", question, "answer"]) => {
+            s.question_answer(id, question, input.body.clone()).await?
+        }
+        ("GET", ["notifications"]) => s.notifications.configuration(s).await?,
+        ("POST", ["notifications", "subscriptions"]) => {
+            s.notifications.subscribe(s, input.body.clone()).await?
+        }
         ("GET", ["notifications", "subscriptions", id]) => {
             hash(id)?;
-            Ok(json!({
-                "registered": s.store.kv(&format!("push-device:{id}")).await?.is_some()
-            }
-            ))
+            let registered = s.store.kv(&format!("push-device:{id}")).await?.is_some();
+            json!({ "registered": registered })
         }
         ("DELETE", ["notifications", "subscriptions", id]) => {
             hash(id)?;
-            s.notifications.unsubscribe(s, id).await
+            s.notifications.unsubscribe(s, id).await?
         }
+        _ => return Ok(None),
+    };
+    Ok(Some(result))
+}
+
+async fn skill_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result<Option<Value>> {
+    let result = match route {
         ("GET", ["skills"]) => {
             let mut items = s.skills.list("global", None).await?;
             for project in s.store.list("projects").await? {
-                items.extend(s.skills.list(text(&project, "id"), Some(std::path::Path::new(text(&project, "path")))).await?);
+                let path = Path::new(text(&project, "path"));
+                items.extend(s.skills.list(text(&project, "id"), Some(path)).await?);
             }
-            Ok(items.into())
+            items.into()
         }
-        (method, ["skills", scope, name]) => {
+        ("PUT", ["skills", scope, name]) => {
             let project = skill_project(s, scope).await?;
-            match method {
-                "PUT" => {
-                    let result = s.skills.save(name, input.string("content", 100000)?, project.as_deref()).await?;
-                    s.store
-                        .audit(
-                            "skill.saved",
-                            json!({
-                                "scope": scope,
-                                "name": name
-                            }
-                            ),
-                        )
-                        .await?;
-                    Ok(result)
-                }
-                "DELETE" => {
-                    let key = format!("{scope}/{name}");
-                    if s.store.list("tasks").await?.iter().any(|t| t["skills"].as_array().is_some_and(|skills| skills.iter().any(|s| s == &key))) {
-                        return Err(Error::conflict("This skill is selected by a task. Update that task first."));
-                    }
-                    s.skills.remove(name, project.as_deref()).await?;
-                    s.store
-                        .audit(
-                            "skill.deleted",
-                            json!({
-                                "scope": scope,
-                                "name": name
-                            }
-                            ),
-                        )
-                        .await?;
-                    Ok(json!({
-                        "deleted": true
-                    }
-                    ))
-                }
-                _ => Err(Error::not_found("Not found")),
-            }
+            let content = input.string("content", 100000)?;
+            let result = s.skills.save(name, content, project.as_deref()).await?;
+            let detail = json!({ "scope": scope, "name": name });
+            s.store.audit("skill.saved", detail).await?;
+            result
         }
-        ("GET", ["skills", scope, name, "files"]) => Ok(s.skills.files(name, skill_project(s, scope).await?.as_deref()).await?.into()),
+        ("DELETE", ["skills", scope, name]) => {
+            let project = skill_project(s, scope).await?;
+            delete_skill(s, scope, name, project.as_deref()).await?
+        }
+        (_, ["skills", scope, _]) => {
+            skill_project(s, scope).await?;
+            return Err(Error::not_found("Not found"));
+        }
+        ("GET", ["skills", scope, name, "files"]) => {
+            let project = skill_project(s, scope).await?;
+            s.skills.files(name, project.as_deref()).await?.into()
+        }
         (method @ ("GET" | "PUT"), ["skills", scope, name, "file"]) => {
             let file = if method == "GET" {
                 input
@@ -212,78 +294,121 @@ pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
             } else {
                 None
             };
+            let project = skill_project(s, scope).await?;
             s.skills
-                .file(
-                    name,
-                    file,
-                    content,
-                    skill_project(s, scope).await?.as_deref(),
-                )
-                .await
+                .file(name, file, content, project.as_deref())
+                .await?
         }
-        ("GET", ["connections"]) => s.connections.status(s, input.query.get("refresh").is_some_and(|s| s == "true")).await,
-        ("GET", ["claude", "models"]) => crate::claude::model_catalog(s).await,
-        ("GET", ["connections", "login"]) => Ok(s.connections.flow().await),
+        _ => return Ok(None),
+    };
+    Ok(Some(result))
+}
+
+async fn delete_skill(
+    s: &Service,
+    scope: &str,
+    name: &str,
+    project: Option<&Path>,
+) -> Result<Value> {
+    let key = format!("{scope}/{name}");
+    let selected = s.store.list("tasks").await?.iter().any(|task| {
+        task["skills"]
+            .as_array()
+            .is_some_and(|skills| skills.iter().any(|skill| skill == &key))
+    });
+    if selected {
+        return Err(Error::conflict(
+            "This skill is selected by a task. Update that task first.",
+        ));
+    }
+    s.skills.remove(name, project).await?;
+    let detail = json!({ "scope": scope, "name": name });
+    s.store.audit("skill.deleted", detail).await?;
+    Ok(json!({ "deleted": true }))
+}
+
+async fn connection_routes(
+    s: &Arc<Service>,
+    input: &Input,
+    route: Route<'_>,
+) -> Result<Option<Value>> {
+    let result = match route {
+        ("GET", ["connections"]) => {
+            let refresh = input.query.get("refresh").is_some_and(|s| s == "true");
+            s.connections.status(s, refresh).await?
+        }
+        ("GET", ["claude", "models"]) => crate::claude::model_catalog(s).await?,
+        ("GET", ["connections", "login"]) => s.connections.flow().await,
         ("POST", ["connections", "login"]) => {
             if input.string("provider", 20)? != "github" {
                 return Err(Error::bad("Unknown connection provider."));
             }
-            s.connections.start(s).await
+            s.connections.start(s).await?
         }
         ("DELETE", ["connections", "login"]) => {
             s.connections.cancel().await;
-            Ok(json!({
-                "cancelled": true
-            }
-            ))
+            json!({ "cancelled": true })
         }
         ("GET", ["agents", id, "github-token"]) => {
             s.get("agents", id).await?;
-            Ok(json!({
-                "configured": s.store.kv(&format!("agent-github:{id}")).await?.is_some()
-            }
-            ))
+            let configured = s.store.kv(&format!("agent-github:{id}")).await?.is_some();
+            json!({ "configured": configured })
         }
-        ("PUT", ["agents", id, "github-token"]) => {
-            s.get("agents", id).await?;
-            let token = input.string("token", 500)?.trim();
-            let key = format!("agent-github:{id}");
-            if token.is_empty() {
-                s.store.delete(&key).await?;
-            } else {
-                s.store.set(&key, token.into(), None).await?;
-            }
+        ("PUT", ["agents", id, "github-token"]) => set_github_token(s, id, input).await?,
+        _ => return Ok(None),
+    };
+    Ok(Some(result))
+}
+
+async fn set_github_token(s: &Service, id: &str, input: &Input) -> Result<Value> {
+    s.get("agents", id).await?;
+    let token = input.string("token", 500)?.trim();
+    let key = format!("agent-github:{id}");
+    if token.is_empty() {
+        s.store.delete(&key).await?;
+    } else {
+        s.store.set(&key, token.into(), None).await?;
+    }
+    let detail = json!({ "agentId": id, "provider": "github" });
+    s.store.audit("agent.connection.updated", detail).await?;
+    Ok(json!({ "configured": !token.is_empty() }))
+}
+
+fn settings(s: &Service) -> Value {
+    let commit = std::env::var("APP_COMMIT").unwrap_or_else(|_| "development".into());
+    json!({
+        "publicUrl": s.config.public_url,
+        "workspaceRoots": s.config.workspace_roots,
+        "home": s.config.home,
+        "concurrency": s.config.concurrency,
+        "mcpUrl": format!("{}/mcp", s.config.public_url),
+        "version": env!("CARGO_PKG_VERSION"),
+        "commit": commit,
+        "protocol": "2026-07-28",
+        "nativeMcpOauth": true,
+    })
+}
+
+async fn settings_routes(
+    s: &Arc<Service>,
+    input: &Input,
+    route: Route<'_>,
+) -> Result<Option<Value>> {
+    let result = match route {
+        ("GET", ["settings"]) => settings(s),
+        ("GET", ["audit"]) => {
             s.store
-                .audit(
-                    "agent.connection.updated",
-                    json!({
-                        "agentId": id,
-                        "provider": "github"
-                    }
-                    ),
-                )
-                .await?;
-            Ok(json!({
-                "configured": !token.is_empty()
-            }
-            ))
+                .read(|db| {
+                    let rows = db.json_rows(
+                        "SELECT json_object('id',id,'created_at',created_at,'action',action,'detail',detail)
+                         FROM audit ORDER BY id DESC LIMIT 100",
+                        [],
+                    )?;
+                    Ok(rows.into())
+                })
+                .await?
         }
-        ("GET", ["settings"]) => Ok(json!({
-            "publicUrl": s.config.public_url,
-            "workspaceRoots": s.config.workspace_roots,
-            "home": s.config.home,
-            "concurrency": s.config.concurrency,
-            "mcpUrl": format!("{}/mcp",s.config.public_url),
-            "version": env!("CARGO_PKG_VERSION"),
-            "commit": std::env::var("APP_COMMIT").unwrap_or_else(|_|"development".into()),
-            "protocol": "2026-07-28",
-            "nativeMcpOauth": true
-        }
-        )),
-        ("GET", ["audit"]) => s.store.read(|db| Ok(db.json_rows("SELECT \
-            json_object('id',id,'created_at',created_at,'action',action,'detail',detail) \
-            FROM audit ORDER BY id DESC LIMIT 100", [])?.into())).await,
-        ("GET", ["tokens"]) => Ok(s
+        ("GET", ["tokens"]) => s
             .store
             .keys("grant:")
             .await?
@@ -293,7 +418,7 @@ pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 value
             })
             .collect::<Vec<_>>()
-            .into()),
+            .into(),
         ("POST", ["tokens"]) => {
             let label = input.string("label", 100)?;
             let scopes = input.body["scopes"]
@@ -302,22 +427,24 @@ pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 .iter()
                 .map(|v| v.as_str().ok_or_else(|| Error::bad("Invalid scope.")))
                 .collect::<Result<Vec<_>>>()?;
-            s.auth.personal(label, scopes).await
+            s.auth.personal(label, scopes).await?
         }
         ("DELETE", ["tokens", id]) => {
             s.auth.revoke(id).await?;
-            Ok(json!({
-                "revoked": true
-            }
-            ))
+            json!({ "revoked": true })
         }
-        ("POST", ["oauth", "preview"]) => s.auth.authorization(&input.body).await,
-        ("POST", ["oauth", "consent"]) => Ok(json!({
-            "redirect": s.auth.consent(input.body["parameters"].clone(),input.boolean("approved")?).await?
+        ("POST", ["oauth", "preview"]) => s.auth.authorization(&input.body).await?,
+        ("POST", ["oauth", "consent"]) => {
+            let approved = input.boolean("approved")?;
+            let redirect = s
+                .auth
+                .consent(input.body["parameters"].clone(), approved)
+                .await?;
+            json!({ "redirect": redirect })
         }
-        )),
-        _ => Err(Error::not_found("Not found")),
-    }
+        _ => return Ok(None),
+    };
+    Ok(Some(result))
 }
 
 async fn save(s: &Arc<Service>, kind: &str, input: Value, id: Option<&str>) -> Result<Value> {
