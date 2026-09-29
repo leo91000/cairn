@@ -58,7 +58,8 @@ async function main() {
     docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'].flatMap(cap => ['--cap-add', cap]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/net/tun', '--device', '/dev/fuse', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '7g', '--cpus', '3', '--entrypoint', '/usr/local/bin/leo', image, 'runner-broker')
     url = `http://${docker('port', name, '4311/tcp')}`
     await until(() => fetch(`${url}/health`).then(r => r.ok).catch(() => false))
-    const { storage } = await prepareStorageOrigin({ root, docker, name, api })
+    // This device probe has no manager publishing while the SDK is installed.
+    const { storage } = await prepareStorageOrigin({ root, docker, name, api, maxDirtySeconds: 3600 })
     for (const mode of ['first', 'resume']) {
       const id = randomUUID()
       const ackId = randomUUID()

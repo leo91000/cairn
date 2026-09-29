@@ -51,9 +51,9 @@ async function cancel() {
   }
 }
 async function resume() {
+  tab.value = 'events'
   try {
     await api(`/runs/${run.value!.id}/resume`, { method: 'POST' })
-    tab.value = 'events'
     notify('Resuming saved conversation')
   }
   catch (e) { error.value = (e as Error).message }

@@ -30,9 +30,22 @@ test('reconnects after a temporary restart and resumes a cancelled conversation 
   await expectSingleScroll(page)
   await page.screenshot({ animations: 'disabled', path: test.info().outputPath('resume-mobile-dark.png') })
   await expect(page.getByRole('button', { name: 'Resume', exact: true })).toBeInViewport()
+  // The worker can finish before the resume HTTP response reaches the browser.
+  // A late response must preserve a view selected while that request was pending.
+  let releaseResume!: () => void
+  const resumeResponse = new Promise<void>((resolve) => {
+    releaseResume = resolve
+  })
+  await page.route(`**/api/runs/${run.id}/resume`, async (route) => {
+    const response = await route.fetch()
+    await resumeResponse
+    await route.fulfill({ response })
+  })
   await page.getByRole('button', { name: 'Resume', exact: true }).click()
   await expect.poll(() => workspace.service.store.run(run.id)?.status).toBe('succeeded')
   await page.getByRole('button', { name: 'Result', exact: true }).click()
+  releaseResume()
+  await expect(page.getByText('Resuming saved conversation', { exact: true })).toBeVisible()
   await expect(page.getByText('The saved conversation and work survived the restart.', { exact: true })).toBeVisible()
   await page.setViewportSize({ width: 1440, height: 1000 })
   await page.emulateMedia({ colorScheme: 'light' })

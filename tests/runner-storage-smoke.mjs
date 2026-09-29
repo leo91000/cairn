@@ -8,7 +8,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
 
-export async function prepareStorageOrigin({ root, docker, name, api }) {
+export async function prepareStorageOrigin({ root, docker, name, api, maxDirtySeconds = 300 }) {
   const origin = path.join(root, 'data/storage-fixture')
   await mkdir(origin)
   await writeFile(path.join(origin, 'server.mjs'), `
@@ -26,7 +26,7 @@ export async function prepareStorageOrigin({ root, docker, name, api }) {
     }).listen(4313,'127.0.0.1');
   `)
   docker('exec', '-d', name, '/usr/local/bin/node', '/data/storage-fixture/server.mjs')
-  const policy = { cacheMiB: 8, reserveMiB: 64, reservePercent: 1, backupSeconds: 60, maxDirtySeconds: 300 }
+  const policy = { cacheMiB: 8, reserveMiB: 64, reservePercent: 1, backupSeconds: 60, maxDirtySeconds }
   const storage = { master: 'http://127.0.0.1:4313/', grant: 'fixture-storage-grant', policy }
   await api('/storage-policy', 'POST', policy)
   return { origin, policy, storage }
