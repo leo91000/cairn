@@ -104,18 +104,86 @@ pub(crate) fn reserve(db: &Db<'_>, point: &Value, manifest: &mut Value) -> Resul
         }
         block["object"] = object.id.clone().into();
     }
-    Ok(objects.into_values().collect())
+    // Preserve manifest order for contiguous batched reads from the node.
+    Ok(manifest["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|block| objects.remove(block["hash"].as_str()?))
+        .collect())
+}
+
+/// Only call after every upload has passed remote verification. Independent disks
+/// may race to upload a previously unseen hash; atomically choose the first ready
+/// incarnation and retire duplicate uploads before publishing their manifests.
+pub(crate) fn complete_uploads(db: &Db<'_>, publication: &str, manifest: &mut Value) -> Result<()> {
+    let mut pending = db.0.prepare_cached("SELECT o.id,o.destination,o.hash,o.size FROM shared_objects o JOIN shared_references r ON r.object=o.id WHERE r.publication=?1 AND o.state='pending'")?;
+    let objects = pending
+        .query_map([publication], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut replacements = HashMap::new();
+    let mut lookup = db.0.prepare_cached(
+        "SELECT id,size FROM shared_objects WHERE destination=?1 AND hash=?2 AND state='ready'",
+    )?;
+    for (object, destination, hash, size) in objects {
+        let existing = lookup
+            .query_row(params![destination, hash], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .optional()?;
+        let Some((canonical, canonical_size)) = existing else {
+            db.0.execute(
+                "UPDATE shared_objects SET state='ready' WHERE id=?1",
+                [object],
+            )?;
+            continue;
+        };
+        if size != canonical_size {
+            return Err(Error::bad("Shared block size mismatch."));
+        }
+        db.0.execute(
+            "INSERT OR IGNORE INTO shared_references VALUES(?1,?2)",
+            params![publication, canonical],
+        )?;
+        db.0.execute(
+            "UPDATE shared_objects SET unused_at=NULL WHERE id=?1",
+            [&canonical],
+        )?;
+        db.0.execute(
+            "DELETE FROM shared_references WHERE publication=?1 AND object=?2",
+            params![publication, object],
+        )?;
+        db.0.execute(
+            "UPDATE shared_objects SET unused_at=?2 WHERE id=?1",
+            params![object, now()],
+        )?;
+        replacements.insert(object, canonical);
+    }
+    if !replacements.is_empty() {
+        for block in manifest["blocks"].as_array_mut().unwrap() {
+            if let Some(canonical) = block["object"].as_str().and_then(|id| replacements.get(id)) {
+                block["object"] = canonical.clone().into();
+            }
+        }
+    }
+    verified(db, publication)
 }
 
 pub(crate) fn verified(db: &Db<'_>, publication: &str) -> Result<()> {
-    let invalid: bool = db.0.query_row("SELECT EXISTS(SELECT 1 FROM shared_references r JOIN shared_objects o ON o.id=r.object WHERE r.publication=?1 AND o.state NOT IN ('pending','ready'))",[publication],|r|r.get(0))?;
+    let invalid: bool = db.0.query_row("SELECT EXISTS(SELECT 1 FROM shared_references r JOIN shared_objects o ON o.id=r.object WHERE r.publication=?1 AND o.state<>'ready')",[publication],|r|r.get(0))?;
     if invalid {
         return Err(Error::new(
             409,
             "A shared block was invalidated during publication.",
         ));
     }
-    db.0.execute("UPDATE shared_objects SET state='ready' WHERE state='pending' AND id IN (SELECT object FROM shared_references WHERE publication=?1)",[publication])?;
     Ok(())
 }
 
@@ -326,7 +394,7 @@ mod tests {
     async fn ready(store: &Store, point: &Value) {
         let id = text(point, "id").to_owned();
         store
-            .transaction(move |db| verified(db, &id))
+            .transaction(move |db| complete_uploads(db, &id, &mut manifest(&[])))
             .await
             .unwrap();
     }
@@ -359,6 +427,61 @@ mod tests {
         let deleted = garbage(&store).await;
         assert_eq!(deleted.len(), 1);
         assert_eq!(deleted[0].key, key("hash", &first[0].id));
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_uploads_converge_without_blocking_independent_disks() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let a = point("a", "bucket");
+        let b = point("b", "bucket");
+        let first = reserve_point(&store, &a, &["shared", "a-only"]).await;
+        let second = reserve_point(&store, &b, &["shared", "shared", "b-only"]).await;
+        let old = first
+            .iter()
+            .find(|o| o.hash == "shared")
+            .unwrap()
+            .id
+            .clone();
+        let duplicate = second
+            .iter()
+            .find(|o| o.hash == "shared")
+            .unwrap()
+            .id
+            .clone();
+        assert_ne!(old, duplicate);
+        assert!(second.iter().all(|o| !o.ready));
+        ready(&store, &a).await;
+        // Simulate A retiring after its verified upload, while B still transfers.
+        // B must revive the ready object and atomically replace its reservation.
+        retire(&store, &a).await;
+        let mut candidate = manifest(&["shared", "shared", "b-only"]);
+        for block in candidate["blocks"].as_array_mut().unwrap() {
+            block["object"] = second
+                .iter()
+                .find(|o| o.hash == block["hash"])
+                .unwrap()
+                .id
+                .clone()
+                .into();
+        }
+        let publication = text(&b, "id").to_owned();
+        let completed = store
+            .transaction(move |db| {
+                complete_uploads(db, &publication, &mut candidate)?;
+                verified(db, &publication)?;
+                Ok(candidate)
+            })
+            .await
+            .unwrap();
+        assert_eq!(completed["blocks"][0]["object"], old);
+        assert_eq!(completed["blocks"][1]["object"], old);
+        let collected = garbage(&store).await;
+        assert_eq!(collected.len(), 2); // A-only and the duplicate upload.
+        assert!(collected.iter().any(|d| d.id == duplicate));
+        assert!(collected.iter().all(|d| d.id != old));
+        let third = reserve_point(&store, &point("c", "bucket"), &["shared"]).await;
+        assert_eq!(third[0].id, old);
     }
 
     #[tokio::test]

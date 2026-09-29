@@ -582,7 +582,7 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
 }
 
 pub async fn latest(s: &Service, run: &str) -> Result<Option<Value>> {
-    let _operation = s.node_backup_operation.lock().await;
+    let _operation = s.node_backup_operation.lock(run).await;
     let current = s.store.run(run).await?;
     let Some(head) = current["backup"]["id"].as_str() else {
         return Ok(None);

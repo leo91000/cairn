@@ -17,8 +17,7 @@ pub struct Service {
     pub node_lease_deadlines:
         Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::time::Instant>>>,
     pub started: tokio::time::Instant,
-    pub node_backup_operation: Arc<tokio::sync::Mutex<()>>,
-    pub node_disk_reads: Arc<tokio::sync::RwLock<()>>,
+    pub node_backup_operation: Arc<crate::nodes::coordination::Coordination>,
     pub node_backup_lock: Arc<tokio::sync::Mutex<()>>,
     pub shared_block_collection: Arc<tokio::sync::Mutex<()>>,
     pub node_transport: Arc<crate::nodes::transport::Transport>,
@@ -63,7 +62,6 @@ impl Service {
             node_backup_operation: Default::default(),
             node_backup_lock: Default::default(),
             shared_block_collection: Default::default(),
-            node_disk_reads: Default::default(),
             node_transport: Default::default(),
             avatars: Default::default(),
             artifacts: Default::default(),

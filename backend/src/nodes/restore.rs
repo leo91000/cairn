@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
 
 pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Result<()> {
-    let _operation = s.node_backup_operation.lock().await;
+    let _operation = s.node_backup_operation.lock(text(run, "id")).await;
     let manifest = super::publication::manifest(s, backup).await?;
     let record = s.get("nodes", node).await?;
     if record["capabilities"]["fuse"] != true {
@@ -64,7 +64,12 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
-    let _read = s.node_disk_reads.read().await;
+    let grant = s
+        .store
+        .get("node-disk-grants", &crate::auth::digest(credential))
+        .await?
+        .ok_or_else(|| Error::new(401, "Disk grant expired."))?;
+    let _read = s.node_backup_operation.read(text(&grant, "runId")).await;
     if let Some(grant) = super::disk_grants::authorize(s, credential).await? {
         if request.method() == "POST" {
             return Ok(axum::Json(json!({"renewed": true})).into_response());

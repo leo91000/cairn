@@ -2,6 +2,7 @@
 pub mod alerts;
 pub mod checkpoint;
 pub mod connector;
+pub mod coordination;
 pub mod disk_grants;
 pub mod executor;
 pub mod files;
