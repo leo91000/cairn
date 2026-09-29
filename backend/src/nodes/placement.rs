@@ -222,42 +222,62 @@ impl Fleet<'_> {
             .filter(move |a| a["nodeId"] == node && is_active_attempt(a))
     }
 
+    /// CPU or RAM left on `node` once other conversations' reservations are counted.
+    fn free(&self, request: &Request, node: &Value, kind: ResourceKind) -> u64 {
+        let id = text(node, "id");
+        // A moving conversation's own reservation is replaced, not added to.
+        let used = self
+            .active_on(id)
+            .filter(|a| !(request.moving && a["runId"] == request.run["id"]))
+            .map(|a| a["resources"][kind.key()].as_u64().unwrap_or(0))
+            .fold(0u64, u64::saturating_add);
+        let limit = node["limits"][kind.key()].as_u64().unwrap_or(0);
+        limit.saturating_sub(used)
+    }
+
     /// Remaining CPU/RAM headroom after this reservation, or `None` if it does not fit.
     fn fit(&self, request: &Request, node: &Value, resources: &Resources) -> Result<Option<f64>> {
         let id = text(node, "id");
         let storage_policy = Policy::for_node(&node["storage"])?;
         let mut headroom = f64::MAX;
         for kind in [ResourceKind::Cpu, ResourceKind::Memory] {
-            let amount = |a: &Value| a["resources"][kind.key()].as_u64().unwrap_or(0);
-            let same_run = |a: &Value| a["runId"] == request.run["id"];
-            // A moving conversation's own reservation is replaced, not added to.
-            let used = self
-                .active_on(id)
-                .filter(|a| !(request.moving && same_run(a)))
-                .map(amount)
-                .sum::<u64>();
             let current = if request.moving {
                 self.active_on(id)
-                    .filter(|a| same_run(a))
-                    .map(amount)
+                    .filter(|a| a["runId"] == request.run["id"])
+                    .map(|a| a["resources"][kind.key()].as_u64().unwrap_or(0))
                     .max()
                     .unwrap_or(0)
             } else {
                 0
             };
-            let limit = node["limits"][kind.key()].as_u64().unwrap_or(0);
-            let Some(total) = used.checked_add(current.max(resources.amount(kind))) else {
+            let needed = current.max(resources.amount(kind));
+            let free = self.free(request, node, kind);
+            if needed > free {
                 return Ok(None);
-            };
-            if limit > 0 {
-                headroom = headroom.min(limit.saturating_sub(total) as f64 / limit as f64);
             }
-            if total > limit {
-                return Ok(None);
+            let limit = node["limits"][kind.key()].as_u64().unwrap_or(0);
+            if limit > 0 {
+                headroom = headroom.min((free - needed) as f64 / limit as f64);
             }
         }
         let disk_fits = self.disk_fits(request, node, resources, &storage_policy);
         Ok(disk_fits.then_some(headroom))
+    }
+
+    /// What `node` could still offer, for a conversation that does not fit anywhere.
+    fn describe(&self, request: &Request, node: &Value, resources: &Resources) -> Result<String> {
+        let name = node["name"].as_str().unwrap_or_else(|| text(node, "id"));
+        let cpu = self.free(request, node, ResourceKind::Cpu);
+        let memory = self.free(request, node, ResourceKind::Memory);
+        let storage_policy = Policy::for_node(&node["storage"])?;
+        let disk = if self.disk_fits(request, node, resources, &storage_policy) {
+            ""
+        } else {
+            ", not enough disk"
+        };
+        Ok(format!(
+            "{name} has {cpu} CPU and {memory} MiB RAM free{disk}"
+        ))
     }
 
     fn disk_fits(
@@ -338,63 +358,129 @@ fn development_node(configured: bool) -> Value {
     })
 }
 
-fn reserve_in(db: &Db<'_>, run: &Value, attempt: &str, configured: bool) -> Result<Value> {
-    let agent = db
-        .get("agents", super::run_agent(run))?
-        .ok_or_else(|| Error::forbidden("Agent removed."))?;
-    let access = policy(&agent);
-    let checkpoint = super::db_checkpoint(db, text(run, "id"))?;
-    let request = Request::new(run, &access, &checkpoint)?;
-    let mut nodes = db.list("nodes")?;
-    // Existing development execution stays available without a controller.
-    if !configured && nodes.iter().all(|n| n["id"] != LOCAL_NODE_ID) {
-        nodes.push(development_node(configured));
+/// What a placement decision reads, from one consistent database view.
+struct Snapshot {
+    access: Value,
+    checkpoint: Value,
+    nodes: Vec<Value>,
+    attempts: Vec<Value>,
+    volumes: Vec<Value>,
+}
+
+impl Snapshot {
+    fn load(db: &Db<'_>, run: &Value, configured: bool) -> Result<Self> {
+        let agent = db
+            .get("agents", super::run_agent(run))?
+            .ok_or_else(|| Error::forbidden("Agent removed."))?;
+        let mut nodes = db.list("nodes")?;
+        // Existing development execution stays available without a controller.
+        if !configured && nodes.iter().all(|n| n["id"] != LOCAL_NODE_ID) {
+            nodes.push(development_node(configured));
+        }
+        // Ties keep the preferred node, then the current runner.
+        nodes.sort_by_key(|node| {
+            (
+                node["id"] != run["preferredNodeId"],
+                node["id"] != LOCAL_NODE_ID,
+            )
+        });
+        Ok(Self {
+            access: policy(&agent),
+            checkpoint: super::db_checkpoint(db, text(run, "id"))?,
+            nodes,
+            attempts: db.list("node-attempts")?,
+            volumes: db.list("node-volumes")?,
+        })
     }
-    // Ties keep the preferred node, then the current runner.
-    nodes.sort_by_key(|node| {
-        (
-            node["id"] != run["preferredNodeId"],
-            node["id"] != LOCAL_NODE_ID,
-        )
-    });
-    let attempts = db.list("node-attempts")?;
-    let volumes = db.list("node-volumes")?;
+
+    fn fleet(&self) -> Fleet<'_> {
+        Fleet {
+            attempts: &self.attempts,
+            volumes: &self.volumes,
+        }
+    }
+
+    /// The best node for `request`, or why none can take it now.
+    fn select(&self, request: &Request, configured: bool) -> Result<Candidate> {
+        let fleet = self.fleet();
+        let mut best: Option<Candidate> = None;
+        let mut full = Vec::new();
+        for node in &self.nodes {
+            if !request.eligible(node, configured) {
+                continue;
+            }
+            let Some(resources) = request.resources_for(node) else {
+                continue;
+            };
+            let Some(headroom) = fleet.fit(request, node, &resources)? else {
+                full.push(fleet.describe(request, node, &resources)?);
+                continue;
+            };
+            let candidate = Candidate {
+                preferred: node["id"] == request.run["preferredNodeId"],
+                headroom,
+                node: node.clone(),
+                resources,
+            };
+            if best.as_ref().is_none_or(|best| candidate.beats(best)) {
+                best = Some(candidate);
+            }
+        }
+        best.ok_or_else(|| Error::unavailable(shortage(&request.resources, &full)))
+    }
+}
+
+/// Starts every message for a conversation no authorized node can take now.
+pub const NO_CAPACITY: &str = "No authorized node";
+
+/// Whether `error` means the conversation only has to wait for a node to have room.
+pub fn is_no_capacity(error: &Error) -> bool {
+    error.is_unavailable() && error.message.starts_with(NO_CAPACITY)
+}
+
+fn shortage(requested: &Resources, full: &[String]) -> String {
+    if full.is_empty() {
+        return format!(
+            "{NO_CAPACITY} is online and accepting this conversation. The existing environment is preserved."
+        );
+    }
+    format!(
+        "{NO_CAPACITY} has the required capacity for {} CPU, {} MiB RAM and {} MiB disk: {}. The existing environment is preserved.",
+        requested.cpu,
+        requested.memory_mi_b,
+        requested.disk_mi_b,
+        full.join("; ")
+    )
+}
+
+fn reserve_in(db: &Db<'_>, run: &Value, attempt: &str, configured: bool) -> Result<Value> {
+    let snapshot = Snapshot::load(db, run, configured)?;
+    let request = Request::new(run, &snapshot.access, &snapshot.checkpoint)?;
     if !request.moving
         && let Some(reservation) = run["moveReservation"].as_str()
     {
-        return claim_reservation(db, &request, &nodes, reservation, attempt);
+        return claim_reservation(db, &request, &snapshot.nodes, reservation, attempt);
     }
-    let fleet = Fleet {
-        attempts: &attempts,
-        volumes: &volumes,
-    };
-    let mut best: Option<Candidate> = None;
-    for node in nodes {
-        if !request.eligible(&node, configured) {
-            continue;
-        }
-        let Some(resources) = request.resources_for(&node) else {
-            continue;
-        };
-        let Some(headroom) = fleet.fit(&request, &node, &resources)? else {
-            continue;
-        };
-        let candidate = Candidate {
-            preferred: node["id"] == run["preferredNodeId"],
-            headroom,
-            node,
-            resources,
-        };
-        if best.as_ref().is_none_or(|best| candidate.beats(best)) {
-            best = Some(candidate);
-        }
-    }
-    let Some(best) = best else {
-        return Err(Error::unavailable(
-            "No authorized node has the required capacity. The existing environment is preserved.",
-        ));
-    };
-    admit(db, &request, &best, &attempts, attempt)
+    let best = snapshot.select(&request, configured)?;
+    admit(db, &request, &best, &snapshot.attempts, attempt)
+}
+
+/// Fails like [`reserve`] when no node can take `run` now, without reserving anything.
+pub async fn check(s: &Service, run: &Value) -> Result<()> {
+    let _ = super::refresh_local(s).await;
+    let run = run.clone();
+    let configured = !s.config.runner_url.is_empty();
+    s.store
+        .read(move |db| {
+            let snapshot = Snapshot::load(db, &run, configured)?;
+            let request = Request::new(&run, &snapshot.access, &snapshot.checkpoint)?;
+            // A move already holds its destination.
+            if !request.moving && run["moveReservation"].is_string() {
+                return Ok(());
+            }
+            snapshot.select(&request, configured).map(drop)
+        })
+        .await
 }
 
 /// A move reserved destination capacity in advance; the new execution takes it over.

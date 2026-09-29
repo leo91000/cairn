@@ -3844,3 +3844,84 @@ async fn synchronization_scheduler_starts_two_disks_and_leaves_the_third_queued(
     release.add_permits(3);
     server.abort();
 }
+
+#[tokio::test]
+async fn capacity_shortage_reports_free_resources_and_check_reserves_nothing() {
+    use leo_agent_manager::{
+        config::{id, now},
+        nodes::placement,
+    };
+    let owner = Owner::new().await;
+    let node = id();
+    let agent = id();
+    owner
+        .service
+        .store
+        .put(
+            "nodes",
+            json!({
+                "id": node,
+                "name": "Server",
+                "accepting": true,
+                "executionReady": true,
+                "lastSeen": now(),
+                "capabilities": {"kvm": true,"fuse": true},
+                "limits": {"cpu": 7,"memoryMiB": 16384,"diskMiB": 131072}
+            }),
+        )
+        .await
+        .unwrap();
+    owner
+        .service
+        .store
+        .put("agents", json!({"id": agent,"access": {"nodes": [node]}}))
+        .await
+        .unwrap();
+    let other = json!({"id": id(),"snapshot": {"agent": {"id": agent}}});
+    placement::reserve(&owner.service, &other, &id())
+        .await
+        .unwrap();
+    let large = json!({
+        "id": id(),
+        "snapshot": {"agent": {"id": agent}},
+        "requestedResources": {"cpu": 6,"memoryMiB": 12288,"diskMiB": 32768}
+    });
+    let error = placement::check(&owner.service, &large).await.unwrap_err();
+    assert!(placement::is_no_capacity(&error), "{}", error.message);
+    assert!(
+        error
+            .message
+            .contains("6 CPU, 12288 MiB RAM and 32768 MiB disk"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error
+            .message
+            .contains("Server has 5 CPU and 12288 MiB RAM free"),
+        "{}",
+        error.message
+    );
+    let reserved = placement::reserve(&owner.service, &large, &id())
+        .await
+        .unwrap_err();
+    assert_eq!(reserved.message, error.message);
+    let attempts = owner.service.store.list("node-attempts").await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    let small = json!({
+        "id": id(),
+        "snapshot": {"agent": {"id": agent}},
+        "requestedResources": {"cpu": 5,"memoryMiB": 12288,"diskMiB": 32768}
+    });
+    placement::check(&owner.service, &small).await.unwrap();
+    assert_eq!(
+        owner
+            .service
+            .store
+            .list("node-attempts")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}

@@ -1009,3 +1009,71 @@ async fn queued_work_uses_current_node_grants_without_rejecting_unrelated_policy
     );
     fixture.stop(false).await;
 }
+
+#[tokio::test]
+async fn queued_work_waits_for_node_capacity_without_failing() {
+    let mut fixture = Fixture::new().await;
+    fixture.stop(false).await;
+    let s = fixture.service.clone();
+    let node = id();
+    let put_node = |name: &str| {
+        json!({
+            "id": node,
+            "name": name,
+            "accepting": true,
+            "executionReady": true,
+            "lastSeen": now() + 60_000,
+            "capabilities": {"kvm": true, "fuse": true},
+            "limits": {"cpu": 1, "memoryMiB": 8192, "diskMiB": 65536}
+        })
+    };
+    s.store.put("nodes", put_node("Laptop")).await.unwrap();
+    let mut agent = s
+        .get("agents", leo_agent_manager::config::MAIN_AGENT_ID)
+        .await
+        .unwrap();
+    agent["access"]["nodes"] = json!([node]);
+    s.store.put("agents", agent).await.unwrap();
+    let run = fixture.enqueue("Needs more CPU than the node has").await;
+    let run_id = text(&run, "id");
+    let resources = json!({"cpu": 2, "memoryMiB": 4096, "diskMiB": 32768});
+    s.store
+        .patch_run(run_id, json!({"requestedResources": resources}))
+        .await
+        .unwrap();
+    fixture.start().await;
+    let waiting = fixture
+        .until(run_id, |r| {
+            text(r, "accountWaitReason").starts_with("Waiting for capacity.")
+        })
+        .await;
+    let reason = text(&waiting, "accountWaitReason");
+    assert!(reason.contains("2 CPU, 4096 MiB RAM"), "{reason}");
+    assert!(
+        reason.contains("Laptop has 1 CPU and 8192 MiB RAM free"),
+        "{reason}"
+    );
+    assert_eq!(waiting["status"], "queued");
+    // New figures replace the reason without repeating the status event.
+    s.store.put("nodes", put_node("Desk")).await.unwrap();
+    let updated = fixture
+        .until(run_id, |r| {
+            text(r, "accountWaitReason").contains("Desk has")
+        })
+        .await;
+    assert_eq!(updated["status"], "queued");
+    let id = run_id.to_owned();
+    let events = s
+        .store
+        .read(move |db| db.events(&id, 0, 500))
+        .await
+        .unwrap();
+    let waits = events
+        .iter()
+        .filter(|e| text(e, "text").starts_with("Waiting for capacity."))
+        .count();
+    assert_eq!(waits, 1, "{events:?}");
+    let attempts = s.store.list("node-attempts").await.unwrap();
+    assert!(attempts.is_empty(), "{attempts:?}");
+    fixture.stop(false).await;
+}
