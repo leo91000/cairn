@@ -92,6 +92,12 @@ fn metadata(address: IpAddr) -> bool {
     }
 }
 
+pub fn is_event_stream(headers: &reqwest::header::HeaderMap) -> bool {
+    headers
+        .get("content-type")
+        .is_some_and(|v| v.to_str().unwrap_or("").starts_with("text/event-stream"))
+}
+
 pub struct Response {
     pub status: u16,
     pub headers: reqwest::header::HeaderMap,
@@ -168,9 +174,7 @@ pub async fn fetch(
         }
         let status = response.status().as_u16();
         let headers = response.headers().clone();
-        let event_stream = headers
-            .get("content-type")
-            .is_some_and(|v| v.to_str().unwrap_or("").starts_with("text/event-stream"));
+        let event_stream = is_event_stream(&headers);
         let mut bytes = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {

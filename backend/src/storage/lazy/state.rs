@@ -1,5 +1,6 @@
 //! Durable connection context and accounting independent of the mounted view.
 use super::*;
+use rusqlite::OptionalExtension;
 
 impl LazyDisk {
     pub fn performance(&self) -> Value {
@@ -56,7 +57,6 @@ impl LazyDisk {
         let generation: i64 = db
             .query_row("SELECT generation FROM state WHERE id=1", [], |r| r.get(0))
             .map_err(failure)?;
-        use rusqlite::OptionalExtension;
         let published: Option<String> = db
             .query_row(
                 "SELECT value FROM settings WHERE key='published'",

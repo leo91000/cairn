@@ -1,5 +1,6 @@
 //! Sealing is local and short; reconstruction and remote publication happen later.
 use super::*;
+use rusqlite::OptionalExtension;
 use std::collections::BTreeSet;
 
 impl LazyDisk {
@@ -127,7 +128,6 @@ impl LazyDisk {
         timing.next("commit");
         let mut db = self.db.lock().map_err(failure)?;
         let tx = db.transaction().map_err(failure)?;
-        use rusqlite::OptionalExtension;
         let previous: Option<String> = tx
             .query_row(
                 "SELECT value FROM settings WHERE key='published'",
@@ -136,7 +136,10 @@ impl LazyDisk {
             )
             .optional()
             .map_err(failure)?;
-        let receipt = serde_json::json!({"generation": generation,"backupId": backup_id});
+        let receipt = serde_json::json!({
+            "generation": generation,
+            "backupId": backup_id
+        });
         if previous
             .as_ref()
             .is_some_and(|p| serde_json::from_str::<Value>(p).is_ok_and(|p| p == receipt))
@@ -189,12 +192,12 @@ impl LazyDisk {
         match super::super::cache::retire(self.node_state(), &self.directory.join("cache"), &needed)
         {
             Ok(bytes) => {
-                tracing::info!(target: "leo_performance", operation = "cache_retired", id = Self::identity(&self.directory), bytes)
+                tracing::info!(target: "leo_performance", operation = "cache_retired", id = Self::identity(&self.directory), bytes);
             }
             // Clean cache eviction is optional; a local eviction failure must
             // not report an already durable publication as unacknowledged.
             Err(error) => {
-                tracing::warn!(target: "leo_performance", operation = "cache_retire_failed", id = Self::identity(&self.directory), kind = ?error.kind())
+                tracing::warn!(target: "leo_performance", operation = "cache_retire_failed", id = Self::identity(&self.directory), kind = ?error.kind());
             }
         }
         timing.finish();

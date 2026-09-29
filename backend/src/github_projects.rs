@@ -5,8 +5,11 @@ use crate::{
     service::Service,
     validation::{parse, text},
 };
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::time::Duration;
+
+const PAGE_SIZE: usize = 100;
 
 async fn github(s: &Service, endpoint: &str) -> Result<Value> {
     let args = ["api", "--hostname", "github.com", endpoint].map(str::to_owned);
@@ -28,8 +31,7 @@ async fn github(s: &Service, endpoint: &str) -> Result<Value> {
     })?;
     if !output.success {
         return Err(Error::bad_gateway(
-            "Could not access GitHub. Check the GitHub connection and repository \
-                permissions in Connections, then retry.",
+            "Could not access GitHub. Check the GitHub connection and repository permissions in Connections, then retry.",
         ));
     }
     serde_json::from_str(&output.stdout).map_err(|_| Error::bad_gateway("Invalid GitHub response."))
@@ -76,43 +78,72 @@ async fn existing(s: &Service, repo: &str) -> Result<Option<Value>> {
         .find(|p| matches_origin(text(p, "origin"), repo)))
 }
 
+/// A repository as offered for import.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Repository<'a> {
+    full_name: &'a str,
+    name: &'a str,
+    description: &'a str,
+    default_branch: &'a str,
+    private: bool,
+    archived: bool,
+    fork: bool,
+    owner: &'a str,
+    language: &'a str,
+    stars: u64,
+    pushed_at: &'a str,
+    imported: bool,
+}
+
+impl<'a> Repository<'a> {
+    fn of(raw: &'a Value, projects: &[Value]) -> Self {
+        let full_name = text(raw, "full_name");
+        Self {
+            full_name,
+            name: text(raw, "name"),
+            description: text(raw, "description"),
+            default_branch: text(raw, "default_branch"),
+            private: raw["private"] == true,
+            archived: raw["archived"] == true,
+            fork: raw["fork"] == true,
+            owner: text(&raw["owner"], "login"),
+            language: text(raw, "language"),
+            stars: raw["stargazers_count"].as_u64().unwrap_or(0),
+            pushed_at: text(raw, "pushed_at"),
+            imported: projects
+                .iter()
+                .any(|p| matches_origin(text(p, "origin"), full_name)),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RepositoryPage<'a> {
+    repositories: Vec<Repository<'a>>,
+    next_page: Option<i64>,
+}
+
 pub async fn list(s: &Service, page: i64) -> Result<Value> {
-    let values = github(s, &format!("user/repos?per_page=100&page={page}&sort=pushed&direction=desc&affiliation=owner,collaborator,organization_member")).await?;
+    let endpoint = format!(
+        "user/repos?per_page={PAGE_SIZE}&page={page}&sort=pushed&direction=desc&affiliation=owner,collaborator,organization_member"
+    );
+    let values = github(s, &endpoint).await?;
     let values = values
         .as_array()
         .ok_or_else(|| Error::bad_gateway("Invalid GitHub repository list."))?;
     let projects = s.store.list("projects").await?;
-    let repos = values
+    let repositories = values
         .iter()
         .filter(|r| repository(text(r, "full_name")).is_ok())
-        .map(|r| {
-            let full_name = text(r, "full_name");
-            json!({
-                "fullName": full_name,
-                "name": text(r, "name"),
-                "description": text(r, "description"),
-                "defaultBranch": text(r, "default_branch"),
-                "private": r["private"] == true,
-                "archived": r["archived"] == true,
-                "fork": r["fork"] == true,
-                "owner": text(&r["owner"], "login"),
-                "language": text(r, "language"),
-                "stars": r["stargazers_count"].as_u64().unwrap_or(0),
-                "pushedAt": text(r, "pushed_at"),
-                "imported": projects
-                    .iter()
-                    .any(|p| matches_origin(text(p, "origin"), full_name))
-            })
-        })
-        .collect::<Vec<_>>();
-    Ok(json!({
-        "repositories": repos,
-        "nextPage": if values.len() == 100 {
-            Some(page + 1)
-        } else {
-            None
-        }
-    }))
+        .map(|r| Repository::of(r, &projects))
+        .collect();
+    let next_page = (values.len() == PAGE_SIZE).then_some(page + 1);
+    Ok(serde_json::to_value(RepositoryPage {
+        repositories,
+        next_page,
+    })?)
 }
 
 pub async fn import(s: &Service, input: Value) -> Result<Value> {
@@ -133,17 +164,19 @@ pub async fn import(s: &Service, input: Value) -> Result<Value> {
         .first()
         .ok_or_else(|| Error::bad("No workspace root is configured."))?;
     let root = crate::skills::workspace(root, &s.config.workspace_roots).await?;
+    let name = input.get("name").unwrap_or(&metadata["name"]);
+    let description = input
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| text(&metadata, "description"));
     let mut project = parse(
         "project",
         json!({
-            "name": input.get("name").unwrap_or(&metadata["name"]),
-            "description": input
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or_else(|| text(&metadata, "description")),
+            "name": name,
+            "description": description,
             "path": root,
             "baseBranch": branch,
-            "sourceMode": "remote"
+            "sourceMode": "remote",
         }),
     )?;
     let directory = tempfile::Builder::new()
@@ -154,6 +187,7 @@ pub async fn import(s: &Service, input: Value) -> Result<Value> {
     project["path"] = path.to_string_lossy().into_owned().into();
     // The API serializes imports through registration to avoid concurrent duplicates.
     let saved = s.project(project, None).await?;
+    // The registered project now owns the clone.
     let _ = directory.keep();
     Ok(saved)
 }

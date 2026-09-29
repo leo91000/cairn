@@ -1,8 +1,10 @@
 use crate::{
-    error::{Error, Result},
+    error::{Error, Result, required},
     http::{App, Input},
-    mcp_client::MODERN,
+    mcp_client::{LEGACY, MODERN, VERSIONS},
+    rpc::jsonrpc::{Frame, Message},
     service::Service,
+    store::Db,
     validation::{parse, text},
 };
 use axum::{
@@ -11,19 +13,132 @@ use axum::{
     http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
 use std::sync::{Arc, LazyLock};
 
-pub static CATALOG: LazyLock<Value> =
+const INVALID_REQUEST: i64 = -32600;
+const UNSUPPORTED_VERSION: i64 = -32022;
+const INTERNAL_ERROR: i64 = -32603;
+/// Protocol version assumed when a request names none.
+const DEFAULT_VERSION: &str = "2025-03-26";
+const PROTOCOL_META: &str = "io.modelcontextprotocol/protocolVersion";
+
+/// Listing results that modern clients may cache privately.
+const CACHEABLE: [&str; 5] = [
+    "server/discover",
+    "tools/list",
+    "resources/list",
+    "resources/templates/list",
+    "prompts/list",
+];
+
+// Leave ample headroom below the gateway's 8 MiB ceiling: MCP serializes the
+// result both as structured data and as escaped text for older clients.
+const RUN_PAGE_BYTES: usize = 256 * 1024;
+
+/// An entry of the management tool catalog (`schemas/mcp-tools.json`).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CatalogTool {
+    name: String,
+    description: String,
+    scope: String,
+    #[serde(default)]
+    destructive: bool,
+    input_schema: Value,
+}
+
+static CATALOG: LazyLock<Vec<CatalogTool>> =
     LazyLock::new(|| serde_json::from_str(include_str!("../schemas/mcp-tools.json")).unwrap());
 
-const VERSIONS: &[&str] = &[
-    "2026-07-28",
-    "2025-11-25",
-    "2025-06-18",
-    "2025-03-26",
-    "2024-11-05",
-];
+#[derive(Serialize)]
+struct TextContent {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    text: String,
+}
+
+/// A `tools/call` result.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ToolResult {
+    content: [TextContent; 1],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    structured_content: Option<Value>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    is_error: bool,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    meta: Option<Value>,
+}
+
+impl ToolResult {
+    pub(crate) fn success(text: String, structured: Value) -> Self {
+        Self {
+            content: [TextContent { kind: "text", text }],
+            structured_content: Some(structured),
+            is_error: false,
+            meta: None,
+        }
+    }
+
+    pub(crate) fn failure(message: &str) -> Self {
+        Self {
+            content: [TextContent {
+                kind: "text",
+                text: message.to_owned(),
+            }],
+            structured_content: None,
+            is_error: true,
+            meta: None,
+        }
+    }
+
+    /// Reports a failed call as a tool error, the protocol's way of showing it to the model.
+    pub(crate) fn from_result(
+        result: Result<Value>,
+        describe: impl FnOnce(&Value) -> String,
+    ) -> Result<Value> {
+        let result = match result {
+            Ok(value) => Self::success(describe(&value), value),
+            Err(error) => Self::failure(&error.message),
+        };
+        Ok(serde_json::to_value(result)?)
+    }
+}
+
+/// An empty listing for methods a server supports but has nothing for.
+pub(crate) fn empty_listing(method: &str) -> Option<Value> {
+    let key = match method {
+        "resources/list" => "resources",
+        "resources/templates/list" => "resourceTemplates",
+        "prompts/list" => "prompts",
+        _ => return None,
+    };
+    Some(Value::Object(Map::from_iter([(key.to_owned(), json!([]))])))
+}
+
+/// The three MCP endpoints this server exposes.
+enum Endpoint {
+    /// `/mcp`: the owner's management tools, authorized by personal tokens.
+    Management,
+    /// `/mcp-workspace`: run-scoped workspace tools.
+    Workspace,
+    /// `/mcp-gateway/{id}`: a run-scoped proxy to a configured connection.
+    Gateway(String),
+}
+
+impl Endpoint {
+    fn of(path: &str) -> Self {
+        if path == "/mcp-workspace" {
+            return Self::Workspace;
+        }
+        match path.strip_prefix("/mcp-gateway/") {
+            Some(id) => Self::Gateway(id.to_owned()),
+            None => Self::Management,
+        }
+    }
+}
 
 fn bearer(request: &Request) -> String {
     request
@@ -36,55 +151,71 @@ fn bearer(request: &Request) -> String {
         .unwrap_or_default()
 }
 
-fn rpc_error(id: Value, code: i64, message: &str, data: Option<Value>) -> Value {
-    let mut error = json!({
-        "code": code,
-        "message": message
-    }
-    );
-    if let Some(data) = data {
-        error["data"] = data;
-    }
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": error
-    }
+fn resource_metadata(s: &Service) -> String {
+    format!(
+        "{}/.well-known/oauth-protected-resource/mcp",
+        s.config.public_url
     )
+}
+
+/// Checks the bearer for the endpoint. Management clients without a valid token
+/// get the OAuth challenge that starts their sign-in.
+async fn authenticate(s: &Service, endpoint: &Endpoint, bearer: &str) -> Result<Option<Response>> {
+    match endpoint {
+        Endpoint::Workspace => {
+            crate::project_workspaces::authorize(s, bearer).await?;
+        }
+        Endpoint::Gateway(id) => {
+            crate::validation::uuid(id)?;
+            s.mcps.grant(s, id, bearer).await?;
+        }
+        Endpoint::Management => {
+            if s.auth.verify(bearer, None).await.is_ok() {
+                return Ok(None);
+            }
+            let mut response = (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "unauthorized" })),
+            )
+                .into_response();
+            let challenge = format!("Bearer resource_metadata=\"{}\"", resource_metadata(s));
+            response.headers_mut().insert(
+                "www-authenticate",
+                HeaderValue::from_str(&challenge).unwrap(),
+            );
+            return Ok(Some(response));
+        }
+    }
+    Ok(None)
+}
+
+fn bad_request(id: Value, message: &str) -> Response {
+    let frame = Frame::error(id, INVALID_REQUEST, message, None);
+    (StatusCode::BAD_REQUEST, Json(frame)).into_response()
+}
+
+fn valid_request(body: &Value, method: &str, id: &Value) -> bool {
+    body["jsonrpc"] == "2.0"
+        && !method.is_empty()
+        && (id.is_null() || id.is_string() || id.is_number())
+}
+
+/// Modern requests repeat the method and version in headers; both must agree.
+fn headers_match(input: &Input, method: &str, version: &str) -> bool {
+    let header_method = input
+        .headers
+        .get("mcp-method")
+        .and_then(|v| v.to_str().ok());
+    let body_version = input.body["params"]["_meta"][PROTOCOL_META].as_str();
+    !header_method.is_some_and(|m| m != method) && !body_version.is_some_and(|v| v != version)
 }
 
 pub async fn handle(State(app): State<App>, request: Request) -> Result<Response> {
     let s = &app.service;
     let bearer = bearer(&request);
-    let workspace = request.uri().path() == "/mcp-workspace";
-    let gateway = request
-        .uri()
-        .path()
-        .strip_prefix("/mcp-gateway/")
-        .map(str::to_owned);
-    if workspace {
-        crate::project_workspaces::authorize(s, &bearer).await?;
-    } else if let Some(id) = &gateway {
-        crate::validation::uuid(id)?;
-        s.mcps.grant(s, id, &bearer).await?;
-    } else if s.auth.verify(&bearer, None).await.is_err() {
-        let mut response = (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "error": "unauthorized"
-            }
-            )),
-        )
-            .into_response();
-        response.headers_mut().insert(
-            "www-authenticate",
-            HeaderValue::from_str(&format!(
-                "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp\"",
-                s.config.public_url
-            ))
-            .unwrap(),
-        );
-        return Ok(response);
+    let endpoint = Endpoint::of(request.uri().path());
+    if let Some(challenge) = authenticate(s, &endpoint, &bearer).await? {
+        return Ok(challenge);
     }
     if request.method() != "POST" {
         return Err(Error::method_not_allowed("Method not allowed."));
@@ -93,188 +224,53 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
     let body = &input.body;
     let id = body.get("id").cloned().unwrap_or(Value::Null);
     let method = text(body, "method");
-    if body["jsonrpc"] != "2.0"
-        || method.is_empty()
-        || (!id.is_null() && !id.is_string() && !id.is_number())
-    {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(rpc_error(id, -32600, "Invalid JSON-RPC request.", None)),
-        )
-            .into_response());
+    if !valid_request(body, method, &id) {
+        return Ok(bad_request(id, "Invalid JSON-RPC request."));
     }
     let version = input
         .headers
         .get("mcp-protocol-version")
         .and_then(|v| v.to_str().ok())
-        .or_else(|| body["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"].as_str())
-        .unwrap_or("2025-03-26");
+        .or_else(|| body["params"]["_meta"][PROTOCOL_META].as_str())
+        .unwrap_or(DEFAULT_VERSION);
     if !VERSIONS.contains(&version) {
-        return Ok(Json(rpc_error(
+        let data = json!({
+            "requested": version,
+            "supported": VERSIONS
+        });
+        let frame = Frame::error(
             id,
-            -32022,
+            UNSUPPORTED_VERSION,
             "Unsupported protocol version.",
-            Some(json!({
-                "requested": version,
-                "supported": VERSIONS
-            }
-            )),
-        ))
-        .into_response());
+            Some(data),
+        );
+        return Ok(Json(frame).into_response());
     }
     let modern = version == MODERN;
-    if modern {
-        let header_method = input
-            .headers
-            .get("mcp-method")
-            .and_then(|v| v.to_str().ok());
-        let body_version =
-            body["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"].as_str();
-        if header_method.is_some_and(|m| m != method) || body_version.is_some_and(|v| v != version)
-        {
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                Json(rpc_error(
-                    id,
-                    -32600,
-                    "MCP request headers do not match the body.",
-                    None,
-                )),
-            )
-                .into_response());
-        }
+    if modern && !headers_match(&input, method, version) {
+        return Ok(bad_request(
+            id,
+            "MCP request headers do not match the body.",
+        ));
     }
     if id.is_null() {
         return Ok(StatusCode::ACCEPTED.into_response());
     }
-    let server_info = json!({
-        "name": if gateway.is_some(){
-    "leo-mcp-gateway"}
-    else{
-    "leo-agent-manager"}
-    ,
-        "version": env!("CARGO_PKG_VERSION")
-    }
-    );
-    let capabilities = if gateway.is_some() {
-        json!({
-            "tools": {
-        }
-        ,
-            "resources": {
-        }
-        ,
-            "prompts": {
-        }
-        }
-        )
-    } else {
-        json!({
-            "tools": {
-        }
-        }
-        )
-    };
-    let result = match method {
-        "server/discover" => Ok(json!({
-            "supportedVersions": VERSIONS,
-            "capabilities": capabilities,
-            "_meta": {
-                "io.modelcontextprotocol/serverInfo": server_info
-            }
-        }
-        )),
-        "initialize" if !modern => {
-            let offered = text(&body["params"], "protocolVersion");
-            let chosen = if VERSIONS[1..].contains(&offered) {
-                offered
-            } else {
-                "2025-11-25"
-            };
-            Ok(json!({
-                "protocolVersion": chosen,
-                "capabilities": capabilities,
-                "serverInfo": server_info
-            }
-            ))
-        }
-        "ping" => Ok(json!({})),
-        _ => {
-            if workspace {
-                crate::project_workspaces::rpc(s, &bearer, method, &body["params"]).await
-            } else if let Some(gateway) = &gateway {
-                proxy(s, gateway, &bearer, method, body["params"].clone()).await
-            } else {
-                match method {
-                    "tools/list" => Ok(json!({
-                        "tools": catalog()
-                    }
-                    )),
-                    "tools/call" => {
-                        call(
-                            s,
-                            &bearer,
-                            text(&body["params"], "name"),
-                            body["params"]
-                                .get("arguments")
-                                .cloned()
-                                .unwrap_or_else(|| json!({})),
-                        )
-                        .await
-                    }
-                    "resources/list" => Ok(json!({
-                        "resources": []
-                    }
-                    )),
-                    "resources/templates/list" => Ok(json!({
-                        "resourceTemplates": []
-                    }
-                    )),
-                    "prompts/list" => Ok(json!({
-                        "prompts": []
-                    }
-                    )),
-                    _ => Err(Error::not_found("Method not found")),
-                }
-            }
-        }
-    };
-    let response = match result {
-        Ok(mut result) => {
-            if modern
-                && [
-                    "server/discover",
-                    "tools/list",
-                    "resources/list",
-                    "resources/templates/list",
-                    "prompts/list",
-                ]
-                .contains(&method)
-            {
-                result["ttlMs"] = 0.into();
-                result["cacheScope"] = "private".into();
-            }
-            if modern && result.get("resultType").is_none() {
-                result["resultType"] = "complete".into();
-            }
-            if !modern && let Some(object) = result.as_object_mut() {
-                object.remove("resultType");
-            }
-            json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": result
-            }
-            )
-        }
-        Err(error) => rpc_error(
+    let frame = match dispatch(s, &endpoint, &bearer, method, &body["params"], modern).await {
+        Ok(result) => Frame::strict(Message::Result {
             id,
-            if error.is_not_found() { -32601 } else { -32603 },
-            &error.message,
-            None,
-        ),
+            result: finish_result(result, method, modern),
+        }),
+        Err(error) => {
+            let code = if error.is_not_found() {
+                crate::rpc::jsonrpc::METHOD_NOT_FOUND
+            } else {
+                INTERNAL_ERROR
+            };
+            Frame::error(id, code, &error.message, None)
+        }
     };
-    let mut response = Json(response).into_response();
+    let mut response = Json(frame).into_response();
     response.headers_mut().insert(
         "mcp-protocol-version",
         HeaderValue::from_str(version).unwrap(),
@@ -285,110 +281,183 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
     Ok(response)
 }
 
-fn catalog() -> Vec<Value> {
+/// Adapts a result to the negotiated protocol's result metadata.
+fn finish_result(mut result: Value, method: &str, modern: bool) -> Value {
+    if modern && CACHEABLE.contains(&method) {
+        result["ttlMs"] = 0.into();
+        result["cacheScope"] = "private".into();
+    }
+    if modern && result.get("resultType").is_none() {
+        result["resultType"] = "complete".into();
+    }
+    if !modern && let Some(object) = result.as_object_mut() {
+        object.remove("resultType");
+    }
+    result
+}
+
+async fn dispatch(
+    s: &Arc<Service>,
+    endpoint: &Endpoint,
+    bearer: &str,
+    method: &str,
+    params: &Value,
+    modern: bool,
+) -> Result<Value> {
+    let gateway = matches!(endpoint, Endpoint::Gateway(_));
+    let name = if gateway {
+        "leo-mcp-gateway"
+    } else {
+        "leo-agent-manager"
+    };
+    let server_info = json!({
+        "name": name,
+        "version": env!("CARGO_PKG_VERSION")
+    });
+    let capabilities = if gateway {
+        json!({
+            "tools": {},
+            "resources": {},
+            "prompts": {}
+        })
+    } else {
+        json!({ "tools": {} })
+    };
+    match method {
+        "server/discover" => Ok(json!({
+            "supportedVersions": VERSIONS,
+            "capabilities": capabilities,
+            "_meta": { "io.modelcontextprotocol/serverInfo": server_info },
+        })),
+        "initialize" if !modern => {
+            let offered = text(params, "protocolVersion");
+            let chosen = if VERSIONS[1..].contains(&offered) {
+                offered
+            } else {
+                LEGACY
+            };
+            Ok(json!({
+                "protocolVersion": chosen,
+                "capabilities": capabilities,
+                "serverInfo": server_info,
+            }))
+        }
+        "ping" => Ok(json!({})),
+        _ => match endpoint {
+            Endpoint::Workspace => crate::project_workspaces::rpc(s, bearer, method, params).await,
+            Endpoint::Gateway(id) => proxy(s, id, bearer, method, params.clone()).await,
+            Endpoint::Management => management(s, bearer, method, params).await,
+        },
+    }
+}
+
+async fn management(s: &Arc<Service>, bearer: &str, method: &str, params: &Value) -> Result<Value> {
+    if let Some(listing) = empty_listing(method) {
+        return Ok(listing);
+    }
+    match method {
+        "tools/list" => Ok(json!({ "tools": catalog() })),
+        "tools/call" => {
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            call(s, bearer, text(params, "name"), args).await
+        }
+        _ => Err(Error::not_found("Method not found")),
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ToolAnnotations {
+    read_only_hint: bool,
+    destructive_hint: bool,
+    open_world_hint: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ToolDescriptor {
+    name: &'static str,
+    description: &'static str,
+    title: String,
+    input_schema: &'static Value,
+    output_schema: Value,
+    #[serde(rename = "_meta")]
+    meta: Value,
+    annotations: ToolAnnotations,
+}
+
+fn catalog() -> Vec<ToolDescriptor> {
     CATALOG
-        .as_array()
-        .unwrap()
         .iter()
         .map(|tool| {
-            let name = text(tool, "name");
-            let scope = text(tool, "scope");
-            json!({
-                "name": name,
-                "description": tool["description"],
-                "title": name.replace('_'," "),
-                "inputSchema": tool["inputSchema"],
-                "outputSchema": {
+            let name = tool.name.as_str();
+            let scope = tool.scope.as_str();
+            let destructive = tool.destructive
+                || scope == "run"
+                || name.starts_with("update_")
+                || name == "save_skill";
+            ToolDescriptor {
+                name,
+                description: &tool.description,
+                title: name.replace('_', " "),
+                input_schema: &tool.input_schema,
+                output_schema: json!({
                     "type": "object",
-                    "properties": {
-                        "result": {
+                    "properties": { "result": {} },
+                    "required": ["result"],
+                }),
+                meta: json!({ "securitySchemes": [{ "type": "oauth2", "scopes": [scope] }] }),
+                annotations: ToolAnnotations {
+                    read_only_hint: scope == "read",
+                    destructive_hint: destructive,
+                    open_world_hint: scope != "read",
+                },
             }
-                    }
-            ,
-                    "required": ["result"]
-                }
-            ,
-                "_meta": {
-                    "securitySchemes": [{
-                        "type": "oauth2",
-                        "scopes": [scope]
-                    }
-            ]
-                }
-            ,
-                "annotations": {
-                    "readOnlyHint": scope=="read",
-                    "destructiveHint": tool["destructive"]==true||scope=="run"||name.starts_with("update_")||name=="save_skill",
-                    "openWorldHint": scope!="read"
-                }
-            }
-            )
         })
         .collect()
 }
 
 async fn call(s: &Arc<Service>, bearer: &str, name: &str, args: Value) -> Result<Value> {
     let tool = CATALOG
-        .as_array()
-        .unwrap()
         .iter()
-        .find(|t| t["name"] == name)
+        .find(|tool| tool.name == name)
         .ok_or_else(|| Error::not_found("Unknown tool"))?;
-    let scope = text(tool, "scope");
+    let scope = tool.scope.as_str();
     let operation = async {
         s.auth.verify(bearer, Some(scope)).await?;
         let args = parse(&format!("mcp:{name}"), args)?;
         invoke(s, name, args).await
     }
     .await;
-    Ok(match operation {
-        Ok(result) => {
-            json!({
-                "structuredContent": {
-                    "result": result
-                }
-            ,
-                "content": [{
-                    "type": "text",
-                    "text": result.to_string()
-                }
-            ]
-            }
-            )
-        }
+    let result = match operation {
+        Ok(result) => ToolResult::success(result.to_string(), json!({ "result": result })),
         Err(error) => {
-            let mut result = json!({
-                "isError": true,
-                "content": [{
-                    "type": "text",
-                    "text": error.message
-                }
-            ]
-            }
-            );
+            let mut result = ToolResult::failure(&error.message);
             if [401, 403].contains(&error.status) {
-                result["_meta"] = json!({
-                    "mcp/www_authenticate": format!("Bearer error=\"insufficient_scope\", error_description=\"The {scope} scope \
-                        is required\", scope=\"{scope}\", \
-                        resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp\"",s.config.public_url)
-                }
+                let challenge = format!(
+                    "Bearer error=\"insufficient_scope\", error_description=\"The {scope} scope is required\", scope=\"{scope}\", resource_metadata=\"{}\"",
+                    resource_metadata(s)
                 );
+                result.meta = Some(json!({ "mcp/www_authenticate": challenge }));
             }
             result
         }
-    })
+    };
+    Ok(serde_json::to_value(result)?)
 }
-
-// Leave ample headroom below the gateway's 8 MiB ceiling: MCP serializes the
-// result both as structured data and as escaped text for older clients.
-const RUN_PAGE_BYTES: usize = 256 * 1024;
 
 fn run_record_preview(record: Value, fields: &[&str]) -> Result<(Value, usize)> {
     let bytes = serde_json::to_vec(&record)?.len();
     if bytes <= RUN_PAGE_BYTES {
         return Ok((record, bytes));
     }
-    let mut preview = json!({"truncated": true,"totalBytes": bytes});
+    let mut preview = json!({
+        "truncated": true,
+        "totalBytes": bytes
+    });
     let mut bytes = serde_json::to_vec(&preview)?.len();
     for field in fields {
         if let Some(value) = record.get(*field) {
@@ -402,8 +471,17 @@ fn run_record_preview(record: Value, fields: &[&str]) -> Result<(Value, usize)> 
     Ok((preview, bytes))
 }
 
-fn run_history(db: &crate::store::Db<'_>, id: &str, after: i64) -> Result<Value> {
-    let run = crate::error::required(db.run(id)?, "Run not found")?;
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunHistory {
+    run: Value,
+    events: Vec<Value>,
+    next_after: i64,
+    has_more: bool,
+}
+
+fn run_history(db: &Db<'_>, id: &str, after: i64) -> Result<Value> {
+    let run = required(db.run(id)?, "Run not found")?;
     let (run, _) = run_record_preview(
         run,
         &[
@@ -438,15 +516,30 @@ fn run_history(db: &crate::store::Db<'_>, id: &str, after: i64) -> Result<Value>
         rusqlite::params![id, next],
         |row| row.get(0),
     )?;
-    Ok(json!({
-        "run": run,
-        "events": events,
-        "nextAfter": next,
-        "hasMore": more
-    }))
+    let history = RunHistory {
+        run,
+        events,
+        next_after: next,
+        has_more: more,
+    };
+    Ok(serde_json::to_value(history)?)
 }
 
-fn read_run_content(db: &crate::store::Db<'_>, args: &Value) -> Result<Value> {
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunContentChunk<'a> {
+    run_id: &'a str,
+    event_id: &'a Value,
+    encoding: &'static str,
+    format: &'static str,
+    offset: usize,
+    total_bytes: usize,
+    sha256: String,
+    data: &'a str,
+    next_offset: Option<usize>,
+}
+
+fn read_run_content(db: &Db<'_>, args: &Value) -> Result<Value> {
     let id = text(args, "runId");
     let data = if let Some(event_id) = args["eventId"].as_i64() {
         db.require_run(id)?;
@@ -456,39 +549,35 @@ fn read_run_content(db: &crate::store::Db<'_>, args: &Value) -> Result<Value> {
             .find(|event| event.id == event_id);
         // Keep the stored payload as RawValue: reading every chunk must not rebuild
         // a potentially huge nested JSON object just to serialize it again.
-        serde_json::to_string(&crate::error::required(
-            event,
-            "Event not found in this run",
-        )?)?
+        serde_json::to_string(&required(event, "Event not found in this run")?)?
     } else {
-        crate::error::required(db.run(id)?, "Run not found")?.to_string()
+        required(db.run(id)?, "Run not found")?.to_string()
     };
     let digest = crate::auth::hex_digest(&data);
     let offset = args["offset"].as_u64().unwrap() as usize;
     if (offset > 0 || args["sha256"].is_string()) && text(args, "sha256") != digest {
         return Err(Error::conflict(
-            "Content changed or checksum missing. Restart at offset 0 and pass the \
-                returned sha256 with each subsequent chunk.",
+            "Content changed or checksum missing. Restart at offset 0 and pass the returned sha256 with each subsequent chunk.",
         ));
     }
     if offset > data.len() || !data.is_char_boundary(offset) {
         return Err(Error::bad(
-            "Offset must be a UTF-8 byte boundary within the content. Use nextOffset \
-                from the previous response.",
+            "Offset must be a UTF-8 byte boundary within the content. Use nextOffset from the previous response.",
         ));
     }
     let end = data.floor_char_boundary((offset + RUN_PAGE_BYTES).min(data.len()));
-    Ok(json!({
-        "runId": id,
-        "eventId": args["eventId"],
-        "encoding": "utf-8",
-        "format": "json",
-        "offset": offset,
-        "totalBytes": data.len(),
-        "sha256": digest,
-        "data": &data[offset..end],
-        "nextOffset": if end < data.len() { Some(end) } else { None },
-    }))
+    let chunk = RunContentChunk {
+        run_id: id,
+        event_id: &args["eventId"],
+        encoding: "utf-8",
+        format: "json",
+        offset,
+        total_bytes: data.len(),
+        sha256: digest,
+        data: &data[offset..end],
+        next_offset: (end < data.len()).then_some(end),
+    };
+    Ok(serde_json::to_value(chunk)?)
 }
 
 async fn invoke(s: &Arc<Service>, name: &str, args: Value) -> Result<Value> {
@@ -509,96 +598,84 @@ async fn invoke(s: &Arc<Service>, name: &str, args: Value) -> Result<Value> {
         "run_task" => s.enqueue(text(&args, "taskId"), "mcp", None).await,
         "cancel_run" => {
             s.worker.cancel(s, text(&args, "runId")).await?;
-            Ok(json!({
-                "cancelled": true
-            }
-            ))
+            Ok(json!({ "cancelled": true }))
         }
         "list_runs" => {
             s.store
                 .read(move |db| {
-                    Ok(db
-                        .runs(
-                            args["status"].as_str(),
-                            None,
-                            args["limit"].as_i64().unwrap(),
-                            args["offset"].as_i64().unwrap(),
-                            false,
-                        )?
-                        .into())
+                    let runs = db.runs(
+                        args["status"].as_str(),
+                        None,
+                        args["limit"].as_i64().unwrap(),
+                        args["offset"].as_i64().unwrap(),
+                        false,
+                    )?;
+                    Ok(runs.into())
                 })
                 .await
         }
         "get_run" => {
             let id = text(&args, "runId").to_owned();
-            s.store
-                .read(move |db| run_history(db, &id, args["after"].as_i64().unwrap()))
-                .await
+            let after = args["after"].as_i64().unwrap();
+            s.store.read(move |db| run_history(db, &id, after)).await
         }
         "read_run_content" => s.store.read(move |db| read_run_content(db, &args)).await,
-        "list_skills" | "save_skill" => {
-            let project = if let Some(id) = args["projectId"].as_str() {
-                Some(std::path::PathBuf::from(text(
-                    &s.get("projects", id).await?,
-                    "path",
-                )))
-            } else {
-                None
-            };
-            if name == "list_skills" {
-                Ok(s.skills
-                    .list(
-                        args["projectId"].as_str().unwrap_or("global"),
-                        project.as_deref(),
-                    )
-                    .await?
-                    .into())
-            } else {
-                s.skills
-                    .save(
-                        text(&args, "name"),
-                        text(&args, "content"),
-                        project.as_deref(),
-                    )
-                    .await
-            }
-        }
-        "list_mcps" => Ok(s.mcps.list(s).await?.into()),
-        "create_mcp" => {
-            let mut result = s.mcps.save(s, args, None).await?;
-            result["managementUrl"] = format!("{}/mcps", s.config.public_url).into();
-            Ok(result)
-        }
-        "update_mcp" | "test_mcp" | "disconnect_mcp" | "delete_mcp" => {
-            let id = text(&args, "id");
-            s.mcps.assert_management(s, id).await?;
-            match name {
-                "update_mcp" => {
-                    let mut result = s.mcps.save(s, args["connection"].clone(), Some(id)).await?;
-                    result["managementUrl"] = format!("{}/mcps", s.config.public_url).into();
-                    Ok(result)
-                }
-                "test_mcp" => s.mcps.test(s, id).await,
-                _ => {
-                    s.mcps.disconnect(s, id, name == "delete_mcp").await?;
-                    Ok(if name == "delete_mcp" {
-                        json!({
-                            "deleted": true
-                        }
-                        )
-                    } else {
-                        json!({
-                            "disconnected": true
-                        }
-                        )
-                    })
-                }
-            }
-        }
+        "list_skills" | "save_skill" => skills_tool(s, name, &args).await,
+        "list_mcps" | "create_mcp" | "update_mcp" | "test_mcp" | "disconnect_mcp"
+        | "delete_mcp" => connection_tool(s, name, args).await,
         _ => Err(Error::not_found("Unknown tool")),
     }
 }
 
+async fn skills_tool(s: &Service, name: &str, args: &Value) -> Result<Value> {
+    let project_id = args["projectId"].as_str();
+    let project = match project_id {
+        Some(id) => Some(std::path::PathBuf::from(text(
+            &s.get("projects", id).await?,
+            "path",
+        ))),
+        None => None,
+    };
+    let project = project.as_deref();
+    if name == "list_skills" {
+        let scope = project_id.unwrap_or("global");
+        return Ok(s.skills.list(scope, project).await?.into());
+    }
+    s.skills
+        .save(text(args, "name"), text(args, "content"), project)
+        .await
+}
+
+async fn connection_tool(s: &Service, name: &str, args: Value) -> Result<Value> {
+    let with_management_url = |mut result: Value| {
+        result["managementUrl"] = format!("{}/mcps", s.config.public_url).into();
+        result
+    };
+    match name {
+        "list_mcps" => return Ok(s.mcps.list(s).await?.into()),
+        "create_mcp" => return Ok(with_management_url(s.mcps.save(s, args, None).await?)),
+        _ => {}
+    }
+    let id = text(&args, "id");
+    s.mcps.assert_management(s, id).await?;
+    match name {
+        "update_mcp" => {
+            let saved = s.mcps.save(s, args["connection"].clone(), Some(id)).await?;
+            Ok(with_management_url(saved))
+        }
+        "test_mcp" => s.mcps.test(s, id).await,
+        "delete_mcp" => {
+            s.mcps.disconnect(s, id, true).await?;
+            Ok(json!({ "deleted": true }))
+        }
+        _ => {
+            s.mcps.disconnect(s, id, false).await?;
+            Ok(json!({ "disconnected": true }))
+        }
+    }
+}
+
+/// Forwards an allowed request to the granted connection.
 async fn proxy(
     s: &Arc<Service>,
     id: &str,
@@ -607,40 +684,28 @@ async fn proxy(
     params: Value,
 ) -> Result<Value> {
     let _guard = s.mcps.lock(id).await;
-    let (item, scope) = s.mcps.grant(s, id, bearer).await?;
-    if method == "tools/call" && !crate::service::allowed(&scope["tools"], text(&params, "name")) {
+    let (server, scope) = s.mcps.grant(s, id, bearer).await?;
+    if method == "tools/call" && !scope.allows(text(&params, "name")) {
         return Err(Error::forbidden("This tool is unavailable to this agent."));
     }
     let result = async {
-        let mut client = crate::mcp_client::Client::connect(s, &item).await?;
+        let mut client = crate::mcp_client::Client::connect_server(s, &server).await?;
+        let unsupported = match method {
+            "resources/list" | "resources/templates/list" => {
+                client.capabilities.get("resources").is_none()
+            }
+            "prompts/list" => client.capabilities.get("prompts").is_none(),
+            _ => false,
+        };
         let result = match method {
             "tools/list" => client.discover().await.map(|tools| {
-                json!({
-                    "tools": tools.into_iter().filter(|t|crate::service::allowed(&scope["tools"],text(t,"name"))).collect::<Vec<_>>()
-                }
-                )
+                let tools = tools
+                    .into_iter()
+                    .filter(|tool| scope.allows(text(tool, "name")))
+                    .collect::<Vec<_>>();
+                json!({ "tools": tools })
             }),
-            "resources/list" | "resources/templates/list"
-                if client.capabilities.get("resources").is_none() =>
-            {
-                Ok(if method == "resources/list" {
-                    json!({
-                        "resources": []
-                    }
-                    )
-                } else {
-                    json!({
-                        "resourceTemplates": []
-                    }
-                    )
-                })
-            }
-            "prompts/list" if client.capabilities.get("prompts").is_none() => {
-                Ok(json!({
-                    "prompts": []
-                }
-                ))
-            }
+            _ if unsupported => Ok(empty_listing(method).unwrap_or_default()),
             "tools/call"
             | "resources/list"
             | "resources/templates/list"
@@ -654,9 +719,19 @@ async fn proxy(
     }
     .await;
     if let Err(error) = &result {
-        s.mcps.failure(s, item, error).await?;
+        s.mcps.failure(s, server, error).await?;
     }
     result
+}
+
+/// The CSRF token of the signed-in browser session, which binds OAuth sign-ins.
+async fn session_csrf(s: &Service, input: &Input) -> Result<String> {
+    let session = s
+        .auth
+        .read(&crate::http::cookie(&input.headers))
+        .await?
+        .ok_or_else(|| Error::unauthorized("Please sign in."))?;
+    Ok(text(&session, "csrf").to_owned())
 }
 
 pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
@@ -676,10 +751,7 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         ("DELETE", ["mcps", id]) => {
             crate::validation::uuid(id)?;
             s.mcps.disconnect(s, id, true).await?;
-            Ok(json!({
-                "ok": true
-            }
-            ))
+            Ok(json!({ "ok": true }))
         }
         ("POST", ["mcps", id, "test"]) => {
             crate::validation::uuid(id)?;
@@ -687,35 +759,22 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         }
         ("POST", ["mcps", id, "connect"]) => {
             crate::validation::uuid(id)?;
-            let session = s
-                .auth
-                .read(&crate::http::cookie(&input.headers))
-                .await?
-                .ok_or_else(|| Error::unauthorized("Please sign in."))?;
+            let csrf = session_csrf(s, input).await?;
             if input.body["native"] == true {
-                s.mcps.connect_native(s, id, text(&session, "csrf")).await
+                s.mcps.connect_native(s, id, &csrf).await
             } else {
-                s.mcps.connect(s, id, text(&session, "csrf")).await
+                s.mcps.connect(s, id, &csrf).await
             }
         }
         ("POST", ["mcps", id, "callback"]) => {
             crate::validation::uuid(id)?;
-            let session = s
-                .auth
-                .read(&crate::http::cookie(&input.headers))
-                .await?
-                .ok_or_else(|| Error::unauthorized("Please sign in."))?;
-            s.mcps
-                .finish_native_callback(s, id, text(&session, "csrf"))
-                .await
+            let csrf = session_csrf(s, input).await?;
+            s.mcps.finish_native_callback(s, id, &csrf).await
         }
         ("POST", ["mcps", id, "disconnect"]) => {
             crate::validation::uuid(id)?;
             s.mcps.disconnect(s, id, false).await?;
-            Ok(json!({
-                "ok": true
-            }
-            ))
+            Ok(json!({ "ok": true }))
         }
         _ => Err(Error::not_found("Not found")),
     }

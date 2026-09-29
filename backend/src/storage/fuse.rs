@@ -3,6 +3,7 @@
 //! before acknowledgment.
 use super::Disk;
 use fuser::*;
+use std::os::unix::ffi::OsStrExt;
 use std::{
     ffi::OsStr,
     io,
@@ -243,7 +244,6 @@ pub fn cleanup_stale(state: &Path) -> io::Result<()> {
         if !path.starts_with(state.join("jails")) && !path.starts_with(state.join("disks")) {
             continue;
         }
-        use std::os::unix::ffi::OsStrExt;
         let encoded = std::ffi::CString::new(path.as_os_str().as_bytes())?;
         if unsafe { libc::umount2(encoded.as_ptr(), libc::MNT_DETACH) } != 0 {
             return Err(io::Error::last_os_error());

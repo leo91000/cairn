@@ -57,16 +57,22 @@ impl Sample<'_> {
 
 impl Drop for Sample<'_> {
     fn drop(&mut self) {
-        let us = self.started.elapsed().as_micros().min(u64::MAX as u128) as u64;
-        let c = self.counter;
-        c.count.fetch_add(1, Relaxed);
-        c.bytes.fetch_add(self.bytes, Relaxed);
-        c.micros.fetch_add(us, Relaxed);
-        c.max_micros.fetch_max(us, Relaxed);
-        c.errors.fetch_add(u64::from(!self.success), Relaxed);
-        c.over_10ms.fetch_add(u64::from(us >= 10_000), Relaxed);
-        c.over_100ms.fetch_add(u64::from(us >= 100_000), Relaxed);
-        c.over_1s.fetch_add(u64::from(us >= 1_000_000), Relaxed);
+        let micros = u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let counter = self.counter;
+        counter.count.fetch_add(1, Relaxed);
+        counter.bytes.fetch_add(self.bytes, Relaxed);
+        counter.micros.fetch_add(micros, Relaxed);
+        counter.max_micros.fetch_max(micros, Relaxed);
+        counter.errors.fetch_add(u64::from(!self.success), Relaxed);
+        counter
+            .over_10ms
+            .fetch_add(u64::from(micros >= 10_000), Relaxed);
+        counter
+            .over_100ms
+            .fetch_add(u64::from(micros >= 100_000), Relaxed);
+        counter
+            .over_1s
+            .fetch_add(u64::from(micros >= 1_000_000), Relaxed);
     }
 }
 

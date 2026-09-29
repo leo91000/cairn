@@ -90,8 +90,12 @@ impl Disk for AssignedDisk {
     }
 }
 
+type Failure = Box<dyn std::error::Error>;
+
+const JAIL_UID: u32 = 40001;
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Failure> {
     let assets = std::env::args()
         .nth(1)
         .ok_or("Missing disposable fixture assets")?;
@@ -100,18 +104,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return cancelled_boot(&assets).await;
     }
     let prepared = std::env::args().any(|arg| arg == "--prepared");
-    let root = tempfile::tempdir_in(&assets)?;
-    let manifest = snapshots::index(&assets.join("data.ext4")).await?;
+    probe(&assets, prepared).await
+}
+
+/// Serves the fixture image's blocks, counting the bytes fetched.
+fn fixture_source(
+    assets: &Path,
+    manifest: &serde_json::Value,
+) -> Result<(Arc<Source>, u64), Failure> {
     let mut blocks = HashMap::new();
     for block in manifest["blocks"].as_array().ok_or("Missing blocks")? {
         if let Some(hash) = block["hash"].as_str() {
-            blocks.insert(
-                hash.to_owned(),
-                (
-                    block["offset"].as_u64().unwrap(),
-                    block["size"].as_u64().unwrap() as usize,
-                ),
-            );
+            let offset = block["offset"].as_u64().unwrap();
+            let size = block["size"].as_u64().unwrap() as usize;
+            blocks.insert(hash.to_owned(), (offset, size));
         }
     }
     let remote_bytes: u64 = blocks.values().map(|(_, size)| *size as u64).sum();
@@ -120,43 +126,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         blocks,
         bytes: AtomicU64::new(0),
     });
-    let disk = Arc::new(LazyDisk::create(
-        &root.path().join("journal"),
-        &manifest,
-        source.clone(),
-    )?);
-    let id = "storage-probe";
-    let jails = root.path().join("jails");
-    let jail = jails.join("firecracker").join(id).join("root");
+    Ok((source, remote_bytes))
+}
+
+/// Links the kernel and root image into the jail and writes the VM configuration.
+fn prepare_jail(assets: &Path, jail: &Path, prepared: bool) -> Result<(), Failure> {
     std::fs::create_dir_all(jail.join("disk"))?;
-    std::fs::hard_link(
-        assets.join(if prepared {
-            "root-prepared.ext4"
-        } else {
-            "root.ext4"
-        }),
-        jail.join("root.ext4"),
-    )?;
-    std::fs::hard_link(assets.join("vmlinux"), jail.join("vmlinux"))?;
-    let assigned = if prepared {
-        Some(Arc::new(AssignedDisk {
-            size: disk.size(),
-            disk: Mutex::new(None),
-            premature_io: AtomicU64::new(0),
-        }))
+    let root_image = if prepared {
+        "root-prepared.ext4"
     } else {
-        None
+        "root.ext4"
     };
+    std::fs::hard_link(assets.join(root_image), jail.join("root.ext4"))?;
+    std::fs::hard_link(assets.join("vmlinux"), jail.join("vmlinux"))?;
     if prepared {
         let placeholder = jail.join("placeholder.ext4");
         File::create(&placeholder)?.set_len(4 * 1024 * 1024)?;
-        std::os::unix::fs::chown(&placeholder, Some(40001), Some(40001))?;
+        std::os::unix::fs::chown(&placeholder, Some(JAIL_UID), Some(JAIL_UID))?;
     }
-    let mounted_disk: Arc<dyn Disk> = match &assigned {
-        Some(assigned) => assigned.clone(),
-        None => disk.clone(),
-    };
-    let mount = storage::fuse::mount_disk(mounted_disk, &jail.join("disk"), 40001)?;
     let drive = if prepared {
         "placeholder.ext4"
     } else {
@@ -165,55 +152,114 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = json!({
         "boot-source": {
             "kernel_image_path": "vmlinux",
-            "boot_args": "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/init"
+            "boot_args": "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/init",
         },
-        "drives": [{
-            "drive_id": "root",
-            "path_on_host": "root.ext4",
-            "is_root_device": true,
-            "is_read_only": true
-        }, {
-            "drive_id": "data",
-            "path_on_host": drive,
-            "is_root_device": false,
-            "is_read_only": false,
-            "cache_type": "Writeback"
-        }],
-        "machine-config": {"vcpu_count": 1,"mem_size_mib": 128,"smt": false}
+        "drives": [
+            {
+                "drive_id": "root",
+                "path_on_host": "root.ext4",
+                "is_root_device": true,
+                "is_read_only": true,
+            },
+            {
+                "drive_id": "data",
+                "path_on_host": drive,
+                "is_root_device": false,
+                "is_read_only": false,
+                "cache_type": "Writeback",
+            },
+        ],
+        "machine-config": { "vcpu_count": 1, "mem_size_mib": 128, "smt": false },
     });
     std::fs::write(jail.join("config.json"), serde_json::to_vec(&config)?)?;
-    std::os::unix::fs::chown(jail.join("config.json"), Some(40001), Some(40001))?;
+    std::os::unix::fs::chown(jail.join("config.json"), Some(JAIL_UID), Some(JAIL_UID))?;
+    Ok(())
+}
+
+fn spawn_guest(jails: &Path, id: &str, log: &Path) -> Result<Guest, Failure> {
+    let output = File::create(log)?;
+    let child = Command::new("/usr/local/bin/jailer")
+        .args([
+            "--id",
+            id,
+            "--exec-file",
+            "/usr/local/bin/firecracker",
+            "--uid",
+            "40001",
+            "--gid",
+            "40001",
+            "--cgroup-version",
+            "2",
+            "--chroot-base-dir",
+        ])
+        .arg(jails)
+        .args([
+            "--",
+            "--api-sock",
+            "api.sock",
+            "--config-file",
+            "config.json",
+        ])
+        .stdin(Stdio::null())
+        .stdout(output.try_clone()?)
+        .stderr(output)
+        .spawn()?;
+    Ok(Guest(child))
+}
+
+/// Checks the exported journal is a clean filesystem holding the guest's write.
+fn verify_restored(restored: &Path) -> Result<(), Failure> {
+    let check = Command::new("e2fsck")
+        .args(["-fy"])
+        .arg(restored)
+        .output()?;
+    if !matches!(check.status.code(), Some(0..=2)) {
+        return Err(format!(
+            "Guest disk check failed: {}",
+            String::from_utf8_lossy(&check.stderr)
+        )
+        .into());
+    }
+    let result = Command::new("debugfs")
+        .args(["-R", "cat /probe"])
+        .arg(restored)
+        .output()?;
+    if !String::from_utf8_lossy(&result.stdout).contains("storage-after-guest-sync") {
+        return Err(
+            "Acknowledged guest write did not survive VMM termination and journal reopen".into(),
+        );
+    }
+    Ok(())
+}
+
+async fn probe(assets: &Path, prepared: bool) -> Result<(), Failure> {
+    let root = tempfile::tempdir_in(assets)?;
+    let manifest = snapshots::index(&assets.join("data.ext4")).await?;
+    let (source, remote_bytes) = fixture_source(assets, &manifest)?;
+    let disk = Arc::new(LazyDisk::create(
+        &root.path().join("journal"),
+        &manifest,
+        source.clone(),
+    )?);
+    let id = "storage-probe";
+    let jails = root.path().join("jails");
+    let jail = jails.join("firecracker").join(id).join("root");
+    prepare_jail(assets, &jail, prepared)?;
+    let assigned = prepared.then(|| {
+        Arc::new(AssignedDisk {
+            size: disk.size(),
+            disk: Mutex::new(None),
+            premature_io: AtomicU64::new(0),
+        })
+    });
+    let mounted_disk: Arc<dyn Disk> = match &assigned {
+        Some(assigned) => assigned.clone(),
+        None => disk.clone(),
+    };
+    let mount = storage::fuse::mount_disk(mounted_disk, &jail.join("disk"), JAIL_UID)?;
     let log = root.path().join("console.log");
-    let output = File::create(&log)?;
     let started = Instant::now();
-    let mut guest = Guest(
-        Command::new("/usr/local/bin/jailer")
-            .args([
-                "--id",
-                id,
-                "--exec-file",
-                "/usr/local/bin/firecracker",
-                "--uid",
-                "40001",
-                "--gid",
-                "40001",
-                "--cgroup-version",
-                "2",
-                "--chroot-base-dir",
-            ])
-            .arg(&jails)
-            .args([
-                "--",
-                "--api-sock",
-                "api.sock",
-                "--config-file",
-                "config.json",
-            ])
-            .stdin(Stdio::null())
-            .stdout(output.try_clone()?)
-            .stderr(output)
-            .spawn()?,
-    );
+    let mut guest = spawn_guest(&jails, id, &log)?;
     let mut prepared_ms = None;
     loop {
         let console = std::fs::read_to_string(&log)?;
@@ -253,43 +299,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let disk = LazyDisk::open(&root.path().join("journal"), source)?;
     let restored = root.path().join("restored.ext4");
     storage::export(&disk, &restored)?;
-    let check = Command::new("e2fsck")
-        .args(["-fy"])
-        .arg(&restored)
-        .output()?;
-    if !matches!(check.status.code(), Some(0..=2)) {
-        return Err(format!(
-            "Guest disk check failed: {}",
-            String::from_utf8_lossy(&check.stderr)
-        )
-        .into());
-    }
-    let result = Command::new("debugfs")
-        .args(["-R", "cat /probe"])
-        .arg(&restored)
-        .output()?;
-    if !String::from_utf8_lossy(&result.stdout).contains("storage-after-guest-sync") {
-        return Err(
-            "Acknowledged guest write did not survive VMM termination and journal reopen".into(),
-        );
-    }
-    println!(
-        "{}",
-        json!({"mode":if prepared {"prepared-drive-swap"} else {"cold"},"preparedMs":prepared_ms,"guestReadyMs":ready_ms,"afterPreparedMs":prepared_ms.map(|ms|ready_ms-ms),"coldFetchedBytes":fetched,"remoteNonzeroBytes":remote_bytes,"virtualDiskBytes":disk.size(),"guestSyncSurvivedKill":true,"source":"local immutable block fixture, not S3"})
-    );
+    verify_restored(&restored)?;
+    let mode = if prepared {
+        "prepared-drive-swap"
+    } else {
+        "cold"
+    };
+    let report = json!({
+        "mode": mode,
+        "preparedMs": prepared_ms,
+        "guestReadyMs": ready_ms,
+        "afterPreparedMs": prepared_ms.map(|ms| ready_ms - ms),
+        "coldFetchedBytes": fetched,
+        "remoteNonzeroBytes": remote_bytes,
+        "virtualDiskBytes": disk.size(),
+        "guestSyncSurvivedKill": true,
+        "source": "local immutable block fixture, not S3",
+    });
+    println!("{report}");
     Ok(())
 }
 
-fn patch_drive(socket: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn patch_drive(socket: &Path) -> Result<(), Failure> {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::net::UnixStream;
     let mut stream = UnixStream::connect(socket)?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    let body = json!({"drive_id": "data","path_on_host": "disk/data.ext4"}).to_string();
+    let body = json!({
+        "drive_id": "data",
+        "path_on_host": "disk/data.ext4"
+    })
+    .to_string();
     write!(
         stream,
-        "PATCH /drives/data HTTP/1.1\r\nHost: localhost\r\nContent-Type: \
-            application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "PATCH /drives/data HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )?;
     let mut reader = BufReader::new(stream);
@@ -321,7 +364,7 @@ fn patch_drive(socket: &Path) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // Exercise the production VM lifecycle while its first disk read is unavailable.
-async fn cancelled_boot(assets: &Path) -> Result<(), Box<dyn std::error::Error>> {
+async fn cancelled_boot(assets: &Path) -> Result<(), Failure> {
     use leo_agent_manager::microvm::host::Vm;
     use tokio_util::sync::CancellationToken;
     let root = tempfile::tempdir_in(assets)?;
@@ -351,8 +394,8 @@ async fn cancelled_boot(assets: &Path) -> Result<(), Box<dyn std::error::Error>>
             "reserveMiB": 64,
             "reservePercent": 1,
             "backupSeconds": 60,
-            "maxDirtySeconds": 300
-        }
+            "maxDirtySeconds": 300,
+        },
     });
     let source = Arc::new(storage::remote::RemoteSource::new(
         &context,
@@ -372,7 +415,11 @@ async fn cancelled_boot(assets: &Path) -> Result<(), Box<dyn std::error::Error>>
             directory,
             41,
             &stopping,
-            Some(&json!({"cpu": 1,"memoryMiB": 128,"diskMiB": 256})),
+            Some(&json!({
+                "cpu": 1,
+                "memoryMiB": 128,
+                "diskMiB": 256
+            })),
         )
         .await
     });
@@ -408,9 +455,11 @@ async fn cancelled_boot(assets: &Path) -> Result<(), Box<dyn std::error::Error>>
             return Err("Cancelled boot retained a blocked disk beyond 12 seconds".into());
         }
     }
-    println!(
-        "{}",
-        json!({"mode":"cancel-blocked-boot","cancelledMs":started.elapsed().as_millis(),"status":"passed"})
-    );
+    let report = json!({
+        "mode": "cancel-blocked-boot",
+        "cancelledMs": started.elapsed().as_millis(),
+        "status": "passed",
+    });
+    println!("{report}");
     Ok(())
 }
