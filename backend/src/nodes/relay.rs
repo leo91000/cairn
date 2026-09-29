@@ -1,27 +1,99 @@
 //! Node-side HTTP relay. The master can address only the private VM controller.
+use super::executor::Executor;
 use crate::{
     error::{Error, Result},
     validation::text,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
+use futures_util::StreamExt;
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
-pub async fn run(
-    master: url::Url,
-    token: String,
-    runner: String,
-    runner_token: String,
-    stop: CancellationToken,
-) -> Result<()> {
-    let runner = url::Url::parse(&runner).map_err(|_| Error::bad("Invalid local runner URL."))?;
+const MAX_CONCURRENT_COMMANDS: usize = 64;
+const FRAME_BYTES: usize = 65536;
+const MAX_PAYLOAD_BYTES: usize = 2_000_000;
+
+/// The response head, sent before any body frame.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Head<'a> {
+    id: &'a str,
+    sequence: u64,
+    status: u16,
+    length: Option<u64>,
+    content_type: &'a str,
+}
+
+#[derive(Serialize)]
+struct Chunk<'a> {
+    id: &'a str,
+    sequence: u64,
+    data: String,
+}
+
+/// The final frame of a response. A complete response without a head carries its status.
+#[derive(Serialize)]
+struct End<'a> {
+    id: &'a str,
+    sequence: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<u16>,
+    done: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<String>,
+}
+
+impl<'a> End<'a> {
+    const fn with_status(id: &'a str, status: u16) -> Self {
+        Self {
+            id,
+            sequence: 0,
+            status: Some(status),
+            done: true,
+            data: None,
+        }
+    }
+}
+
+/// The master connection a relayed command answers through.
+struct Master<'a> {
+    client: &'a reqwest::Client,
+    url: &'a url::Url,
+    token: &'a str,
+}
+
+impl Master<'_> {
+    async fn send(&self, frame: &impl Serialize) -> Result<()> {
+        let response = self
+            .client
+            .post(
+                self.url
+                    .join("internal/nodes/reply")
+                    .map_err(Error::internal)?,
+            )
+            .bearer_auth(self.token)
+            .json(frame)
+            .timeout(Duration::from_secs(25))
+            .send()
+            .await
+            .map_err(|_| Error::unavailable("Master connection interrupted."))?;
+        if !response.status().is_success() {
+            return Err(Error::conflict("Execution response rejected."));
+        }
+        Ok(())
+    }
+}
+
+fn validate_runner(runner: &url::Url) -> Result<()> {
+    let loopback = runner.host_str().is_some_and(|h| {
+        h == "localhost"
+            || h.parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    });
     if runner.scheme() != "http"
-        || !runner.host_str().is_some_and(|h| {
-            h == "localhost"
-                || h.parse::<std::net::IpAddr>()
-                    .is_ok_and(|ip| ip.is_loopback())
-        })
+        || !loopback
         || !runner.username().is_empty()
         || runner.password().is_some()
         || runner.path() != "/"
@@ -32,22 +104,39 @@ pub async fn run(
             "The node relay requires a loopback HTTP VM controller.",
         ));
     }
+    Ok(())
+}
+
+pub async fn run(
+    master: url::Url,
+    token: String,
+    runner: String,
+    runner_token: String,
+    stop: CancellationToken,
+) -> Result<()> {
+    let runner = url::Url::parse(&runner).map_err(|_| Error::bad("Invalid local runner URL."))?;
+    validate_runner(&runner)?;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(Error::internal)?;
-    let permits = Arc::new(tokio::sync::Semaphore::new(64));
+    let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_COMMANDS));
     let mut tasks = tokio::task::JoinSet::new();
-    let executor = Arc::new(super::executor::Executor::default());
+    let executor = Arc::new(Executor::default());
     let result = loop {
+        let poll = client
+            .post(
+                master
+                    .join("internal/nodes/poll")
+                    .map_err(Error::internal)?,
+            )
+            .bearer_auth(&token)
+            .json(&json!({}))
+            .timeout(Duration::from_secs(25))
+            .send();
         let response = tokio::select! {
-            _ = stop.cancelled() => break Ok(()),
-            result = client
-                .post(master.join("internal/nodes/poll").map_err(Error::internal)?)
-                .bearer_auth(&token)
-                .json(&json!({}))
-                .timeout(Duration::from_secs(25))
-                .send() => result,
+            () = stop.cancelled() => break Ok(()),
+            result = poll => result,
         };
         let command = match response {
             Ok(response) if response.status() == 401 => {
@@ -59,8 +148,8 @@ pub async fn run(
         while tasks.try_join_next().is_some() {}
         let Some(command) = command.filter(Value::is_object) else {
             tokio::select! {
-                _ = stop.cancelled() => break Ok(()),
-                _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+                () = stop.cancelled() => break Ok(()),
+                () = tokio::time::sleep(Duration::from_millis(250)) => {}
             }
             continue;
         };
@@ -79,21 +168,19 @@ pub async fn run(
         let executor = executor.clone();
         tasks.spawn(async move {
             let _permit = permit;
-            let _ = forward(
-                &http,
-                &master,
-                &token,
-                &runner,
-                &runner_token,
-                command,
-                executor,
-            )
-            .await;
+            let master = Master {
+                client: &http,
+                url: &master,
+                token: &token,
+            };
+            // The master fails the call itself when its reply never completes.
+            let _ = forward(&master, &runner, &runner_token, &command, &executor).await;
         });
     };
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
     for attempt in executor.close().await {
+        // Best effort: the controller also stops VMs whose lease expires.
         let _ = client
             .delete(
                 runner
@@ -110,17 +197,18 @@ pub async fn run(
 
 fn route(method: &str, path: &str) -> Result<()> {
     let parts = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
+    let uuid = |id: &str| crate::validation::uuid(id).is_ok();
     let allowed = match parts.as_slice() {
         ["health"] => method == "GET",
         ["snapshots", id, hash] => {
-            crate::validation::uuid(id).is_ok()
+            uuid(id)
                 && ((method == "GET" && super::snapshots::valid_hash(hash))
                     || (method == "POST" && *hash == "blocks")
                     || (method == "DELETE" && *hash == "discard"))
         }
-        ["runs", id] => crate::validation::uuid(id).is_ok() && ["POST", "DELETE"].contains(&method),
+        ["runs", id] => uuid(id) && ["POST", "DELETE"].contains(&method),
         ["runs", id, operation] => {
-            crate::validation::uuid(id).is_ok()
+            uuid(id)
                 && matches!(
                     (method, *operation),
                     ("GET", "logs")
@@ -129,15 +217,11 @@ fn route(method: &str, path: &str) -> Result<()> {
                         | ("POST", "snapshot")
                 )
         }
-        ["runs", id, "projects", project] => {
-            method == "POST"
-                && crate::validation::uuid(id).is_ok()
-                && crate::validation::uuid(project).is_ok()
-        }
+        ["runs", id, "projects", project] => method == "POST" && uuid(id) && uuid(project),
         ["storage-policy"] => method == "POST",
         ["disks", id, operation] => {
             method == "POST"
-                && crate::validation::uuid(id).is_ok()
+                && uuid(id)
                 && [
                     "delete",
                     "prune",
@@ -156,24 +240,33 @@ fn route(method: &str, path: &str) -> Result<()> {
     Ok(())
 }
 
+/// How long the controller may take to answer, by operation.
+fn controller_timeout(path: &str) -> Duration {
+    Duration::from_secs(if path.ends_with("/restore") {
+        120
+    } else if path.ends_with("snapshot") {
+        300
+    } else {
+        25
+    })
+}
+
 async fn forward(
-    client: &reqwest::Client,
-    master: &url::Url,
-    token: &str,
+    master: &Master<'_>,
     runner: &url::Url,
     runner_token: &str,
-    command: Value,
-    executor: Arc<super::executor::Executor>,
+    command: &Value,
+    executor: &Arc<Executor>,
 ) -> Result<()> {
-    let id = text(&command, "id");
+    let id = text(command, "id");
     crate::validation::uuid(id)?;
-    let method = text(&command, "method");
-    let path = text(&command, "path");
+    let method = text(command, "method");
+    let path = text(command, "path");
     if let Some(attempt) = path.strip_prefix("/prepare/") {
         crate::validation::uuid(attempt)?;
         let prepared = tokio::time::timeout(
             Duration::from_secs(280),
-            executor.prepare(client, master, token, attempt),
+            executor.prepare(master.client, master.url, master.token, attempt),
         )
         .await;
         let status = if matches!(prepared, Ok(Ok(()))) {
@@ -181,118 +274,37 @@ async fn forward(
         } else {
             503
         };
-        return send(
-            client,
-            master,
-            token,
-            &json!({
-                "id": id,
-                "sequence": 0,
-                "status": status,
-                "done": true
-            }),
-        )
-        .await;
+        return master.send(&End::with_status(id, status)).await;
     }
-    let operation = async {
-        route(method, path)?;
-        let bytes = STANDARD
-            .decode(text(&command, "body"))
-            .map_err(|_| Error::bad("Invalid execution payload."))?;
-        if bytes.len()
-            > if path.ends_with("/restore") {
-                super::snapshots::MAX_MANIFEST_BYTES
-            } else {
-                2_000_000
-            }
-        {
-            return Err(Error::bad("Execution payload exceeds limit."));
-        }
-        executor
-            .before(client, master, token, method, path, &bytes)
-            .await?;
-        client
-            .request(
-                method.parse().map_err(Error::internal)?,
-                runner.join(path).map_err(Error::internal)?,
-            )
-            .bearer_auth(runner_token)
-            .header("content-type", "application/json")
-            .body(bytes)
-            .send()
-            .await
-            .map_err(|_| Error::unavailable("Local VM controller unavailable."))
+    let operation = call_controller(master, runner, runner_token, command, executor);
+    let Ok(Ok(mut response)) = tokio::time::timeout(controller_timeout(path), operation).await
+    else {
+        let unavailable = End {
+            data: Some(STANDARD.encode(b"VM controller unavailable")),
+            ..End::with_status(id, 503)
+        };
+        return master.send(&unavailable).await;
     };
-    let response = tokio::time::timeout(
-        Duration::from_secs(if path.ends_with("/restore") {
-            120
-        } else if path.ends_with("snapshot") {
-            300
-        } else {
-            25
-        }),
-        operation,
-    )
-    .await;
-    let mut response = match response {
-        Ok(Ok(response)) => response,
-        _ => {
-            send(
-                client,
-                master,
-                token,
-                &json!({
-                    "id": id,
-                    "sequence": 0,
-                    "status": 503,
-                    "done": true,
-                    "data": STANDARD.encode(b"VM controller unavailable")
-                }),
-            )
-            .await?;
-            return Ok(());
-        }
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    let head = Head {
+        id,
+        sequence: 0,
+        status: response.status().as_u16(),
+        length: response.content_length(),
+        content_type: &content_type,
     };
-    let head = json!({
-        "id": id,
-        "sequence": 0,
-        "status": response.status().as_u16(),
-        "length": response.content_length(),
-        "contentType": response.headers().get("content-type").and_then(|v|v.to_str().ok()).unwrap_or("")
-    });
-    send(client, master, token, &head).await?;
+    master.send(&head).await?;
     // Bulk data uses one continuous, backpressured request. Keep control/log
     // frames and old masters on the existing protocol (including /wait's result).
-    if command["streamBody"] == true
-        && path.starts_with("/snapshots/")
-        && (method == "GET" || (method == "POST" && path.ends_with("/blocks")))
-    {
-        use futures_util::StreamExt;
-        let chunks =
-            futures_util::stream::try_unfold(response.bytes_stream(), |mut stream| async move {
-                match tokio::time::timeout(Duration::from_secs(60), stream.next()).await {
-                    Ok(Some(Ok(bytes))) => Ok(Some((bytes, stream))),
-                    Ok(None) => Ok(None),
-                    _ => Err(std::io::Error::other("VM response interrupted")),
-                }
-            });
-        let uploaded = client
-            .post(
-                master
-                    .join(&format!("internal/nodes/stream/{id}"))
-                    .map_err(Error::internal)?,
-            )
-            .bearer_auth(token)
-            .header("content-type", "application/octet-stream")
-            .timeout(Duration::from_secs(120))
-            .body(reqwest::Body::wrap_stream(chunks))
-            .send()
-            .await
-            .map_err(|_| Error::unavailable("Master upload interrupted."))?;
-        if !uploaded.status().is_success() {
-            return Err(Error::conflict("Execution stream rejected."));
-        }
-        return Ok(());
+    let streams_snapshot_body = path.starts_with("/snapshots/")
+        && (method == "GET" || (method == "POST" && path.ends_with("/blocks")));
+    if command["streamBody"] == true && streams_snapshot_body {
+        return stream_body(master, id, response).await;
     }
     let mut sequence = 1u64;
     while let Some(bytes) = response
@@ -300,14 +312,13 @@ async fn forward(
         .await
         .map_err(|_| Error::unavailable("VM response interrupted."))?
     {
-        for chunk in bytes.chunks(65536) {
-            send(
-                client,
-                master,
-                token,
-                &json!({"id": id,"sequence": sequence,"data": STANDARD.encode(chunk)}),
-            )
-            .await?;
+        for chunk in bytes.chunks(FRAME_BYTES) {
+            let frame = Chunk {
+                id,
+                sequence,
+                data: STANDARD.encode(chunk),
+            };
+            master.send(&frame).await?;
             sequence += 1;
         }
     }
@@ -315,37 +326,91 @@ async fn forward(
         .strip_prefix("/runs/")
         .and_then(|v| v.strip_suffix("/wait"))
     {
-        super::executor::Executor::result(client, master, token, attempt).await?;
+        Executor::result(master.client, master.url, master.token, attempt).await?;
     }
-    send(
-        client,
-        master,
-        token,
-        &json!({"id": id,"sequence": sequence,"done": true}),
-    )
-    .await
+    let end = End {
+        id,
+        sequence,
+        status: None,
+        done: true,
+        data: None,
+    };
+    master.send(&end).await
 }
 
-async fn send(
-    client: &reqwest::Client,
-    master: &url::Url,
-    token: &str,
-    value: &Value,
-) -> Result<()> {
-    let response = client
-        .post(
-            master
-                .join("internal/nodes/reply")
-                .map_err(Error::internal)?,
+/// Validates a relayed command and sends it to the local controller.
+async fn call_controller(
+    master: &Master<'_>,
+    runner: &url::Url,
+    runner_token: &str,
+    command: &Value,
+    executor: &Executor,
+) -> Result<reqwest::Response> {
+    let method = text(command, "method");
+    let path = text(command, "path");
+    route(method, path)?;
+    let bytes = STANDARD
+        .decode(text(command, "body"))
+        .map_err(|_| Error::bad("Invalid execution payload."))?;
+    let limit = if path.ends_with("/restore") {
+        super::snapshots::MAX_MANIFEST_BYTES
+    } else {
+        MAX_PAYLOAD_BYTES
+    };
+    if bytes.len() > limit {
+        return Err(Error::bad("Execution payload exceeds limit."));
+    }
+    executor
+        .before(
+            master.client,
+            master.url,
+            master.token,
+            method,
+            path,
+            &bytes,
         )
-        .bearer_auth(token)
-        .json(value)
-        .timeout(Duration::from_secs(25))
+        .await?;
+    master
+        .client
+        .request(
+            method.parse().map_err(Error::internal)?,
+            runner.join(path).map_err(Error::internal)?,
+        )
+        .bearer_auth(runner_token)
+        .header("content-type", "application/json")
+        .body(bytes)
         .send()
         .await
-        .map_err(|_| Error::unavailable("Master connection interrupted."))?;
-    if !response.status().is_success() {
-        return Err(Error::conflict("Execution response rejected."));
+        .map_err(|_| Error::unavailable("Local VM controller unavailable."))
+}
+
+/// Uploads the whole response body to the master in one streaming request.
+async fn stream_body(master: &Master<'_>, id: &str, response: reqwest::Response) -> Result<()> {
+    let chunks =
+        futures_util::stream::try_unfold(response.bytes_stream(), |mut stream| async move {
+            match tokio::time::timeout(Duration::from_secs(60), stream.next()).await {
+                Ok(Some(Ok(bytes))) => Ok(Some((bytes, stream))),
+                Ok(None) => Ok(None),
+                _ => Err(std::io::Error::other("VM response interrupted")),
+            }
+        });
+    let uploaded = master
+        .client
+        .post(
+            master
+                .url
+                .join(&format!("internal/nodes/stream/{id}"))
+                .map_err(Error::internal)?,
+        )
+        .bearer_auth(master.token)
+        .header("content-type", "application/octet-stream")
+        .timeout(Duration::from_secs(120))
+        .body(reqwest::Body::wrap_stream(chunks))
+        .send()
+        .await
+        .map_err(|_| Error::unavailable("Master upload interrupted."))?;
+    if !uploaded.status().is_success() {
+        return Err(Error::conflict("Execution stream rejected."));
     }
     Ok(())
 }

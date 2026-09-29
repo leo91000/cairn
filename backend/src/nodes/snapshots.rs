@@ -3,19 +3,69 @@ use crate::{
     error::{Error, Result},
     validation::text,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{future::Future, path::Path};
+use std::{
+    future::Future,
+    os::{
+        fd::AsRawFd,
+        unix::fs::{FileExt, OpenOptionsExt},
+    },
+    path::Path,
+};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
 pub const BLOCK: u64 = 4 * 1024 * 1024;
 pub const READ_BATCH: usize = 8;
+const MANIFEST_VERSION: u64 = 1;
+
+/// One fixed-size extent of a disk manifest. Holes and zero blocks have no hash.
+#[derive(Deserialize, Serialize)]
+pub(crate) struct ManifestBlock {
+    pub offset: u64,
+    pub size: u64,
+    pub hash: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Index {
+    version: u64,
+    size: u64,
+    block_size: u64,
+    blocks: Vec<ManifestBlock>,
+    local_bytes_read: u64,
+}
+
+/// The extents of a manifest that already passed [`validate`].
+pub(crate) fn blocks(manifest: &Value) -> Result<Vec<ManifestBlock>> {
+    Vec::<ManifestBlock>::deserialize(&manifest["blocks"])
+        .map_err(|_| Error::bad("Invalid backup manifest."))
+}
+
+/// Content hashes of the manifest's data blocks, in disk order.
+pub(crate) fn hashes(manifest: &Value) -> impl Iterator<Item = &str> {
+    manifest["blocks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|block| block["hash"].as_str())
+}
+
+/// The manifest entry holding `hash`, if any.
+pub(crate) fn find_block<'a>(manifest: &'a Value, hash: &str) -> Option<&'a Value> {
+    manifest["blocks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|block| block["hash"] == hash)
+}
 
 /// Next offset at or after `offset` that may hold data. Holes read as zeros, so blocks
 /// entirely inside one need neither reading nor hashing.
 fn next_data(file: &std::fs::File, offset: u64) -> std::io::Result<u64> {
-    use std::os::fd::AsRawFd;
     let position = unsafe { libc::lseek(file.as_raw_fd(), offset as libc::off_t, libc::SEEK_DATA) };
     if position >= 0 {
         return Ok(position as u64);
@@ -33,7 +83,6 @@ fn next_data(file: &std::fs::File, offset: u64) -> std::io::Result<u64> {
 pub async fn index(path: &Path) -> Result<Value> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || -> Result<Value> {
-        use std::os::unix::fs::{FileExt, OpenOptionsExt};
         let file = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
@@ -48,26 +97,29 @@ pub async fn index(path: &Path) -> Result<Value> {
                 data = next_data(&file, offset)?;
             }
             let hash = if data >= offset + length as u64 {
-                Value::Null
+                None
             } else {
                 file.read_exact_at(&mut buffer[..length], offset)?;
                 read += length as u64;
-                if buffer[..length].iter().all(|b| *b == 0) {
-                    Value::Null
-                } else {
-                    hex::encode(Sha256::digest(&buffer[..length])).into()
-                }
+                let data = &buffer[..length];
+                (!data.iter().all(|b| *b == 0)).then(|| hex::encode(Sha256::digest(data)))
             };
-            blocks.push(json!({"offset": offset,"size": length,"hash": hash}));
+            blocks.push(ManifestBlock {
+                offset,
+                size: length as u64,
+                hash,
+            });
             offset += length as u64;
         }
-        Ok(json!({
-            "version": 1,
-            "size": size,
-            "blockSize": BLOCK,
-            "blocks": blocks,
-            "localBytesRead": read
-        }))
+
+        let index = Index {
+            version: MANIFEST_VERSION,
+            size,
+            block_size: BLOCK,
+            blocks,
+            local_bytes_read: read,
+        };
+        Ok(serde_json::to_value(index)?)
     })
     .await
     .map_err(Error::internal)?
@@ -81,7 +133,7 @@ pub fn validate(manifest: &Value) -> Result<()> {
         .as_u64()
         .filter(|s| *s > 0 && *s <= 1024 * 1024 * 1024 * 1024)
         .ok_or_else(|| Error::bad("Invalid backup size."))?;
-    if manifest["version"] != 1
+    if manifest["version"] != MANIFEST_VERSION
         || manifest["blockSize"] != BLOCK
         || blocks.len() as u64 != size.div_ceil(BLOCK)
     {
@@ -147,7 +199,7 @@ impl Reader {
             let disk = state.join("disks").join(run);
             let stopped = match crate::file_lock::exclusive(&disk.join("lock"), "Disk active.") {
                 Ok(lock) => Some(lock),
-                Err(error) if error.is_conflict() => None,
+                Err(error) if error.status == 409 => None,
                 Err(error) => return Err(error),
             };
             let volume = crate::storage::runtime::load(&disk).await?;
@@ -219,13 +271,9 @@ pub async fn served_batch(
     validate(&reader.manifest)?;
     let mut length = 0;
     for hash in &hashes {
-        let block = reader.manifest["blocks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|block| block["hash"] == *hash)
+        let block = find_block(&reader.manifest, hash)
             .ok_or_else(|| Error::not_found("Unknown backup block."))?;
-        length += block["size"].as_u64().unwrap();
+        length += block["size"].as_u64().unwrap_or_default();
     }
     let stream = futures_util::stream::try_unfold(
         (reader, hashes.into_iter()),
@@ -289,20 +337,17 @@ where
     crate::skills::private_dir(directory).await?;
     let temporary = tempfile::NamedTempFile::new_in(directory)?;
     let mut file = tokio::fs::File::from_std(temporary.reopen()?);
-    file.set_len(manifest["size"].as_u64().unwrap()).await?;
-    for block in manifest["blocks"].as_array().unwrap() {
-        if block["hash"].is_null() {
+    file.set_len(manifest["size"].as_u64().unwrap_or_default())
+        .await?;
+    for block in blocks(manifest)? {
+        let Some(hash) = block.hash else {
             continue;
-        }
-        let hash = text(block, "hash");
-        let bytes = fetch(hash.to_owned()).await?;
-        if bytes.len() as u64 != block["size"].as_u64().unwrap()
-            || hex::encode(Sha256::digest(&bytes)) != hash
-        {
+        };
+        let bytes = fetch(hash.clone()).await?;
+        if bytes.len() as u64 != block.size || hex::encode(Sha256::digest(&bytes)) != hash {
             return Err(Error::bad("Backup block integrity check failed."));
         }
-        file.seek(std::io::SeekFrom::Start(block["offset"].as_u64().unwrap()))
-            .await?;
+        file.seek(std::io::SeekFrom::Start(block.offset)).await?;
         file.write_all(&bytes).await?;
     }
     file.sync_all().await?;
@@ -375,7 +420,7 @@ impl Fetch {
                 .http
                 .post(format!("{}/blocks", self.url))
                 .bearer_auth(&self.credential)
-                .json(&json!({"hashes": hashes}))
+                .json(&json!({ "hashes": hashes }))
                 .timeout(std::time::Duration::from_secs(120))
                 .send()
                 .await
