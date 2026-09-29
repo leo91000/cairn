@@ -1303,6 +1303,144 @@ async fn native_auth_relays_refresh_both_protocols_and_stop_after_grant_revocati
 }
 
 #[tokio::test]
+async fn completed_run_storage_refresh_clears_stale_dirty_counts() {
+    use leo_agent_manager::{
+        config::id,
+        nodes::{LOCAL_NODE_ID, storage},
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, axum::Router::new().fallback(|| async {
+            axum::Json(json!({"mode":"on-demand","dirtyBytes":0,"dirtySince":null,"localBytes":4096,"activeLocalBytes":4096}))
+        })).await.unwrap();
+    });
+    let owner = Owner::with_runner("localhost:4310".into(), format!("http://{address}")).await;
+    let run = id();
+    let record = json!({"id":run,"taskId":"fixture","createdAt":0,"status":"succeeded","nodeId":LOCAL_NODE_ID,"storage":{"mode":"on-demand","dirtyBytes":1048576,"dirtySince":1}});
+    let saved = record.clone();
+    owner
+        .service
+        .store
+        .write(move |db| db.add_run(&saved, None))
+        .await
+        .unwrap();
+    owner.service.store.put("node-volumes", json!({"id":format!("{run}:{LOCAL_NODE_ID}"),"runId":run,"nodeId":LOCAL_NODE_ID,"diskMiB":100})).await.unwrap();
+    storage::refresh(&owner.service, &record).await.unwrap();
+    let current = owner.service.store.run(&run).await.unwrap();
+    assert_eq!(current["status"], "succeeded");
+    assert_eq!(current["storage"]["dirtyBytes"], 0);
+    assert!(current["storage"]["dirtySince"].is_null());
+    let volume = owner
+        .service
+        .store
+        .get("node-volumes", &format!("{run}:{LOCAL_NODE_ID}"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(volume["diskMiB"], 1);
+    // A late reply from the old owner cannot overwrite the destination's state.
+    owner
+        .service
+        .store
+        .patch_run(&run, json!({"nodeId":id(),"storage":{"dirtyBytes":42}}))
+        .await
+        .unwrap();
+    storage::refresh(&owner.service, &record).await.unwrap();
+    assert_eq!(
+        owner.service.store.run(&run).await.unwrap()["storage"]["dirtyBytes"],
+        42
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn starting_vm_defers_publication_without_a_sync_failure() {
+    use leo_agent_manager::{config::id, nodes::publication};
+    let captures = std::sync::Arc::new(tokio::sync::Notify::new());
+    let captured = captures.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            axum::Router::new().fallback(move || {
+                let captured = captured.clone();
+                async move {
+                    captured.notify_one();
+                    (
+                        axum::http::StatusCode::CONFLICT,
+                        axum::Json(json!({"error":"VM is still starting."})),
+                    )
+                }
+            }),
+        )
+        .await
+        .unwrap();
+    });
+    let owner = Owner::with_runner("localhost:4310".into(), format!("http://{address}")).await;
+    std::fs::write(
+        owner.service.config.data_dir.join("storage-s3.json"),
+        r#"{"bucket":"fixture"}"#,
+    )
+    .unwrap();
+    let run = id();
+    let previous_snapshot = id();
+    let record = json!({"id":run,"taskId":"fixture","createdAt":0,"status":"running","isolated":true,"backup":{"snapshotId":previous_snapshot}});
+    let saved = record.clone();
+    owner
+        .service
+        .store
+        .write(move |db| db.add_run(&saved, None))
+        .await
+        .unwrap();
+    owner
+        .service
+        .store
+        .set(
+            &format!("run-checkpoint:{run}"),
+            json!({"runnerId":id()}),
+            None,
+        )
+        .await
+        .unwrap();
+    publication::attempt(&owner.service, &record).await;
+    let current = owner.service.store.run(&run).await.unwrap();
+    assert!(
+        current["backup"]["error"].is_null(),
+        "{}",
+        current["backup"]
+    );
+    assert_eq!(current["backup"]["status"], "pending");
+    assert_eq!(current["backup"]["snapshotId"], previous_snapshot);
+    captures.notified().await;
+    owner
+        .service
+        .store
+        .patch_run(
+            &run,
+            json!({"status":"succeeded","storage":{"mode":"on-demand","dirtyBytes":0}}),
+        )
+        .await
+        .unwrap();
+    let maintenance = tokio::spawn(publication::maintain(owner.service.clone()));
+    tokio::time::timeout(std::time::Duration::from_secs(8), captures.notified())
+        .await
+        .expect("a deferred final capture must retry after the run has completed");
+    maintenance.abort();
+    assert!(
+        owner
+            .service
+            .store
+            .list("node-alerts")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn retired_audit_errors_do_not_force_full_download_before_demand_resume() {
     use leo_agent_manager::{
         config::id,

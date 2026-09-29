@@ -88,7 +88,9 @@ pub async fn capture(s: &Service, run: &Value) -> Result<Value> {
     let result = publish(s, run).await;
     // A capture continuing from a baseline may rely on blocks the master no longer
     // holds: forget the baseline so the next capture copies the whole disk.
-    if result.is_err() && run["backup"]["snapshotId"].is_string() {
+    if result.as_ref().is_err_and(|error| error.status != 425)
+        && run["backup"]["snapshotId"].is_string()
+    {
         let _ = forget_baseline(s, text(run, "id")).await;
     }
     result
@@ -127,6 +129,14 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
         .send()
         .await
         .map_err(|_| Error::new(503, "Snapshot capture interrupted."))?;
+    if response.status() == reqwest::StatusCode::CONFLICT {
+        // Startup, shutdown and an overlapping capture are temporary ownership
+        // conflicts. Keep them distinct from broken storage or S3 configuration.
+        return Err(Error::new(
+            425,
+            "Waiting for the VM to be ready for synchronization.",
+        ));
+    }
     if !response.status().is_success() {
         return Err(Error::new(503, "Unable to capture a coherent VM snapshot."));
     }
@@ -213,6 +223,9 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
             let response=s.http.post(format!("{base}/disks/{run_id}/published")).bearer_auth(&credential).json(&json!({"generation":manifest["generation"],"backupId":backup_id,"grantId":snapshot["grantId"]})).timeout(Duration::from_secs(120)).send().await.map_err(|_|Error::new(503,"Disk publication acknowledgement interrupted."))?;
             if !response.status().is_success(){return Err(Error::new(503,"Node could not acknowledge the published disk."));}
             super::disk_grants::acknowledged(s,text(&snapshot,"grantId"),&value).await?;
+            // Completed runs leave the active-run monitor. Read back the final
+            // journal counters so their UI does not retain an old dirty count.
+            let _ = super::storage::refresh(s, run).await;
         }
         collect_unused(s,run_id).await?;
         Ok(public(value))
@@ -622,6 +635,11 @@ pub async fn attempt(s: &Service, run: &Value) {
     }
     let _ = update_status(s, text(run, "id"), json!({"status":"saving"})).await;
     if let Err(error) = capture(s, run).await {
+        if error.status == 425 {
+            let _ =
+                update_status(s, text(run, "id"), json!({"status":"pending","error":null})).await;
+            return;
+        }
         // Nothing to save yet, or an older guest image whose limitation is shown in the conversation.
         if error.status != 409 && error.status != 412 {
             let _ = super::alerts::raise(
@@ -702,20 +720,41 @@ pub async fn maintain(s: std::sync::Arc<Service>) {
         }
         let settings = settings(&s).await.unwrap_or_default();
         let interval = settings["intervalSeconds"].as_i64().unwrap_or(60) * 1000;
-        if let Ok(runs) = s.store.read(|db| db.active()).await {
+        if let Ok(runs) = s
+            .store
+            .read(|db| {
+                db.json_rows(
+                    "SELECT data FROM runs WHERE status='running' OR (status='succeeded'
+             AND json_extract(data,'$.storage.mode')='on-demand'
+             AND (json_extract(data,'$.storage.dirtyBytes')>0
+                  OR json_extract(data,'$.backup.status') IN ('pending','saving','error')))",
+                    [],
+                )
+            })
+            .await
+        {
             for run in runs {
                 let id = text(&run, "id");
-                if run["status"] != "running"
-                    || !protected(&run)
+                if !protected(&run)
                     || run["isolated"] != true
                     || (!run["sessionId"].is_string() && run["storage"]["mode"] != "on-demand")
                     || run["moveRequest"].is_object()
-                    || (run["storage"]["mode"] == "on-demand" && run["storage"]["dirtyBytes"] == 0)
+                    || (run["storage"]["mode"] == "on-demand"
+                        && run["storage"]["dirtyBytes"] == 0
+                        && run["backup"]["status"] == "ready")
                     || now() - last.get(id).copied().unwrap_or(0)
                         < run["storage"]["backupSeconds"]
                             .as_i64()
                             .map(|v| v * 1000)
                             .unwrap_or(interval)
+                {
+                    continue;
+                }
+                let run_id = id.to_owned();
+                if s.store
+                    .read(move |db| crate::conversation_lifecycle::require_active_run(db, &run_id))
+                    .await
+                    .is_err()
                 {
                     continue;
                 }

@@ -622,9 +622,17 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
                 let (run, socket, control, stop) = {
                     let active = broker.active.lock().await;
                     if let Some(attempt) = active.get(&id) {
+                        if attempt.stop.is_cancelled() {
+                            return Err(Error::new(409, "VM is stopping."));
+                        }
+                        let socket = attempt
+                            .socket
+                            .get()
+                            .cloned()
+                            .ok_or_else(|| Error::new(409, "VM is still starting."))?;
                         (
                             text(&attempt.plan, "runId").to_owned(),
-                            attempt.socket.get().cloned(),
+                            Some(socket),
                             attempt.control.clone(),
                             attempt.stop.clone(),
                         )
@@ -979,6 +987,62 @@ async fn snapshot_baseline(request: axum::extract::Request) -> Result<Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn snapshot_during_startup_is_deferred_without_touching_the_disk() {
+        use tower::ServiceExt;
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let state = root.path().join("state");
+        private_dir(&data).await.unwrap();
+        private_dir(&state).await.unwrap();
+        std::fs::write(data.join("runner-secret"), "fixture").unwrap();
+        let stop = CancellationToken::new();
+        let pool =
+            crate::microvm::pool::Pool::new(state.clone(), root.path().into(), stop.clone(), 1)
+                .await
+                .unwrap();
+        let broker = Broker {
+            data,
+            state: state.clone(),
+            pool,
+            active: Default::default(),
+            stop,
+            leases: Default::default(),
+        };
+        let attempt = crate::config::id();
+        let run = crate::config::id();
+        let (_done, receiver) = watch::channel(false);
+        broker.active.lock().await.insert(
+            attempt.clone(),
+            Attempt {
+                stop: CancellationToken::new(),
+                done: receiver,
+                socket: Default::default(),
+                plan: json!({"runId":run}),
+                imports: Default::default(),
+                control: Default::default(),
+            },
+        );
+        let app = Router::new().fallback(any(handler)).with_state(broker);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/runs/{attempt}/snapshot"))
+                    .header("authorization", "Bearer fixture")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 409, "startup is not a storage failure");
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"], "VM is still starting.");
+        assert!(!state.join("disks").join(run).exists());
+    }
     #[tokio::test]
     async fn workspace_disk_deletion_uses_authenticated_http_and_preserves_the_lock() {
         use std::io::{Seek, SeekFrom, Write};

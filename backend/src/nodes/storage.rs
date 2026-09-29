@@ -53,47 +53,52 @@ pub async fn monitor(s: Arc<Service>) {
             if run["storage"]["mode"] != "on-demand" {
                 continue;
             }
-            let id = text(&run, "id");
-            if let Ok(status) = controller(&s, id, "storage-status", &json!({})).await
-                && status["mode"] == "on-demand"
-            {
-                let point = if let Some(backup) = status["published"]["backupId"].as_str() {
-                    s.store.get("node-backups", backup).await.ok().flatten()
-                } else {
-                    None
-                };
-                let point = point.filter(|p| {
-                    p["runId"] == run["id"]
-                        && p["nodeId"].as_str().unwrap_or(super::LOCAL_NODE_ID)
-                            == run["nodeId"].as_str().unwrap_or(super::LOCAL_NODE_ID)
-                });
-                if let Some(point) = &point
-                    && super::disk_grants::acknowledged(&s, text(&status, "grantId"), point)
-                        .await
-                        .is_err()
-                {
-                    continue;
-                }
-                let (id, node) = (
-                    id.to_owned(),
-                    run["nodeId"]
-                        .as_str()
-                        .unwrap_or(super::LOCAL_NODE_ID)
-                        .to_owned(),
-                );
-                let _ = s
-                        .store
-                        .transaction(move |db| {
-                            let Some(current)=db.run(&id)? else{return Ok(());};
-                            if current["nodeId"].as_str().unwrap_or(super::LOCAL_NODE_ID)!=node{return Ok(());}
-                            let mut patch=json!({"storage":status});
-                            if status["dirtyBytes"]==0 && let Some(point)=point && point["capturedAt"].as_i64().unwrap_or(0)>=current["backup"]["capturedAt"].as_i64().unwrap_or(0) {patch["backup"]=json!({"id":point["id"],"snapshotId":point["snapshotId"],"capturedAt":point["capturedAt"],"status":"ready","error":null});}
-                            db.patch_run(&id, &patch)?;
-                            record_volume(db, &id, &node, &status)?;
-                            Ok(())
-                        })
-                        .await;
-            }
+            let _ = refresh(&s, &run).await;
         }
     }
+}
+
+pub async fn refresh(s: &Service, run: &Value) -> Result<()> {
+    let id = text(run, "id");
+    let status = controller(s, id, "storage-status", &json!({})).await?;
+    if status["mode"] != "on-demand" {
+        return Ok(());
+    }
+    let point = if let Some(backup) = status["published"]["backupId"].as_str() {
+        s.store.get("node-backups", backup).await.ok().flatten()
+    } else {
+        None
+    };
+    let point = point.filter(|p| {
+        p["runId"] == run["id"]
+            && p["nodeId"].as_str().unwrap_or(super::LOCAL_NODE_ID)
+                == run["nodeId"].as_str().unwrap_or(super::LOCAL_NODE_ID)
+    });
+    if let Some(point) = &point {
+        super::disk_grants::acknowledged(s, text(&status, "grantId"), point).await?;
+    }
+    let (id, node) = (
+        id.to_owned(),
+        run["nodeId"]
+            .as_str()
+            .unwrap_or(super::LOCAL_NODE_ID)
+            .to_owned(),
+    );
+    s.store.transaction(move |db| {
+        let Some(current) = db.run(&id)? else { return Ok(()); };
+        if current["nodeId"].as_str().unwrap_or(super::LOCAL_NODE_ID) != node {
+            return Ok(());
+        }
+        let mut patch = json!({"storage":status});
+        if status["dirtyBytes"] == 0
+            && let Some(point) = point
+            && point["capturedAt"].as_i64().unwrap_or(0)
+                >= current["backup"]["capturedAt"].as_i64().unwrap_or(0)
+        {
+            patch["backup"] = json!({"id":point["id"],"snapshotId":point["snapshotId"],"capturedAt":point["capturedAt"],"status":"ready","error":null});
+        }
+        db.patch_run(&id, &patch)?;
+        record_volume(db, &id, &node, &status)?;
+        Ok(())
+    }).await
 }

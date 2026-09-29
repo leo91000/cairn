@@ -130,6 +130,9 @@ impl Reservation {
         };
         // Do not drop boot or cleanup futures on cancellation: their resource ownership must drain.
         let result = operation.await;
+        // Captures share this attempt's lifetime. Release pending thaw retries
+        // before shutdown removes the guest socket, including normal completion.
+        stop.cancel();
         self.finish().await;
         result
     }
@@ -162,6 +165,33 @@ impl Drop for Reservation {
 mod tests {
     use super::*;
     use std::time::Duration;
+    #[tokio::test]
+    async fn finished_execution_cancels_captures_before_releasing_its_slot() {
+        let root = tempfile::tempdir().unwrap();
+        let pool = Pool::new(
+            root.path().into(),
+            root.path().into(),
+            CancellationToken::new(),
+            1,
+        )
+        .await
+        .unwrap();
+        let stop = CancellationToken::new();
+        let reservation = pool.reserve("run").await.unwrap();
+        // Rejecting an invalid plan reaches the same completion/cleanup path as
+        // a guest returning its exit status, without requiring KVM in this test.
+        assert!(
+            reservation
+                .execute(json!({"runId":"run"}), Default::default(), stop.clone())
+                .await
+                .is_err()
+        );
+        assert!(
+            stop.is_cancelled(),
+            "captures must not retry a finished VM's deleted socket"
+        );
+        assert_eq!(pool.health().await["occupied"], 0);
+    }
     #[tokio::test]
     async fn abandoned_reservations_release_capacity_and_shutdown_rejects_work() {
         let root = tempfile::tempdir().unwrap();
