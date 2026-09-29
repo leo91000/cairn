@@ -42,6 +42,17 @@ async function adb(env, args) {
   return result.stdout.trim()
 }
 
+async function waitForExit(env, timeout) {
+  const deadline = Date.now() + timeout
+  while (await running(env)) {
+    if (Date.now() >= deadline)
+      return false
+    await sleep(100)
+  }
+
+  return true
+}
+
 export function apiLevel(value) {
   if (!/^\d{2}$/.test(value || '') || Number(value) < 29 || Number(value) > 99)
     throw new Error('Choose an Android API level between 29 and 99.')
@@ -64,17 +75,30 @@ export async function emulator(action, args, env, setup, run) {
 
   if (action === 'stop') {
     if (current) {
-      await adb(env, ['emu', 'kill']).catch(() => {})
+      // Killing QEMU can discard Android's pending package/device metadata.
+      // Ask Android to shut down and flush its state before stopping the host process.
+      await adb(env, ['shell', 'reboot', '-p']).catch(() => {})
+      // ADB can disconnect before reporting success while Android is powering off.
+      if (await waitForExit(env, 30000)) {
+        output('Android emulator stopped. Device data is preserved.')
+        return
+      }
+
+      if (await running(env)) {
+        process.stderr.write('Android did not shut down cleanly; force-stopping the emulator. Recent device changes may not be saved.\n')
+        await adb(env, ['emu', 'kill']).catch(() => {})
+        await waitForExit(env, 5000)
+      }
+
       // The boot + process start identity prevents PID reuse after a VM restart.
       if (await running(env))
         process.kill(current.pid, 'SIGTERM')
-      for (let attempt = 0; attempt < 50 && await running(env); attempt++)
-        await sleep(100)
+      await waitForExit(env, 5000)
       if (await running(env))
         process.kill(current.pid, 'SIGKILL')
     }
 
-    output('Android emulator stopped. Device data is preserved.')
+    output('Android emulator stopped.')
     return
   }
 

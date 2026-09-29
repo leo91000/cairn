@@ -29,6 +29,55 @@ describe('persistent Android tooling', () => {
 })
 
 describe('device process ownership across VM restarts', () => {
+  it.each([0, 1])('lets Android persist state when the shutdown connection exits with %i', async (adbExit) => {
+    const { spawn } = await import('node:child_process')
+    const {
+      mkdtemp,
+      mkdir,
+      readFile,
+      writeFile,
+      rm,
+    } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const { default: path } = await import('node:path')
+    const { default: process } = await import('node:process')
+    const { emulator } = await import('../deploy/toolkit/android-emulator.mjs')
+    const home = await mkdtemp(path.join(tmpdir(), 'android-shutdown-'))
+    const env = environment({ HOME: home, PATH: process.env.PATH })
+    const saved = path.join(home, 'device-state-saved')
+    const child = spawn(process.execPath, ['-e', `
+process.on('SIGUSR1', () => setTimeout(() => {
+  require('node:fs').writeFileSync(${JSON.stringify(saved)}, 'saved');
+  process.exit(0);
+}, 200));
+setInterval(() => {}, 1000);
+process.send('ready');
+`], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
+    const exited = new Promise(resolve => child.once('exit', resolve))
+    try {
+      await new Promise(resolve => child.once('message', resolve))
+      await mkdir(env.ANDROID_USER_HOME, { recursive: true })
+      await mkdir(path.join(env.ANDROID_HOME, 'platform-tools'), { recursive: true })
+      const boot = (await readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim()
+      const start = (await readFile(`/proc/${child.pid}/stat`, 'utf8')).split(') ').at(-1).split(' ')[19]
+      await writeFile(path.join(env.ANDROID_USER_HOME, 'leo-emulator.json'), JSON.stringify({ pid: child.pid, boot, start }))
+      await writeFile(path.join(env.ANDROID_HOME, 'platform-tools/adb'), `#!/usr/bin/env node
+const graceful = process.argv.slice(4).join(' ') === 'shell reboot -p';
+process.kill(${child.pid}, graceful ? 'SIGUSR1' : 'SIGTERM');
+process.exitCode = graceful ? ${adbExit} : 0;
+`, { mode: 0o755 })
+      await emulator('stop', [], env)
+      await exited
+      expect(await readFile(saved, 'utf8')).toBe('saved')
+    }
+    finally {
+      if (child.exitCode === null && child.signalCode === null)
+        child.kill()
+      await exited
+      await rm(home, { recursive: true })
+    }
+  })
+
   it('never signals a reused PID from an earlier VM boot', async () => {
     const {
       mkdtemp,

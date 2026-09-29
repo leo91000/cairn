@@ -75,7 +75,9 @@ async function main() {
     adb(['shell', 'pm', 'clear', 'com.leo.fixture'])
   }
 
-  adb(['shell', 'am', 'start', '-W', '-n', 'com.leo.fixture/.MainActivity'])
+  assert.match(adb(['shell', 'pm', 'path', 'com.leo.fixture']), /^package:/, 'installed application survives device restart')
+  const launch = adb(['shell', 'am', 'start', '-W', '-n', 'com.leo.fixture/.MainActivity'])
+  assert.doesNotMatch(launch, /Error(?: type \d+|:)/, 'application activity launches')
 
   async function dump() {
     const deadline = Date.now() + 120000
