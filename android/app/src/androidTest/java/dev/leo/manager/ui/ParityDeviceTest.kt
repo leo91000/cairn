@@ -12,7 +12,7 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.SoftwareKeyboardController
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.ComposeContentTestRule
-import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.unit.Density
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -264,6 +264,10 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                 }
                 capture("conversation-switcher-dark")
                 compose.onNodeWithText("Rechercher une conversation").performTextInput("prochaine")
+                // Removed LazyColumn rows can retain semantics during their exit animation.
+                compose.waitUntil(10000) {
+                    compose.onAllNodesWithText("Explorer les résultats").fetchSemanticsNodes().isEmpty()
+                }
                 compose.onNodeWithText("Explorer les résultats").assertDoesNotExist()
                 compose.onNodeWithText("Préparer la prochaine version").performClick()
                 compose.waitUntil(30000) {
@@ -280,11 +284,11 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                     .onNode(hasSetTextAction())
                     .performClick()
                     .performTextInput("Un brouillon sur téléphone")
-                compose.runOnIdle { checkNotNull(keyboard).show() }
-                // A fresh Android 16 CI image can spend over 15 seconds initializing
-                // Gboard. Still require a genuinely visible IME before checking layout.
+                compose.onNode(hasSetTextAction()).assertIsFocused()
+                // Showing the IME is best-effort while Android establishes the input
+                // connection. Retry that request until real insets confirm visibility.
                 compose.waitUntil(30000) {
-                    compose.onAllNodes(hasSetTextAction()).fetchSemanticsNodes()
+                    compose.runOnIdle { if (!imeVisible) checkNotNull(keyboard).show() }
                     imeVisible
                 }
                 compose.onNodeWithContentDescription("Envoyer").assertIsDisplayed()

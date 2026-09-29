@@ -43,7 +43,12 @@ describe('durable conversation recovery', () => {
     return worker
   }
   const succeeded = async (id: string) => {
-    await expect.poll(() => ctx.service.store.run(id)?.status, { timeout: 10000 }).toBe('succeeded')
+    await expect.poll(async () => {
+      // These workers have no interval. Recovery can defer a run while its old
+      // process is being fenced, so keep scheduling as the real worker does.
+      for (const worker of workers) await worker.tick()
+      return ctx.service.store.run(id)?.status
+    }, { timeout: 10000 }).toBe('succeeded')
     expect(ctx.service.store.run(id)?.summary).toContain('saved conversation and work survived')
   }
 

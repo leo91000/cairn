@@ -254,6 +254,47 @@ async fn structured_sign_in_reports_errors_without_exposing_provider_details() {
 }
 
 #[tokio::test]
+async fn completed_sign_in_is_already_cleaned_up_and_available() {
+    let root = TempDir::new().unwrap();
+    let service = Service::new(config(&root)).await.unwrap();
+    let flow = service
+        .accounts
+        .add(&service, Provider::Codex, "Personal")
+        .await
+        .unwrap();
+    let id = flow["accountId"].as_str().unwrap();
+    // Observe the publication boundary, rather than allowing a polling delay to
+    // hide work that still happens after the UI is told sign-in is complete.
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            let view = service.accounts.sign_in().await;
+            if view["state"] != "pending" {
+                assert_eq!(view["state"], "complete", "{view}");
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        !service
+            .config
+            .data_dir
+            .join("account-login")
+            .join(id)
+            .exists()
+    );
+    assert!(!service.accounts.busy(&service, id).await.unwrap());
+    assert_eq!(
+        service.accounts.list(&service).await.unwrap()[0]["status"],
+        "next"
+    );
+    service.accounts.reconnect(&service, id).await.unwrap();
+    service.accounts.cancel(&service).await.unwrap();
+}
+
+#[tokio::test]
 async fn account_sign_in_verifies_identity_captures_credentials_and_cleans_up() {
     let root = TempDir::new().unwrap();
     let service = Service::new(config(&root)).await.unwrap();

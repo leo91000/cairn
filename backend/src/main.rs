@@ -298,6 +298,9 @@ async fn chat(config: &Config, plan: Value, stop: CancellationToken) -> Result<i
             bytes.push(b'\n');
             stdout.write_all(&bytes).await?;
         }
+        // Tokio stdout can still have a blocking write in flight. The final
+        // turn marker must reach the worker before this process reports success.
+        stdout.flush().await?;
         Ok::<_, std::io::Error>(())
     });
     let result = if plan["provider"] == "claude" {

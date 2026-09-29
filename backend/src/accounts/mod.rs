@@ -753,6 +753,17 @@ impl Accounts {
             }
             .await;
             let stopped = login.stop.is_cancelled() || s.shutdown.is_cancelled();
+            if result.is_ok() {
+                let _ = s
+                    .store
+                    .audit("account.connected", json!({"id":id,"provider":provider}))
+                    .await;
+            }
+            let _ = remove_directory(&home).await;
+            *s.accounts.connecting.lock().await = None;
+            // A terminal view lets clients immediately select, reconnect or remove
+            // the account. Finish cleanup and release its fence before publishing it.
+            let _ = done.send(true);
             login.update(|v| {
                 v["url"] = Value::Null;
                 v["code"] = Value::Null;
@@ -770,15 +781,6 @@ impl Accounts {
                     v["error"] = error.message.clone().into();
                 }
             });
-            if result.is_ok() {
-                let _ = s
-                    .store
-                    .audit("account.connected", json!({"id":id,"provider":provider}))
-                    .await;
-            }
-            let _ = remove_directory(&home).await;
-            *s.accounts.connecting.lock().await = None;
-            let _ = done.send(true);
         });
         Ok(view)
     }

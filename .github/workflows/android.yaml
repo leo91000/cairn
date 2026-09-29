@@ -1,11 +1,11 @@
 name: Android
 on:
   pull_request:
-    paths: ['android/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'tests/android-*.test.mjs']
+    paths: ['android/**', '.github/actions/setup-pnpm/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'tests/android-*.test.mjs']
   push:
     branches: [main]
     tags: ['v*']
-    paths: ['android/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'tests/android-*.test.mjs']
+    paths: ['android/**', '.github/actions/setup-pnpm/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'tests/android-*.test.mjs']
   workflow_dispatch:
 permissions:
   contents: read
@@ -24,10 +24,8 @@ jobs:
       run-id: ${{ steps.resolve.outputs.run-id }}
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: pnpm/setup@v2.1.0
+      - uses: ./.github/actions/setup-pnpm
         with:
-          runtime: node@24
-          require-lockfile: true
           install: false
       - id: resolve
         env:
@@ -40,10 +38,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: pnpm/setup@v2.1.0
+      - uses: ./.github/actions/setup-pnpm
         with:
-          runtime: node@24
-          require-lockfile: true
           install: false
       - uses: actions/setup-java@v5
         with:
@@ -108,10 +104,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: pnpm/setup@v2.1.0
+      - uses: ./.github/actions/setup-pnpm
         with:
-          runtime: node@24
-          require-lockfile: true
           install: false
       - uses: actions/setup-java@v5
         with:
@@ -159,10 +153,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: pnpm/setup@v2.1.0
+      - uses: ./.github/actions/setup-pnpm
         with:
-          runtime: node@24
-          require-lockfile: true
           install: false
       - uses: actions/setup-java@v5
         with:
@@ -208,10 +200,8 @@ jobs:
       actions: read
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: pnpm/setup@v2.1.0
+      - uses: ./.github/actions/setup-pnpm
         with:
-          runtime: node@24
-          require-lockfile: true
           install: false
       - uses: actions/setup-java@v5
         with:

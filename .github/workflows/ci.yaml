@@ -28,10 +28,8 @@ jobs:
       digest: ${{ steps.resolve.outputs.digest }}
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: pnpm/setup@v2.1.0
+      - uses: ./.github/actions/setup-pnpm
         with:
-          runtime: node@24
-          require-lockfile: true
           install: false
       - id: resolve
         env:
@@ -47,10 +45,8 @@ jobs:
       CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: pnpm/setup@v2.1.0
+      - uses: ./.github/actions/setup-pnpm
         with:
-          runtime: node@24
-          require-lockfile: true
           cache: true
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
       - uses: actions/cache@v6.1.0
@@ -112,10 +108,8 @@ jobs:
             shard: 2/2
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: pnpm/setup@v2.1.0
+      - uses: ./.github/actions/setup-pnpm
         with:
-          runtime: node@24
-          require-lockfile: true
           cache: true
       - uses: actions/download-artifact@v8.0.1
         with:
@@ -299,10 +293,8 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: pnpm/setup@v2.1.0
+      - uses: ./.github/actions/setup-pnpm
         with:
-          runtime: node@24
-          require-lockfile: true
           cache: true
       - run: docker buildx version
         if: needs.resolve.outputs.reuse == 'true'

@@ -935,6 +935,8 @@ pub async fn client(id: &str, stop: CancellationToken) -> Result<i32> {
                     stdout.write_all(&bytes).await?;
                 }
             }
+            stdout.flush().await?;
+            stderr.flush().await?;
             Ok::<_, Error>(())
         };
         let wait = async {
