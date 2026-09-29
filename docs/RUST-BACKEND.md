@@ -16,10 +16,13 @@ bounded blocking pool. Event pages preserve stored JSON payload bytes instead of
 allocating an object tree to serialize again. Record saves and their audit entry
 commit together. The release profile uses thin LTO and one code generation unit.
 
-The public API, schema version 4, password hashes, session cookies, OAuth grants,
+The public API, password hashes, session cookies, OAuth grants,
 encrypted credential records, chat messages and execution checkpoints retain their
 existing formats. Startup does not rewrite existing agents or change their order.
 Bootstrap tokens are generated privately when `SETUP_TOKEN` is absent, as before.
+
+Schema version 5 adds durable shared S3 object references and deletion jobs. Older
+executables refuse that database; see [shared blocks and rollback](SHARED-S3-BLOCKS.md).
 
 The old implementation is frozen under `tests/legacy/server` solely as a migration
 oracle, fixture seeder and benchmark reference. It is excluded from the container.

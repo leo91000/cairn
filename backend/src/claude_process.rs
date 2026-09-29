@@ -15,10 +15,67 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     sync::mpsc,
 };
 use tokio_util::sync::CancellationToken;
+
+const SHELL_ENVIRONMENT_ERROR: &str = "Claude Code's session environment contains NUL bytes, so shell commands cannot start. Repair the affected .sh file in the Claude session-env directory, then resume this conversation to start a fresh process. The conversation and workspace have been preserved.";
+
+async fn validate_session_environment(directory: &Path, session: &str) -> Result<()> {
+    crate::validation::uuid(session)?;
+    let environment = directory.join("session-env").join(session);
+    let mut entries = match tokio::fs::read_dir(&environment).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != "sh") {
+            continue;
+        }
+        // Never execute or rewrite saved shell code while checking it. Scan in
+        // chunks so an unexpectedly large generated file cannot exhaust memory.
+        let mut file = tokio::fs::File::open(&path).await?;
+        let mut buffer = [0; 8192];
+        loop {
+            let count = file.read(&mut buffer).await?;
+            if count == 0 {
+                break;
+            }
+            if buffer[..count].contains(&0) {
+                return Err(Error::new(
+                    502,
+                    format!(
+                        "{SHELL_ENVIRONMENT_ERROR} Affected file: {}",
+                        path.display()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn shell_environment_failed(item: &Value, block: &Value) -> bool {
+    if block["is_error"] != true
+        || (item["type"] != "command_execution" && item["tool"] != "Monitor")
+    {
+        return false;
+    }
+    let matches = |message: &str| {
+        message.starts_with("The argument 'args[1]' must be a string without null bytes.")
+            && (message.contains("/shell-snapshots/") || message.contains("/session-env/"))
+    };
+    match &block["content"] {
+        Value::String(message) => matches(message),
+        Value::Array(blocks) => blocks
+            .iter()
+            .any(|block| block["type"] == "text" && matches(text(block, "text"))),
+        _ => false,
+    }
+}
 
 async fn send(stdin: &mut tokio::process::ChildStdin, value: Value) -> Result<()> {
     stdin.write_all(format!("{value}\n").as_bytes()).await?;
@@ -275,6 +332,10 @@ pub async fn run(
         )
         .await;
     }
+    // Completed receipts above do not launch Claude and must remain replayable.
+    if let Some(session) = plan["sessionId"].as_str() {
+        validate_session_environment(&directory, session).await?;
+    }
     // Managed runs keep access-only credentials from their broker next to their session.
     let mut auth = if plan["claudeManagedAuth"] == true {
         let mut client = crate::accounts::claude::Client::new(&directory);
@@ -463,13 +524,23 @@ pub async fn run(
                                 if block["type"] == "tool_result"
                                     && let Some(mut item) = tools.remove(text(block, "tool_use_id"))
                                 {
+                                    let environment_failed = shell_environment_failed(&item, block);
                                     item["status"] = if block["is_error"] == true {
                                         "failed"
                                     } else {
                                         "completed"
                                     }
                                     .into();
-                                    if item["type"] == "command_execution" {
+                                    // The raw spawn error includes environment exports, which
+                                    // can contain secrets. Persist only the recovery message.
+                                    if environment_failed {
+                                        let output = if item["type"] == "command_execution" {
+                                            "aggregated_output"
+                                        } else {
+                                            "result"
+                                        };
+                                        item[output] = SHELL_ENVIRONMENT_ERROR.into();
+                                    } else if item["type"] == "command_execution" {
                                         item["aggregated_output"] = if block["content"].is_string() {
                                             block["content"].clone()
                                         } else {
@@ -479,6 +550,9 @@ pub async fn run(
                                         item["result"] = block["content"].clone();
                                     }
                                     emit(&events, json!({"type": "item.completed","item": item})).await?;
+                                    if environment_failed {
+                                        return Err(Error::new(502, SHELL_ENVIRONMENT_ERROR));
+                                    }
                                 }
                             }
                         }

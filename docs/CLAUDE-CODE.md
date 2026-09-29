@@ -24,6 +24,19 @@ the original Léo message and completion receipt. Claude ignores IDs already in
 its transcript, so replaying the original ID would acknowledge the request without
 continuing it. Completed receipts are replayed without starting another model turn.
 
+Before resuming, Léo checks the selected session's generated `session-env/<session-id>/*.sh`
+files for NUL bytes. Corrupted files block launch with an error identifying the file.
+If Claude reports the same shell initialization failure during a turn, Léo stops
+that process and marks the attempt failed instead of accepting a later successful
+turn result. The error's raw environment exports are not included in the activity
+log, and no completion receipt is written for that attempt.
+
+Repair the affected script in the conversation's retained Claude home, then resume
+the same conversation. Resume starts a fresh process so cached corrupted text is
+discarded. Léo preserves the script, transcript and workspace; it does not guess
+replacement shell code, delete hooks, or retry automatically. This detects and
+contains corruption but does not identify or repair the cause of the invalid bytes.
+
 Private question answers and raw tool outputs are excluded from the transfer.
 For long chats, the transfer includes up to 200 recent transcript entries and
 100,000 characters, plus an excerpt of the initial request when earlier history

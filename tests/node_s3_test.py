@@ -3,6 +3,7 @@
 Run: uv run --with 'moto[server]==5.2.3' python tests/node_s3_test.py
 Requires the AWS CLI and the project's pinned pnpm/Rust tools.
 """
+import argparse
 import os
 from pathlib import Path
 import subprocess
@@ -12,6 +13,11 @@ from moto.server import ThreadedMotoServer
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--benchmark', action='store_true')
+    parser.add_argument('--repo', type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument('--repeat', type=int, default=3)
+    args = parser.parse_args()
     server = ThreadedMotoServer(ip_address='127.0.0.1', port=0, verbose=False)
     server.start()
     try:
@@ -32,11 +38,23 @@ def main():
         env['AWS_EC2_METADATA_DISABLED'] = 'true'
         env['AWS_CONFIG_FILE'] = '/dev/null'
         env['AWS_SHARED_CREDENTIALS_FILE'] = '/dev/null'
+        if args.benchmark:
+            for _ in range(args.repeat):
+                # Each process gets the same empty fixture bucket. Moto's object
+                # listing cost must not grow across benchmark repetitions.
+                for page in client.get_paginator('list_objects_v2').paginate(Bucket='leo-node-test'):
+                    objects = [{'Key': obj['Key']} for obj in page.get('Contents', [])]
+                    if objects:
+                        client.delete_objects(Bucket='leo-node-test', Delete={'Objects': objects})
+                subprocess.run(['node', 'scripts/test-backend.mjs', '--release', '--test', 'node_performance',
+                                'master_reuses_unchanged_blocks', '--', '--ignored', '--nocapture', '--test-threads=1'],
+                               cwd=args.repo, env=env, check=True)
+            return
         subprocess.run(['pnpm', 'test:backend', '--test', 'nodes', 'encrypted_recovery_points', '--', '--ignored'],
                        cwd=Path(__file__).resolve().parents[1], env=env, check=True)
         remaining = client.list_objects_v2(Bucket='leo-node-test')
         assert remaining.get('KeyCount', 0) == 0, 'Conversation purge must remove all remote recovery objects'
-        for case in ['idle_conversations_move_twice', 'active_captures_name', 'obsolete_object_collection', 'interrupted_first_publication']:
+        for case in ['idle_conversations_move_twice', 'active_captures_name', 'obsolete_object_collection', 'interrupted_first_publication', 'shared_publications']:
             subprocess.run(['pnpm', 'test:backend', '--test', 'nodes', case, '--', '--ignored'],
                            cwd=Path(__file__).resolve().parents[1], env=env, check=True)
 

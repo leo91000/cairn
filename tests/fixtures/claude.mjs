@@ -233,6 +233,41 @@ else {
     }
 
     out(value)
+    if (prompt.includes('fixture:shell-environment')) {
+      const tool = prompt.includes('read-tool') ? 'Read' : prompt.includes('monitor-tool') ? 'Monitor' : 'Bash'
+      const id = `shell-${process.pid}`
+      const error = prompt.includes('ordinary-error')
+        ? 'Command exited with code 1'
+        : 'The argument \'args[1]\' must be a string without null bytes. Received "source /home/node/.claude/shell-snapshots/snapshot-bash-fixture.sh && export PRIVATE=never-return-this-secret\\x00"'
+      out({
+        type: 'assistant',
+        message: {
+          id: 'shell-call',
+          content: [{
+            type: 'tool_use',
+            id,
+            name: tool,
+            input: { command: 'pwd' },
+          }],
+        },
+      })
+      const content = prompt.includes('array-content') ? [{ type: 'text', text: error }] : error
+      out({
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            tool_use_id: id,
+            is_error: !prompt.includes('successful-tool'),
+            content,
+          }],
+        },
+      })
+      complete('Shell failure incorrectly treated as success', false, correlation)
+      return
+    }
+
     if (prompt.includes('fixture:background')) {
       const ambient = prompt.includes('fixture:background-ambient')
       if (prompt.includes('fixture:background-ambient-flip'))

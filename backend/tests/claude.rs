@@ -254,6 +254,125 @@ fn setup(root: &TempDir) -> Config {
 }
 
 #[tokio::test]
+async fn corrupted_session_environment_blocks_launch_until_repaired() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let home = c.home.join(".claude");
+    let session = "70f5e7a1-8d65-4f5f-a545-af6ee8c0e1ab";
+    let environment = home.join("session-env").join(session);
+    std::fs::create_dir_all(&environment).unwrap();
+    let hook = environment.join("sessionstart-hook-0.sh");
+    let mut corrupt = b"export PRIVATE=never-return-this-secret\n".to_vec();
+    corrupt.extend([0; 100]);
+    corrupt.extend(b"export PATH=\"$HOME/.safe-chain/bin:$PATH\"\n");
+    std::fs::write(&hook, &corrupt).unwrap();
+    let mut p = plan(&root, "Inspect the workspace");
+    p["sessionId"] = session.into();
+
+    let (tx, _rx) = mpsc::channel(64);
+    let error = claude_process::run(&c, p.clone(), tx, CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(error.message.contains("session environment"));
+    assert!(error.message.contains("sessionstart-hook-0.sh"));
+    assert!(!error.message.contains("never-return-this-secret"));
+    assert!(!home.join("invocations.jsonl").exists());
+    assert!(!root.path().join("result.claude-receipt.json").exists());
+    assert_eq!(std::fs::read(&hook).unwrap(), corrupt);
+
+    // Repair is explicit: Leo must not guess what a corrupted shell script meant.
+    std::fs::write(&hook, "export PATH=\"$HOME/.safe-chain/bin:$PATH\"\n").unwrap();
+    let other = home.join("session-env/00000000-0000-4000-8000-000000000001");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("sessionstart-hook-0.sh"), &corrupt).unwrap();
+    let (tx, mut rx) = mpsc::channel(64);
+    claude_process::run(&c, p.clone(), tx, CancellationToken::new())
+        .await
+        .unwrap();
+    let mut completed = false;
+    while let Some(event) = rx.recv().await {
+        completed |= event["type"] == "turn.completed";
+    }
+    assert!(completed);
+
+    // A completed receipt remains replayable without reopening the environment
+    // or starting another process, even if a hook became corrupt afterward.
+    std::fs::write(&hook, &corrupt).unwrap();
+    let (tx, mut rx) = mpsc::channel(64);
+    claude_process::run(&c, p, tx, CancellationToken::new())
+        .await
+        .unwrap();
+    while rx.recv().await.is_some() {}
+    assert_eq!(
+        std::fs::read_to_string(home.join("invocations.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn shell_environment_failure_stops_before_success_and_does_not_save_a_receipt() {
+    for prompt in [
+        "fixture:shell-environment",
+        "fixture:shell-environment array-content",
+        "fixture:shell-environment monitor-tool",
+    ] {
+        let root = TempDir::new().unwrap();
+        let c = setup(&root);
+        let (tx, mut rx) = mpsc::channel(64);
+        let error = claude_process::run(&c, plan(&root, prompt), tx, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("session environment"));
+        assert!(error.message.contains("resume"));
+        assert!(!error.message.contains("never-return-this-secret"));
+        let mut failed = false;
+        while let Some(event) = rx.recv().await {
+            assert_ne!(event["type"], "turn.completed");
+            assert!(!event.to_string().contains("never-return-this-secret"));
+            failed |= event["type"] == "item.completed" && event["item"]["status"] == "failed";
+        }
+        assert!(failed);
+        assert!(!root.path().join("result.claude-receipt.json").exists());
+
+        let mut resume = plan(&root, "Continue after repairing the shell environment");
+        resume["sessionId"] = "70f5e7a1-8d65-4f5f-a545-af6ee8c0e1ab".into();
+        let (tx, mut rx) = mpsc::channel(64);
+        claude_process::run(&c, resume, tx, CancellationToken::new())
+            .await
+            .unwrap();
+        while rx.recv().await.is_some() {}
+        let calls = std::fs::read_to_string(c.home.join(".claude/invocations.jsonl")).unwrap();
+        assert_eq!(calls.lines().count(), 2);
+        assert!(calls.lines().last().unwrap().contains("--resume"));
+        assert!(root.path().join("result.claude-receipt.json").exists());
+    }
+}
+
+#[tokio::test]
+async fn ordinary_tool_errors_and_read_content_do_not_abort_claude() {
+    for prompt in [
+        "fixture:shell-environment ordinary-error",
+        "fixture:shell-environment read-tool",
+        "fixture:shell-environment successful-tool",
+    ] {
+        let root = TempDir::new().unwrap();
+        let c = setup(&root);
+        let (tx, mut rx) = mpsc::channel(64);
+        claude_process::run(&c, plan(&root, prompt), tx, CancellationToken::new())
+            .await
+            .unwrap();
+        let mut completed = false;
+        while let Some(event) = rx.recv().await {
+            completed |= event["type"] == "turn.completed";
+        }
+        assert!(completed);
+    }
+}
+
+#[tokio::test]
 async fn streaming_tools_receipts_resume_and_no_replay_after_completion() {
     let root = TempDir::new().unwrap();
     let c = setup(&root);

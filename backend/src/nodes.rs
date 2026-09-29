@@ -12,6 +12,7 @@ pub mod placement;
 pub mod publication;
 pub mod relay;
 pub mod restore;
+pub mod shared_blocks;
 pub mod snapshots;
 pub mod storage;
 pub mod transport;

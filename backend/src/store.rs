@@ -58,7 +58,7 @@ impl Store {
         let file = directory.join("manager.db");
         let mut writer = Connection::open(&file)?;
         let version: i64 = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 4 {
+        if version > 5 {
             return Err(Error::bad(
                 "This database belongs to a newer application version.",
             ));
@@ -86,12 +86,13 @@ CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at
         }
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS chat_messages(id TEXT PRIMARY KEY,chat_id TEXT NOT NULL,data TEXT NOT NULL,created_at INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id,created_at); PRAGMA user_version=4;",
+CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id,created_at); PRAGMA user_version=5;",
         )?;
         // Backwards history excludes superseded text snapshots. These small keys
         // bound both the next-turn lookup and the same-message revision lookup.
         tx.execute_batch("CREATE INDEX IF NOT EXISTS events_turns ON events(run_id,id) WHERE type='turn.started';
 CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload,'$.item.id'),id) WHERE json_extract(payload,'$.item.type')='agent_message';")?;
+        tx.execute_batch(crate::nodes::shared_blocks::SCHEMA)?;
         tx.commit()?;
         let mut readers = Vec::new();
         for _ in 0..2 {
