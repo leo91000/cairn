@@ -33,15 +33,11 @@ fn published_journal_reclaims_disk_space() {
     let disk = LazyDisk::create(root.path(), &manifest, source).unwrap();
     disk.write_at(0, &vec![7; BLOCK as usize]).unwrap();
     disk.sync().unwrap();
-    let before = std::fs::metadata(root.path().join("journal.sqlite"))
-        .unwrap()
-        .len();
+    let before = disk.accounting().unwrap()["journalBytes"].as_u64().unwrap();
     let generation = disk.seal().unwrap();
     disk.capture(generation).unwrap();
     disk.commit_published(generation, "published").unwrap();
-    let after = std::fs::metadata(root.path().join("journal.sqlite"))
-        .unwrap()
-        .len();
+    let after = disk.accounting().unwrap()["journalBytes"].as_u64().unwrap();
     assert!(
         after < before / 4,
         "published journal retained {after} of {before} bytes"
@@ -114,42 +110,56 @@ fn legacy_journal_conversion_waits_for_all_unpublished_writes() {
         reads: AtomicUsize::new(0),
     });
     let manifest = single_block(BLOCK, BLOCK, &serde_json::Value::Null);
-    let disk = LazyDisk::create(root.path(), &manifest, source.clone()).unwrap();
-    disk.write_at(0, &vec![7; BLOCK as usize]).unwrap();
-    drop(disk);
-    let db = Connection::open(root.path().join("journal.sqlite")).unwrap();
-    db.execute_batch("PRAGMA auto_vacuum=NONE; VACUUM;")
-        .unwrap();
-    drop(db);
+    legacy_fixture(root.path(), &manifest);
     let disk = LazyDisk::open(root.path(), source.clone()).unwrap();
-    let mode = || {
-        disk.db
-            .lock()
-            .unwrap()
-            .query_row::<u32, _, _>("PRAGMA auto_vacuum", [], |r| r.get(0))
-            .unwrap()
-    };
-    assert_eq!(mode(), 0, "opening a dirty legacy disk must not vacuum it");
+    assert!(root.path().join("journal.sqlite").exists());
+    assert_eq!(disk.accounting().unwrap()["dirtyBytes"], BLOCK);
     let first = disk.seal().unwrap();
     disk.capture(first).unwrap();
     disk.write_at(1, &[7]).unwrap();
     disk.commit_published(first, "first").unwrap();
-    assert_eq!(mode(), 0, "a newer write still needs its journal");
-    let second = disk.seal().unwrap();
-    disk.capture(second).unwrap();
-    disk.commit_published(second, "second").unwrap();
-    assert_eq!(mode(), 1);
     assert!(
         std::fs::metadata(root.path().join("journal.sqlite"))
             .unwrap()
             .len()
-            < BLOCK / 4
+            < 4096,
+        "published legacy payloads should be unlinked"
     );
+    assert_eq!(disk.accounting().unwrap()["dirtyBytes"], 1);
+    let second = disk.seal().unwrap();
+    disk.capture(second).unwrap();
+    disk.commit_published(second, "second").unwrap();
+    assert_eq!(disk.accounting().unwrap()["dirtyBytes"], 0);
     drop(disk);
     let reopened = LazyDisk::open(root.path(), source).unwrap();
     let mut bytes = [0; 8];
     reopened.read_at(0, &mut bytes).unwrap();
     assert_eq!(bytes, [7; 8]);
+}
+
+fn legacy_fixture(directory: &Path, manifest: &Value) {
+    let db = Connection::open(directory.join("journal.sqlite")).unwrap();
+    db.execute_batch("CREATE TABLE state(id INTEGER PRIMARY KEY,manifest TEXT,generation INTEGER,next_sequence INTEGER);
+        CREATE TABLE sealed(generation INTEGER PRIMARY KEY,manifest TEXT);
+        CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT);
+        CREATE TABLE epochs(generation INTEGER PRIMARY KEY,written_at INTEGER);
+        CREATE TABLE writes(seq INTEGER PRIMARY KEY AUTOINCREMENT,generation INTEGER,start INTEGER,end INTEGER,data BLOB,checksum TEXT);
+        INSERT INTO epochs VALUES (1,0);").unwrap();
+    db.execute(
+        "INSERT INTO state VALUES (1,?1,1,2)",
+        [manifest.to_string()],
+    )
+    .unwrap();
+    let bytes = vec![7; manifest["size"].as_u64().unwrap().min(BLOCK) as usize];
+    db.execute(
+        "INSERT INTO writes VALUES (1,1,0,?1,?2,?3)",
+        params![
+            bytes.len() as i64,
+            bytes,
+            LazyDisk::checksum(1, 1, 0, &bytes)
+        ],
+    )
+    .unwrap();
 }
 
 impl BlockSource for Source {
@@ -193,7 +203,7 @@ fn node_cache_evicts_the_oldest_clean_block_after_a_verified_read() {
     let source = Arc::new(Blocks(blocks));
     let read = |index: usize| {
         let (directory, manifest, _, value) = &disks[index];
-        let disk = if directory.join("journal.sqlite").exists() {
+        let disk = if directory.join("journal-v2.sqlite").exists() {
             LazyDisk::open(directory, source.clone()).unwrap()
         } else {
             LazyDisk::create(directory, manifest, source.clone()).unwrap()
@@ -209,7 +219,7 @@ fn node_cache_evicts_the_oldest_clean_block_after_a_verified_read() {
     for (index, present) in [(0, true), (1, false), (2, true)] {
         let (directory, _, hash, _) = &disks[index];
         assert_eq!(directory.join("cache").join(hash).exists(), present);
-        assert!(directory.join("journal.sqlite").exists());
+        assert!(directory.join("journal-v2.sqlite").exists());
     }
 }
 
@@ -279,6 +289,7 @@ fn crash_writer() {
 
 #[test]
 fn journal_integrity_covers_the_write_location() {
+    use std::os::unix::fs::FileExt;
     let root = tempfile::tempdir().unwrap();
     let source = Arc::new(Source {
         reads: AtomicUsize::new(0),
@@ -287,15 +298,151 @@ fn journal_integrity_covers_the_write_location() {
     let disk = LazyDisk::create(root.path(), &manifest, source.clone()).unwrap();
     disk.write_at(3, b"retained").unwrap();
     drop(disk);
-    let corruptor = rusqlite::Connection::open(root.path().join("journal.sqlite")).unwrap();
-    corruptor
-        .execute("UPDATE writes SET start=4, end=12", [])
+    let segment = std::fs::OpenOptions::new()
+        .write(true)
+        .open(root.path().join("payload-1-1.segment"))
         .unwrap();
-    drop(corruptor);
+    segment.write_all_at(&4_i64.to_le_bytes(), 24).unwrap();
+    segment.sync_all().unwrap();
     assert!(
         LazyDisk::open(root.path(), source).is_err(),
         "corrupt journal metadata must be rejected before any read"
     );
+}
+
+#[test]
+fn interrupted_tail_is_trimmed_and_missing_acknowledged_segments_are_rejected() {
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    let source = Arc::new(Source {
+        reads: AtomicUsize::new(0),
+    });
+    let disk = LazyDisk::create(
+        root.path(),
+        &single_block(4096, BLOCK, &Value::Null),
+        source.clone(),
+    )
+    .unwrap();
+    disk.write_at(0, b"retained").unwrap();
+    drop(disk);
+    let path = root.path().join("payload-1-1.segment");
+    let length = std::fs::metadata(&path).unwrap().len();
+    let mut tail = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    tail.write_all(b"LEOJNL02partial").unwrap();
+    tail.sync_all().unwrap();
+    let disk = LazyDisk::open(root.path(), source.clone()).unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), length);
+    drop(disk);
+    // A complete, valid header followed by an incomplete payload is also an
+    // unacknowledged append; corrupt headers must not take this recovery path.
+    let mut header = std::fs::read(&path).unwrap()[..112].to_vec();
+    header[8..16].copy_from_slice(&2_i64.to_le_bytes());
+    let checksum = Sha256::digest(&header[..48]);
+    header[48..80].copy_from_slice(&checksum);
+    tail.write_all(&header).unwrap();
+    tail.write_all(b"par").unwrap();
+    tail.sync_all().unwrap();
+    let disk = LazyDisk::open(root.path(), source.clone()).unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), length);
+    disk.write_at(8, b"continued").unwrap();
+    let generation = disk.seal().unwrap();
+    disk.write_at(20, b"new generation").unwrap();
+    drop(disk);
+    let disk = LazyDisk::open(root.path(), source.clone()).unwrap();
+    assert_eq!(disk.accounting().unwrap()["generation"], generation + 1);
+    let mut bytes = [0; 17];
+    disk.read_at(0, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"retainedcontinued");
+    drop(disk);
+    std::fs::remove_file(path).unwrap();
+    assert!(
+        LazyDisk::open(root.path(), source).is_err(),
+        "missing durable descriptor must fail closed"
+    );
+}
+
+struct PublishedSource(PathBuf);
+
+impl BlockSource for PublishedSource {
+    fn fetch(&self, hash: &str) -> io::Result<Vec<u8>> {
+        std::fs::read(self.0.join(format!("remote-{hash}")))
+    }
+}
+
+#[test]
+fn publication_and_partial_reclamation_survive_process_crashes() {
+    use std::io::BufRead;
+    for phase in [
+        "publication_transaction",
+        "publication_committed",
+        "reclamation",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let source = Arc::new(PublishedSource(root.path().to_owned()));
+        drop(
+            LazyDisk::create(
+                root.path(),
+                &single_block(BLOCK, BLOCK, &Value::Null),
+                source.clone(),
+            )
+            .unwrap(),
+        );
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["crash_publication_writer", "--nocapture"])
+            .env("LEO_JOURNAL_CRASH_DIR", root.path())
+            .env("LEO_JOURNAL_CRASH_PHASE", phase)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output = std::io::BufReader::new(child.stdout.take().unwrap());
+        let reached = output
+            .lines()
+            .any(|line| line.unwrap().contains("JOURNAL_CRASH_READY"));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(reached, "missing injection: {phase}");
+        let disk = LazyDisk::open(root.path(), source).unwrap();
+        let mut bytes = [0; 6];
+        disk.read_at(0, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"before");
+        disk.read_at(8, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"after!");
+        let published = disk.accounting().unwrap()["published"].clone();
+        assert_eq!(published.is_null(), phase == "publication_transaction");
+        disk.write_at(32, b"continued").unwrap();
+        disk.sync().unwrap();
+    }
+}
+
+#[test]
+fn crash_publication_writer() {
+    let Some(root) = std::env::var_os("LEO_JOURNAL_CRASH_DIR") else {
+        return;
+    };
+    let root = Path::new(&root);
+    let disk = LazyDisk::open(root, Arc::new(PublishedSource(root.to_owned()))).unwrap();
+    // More than one obsolete segment makes the unlink injection meaningful.
+    for _ in 0..17 {
+        disk.write_at(0, &vec![7; BLOCK as usize]).unwrap();
+    }
+    disk.write_at(0, b"before").unwrap();
+    let generation = disk.seal().unwrap();
+    let manifest = disk.capture(generation).unwrap();
+    let hash = manifest["blocks"][0]["hash"].as_str().unwrap();
+    let bytes = disk.captured_block(generation, hash).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(root.join(format!("remote-{hash}")))
+        .unwrap();
+    std::io::Write::write_all(&mut &file, &bytes).unwrap();
+    file.sync_all().unwrap();
+    File::open(root).unwrap().sync_all().unwrap();
+    disk.write_at(8, b"after!").unwrap();
+    disk.commit_published(generation, "published").unwrap();
 }
 
 #[test]

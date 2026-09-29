@@ -43,6 +43,15 @@ pub async fn capture(
     let paused_at = std::time::Instant::now();
     timing.next("freeze_and_pause");
     if let Some(socket) = &socket {
+        // A healthy VM may still be paused after its previous protection cycle.
+        // Resume it before asking the guest to freeze; paused CPUs cannot reply.
+        if !emergency && (volume.paused() || volume.transition_pending()) {
+            if let Err(error) = host::settle_attempt(state, attempt, false, &stop).await {
+                stop.cancel();
+                return Err(error);
+            }
+            volume.set_paused(false);
+        }
         if !emergency {
             let reply = tokio::time::timeout(
                 Duration::from_secs(30),
@@ -60,9 +69,12 @@ pub async fn capture(
         // A failed response does not establish that the pause was rejected.
         // Keep the monitor aware of the possible pause until resume succeeds.
         volume.set_paused(true);
-        if let Err(error) = host::pause_attempt(state, attempt).await {
+        if let Err(error) = host::settle_attempt(state, attempt, true, &stop).await {
             if !emergency && !stop.is_cancelled() {
-                if host::resume_attempt(state, attempt).await.is_ok() {
+                if host::settle_attempt(state, attempt, false, &stop)
+                    .await
+                    .is_ok()
+                {
                     volume.set_paused(false);
                 } else {
                     stop.cancel();
@@ -87,7 +99,7 @@ pub async fn capture(
     timing.next("seal_and_resume");
     let generation = volume.seal().await;
     if socket.is_some() && !stop.is_cancelled() && !emergency {
-        if let Err(error) = host::resume_attempt(state, attempt).await {
+        if let Err(error) = host::settle_attempt(state, attempt, false, &stop).await {
             // The controller tears down an attempt whose CPUs cannot be resumed.
             stop.cancel();
             return Err(error);

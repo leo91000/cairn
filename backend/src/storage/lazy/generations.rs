@@ -1,11 +1,12 @@
 //! Sealing is local and short; reconstruction and remote publication happen later.
 use super::*;
 use rusqlite::OptionalExtension;
-use std::collections::BTreeSet;
 
 impl LazyDisk {
     /// The caller freezes the guest filesystem and drains guest I/O before sealing.
     pub fn seal(&self) -> io::Result<i64> {
+        let mut journal = self.journal.lock().map_err(failure)?;
+        journal.sync()?;
         let mut db = self.db.lock().map_err(failure)?;
         let tx = db.transaction().map_err(failure)?;
         let generation: i64 = tx
@@ -16,9 +17,17 @@ impl LazyDisk {
             .ok_or_else(|| failure("Generation exhausted"))?;
         tx.execute("INSERT INTO sealed(generation) VALUES (?1)", [generation])
             .map_err(failure)?;
-        tx.execute("UPDATE state SET generation=?1 WHERE id=1", [next])
-            .map_err(failure)?;
-        tx.commit().map_err(failure)?;
+        tx.execute(
+            "UPDATE state SET generation=?1,next_sequence=?2 WHERE id=1",
+            params![next, journal.next],
+        )
+        .map_err(failure)?;
+        if let Err(error) = tx.commit() {
+            journal.fail();
+            return Err(failure(error));
+        }
+        journal.sealed(next);
+        self.update_accounting(&journal)?;
         Ok(generation)
     }
 
@@ -30,6 +39,7 @@ impl LazyDisk {
         );
         let _publication = self.publication.read().map_err(failure)?;
         let (mut manifest, changed) = {
+            let journal = self.journal.lock().map_err(failure)?;
             let db = self.db.lock().map_err(failure)?;
             let previous: Option<String> = db
                 .query_row(
@@ -46,16 +56,7 @@ impl LazyDisk {
             let manifest: String = db
                 .query_row("SELECT manifest FROM state WHERE id=1", [], |r| r.get(0))
                 .map_err(failure)?;
-            let mut changed = BTreeSet::new();
-            let mut statement = db
-                .prepare("SELECT start,end FROM writes WHERE generation<=?1")
-                .map_err(failure)?;
-            let mut rows = statement.query([generation]).map_err(failure)?;
-            while let Some(row) = rows.next().map_err(failure)? {
-                let start = row.get::<_, i64>(0).map_err(failure)? as u64;
-                let end = row.get::<_, i64>(1).map_err(failure)? as u64;
-                changed.extend(start / BLOCK..end.div_ceil(BLOCK));
-            }
+            let changed = journal.changed(generation);
             (
                 serde_json::from_str::<Value>(&manifest).map_err(failure)?,
                 changed,
@@ -126,6 +127,7 @@ impl LazyDisk {
             crate::performance::Operation::new("journal_publish", backup_id, "reader_lock");
         let _publication = self.publication.write().map_err(failure)?;
         timing.next("commit");
+        let mut journal = self.journal.lock().map_err(failure)?;
         let mut db = self.db.lock().map_err(failure)?;
         let tx = db.transaction().map_err(failure)?;
         let previous: Option<String> = tx
@@ -140,28 +142,32 @@ impl LazyDisk {
             "generation": generation,
             "backupId": backup_id
         });
-        if previous
+        let already_published = previous
             .as_ref()
-            .is_some_and(|p| serde_json::from_str::<Value>(p).is_ok_and(|p| p == receipt))
-        {
+            .is_some_and(|p| serde_json::from_str::<Value>(p).is_ok_and(|p| p == receipt));
+        if already_published && self.accounting.lock().map_err(failure)?["published"] == receipt {
             timing.finish();
             return Ok(());
         }
-        let manifest: String = tx
-            .query_row(
+        let manifest: String = if already_published {
+            // A previous commit may have succeeded but lost its local response.
+            // Reconcile the in-memory base before acknowledging a repeated receipt.
+            tx.query_row("SELECT manifest FROM state WHERE id=1", [], |r| r.get(0))
+                .map_err(failure)?
+        } else {
+            tx.query_row(
                 "SELECT manifest FROM sealed WHERE generation=?1",
                 [generation],
                 |r| r.get(0),
             )
-            .map_err(failure)?;
+            .map_err(failure)?
+        };
         let next_base = Arc::new(serde_json::from_str::<Value>(&manifest).map_err(failure)?);
         validate(&next_base)?;
         let mut base = self.base.lock().map_err(failure)?;
         tx.execute("UPDATE state SET manifest=?1 WHERE id=1", [manifest])
             .map_err(failure)?;
-        tx.execute("DELETE FROM epochs WHERE generation<=?1", [generation])
-            .map_err(failure)?;
-        tx.execute("DELETE FROM writes WHERE generation<=?1", [generation])
+        tx.execute("DELETE FROM segments WHERE generation<=?1", [generation])
             .map_err(failure)?;
         tx.execute("DELETE FROM sealed WHERE generation<=?1", [generation])
             .map_err(failure)?;
@@ -171,17 +177,25 @@ impl LazyDisk {
             [receipt.to_string()],
         )
         .map_err(failure)?;
+        #[cfg(test)]
+        journal::crash_point(&self.directory, "publication_transaction");
         tx.commit().map_err(failure)?;
         *base = next_base.clone();
-        timing.next("reclaim");
-        Self::reclaim_empty_legacy_journal(&db)?;
-        db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
-            .map_err(failure)?;
-        File::open(&self.directory)?.sync_all()?;
-        // Writers acquire node cache admission before the journal mutex. Drop
-        // both local guards before retiring cache files to preserve that order.
+        #[cfg(test)]
+        journal::crash_point(&self.directory, "publication_committed");
+        let retired = journal.retire(generation);
+        self.update_accounting(&journal)?;
+        self.accounting.lock().map_err(failure)?["published"] = receipt;
         drop(base);
         drop(db);
+        drop(journal);
+        drop(_publication);
+        timing.next("reclaim");
+        // Reclamation failures do not undo the durable receipt. Recovery retries
+        // orphan deletion before serving the disk; unpublished frames stay owned.
+        if let Err(error) = journal::Journal::reclaim(&self.directory, &retired) {
+            tracing::warn!(target: "leo_performance", operation="journal_reclaim_failed", kind=?error.kind());
+        }
         timing.next("retire_clean_cache");
         let needed = next_base["blocks"]
             .as_array()

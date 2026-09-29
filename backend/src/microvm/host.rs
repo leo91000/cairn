@@ -288,7 +288,8 @@ async fn vm_state(state: &Path, attempt: &str, status: &str) -> Result<()> {
         .join(vm)
         .join("root/api.sock");
     let request = async {
-        let mut stream = UnixStream::connect(socket).await?;
+        let transport = |_| Error::timeout("VM state response was lost; retry confirmation.");
+        let mut stream = UnixStream::connect(socket).await.map_err(transport)?;
         let body = json!({ "state": status }).to_string();
         let length = body.len();
         stream
@@ -298,10 +299,15 @@ async fn vm_state(state: &Path, attempt: &str, status: &str) -> Result<()> {
                 )
                 .as_bytes(),
             )
-            .await?;
+            .await.map_err(transport)?;
         let mut read = BufReader::new(stream);
         let mut line = String::new();
-        read.read_line(&mut line).await?;
+        read.read_line(&mut line).await.map_err(transport)?;
+        if line.is_empty() {
+            return Err(Error::timeout(
+                "VM state response was lost; retry confirmation.",
+            ));
+        }
         if !line.starts_with("HTTP/1.1 204 ") {
             return Err(Error::unavailable("VM pause failed."));
         }
@@ -309,5 +315,31 @@ async fn vm_state(state: &Path, attempt: &str, status: &str) -> Result<()> {
     };
     tokio::time::timeout(Duration::from_secs(1), request)
         .await
-        .map_err(|_| Error::unavailable("VM pause timed out."))?
+        .map_err(|_| Error::timeout("VM state transition is not yet confirmed."))?
+}
+
+/// Checkpoint transitions must settle before sealing/thawing. Repeat the same
+/// idempotent desired state after a lost response; cancellation still fences
+/// lease loss and shutdown. The monitor uses one bounded request per tick.
+pub async fn settle_attempt(
+    state: &Path,
+    attempt: &str,
+    paused: bool,
+    stop: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let result = tokio::select! {
+            () = stop.cancelled() => return Err(Error::conflict("Execution stopped during VM transition.")),
+            result = vm_state(state, attempt, if paused { "Paused" } else { "Resumed" }) => result,
+        };
+        match result {
+            Err(error) if error.status == 408 && tokio::time::Instant::now() < deadline => {}
+            result => return result,
+        }
+        tokio::select! {
+            () = stop.cancelled() => return Err(Error::conflict("Execution stopped during VM transition.")),
+            () = tokio::time::sleep(Duration::from_millis(100)) => {},
+        }
+    }
 }

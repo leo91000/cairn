@@ -34,6 +34,8 @@ pub struct Volume {
     pressure: AtomicBool,
     fault: AtomicBool,
     paused: AtomicBool,
+    transition: Mutex<Option<std::time::Instant>>,
+    health_probe: tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<bool>>>>,
 }
 
 impl Drop for Volume {
@@ -43,7 +45,8 @@ impl Drop for Volume {
 }
 
 pub fn exists(directory: &Path) -> bool {
-    directory.join("lazy/journal.sqlite").exists()
+    directory.join("lazy/journal-v2.sqlite").exists()
+        || directory.join("lazy/journal.sqlite").exists()
 }
 
 pub fn live(directory: &Path) -> Option<Arc<Volume>> {
@@ -85,6 +88,8 @@ pub fn open(directory: &Path) -> Result<Arc<Volume>> {
         pressure: AtomicBool::new(false),
         fault: AtomicBool::new(false),
         paused: AtomicBool::new(false),
+        transition: Mutex::new(None),
+        health_probe: tokio::sync::Mutex::new(None),
     });
     registry.insert(directory.to_owned(), Entry::Open(Arc::downgrade(&volume)));
     Ok(volume)
@@ -196,6 +201,10 @@ impl Volume {
         self.paused.store(value, Ordering::SeqCst);
     }
 
+    pub fn transition_pending(&self) -> bool {
+        self.transition.lock().map_or(true, |state| state.is_some())
+    }
+
     pub async fn seal(self: &Arc<Self>) -> Result<i64> {
         let disk = self.disk.clone();
         blocking(move || Ok(disk.seal()?)).await
@@ -207,8 +216,16 @@ impl Volume {
     }
 
     pub async fn needs_pause(self: &Arc<Self>) -> Result<bool> {
-        let volume = self.clone();
-        blocking(move || Ok(!volume.health()?["waitingFor"].is_null())).await
+        // Keep a timed-out probe alive instead of queuing more blocking work on
+        // every monitor tick. It uses cached journal counters, never compaction.
+        let mut probe = self.health_probe.lock().await;
+        let task = probe.get_or_insert_with(|| {
+            let volume = self.clone();
+            tokio::task::spawn_blocking(move || Ok(!volume.health()?["waitingFor"].is_null()))
+        });
+        let result = task.await.map_err(Error::internal);
+        *probe = None;
+        result?
     }
 
     /// Called under the attempt's control lock, shared with checkpoint capture.
@@ -234,7 +251,8 @@ impl Volume {
                 value.ok().and_then(std::result::Result::ok).unwrap_or(true)
             }
         };
-        if blocked != self.paused() {
+        let pending = self.transition.lock().map_err(Error::internal)?.is_some();
+        if blocked != self.paused() || pending {
             tracing::info!(target: "leo_performance", operation = "storage_backpressure", id = attempt, paused = blocked);
             let result = if blocked {
                 host::pause_attempt(state, attempt).await
@@ -242,13 +260,24 @@ impl Volume {
                 host::resume_attempt(state, attempt).await
             };
             if let Err(error) = result {
-                // Either command may have taken effect despite a lost response.
-                // Stop the attempt and release blocked reads for its shutdown.
+                if error.status == 408 {
+                    // A lost response is an unknown transition, not VM death.
+                    // Retry the current desired state on the next monitor tick.
+                    // Keep the confirmed state unchanged until an explicit 204.
+                    let mut transition = self.transition.lock().map_err(Error::internal)?;
+                    let since = transition.get_or_insert_with(std::time::Instant::now);
+                    if since.elapsed() < Duration::from_secs(30) {
+                        return Ok(());
+                    }
+                }
+                // Explicit refusal or a sustained inability to fence CPUs is
+                // unsafe. Preserve the existing fail-closed teardown and leases.
                 stop.cancel();
                 self.stop.cancel();
                 return Err(error);
             }
             self.set_paused(blocked);
+            *self.transition.lock().map_err(Error::internal)? = None;
         }
         Ok(())
     }
@@ -271,6 +300,14 @@ impl Volume {
     }
 
     pub fn status(&self) -> Result<Value> {
+        let state = self
+            .directory
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| Error::bad("Invalid disk directory."))?;
+        // Cache reconciliation is maintenance, not a CPU safety probe. Writers
+        // continue to enforce the disk reserve under node-wide admission.
+        super::cache::maintain(state, &self.policy()?)?;
         let mut status = self.health()?;
         status["localBytes"] = allocated(&self.directory)?.into();
         status["activeLocalBytes"] = allocated(&self.directory.join("lazy"))?.into();
@@ -280,13 +317,7 @@ impl Volume {
 
     fn health(&self) -> Result<Value> {
         let mut status = self.disk.accounting()?;
-        let state = self
-            .directory
-            .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| Error::bad("Invalid disk directory."))?;
         let policy = self.policy()?;
-        super::cache::maintain(state, &policy)?;
         let (total, free) = super::policy::space(&self.directory)?;
         let reason = if self.fault.load(Ordering::SeqCst) {
             Some("integrity")
@@ -346,7 +377,11 @@ impl Disk for Volume {
                     .saturating_add(bytes.len() as u64 * 4 + 1024 * 1024)
             {
                 self.pressure.store(false, Ordering::SeqCst);
-                return self.disk.write_at(offset, bytes);
+                let result = self.disk.write_at(offset, bytes);
+                if result.is_err() {
+                    self.fault.store(true, Ordering::SeqCst);
+                }
+                return result;
             }
             self.pressure.store(true, Ordering::SeqCst);
             drop(guard);
@@ -355,7 +390,11 @@ impl Disk for Volume {
     }
 
     fn sync(&self) -> io::Result<()> {
-        self.disk.sync()
+        let result = self.disk.sync();
+        if result.is_err() {
+            self.fault.store(true, Ordering::SeqCst);
+        }
+        result
     }
 }
 
@@ -418,6 +457,223 @@ pub async fn materialize(directory: &Path, stop: &CancellationToken) -> Result<(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    async fn controller_fixture(root: &Path) -> (Arc<Volume>, String, tokio::net::UnixListener) {
+        let directory = root.join("disks/conversation");
+        let context = json!({"master":"http://127.0.0.1:1/","grant":"fixture",
+            "policy":{"reserveMiB":64,"reservePercent":1}});
+        drop(
+            create(
+                &directory.join("lazy"),
+                &json!({"version":1,"size":4096,"blockSize":4194304,
+            "blocks":[{"offset":0,"size":4096,"hash":null}]}),
+                &context,
+            )
+            .await
+            .unwrap(),
+        );
+        let volume = load(&directory).await.unwrap();
+        let attempt = "attempt".to_owned();
+        let vm = uuid::Uuid::new_v4().to_string();
+        let jail = root.join("jails/firecracker").join(&vm).join("root");
+        std::fs::create_dir_all(&jail).unwrap();
+        std::fs::write(root.join("attempt.vm.json"), json!({"vmId":vm}).to_string()).unwrap();
+        (
+            volume,
+            attempt,
+            tokio::net::UnixListener::bind(jail.join("api.sock")).unwrap(),
+        )
+    }
+
+    async fn request_state(
+        stream: tokio::net::UnixStream,
+    ) -> (tokio::io::BufReader<tokio::net::UnixStream>, String) {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+        let mut stream = tokio::io::BufReader::new(stream);
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            if let Some(value) = line.strip_prefix("Content-Length: ") {
+                length = value.trim().parse().unwrap();
+            }
+        }
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        (stream, value["state"].as_str().unwrap().to_owned())
+    }
+
+    #[tokio::test]
+    async fn lost_pause_response_retries_latest_state_without_restarting() {
+        use tokio::io::AsyncWriteExt;
+        let root = tempfile::tempdir().unwrap();
+        let (volume, attempt, listener) = controller_fixture(root.path()).await;
+        let server = tokio::spawn(async move {
+            let (_, state) = request_state(listener.accept().await.unwrap().0).await;
+            assert_eq!(state, "Paused"); // applied, but the connection loses its reply
+            let (mut stream, state) = request_state(listener.accept().await.unwrap().0).await;
+            assert_eq!(state, "Resumed");
+            stream
+                .get_mut()
+                .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let stop = CancellationToken::new();
+        volume.pressure.store(true, Ordering::SeqCst);
+        volume
+            .enforce_limits(root.path(), &attempt, &stop)
+            .await
+            .unwrap();
+        assert!(!stop.is_cancelled());
+        assert!(volume.transition.lock().unwrap().is_some());
+        volume.pressure.store(false, Ordering::SeqCst);
+        volume
+            .enforce_limits(root.path(), &attempt, &stop)
+            .await
+            .unwrap();
+        assert!(!stop.is_cancelled());
+        assert!(!volume.paused());
+        assert!(volume.transition.lock().unwrap().is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sustained_unknown_transition_still_fences_the_attempt() {
+        let root = tempfile::tempdir().unwrap();
+        let (volume, attempt, listener) = controller_fixture(root.path()).await;
+        let server = tokio::spawn(async move {
+            let (_, state) = request_state(listener.accept().await.unwrap().0).await;
+            assert_eq!(state, "Paused");
+        });
+        let stop = CancellationToken::new();
+        volume.pressure.store(true, Ordering::SeqCst);
+        *volume.transition.lock().unwrap() =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(31));
+        assert!(
+            volume
+                .enforce_limits(root.path(), &attempt, &stop)
+                .await
+                .is_err()
+        );
+        assert!(stop.is_cancelled());
+        assert!(volume.stop.is_cancelled());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delayed_pause_response_is_retried_and_explicit_refusal_still_stops() {
+        use tokio::io::AsyncWriteExt;
+        let root = tempfile::tempdir().unwrap();
+        let (volume, attempt, listener) = controller_fixture(root.path()).await;
+        let server = tokio::spawn(async move {
+            let (stream, state) = request_state(listener.accept().await.unwrap().0).await;
+            assert_eq!(state, "Paused");
+            let delayed = tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                let mut stream = stream;
+                let _ = stream
+                    .get_mut()
+                    .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+                    .await;
+            });
+            let (mut stream, state) = request_state(listener.accept().await.unwrap().0).await;
+            assert_eq!(state, "Paused");
+            stream
+                .get_mut()
+                .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+                .await
+                .unwrap();
+            let (mut stream, state) = request_state(listener.accept().await.unwrap().0).await;
+            assert_eq!(state, "Resumed");
+            stream
+                .get_mut()
+                .write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+                .await
+                .unwrap();
+            delayed.await.unwrap();
+        });
+        let stop = CancellationToken::new();
+        volume.pressure.store(true, Ordering::SeqCst);
+        volume
+            .enforce_limits(root.path(), &attempt, &stop)
+            .await
+            .unwrap();
+        assert!(!stop.is_cancelled());
+        assert!(
+            !volume.paused(),
+            "an unconfirmed pause must not be marked complete"
+        );
+        volume
+            .enforce_limits(root.path(), &attempt, &stop)
+            .await
+            .unwrap();
+        assert!(volume.paused());
+        volume.pressure.store(false, Ordering::SeqCst);
+        assert!(
+            volume
+                .enforce_limits(root.path(), &attempt, &stop)
+                .await
+                .is_err()
+        );
+        assert!(stop.is_cancelled());
+        assert!(volume.stop.is_cancelled());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cache_admission_contention_does_not_interrupt_the_vm() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("disks/conversation");
+        let context = json!({
+            "master": "http://127.0.0.1:1/", "grant": "fixture",
+            "policy": { "reserveMiB": 64, "reservePercent": 1 }
+        });
+        drop(
+            create(
+                &directory.join("lazy"),
+                &json!({
+                    "version": 1, "size": 4096, "blockSize": 4194304,
+                    "blocks": [{"offset": 0, "size": 4096, "hash": null}]
+                }),
+                &context,
+            )
+            .await
+            .unwrap(),
+        );
+        let volume = load(&directory).await.unwrap();
+        std::fs::write(
+            root.path().join("attempt.vm.json"),
+            json!({"vmId":uuid::Uuid::new_v4().to_string()}).to_string(),
+        )
+        .unwrap();
+        let (ready, acquired) = std::sync::mpsc::channel();
+        let admission = std::thread::spawn(move || {
+            let _guard = super::super::cache::admission().unwrap();
+            ready.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1300));
+        });
+        acquired.recv().unwrap();
+        let stop = CancellationToken::new();
+        let start = std::time::Instant::now();
+        let result = volume.enforce_limits(root.path(), "attempt", &stop).await;
+        let elapsed = start.elapsed();
+        admission.join().unwrap();
+        assert!(
+            result.is_ok(),
+            "contention was treated as a VM failure: {result:?}"
+        );
+        assert!(!stop.is_cancelled());
+        assert!(!volume.paused());
+        assert!(
+            elapsed < std::time::Duration::from_millis(200),
+            "health waited on maintenance: {elapsed:?}"
+        );
+    }
 
     #[tokio::test]
     async fn missing_remote_block_requires_resolution_and_preserves_local_work() {

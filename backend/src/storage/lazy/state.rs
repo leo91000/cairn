@@ -1,6 +1,5 @@
 //! Durable connection context and accounting independent of the mounted view.
 use super::*;
-use rusqlite::OptionalExtension;
 
 impl LazyDisk {
     pub fn performance(&self) -> Value {
@@ -27,7 +26,11 @@ impl LazyDisk {
 
     pub fn context(directory: &Path) -> io::Result<Value> {
         let db = Connection::open_with_flags(
-            directory.join("journal.sqlite"),
+            if directory.join("journal-v2.sqlite").exists() {
+                directory.join("journal-v2.sqlite")
+            } else {
+                directory.join("journal.sqlite")
+            },
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .map_err(failure)?;
@@ -43,50 +46,15 @@ impl LazyDisk {
     }
 
     pub fn accounting(&self) -> io::Result<Value> {
-        let db = self.db.lock().map_err(failure)?;
-        let dirty: i64 = db
-            .query_row(
-                "SELECT COALESCE(SUM(length(data)),0) FROM writes",
-                [],
-                |r| r.get(0),
-            )
-            .map_err(failure)?;
-        let since: Option<i64> = db
-            .query_row("SELECT MIN(written_at) FROM epochs", [], |r| r.get(0))
-            .map_err(failure)?;
-        let generation: i64 = db
-            .query_row("SELECT generation FROM state WHERE id=1", [], |r| r.get(0))
-            .map_err(failure)?;
-        let published: Option<String> = db
-            .query_row(
-                "SELECT value FROM settings WHERE key='published'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(failure)?;
-        let published = published
-            .map(|v| serde_json::from_str::<Value>(&v))
-            .transpose()
-            .map_err(failure)?
-            .unwrap_or(Value::Null);
-        let pages: i64 = db
-            .query_row("PRAGMA page_count", [], |r| r.get(0))
-            .map_err(failure)?;
-        let free: i64 = db
-            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
-            .map_err(failure)?;
-        let page_size: i64 = db
-            .query_row("PRAGMA page_size", [], |r| r.get(0))
-            .map_err(failure)?;
-        Ok(serde_json::json!({
-            "dirtyBytes": dirty,
-            "dirtySince": since,
-            "generation": generation,
-            "published": published,
-            "journalBytes": pages * page_size,
-            "journalFreeBytes": free * page_size
-        }))
+        Ok(self.accounting.lock().map_err(failure)?.clone())
+    }
+
+    pub(super) fn update_accounting(&self, journal: &journal::Journal) -> io::Result<()> {
+        let mut accounting = self.accounting.lock().map_err(failure)?;
+        let published = accounting["published"].take();
+        *accounting = journal.stats();
+        accounting["published"] = published;
+        Ok(())
     }
 }
 

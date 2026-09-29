@@ -69,7 +69,7 @@ export async function storageSmoke({
   const inbox = path.join(root, 'data/runs', runId, 'chat-input')
   await mkdir(inbox)
 
-  async function start(first, { benchmark = false } = {}) {
+  async function start(first, { benchmark = false, soak = false } = {}) {
     const id = randomUUID()
     const code = `
       const fs=require('node:fs'),assert=require('node:assert/strict'),cp=require('node:child_process');
@@ -81,6 +81,22 @@ export async function storageSmoke({
       assert.equal(fs.readFileSync(file,'utf8'),'journal survives');
       const savedReadMs=performance.now()-started;
       console.log('storage.ready'); setInterval(()=>console.log('storage.tick'),1000);
+      if(${soak}) {
+        const fd=fs.openSync(file+'.load','w+'), data=Buffer.alloc(4096), read=Buffer.alloc(4096);
+        let sequence=0, maximumMs=0;const latencies=[];
+        setInterval(()=>{
+          sequence++;data.fill(sequence%251);
+          const offset=(sequence%128)*4096,at=performance.now();
+          assert.equal(fs.writeSync(fd,data,0,data.length,offset),data.length);fs.fsyncSync(fd);
+          assert.equal(fs.readSync(fd,read,0,read.length,offset),read.length);assert.deepEqual(read,data);
+          const ms=performance.now()-at;maximumMs=Math.max(maximumMs,ms);latencies.push(ms);
+          if(latencies.length>5000)latencies.shift();
+        },10);
+        setInterval(()=>{
+          const sorted=[...latencies].sort((a,b)=>a-b);
+          console.log('storage.soak '+JSON.stringify({writes:sequence,maximumMs,p99Ms:sorted[Math.floor(sorted.length*.99)]||0}));
+        },1000);
+      }
       if(${benchmark}) {
         const control=setInterval(()=>{
           if(!fs.readFileSync('/run/leo-chat/messages.json','utf8').includes('measure'))return;
@@ -167,6 +183,65 @@ export async function storageSmoke({
   assert.equal((await status()).mode, 'on-demand')
   docker('exec', name, 'test', '!', '-e', `/runner-state/disks/${runId}/data.ext4`)
   await stop(first)
+
+  // Opt-in sustained VM qualification, separate from the short CI smoke path.
+  const soakSeconds = Number(process.env.LEO_STORAGE_SOAK_SECONDS || 0)
+  if (soakSeconds > 0) {
+    assert.ok(Number.isFinite(soakSeconds) && soakSeconds >= 60 && soakSeconds <= 3600)
+    const attempt = await start(false, { soak: true })
+    await ready(attempt)
+    const vmIdentity = () => JSON.parse(docker('exec', name, 'cat', `/runner-state/${attempt}.vm.json`)).vmId
+    const initialVm = vmIdentity()
+    const started = performance.now()
+    const publications = []
+    const resources = []
+    while (performance.now() - started < soakSeconds * 1000) {
+      await setTimeout(5000)
+      const at = performance.now()
+      const saved = await publish(attempt)
+      publications.push({
+        generation: saved.point.manifest.generation,
+        totalMs: performance.now() - at,
+        pauseMs: saved.point.manifest.pauseMs,
+        indexMs: saved.point.manifest.indexMs,
+      })
+      assert.equal(vmIdentity(), initialVm, 'checkpoint must not replace the VM')
+      const sample = await status()
+      assert.equal(sample.waitingFor, null)
+      assert.equal(sample.published.backupId, saved.backupId)
+      resources.push(sample.performance)
+    }
+
+    const output = await logs(attempt)
+    const metrics = [...output.matchAll(/storage.soak (\{[^\n]+\})/g)].map(match => JSON.parse(match[1]))
+    assert.ok(metrics.length > soakSeconds / 2, 'guest must keep progressing under repeated backups')
+    for (let index = 1; index < metrics.length; index++)
+      assert.ok(metrics[index].writes > metrics[index - 1].writes, 'durable guest writes stalled')
+    assert.ok(publications.length >= 6)
+    assert.ok(metrics.at(-1).writes >= soakSeconds * 20, 'sustained durable write load')
+    assert.ok(Math.max(...metrics.map(sample => sample.maximumMs)) < 1000, 'guest disk stall exceeded the old controller timeout')
+    assert.ok(resources.every(sample => sample.write.errors === 0 && sample.read.errors === 0))
+    const evidence = {
+      kind: 'storage-vm-soak',
+      seconds: (performance.now() - started) / 1000,
+      attempt,
+      vmId: initialVm,
+      publications,
+      metrics,
+      resources,
+      unintendedRestarts: 0,
+      source: 'real Firecracker/FUSE journal, loopback immutable origin; not S3/WAN',
+    }
+    if (process.env.LEO_STORAGE_SOAK_EVIDENCE)
+      await writeFile(process.env.LEO_STORAGE_SOAK_EVIDENCE, JSON.stringify(evidence, null, 2))
+    process.stdout.write(`${JSON.stringify(evidence)}\n`)
+    await stop(attempt)
+    // Verify durable guest contents on a new VM after all acknowledged backups.
+    const recovered = await start(false)
+    await ready(recovered)
+    await stop(recovered)
+  }
+
   // Restore into a separate empty directory, retaining the source for comparison.
   docker('exec', name, 'mv', `/runner-state/disks/${runId}`, `/runner-state/disks/source-${runId}`)
   await writeFile(path.join(origin, 'offline'), '')

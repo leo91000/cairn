@@ -31,6 +31,8 @@ pub struct LazyDisk {
     directory: PathBuf,
     size: u64,
     db: Mutex<Connection>,
+    journal: Mutex<journal::Journal>,
+    accounting: Mutex<Value>,
     base: Mutex<Arc<Value>>,
     source: Arc<dyn BlockSource>,
     cache: Mutex<()>,
@@ -39,6 +41,14 @@ pub struct LazyDisk {
     publication: RwLock<()>,
     _lock: File,
     metrics: super::metrics::Metrics,
+}
+
+impl Drop for LazyDisk {
+    fn drop(&mut self) {
+        // A concurrently forked child can briefly inherit the open description
+        // before exec closes it. Release ownership explicitly when the disk dies.
+        let _ = self._lock.unlock();
+    }
 }
 
 fn validate(manifest: &Value) -> io::Result<u64> {
@@ -149,38 +159,7 @@ impl LazyDisk {
             .mode(0o600)
             .open(directory.join("journal.lock"))?;
         lock.try_lock().map_err(failure)?;
-        let path = directory.join("journal.sqlite");
-        if initial.is_some() && path.exists() {
-            return Err(failure("Disk already exists"));
-        }
-        if initial.is_none() && !path.exists() {
-            return Err(failure("Disk journal is missing"));
-        }
-        let db = Connection::open(&path).map_err(failure)?;
-        db.execute_batch(
-            "PRAGMA auto_vacuum=FULL; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
-        )
-        .map_err(failure)?;
-        if let Some((manifest, generation)) = initial {
-            db.execute_batch("BEGIN IMMEDIATE;
-                CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), manifest TEXT NOT NULL, generation INTEGER NOT NULL, next_sequence INTEGER NOT NULL);
-                CREATE TABLE writes (seq INTEGER PRIMARY KEY AUTOINCREMENT, generation INTEGER NOT NULL, start INTEGER NOT NULL, end INTEGER NOT NULL, data BLOB NOT NULL, checksum TEXT NOT NULL);
-                CREATE INDEX write_ranges ON writes(end);
-                COMMIT;").map_err(failure)?;
-            db.execute(
-                "INSERT INTO state VALUES (1, ?1, ?2, 1)",
-                params![manifest.to_string(), generation],
-            )
-            .map_err(failure)?;
-            File::open(directory)?.sync_all()?;
-        }
-        db.execute_batch(
-            "CREATE TABLE IF NOT EXISTS sealed (generation INTEGER PRIMARY KEY, manifest TEXT);
-            CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS epochs (generation INTEGER PRIMARY KEY, written_at INTEGER NOT NULL);
-            INSERT OR IGNORE INTO epochs SELECT DISTINCT generation,0 FROM writes;",
-        )
-        .map_err(failure)?;
+        let db = journal::metadata(directory, initial)?;
         let manifest: String = db
             .query_row("SELECT manifest FROM state WHERE id=1", [], |row| {
                 row.get(0)
@@ -188,38 +167,16 @@ impl LazyDisk {
             .map_err(failure)?;
         let manifest: Value = serde_json::from_str(&manifest).map_err(failure)?;
         let size = validate(&manifest)?;
-        let (generation, next): (i64, i64) = db
-            .query_row(
-                "SELECT generation, next_sequence FROM state WHERE id=1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .map_err(failure)?;
-        if generation < 1 || next < 1 {
-            return Err(failure("Invalid journal counters"));
-        }
-        {
-            let mut statement = db
-                .prepare(
-                    "SELECT start, data, checksum, seq, generation, end FROM writes ORDER BY seq",
-                )
-                .map_err(failure)?;
-            let mut rows = statement.query([]).map_err(failure)?;
-            while let Some(row) = rows.next().map_err(failure)? {
-                Self::record(row, size)?;
-                if row.get::<_, i64>(3).map_err(failure)? >= next
-                    || row.get::<_, i64>(4).map_err(failure)? > generation
-                {
-                    return Err(failure("Invalid journal ordering"));
-                }
-            }
-        }
-        Self::reclaim_empty_legacy_journal(&db)?;
+        let journal = journal::Journal::open(directory, &db, size)?;
+        let mut accounting = journal.stats();
+        accounting["published"] = journal::published(&db)?;
         timing.finish();
         Ok(Self {
             directory: directory.to_owned(),
             size,
             db: Mutex::new(db),
+            journal: Mutex::new(journal),
+            accounting: Mutex::new(accounting),
             base: Mutex::new(Arc::new(manifest)),
             source,
             cache: Mutex::new(()),
@@ -284,20 +241,12 @@ impl LazyDisk {
             }))
     }
 
-    fn cached_record(&self, row: &rusqlite::Row<'_>) -> io::Result<(u64, Arc<Vec<u8>>)> {
-        let start: i64 = row.get(0).map_err(failure)?;
-        let key = format!(
-            "write:{}:{}:{start}:{}:{}",
-            row.get::<_, i64>(3).map_err(failure)?,
-            row.get::<_, i64>(4).map_err(failure)?,
-            row.get::<_, i64>(5).map_err(failure)?,
-            row.get::<_, String>(2).map_err(failure)?
-        );
+    fn cached_record(&self, record: &journal::Record) -> io::Result<(u64, Arc<Vec<u8>>)> {
+        let key = record.cache_key();
         if let Some(bytes) = self.cached(&key)? {
-            return Ok((start as u64, bytes));
+            return Ok((record.start, bytes));
         }
-        let (offset, bytes) = Self::record(row, self.size)?;
-        Ok((offset, self.remember(&key, bytes)?))
+        Ok((record.start, self.remember(&key, record.read(self.size)?)?))
     }
 
     fn remember(&self, hash: &str, bytes: Vec<u8>) -> io::Result<Arc<Vec<u8>>> {
@@ -430,30 +379,6 @@ impl LazyDisk {
 }
 
 impl LazyDisk {
-    /// Older journals enabled auto-vacuum after entering WAL mode, which left it
-    /// disabled. Convert only an empty journal: never copy unsynchronized blobs
-    /// or make startup proportional to the dirty working set.
-    fn reclaim_empty_legacy_journal(db: &Connection) -> io::Result<()> {
-        let mode: u32 = db
-            .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))
-            .map_err(failure)?;
-        if mode != 0 {
-            return Ok(());
-        }
-        let dirty: bool = db
-            .query_row("SELECT EXISTS(SELECT 1 FROM writes)", [], |r| r.get(0))
-            .map_err(failure)?;
-        if dirty {
-            return Ok(());
-        }
-        let timing =
-            crate::performance::Operation::new("journal_reclaim", "", "empty_legacy_journal");
-        db.execute_batch("PRAGMA auto_vacuum=FULL; VACUUM; PRAGMA wal_checkpoint(TRUNCATE)")
-            .map_err(failure)?;
-        timing.finish();
-        Ok(())
-    }
-
     fn read_generation(&self, generation: i64, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
         self.check(offset, bytes.len())?;
         if bytes.is_empty() {
@@ -464,28 +389,16 @@ impl LazyDisk {
         let mut missing = vec![(0, bytes.len())];
         let manifest = self.base.lock().map_err(failure)?.clone();
         {
-            let db = self.db.lock().map_err(failure)?;
-            let end = (offset + bytes.len() as u64) as i64;
-            let start = offset as i64;
-            // An overlapping write ends before the read end plus MAX_IO,
-            // because no journal write can exceed MAX_IO bytes. Bound both
-            // ends of the indexed range instead of scanning the whole journal
-            // in sequence order for every small read.
-            let mut statement = db
-                .prepare_cached(
-                    "SELECT start, data, checksum, seq, generation, end FROM writes INDEXED BY \
-                write_ranges WHERE end > ?1 AND end < ?2 AND start < ?3 AND generation <= \
-                ?4 ORDER BY seq DESC",
-                )
-                .map_err(failure)?;
-            let mut rows = statement
-                .query(params![start, end + MAX_IO as i64, end, generation])
-                .map_err(failure)?;
-            while let Some(row) = rows.next().map_err(failure)? {
+            let records = self.journal.lock().map_err(failure)?.overlapping(
+                generation,
+                offset,
+                offset + bytes.len() as u64,
+            );
+            for record in records {
                 self.metrics
                     .journal_rows
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let (start, data) = self.cached_record(row)?;
+                let (start, data) = self.cached_record(&record)?;
                 let begin = (start.max(offset) - offset) as usize;
                 let end = ((start + data.len() as u64).min(offset + bytes.len() as u64) - offset)
                     as usize;
@@ -557,6 +470,7 @@ impl LazyDisk {
 }
 
 mod generations;
+mod journal;
 mod state;
 
 impl Disk for LazyDisk {
@@ -579,47 +493,22 @@ impl Disk for LazyDisk {
             sample.finish(0);
             return Ok(());
         }
-        let mut db = self.db.lock().map_err(failure)?;
-        let tx = db.transaction().map_err(failure)?;
-        let (generation, sequence): (i64, i64) = tx
-            .query_row(
-                "SELECT generation, next_sequence FROM state WHERE id=1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .map_err(failure)?;
-        let next = sequence
-            .checked_add(1)
-            .ok_or_else(|| failure("Journal sequence exhausted"))?;
-        tx.execute(
-            "INSERT INTO writes(seq,generation,start,end,data,checksum) VALUES (?1,?2,?3,?4,?5,?6)",
-            params![
-                sequence,
-                generation,
-                offset as i64,
-                (offset + bytes.len() as u64) as i64,
-                bytes,
-                Self::checksum(sequence, generation, offset, bytes)
-            ],
-        )
-        .map_err(failure)?;
-        tx.execute(
-            "INSERT OR IGNORE INTO epochs VALUES (?1,?2)",
-            params![generation, state::now()],
-        )
-        .map_err(failure)?;
-        tx.execute("UPDATE state SET next_sequence=?1 WHERE id=1", [next])
-            .map_err(failure)?;
-        tx.commit().map_err(failure)?;
+        let mut journal = self.journal.lock().map_err(failure)?;
+        if let Err(error) = journal.append(&self.directory, &self.db, offset, bytes) {
+            journal.fail();
+            return Err(error);
+        }
+        self.update_accounting(&journal)?;
         sample.finish(bytes.len());
         Ok(())
     }
 
     fn sync(&self) -> io::Result<()> {
         let sample = self.metrics.syncs.start();
-        let db = self.db.lock().map_err(failure)?;
-        db.execute_batch("PRAGMA wal_checkpoint(FULL)")
-            .map_err(failure)?;
+        // Every acknowledged append is already synced. Serialize with an append
+        // and propagate a prior sync failure instead of checkpointing payloads.
+        let journal = self.journal.lock().map_err(failure)?;
+        journal.sync()?;
         File::open(&self.directory)?.sync_all()?;
         sample.finish(0);
         Ok(())

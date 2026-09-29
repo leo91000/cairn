@@ -116,6 +116,7 @@ async fn holes_are_indexed_as_zero_blocks_without_reading_them() {
 #[derive(Clone, Copy)]
 enum ControlScenario {
     DemandCapture,
+    PausedCapture,
     EmergencyCapture,
     MonitorPause,
     MonitorResume,
@@ -137,36 +138,44 @@ impl ControlScenario {
 
     /// Whether the VM starts paused, so the lost acknowledgement is a resume.
     fn resume_ack(self) -> bool {
-        matches!(self, Self::MonitorResume)
+        matches!(self, Self::MonitorResume | Self::PausedCapture)
     }
 
     fn lose_ack(self) -> bool {
-        !matches!(self, Self::MonitorHealthy)
+        !matches!(self, Self::MonitorHealthy | Self::PausedCapture)
     }
 
     /// Whether the storage monitor, rather than a capture, drives the VM.
     fn monitor(self) -> bool {
-        !matches!(self, Self::DemandCapture | Self::EmergencyCapture)
+        !matches!(
+            self,
+            Self::DemandCapture | Self::PausedCapture | Self::EmergencyCapture
+        )
     }
 }
 
 #[tokio::test]
-async fn an_on_demand_lost_pause_acknowledgement_resumes_and_thaws_before_returning_error() {
+async fn on_demand_capture_retries_lost_pause_acknowledgement_before_sealing_and_thawing() {
     exercise_vm_control(ControlScenario::DemandCapture).await;
 }
 
 #[tokio::test]
-async fn an_emergency_capture_with_unknown_pause_state_stops_the_attempt() {
+async fn healthy_paused_vm_resumes_before_guest_freeze() {
+    exercise_vm_control(ControlScenario::PausedCapture).await;
+}
+
+#[tokio::test]
+async fn emergency_capture_retries_lost_pause_acknowledgement_and_remains_protected() {
     exercise_vm_control(ControlScenario::EmergencyCapture).await;
 }
 
 #[tokio::test]
-async fn monitor_stops_unknown_cpu_state_after_a_lost_pause_acknowledgement() {
+async fn monitor_retries_unknown_cpu_state_after_a_lost_pause_acknowledgement() {
     exercise_vm_control(ControlScenario::MonitorPause).await;
 }
 
 #[tokio::test]
-async fn monitor_stops_unknown_cpu_state_after_a_lost_resume_acknowledgement() {
+async fn monitor_retries_unknown_cpu_state_after_a_lost_resume_acknowledgement() {
     exercise_vm_control(ControlScenario::MonitorResume).await;
 }
 
@@ -205,23 +214,28 @@ fn create_lazy_disk(disk: &Path, emergency: bool) {
 }
 
 /// Serves the Firecracker API: records the requested VM state, and never
-/// acknowledges the command whose acknowledgement the scenario loses.
+/// acknowledges the first transition whose acknowledgement the scenario loses.
 fn spawn_firecracker_api(
     controller: UnixListener,
     paused: Arc<AtomicBool>,
     case: ControlScenario,
 ) -> JoinHandle<()> {
+    let lost = Arc::new(AtomicBool::new(false));
     tokio::spawn(async move {
         loop {
             let (socket, _) = controller.accept().await.unwrap();
             let paused = paused.clone();
+            let lost = lost.clone();
             tokio::spawn(async move {
                 let mut socket = BufReader::new(socket);
                 let body = read_http_body(&mut socket).await;
                 let value: Value = serde_json::from_slice(&body).unwrap();
                 let pause = value["state"] == "Paused";
                 paused.store(pause, Ordering::SeqCst);
-                if case.lose_ack() && pause != case.resume_ack() {
+                if case.lose_ack()
+                    && pause != case.resume_ack()
+                    && !lost.swap(true, Ordering::SeqCst)
+                {
                     tokio::time::sleep(Duration::from_secs(3)).await;
                     return;
                 }
@@ -253,7 +267,11 @@ async fn read_http_body(socket: &mut BufReader<UnixStream>) -> Vec<u8> {
 }
 
 /// Serves the guest agent, which records whether it was asked to thaw.
-fn spawn_guest_agent(guest: UnixListener, thawed: Arc<AtomicBool>) -> JoinHandle<()> {
+fn spawn_guest_agent(
+    guest: UnixListener,
+    thawed: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             let (socket, _) = guest.accept().await.unwrap();
@@ -264,6 +282,12 @@ fn spawn_guest_agent(guest: UnixListener, thawed: Arc<AtomicBool>) -> JoinHandle
             line.clear();
             socket.read_line(&mut line).await.unwrap();
             let value: Value = serde_json::from_str(&line).unwrap();
+            if value["op"] == "freeze" {
+                assert!(
+                    !paused.load(Ordering::SeqCst),
+                    "paused CPUs cannot execute freeze"
+                );
+            }
             if value["op"] == "thaw" {
                 thawed.store(true, Ordering::SeqCst);
             }
@@ -320,20 +344,20 @@ async fn check_monitor(
             assert!(!volume.stop.is_cancelled());
         }
         _ => {
-            assert!(result.is_err());
+            result.unwrap();
             assert_eq!(
                 paused.load(Ordering::SeqCst),
                 !case.resume_ack(),
                 "the VM applied the command even though its acknowledgement was lost"
             );
             assert!(
-                stop.is_cancelled(),
-                "an ambiguous monitor command must stop execution"
+                !stop.is_cancelled(),
+                "a lost reply must not restart the attempt"
             );
-            assert!(
-                volume.stop.is_cancelled(),
-                "blocked disk reads must be released for shutdown"
-            );
+            assert!(!volume.stop.is_cancelled());
+            volume.enforce_limits(root, attempt, &stop).await.unwrap();
+            assert_eq!(volume.paused(), !case.resume_ack());
+            assert!(!stop.is_cancelled());
         }
     }
     let mut saved = [0; 7];
@@ -342,7 +366,7 @@ async fn check_monitor(
 }
 
 /// A capture pauses the VM and freezes the guest; a lost acknowledgement
-/// must either stop an emergency attempt or resume and thaw an on-demand one.
+/// is retried before sealing; an emergency capture stays paused, a normal one thaws.
 async fn check_capture(
     case: ControlScenario,
     root: &Path,
@@ -367,12 +391,11 @@ async fn check_capture(
     )
     .await
     .unwrap();
-    assert!(result.is_err());
+    let point = result.unwrap();
+    assert!(!stop.is_cancelled());
     if case.emergency() {
-        assert!(
-            stop.is_cancelled(),
-            "an unconfirmed emergency pause must stop execution"
-        );
+        assert_eq!(point["manifest"]["consistency"], "crash");
+        assert!(paused.load(Ordering::SeqCst));
         assert!(!thawed.load(Ordering::SeqCst));
     } else {
         assert!(!paused.load(Ordering::SeqCst));
@@ -392,6 +415,11 @@ async fn exercise_vm_control(case: ControlScenario) {
     )
     .unwrap();
     create_lazy_disk(&disk, case.emergency());
+    std::fs::write(
+        disk.join("runtime.json"),
+        json!({"runtimeId":"fixture"}).to_string(),
+    )
+    .unwrap();
     let api = root.path().join("jails/firecracker").join(vm).join("root");
     std::fs::create_dir_all(&api).unwrap();
     let paused = Arc::new(AtomicBool::new(case.resume_ack()));
@@ -402,10 +430,18 @@ async fn exercise_vm_control(case: ControlScenario) {
     );
     let guest_path = root.path().join("guest.sock");
     let thawed = Arc::new(AtomicBool::new(false));
-    let guest_task = spawn_guest_agent(UnixListener::bind(&guest_path).unwrap(), thawed.clone());
+    let guest_task = spawn_guest_agent(
+        UnixListener::bind(&guest_path).unwrap(),
+        thawed.clone(),
+        paused.clone(),
+    );
     if case.monitor() {
         check_monitor(case, root.path(), &disk, &attempt, &paused).await;
     } else {
+        let held_volume = runtime::load(&disk).await.unwrap();
+        if matches!(case, ControlScenario::PausedCapture) {
+            held_volume.set_paused(true);
+        }
         check_capture(
             case,
             root.path(),

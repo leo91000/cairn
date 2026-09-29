@@ -306,7 +306,10 @@ async fn prune_stale_disks(directory: &Path) -> Result<Vec<String>> {
             continue;
         }
         let is_dir = entry.file_type().await?.is_dir();
-        if is_dir && entry.path().join("journal.sqlite").exists() {
+        if is_dir
+            && (entry.path().join("journal.sqlite").exists()
+                || entry.path().join("journal-v2.sqlite").exists())
+        {
             let context = crate::storage::LazyDisk::context(&entry.path())?;
             retired_grants.push(crate::auth::digest(text(&context, "grant")));
         }
