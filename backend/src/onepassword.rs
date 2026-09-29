@@ -86,7 +86,7 @@ pub async fn save(s: &Service, input: &Value, existing: Option<&str>) -> Result<
     s.store
         .transaction(move |db| {
             if updating && db.get(KIND, &account_id)?.is_none() {
-                return Err(Error::new(404, "1Password account not found."));
+                return Err(Error::not_found("1Password account not found."));
             }
             for agent in record["agentIds"].as_array().unwrap() {
                 if db.get("agents", agent.as_str().unwrap())?.is_none() {
@@ -160,7 +160,7 @@ pub async fn routes(s: &Service, input: &Input) -> Result<Value> {
                 "ok": true
             }))
         }
-        _ => Err(Error::new(404, "Not found")),
+        _ => Err(Error::not_found("Not found")),
     }
 }
 
@@ -224,9 +224,9 @@ async fn grant(s: &Service, bearer: &str, account_id: &str) -> Result<Value> {
             let account = db
                 .get(KIND, &account_id)?
                 .filter(|a| permitted(a, text(&run["snapshot"]["agent"], "id")))
-                .ok_or_else(|| Error::new(403, "This 1Password account is not authorized."))?;
+                .ok_or_else(|| Error::forbidden("This 1Password account is not authorized."))?;
             db.kv(&format!("mcp-secret:{}", secret_key(text(&account, "id"))))?
-                .ok_or_else(|| Error::new(403, "This 1Password account is not authorized."))
+                .ok_or_else(|| Error::forbidden("This 1Password account is not authorized."))
         })
         .await?;
     s.vault.decrypt(&key, &encrypted)
@@ -308,8 +308,7 @@ async fn call_with_binary(s: &Service, bearer: &str, input: &Value, binary: &str
     let output = execute_with_binary(text(&credential, "token"), &args, binary).await?;
     let current = grant(s, bearer, account_id).await?;
     if current != credential {
-        return Err(Error::new(
-            403,
+        return Err(Error::forbidden(
             "1Password token changed. Retry the operation.",
         ));
     }
@@ -319,7 +318,7 @@ async fn call_with_binary(s: &Service, bearer: &str, input: &Value, binary: &str
         }))
     } else {
         let value: Value = serde_json::from_str(&output)
-            .map_err(|_| Error::new(502, "Invalid 1Password response."))?;
+            .map_err(|_| Error::bad_gateway("Invalid 1Password response."))?;
         if input["operation"] == "fields" {
             Ok(field_references(&value))
         } else {
@@ -366,14 +365,12 @@ async fn execute_with_binary(token: &str, args: &[String], binary: &str) -> Resu
     )
     .await
     .map_err(|_| {
-        Error::new(
-            502,
+        Error::bad_gateway(
             "1Password is unavailable. Check the server CLI, token, and vault permissions.",
         )
     })?;
     if !output.success {
-        return Err(Error::new(
-            502,
+        return Err(Error::bad_gateway(
             "1Password request failed. Check the token, vault permissions, reference, \
                 and service account limits.",
         ));

@@ -119,7 +119,7 @@ async fn generate(session: &mut Session, cwd: &std::path::Path, input: Value) ->
                     .is_some_and(|efforts| efforts.iter().any(|e| e["reasoningEffort"] == "xhigh"))
         })
     }) {
-        return Err(Error::new(503, "The title model is unavailable."));
+        return Err(Error::unavailable("The title model is unavailable."));
     }
     let current_title = input["currentTitle"].clone();
     let mut messages = input["messages"].as_array().cloned().unwrap_or_default();
@@ -193,7 +193,7 @@ async fn complete(
         exchange(session, cwd, input, summary),
     )
     .await
-    .unwrap_or_else(|_| Err(Error::new(504, "Title generation timed out.")))
+    .unwrap_or_else(|_| Err(Error::gateway_timeout("Title generation timed out.")))
 }
 
 async fn exchange(

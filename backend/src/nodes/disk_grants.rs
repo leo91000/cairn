@@ -24,8 +24,7 @@ pub async fn new_disk(s: &Service, run: &Value, node: &str) -> Result<String> {
 
 pub async fn issue(s: &Service, run: &Value, node: &str, backup: &Value) -> Result<String> {
     if backup["destination"] != "s3" {
-        return Err(Error::new(
-            409,
+        return Err(Error::conflict(
             "On-demand disks require a verified S3 recovery point.",
         ));
     }
@@ -64,7 +63,7 @@ pub async fn authorize(s: &Service, credential: &str) -> Result<Option<Value>> {
         || (run["status"] == "running" && !run["cancelRequestedAt"].is_null())
         || !crate::service::allowed(&crate::service::policy(&agent)["nodes"], node)
     {
-        return Err(Error::new(403, "Disk ownership or authorization changed."));
+        return Err(Error::forbidden("Disk ownership or authorization changed."));
     }
     Ok(Some(grant))
 }
@@ -85,13 +84,12 @@ async fn update(s: &Service, grant_id: &str, backup: &Value, acknowledged: bool)
         .transaction(move |db| {
             let mut grant = db
                 .get("node-disk-grants", &grant_id)?
-                .ok_or_else(|| Error::new(403, "Disk read grant missing."))?;
+                .ok_or_else(|| Error::forbidden("Disk read grant missing."))?;
             if grant["runId"] != backup["runId"]
                 || grant["nodeId"].as_str().unwrap_or(super::LOCAL_NODE_ID)
                     != backup["nodeId"].as_str().unwrap_or(super::LOCAL_NODE_ID)
             {
-                return Err(Error::new(
-                    403,
+                return Err(Error::forbidden(
                     "Publication belongs to another disk owner.",
                 ));
             }
@@ -107,8 +105,7 @@ async fn update(s: &Service, grant_id: &str, backup: &Value, acknowledged: bool)
                 if grant["published"] == backup["id"] {
                     return Ok(());
                 }
-                return Err(Error::new(
-                    409,
+                return Err(Error::conflict(
                     "Conflicting journal publication generation.",
                 ));
             }

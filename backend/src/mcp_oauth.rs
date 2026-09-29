@@ -25,7 +25,7 @@ async fn get(item: &Value, url: &str) -> Result<Value> {
     )
     .await?;
     if !(200..300).contains(&response.status) {
-        return Err(Error::new(502, "OAuth metadata is unavailable."));
+        return Err(Error::bad_gateway("OAuth metadata is unavailable."));
     }
     response.json()
 }
@@ -116,9 +116,9 @@ async fn discover(s: &Service, item: &Value) -> Result<Value> {
                 "{}/.well-known/oauth-protected-resource",
                 endpoint.origin().ascii_serialization()
             );
-            get(item, &metadata_url)
-                .await
-                .map_err(|_| Error::new(502, "OAuth protected resource metadata is unavailable."))?
+            get(item, &metadata_url).await.map_err(|_| {
+                Error::bad_gateway("OAuth protected resource metadata is unavailable.")
+            })?
         }
     };
     let resource_url = valid_url(item, text(&resource, "resource"))?;
@@ -331,20 +331,22 @@ async fn exchange(
     )
     .await?;
     if !(200..300).contains(&response.status) {
-        return Err(Error::new(401, "Sign in to connect this server."));
+        return Err(Error::unauthorized("Sign in to connect this server."));
     }
     let mut tokens = response.json()?;
     if text(&tokens, "access_token").is_empty()
         || !text(&tokens, "token_type").eq_ignore_ascii_case("bearer")
     {
-        return Err(Error::new(401, "OAuth returned invalid credentials."));
+        return Err(Error::unauthorized("OAuth returned invalid credentials."));
     }
     if tokens.get("expires_in").is_some()
         && !tokens["expires_in"]
             .as_f64()
             .is_some_and(|n| n.is_finite() && (0. ..=315360000.).contains(&n))
     {
-        return Err(Error::new(401, "OAuth returned an invalid token lifetime."));
+        return Err(Error::unauthorized(
+            "OAuth returned an invalid token lifetime.",
+        ));
     }
     if parameters
         .get("grant_type")
@@ -376,7 +378,7 @@ pub async fn refresh(s: &Service, item: &Value) -> Result<()> {
     let secrets = s.mcps.secrets(s, text(item, "id")).await?;
     let refresh = text(&secrets["tokens"], "refresh_token");
     if refresh.is_empty() {
-        return Err(Error::new(401, "Sign in to connect this server."));
+        return Err(Error::unauthorized("Sign in to connect this server."));
     }
     let discovery = if secrets["discovery"].is_object() {
         secrets["discovery"].clone()

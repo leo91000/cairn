@@ -81,7 +81,7 @@ impl Chat {
         self.events
             .send(value)
             .await
-            .map_err(|_| Error::new(503, "Conversation output stopped."))
+            .map_err(|_| Error::unavailable("Conversation output stopped."))
     }
 
     async fn acknowledge(&mut self, id: &str) -> Result<()> {
@@ -250,8 +250,7 @@ impl Chat {
                     .entry(text(&params, "itemId").to_owned())
                     .or_default();
                 if value.len() + text(&params, "delta").len() > 5_000_000 {
-                    return Err(Error::new(
-                        502,
+                    return Err(Error::bad_gateway(
                         "Conversation output exceeded the supported limit.",
                     ));
                 }
@@ -280,7 +279,7 @@ impl Chat {
         loop {
             tokio::select! {
                 _ = self.cancel.cancelled() => {
-                    return Err(Error::new(409, "Conversation stopped."));
+                    return Err(Error::conflict("Conversation stopped."));
                 }
                 result = &mut request => return result,
                 incoming = self.session.incoming.recv() => {
@@ -350,7 +349,9 @@ impl Chat {
             .await?;
         self.thread = text(&result["thread"], "id").to_owned();
         if self.thread.is_empty() {
-            return Err(Error::new(502, "Codex returned an invalid conversation."));
+            return Err(Error::bad_gateway(
+                "Codex returned an invalid conversation.",
+            ));
         }
         self.emit(json!({
             "type": "chat.question.closed"
@@ -382,15 +383,14 @@ impl Chat {
                 }
                 let page = self.request("thread/turns/list", params).await?;
                 turns.extend(page["data"].as_array().cloned().ok_or_else(|| {
-                    Error::new(502, "Codex returned invalid conversation history.")
+                    Error::bad_gateway("Codex returned invalid conversation history.")
                 })?);
                 cursor = page["nextCursor"].clone();
                 if cursor.is_null() {
                     break;
                 }
                 if !cursors.insert(cursor.to_string()) || cursors.len() > 1000 {
-                    return Err(Error::new(
-                        502,
+                    return Err(Error::bad_gateway(
                         "Codex returned invalid conversation pagination.",
                     ));
                 }
@@ -418,15 +418,15 @@ impl Chat {
                         }),
                     )
                     .await?;
-                let entries = page["data"]
-                    .as_array()
-                    .ok_or_else(|| Error::new(502, "Codex returned invalid conversation items."))?;
+                let entries = page["data"].as_array().ok_or_else(|| {
+                    Error::bad_gateway("Codex returned invalid conversation items.")
+                })?;
                 for entry in entries {
                     let turn_id = entry["turnId"]
                         .as_str()
                         .filter(|id| !id.is_empty())
                         .ok_or_else(|| {
-                            Error::new(502, "Codex returned an invalid conversation turn.")
+                            Error::bad_gateway("Codex returned an invalid conversation turn.")
                         })?;
                     let index = if let Some(index) = indices.get(turn_id) {
                         *index
@@ -450,7 +450,7 @@ impl Chat {
                     previous_item_turn = Some(index);
                     let item = &entry["item"];
                     let items = turns[index]["items"].as_array_mut().ok_or_else(|| {
-                        Error::new(502, "Codex returned invalid conversation history.")
+                        Error::bad_gateway("Codex returned invalid conversation history.")
                     })?;
                     match text(item, "type") {
                         "userMessage" => items.push(json!({
@@ -471,15 +471,13 @@ impl Chat {
                     break;
                 }
                 if !cursors.insert(cursor.to_string()) || cursors.len() > 100_000 {
-                    return Err(Error::new(
-                        502,
+                    return Err(Error::bad_gateway(
                         "Codex returned invalid conversation item pagination.",
                     ));
                 }
             }
         } else if resume && turns.is_empty() {
-            return Err(Error::new(
-                502,
+            return Err(Error::bad_gateway(
                 "Update Codex to resume conversations with paginated history.",
             ));
         }
@@ -554,7 +552,7 @@ impl Chat {
         while self.completed.is_none() {
             tokio::select! {
                 _ = self.cancel.cancelled() => {
-                    return Err(Error::new(409, "Conversation stopped."));
+                    return Err(Error::conflict("Conversation stopped."));
                 }
                 incoming = self.session.incoming.recv() => {
                     let Some(incoming) = incoming else {
@@ -576,7 +574,7 @@ impl Chat {
                 ))
             }))
             .await?;
-            return Err(Error::new(409, "Conversation interrupted."));
+            return Err(Error::conflict("Conversation interrupted."));
         }
         self.finish(plan).await
     }
@@ -673,8 +671,7 @@ pub async fn run(
     let mut auth = crate::accounts::codex::Client::new(home);
     if home.join("leo-managed-auth").exists() && auth.is_none() {
         session.close().await;
-        return Err(Error::new(
-            503,
+        return Err(Error::unavailable(
             "Account authentication service is unavailable.",
         ));
     }

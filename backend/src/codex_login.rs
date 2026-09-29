@@ -43,10 +43,10 @@ pub(crate) async fn run(
         loop {
             tokio::select! {
                 _ = stop.cancelled() => return Err(cancelled()),
-                _ = &mut deadline => return Err(Error::new(408, "Sign-in expired. Try again to get a new code.")),
+                _ = &mut deadline => return Err(Error::timeout("Sign-in expired. Try again to get a new code.")),
                 incoming = session.incoming.recv() => {
                     let Some(incoming) = incoming else {
-                        return Err(Error::new(503, "Codex disconnected during sign-in. Try again."));
+                        return Err(Error::unavailable("Codex disconnected during sign-in. Try again."));
                     };
                     if let Some(id) = incoming.id {
                         session.rpc.reject(id).await?;
@@ -107,8 +107,7 @@ fn challenge(value: &Value) -> Result<(&str, &str, &str)> {
         || !code.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
         || !trusted_url
     {
-        return Err(Error::new(
-            502,
+        return Err(Error::bad_gateway(
             "Codex did not provide a valid sign-in code. Update Codex and try again.",
         ));
     }

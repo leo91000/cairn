@@ -35,7 +35,7 @@ pub async fn capture(
         None
     };
     if !crate::storage::runtime::exists(&disk) {
-        return Err(Error::new(409, "Conversation has no S3-backed journal."));
+        return Err(Error::conflict("Conversation has no S3-backed journal."));
     }
     let snapshots = state.join("snapshots");
     private_dir(&snapshots).await?;

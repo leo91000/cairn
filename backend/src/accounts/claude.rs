@@ -36,10 +36,7 @@ pub fn account_home(config: &Config, id: &str) -> PathBuf {
 }
 
 fn unavailable() -> Error {
-    Error::new(
-        503,
-        "Claude authentication is unavailable. Check the account in Connections.",
-    )
+    Error::unavailable("Claude authentication is unavailable. Check the account in Connections.")
 }
 
 async fn read_private(path: &Path) -> Result<Option<Vec<u8>>> {
@@ -178,12 +175,9 @@ async fn status(config: &Config, home: &Path) -> Result<Value> {
         32000,
     )
     .await
-    .map_err(|_| Error::new(503, "Claude Code is not installed on the server."))?;
+    .map_err(|_| Error::unavailable("Claude Code is not installed on the server."))?;
     let value: Value = serde_json::from_str(&output.stdout).map_err(|_| {
-        Error::new(
-            502,
-            "Update Claude Code: authentication status was not valid JSON.",
-        )
+        Error::bad_gateway("Update Claude Code: authentication status was not valid JSON.")
     })?;
     Ok(json!({
         "connected": output.success && value["loggedIn"]==true,
@@ -198,8 +192,7 @@ fn identity(email: &str) -> String {
 
 fn usage_windows(value: &Value) -> Result<Vec<Value>> {
     if value["rate_limits_available"] != true {
-        return Err(Error::new(
-            502,
+        return Err(Error::bad_gateway(
             "Usage limits are unavailable for this Claude account.",
         ));
     }
@@ -268,8 +261,7 @@ fn usage_windows(value: &Value) -> Result<Vec<Value>> {
         }
     }
     if windows.is_empty() {
-        return Err(Error::new(
-            502,
+        return Err(Error::bad_gateway(
             "Claude Code has not returned usage limits yet.",
         ));
     }
@@ -480,8 +472,7 @@ impl Driver for Claude {
         );
         cmd.stdin(std::process::Stdio::piped());
         let mut child = cmd.spawn().map_err(|_| {
-            Error::new(
-                503,
+            Error::unavailable(
                 "Claude Code is not installed. Install the supported CLI on the server.",
             )
         })?;
@@ -497,9 +488,9 @@ impl Driver for Claude {
         let result: Result<bool> = async {
             loop {
                 tokio::select! {
-                    _ = login.stop.cancelled() => return Err(Error::new(409, "Sign-in cancelled.")),
-                    _ = s.shutdown.cancelled() => return Err(Error::new(409, "Sign-in cancelled.")),
-                    _ = &mut deadline => return Err(Error::new(408, "Sign-in expired. Start again to get a new link.")),
+                    _ = login.stop.cancelled() => return Err(Error::conflict("Sign-in cancelled.")),
+                    _ = s.shutdown.cancelled() => return Err(Error::conflict("Sign-in cancelled.")),
+                    _ = &mut deadline => return Err(Error::timeout("Sign-in expired. Start again to get a new link.")),
                     code = login.code() => if let Some(code) = code {
                         stdin.write_all(code.as_bytes()).await?;
                         stdin.write_all(b"\n").await?;
@@ -519,9 +510,7 @@ impl Driver for Claude {
                     },
                 }
                 if output.len() > 64_000 {
-                    return Err(Error::new(
-                        502,
-                        "Claude Code sign-in returned too much output.",
+                    return Err(Error::bad_gateway("Claude Code sign-in returned too much output.",
                     ));
                 }
                 if let Some(url) = login_url(&output) {
@@ -586,7 +575,7 @@ impl Driver for Claude {
     async fn refresh(&self, s: &Service, id: &str, _models: &[String]) -> Result<()> {
         let current = status(&s.config, &account_home(&s.config, id)).await?;
         if current["connected"] != true {
-            return Err(Error::new(409, "Reconnect this Claude account."));
+            return Err(Error::conflict("Reconnect this Claude account."));
         }
         let mut account = s.accounts.get(s, id).await?;
         let usage = read_usage(s, id, &account["usage"]).await;

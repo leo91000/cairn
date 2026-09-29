@@ -22,19 +22,17 @@ async fn github(s: &Service, endpoint: &str) -> Result<Value> {
     )
     .await
     .map_err(|_| {
-        Error::new(
-            502,
+        Error::bad_gateway(
             "GitHub is unavailable. Check the GitHub connection in Connections and retry.",
         )
     })?;
     if !output.success {
-        return Err(Error::new(
-            502,
+        return Err(Error::bad_gateway(
             "Could not access GitHub. Check the GitHub connection and repository \
                 permissions in Connections, then retry.",
         ));
     }
-    serde_json::from_str(&output.stdout).map_err(|_| Error::new(502, "Invalid GitHub response."))
+    serde_json::from_str(&output.stdout).map_err(|_| Error::bad_gateway("Invalid GitHub response."))
 }
 
 fn repository(raw: &str) -> Result<&str> {
@@ -82,7 +80,7 @@ pub async fn list(s: &Service, page: i64) -> Result<Value> {
     let values = github(s, &format!("user/repos?per_page=100&page={page}&sort=pushed&direction=desc&affiliation=owner,collaborator,organization_member")).await?;
     let values = values
         .as_array()
-        .ok_or_else(|| Error::new(502, "Invalid GitHub repository list."))?;
+        .ok_or_else(|| Error::bad_gateway("Invalid GitHub repository list."))?;
     let projects = s.store.list("projects").await?;
     let repos = values
         .iter()

@@ -18,7 +18,7 @@ pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Resu
     let manifest = super::publication::manifest(s, backup).await?;
     let record = s.get("nodes", node).await?;
     if record["capabilities"]["fuse"] != true {
-        return Err(Error::new(409, "Destination has no FUSE device."));
+        return Err(Error::conflict("Destination has no FUSE device."));
     }
     let policy = crate::storage::policy::Policy::for_node(&record["storage"])?;
     let credential = super::disk_grants::issue(s, run, node, backup).await?;
@@ -41,10 +41,9 @@ pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Resu
         .timeout(Duration::from_secs(120))
         .send()
         .await
-        .map_err(|_| Error::new(503, "VM restore connection interrupted."))?;
+        .map_err(|_| Error::unavailable("VM restore connection interrupted."))?;
     if !response.status().is_success() {
-        return Err(Error::new(
-            503,
+        return Err(Error::unavailable(
             "Destination could not restore this VM runtime and disk.",
         ));
     }
@@ -56,7 +55,7 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
     if request.method() != "GET"
         && !(request.method() == "POST" && request.uri().path().ends_with("/renew"))
     {
-        return Err(Error::new(405, "Method not allowed."));
+        return Err(Error::method_not_allowed("Method not allowed."));
     }
     let credential = request
         .headers()
@@ -68,7 +67,7 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
         .store
         .get("node-disk-grants", &crate::auth::digest(credential))
         .await?
-        .ok_or_else(|| Error::new(401, "Disk grant expired."))?;
+        .ok_or_else(|| Error::unauthorized("Disk grant expired."))?;
     let _read = s.node_backup_operation.read(text(&grant, "runId")).await;
     if let Some(grant) = super::disk_grants::authorize(s, credential).await? {
         if request.method() == "POST" {
@@ -104,9 +103,9 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
                     .into_response());
             }
         }
-        return Err(Error::new(403, "Block outside disk scope."));
+        return Err(Error::forbidden("Block outside disk scope."));
     }
-    Err(Error::new(401, "Disk grant expired."))
+    Err(Error::unauthorized("Disk grant expired."))
 }
 
 pub async fn controller(state: &Path, run: &str, value: Value) -> Result<Value> {
@@ -119,8 +118,7 @@ pub async fn controller(state: &Path, run: &str, value: Value) -> Result<Value> 
     }
     let image = state.join("images").join(runtime);
     if !image.join("root.ext4").exists() || !image.join("vmlinux").exists() {
-        return Err(Error::new(
-            409,
+        return Err(Error::conflict(
             "Required VM runtime is not installed on this node.",
         ));
     }
@@ -128,8 +126,7 @@ pub async fn controller(state: &Path, run: &str, value: Value) -> Result<Value> 
     crate::skills::private_dir(&directory).await?;
     let _lock = crate::file_lock::exclusive(&directory.join("lock"), "VM disk is active.")?;
     if directory.join("data.ext4").exists() {
-        return Err(Error::new(
-            409,
+        return Err(Error::conflict(
             "Destination still has a legacy local disk.",
         ));
     }
@@ -153,7 +150,7 @@ pub async fn controller(state: &Path, run: &str, value: Value) -> Result<Value> 
         .await?;
     }
     if !Path::new("/dev/fuse").exists() {
-        return Err(Error::new(409, "Node has no FUSE device."));
+        return Err(Error::conflict("Node has no FUSE device."));
     }
     let context =
         json!({"master": origin.as_str(),"grant": value["grant"],"policy": value["policy"]});

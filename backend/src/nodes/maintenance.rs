@@ -16,8 +16,7 @@ use std::time::Duration;
 pub fn release() -> Result<Value> {
     let image = std::env::var("LEO_NODE_IMAGE").unwrap_or_default();
     let (repository, digest) = image.split_once("@sha256:").ok_or_else(|| {
-        Error::new(
-            503,
+        Error::unavailable(
             "The master must configure LEO_NODE_IMAGE with its immutable deployed image digest.",
         )
     })?;
@@ -29,7 +28,7 @@ pub fn release() -> Result<Value> {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"/:._-".contains(&c))
         || !super::snapshots::valid_hash(digest)
     {
-        return Err(Error::new(503, "Invalid master node image digest."));
+        return Err(Error::unavailable("Invalid master node image digest."));
     }
     Ok(json!({
         "image": image,
@@ -41,7 +40,7 @@ pub fn release() -> Result<Value> {
 
 pub async fn downloads(State(app): State<App>, request: Request) -> Result<Response> {
     if request.method() != "GET" {
-        return Err(Error::new(405, "Method not allowed."));
+        return Err(Error::method_not_allowed("Method not allowed."));
     }
     let (kind, body) = match request.uri().path() {
         "/internal/nodes/release" => {
@@ -75,7 +74,7 @@ pub async fn downloads(State(app): State<App>, request: Request) -> Result<Respo
                     .replace("__LEO_MASTER_ORIGIN__", &quoted),
             )
         }
-        _ => return Err(Error::new(404, "Unknown node download.")),
+        _ => return Err(Error::not_found("Unknown node download.")),
     };
     Response::builder()
         .header("content-type", kind)
@@ -100,7 +99,7 @@ pub async fn request(s: &Service, node: &str, input: &Value) -> Result<Value> {
                 .transaction(move |db| {
                     let mut record = db
                         .get("nodes", &node)?
-                        .ok_or_else(|| Error::new(404, "Node removed."))?;
+                        .ok_or_else(|| Error::not_found("Node removed."))?;
                     record["maintenance"] = Value::Null;
                     record["maintenanceGeneration"] = Value::Null;
                     record["imageDigest"] = image.into();
@@ -129,7 +128,7 @@ pub async fn request(s: &Service, node: &str, input: &Value) -> Result<Value> {
                 .transaction(move |db| {
                     let mut record = db
                         .get("nodes", &id)?
-                        .ok_or_else(|| Error::new(404, "Node removed."))?;
+                        .ok_or_else(|| Error::not_found("Node removed."))?;
                     record["maintenance"] = "draining".into();
                     record["maintenanceGeneration"] = started_generation.into();
                     record["maintenanceStartedAt"] = crate::config::now().into();
@@ -219,7 +218,9 @@ async fn drain(s: &Service, node: &str) -> Result<()> {
             .send()
             .await;
         if stopped.is_err() || stopped.is_ok_and(|r| !r.status().is_success()) {
-            failure = Some(Error::new(503, "Node did not confirm maintenance pause."));
+            failure = Some(Error::unavailable(
+                "Node did not confirm maintenance pause.",
+            ));
             continue;
         }
         super::placement::release(s, text(&attempt, "id")).await?;

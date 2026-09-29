@@ -147,7 +147,7 @@ impl Reader {
             let disk = state.join("disks").join(run);
             let stopped = match crate::file_lock::exclusive(&disk.join("lock"), "Disk active.") {
                 Ok(lock) => Some(lock),
-                Err(error) if error.status == 409 => None,
+                Err(error) if error.is_conflict() => None,
                 Err(error) => return Err(error),
             };
             let volume = crate::storage::runtime::load(&disk).await?;
@@ -224,7 +224,7 @@ pub async fn served_batch(
             .unwrap()
             .iter()
             .find(|block| block["hash"] == *hash)
-            .ok_or_else(|| Error::new(404, "Unknown backup block."))?;
+            .ok_or_else(|| Error::not_found("Unknown backup block."))?;
         length += block["size"].as_u64().unwrap();
     }
     let stream = futures_util::stream::try_unfold(
@@ -254,7 +254,7 @@ async fn block_where(
         .into_iter()
         .flatten()
         .find(|b| b["hash"] == hash && b["offset"].as_u64().is_some_and(&available))
-        .ok_or_else(|| Error::new(404, "Unknown backup block."))?;
+        .ok_or_else(|| Error::not_found("Unknown backup block."))?;
     let size = block["size"]
         .as_u64()
         .filter(|s| *s <= BLOCK)
@@ -269,7 +269,7 @@ async fn block_where(
     let mut bytes = vec![0; size as usize];
     file.read_exact(&mut bytes).await?;
     if hex::encode(Sha256::digest(&bytes)) != hash {
-        return Err(Error::new(409, "Backup data changed."));
+        return Err(Error::conflict("Backup data changed."));
     }
     Ok(bytes)
 }
@@ -281,7 +281,7 @@ where
 {
     validate(manifest)?;
     if target.exists() {
-        return Err(Error::new(409, "Restore cannot replace an existing disk."));
+        return Err(Error::conflict("Restore cannot replace an existing disk."));
     }
     let directory = target
         .parent()
@@ -379,14 +379,14 @@ impl Fetch {
                 .timeout(std::time::Duration::from_secs(120))
                 .send()
                 .await
-                .map_err(|_| Error::new(503, "Backup block transfer interrupted."))?;
+                .map_err(|_| Error::unavailable("Backup block transfer interrupted."))?;
             // Old relays translate unsupported operations into 503. Retry the
             // existing endpoint once; actual unavailability still fails there.
             if matches!(response.status().as_u16(), 404 | 405 | 503) {
                 self.legacy = true;
             } else {
                 if !response.status().is_success() {
-                    return Err(Error::new(503, "Backup block batch unavailable."));
+                    return Err(Error::unavailable("Backup block batch unavailable."));
                 }
                 if response
                     .content_length()
@@ -405,13 +405,13 @@ impl Fetch {
             stream
                 .read_exact(&mut bytes)
                 .await
-                .map_err(|_| Error::new(503, "Backup block batch interrupted."))?;
+                .map_err(|_| Error::unavailable("Backup block batch interrupted."))?;
             self.remaining -= 1;
             if self.remaining == 0 {
                 if stream
                     .read(&mut [0])
                     .await
-                    .map_err(|_| Error::new(503, "Backup block batch interrupted."))?
+                    .map_err(|_| Error::unavailable("Backup block batch interrupted."))?
                     != 0
                 {
                     return Err(Error::bad("Backup block batch exceeds its expected size."));
@@ -427,9 +427,9 @@ impl Fetch {
                 .timeout(std::time::Duration::from_secs(120))
                 .send()
                 .await
-                .map_err(|_| Error::new(503, "Backup block transfer interrupted."))?;
+                .map_err(|_| Error::unavailable("Backup block transfer interrupted."))?;
             if !response.status().is_success() {
-                return Err(Error::new(503, "Backup block unavailable."));
+                return Err(Error::unavailable("Backup block unavailable."));
             }
             response_block(response).await?
         };

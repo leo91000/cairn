@@ -120,9 +120,9 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             let _ = reply.send(f(&mut Db(connection)));
         }))
         .await
-        .map_err(|_| Error::new(503, "Database is closing."))?;
+        .map_err(|_| Error::unavailable("Database is closing."))?;
         rx.await
-            .map_err(|_| Error::new(503, "Database operation stopped."))?
+            .map_err(|_| Error::unavailable("Database operation stopped."))?
     }
 
     pub async fn read<T: Send + 'static>(
@@ -632,7 +632,7 @@ WHERE e.run_id=? AND e.id<? AND (
             .prepare_cached("SELECT 1 FROM runs WHERE id=?")?
             .exists([id])?;
         if !exists {
-            return Err(Error::new(404, "Run not found."));
+            return Err(Error::not_found("Run not found."));
         }
         Ok(())
     }

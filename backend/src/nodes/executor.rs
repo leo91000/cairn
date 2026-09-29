@@ -35,15 +35,13 @@ impl Executor {
         let mut plan = descriptor["plan"].clone();
         let data = PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| "/data".into()));
         if descriptor["dataRoot"] != data.to_string_lossy().as_ref() {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "Master and node DATA_DIR must match for portable VM paths.",
             ));
         }
         crate::validation::uuid(text(&plan, "runId"))?;
         if plan["id"] != attempt || plan.get("claudeState").is_some() {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "Remote execution requires managed provider authentication.",
             ));
         }
@@ -91,8 +89,7 @@ impl Executor {
             .await
             .map_err(Error::internal)?;
         if !lease.status().is_success() {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "Local controller rejected execution lease.",
             ));
         }

@@ -45,13 +45,10 @@ async fn validate_session_environment(directory: &Path, session: &str) -> Result
                 break;
             }
             if buffer[..count].contains(&0) {
-                return Err(Error::new(
-                    502,
-                    format!(
-                        "{SHELL_ENVIRONMENT_ERROR} Affected file: {}",
-                        path.display()
-                    ),
-                ));
+                return Err(Error::bad_gateway(format!(
+                    "{SHELL_ENVIRONMENT_ERROR} Affected file: {}",
+                    path.display()
+                )));
             }
         }
     }
@@ -86,7 +83,7 @@ async fn emit(events: &mpsc::Sender<Value>, value: Value) -> Result<()> {
     events
         .send(value)
         .await
-        .map_err(|_| Error::new(503, "Claude output stopped."))
+        .map_err(|_| Error::unavailable("Claude output stopped."))
 }
 
 async fn input(message: &Value, directory: &Path) -> Result<Value> {
@@ -355,10 +352,7 @@ pub async fn run(
     }
     cmd.stdin(std::process::Stdio::piped()).process_group(0);
     let mut child = cmd.spawn().map_err(|_| {
-        Error::new(
-            503,
-            "Unable to start Claude Code. Check the server installation.",
-        )
+        Error::unavailable("Unable to start Claude Code. Check the server installation.")
     })?;
     let pid = child.id().unwrap();
     let mut stdin = child.stdin.take().unwrap();
@@ -399,11 +393,11 @@ pub async fn run(
         loop {
             // read_until is cancellation safe. Bound allocation using fill_buf below.
             tokio::select! {
-                _ = cancel.cancelled() => return Err(Error::new(409,"Claude execution stopped.")),
+                _ = cancel.cancelled() => return Err(Error::conflict("Claude execution stopped.")),
                 _ = auth_timer.tick(),
                 if auth.is_some() => {
                     tokio::select! {
-                        _ = cancel.cancelled()=>return Err(Error::new(409,"Claude execution stopped.")),
+                        _ = cancel.cancelled()=>return Err(Error::conflict("Claude execution stopped.")),
                         result = auth.as_mut().unwrap().sync()=>result?,
                     }
                 },
@@ -462,18 +456,14 @@ pub async fn run(
                 bytes = stdout.fill_buf() => {
                     let bytes = bytes?;
                     if bytes.is_empty() {
-                        return Err(Error::new(
-                            502,
-                            "Claude Code disconnected before completing its response. Resume \
+                        return Err(Error::bad_gateway("Claude Code disconnected before completing its response. Resume \
                                     to continue.",
                         ));
                     }
                     let end = bytes.iter().position(|b| *b == b'\n').map(|i| i + 1);
                     let count = end.unwrap_or(bytes.len());
                     if buffer.len() + count > 32_000_000 {
-                        return Err(Error::new(
-                            502,
-                            "Claude response exceeded the supported limit.",
+                        return Err(Error::bad_gateway("Claude response exceeded the supported limit.",
                         ));
                     }
                     buffer.extend_from_slice(&bytes[..count]);
@@ -482,7 +472,7 @@ pub async fn run(
                         continue;
                     }
                     let value: Value = serde_json::from_slice(&buffer)
-                        .map_err(|_| Error::new(502, "Claude Code returned an invalid streaming event."))?;
+                        .map_err(|_| Error::bad_gateway("Claude Code returned an invalid streaming event."))?;
                     buffer.clear();
                     match text(&value, "type") {
                         "system" if value["subtype"] == "init" => {
@@ -551,7 +541,7 @@ pub async fn run(
                                     }
                                     emit(&events, json!({"type": "item.completed","item": item})).await?;
                                     if environment_failed {
-                                        return Err(Error::new(502, SHELL_ENVIRONMENT_ERROR));
+                                        return Err(Error::bad_gateway(SHELL_ENVIRONMENT_ERROR));
                                     }
                                 }
                             }
@@ -645,9 +635,7 @@ pub async fn run(
                         }
                         "result" => {
                             if value["is_error"] == true || value["subtype"] != "success" {
-                                return Err(Error::new(
-                                    502,
-                                    if text(&value, "result").is_empty() {
+                                return Err(Error::bad_gateway(if text(&value, "result").is_empty() {
                                         "Claude Code could not complete this turn. Check sign-in, model access, or usage \
                                             limits."
                                     } else {

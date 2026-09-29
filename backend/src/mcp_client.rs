@@ -46,7 +46,7 @@ impl Client {
             secrets = s.mcps.secrets(s, text(item, "id")).await?;
         }
         let first = Self::open(s, item, &secrets).await;
-        if first.as_ref().is_err_and(|error| error.status == 401)
+        if first.as_ref().is_err_and(|error| error.is_unauthorized())
             && item["auth"] == "oauth"
             && !text(&secrets["tokens"], "refresh_token").is_empty()
         {
@@ -71,7 +71,7 @@ impl Client {
                     .is_some_and(|v| v.iter().any(|v| v == MODERN))
                 {
                     client.close().await;
-                    return Err(Error::new(502, "No supported MCP protocol version."));
+                    return Err(Error::bad_gateway("No supported MCP protocol version."));
                 }
                 client.capabilities = discovery["capabilities"].clone();
             }
@@ -104,7 +104,7 @@ impl Client {
                     .await?;
                 let version = text(&result, "protocolVersion");
                 if !["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"].contains(&version) {
-                    return Err(Error::new(502, "No supported MCP protocol version."));
+                    return Err(Error::bad_gateway("No supported MCP protocol version."));
                 }
                 client.protocol = version.into();
                 client.capabilities = result["capabilities"].clone();
@@ -220,7 +220,7 @@ impl Client {
                 )
                 .await?;
                 if response.status == 401 {
-                    return Err(Error::new(401, "Sign in to connect this server."));
+                    return Err(Error::unauthorized("Sign in to connect this server."));
                 }
                 if response.status == 400 || response.status == 405 {
                     return Err(Error::new(
@@ -229,7 +229,7 @@ impl Client {
                     ));
                 }
                 if !(200..300).contains(&response.status) {
-                    return Err(Error::new(502, "MCP request failed."));
+                    return Err(Error::bad_gateway("MCP request failed."));
                 }
                 if !modern
                     && let Some(value) = response
@@ -249,7 +249,7 @@ impl Client {
                     response.json()?
                 };
                 if result["id"] != id {
-                    return Err(Error::new(502, "MCP response identifier mismatch."));
+                    return Err(Error::bad_gateway("MCP response identifier mismatch."));
                 }
                 if !result["error"].is_null() {
                     return Err(Error::new(
@@ -288,7 +288,7 @@ impl Client {
                 )
                 .await?;
                 if !(200..300).contains(&response.status) {
-                    return Err(Error::new(502, "MCP initialization failed."));
+                    return Err(Error::bad_gateway("MCP initialization failed."));
                 }
                 Ok(())
             }
@@ -311,15 +311,12 @@ impl Client {
                 })
             };
             let page = self.request("tools/list", params).await?;
-            tools.extend(
-                page["tools"].as_array().cloned().ok_or_else(|| {
-                    Error::new(502, "MCP server returned an invalid tool catalog.")
-                })?,
-            );
+            tools.extend(page["tools"].as_array().cloned().ok_or_else(|| {
+                Error::bad_gateway("MCP server returned an invalid tool catalog.")
+            })?);
             cursor = page["nextCursor"].clone();
             if tools.len() > 1000 || (!cursor.is_null() && !cursors.insert(cursor.to_string())) {
-                return Err(Error::new(
-                    502,
+                return Err(Error::bad_gateway(
                     "Tool catalog is too large or has an invalid cursor.",
                 ));
             }
@@ -373,7 +370,8 @@ fn headers(bearer: &str, version: &str, session: Option<&str>) -> Result<HeaderM
     if let Some(session) = session {
         headers.insert(
             "mcp-session-id",
-            HeaderValue::from_str(session).map_err(|_| Error::new(502, "Invalid MCP session."))?,
+            HeaderValue::from_str(session)
+                .map_err(|_| Error::bad_gateway("Invalid MCP session."))?,
         );
     }
     Ok(headers)
@@ -397,5 +395,5 @@ pub fn sse_result(bytes: &[u8], id: &Value) -> Result<Value> {
             return Ok(value);
         }
     }
-    Err(Error::new(502, "MCP stream ended without a response."))
+    Err(Error::bad_gateway("MCP stream ended without a response."))
 }

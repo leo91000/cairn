@@ -148,13 +148,12 @@ impl Service {
                     to_bytes(request.into_body(), MAX_FILE),
                 )
                 .await
-                .map_err(|_| Error::new(408, "Upload timed out."))?
-                .map_err(|_| Error::new(413, "Files must be 10 MB or smaller."))?;
+                .map_err(|_| Error::timeout("Upload timed out."))?
+                .map_err(|_| Error::too_large("Files must be 10 MB or smaller."))?;
                 let digest = hex::encode(Sha256::digest(&bytes));
                 if let Some(existing) = self.store.kv(&k).await? {
                     if existing["digest"] != digest || existing["name"] != name {
-                        return Err(Error::new(
-                            409,
+                        return Err(Error::conflict(
                             "This attachment identifier has already been used.",
                         ));
                     }
@@ -172,8 +171,7 @@ impl Service {
                     })
                     .await?;
                 if used + bytes.len() as u64 > 200 * 1024 * 1024 {
-                    return Err(Error::new(
-                        413,
+                    return Err(Error::too_large(
                         "This chat has reached its 200 MB attachment limit. Start a new chat.",
                     ));
                 }
@@ -249,7 +247,7 @@ impl Service {
                 );
                 Ok(response)
             }
-            _ => Err(Error::new(405, "Method not allowed.")),
+            _ => Err(Error::method_not_allowed("Method not allowed.")),
         }
     }
 

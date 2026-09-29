@@ -112,10 +112,7 @@ pub async fn enroll(origin: &str, directory: &Path) -> Result<()> {
         .open(&identity_path)
         .await
         .map_err(|_| {
-            Error::new(
-                409,
-                "Node identity already exists or its directory is not writable.",
-            )
+            Error::conflict("Node identity already exists or its directory is not writable.")
         })?;
     let result: Result<()> = async {
         let code = crate::process::read_bounded(tokio::io::stdin(), 256).await?;
@@ -137,7 +134,7 @@ pub async fn enroll(origin: &str, directory: &Path) -> Result<()> {
             }))
             .send()
             .await
-            .map_err(|_| Error::new(503, "Cannot reach the master."))?;
+            .map_err(|_| Error::unavailable("Cannot reach the master."))?;
         if !response.status().is_success() {
             return Err(Error::new(
                 response.status().as_u16(),
@@ -200,9 +197,9 @@ pub async fn connect(directory: &Path, stop: CancellationToken) -> Result<()> {
         let result = tokio::select! {
             result = heartbeat(&client, &origin, &identity, &stop) => result,
             result = &mut task => return match result {
-                Ok(Ok(())) => Err(Error::new(503, "Execution relay stopped.")),
+                Ok(Ok(())) => Err(Error::unavailable("Execution relay stopped.")),
                 Ok(Err(error)) => Err(error),
-                Err(_) => Err(Error::new(503, "Execution relay failed.")),
+                Err(_) => Err(Error::unavailable("Execution relay failed.")),
             }
         };
         relay_stop.cancel();
@@ -257,8 +254,7 @@ async fn heartbeat(
             tokio::select! { _ = stop.cancelled() => return Ok(()), value = request => value };
         match result {
             Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
-                return Err(Error::new(
-                    401,
+                return Err(Error::unauthorized(
                     "Node identity revoked. Register the node again.",
                 ));
             }

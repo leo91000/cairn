@@ -148,8 +148,7 @@ impl Notifications {
             .transaction(move |db| {
                 let key = format!("push-device:{id}");
                 if db.kv(&key)?.is_none() && db.keys("push-device:")?.len() >= 50 {
-                    return Err(Error::new(
-                        409,
+                    return Err(Error::conflict(
                         "Too many notification devices are registered.",
                     ));
                 }

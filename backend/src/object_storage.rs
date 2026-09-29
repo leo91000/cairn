@@ -153,15 +153,13 @@ impl Storage {
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
         {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "Configure a valid STORAGE_S3_BUCKET on the server.",
             ));
         }
         let endpoint = setting(&config, "ENDPOINT", "endpoint");
         if !endpoint.is_empty() && !endpoint.starts_with("https://") {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "STORAGE_S3_ENDPOINT must be an https:// URL.",
             ));
         }
@@ -210,16 +208,15 @@ impl Storage {
         }
         let output = tokio::time::timeout(Duration::from_secs(7200), command.output())
             .await
-            .map_err(|_| Error::new(503, "Object storage operation timed out; it will retry."))?
-            .map_err(|_| Error::new(503, "Unable to start the server's AWS CLI."))?;
+            .map_err(|_| Error::unavailable("Object storage operation timed out; it will retry."))?
+            .map_err(|_| Error::unavailable("Unable to start the server's AWS CLI."))?;
         if !output.status.success()
             && missing.is_some_and(|code| String::from_utf8_lossy(&output.stderr).contains(code))
         {
             return Ok(Value::Null);
         }
         if !output.status.success() {
-            return Err(Error::new(
-                503,
+            return Err(Error::unavailable(
                 "Object storage operation failed; local data is retained and the operation will retry.",
             ));
         }
@@ -227,7 +224,7 @@ impl Storage {
             return Ok(Value::Null);
         }
         serde_json::from_slice(&output.stdout)
-            .map_err(|_| Error::new(503, "Invalid response from object storage."))
+            .map_err(|_| Error::unavailable("Invalid response from object storage."))
     }
 
     pub async fn validate(&self) -> Result<()> {
@@ -367,7 +364,7 @@ impl Storage {
             .send()
             .await
             .map_err(|_| {
-                Error::new(503, "Recovery block upload failed; local data is retained.")
+                Error::unavailable("Recovery block upload failed; local data is retained.")
             })?;
         sample.finish(bytes.len());
         self.verify_bytes(key, &bytes).await
@@ -449,13 +446,13 @@ impl Storage {
                             .raw_response()
                             .is_some_and(|response| response.status().as_u16() == 404)
                     {
-                        Error::new(409, "Remote recovery block is missing.")
+                        Error::conflict("Remote recovery block is missing.")
                     } else if status.is_some_and(|status| (400..500).contains(&status) && !matches!(status, 408 | 429))
                         && !matches!(code, Some("RequestTimeout" | "RequestTimeoutException" | "SlowDown" | "Throttling"))
                     {
                         Error::new(424, "Recovery storage rejected the read; check its access and configuration.")
                     } else {
-                        Error::new(503, "Recovery storage unavailable; the read will retry.")
+                        Error::unavailable("Recovery storage unavailable; the read will retry.")
                     }
                 })?;
             if output
@@ -468,9 +465,7 @@ impl Storage {
             let mut bytes = Vec::with_capacity(capacity.min(limit) as usize);
             let mut body = output.body;
             while let Some(chunk) = body.try_next().await.map_err(|_| {
-                Error::new(
-                    503,
-                    "Recovery block transfer interrupted; the read will retry.",
+                Error::unavailable("Recovery block transfer interrupted; the read will retry.",
                 )
             })? {
                 if chunk.len() as u64 > limit.saturating_sub(bytes.len() as u64) {
@@ -482,9 +477,7 @@ impl Storage {
         })
         .await
         .map_err(|_| {
-            Error::new(
-                503,
-                "Recovery block transfer timed out; the read will retry.",
+            Error::unavailable("Recovery block transfer timed out; the read will retry.",
             )
         })??;
         sample.finish(bytes.len());
@@ -510,8 +503,7 @@ impl Storage {
                 .send()
                 .await
                 .map_err(|_| {
-                    Error::new(
-                        503,
+                    Error::unavailable(
                         "Cannot list obsolete disk object versions; cleanup will retry.",
                     )
                 })?;
@@ -554,14 +546,12 @@ impl Storage {
                     .send()
                     .await
                     .map_err(|_| {
-                        Error::new(
-                            503,
+                        Error::unavailable(
                             "Cannot delete obsolete disk object; cleanup will retry.",
                         )
                     })?;
                 if !result.errors().is_empty() {
-                    return Err(Error::new(
-                        503,
+                    return Err(Error::unavailable(
                         "Some obsolete disk versions could not be deleted; cleanup will retry.",
                     ));
                 }

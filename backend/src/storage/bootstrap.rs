@@ -41,7 +41,7 @@ pub async fn prepare(
         }
         let current = super::runtime::load(directory).await?.disk.size();
         if size < current {
-            return Err(Error::new(409, "A retained VM disk cannot be shrunk."));
+            return Err(Error::conflict("A retained VM disk cannot be shrunk."));
         }
         if size == current {
             return Ok(());
@@ -55,8 +55,7 @@ pub async fn prepare(
         super::runtime::materialize(directory, stop).await?;
     }
     if directory.join("data.ext4").exists() && !marker.exists() {
-        return Err(Error::new(
-            409,
+        return Err(Error::conflict(
             "This conversation still has a legacy local disk and cannot start with S3-backed storage.",
         ));
     }

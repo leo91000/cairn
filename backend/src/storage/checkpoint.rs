@@ -28,14 +28,13 @@ pub async fn capture(
     timing.next("control_lock");
     let guard = control.lock().await;
     if stop.is_cancelled() {
-        return Err(Error::new(409, "VM stopped during capture."));
+        return Err(Error::conflict("VM stopped during capture."));
     }
     let waiting = volume.inspect().await?["waitingFor"]
         .as_str()
         .map(str::to_owned);
     if waiting.as_deref() == Some("storage-unavailable") {
-        return Err(Error::new(
-            503,
+        return Err(Error::unavailable(
             "Waiting for storage before capturing the disk.",
         ));
     }
@@ -128,7 +127,7 @@ pub async fn capture(
     let indexed_at = std::time::Instant::now();
     let disk = volume.disk.clone();
     let mut manifest = tokio::select! {
-        _ = stop.cancelled() => return Err(Error::new(409, "Disk capture stopped.")),
+        _ = stop.cancelled() => return Err(Error::conflict("Disk capture stopped.")),
         result = tokio::task::spawn_blocking(move || disk.capture(generation)) => result.map_err(Error::internal)??,
     };
     manifest["indexMs"] = (indexed_at.elapsed().as_millis() as u64).into();
@@ -157,7 +156,7 @@ async fn thaw(socket: &Path, stop: &CancellationToken) -> Result<()> {
     let request = json!({"op": "thaw"});
     loop {
         tokio::select! {
-            _ = stop.cancelled() => return Err(Error::new(409,"VM stopped during capture.")),
+            _ = stop.cancelled() => return Err(Error::conflict("VM stopped during capture.")),
             result = tokio::time::timeout(Duration::from_secs(5),host::guest_request(socket,&request)) => if matches!(result,Ok(Ok(value)) if value["ok"]==true){return Ok(());}
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

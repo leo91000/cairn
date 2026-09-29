@@ -180,8 +180,7 @@ impl Worker {
                     .kv("deployment-lease")?
                     .is_some_and(|value| value != owner)
                 {
-                    return Err(Error::new(
-                        409,
+                    return Err(Error::conflict(
                         "Another deployment holds the worker lease.",
                     ));
                 }
@@ -520,7 +519,7 @@ impl Worker {
         .await;
         if let Err(error) = result {
             let saved = checkpoint.value().await;
-            let recover_controller = error.status == 503
+            let recover_controller = error.is_unavailable()
                 && saved["prepared"]["backend"] == "firecracker"
                 && (saved["controllerRecoveries"].as_u64().unwrap_or(0) < 3
                     || s.store.run(&run_id).await?["moveRequest"].is_object()
@@ -764,8 +763,7 @@ impl Worker {
         let mut queued_policy = policy(&run["snapshot"]["agent"]);
         queued_policy["nodes"] = current_policy["nodes"].clone();
         if current_policy != queued_policy {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "Agent access changed after this run was queued. Run the task again with the current policy.",
             ));
         }
@@ -904,13 +902,13 @@ impl Worker {
         let mut total = 0;
         loop {
             if cancel.is_cancelled() || s.shutdown.is_cancelled() {
-                return Err(Error::new(409, "Execution stopped."));
+                return Err(Error::conflict("Execution stopped."));
             }
             if checkpoint
                 .deadline
                 .is_some_and(|deadline| now() >= deadline)
             {
-                return Err(Error::new(409, "Run exceeded its time limit."));
+                return Err(Error::conflict("Run exceeded its time limit."));
             }
             let output = text(&prepared, "output");
             match tokio::fs::remove_file(output).await {
@@ -1109,11 +1107,10 @@ impl Worker {
                         .send()
                         .await
                         .map_err(|_| {
-                            Error::new(503, "Remote workspace preparation interrupted.")
+                            Error::unavailable("Remote workspace preparation interrupted.")
                         })?;
                     if !prepared.status().is_success() {
-                        return Err(Error::new(
-                            503,
+                        return Err(Error::unavailable(
                             "Remote workspace preparation failed; source files are preserved.",
                         ));
                     }
@@ -1171,7 +1168,7 @@ impl Worker {
                 .await?;
             if cancel.is_cancelled() || s.shutdown.is_cancelled() {
                 child.stop().await;
-                return Err(Error::new(409, "Execution stopped before launch."));
+                return Err(Error::conflict("Execution stopped before launch."));
             }
             let (stdout, stderr) = (
                 child.child.stdout.take().unwrap(),
@@ -1242,7 +1239,7 @@ impl Worker {
             }
             let saved = checkpoint.value().await;
             if s.shutdown.is_cancelled() && !cancel.is_cancelled() && saved["completed"] != true {
-                return Err(Error::new(409, "Worker is restarting"));
+                return Err(Error::conflict("Worker is restarting"));
             }
             if prepared["backend"] == "firecracker"
                 && status == Some(crate::runner::CONTROLLER_INTERRUPTED)
@@ -1250,8 +1247,7 @@ impl Worker {
                 && !timed_out
                 && !exhausted
             {
-                return Err(Error::new(
-                    503,
+                return Err(Error::unavailable(
                     "VM controller interrupted execution. The saved conversation and workspace have been preserved.",
                 ));
             }
@@ -1293,7 +1289,7 @@ impl Worker {
                 {
                     match s.accounts.acquire(s, &id, provider, model).await {
                         Ok(value) => *account = value,
-                        Err(error) if error.status == 409 => {
+                        Err(error) if error.is_conflict() => {
                             tokio::select! {
                                 _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                             ,
@@ -1396,7 +1392,7 @@ impl Worker {
             .transaction(move |db| {
                 let run = required(db.run(&id_owned)?, "Run not found")?;
                 if !["queued", "running"].contains(&text(&run, "status")) {
-                    return Err(Error::new(409, "This run has already finished."));
+                    return Err(Error::conflict("This run has already finished."));
                 }
                 db.patch_run(
                     &id_owned,
@@ -1435,8 +1431,7 @@ impl Worker {
     pub async fn resume(&self, s: &Service, id: &str) -> Result<Value> {
         let active = self.active.lock().await;
         if active.contains_key(id) {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "Wait for this run to finish stopping before resuming.",
             ));
         }
@@ -1451,8 +1446,7 @@ impl Worker {
                         && (c["cancelledByDeletion"] == true
                             || c["sessionRestartRequested"] == true)
                 }) {
-                    return Err(Error::new(
-                        409,
+                    return Err(Error::conflict(
                         "Send a new message and resume the conversation queue \
                         to continue; cancelled work will not replay.",
                     ));
@@ -1470,13 +1464,12 @@ impl Worker {
                             .is_none_or(|c| !c["prepared"].is_object())
                         || !run["workspaceCleanedAt"].is_null())
                 {
-                    return Err(Error::new(
-                        409,
+                    return Err(Error::conflict(
                         "This run has no saved conversation available to resume.",
                     ));
                 }
                 if db.active()?.iter().any(|a| a["taskId"] == run["taskId"]) {
-                    return Err(Error::new(409, "This task already has an active run."));
+                    return Err(Error::conflict("This task already has an active run."));
                 }
                 if let Some(mut checkpoint) = checkpoint {
                     checkpoint["remainingMs"] =
@@ -1717,14 +1710,12 @@ impl Worker {
         let _active = self.active.lock().await;
         let run = s.store.run(id).await?;
         if ["queued", "running"].contains(&text(&run, "status")) || _active.contains_key(id) {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "Wait for this run to finish before cleaning up.",
             ));
         }
         if run["isolated"] == true {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "This workspace is retained on a private VM disk. Resume the run to review and preserve its work.",
             ));
         }
@@ -1745,8 +1736,7 @@ impl Worker {
             || !run["workspace"].is_string()
             || managed.is_empty()
         {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "This run has no managed worktree to clean up.",
             ));
         }
@@ -1767,8 +1757,7 @@ impl Worker {
             if !target.starts_with(&root)
                 || crate::skills::workspace(target, std::slice::from_ref(&root)).await? != target
             {
-                return Err(Error::new(
-                    409,
+                return Err(Error::conflict(
                     "Workspace is outside this run’s managed directory.",
                 ));
             }
@@ -1786,8 +1775,7 @@ impl Worker {
             )
             .await?;
             if !output.success || !output.stdout.trim().is_empty() {
-                return Err(Error::new(
-                    409,
+                return Err(Error::conflict(
                     "This worktree contains changes or untracked files. Commit or move them before cleanup.",
                 ));
             }
@@ -1815,7 +1803,7 @@ impl Worker {
             )
             .await?;
             if !output.success {
-                return Err(Error::new(409, "Git could not remove this worktree."));
+                return Err(Error::conflict("Git could not remove this worktree."));
             }
         }
         s.store

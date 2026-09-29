@@ -82,11 +82,10 @@ impl AgentAvatars {
         // Serialize registration with close: no job may escape the shutdown drain.
         let tasks = self.tasks.lock().await;
         if self.stop.is_cancelled() || s.shutdown.is_cancelled() {
-            return Err(Error::new(503, INTERRUPTED));
+            return Err(Error::unavailable(INTERRUPTED));
         }
         if !self.configured(s).await? {
-            return Err(Error::new(
-                503,
+            return Err(Error::unavailable(
                 "Connect an active Codex account in Connections to generate portraits. You \
                     can also upload an image.",
             ));
@@ -99,7 +98,7 @@ impl AgentAvatars {
             .transaction(move |db| {
                 let mut agent = required(db.get("agents", &agent_id)?, "Agent not found")?;
                 if agent["avatar"]["status"] == "generating" {
-                    return Err(Error::new(409, "A portrait is already being generated."));
+                    return Err(Error::conflict("A portrait is already being generated."));
                 }
                 let url = agent["avatar"]["url"].clone();
                 agent["avatar"] = json!({"status": "generating", "revision": job, "url": url});
@@ -120,13 +119,13 @@ impl AgentAvatars {
 
     async fn render(&self, s: &Service, agent: &Value) -> Result<Vec<u8>> {
         let _slot = tokio::select! {
-            _ = s.shutdown.cancelled() => return Err(Error::new(503, INTERRUPTED)),
-            _ = self.stop.cancelled() => return Err(Error::new(503, INTERRUPTED)),
-            slot = self.slots.acquire() => slot.map_err(|_| Error::new(503, INTERRUPTED))?,
+            _ = s.shutdown.cancelled() => return Err(Error::unavailable(INTERRUPTED)),
+            _ = self.stop.cancelled() => return Err(Error::unavailable(INTERRUPTED)),
+            slot = self.slots.acquire() => slot.map_err(|_| Error::unavailable(INTERRUPTED))?,
         };
         // An upload or deletion while queued supersedes this request before using quota.
         if s.get("agents", text(agent, "id")).await?["avatar"] != agent["avatar"] {
-            return Err(Error::new(409, "Portrait request superseded."));
+            return Err(Error::conflict("Portrait request superseded."));
         }
         let identity =
             json!({"name": agent["name"], "role": agent["description"], "variation": id()});
@@ -148,8 +147,7 @@ impl AgentAvatars {
                 )
                 .await
                 .unwrap_or_else(|_| {
-                    Err(Error::new(
-                        504,
+                    Err(Error::gateway_timeout(
                         "Codex portrait generation timed out. Try again.",
                     ))
                 })
@@ -158,17 +156,15 @@ impl AgentAvatars {
         .await;
         // Never persist raw RPC/provider errors: they may include request data.
         result.map_err(|error| match error.message.as_str() {
-            codex_background::STOPPED => Error::new(503, INTERRUPTED),
-            codex_background::YIELDED => Error::new(
-                503,
+            codex_background::STOPPED => Error::unavailable(INTERRUPTED),
+            codex_background::YIELDED => Error::unavailable(
                 "Portrait generation yielded to a conversation or \
                 server maintenance. You can try again.",
             ),
             codex_background::UNAVAILABLE | "Codex portrait generation timed out. Try again." => {
                 error
             }
-            _ => Error::new(
-                502,
+            _ => Error::bad_gateway(
                 "Codex could not generate a portrait. Check the account and image quota in \
                 Connections, then try again or upload an image.",
             ),
@@ -338,7 +334,7 @@ pub async fn http(s: &Arc<Service>, agent_id: &str, request: Request) -> Result<
         "PUT" => {
             let bytes = to_bytes(request.into_body(), MAX_UPLOAD)
                 .await
-                .map_err(|_| Error::new(413, "Choose an image smaller than 5 MB."))?;
+                .map_err(|_| Error::too_large("Choose an image smaller than 5 MB."))?;
             let bytes = portrait(bytes.to_vec()).await?;
             let agent_id = agent_id.to_owned();
             let agent = s
@@ -351,7 +347,7 @@ pub async fn http(s: &Arc<Service>, agent_id: &str, request: Request) -> Result<
                 .await?;
             Ok(Json(agent).into_response())
         }
-        _ => Err(Error::new(405, "Method not allowed.")),
+        _ => Err(Error::method_not_allowed("Method not allowed.")),
     }
 }
 

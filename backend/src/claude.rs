@@ -125,7 +125,7 @@ pub async fn query_metadata(s: &Service, id: &str, request: Option<Value>) -> Re
     cmd.stdin(std::process::Stdio::piped());
     let mut child = cmd
         .spawn()
-        .map_err(|_| Error::new(503, "Claude Code is not installed."))?;
+        .map_err(|_| Error::unavailable("Claude Code is not installed."))?;
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap().take(2_000_000));
     let mut stderr = child.stderr.take().unwrap();
@@ -139,7 +139,7 @@ pub async fn query_metadata(s: &Service, id: &str, request: Option<Value>) -> Re
         loop {
             line.clear();
             if stdout.read_line(&mut line).await? == 0 {
-                return Err(Error::new(502, "Claude Code metadata query stopped."));
+                return Err(Error::bad_gateway("Claude Code metadata query stopped."));
             }
             let value: Value = serde_json::from_str(&line)?;
             if value["type"] != "control_response" || value["response"]["request_id"] != expected {
@@ -147,7 +147,7 @@ pub async fn query_metadata(s: &Service, id: &str, request: Option<Value>) -> Re
             }
             if value["response"]["subtype"] != "success" {
                 // CLI error text can contain private state. Never forward it.
-                return Err(Error::new(502, "Claude Code could not load account data. Check the connection and CLI version."));
+                return Err(Error::bad_gateway("Claude Code could not load account data. Check the connection and CLI version."));
             }
             if expected == "initialize" && let Some(request) = &request {
                 let message = json!({"type": "control_request","request_id": "metadata","request": request});
@@ -157,7 +157,7 @@ pub async fn query_metadata(s: &Service, id: &str, request: Option<Value>) -> Re
             }
             return Ok(value["response"]["response"].clone());
         }
-    }).await.unwrap_or_else(|_| Err(Error::new(504, "Claude Code metadata query timed out.")));
+    }).await.unwrap_or_else(|_| Err(Error::gateway_timeout("Claude Code metadata query timed out.")));
     // Claude Code writes its account model catalog shortly after answering initialize. Model
     // discovery reads it for the model and effort behind each alias, so let the write finish.
     if request.is_none() && result.is_ok() {
@@ -250,7 +250,7 @@ async fn discover_models(s: &Service, id: &str) -> Result<Value> {
     let value = query_metadata(s, id, None).await?;
     let rows = value["models"]
         .as_array()
-        .ok_or_else(|| Error::new(502, "Update Claude Code to load its model catalog."))?;
+        .ok_or_else(|| Error::bad_gateway("Update Claude Code to load its model catalog."))?;
     let models = rows
         .iter()
         .filter(|row| !text(row, "value").is_empty())
@@ -274,7 +274,9 @@ async fn discover_models(s: &Service, id: &str) -> Result<Value> {
         })
         .collect::<Vec<_>>();
     if models.is_empty() {
-        return Err(Error::new(502, "Claude Code returned no available models."));
+        return Err(Error::bad_gateway(
+            "Claude Code returned no available models.",
+        ));
     }
     Ok(json!({
         "models": models,

@@ -120,7 +120,7 @@ impl Artifacts {
             .send()
             .await
             .map_err(|_| {
-                Error::new(503, "Artifact transfer was interrupted. Retry publication.")
+                Error::unavailable("Artifact transfer was interrupted. Retry publication.")
             })?;
         if !response.status().is_success() {
             return Err(Error::bad(
@@ -142,7 +142,7 @@ impl Artifacts {
         let mut sample = Vec::new();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|_| {
-                Error::new(503, "Artifact transfer was interrupted. Retry publication.")
+                Error::unavailable("Artifact transfer was interrupted. Retry publication.")
             })?;
             size += chunk.len() as u64;
             if size > expected {
@@ -157,8 +157,7 @@ impl Artifacts {
             output.write_all(&chunk).await?;
         }
         if size != expected {
-            return Err(Error::new(
-                503,
+            return Err(Error::unavailable(
                 "Artifact transfer was incomplete. Retry publication.",
             ));
         }
@@ -174,8 +173,7 @@ impl Artifacts {
         if current_checkpoint["runnerId"] != checkpoint["runnerId"]
             || current["chatExecution"]["messageId"] != run["chatExecution"]["messageId"]
         {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "The active turn changed. Publish again from the current turn.",
             ));
         }
@@ -210,8 +208,7 @@ impl Artifacts {
                 + size
                 > 2 * 1024 * 1024 * 1024
         {
-            return Err(Error::new(
-                413,
+            return Err(Error::too_large(
                 "This conversation has reached its artifact limit (2 GB or 500 \
                 versions).",
             ));
@@ -279,8 +276,7 @@ impl Artifacts {
                     || checkpoint["runnerId"] != expected_attempt
                     || current["chatExecution"]["messageId"] != record["messageId"]
                 {
-                    return Err(Error::new(
-                        409,
+                    return Err(Error::conflict(
                         "The active turn changed during publication.",
                     ));
                 }
@@ -332,7 +328,7 @@ pub async fn http(
 ) -> Result<Response> {
     uuid(run)?;
     if !["GET", "HEAD"].contains(&request.method().as_str()) {
-        return Err(Error::new(405, "Method not allowed."));
+        return Err(Error::method_not_allowed("Method not allowed."));
     }
     let Some(artifact) = artifact else {
         return Ok(Json(list(s, run).await?).into_response());
@@ -359,7 +355,7 @@ async fn serve(s: &Service, record: &Value, request: Request) -> Result<Response
         serde_urlencoded::from_str(request.uri().query().unwrap_or("")).map_err(Error::internal)?;
     let preview = query.contains_key("preview");
     if preview && record["previewStatus"] != "ready" {
-        return Err(Error::new(404, "Preview is unavailable."));
+        return Err(Error::not_found("Preview is unavailable."));
     }
     let path = s.config.data_dir.join("artifacts").join(if preview {
         format!("{artifact}.jpg")

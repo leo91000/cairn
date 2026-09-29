@@ -104,8 +104,7 @@ impl Mcps {
             .is_some_and(|lock| lock.try_lock().is_err());
         if busy && url.origin().ascii_serialization() == s.config.public_url && url.path() == "/mcp"
         {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "This self-connection is serving an active request. Manage other \
                     connections here; test or change this connection directly from the MCPs UI \
                     after the request finishes.",
@@ -262,7 +261,7 @@ impl Mcps {
         ];
         let message = if known.contains(&error.message.as_str()) {
             &error.message
-        } else if error.status == 401 {
+        } else if error.is_unauthorized() {
             "Sign in to connect this server."
         } else {
             "Could not connect. Check the endpoint, credentials, and server availability."
@@ -270,7 +269,7 @@ impl Mcps {
         merge(
             &mut item,
             &json!({
-                "state": if error.status==401{
+                "state": if error.is_unauthorized(){
             "needs-auth"}
             else{
             "error"}
@@ -458,7 +457,7 @@ impl Mcps {
         let (id, bearer) = (id.to_owned(), bearer.to_owned());
         s.store
             .read(move |db| {
-                let expired = || Error::new(401, "MCP run access expired or was revoked.");
+                let expired = || Error::unauthorized("MCP run access expired or was revoked.");
                 let grant = db
                     .kv(&format!("mcp-grant:{}", hex_digest(&bearer)))?
                     .ok_or_else(expired)?;
@@ -475,9 +474,9 @@ impl Mcps {
                 }
                 let current = db
                     .get("agents", text(&run["snapshot"]["agent"], "id"))?
-                    .ok_or_else(|| Error::new(403, "Agent permissions changed."))?;
+                    .ok_or_else(|| Error::forbidden("Agent permissions changed."))?;
                 if policy(&current) != policy(&run["snapshot"]["agent"]) {
-                    return Err(Error::new(403, "Agent permissions changed."));
+                    return Err(Error::forbidden("Agent permissions changed."));
                 }
                 Ok((item, scope))
             })

@@ -87,7 +87,7 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
         return Ok(response);
     }
     if request.method() != "POST" {
-        return Err(Error::new(405, "Method not allowed."));
+        return Err(Error::method_not_allowed("Method not allowed."));
     }
     let input = Input::read(request).await?;
     let body = &input.body;
@@ -234,7 +234,7 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
                         "prompts": []
                     }
                     )),
-                    _ => Err(Error::new(404, "Method not found")),
+                    _ => Err(Error::not_found("Method not found")),
                 }
             }
         }
@@ -269,7 +269,7 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
         }
         Err(error) => rpc_error(
             id,
-            if error.status == 404 { -32601 } else { -32603 },
+            if error.is_not_found() { -32601 } else { -32603 },
             &error.message,
             None,
         ),
@@ -333,7 +333,7 @@ async fn call(s: &Arc<Service>, bearer: &str, name: &str, args: Value) -> Result
         .unwrap()
         .iter()
         .find(|t| t["name"] == name)
-        .ok_or_else(|| Error::new(404, "Unknown tool"))?;
+        .ok_or_else(|| Error::not_found("Unknown tool"))?;
     let scope = text(tool, "scope");
     let operation = async {
         s.auth.verify(bearer, Some(scope)).await?;
@@ -466,8 +466,7 @@ fn read_run_content(db: &crate::store::Db<'_>, args: &Value) -> Result<Value> {
     let digest = crate::auth::hex_digest(&data);
     let offset = args["offset"].as_u64().unwrap() as usize;
     if (offset > 0 || args["sha256"].is_string()) && text(args, "sha256") != digest {
-        return Err(Error::new(
-            409,
+        return Err(Error::conflict(
             "Content changed or checksum missing. Restart at offset 0 and pass the \
                 returned sha256 with each subsequent chunk.",
         ));
@@ -596,7 +595,7 @@ async fn invoke(s: &Arc<Service>, name: &str, args: Value) -> Result<Value> {
                 }
             }
         }
-        _ => Err(Error::new(404, "Unknown tool")),
+        _ => Err(Error::not_found("Unknown tool")),
     }
 }
 
@@ -610,7 +609,7 @@ async fn proxy(
     let _guard = s.mcps.lock(id).await;
     let (item, scope) = s.mcps.grant(s, id, bearer).await?;
     if method == "tools/call" && !crate::service::allowed(&scope["tools"], text(&params, "name")) {
-        return Err(Error::new(403, "This tool is unavailable to this agent."));
+        return Err(Error::forbidden("This tool is unavailable to this agent."));
     }
     let result = async {
         let mut client = crate::mcp_client::Client::connect(s, &item).await?;
@@ -648,7 +647,7 @@ async fn proxy(
             | "resources/read"
             | "prompts/list"
             | "prompts/get" => client.request(method, params).await,
-            _ => Err(Error::new(404, "Method not found")),
+            _ => Err(Error::not_found("Method not found")),
         };
         client.close().await;
         result
@@ -692,7 +691,7 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 .auth
                 .read(&crate::http::cookie(&input.headers))
                 .await?
-                .ok_or_else(|| Error::new(401, "Please sign in."))?;
+                .ok_or_else(|| Error::unauthorized("Please sign in."))?;
             if input.body["native"] == true {
                 s.mcps.connect_native(s, id, text(&session, "csrf")).await
             } else {
@@ -705,7 +704,7 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 .auth
                 .read(&crate::http::cookie(&input.headers))
                 .await?
-                .ok_or_else(|| Error::new(401, "Please sign in."))?;
+                .ok_or_else(|| Error::unauthorized("Please sign in."))?;
             s.mcps
                 .finish_native_callback(s, id, text(&session, "csrf"))
                 .await
@@ -718,6 +717,6 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
             }
             ))
         }
-        _ => Err(Error::new(404, "Not found")),
+        _ => Err(Error::not_found("Not found")),
     }
 }

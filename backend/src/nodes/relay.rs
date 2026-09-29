@@ -51,7 +51,7 @@ pub async fn run(
         };
         let command = match response {
             Ok(response) if response.status() == 401 => {
-                break Err(Error::new(401, "Node identity revoked."));
+                break Err(Error::unauthorized("Node identity revoked."));
             }
             Ok(response) if response.status().is_success() => response.json::<Value>().await.ok(),
             _ => None,
@@ -221,7 +221,7 @@ async fn forward(
             .body(bytes)
             .send()
             .await
-            .map_err(|_| Error::new(503, "Local VM controller unavailable."))
+            .map_err(|_| Error::unavailable("Local VM controller unavailable."))
     };
     let response = tokio::time::timeout(
         Duration::from_secs(if path.ends_with("/restore") {
@@ -288,9 +288,9 @@ async fn forward(
             .body(reqwest::Body::wrap_stream(chunks))
             .send()
             .await
-            .map_err(|_| Error::new(503, "Master upload interrupted."))?;
+            .map_err(|_| Error::unavailable("Master upload interrupted."))?;
         if !uploaded.status().is_success() {
-            return Err(Error::new(409, "Execution stream rejected."));
+            return Err(Error::conflict("Execution stream rejected."));
         }
         return Ok(());
     }
@@ -298,7 +298,7 @@ async fn forward(
     while let Some(bytes) = response
         .chunk()
         .await
-        .map_err(|_| Error::new(503, "VM response interrupted."))?
+        .map_err(|_| Error::unavailable("VM response interrupted."))?
     {
         for chunk in bytes.chunks(65536) {
             send(
@@ -343,9 +343,9 @@ async fn send(
         .timeout(Duration::from_secs(25))
         .send()
         .await
-        .map_err(|_| Error::new(503, "Master connection interrupted."))?;
+        .map_err(|_| Error::unavailable("Master connection interrupted."))?;
     if !response.status().is_success() {
-        return Err(Error::new(409, "Execution response rejected."));
+        return Err(Error::conflict("Execution response rejected."));
     }
     Ok(())
 }

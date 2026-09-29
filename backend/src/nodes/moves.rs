@@ -48,7 +48,7 @@ pub async fn list(s: &Service, run: &Value) -> Result<Value> {
         .store
         .get("agents", text(&run["snapshot"]["agent"], "id"))
         .await?
-        .ok_or_else(|| Error::new(403, "Agent removed."))?;
+        .ok_or_else(|| Error::forbidden("Agent removed."))?;
     let access = crate::service::policy(&agent);
     let scope = access["nodes"].clone();
     let current = run["nodeId"].clone();
@@ -95,20 +95,17 @@ pub async fn request_by_agent(s: &Service, run: &Value, args: &Value) -> Result<
         .store
         .get("agents", text(&run["snapshot"]["agent"], "id"))
         .await?
-        .ok_or_else(|| Error::new(403, "Agent removed."))?;
+        .ok_or_else(|| Error::forbidden("Agent removed."))?;
     let limit = crate::service::policy(&agent)["maxResources"].clone();
     if limit.is_object()
         && ["cpu", "memoryMiB", "diskMiB"]
             .iter()
             .any(|key| args[*key].as_u64() > limit[*key].as_u64())
     {
-        return Err(Error::new(
-            403,
-            format!(
-                "This agent may request at most {} CPU, {} MiB RAM and {} MiB disk per conversation.",
-                limit["cpu"], limit["memoryMiB"], limit["diskMiB"]
-            ),
-        ));
+        return Err(Error::forbidden(format!(
+            "This agent may request at most {} CPU, {} MiB RAM and {} MiB disk per conversation.",
+            limit["cpu"], limit["memoryMiB"], limit["diskMiB"]
+        )));
     }
     requested(s, run, args, true).await
 }
@@ -158,7 +155,7 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
     }
     let run_id = text(run, "id");
     if run["moveRequest"].is_object() {
-        return Err(Error::new(409, "A movement is already pending."));
+        return Err(Error::conflict("A movement is already pending."));
     }
     let checkpoint = s
         .store
@@ -187,18 +184,18 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
             s.store
                 .patch_run(run_id, json!({"capacityWaitUntil": null}))
                 .await?;
-            return Err(Error::new(409, "Conversation is no longer active."));
+            return Err(Error::conflict("Conversation is no longer active."));
         }
         match super::placement::reserve(s, &selecting, &reservation).await {
             Ok(value) => break value,
-            Err(error) if error.status == 503 && now() < deadline => {
+            Err(error) if error.is_unavailable() && now() < deadline => {
                 s.store
                     .patch_run(run_id, json!({"capacityWaitUntil": deadline}))
                     .await?;
                 tokio::select! {
                     _ = s.shutdown.cancelled() => {
                         s.store.patch_run(run_id, json!({"capacityWaitUntil": null})).await?;
-                        return Err(Error::new(503, "Master is stopping."));
+                        return Err(Error::unavailable("Master is stopping."));
                     },
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                 }
@@ -220,13 +217,12 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
         .transaction(move |db| {
             let current = db
                 .run(&owner)?
-                .ok_or_else(|| Error::new(404, "Conversation removed."))?;
+                .ok_or_else(|| Error::not_found("Conversation removed."))?;
             if current["moveRequest"].is_object()
                 || !current["cancelRequestedAt"].is_null()
                 || current["status"] != if idle { "succeeded" } else { "running" }
             {
-                return Err(Error::new(
-                    409,
+                return Err(Error::conflict(
                     "Conversation changed while reserving capacity.",
                 ));
             }
@@ -316,9 +312,9 @@ async fn stop(s: &Service, run: &Value) -> Result<()> {
         .timeout(Duration::from_secs(20))
         .send()
         .await
-        .map_err(|_| Error::new(503, "Waiting for source node to pause."))?;
+        .map_err(|_| Error::unavailable("Waiting for source node to pause."))?;
     if !response.status().is_success() {
-        return Err(Error::new(503, "Waiting for source VM to stop."));
+        return Err(Error::unavailable("Waiting for source VM to stop."));
     }
     Ok(())
 }
@@ -462,7 +458,7 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
                 .transaction(move |db| {
                     let current = db
                         .run(&owner)?
-                        .ok_or_else(|| Error::new(404, "Conversation removed."))?;
+                        .ok_or_else(|| Error::not_found("Conversation removed."))?;
                     if !current["cancelRequestedAt"].is_null() {
                         patch["status"] = "cancelled".into();
                         patch["recoveryPending"] = false.into();
@@ -518,12 +514,12 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
             let key = format!("run-checkpoint:{run_id}");
             let mut checkpoint = db
                 .kv(&key)?
-                .ok_or_else(|| Error::new(409, "Missing resume checkpoint."))?;
+                .ok_or_else(|| Error::conflict("Missing resume checkpoint."))?;
             let current = db
                 .run(&run_id)?
-                .ok_or_else(|| Error::new(404, "Conversation removed."))?;
+                .ok_or_else(|| Error::not_found("Conversation removed."))?;
             if !current["cancelRequestedAt"].is_null() {
-                return Err(Error::new(409, "Conversation cancelled during restore."));
+                return Err(Error::conflict("Conversation cancelled during restore."));
             }
             checkpoint["nodeId"] = node.clone();
             checkpoint["process"] = Value::Null;

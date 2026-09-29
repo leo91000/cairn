@@ -31,7 +31,7 @@ async fn disk(s: &Service, run: &str, action: &str, destination: Option<&str>) -
     };
     if base.is_empty() {
         if s.store.run(run).await?["isolated"] == true {
-            return Err(Error::new(503, "The VM node is unavailable."));
+            return Err(Error::unavailable("The VM node is unavailable."));
         }
         return Ok(());
     }
@@ -53,10 +53,9 @@ async fn disk(s: &Service, run: &str, action: &str, destination: Option<&str>) -
             .timeout(std::time::Duration::from_secs(7200))
             .send()
             .await
-            .map_err(|_| Error::new(503, "Workspace transfer interrupted."))?;
+            .map_err(|_| Error::unavailable("Workspace transfer interrupted."))?;
         if !response.status().is_success() {
-            return Err(Error::new(
-                503,
+            return Err(Error::unavailable(
                 "Workspace transfer failed or the agent has not stopped yet.",
             ));
         }
@@ -177,8 +176,7 @@ async fn detach_worktrees(s: &Service, chat: &Value) -> Result<()> {
                     .status()
                     .await?;
                 if !status.success() {
-                    return Err(Error::new(
-                        503,
+                    return Err(Error::unavailable(
                         "Unable to detach a conversation worktree; cleanup will retry.",
                     ));
                 }

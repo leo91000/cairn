@@ -33,7 +33,7 @@ pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
         ("GET", ["github", "repositories"]) => crate::github_projects::list(s, input.number("page", 1, 1, 10000)?).await,
         ("POST", ["projects", "github"]) => {
             static IMPORT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-            let _guard = IMPORT.try_lock().map_err(|_| Error::new(409, "A GitHub import is already running. Retry shortly."))?;
+            let _guard = IMPORT.try_lock().map_err(|_| Error::conflict("A GitHub import is already running. Retry shortly."))?;
             crate::github_projects::import(s, input.body.clone()).await
         }
         ("GET", ["overview"]) => {
@@ -175,7 +175,7 @@ pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 "DELETE" => {
                     let key = format!("{scope}/{name}");
                     if s.store.list("tasks").await?.iter().any(|t| t["skills"].as_array().is_some_and(|skills| skills.iter().any(|s| s == &key))) {
-                        return Err(Error::new(409, "This skill is selected by a task. Update that task first."));
+                        return Err(Error::conflict("This skill is selected by a task. Update that task first."));
                     }
                     s.skills.remove(name, project.as_deref()).await?;
                     s.store
@@ -193,7 +193,7 @@ pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
                     }
                     ))
                 }
-                _ => Err(Error::new(404, "Not found")),
+                _ => Err(Error::not_found("Not found")),
             }
         }
         ("GET", ["skills", scope, name, "files"]) => Ok(s.skills.files(name, skill_project(s, scope).await?.as_deref()).await?.into()),
@@ -316,7 +316,7 @@ pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
             "redirect": s.auth.consent(input.body["parameters"].clone(),input.boolean("approved")?).await?
         }
         )),
-        _ => Err(Error::new(404, "Not found")),
+        _ => Err(Error::not_found("Not found")),
     }
 }
 

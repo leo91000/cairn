@@ -24,8 +24,7 @@ pub fn state(chat: &Value) -> &str {
 
 pub fn require_active(chat: &Value) -> Result<()> {
     if state(chat) != "active" {
-        return Err(Error::new(
-            409,
+        return Err(Error::conflict(
             "Restore this conversation before continuing.",
         ));
     }
@@ -79,7 +78,7 @@ impl Service {
                 || messages.iter().any(|m| ["queued", "sending"].contains(&text(m, "status")))
                 || questions.iter().any(|(_, q)| ["pending", "answering"].contains(&text(q, "status")));
             if busy && !confirmed {
-                return Err(Error::new(409, "Confirm deletion to stop the agent and cancel pending messages and questions."));
+                return Err(Error::conflict("Confirm deletion to stop the agent and cancel pending messages and questions."));
             }
             for mut message in messages {
                 if ["queued", "sending"].contains(&text(&message, "status")) {
@@ -123,7 +122,7 @@ impl Service {
         if let Some(run) = result["runId"].as_str() {
             match self.worker.cancel(self, run).await {
                 Ok(()) => {}
-                Err(error) if error.status == 409 => {}
+                Err(error) if error.is_conflict() => {}
                 Err(error) => return Err(error),
             }
         }
@@ -136,13 +135,13 @@ impl Service {
         let _guard = self
             .conversation_storage_lock
             .try_lock()
-            .map_err(|_| Error::new(409, "A storage operation is in progress. Retry shortly."))?;
+            .map_err(|_| Error::conflict("A storage operation is in progress. Retry shortly."))?;
         let id = id.to_owned();
         self.store
             .transaction(move |db| {
                 let mut chat = required(db.get("chats", &id)?, "Chat not found")?;
                 if state(&chat) != "trash" {
-                    return Err(Error::new(409, "This conversation is not in the trash."));
+                    return Err(Error::conflict("This conversation is not in the trash."));
                 }
                 if chat["purgeAt"].as_i64().is_none_or(|at| at <= now()) {
                     return Err(Error::new(410, "This conversation has expired."));
@@ -151,7 +150,7 @@ impl Service {
                     .run(text(&chat, "runId"))?
                     .is_some_and(|r| ["queued", "running"].contains(&text(&r, "status")))
                 {
-                    return Err(Error::new(409, "Wait for the agent to finish stopping."));
+                    return Err(Error::conflict("Wait for the agent to finish stopping."));
                 }
                 chat["lifecycle"] = "active".into();
                 chat["trashedAt"] = Value::Null;
@@ -170,7 +169,7 @@ impl Service {
     pub async fn cleanup_conversations(&self) -> Result<()> {
         let _process_lock = match storage_lock(&self.config.data_dir) {
             Ok(lock) => lock,
-            Err(error) if error.status == 409 => return Ok(()),
+            Err(error) if error.is_conflict() => return Ok(()),
             Err(error) => return Err(error),
         };
         let Ok(_guard) = self.conversation_storage_lock.try_lock() else {
@@ -233,8 +232,7 @@ impl Service {
 impl Service {
     pub async fn chat_new_session(&self, id: &str, confirmed: bool) -> Result<Value> {
         if !confirmed {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "Confirm starting a fresh agent session using the preserved history and files.",
             ));
         }
@@ -247,8 +245,7 @@ impl Service {
                 if chat["restoredAt"].is_null()
                     || !["failed", "interrupted"].contains(&text(&run, "status"))
                 {
-                    return Err(Error::new(
-                        409,
+                    return Err(Error::conflict(
                         "A fresh session is available after a restored session fails.",
                     ));
                 }

@@ -188,8 +188,7 @@ impl Session {
                         let end = buffer.iter().position(|b| *b == b'\n').map(|i| i + 1);
                         let length = end.unwrap_or(buffer.len());
                         if jsonrpc && bytes.len() + length > 2_000_000 {
-                            return Err(Error::new(
-                                502,
+                            return Err(Error::bad_gateway(
                                 "MCP response exceeded the 2000000-byte limit.",
                             ));
                         }
@@ -368,7 +367,7 @@ impl Rpc {
         };
         let result = tokio::time::timeout(Duration::from_secs(20), result)
             .await
-            .unwrap_or_else(|_| Err(Error::new(504, "Codex account request timed out.")));
+            .unwrap_or_else(|_| Err(Error::gateway_timeout("Codex account request timed out.")));
         self.pending.lock().await.remove(&id);
         result
     }
@@ -409,8 +408,7 @@ impl Rpc {
 }
 
 fn unavailable() -> Error {
-    Error::new(
-        503,
+    Error::unavailable(
         "Codex disconnected before finishing the operation. Try again or resume the conversation.",
     )
 }

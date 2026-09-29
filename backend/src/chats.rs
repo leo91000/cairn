@@ -264,8 +264,7 @@ fn validate_steer(db: &Db<'_>, chat: &Value, message: &Value) -> Result<()> {
             || (!text(message, "reasoning").is_empty()
                 && message["reasoning"] != run["snapshot"]["agent"]["reasoning"]))
     {
-        return Err(Error::new(
-            409,
+        return Err(Error::conflict(
             "Queue this message to change provider, model or reasoning on the next turn.",
         ));
     }
@@ -292,8 +291,7 @@ fn send(
                 .as_ref()
                 .is_some_and(|(q, _)| existing["questionId"] != q["id"])
         {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "This message identifier has already been used.",
             ));
         }
@@ -305,8 +303,7 @@ fn send(
         .count()
         >= 20
     {
-        return Err(Error::new(
-            409,
+        return Err(Error::conflict(
             "The queue is full. Wait for a reply or remove a queued message.",
         ));
     }
@@ -315,8 +312,7 @@ fn send(
         [text(&values, "id")],
         |r| r.get::<_, bool>(0),
     )? {
-        return Err(Error::new(
-            409,
+        return Err(Error::conflict(
             "This message identifier has already been used.",
         ));
     }
@@ -330,8 +326,7 @@ fn send(
         .run(text(&chat, "runId"))?
         .is_some_and(|r| !r["workspaceCleanedAt"].is_null())
     {
-        return Err(Error::new(
-            409,
+        return Err(Error::conflict(
             "This workspace has been cleaned up. Start a new chat.",
         ));
     }
@@ -438,7 +433,7 @@ impl Service {
                     "Message not found",
                 )?;
                 if current["status"] != "queued" {
-                    return Err(Error::new(409, "This message is already being sent."));
+                    return Err(Error::conflict("This message is already being sent."));
                 }
                 let Some(mut values) = values else {
                     if let Some(mut question) = questions(db, &id)?
@@ -459,7 +454,7 @@ impl Service {
                     ));
                 };
                 if current["questionId"].is_string() {
-                    return Err(Error::new(409, "A submitted answer cannot be edited."));
+                    return Err(Error::conflict("A submitted answer cannot be edited."));
                 }
                 crate::attachments::message(db, &id, &mut values)?;
                 validate_steer(db, &chat, &values)?;
@@ -654,7 +649,7 @@ impl Service {
                     return Ok(question);
                 }
                 if question["status"] != "pending" {
-                    return Err(Error::new(409, "This question has already been answered."));
+                    return Err(Error::conflict("This question has already been answered."));
                 }
                 let fields = question["fields"].as_array().unwrap();
                 let answers = values["answers"].as_object().unwrap();
@@ -897,9 +892,7 @@ impl Service {
                     let switched = Provider::of_run(&snapshot) != Provider::of_run(&run);
                     if snapshot["snapshot"]["agent"]["access"] != run["snapshot"]["agent"]["access"]
                     {
-                        return Err(Error::new(
-                            409,
-                            "Agent access changed. Start a new chat with the updated permissions.",
+                        return Err(Error::conflict("Agent access changed. Start a new chat with the updated permissions.",
                         ));
                     }
                     let key = format!("run-checkpoint:{}", text(&run, "id"));
@@ -908,7 +901,7 @@ impl Service {
                         None if current_chat["cancelledByDeletion"] == true => {
                             json!({})
                         }
-                        None => return Err(Error::new(409, "Run checkpoint not found")),
+                        None => return Err(Error::conflict("Run checkpoint not found")),
                     };
                     if switched || checkpoint["freshSession"] == true {
                         checkpoint["freshSession"] = false.into();

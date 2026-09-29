@@ -319,15 +319,14 @@ impl Service {
             .transaction(move |db| {
                 required(db.get(&kind, &id)?, "Record not found")?;
                 if kind == "agents" && id == MAIN_AGENT_ID {
-                    return Err(Error::new(409, "The main agent cannot be removed."));
+                    return Err(Error::conflict("The main agent cannot be removed."));
                 }
                 if kind == "projects"
                     && db.list("agents")?.iter().any(|a| {
                         !policy(a)["projects"].is_null() && allowed(&policy(a)["projects"], &id)
                     })
                 {
-                    return Err(Error::new(
-                        409,
+                    return Err(Error::conflict(
                         "This project is assigned to an agent. Update the agent first.",
                     ));
                 }
@@ -340,8 +339,7 @@ impl Service {
                         }] == id
                     })
                 {
-                    return Err(Error::new(
-                        409,
+                    return Err(Error::conflict(
                         "This item is used by a task. Update or remove that task first.",
                     ));
                 }
@@ -357,8 +355,7 @@ impl Service {
                     }
                     _ => r["snapshot"]["agent"]["id"] == id,
                 }) {
-                    return Err(Error::new(
-                        409,
+                    return Err(Error::conflict(
                         "This item has active work. Cancel or wait for the run first.",
                     ));
                 }
@@ -410,8 +407,7 @@ impl Service {
 
     pub async fn snapshot(&self, task: Value, trigger: &str) -> Result<Value> {
         if task["archived"] == true {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "Restore this archived task before running it.",
             ));
         }

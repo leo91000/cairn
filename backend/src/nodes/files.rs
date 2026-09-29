@@ -58,7 +58,7 @@ pub async fn send(root: &Path, writer: &mut (impl tokio::io::AsyncWrite + Unpin)
                     let limit = left.min(buffer.len() as u64) as usize;
                     let count = file.read(&mut buffer[..limit]).await?;
                     if count == 0 {
-                        return Err(Error::new(409, "Workspace changed during transfer."));
+                        return Err(Error::conflict("Workspace changed during transfer."));
                     }
                     wire::write(writer, &json!({"data": STANDARD.encode(&buffer[..count])}))
                         .await?;

@@ -112,7 +112,7 @@ pub async fn request(socket: &Path, request: &Value, timeout: Duration) -> Resul
         line(&mut BufReader::new(stream)).await
     })
     .await
-    .map_err(|_| Error::new(503, "Account authentication timed out."))?
+    .map_err(|_| Error::unavailable("Account authentication timed out."))?
 }
 
 /// The socket a run reaches its broker through: inside a microVM it is mapped elsewhere.

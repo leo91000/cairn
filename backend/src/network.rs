@@ -101,7 +101,7 @@ pub struct Response {
 impl Response {
     pub fn json(&self) -> Result<Value> {
         serde_json::from_slice(&self.bytes)
-            .map_err(|_| Error::new(502, "The endpoint returned invalid JSON."))
+            .map_err(|_| Error::bad_gateway("The endpoint returned invalid JSON."))
     }
 }
 
@@ -132,7 +132,7 @@ pub async fn fetch(
         } else {
             tokio::net::lookup_host((hostname.as_str(), port))
                 .await
-                .map_err(|_| Error::new(502, "Unable to resolve MCP endpoint."))?
+                .map_err(|_| Error::bad_gateway("Unable to resolve MCP endpoint."))?
                 .collect::<Vec<_>>()
         };
         if addresses.is_empty()
@@ -160,7 +160,7 @@ pub async fn fetch(
         let response = request
             .send()
             .await
-            .map_err(|_| Error::new(502, "Could not connect to the MCP endpoint."))?;
+            .map_err(|_| Error::bad_gateway("Could not connect to the MCP endpoint."))?;
         if response.status().is_redirection() {
             return Err(Error::bad(
                 "The endpoint redirects. Configure its final URL.",
@@ -174,9 +174,10 @@ pub async fn fetch(
         let mut bytes = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|_| Error::new(502, "MCP response ended unexpectedly."))?;
+            let chunk =
+                chunk.map_err(|_| Error::bad_gateway("MCP response ended unexpectedly."))?;
             if bytes.len() + chunk.len() > 8 * 1024 * 1024 {
-                return Err(Error::new(502, "MCP response exceeds 8 MB."));
+                return Err(Error::bad_gateway("MCP response exceeds 8 MB."));
             }
             bytes.extend_from_slice(&chunk);
             if event_stream
@@ -194,5 +195,5 @@ pub async fn fetch(
         })
     })
     .await
-    .map_err(|_| Error::new(504, "MCP endpoint timed out."))?
+    .map_err(|_| Error::gateway_timeout("MCP endpoint timed out."))?
 }

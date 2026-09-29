@@ -183,7 +183,7 @@ pub async fn environment(home: &Path, mut env: Environment) -> Result<Environmen
         )
         .await?;
         if !output.success {
-            return Err(Error::new(503, "Unable to prepare the agent toolkit."));
+            return Err(Error::unavailable("Unable to prepare the agent toolkit."));
         }
     }
     Ok(env)

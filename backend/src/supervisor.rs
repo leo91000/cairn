@@ -128,7 +128,7 @@ pub async fn entry(binary: &str, args: &[String]) -> Result<i32> {
         .process_group(0)
         .kill_on_drop(true)
         .spawn()
-        .map_err(|_| Error::new(503, "Unable to start the run process."))?;
+        .map_err(|_| Error::unavailable("Unable to start the run process."))?;
     let pid = child.id().unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let input = tokio::spawn(async move {

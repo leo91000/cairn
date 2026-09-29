@@ -75,14 +75,14 @@ impl Auth {
             return Err(Error::bad("Use a password between 12 and 200 characters."));
         }
         if self.store.kv("admin").await?.is_some() {
-            return Err(Error::new(409, "Setup is already complete."));
+            return Err(Error::conflict("Setup is already complete."));
         }
         let salt = token();
         let hash = self.password(password, &salt).await?;
         self.store
             .transaction(move |db| {
                 if db.kv("admin")?.is_some() {
-                    return Err(Error::new(409, "Setup is already complete."));
+                    return Err(Error::conflict("Setup is already complete."));
                 }
                 db.set(
                     "admin",
@@ -104,10 +104,10 @@ impl Auth {
             .store
             .kv("admin")
             .await?
-            .ok_or_else(|| Error::new(401, "Complete setup first."))?;
+            .ok_or_else(|| Error::unauthorized("Complete setup first."))?;
         let hash = self.password(password, text(&admin, "salt")).await?;
         if !safe_equal(&hash, text(&admin, "hash")) {
-            return Err(Error::new(401, "Incorrect password."));
+            return Err(Error::unauthorized("Incorrect password."));
         }
         self.session().await
     }
@@ -182,7 +182,9 @@ impl Auth {
         self.store
             .transaction(move |db| {
                 if db.keys("client:")?.len() >= 100 {
-                    return Err(Error::new(429, "Client registration limit reached."));
+                    return Err(Error::too_many_requests(
+                        "Client registration limit reached.",
+                    ));
                 }
                 db.set(
                     &format!("client:{}", text(&client, "client_id")),
@@ -371,16 +373,16 @@ impl Auth {
             .store
             .kv(&format!("access:{}", digest(value)))
             .await?
-            .ok_or_else(|| Error::new(401, "A valid MCP access token is required."))?;
+            .ok_or_else(|| Error::unauthorized("A valid MCP access token is required."))?;
         if grant["resource"] != format!("{}/mcp", self.public_url) {
-            return Err(Error::new(401, "A valid MCP access token is required."));
+            return Err(Error::unauthorized("A valid MCP access token is required."));
         }
         if let Some(scope) = scope
             && !grant["scopes"]
                 .as_array()
                 .is_some_and(|scopes| scopes.contains(&Value::String(scope.into())))
         {
-            return Err(Error::new(403, format!("The {scope} scope is required.")));
+            return Err(Error::forbidden(format!("The {scope} scope is required.")));
         }
         Ok(grant)
     }

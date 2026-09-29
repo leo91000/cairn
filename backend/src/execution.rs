@@ -353,8 +353,7 @@ pub async fn prepare(
     let is_isolated = microvm || isolated(&run["snapshot"]["agent"]);
     let access = policy(&run["snapshot"]["agent"]);
     if is_isolated && !microvm {
-        return Err(Error::new(
-            503,
+        return Err(Error::unavailable(
             "Isolated runner is not configured. This agent will not fall back to shared execution.",
         ));
     }
@@ -719,13 +718,12 @@ pub async fn restore(
         }
     }
     if prepared["isolated"] != (uses_vm(run, config) || isolated(&run["snapshot"]["agent"])) {
-        return Err(Error::new(
-            409,
+        return Err(Error::conflict(
             "Execution isolation changed; this run cannot be resumed.",
         ));
     }
     if prepared["isolated"] == true && !uses_vm(run, config) {
-        return Err(Error::new(503, "The isolated runner is not configured."));
+        return Err(Error::unavailable("The isolated runner is not configured."));
     }
     let projects = run_projects(run);
     for project in &projects {
@@ -741,8 +739,7 @@ pub async fn restore(
         if workspace(Path::new(text(project, "path")), &config.workspace_roots).await?
             != Path::new(text(project, "path"))
         {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "A project moved outside its permitted location.",
             ));
         }
@@ -758,10 +755,7 @@ pub async fn restore(
                 .iter()
                 .find(|p| p["id"] == w["projectId"])
                 .ok_or_else(|| {
-                    Error::new(
-                        409,
-                        "A saved workspace is no longer in the agent’s project scope.",
-                    )
+                    Error::conflict("A saved workspace is no longer in the agent’s project scope.")
                 })?;
             allowed.push(PathBuf::from(text(p, "path")));
         }
@@ -785,8 +779,7 @@ pub async fn restore(
     paths.dedup();
     for source in paths {
         if workspace(&source, &allowed).await? != source {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "A saved workspace changed location. Working files were preserved.",
             ));
         }

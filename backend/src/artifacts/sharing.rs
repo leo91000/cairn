@@ -90,7 +90,7 @@ pub async fn set(
             if let Some(token) = bearer {
                 let authorized = crate::project_workspaces::authorize_in(db, &token)?;
                 if authorized["id"] != run {
-                    return Err(Error::new(403, "Artifact is outside this run."));
+                    return Err(Error::forbidden("Artifact is outside this run."));
                 }
             }
             required(db.run(&run)?, "Run not found")?;
@@ -123,7 +123,7 @@ pub fn public_read(path: &str, method: &str) -> bool {
 
 pub async fn http(s: &Service, token: &str, request: Request) -> Result<Response> {
     if !public_read(request.uri().path(), request.method().as_str()) {
-        return Err(Error::new(404, "Public file not found."));
+        return Err(Error::not_found("Public file not found."));
     }
     let token = token.to_owned();
     let record = s
@@ -140,7 +140,7 @@ pub async fn http(s: &Service, token: &str, request: Request) -> Result<Response
                 "Public file not found",
             )?;
             if record["visibility"] != "public" || record["publicToken"] != token {
-                return Err(Error::new(404, "Public file not found."));
+                return Err(Error::not_found("Public file not found."));
             }
             Ok(record)
         })

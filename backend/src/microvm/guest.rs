@@ -259,7 +259,7 @@ async fn handle(
         "run" => {
             let _guard = running
                 .try_lock()
-                .map_err(|_| Error::new(409, "Guest already running."))?;
+                .map_err(|_| Error::conflict("Guest already running."))?;
             let plan = &request["plan"];
             tokio::fs::create_dir_all("/var/lib/leo").await?;
             atomic_write(Path::new(INITIALIZED), b"1").await?;

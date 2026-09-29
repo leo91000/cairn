@@ -50,9 +50,9 @@ impl DeviceLogin {
             None,
         );
         command.stdin(std::process::Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|_| Error::new(503, "Unable to start sign-in. Check the CLI installation."))?;
+        let mut child = command.spawn().map_err(|_| {
+            Error::unavailable("Unable to start sign-in. Check the CLI installation.")
+        })?;
         let mut stdout = child.stdout.take().unwrap();
         let mut stderr = child.stderr.take().unwrap();
         let mut stdin = child.stdin.take().unwrap();
@@ -180,7 +180,7 @@ impl Connections {
     pub async fn start(&self, s: &Arc<Service>) -> Result<Value> {
         let mut login = self.login.lock().await;
         if login.as_ref().is_some_and(DeviceLogin::running) {
-            return Err(Error::new(409, "A sign-in is already in progress."));
+            return Err(Error::conflict("A sign-in is already in progress."));
         }
         let owner = format!("github-login-{}", crate::config::id());
         let lease = s.worker.deployment_lease(s, owner.clone(), false).await?;
@@ -199,8 +199,7 @@ impl Connections {
         .await;
         let flow = match active {
             Ok(false) => DeviceLogin::start(&s.config, &s.config.home),
-            Ok(true) => Err(Error::new(
-                409,
+            Ok(true) => Err(Error::conflict(
                 "Wait for active runs to finish before changing the shared GitHub connection.",
             )),
             Err(error) => Err(error),

@@ -179,8 +179,7 @@ pub(crate) fn complete_uploads(db: &Db<'_>, publication: &str, manifest: &mut Va
 pub(crate) fn verified(db: &Db<'_>, publication: &str) -> Result<()> {
     let invalid: bool = db.0.query_row("SELECT EXISTS(SELECT 1 FROM shared_references r JOIN shared_objects o ON o.id=r.object WHERE r.publication=?1 AND o.state<>'ready')",[publication],|r|r.get(0))?;
     if invalid {
-        return Err(Error::new(
-            409,
+        return Err(Error::conflict(
             "A shared block was invalidated during publication.",
         ));
     }

@@ -156,7 +156,7 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
         .timeout(Duration::from_secs(300))
         .send()
         .await
-        .map_err(|_| Error::new(503, "Snapshot capture interrupted."))?;
+        .map_err(|_| Error::unavailable("Snapshot capture interrupted."))?;
     if response.status() == reqwest::StatusCode::CONFLICT {
         // Startup, shutdown and an overlapping capture are temporary ownership
         // conflicts. Keep them distinct from broken storage or S3 configuration.
@@ -166,7 +166,9 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
         ));
     }
     if !response.status().is_success() {
-        return Err(Error::new(503, "Unable to capture a coherent VM snapshot."));
+        return Err(Error::unavailable(
+            "Unable to capture a coherent VM snapshot.",
+        ));
     }
     let snapshot: Value = response.json().await.map_err(Error::internal)?;
     timing.next("prepare_upload");
@@ -286,7 +288,7 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
         let (owner_run,owner_attempt,owner_node,point)=(run_id.to_owned(),attempt.to_owned(),checkpoint["nodeId"].clone(),value.clone());
         s.store.transaction(move |db| {
             let current=db.kv(&format!("run-checkpoint:{owner_run}"))?.unwrap_or_default();
-            if current["runnerId"]!=owner_attempt || current["nodeId"]!=owner_node {return Err(Error::new(409,"Disk owner changed during publication."));}
+            if current["runnerId"]!=owner_attempt || current["nodeId"]!=owner_node {return Err(Error::conflict("Disk owner changed during publication."));}
             shared_blocks::verified(db, text(&point,"id"))?;
             db.put("node-backups",&point)?;db.patch_run(&owner_run,&patch)?;Ok(())
         }).await?;
@@ -297,8 +299,8 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
                 "generation": manifest["generation"],
                 "backupId": backup_id,
                 "grantId": snapshot["grantId"]
-            })).timeout(Duration::from_secs(120)).send().await.map_err(|_|Error::new(503,"Disk publication acknowledgement interrupted."))?;
-            if !response.status().is_success(){return Err(Error::new(503,"Node could not acknowledge the published disk."));}
+            })).timeout(Duration::from_secs(120)).send().await.map_err(|_|Error::unavailable("Disk publication acknowledgement interrupted."))?;
+            if !response.status().is_success(){return Err(Error::unavailable("Node could not acknowledge the published disk."));}
             super::disk_grants::acknowledged(s,text(&snapshot,"grantId"),&value).await?;
             // Completed runs leave the active-run monitor. Read back the final
             // journal counters so their UI does not retain an old dirty count.
@@ -404,7 +406,7 @@ pub async fn read_block(s: &Service, backup: &Value, hash: &str) -> Result<Vec<u
             .unwrap()
             .iter()
             .find(|b| b["hash"] == hash)
-            .ok_or_else(|| Error::new(403, "Block outside disk scope."))?;
+            .ok_or_else(|| Error::forbidden("Block outside disk scope."))?;
         return read_manifest_block(s, backup, block).await;
     }
     read_legacy_block(s, backup, hash).await
@@ -434,7 +436,7 @@ pub(crate) async fn read_manifest_block(
             .await?;
         let bytes = decode_scoped_block(s, &scope, hash, encoded).await?;
         if Some(bytes.len() as u64) != block["size"].as_u64() {
-            return Err(Error::new(409, "Recovery block size mismatch."));
+            return Err(Error::conflict("Recovery block size mismatch."));
         }
         Ok(bytes)
     }
@@ -467,7 +469,7 @@ async fn read_legacy_block(s: &Service, backup: &Value, hash: &str) -> Result<Ve
     }
     if backup["destination"] != "s3" {
         forget_baseline(s, run).await?;
-        return Err(Error::new(503, "Local recovery block is missing."));
+        return Err(Error::unavailable("Local recovery block is missing."));
     }
     let storage = storage_for(s, backup)?;
     crate::skills::private_dir(path.parent().unwrap()).await?;
@@ -529,7 +531,7 @@ async fn decode_scoped_block(
     .map_err(Error::internal)?
     // Decoding has no network or filesystem effects. Invalid envelopes,
     // authentication failures and digest mismatches all require repair.
-    .map_err(|_| Error::new(409, "Recovery block integrity check failed."))
+    .map_err(|_| Error::conflict("Recovery block integrity check failed."))
 }
 
 /// The local controller owns the configured node cache. Retire duplicate S3
@@ -666,8 +668,7 @@ async fn collect_unused(s: &Service, run: &str) -> Result<()> {
     if let Some(head) = current["backup"]["id"].as_str() {
         keep.insert(head.to_owned());
     } else if !points.is_empty() {
-        return Err(Error::new(
-            409,
+        return Err(Error::conflict(
             "Published disk pointer missing; cleanup deferred.",
         ));
     }
@@ -678,8 +679,7 @@ async fn collect_unused(s: &Service, run: &str) -> Result<()> {
         .iter()
         .any(|id| !points.iter().any(|point| point["id"] == *id))
     {
-        return Err(Error::new(
-            409,
+        return Err(Error::conflict(
             "A referenced disk manifest is missing; cleanup deferred.",
         ));
     }
@@ -856,7 +856,7 @@ async fn update_status(s: &Service, run: &str, patch: Value) -> Result<()> {
         .transaction(move |db| {
             let current = db
                 .run(&run)?
-                .ok_or_else(|| Error::new(404, "Conversation missing."))?;
+                .ok_or_else(|| Error::not_found("Conversation missing."))?;
             let mut status = current["backup"].as_object().cloned().unwrap_or_default();
             status.extend(patch.as_object().unwrap().clone());
             db.patch_run(&run, &json!({"backup": status}))?;
@@ -1004,12 +1004,11 @@ pub async fn maintain(s: std::sync::Arc<Service>) {
 
 pub(crate) fn storage_for(s: &Service, backup: &Value) -> Result<crate::object_storage::Storage> {
     if backup["destination"] != "s3" {
-        return Err(Error::new(503, "Local recovery block is missing."));
+        return Err(Error::unavailable("Local recovery block is missing."));
     }
     let mut storage = crate::object_storage::Storage::configured(s)?;
     if storage.endpoint.as_deref() != backup["endpoint"].as_str() {
-        return Err(Error::new(
-            409,
+        return Err(Error::conflict(
             "This recovery point belongs to a different S3 endpoint. Restore its \
                 storage configuration before accessing it.",
         ));

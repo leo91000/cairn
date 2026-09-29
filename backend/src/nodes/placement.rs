@@ -41,7 +41,7 @@ pub async fn reserve(s: &Service, run: &Value, attempt: &str) -> Result<Value> {
     let attempt = attempt.to_owned();
     let configured = !s.config.runner_url.is_empty();
     s.store.transaction(move |db| {
-        let agent=db.get("agents",text(&run["snapshot"]["agent"],"id"))?.ok_or_else(||Error::new(403,"Agent removed."))?;
+        let agent=db.get("agents",text(&run["snapshot"]["agent"],"id"))?.ok_or_else(||Error::forbidden("Agent removed."))?;
         let access=policy(&agent);
         let checkpoint=db.kv(&format!("run-checkpoint:{}",text(&run,"id")))?.unwrap_or_default();
         let requested=run.get("requestedResources").filter(|v|v.is_object()).or_else(||run.get("resources").filter(|v|v.is_object()));
@@ -71,27 +71,25 @@ pub async fn reserve(s: &Service, run: &Value, attempt: &str) -> Result<Value> {
         if !moving && let Some(reservation)=run["moveReservation"].as_str() {
             let mut held = db
                 .get("node-attempts", reservation)?
-                .ok_or_else(|| Error::new(409, "Movement reservation is missing."))?;
+                .ok_or_else(|| Error::conflict("Movement reservation is missing."))?;
             let node = text(&held, "nodeId");
             let record = nodes
                 .iter()
                 .find(|n| n["id"] == node)
-                .ok_or_else(|| Error::new(409, "Destination removed."))?;
+                .ok_or_else(|| Error::conflict("Destination removed."))?;
             if record["capabilities"]["fuse"] != true {
-                return Err(Error::new(
-                    409,
-                    "Destination no longer supports on-demand disks.",
+                return Err(Error::conflict("Destination no longer supports on-demand disks.",
                 ));
             }
             if record["maintenance"].is_string() {
-                return Err(Error::new(503, "Destination is preparing for maintenance."));
+                return Err(Error::unavailable("Destination is preparing for maintenance."));
             }
             if held["released"] == true
                 || held["runId"] != run["id"]
                 || !allowed(&access["nodes"], node)
                 || record["revoked"] == true
             {
-                return Err(Error::new(409, "Movement reservation was revoked."));
+                return Err(Error::conflict("Movement reservation was revoked."));
             }
             let mut consumed = held.clone();
             consumed["released"] = true.into();
@@ -244,9 +242,7 @@ pub async fn reserve(s: &Service, run: &Value, attempt: &str) -> Result<Value> {
             if attempts.iter().any(|a| {
                 a["runId"] == run["id"] && a["released"] != true && (!moving || a["role"] == "destination")
             }) {
-                return Err(Error::new(
-                    409,
-                    "Previous execution still owns this conversation.",
+                return Err(Error::conflict("Previous execution still owns this conversation.",
                 ));
             }
             let mut record = json!({
@@ -290,7 +286,7 @@ pub async fn reserve(s: &Service, run: &Value, attempt: &str) -> Result<Value> {
                 "leaseExpiresAt": now()+60000
             }));
         }
-        Err(Error::new(503,"No authorized node has the required capacity. The existing environment is preserved."))
+        Err(Error::unavailable("No authorized node has the required capacity. The existing environment is preserved."))
     }).await
 }
 
@@ -338,16 +334,16 @@ pub async fn materialize(s: &Service, attempt: &str) -> Result<()> {
         .transaction(move |db| {
             let mut record = db
                 .get("node-attempts", &attempt)?
-                .ok_or_else(|| Error::new(409, "Missing disk allocation."))?;
+                .ok_or_else(|| Error::conflict("Missing disk allocation."))?;
             if record["released"] == true {
-                return Err(Error::new(409, "Disk reservation was released."));
+                return Err(Error::conflict("Disk reservation was released."));
             }
             record["diskMaterialized"] = true.into();
             db.put("node-attempts", &record)?;
             let id = format!("{}:{}", text(&record, "runId"), text(&record, "nodeId"));
             let mut volume = db
                 .get("node-volumes", &id)?
-                .ok_or_else(|| Error::new(409, "Missing disk allocation."))?;
+                .ok_or_else(|| Error::conflict("Missing disk allocation."))?;
             volume["materialized"] = true.into();
             volume["activeDiskMiB"] = record["resources"]["diskMiB"].clone();
             db.put("node-volumes", &volume)?;
@@ -364,10 +360,10 @@ pub async fn configure(s: &Service, run: &str, input: Option<Value>) -> Result<V
         .transaction(move |db| {
             let mut record = db
                 .run(&run)?
-                .ok_or_else(|| Error::new(404, "Conversation not found."))?;
+                .ok_or_else(|| Error::not_found("Conversation not found."))?;
             let agent = db
                 .get("agents", text(&record["snapshot"]["agent"], "id"))?
-                .ok_or_else(|| Error::new(403, "Agent removed."))?;
+                .ok_or_else(|| Error::forbidden("Agent removed."))?;
             let access = policy(&agent);
             if let Some(input) = input {
                 #[derive(serde::Deserialize)]
@@ -387,14 +383,13 @@ pub async fn configure(s: &Service, run: &str, input: Option<Value>) -> Result<V
                         || (node != LOCAL_NODE_ID
                             && db.get("nodes", node)?.is_none_or(|n| n["revoked"] == true))
                     {
-                        return Err(Error::new(
-                            403,
+                        return Err(Error::forbidden(
                             "This node is not authorized for the conversation's agent.",
                         ));
                     }
                 }
                 if record["moveRequest"].is_object() || record["moveReservation"].is_string() {
-                    return Err(Error::new(409, "Wait for the current movement to finish."));
+                    return Err(Error::conflict("Wait for the current movement to finish."));
                 }
                 record = db.patch_run(
                     &run,
@@ -449,19 +444,19 @@ pub async fn renew_local(s: &Service, run_id: &str) -> Result<()> {
         .transaction(move |db| {
             let run = db
                 .run(&run_id)?
-                .ok_or_else(|| Error::new(404, "Conversation removed."))?;
+                .ok_or_else(|| Error::not_found("Conversation removed."))?;
             let agent = db
                 .get("agents", text(&run["snapshot"]["agent"], "id"))?
                 .unwrap_or_default();
             let mut record = db
                 .get("node-attempts", &owned)?
-                .ok_or_else(|| Error::new(409, "Attempt removed."))?;
+                .ok_or_else(|| Error::conflict("Attempt removed."))?;
             if run["status"] != "running"
                 || !run["cancelRequestedAt"].is_null()
                 || record["released"] == true
                 || !allowed(&policy(&agent)["nodes"], LOCAL_NODE_ID)
             {
-                return Err(Error::new(409, "Execution no longer authorized."));
+                return Err(Error::conflict("Execution no longer authorized."));
             }
             record["leaseRequired"] = true.into();
             record["leaseDurationMs"] = record["leaseDurationMs"]
@@ -483,10 +478,9 @@ pub async fn renew_local(s: &Service, run_id: &str) -> Result<()> {
         .timeout(std::time::Duration::from_secs(3))
         .send()
         .await
-        .map_err(|_| Error::new(503, "Local execution lease unavailable."))?;
+        .map_err(|_| Error::unavailable("Local execution lease unavailable."))?;
     if !response.status().is_success() {
-        return Err(Error::new(
-            503,
+        return Err(Error::unavailable(
             "Local controller rejected execution lease.",
         ));
     }

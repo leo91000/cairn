@@ -50,7 +50,7 @@ async fn authorize(s: &Service, node: &str, attempt: &str) -> Result<(Value, Val
         || !run["cancelRequestedAt"].is_null()
         || !crate::service::allowed(&crate::service::policy(&agent)["nodes"], node)
     {
-        return Err(Error::new(403, "Remote execution scope expired."));
+        return Err(Error::forbidden("Remote execution scope expired."));
     }
     Ok((run, plan))
 }
@@ -68,7 +68,7 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
         return Err(Error::bad("Invalid workspace operation."));
     };
     if input.method != "POST" {
-        return Err(Error::new(405, "Method not allowed."));
+        return Err(Error::method_not_allowed("Method not allowed."));
     }
     let (run, plan) = authorize(s, &node, attempt).await?;
     let root = s.config.data_dir.join("runs").join(text(&run, "id"));
@@ -83,9 +83,9 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
                 .transaction(move |db| {
                     let mut record = db
                         .get("node-attempts", &id)?
-                        .ok_or_else(|| Error::new(409, "Attempt removed."))?;
+                        .ok_or_else(|| Error::conflict("Attempt removed."))?;
                     if record["released"] == true {
-                        return Err(Error::new(409, "Attempt released."));
+                        return Err(Error::conflict("Attempt released."));
                     }
                     record["leaseExpiresAt"] = (crate::config::now() + lease_ms as i64).into();
                     record["leaseDurationMs"] = record["leaseDurationMs"]
@@ -119,7 +119,7 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
                         .iter()
                         .any(|p| p["id"] == project)
                     {
-                        return Err(Error::new(403, "Project outside run scope."));
+                        return Err(Error::forbidden("Project outside run scope."));
                     }
                     root.join("workspace").join(project)
                 }
@@ -154,7 +154,7 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
             crate::skills::atomic_write(&root.join("output/result.md"), result.as_bytes()).await?;
             Ok(Json(json!({"ok": true})).into_response())
         }
-        _ => Err(Error::new(404, "Unknown workspace operation.")),
+        _ => Err(Error::not_found("Unknown workspace operation.")),
     }
 }
 
@@ -167,10 +167,10 @@ async fn relay_auth(path: &Path, value: &Value) -> Result<Value> {
         crate::microvm::wire::write(stream.get_mut(), value).await?;
         crate::microvm::wire::read(&mut stream)
             .await?
-            .ok_or_else(|| Error::new(503, "Authentication unavailable."))
+            .ok_or_else(|| Error::unavailable("Authentication unavailable."))
     })
     .await
-    .map_err(|_| Error::new(503, "Authentication unavailable."))?
+    .map_err(|_| Error::unavailable("Authentication unavailable."))?
 }
 
 pub async fn fetch(
@@ -191,7 +191,7 @@ pub async fn fetch(
         .json(body)
         .send()
         .await
-        .map_err(|_| Error::new(503, "Workspace connection interrupted."))?;
+        .map_err(|_| Error::unavailable("Workspace connection interrupted."))?;
     if !response.status().is_success() {
         return Err(Error::new(
             response.status().as_u16(),

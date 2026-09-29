@@ -76,8 +76,7 @@ async fn page(
             // Stop reading rows at the byte budget, rather than allocating an
             // entire page of large historical outputs for every subscriber.
             if before.is_some() && reset {
-                return Err(Error::new(
-                    409,
+                return Err(Error::conflict(
                     "History changed. Reconnect before loading older messages.",
                 ));
             }
@@ -138,7 +137,7 @@ async fn page(
 
 pub async fn http(s: Arc<Service>, kind: &str, id: &str, input: Input) -> Result<Response> {
     if input.method != "GET" {
-        return Err(Error::new(405, "Method not allowed."));
+        return Err(Error::method_not_allowed("Method not allowed."));
     }
     if !id.is_empty() {
         uuid(id)?;

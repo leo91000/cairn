@@ -62,7 +62,7 @@ pub fn open(directory: &Path) -> Result<Arc<Volume>> {
                 return Ok(volume);
             }
         }
-        Some(Entry::Replacing) => return Err(Error::new(409, "Disk replacement is in progress.")),
+        Some(Entry::Replacing) => return Err(Error::conflict("Disk replacement is in progress.")),
         None => {}
     }
     let root = directory.join("lazy");
@@ -110,10 +110,10 @@ pub async fn replacement(directory: &Path) -> Result<Replacement> {
         let mut registry = registry().lock().map_err(Error::internal)?;
         match registry.get(&directory) {
             Some(Entry::Replacing) => {
-                return Err(Error::new(409, "Disk replacement is in progress."));
+                return Err(Error::conflict("Disk replacement is in progress."));
             }
             Some(Entry::Open(volume)) if volume.strong_count() > 0 => {
-                return Err(Error::new(409, "Disk is still in use; retry restoration."));
+                return Err(Error::conflict("Disk is still in use; retry restoration."));
             }
             _ => {}
         }
@@ -229,7 +229,7 @@ impl Volume {
             return Ok(());
         }
         let blocked = tokio::select! {
-            _ = stop.cancelled() => return Err(Error::new(409, "Execution stopped.")),
+            _ = stop.cancelled() => return Err(Error::conflict("Execution stopped.")),
             value = tokio::time::timeout(Duration::from_secs(1), self.needs_pause()) => value.ok().and_then(std::result::Result::ok).unwrap_or(true),
         };
         if blocked != self.paused() {
@@ -399,7 +399,7 @@ pub async fn materialize(directory: &Path, stop: &CancellationToken) -> Result<(
     let disk = volume.disk.clone();
     let writer = tokio::task::spawn_blocking(move || super::export(disk.as_ref(), &copy));
     tokio::select! {
-        _ = stop.cancelled() => { return Err(Error::new(409, "Disk materialization cancelled.")); },
+        _ = stop.cancelled() => { return Err(Error::conflict("Disk materialization cancelled.")); },
         result = writer => result.map_err(Error::internal)??,
     }
     drop(cancel_reads);

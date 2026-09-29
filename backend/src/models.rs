@@ -23,7 +23,7 @@ pub struct Models {
 pub async fn discover(session: &mut Session) -> Result<Value> {
     tokio::time::timeout(Duration::from_secs(20), discover_pages(session))
         .await
-        .unwrap_or_else(|_| Err(Error::new(504, "Codex model discovery timed out.")))
+        .unwrap_or_else(|_| Err(Error::gateway_timeout("Codex model discovery timed out.")))
 }
 
 async fn discover_pages(session: &mut Session) -> Result<Value> {
@@ -43,12 +43,12 @@ async fn discover_pages(session: &mut Session) -> Result<Value> {
             .await?;
         let rows = page["data"]
             .as_array()
-            .ok_or_else(|| Error::new(502, "Codex returned an invalid model list."))?;
+            .ok_or_else(|| Error::bad_gateway("Codex returned an invalid model list."))?;
         for row in rows {
             let model = text(row, "model");
             if model.is_empty() || model.len() > 120 || !row["supportedReasoningEfforts"].is_array()
             {
-                return Err(Error::new(502, "Codex returned an invalid model."));
+                return Err(Error::bad_gateway("Codex returned an invalid model."));
             }
             let efforts = row["supportedReasoningEfforts"]
                 .as_array()
@@ -94,7 +94,9 @@ async fn discover_pages(session: &mut Session) -> Result<Value> {
             break;
         }
     }
-    Err(Error::new(502, "Codex model pagination did not complete."))
+    Err(Error::bad_gateway(
+        "Codex model pagination did not complete.",
+    ))
 }
 
 fn due(cached: &Value) -> bool {

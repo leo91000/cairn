@@ -28,7 +28,7 @@ pub fn catalog(run: &Value) -> Vec<Value> {
 
 pub fn authorize_in(db: &crate::store::Db<'_>, bearer: &str) -> Result<Value> {
     let key = format!("mcp-grant:{}", hex_digest(bearer));
-    let denied = || Error::new(401, "Workspace access expired or was revoked.");
+    let denied = || Error::unauthorized("Workspace access expired or was revoked.");
     let grant = db.kv(&key)?.ok_or_else(denied)?;
     let run = db.run(text(&grant, "runId"))?.ok_or_else(denied)?;
     if grant["messageId"] != run["chatExecution"]["messageId"]
@@ -42,7 +42,7 @@ pub fn authorize_in(db: &crate::store::Db<'_>, bearer: &str) -> Result<Value> {
         .get("agents", text(&run["snapshot"]["agent"], "id"))?
         .ok_or_else(denied)?;
     if policy(&current) != policy(&run["snapshot"]["agent"]) {
-        return Err(Error::new(403, "Agent permissions changed."));
+        return Err(Error::forbidden("Agent permissions changed."));
     }
     Ok(run)
 }
@@ -69,18 +69,17 @@ impl Projects {
         let project = catalog(&run)
             .into_iter()
             .find(|p| p["id"] == project_id)
-            .ok_or_else(|| Error::new(403, "This project is not authorized for this run."))?;
+            .ok_or_else(|| Error::forbidden("This project is not authorized for this run."))?;
         let current = s
             .store
             .get("projects", project_id)
             .await?
-            .ok_or_else(|| Error::new(404, "Project no longer exists."))?;
+            .ok_or_else(|| Error::not_found("Project no longer exists."))?;
         if current["path"] != project["path"]
             || current["baseBranch"] != project["baseBranch"]
             || (current["sourceMode"] == "local") != (project["sourceMode"] == "local")
         {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "Project configuration changed. Start a new conversation.",
             ));
         }
@@ -92,8 +91,7 @@ impl Projects {
         let prepared = &checkpoint["prepared"];
         let root = Path::new(text(prepared, "projectRoot"));
         if prepared["backend"] != "firecracker" || !root.is_absolute() {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "The private workspace is not ready. Retry when the run is active.",
             ));
         }
@@ -115,16 +113,15 @@ impl Projects {
             .bearer_auth(credential)
             .json(&json!({"runId": run["id"],"source": entry["path"],"target": entry["path"]}))
             .timeout(Duration::from_secs(300)).send().await
-            .map_err(|_| Error::new(503,"Project transfer was interrupted. Retry open_project; saved files are preserved."))?;
+            .map_err(|_| Error::unavailable("Project transfer was interrupted. Retry open_project; saved files are preserved."))?;
         if !response.status().is_success() {
-            return Err(Error::new(
-                503,
+            return Err(Error::unavailable(
                 "Project could not be opened in this VM. Retry when the run is active.",
             ));
         }
         let response: Value = response.json().await.map_err(Error::internal)?;
         if response["ok"] != true {
-            return Err(Error::new(503, "Project import was not acknowledged."));
+            return Err(Error::unavailable("Project import was not acknowledged."));
         }
         let id = text(&run, "id").to_owned();
         let entry_copy = entry.clone();
@@ -132,7 +129,7 @@ impl Projects {
             .write(move |db| {
                 let mut run = db
                     .run(&id)?
-                    .ok_or_else(|| Error::new(404, "Run not found."))?;
+                    .ok_or_else(|| Error::not_found("Run not found."))?;
                 let mut entries = run["workspaces"].as_array().cloned().unwrap_or_default();
                 if !entries
                     .iter()
@@ -375,6 +372,6 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         "prompts/list" => Ok(json!({
             "prompts": []
         })),
-        _ => Err(Error::new(404, "Unknown workspace operation.")),
+        _ => Err(Error::not_found("Unknown workspace operation.")),
     }
 }

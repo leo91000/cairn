@@ -79,7 +79,7 @@ impl Transport {
         {
             let mut state = self.state.lock().unwrap();
             if state.calls.values().filter(|c| c.node == node).count() >= 64 {
-                return Err(Error::new(503, "Node transport is busy."));
+                return Err(Error::unavailable("Node transport is busy."));
             }
             state.calls.insert(
                 id.clone(),
@@ -121,8 +121,8 @@ impl Transport {
             head_rx,
         )
         .await
-        .map_err(|_| Error::new(503, "Node did not acknowledge execution."))?
-        .map_err(|_| Error::new(503, "Node disconnected."))?;
+        .map_err(|_| Error::unavailable("Node did not acknowledge execution."))?
+        .map_err(|_| Error::unavailable("Node disconnected."))?;
         let stream = futures_util::stream::try_unfold(
             (body_rx, pending, false),
             |(mut rx, guard, done)| async move {
@@ -193,12 +193,12 @@ impl Transport {
                 .calls
                 .get(id)
                 .filter(|c| c.node == node && !c.streaming)
-                .ok_or_else(|| Error::new(409, "Execution request no longer exists."))?;
+                .ok_or_else(|| Error::conflict("Execution request no longer exists."))?;
             if sequence < call.sequence {
                 return Ok(json!({"ack": sequence}));
             }
             if sequence != call.sequence {
-                return Err(Error::new(409, "Node response out of order."));
+                return Err(Error::conflict("Node response out of order."));
             }
             call.body.clone()
         };
@@ -206,19 +206,19 @@ impl Transport {
         // synchronously so cancellation or a concurrent retry cannot lose a frame.
         let permit = tokio::time::timeout(Duration::from_secs(20), sender.reserve_owned())
             .await
-            .map_err(|_| Error::new(503, "Execution reader is stalled."))?
-            .map_err(|_| Error::new(409, "Execution reader closed."))?;
+            .map_err(|_| Error::unavailable("Execution reader is stalled."))?
+            .map_err(|_| Error::conflict("Execution reader closed."))?;
         let mut state = self.state.lock().unwrap();
         let call = state
             .calls
             .get_mut(id)
             .filter(|c| c.node == node && !c.streaming)
-            .ok_or_else(|| Error::new(409, "Execution request no longer exists."))?;
+            .ok_or_else(|| Error::conflict("Execution request no longer exists."))?;
         if sequence < call.sequence {
             return Ok(json!({"ack": sequence}));
         }
         if sequence != call.sequence {
-            return Err(Error::new(409, "Node response out of order."));
+            return Err(Error::conflict("Node response out of order."));
         }
         if call.head.is_some() {
             let status = value["status"]
@@ -265,7 +265,7 @@ impl Transport {
                         && call.sequence == 1
                         && call.head.is_none()
                 })
-                .ok_or_else(|| Error::new(409, "Execution stream no longer available."))?;
+                .ok_or_else(|| Error::conflict("Execution stream no longer available."))?;
             call.streaming = true;
             (call.body.clone(), call.length)
         };
@@ -279,11 +279,11 @@ impl Transport {
         let mut received = 0u64;
         loop {
             let next = tokio::select! {
-                _ = sender.closed() => return Err(Error::new(409,"Execution reader closed.")),
-                next = tokio::time::timeout(Duration::from_secs(60),body.next()) => next.map_err(|_|Error::new(503,"Node upload stalled."))?,
+                _ = sender.closed() => return Err(Error::conflict("Execution reader closed.")),
+                next = tokio::time::timeout(Duration::from_secs(60),body.next()) => next.map_err(|_|Error::unavailable("Node upload stalled."))?,
             };
             let Some(bytes) = next else { break };
-            let bytes = bytes.map_err(|_| Error::new(503, "Node upload interrupted."))?;
+            let bytes = bytes.map_err(|_| Error::unavailable("Node upload interrupted."))?;
             received = received
                 .checked_add(bytes.len() as u64)
                 .ok_or_else(|| Error::bad("Response too large."))?;
@@ -299,8 +299,8 @@ impl Transport {
                     }),
                 )
                 .await
-                .map_err(|_| Error::new(503, "Execution reader is stalled."))?
-                .map_err(|_| Error::new(409, "Execution reader closed."))?;
+                .map_err(|_| Error::unavailable("Execution reader is stalled."))?
+                .map_err(|_| Error::conflict("Execution reader closed."))?;
             }
         }
         if length.is_some_and(|length| received != length) {
@@ -314,15 +314,15 @@ impl Transport {
             }),
         )
         .await
-        .map_err(|_| Error::new(503, "Execution reader is stalled."))?
-        .map_err(|_| Error::new(409, "Execution reader closed."))?;
+        .map_err(|_| Error::unavailable("Execution reader is stalled."))?
+        .map_err(|_| Error::conflict("Execution reader closed."))?;
         Ok(())
     }
 }
 
 pub async fn stream(State(app): State<App>, request: Request) -> Result<axum::Json<Value>> {
     if request.method() != "POST" {
-        return Err(Error::new(405, "Method not allowed."));
+        return Err(Error::method_not_allowed("Method not allowed."));
     }
     let node = authenticate(&app.service, request.headers()).await?;
     let id = request
@@ -344,15 +344,15 @@ pub async fn authenticate(s: &Service, headers: &axum::http::HeaderMap) -> Resul
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .filter(|v| v.len() == 43)
-        .ok_or_else(|| Error::new(401, "Invalid node identity."))?;
+        .ok_or_else(|| Error::unauthorized("Invalid node identity."))?;
     let node = s
         .store
         .kv(&format!("node-token:{}", crate::auth::digest(credential)))
         .await?
         .and_then(|v| v.as_str().map(str::to_owned))
-        .ok_or_else(|| Error::new(401, "Invalid node identity."))?;
+        .ok_or_else(|| Error::unauthorized("Invalid node identity."))?;
     if s.get("nodes", &node).await?["revoked"] == true {
-        return Err(Error::new(401, "Node revoked."));
+        return Err(Error::unauthorized("Node revoked."));
     }
     Ok(node)
 }
@@ -367,7 +367,7 @@ pub async fn proxy(State(app): State<App>, request: Request) -> Result<Response>
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
     if !crate::auth::safe_equal(supplied, &token) {
-        return Err(Error::new(401, "Invalid execution credential."));
+        return Err(Error::unauthorized("Invalid execution credential."));
     }
     let path = request
         .uri()
@@ -379,7 +379,7 @@ pub async fn proxy(State(app): State<App>, request: Request) -> Result<Response>
     crate::validation::uuid(node)?;
     let record = s.get("nodes", node).await?;
     if record["revoked"] == true {
-        return Err(Error::new(409, "Node revoked."));
+        return Err(Error::conflict("Node revoked."));
     }
     let (node, path, method) = (
         node.to_owned(),

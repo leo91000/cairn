@@ -116,8 +116,7 @@ impl Broker {
         if self.state.join(format!("{id}.stopped")).exists()
             || self.state.join(format!("{id}.exit")).exists()
         {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "This execution attempt has already stopped.",
             ));
         }
@@ -138,8 +137,7 @@ impl Broker {
                 .get(id)
                 .is_none_or(|until| *until <= crate::nodes::boot_ms())
         {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "Node execution lease is missing or expired.",
             ));
         }
@@ -157,8 +155,7 @@ impl Broker {
             .values()
             .any(|a| a.plan["runId"] == plan["runId"])
         {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "This workspace already has an active attempt.",
             ));
         }
@@ -172,12 +169,11 @@ impl Broker {
             || self.state.join(format!("{id}.stopped")).exists()
             || self.state.join(format!("{id}.exit")).exists()
         {
-            return Err(Error::new(409, "This execution attempt has stopped."));
+            return Err(Error::conflict("This execution attempt has stopped."));
         }
         validate(&plan, id, &self.data)?;
         if active.values().any(|a| a.plan["runId"] == plan["runId"]) {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "This workspace already has an active attempt.",
             ));
         }
@@ -299,7 +295,7 @@ impl Broker {
             let active = self.active.lock().await;
             let attempt = active
                 .get(id)
-                .ok_or_else(|| Error::new(409, "VM is not active."))?;
+                .ok_or_else(|| Error::conflict("VM is not active."))?;
             (
                 attempt.plan.clone(),
                 attempt.stop.clone(),
@@ -309,7 +305,7 @@ impl Broker {
         };
         let _guard = lock.lock().await;
         if stop.is_cancelled() || value["runId"] != plan["runId"] {
-            return Err(Error::new(409, "VM attempt changed."));
+            return Err(Error::conflict("VM attempt changed."));
         }
         let root = self.data.join("runs").join(text(&plan, "runId"));
         let source = Path::new(text(&value, "source"));
@@ -326,13 +322,13 @@ impl Broker {
         }
         let socket = socket
             .get()
-            .ok_or_else(|| Error::new(409, "VM is still starting."))?;
+            .ok_or_else(|| Error::conflict("VM is still starting."))?;
         tokio::select! {
-            _ = stop.cancelled() => Err(Error::new(409,"VM stopped during project import.")),
+            _ = stop.cancelled() => Err(Error::conflict("VM stopped during project import.")),
             result = tokio::time::timeout(
                 Duration::from_secs(290),
                 host::import_project(socket, source, text(&value, "target"), plan["sandbox"] == "read-only"),
-            ) => result.map_err(|_| Error::new(503, "Project import timed out."))?,
+            ) => result.map_err(|_| Error::unavailable("Project import timed out."))?,
         }
     }
 
@@ -348,7 +344,7 @@ impl Broker {
         if let Some(mut done) = attempt {
             let _ = tokio::time::timeout(Duration::from_secs(15), done.wait_for(|done| *done))
                 .await
-                .map_err(|_| Error::new(503, "Waiting for the previous VM to stop."))?;
+                .map_err(|_| Error::unavailable("Waiting for the previous VM to stop."))?;
         }
         Ok(())
     }
@@ -447,7 +443,7 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if !safe_equal(authorization, &format!("Bearer {}", credential.trim())) {
-        return Err(Error::new(401, "Invalid runner credential."));
+        return Err(Error::unauthorized("Invalid runner credential."));
     }
     let segments = request
         .uri()
@@ -457,7 +453,7 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
         .collect::<Vec<_>>();
     if segments.as_slice() == ["storage-policy"] {
         if request.method() != "POST" {
-            return Err(Error::new(405, "Method not allowed."));
+            return Err(Error::method_not_allowed("Method not allowed."));
         }
         let bytes = axum::body::to_bytes(request.into_body(), 16384)
             .await
@@ -498,7 +494,7 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
             return Ok(([("content-length", length.to_string())], body).into_response());
         }
         if request.method() != "GET" {
-            return Err(Error::new(405, "Method not allowed."));
+            return Err(Error::method_not_allowed("Method not allowed."));
         }
         let bytes = crate::nodes::snapshots::served(&directory, hash).await?;
         return Ok(([("content-length", bytes.len().to_string())], bytes).into_response());
@@ -506,7 +502,7 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
     if let ["disks", run, "snapshot"] = segments.as_slice() {
         uuid(run)?;
         if request.method() != "POST" {
-            return Err(Error::new(405, "Method not allowed."));
+            return Err(Error::method_not_allowed("Method not allowed."));
         }
         let run = (*run).to_owned();
         let baseline = snapshot_baseline(request).await?;
@@ -517,8 +513,7 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
             .values()
             .any(|a| a.plan["runId"] == *run)
         {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "Use the active attempt for a running VM snapshot.",
             ));
         }
@@ -541,11 +536,11 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
     if let ["disks", run, operation @ ("storage-status" | "published")] = segments.as_slice() {
         uuid(run)?;
         if request.method() != "POST" {
-            return Err(Error::new(405, "Method not allowed."));
+            return Err(Error::method_not_allowed("Method not allowed."));
         }
         let directory = broker.state.join("disks").join(run);
         if !crate::storage::runtime::exists(&directory) {
-            return Err(Error::new(409, "Conversation has no S3-backed journal."));
+            return Err(Error::conflict("Conversation has no S3-backed journal."));
         }
         let volume = crate::storage::runtime::load(&directory).await?;
         if *operation == "storage-status" {
@@ -559,7 +554,7 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
             .as_i64()
             .ok_or_else(|| Error::bad("Missing generation."))?;
         if value["grantId"] != volume.source.grant_id() {
-            return Err(Error::new(409, "Publication belongs to a replaced disk."));
+            return Err(Error::conflict("Publication belongs to a replaced disk."));
         }
         let backup_id = text(&value, "backupId").to_owned();
         uuid(&backup_id)?;
@@ -572,7 +567,7 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
     if let ["disks", run, "restore"] = segments.as_slice() {
         let run = (*run).to_owned();
         if request.method() != "POST" {
-            return Err(Error::new(405, "Method not allowed."));
+            return Err(Error::method_not_allowed("Method not allowed."));
         }
         let bytes = axum::body::to_bytes(
             request.into_body(),
@@ -590,7 +585,7 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
         let run = (*run).to_owned();
         let action = (*action).to_owned();
         if request.method() != "POST" || !["delete", "prune"].contains(&action.as_str()) {
-            return Err(Error::new(405, "Invalid workspace operation."));
+            return Err(Error::method_not_allowed("Invalid workspace operation."));
         }
         uuid(&run)?;
         let bytes = axum::body::to_bytes(request.into_body(), 4096)
@@ -599,7 +594,7 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
         let _: Value = serde_json::from_slice(&bytes)?;
         let active = broker.active.lock().await;
         if active.values().any(|a| a.plan["runId"] == run) {
-            return Err(Error::new(409, "The workspace still has an active agent."));
+            return Err(Error::conflict("The workspace still has an active agent."));
         }
         let directory = broker.state.join("disks").join(&run);
         private_dir(&directory).await?;
@@ -649,12 +644,12 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
             // Preserve the lock inode: an overlapping boot must contend on it.
             return Ok(Json(json!({"deleted": true})).into_response());
         }
-        Err(Error::new(405, "Invalid workspace operation."))
+        Err(Error::method_not_allowed("Invalid workspace operation."))
     } else {
         let id = segments
             .get(1)
             .filter(|_| segments.first() == Some(&"runs"))
-            .ok_or_else(|| Error::new(404, "Not found"))?;
+            .ok_or_else(|| Error::not_found("Not found"))?;
         uuid(id)?;
         match (request.method().as_str(), segments.as_slice()) {
             ("POST", ["runs", id, "snapshot"]) => {
@@ -664,13 +659,13 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
                     let active = broker.active.lock().await;
                     if let Some(attempt) = active.get(&id) {
                         if attempt.stop.is_cancelled() {
-                            return Err(Error::new(409, "VM is stopping."));
+                            return Err(Error::conflict("VM is stopping."));
                         }
                         let socket = attempt
                             .socket
                             .get()
                             .cloned()
-                            .ok_or_else(|| Error::new(409, "VM is still starting."))?;
+                            .ok_or_else(|| Error::conflict("VM is still starting."))?;
                         (
                             text(&attempt.plan, "runId").to_owned(),
                             Some(socket),
@@ -715,7 +710,7 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
                 if broker.state.join(format!("{id}.stopped")).exists()
                     || broker.state.join(format!("{id}.exit")).exists()
                 {
-                    return Err(Error::new(409, "Attempt stopped."));
+                    return Err(Error::conflict("Attempt stopped."));
                 }
                 broker
                     .leases
@@ -734,27 +729,27 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
                     let active = broker.active.lock().await;
                     let attempt = active
                         .get(&id)
-                        .ok_or_else(|| Error::new(409, "VM is not active."))?;
+                        .ok_or_else(|| Error::conflict("VM is not active."))?;
                     if attempt.plan["runId"] != value["runId"] {
-                        return Err(Error::new(403, "Wrong artifact scope."));
+                        return Err(Error::forbidden("Wrong artifact scope."));
                     }
                     (
                         attempt
                             .socket
                             .get()
                             .cloned()
-                            .ok_or_else(|| Error::new(409, "VM is not ready."))?,
+                            .ok_or_else(|| Error::conflict("VM is not ready."))?,
                         text(&attempt.plan, "runId").to_owned(),
                         attempt.stop.clone(),
                     )
                 };
                 let root = broker.data.join("runs").join(run);
                 let (stream, size) = tokio::select! {
-                    _ = stop.cancelled() => return Err(Error::new(409,"VM stopped.")),
+                    _ = stop.cancelled() => return Err(Error::conflict("VM stopped.")),
                     result = tokio::time::timeout(
                         Duration::from_secs(10),
                         host::export_artifact(&socket, text(&value, "path"), &root),
-                    ) => result.map_err(|_| Error::new(408, "Artifact export timed out."))??,
+                    ) => result.map_err(|_| Error::timeout("Artifact export timed out."))??,
                 };
                 let stream = tokio_util::io::ReaderStream::new(stream.take(size))
                     .take_until(async move { stop.cancelled().await });
@@ -859,7 +854,7 @@ async fn handler(State(broker): State<Broker>, request: Request) -> Result<Respo
                 )
                     .into_response())
             }
-            _ => Err(Error::new(405, "Method not allowed.")),
+            _ => Err(Error::method_not_allowed("Method not allowed.")),
         }
     }
 }
@@ -877,7 +872,9 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         .write(true)
         .open(state.join("controller.lock"))?;
     if unsafe { libc::flock(controller.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err(Error::new(503, "Another VM controller owns this storage."));
+        return Err(Error::unavailable(
+            "Another VM controller owns this storage.",
+        ));
     }
     // No snapshot transfer survives a controller restart; durable points live on the master/S3.
     if state.join("snapshots").exists() {
@@ -946,18 +943,18 @@ pub async fn client(id: &str, stop: CancellationToken) -> Result<i32> {
             .timeout(Duration::from_secs(30))
             .send()
             .await
-            .map_err(|_| Error::new(503, "VM controller could not start the run."))?;
+            .map_err(|_| Error::unavailable("VM controller could not start the run."))?;
         if !response.status().is_success() {
-            return Err(Error::new(503, "VM controller could not start the run."));
+            return Err(Error::unavailable("VM controller could not start the run."));
         }
         let logs = http
             .get(format!("{url}/logs"))
             .bearer_auth(&token)
             .send()
             .await
-            .map_err(|_| Error::new(503, "Could not read VM output."))?;
+            .map_err(|_| Error::unavailable("Could not read VM output."))?;
         if !logs.status().is_success() {
-            return Err(Error::new(503, "Could not read VM output."));
+            return Err(Error::unavailable("Could not read VM output."));
         }
         let output = async {
             let stream = logs
@@ -968,7 +965,7 @@ pub async fn client(id: &str, stop: CancellationToken) -> Result<i32> {
             let mut stderr = tokio::io::stderr();
             while let Some(event) = wire::read(&mut reader).await.map_err(|error| {
                 if error.status == 500 {
-                    Error::new(503, "VM output connection was interrupted.")
+                    Error::unavailable("VM output connection was interrupted.")
                 } else {
                     error
                 }
@@ -995,11 +992,11 @@ pub async fn client(id: &str, stop: CancellationToken) -> Result<i32> {
                 .bearer_auth(&token)
                 .send()
                 .await
-                .map_err(|_| Error::new(503, "Could not wait for VM."))?;
+                .map_err(|_| Error::unavailable("Could not wait for VM."))?;
             let value: Value = response
                 .json()
                 .await
-                .map_err(|_| Error::new(503, "VM completion connection was interrupted."))?;
+                .map_err(|_| Error::unavailable("VM completion connection was interrupted."))?;
             value["StatusCode"]
                 .as_i64()
                 .filter(|n| (0..=255).contains(n))
@@ -1017,7 +1014,7 @@ pub async fn client(id: &str, stop: CancellationToken) -> Result<i32> {
         .send()
         .await;
     match result {
-        Err(error) if error.status == 503 => {
+        Err(error) if error.is_unavailable() => {
             eprintln!("{}", error.message);
             Ok(CONTROLLER_INTERRUPTED)
         }

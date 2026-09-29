@@ -17,7 +17,7 @@ async fn controller(s: &Service, run: &str, operation: &str, value: &Value) -> R
         .timeout(Duration::from_secs(10))
         .send()
         .await
-        .map_err(|_| Error::new(503, "Node storage request interrupted."))?;
+        .map_err(|_| Error::unavailable("Node storage request interrupted."))?;
     if !response.status().is_success() {
         return Err(Error::new(
             response.status().as_u16(),

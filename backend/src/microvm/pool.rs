@@ -85,11 +85,11 @@ impl Pool {
     pub async fn reserve(self: &Arc<Self>, _run_id: &str) -> Result<Reservation> {
         let mut slots = self.slots.lock().await;
         if self.stop.is_cancelled() {
-            return Err(Error::new(503, "VM controller is stopping."));
+            return Err(Error::unavailable("VM controller is stopping."));
         }
         let slot = slots
             .reserve(self.capacity)
-            .ok_or_else(|| Error::new(503, "All VM slots are occupied."))?;
+            .ok_or_else(|| Error::unavailable("All VM slots are occupied."))?;
         Ok(Reservation {
             pool: self.clone(),
             released: false,
@@ -123,8 +123,7 @@ impl Reservation {
                 "prepare_disk",
             );
             if !plan["storage"].is_object() {
-                return Err(Error::new(
-                    409,
+                return Err(Error::conflict(
                     "S3-backed storage is required for VM execution.",
                 ));
             }

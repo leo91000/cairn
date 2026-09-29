@@ -42,8 +42,7 @@ pub fn require_node(agent: &Value) -> Result<()> {
         .as_array()
         .is_some_and(Vec::is_empty)
     {
-        return Err(Error::new(
-            403,
+        return Err(Error::forbidden(
             "This agent has no authorized execution node.",
         ));
     }
@@ -324,7 +323,7 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
             policy.validate()?;
             let record = s.get("nodes", node).await?;
             if record["revoked"] == true {
-                return Err(Error::new(409, "Node revoked."));
+                return Err(Error::conflict("Node revoked."));
             }
             crate::object_storage::Storage::configured(s)?
                 .validate()
@@ -342,9 +341,9 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
                 .timeout(std::time::Duration::from_secs(30))
                 .send()
                 .await
-                .map_err(|_| Error::new(503, "Node storage probe unavailable."))?;
+                .map_err(|_| Error::unavailable("Node storage probe unavailable."))?;
             if !response.status().is_success() {
-                return Err(Error::new(409, "Node did not pass its FUSE storage probe."));
+                return Err(Error::conflict("Node did not pass its FUSE storage probe."));
             }
             let node = (*node).to_owned();
             let value = s
@@ -352,7 +351,7 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
                 .transaction(move |db| {
                     let mut record = db
                         .get("nodes", &node)?
-                        .ok_or_else(|| Error::new(404, "Node missing."))?;
+                        .ok_or_else(|| Error::not_found("Node missing."))?;
                     record["storage"] = json!(policy);
                     db.put("nodes", &record)
                 })
@@ -390,9 +389,9 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
                 .transaction(move |db| {
                     let mut record = db
                         .get("nodes", &node)?
-                        .ok_or_else(|| Error::new(404, "Node not found."))?;
+                        .ok_or_else(|| Error::not_found("Node not found."))?;
                     if record["revoked"] == true {
-                        return Err(Error::new(409, "This node is revoked."));
+                        return Err(Error::conflict("This node is revoked."));
                     }
                     let resources = json!(request.limits);
                     for key in ["cpu", "memoryMiB", "diskMiB"] {
@@ -485,9 +484,9 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
                 .transaction(move |db| {
                     let record = db
                         .get("nodes", &node)?
-                        .ok_or_else(|| Error::new(404, "Node not found."))?;
+                        .ok_or_else(|| Error::not_found("Node not found."))?;
                     if record["revoked"] == true {
-                        return Err(Error::new(409, "This node is revoked."));
+                        return Err(Error::conflict("This node is revoked."));
                     }
                     // Agents allowed on every node keep that broader grant.
                     for mut agent in db.list("agents")? {
@@ -525,7 +524,7 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
                 .transaction(move |db| {
                     let mut record = db
                         .get("nodes", &node)?
-                        .ok_or_else(|| Error::new(404, "Node not found."))?;
+                        .ok_or_else(|| Error::not_found("Node not found."))?;
                     if record["local"] == true {
                         return Err(Error::bad("The local runner cannot be revoked."));
                     }
@@ -551,7 +550,7 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
                 })
                 .await
         }
-        _ => Err(Error::new(404, "Not found")),
+        _ => Err(Error::not_found("Not found")),
     }
 }
 
@@ -559,7 +558,7 @@ pub async fn internal(State(app): State<App>, request: Request) -> Result<Json<V
     let input = Input::read(request).await?;
     let s = &app.service;
     if input.method != "POST" {
-        return Err(Error::new(405, "Method not allowed."));
+        return Err(Error::method_not_allowed("Method not allowed."));
     }
     match input.path.as_str() {
         "/internal/nodes/maintenance" => {
@@ -586,13 +585,13 @@ pub async fn internal(State(app): State<App>, request: Request) -> Result<Json<V
             }
             let request: Enrollment = decode(input.body)?;
             if request.protocol != 1 {
-                return Err(Error::new(409, "Unsupported node protocol."));
+                return Err(Error::conflict("Unsupported node protocol."));
             }
             request.capabilities.validate()?;
             name(&request.name)?;
             let runtime = name(&request.runtime_id)?;
             if request.code.len() != 43 {
-                return Err(Error::new(401, "Invalid or expired enrollment code."));
+                return Err(Error::unauthorized("Invalid or expired enrollment code."));
             }
             let key = format!("node-enrollment:{}", digest(&request.code));
             let node_id = id();
@@ -601,9 +600,9 @@ pub async fn internal(State(app): State<App>, request: Request) -> Result<Json<V
             let value = s
                 .store
                 .transaction(move |db| {
-                    let invitation = db
-                        .kv(&key)?
-                        .ok_or_else(|| Error::new(401, "Invalid or expired enrollment code."))?;
+                    let invitation = db.kv(&key)?.ok_or_else(|| {
+                        Error::unauthorized("Invalid or expired enrollment code.")
+                    })?;
                     db.delete(&key)?;
                     let node = json!({
                         "id": node_id,
@@ -640,7 +639,7 @@ pub async fn internal(State(app): State<App>, request: Request) -> Result<Json<V
                 .and_then(|h| h.to_str().ok())
                 .and_then(|h| h.strip_prefix("Bearer "))
                 .filter(|token| token.len() == 43)
-                .ok_or_else(|| Error::new(401, "Invalid node identity."))?;
+                .ok_or_else(|| Error::unauthorized("Invalid node identity."))?;
             let key = format!("node-token:{}", digest(credential));
             let capabilities = if input.body["capabilities"].is_object() {
                 let value: Capabilities = decode(input.body["capabilities"].clone())?;
@@ -661,11 +660,11 @@ pub async fn internal(State(app): State<App>, request: Request) -> Result<Json<V
                     let node_id = db
                         .kv(&key)?
                         .and_then(|v| v.as_str().map(str::to_owned))
-                        .ok_or_else(|| Error::new(401, "Invalid node identity."))?;
+                        .ok_or_else(|| Error::unauthorized("Invalid node identity."))?;
                     let mut node = db
                         .get("nodes", &node_id)?
                         .filter(|v| v["revoked"] != true)
-                        .ok_or_else(|| Error::new(401, "Invalid node identity."))?;
+                        .ok_or_else(|| Error::unauthorized("Invalid node identity."))?;
                     if let Some(runtime) = input.body.get("runtimeId") {
                         node["runtimeId"] = name(runtime.as_str().unwrap_or(""))?.into();
                     }
@@ -743,7 +742,7 @@ pub async fn internal(State(app): State<App>, request: Request) -> Result<Json<V
             }
             Ok(Json(value))
         }
-        _ => Err(Error::new(404, "Not found")),
+        _ => Err(Error::not_found("Not found")),
     }
 }
 
@@ -757,7 +756,7 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
         .timeout(std::time::Duration::from_secs(2))
         .send()
         .await
-        .map_err(|_| Error::new(503, "Local runner unavailable."))?
+        .map_err(|_| Error::unavailable("Local runner unavailable."))?
         .json::<Value>()
         .await
         .map_err(Error::internal)?;

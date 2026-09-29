@@ -20,7 +20,7 @@ pub async fn prepare(disk_dir: &Path, desired: u64) -> Result<PathBuf> {
     }
     let actual = tokio::fs::metadata(&disk).await?.len();
     if desired < actual {
-        return Err(Error::new(409, "A retained VM disk cannot be shrunk."));
+        return Err(Error::conflict("A retained VM disk cannot be shrunk."));
     }
     if desired > actual {
         tokio::fs::OpenOptions::new()

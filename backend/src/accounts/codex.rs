@@ -54,7 +54,7 @@ fn auth_input(value: Value) -> Result<Value> {
 
 fn limits_input(value: Value) -> Result<Value> {
     if !value["rateLimits"].is_object() {
-        return Err(Error::new(502, "Codex returned invalid usage data."));
+        return Err(Error::bad_gateway("Codex returned invalid usage data."));
     }
     let mut all = vec![&value["rateLimits"]];
     if let Some(b) = value["rateLimitsByLimitId"].as_object() {
@@ -68,7 +68,7 @@ fn limits_input(value: Value) -> Result<Value> {
                     .as_f64()
                     .is_none_or(|n| !n.is_finite() || n < 0.)
             {
-                return Err(Error::new(502, "Codex returned invalid usage data."));
+                return Err(Error::bad_gateway("Codex returned invalid usage data."));
             }
         }
     }
@@ -139,8 +139,7 @@ async fn read_limits(rpc: &mut Session, auth: &Value) -> Result<Value> {
         && !text(&auth["tokens"], "account_id").is_empty()
         && limits["accountId"] != auth["tokens"]["account_id"]
     {
-        return Err(Error::new(
-            409,
+        return Err(Error::conflict(
             "Codex returned usage for a different account. Reconnect this account.",
         ));
     }
@@ -156,7 +155,7 @@ async fn capture(s: &Service, id: &str, home: &Path) -> Result<()> {
         .await
         .map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
-                Error::new(404, "No saved account credentials in this workspace.")
+                Error::not_found("No saved account credentials in this workspace.")
             } else {
                 Error::from(error)
             }
@@ -226,8 +225,7 @@ pub async fn discover_models(s: &Service, id: &str) -> Result<Value> {
     let _guard = s.accounts.lock(id).await;
     s.accounts.get(s, id).await?;
     if s.accounts.busy(s, id).await? {
-        return Err(Error::new(
-            409,
+        return Err(Error::conflict(
             "Account sign-in or recovery is in progress.",
         ));
     }
@@ -425,7 +423,7 @@ async fn reset(
                     confirmed,
                 ))
             }
-            _ => Err(Error::new(502, "Invalid reset result")),
+            _ => Err(Error::bad_gateway("Invalid reset result")),
         }
     }
     .await;
@@ -726,7 +724,7 @@ impl Client {
             || text(&result, "chatgptAccountId").is_empty()
             || (!self.account.is_empty() && result["chatgptAccountId"] != self.account)
         {
-            return Err(Error::new(503, "Account authentication is unavailable."));
+            return Err(Error::unavailable("Account authentication is unavailable."));
         }
         self.previous = hex_digest(text(&result, "accessToken"));
         self.account = text(&result, "chatgptAccountId").into();
@@ -738,8 +736,7 @@ impl Client {
         tokens["type"] = "chatgptAuthTokens".into();
         let result = session.request("account/login/start", tokens).await?;
         if result["type"] != "chatgptAuthTokens" {
-            return Err(Error::new(
-                503,
+            return Err(Error::unavailable(
                 "Update Codex to support shared account authentication.",
             ));
         }

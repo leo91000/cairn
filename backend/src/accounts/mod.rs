@@ -209,8 +209,7 @@ pub(crate) async fn claim(s: &Service, account: Value) -> Result<()> {
                     && a["provider"] == account["provider"]
                     && a["identity"] == account["identity"]
             }) {
-                return Err(Error::new(
-                    409,
+                return Err(Error::conflict(
                     "This account is already connected. Reconnect the existing account instead.",
                 ));
             }
@@ -221,10 +220,7 @@ pub(crate) async fn claim(s: &Service, account: Value) -> Result<()> {
 
 /// A reconnection signed in with another identity than the account's own.
 pub(crate) fn different_account() -> Error {
-    Error::new(
-        409,
-        "Sign-in belongs to a different account. Add it as a new account instead.",
-    )
+    Error::conflict("Sign-in belongs to a different account. Add it as a new account instead.")
 }
 
 /// Clears exhaustion once usage read after it shows the account recovered; otherwise that
@@ -452,7 +448,7 @@ impl Accounts {
         let _selection = self.selection.lock().await;
         let leases = self.leases.lock().await;
         if leases.contains_key(run_id) {
-            return Err(Error::new(409, "This run already holds an account."));
+            return Err(Error::conflict("This run already holds an account."));
         }
         let candidates = self.eligible(s, provider, model, &leases).await?;
         drop(leases);
@@ -506,7 +502,7 @@ impl Accounts {
         } else {
             format!("Waiting for a {label} account with available usage.")
         };
-        Ok(Error::new(409, message))
+        Ok(Error::conflict(message))
     }
 
     /// Whether runs of `provider` wait for the user to connect, reconnect or resume an account.
@@ -569,7 +565,7 @@ impl Accounts {
             .get(&lease.run_id)
             .is_none_or(|l| l.account_id != lease.account_id || l.home != lease.home)
         {
-            return Err(Error::new(409, "This account lease has ended."));
+            return Err(Error::conflict("This account lease has ended."));
         }
         lease.provider.driver().access(s, lease, request).await
     }
@@ -742,7 +738,7 @@ impl Accounts {
         let _selection = self.selection.lock().await;
         let mut current = self.signing_in.lock().await;
         if current.as_ref().is_some_and(SignIn::busy) {
-            return Err(Error::new(409, "Another sign-in is in progress."));
+            return Err(Error::conflict("Another sign-in is in progress."));
         }
         let account = self.create(s, provider, name).await?;
         self.begin(s, &mut current, account).await
@@ -753,11 +749,10 @@ impl Accounts {
         let _selection = self.selection.lock().await;
         let mut current = self.signing_in.lock().await;
         if current.as_ref().is_some_and(SignIn::busy) {
-            return Err(Error::new(409, "Another sign-in is in progress."));
+            return Err(Error::conflict("Another sign-in is in progress."));
         }
         if self.recovering(s, id).await? || !self.active(id).await.is_empty() {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "Wait for this account’s runs to finish before reconnecting it.",
             ));
         }
@@ -890,18 +885,17 @@ impl Accounts {
         let sign_in = current
             .as_ref()
             .filter(|c| c.busy() && c.login.view.borrow()["acceptsCode"] == true)
-            .ok_or_else(|| Error::new(409, "This sign-in is no longer waiting for a code."))?;
+            .ok_or_else(|| Error::conflict("This sign-in is no longer waiting for a code."))?;
         sign_in
             .input
             .try_send(code.into())
-            .map_err(|_| Error::new(409, "A code is already being checked."))
+            .map_err(|_| Error::conflict("A code is already being checked."))
     }
 
     pub async fn update(&self, s: &Service, id: &str, input: &Value) -> Result<Value> {
         let _guard = self.lock(id).await;
         if self.connecting.lock().await.as_deref() == Some(id) {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "Finish or cancel sign-in before editing this account.",
             ));
         }
@@ -942,8 +936,7 @@ impl Accounts {
             .as_ref()
             .is_some_and(|c| c.busy() && c.account_id == id);
         if signing_in || self.recovering(s, id).await? || !self.active(id).await.is_empty() {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "Wait for this account’s runs or sign-in to finish before removing it.",
             ));
         }
@@ -1057,6 +1050,6 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
             accounts.remove(s, id).await?;
             Ok(json!({"deleted": true}))
         }
-        _ => Err(Error::new(404, "Unknown account operation.")),
+        _ => Err(Error::not_found("Unknown account operation.")),
     }
 }

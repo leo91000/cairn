@@ -37,24 +37,20 @@ pub async fn command(binary: &str, args: &[&str]) -> Result<()> {
     )
     .await
     .map_err(|_| {
-        Error::new(
-            503,
-            format!("VM infrastructure operation timed out: {binary}"),
-        )
+        Error::unavailable(format!("VM infrastructure operation timed out: {binary}"))
     })??;
     if !result.status.success() {
         tracing::warn!(binary, detail=%String::from_utf8_lossy(&result.stderr), "VM infrastructure operation failed");
-        return Err(Error::new(
-            503,
-            format!("VM infrastructure operation failed: {binary}"),
-        ));
+        return Err(Error::unavailable(format!(
+            "VM infrastructure operation failed: {binary}"
+        )));
     }
     Ok(())
 }
 
 pub async fn assets(state: &Path) -> Result<PathBuf> {
     if !Path::new("/dev/kvm").exists() {
-        return Err(Error::new(503, "Firecracker requires /dev/kvm."));
+        return Err(Error::unavailable("Firecracker requires /dev/kvm."));
     }
     let version = std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into());
     if !version
@@ -105,7 +101,7 @@ async fn connect(socket: &Path) -> Result<BufReader<UnixStream>> {
     let mut answer = String::new();
     stream.read_line(&mut answer).await?;
     if !answer.starts_with("OK ") {
-        return Err(Error::new(503, "Guest connection is not ready."));
+        return Err(Error::unavailable("Guest connection is not ready."));
     }
     Ok(stream)
 }
@@ -115,7 +111,7 @@ pub async fn guest_request(socket: &Path, request: &Value) -> Result<Value> {
     wire::write(stream.get_mut(), request).await?;
     wire::read(&mut stream)
         .await?
-        .ok_or_else(|| Error::new(503, "Guest disconnected."))
+        .ok_or_else(|| Error::unavailable("Guest disconnected."))
 }
 
 pub async fn export_artifact(
@@ -198,7 +194,7 @@ pub async fn import_project(
     .await?;
     let response = wire::read(&mut stream)
         .await?
-        .ok_or_else(|| Error::new(503, "Guest disconnected."))?;
+        .ok_or_else(|| Error::unavailable("Guest disconnected."))?;
     if response["ok"] == true {
         return Ok(json!({"ok": true,"reused": true}));
     }
@@ -280,7 +276,7 @@ impl Network {
             .filter(|slot| *slot > 0)
             .and_then(|slot| slot.checked_mul(4))
             .filter(|subnet| *subnet < (1 << 24))
-            .ok_or_else(|| Error::new(503, "VM private IPv4 address space is exhausted."))?;
+            .ok_or_else(|| Error::unavailable("VM private IPv4 address space is exhausted."))?;
         let base = u32::from(std::net::Ipv4Addr::new(10, 0, 0, 0)) + subnet;
         let bytes = (slot as u32).to_be_bytes();
         Ok(Self {
@@ -540,8 +536,7 @@ impl Vm {
             .write(true)
             .open(disk_dir.join("lock"))?;
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "The previous VM still owns this workspace.",
             ));
         }
@@ -558,8 +553,7 @@ impl Vm {
             image.to_owned()
         };
         if !retained_image.join("root.ext4").exists() || !retained_image.join("vmlinux").exists() {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "The conversation requires an unavailable retained VM runtime.",
             ));
         }
@@ -574,14 +568,13 @@ impl Vm {
             .await?;
         }
         if disk_dir.join("restore.pending").exists() {
-            return Err(Error::new(409, "VM restore is incomplete."));
+            return Err(Error::conflict("VM restore is incomplete."));
         }
         timing.next("open_journal");
         let volume = crate::storage::runtime::load(&disk_dir).await?;
         use crate::storage::Disk;
         if volume.disk.size() != resources.disk_mi_b * 1024 * 1024 {
-            return Err(Error::new(
-                409,
+            return Err(Error::conflict(
                 "VM disk size does not match its S3-backed journal.",
             ));
         }
@@ -687,8 +680,7 @@ impl Vm {
             let mut deadline = tokio::time::Instant::now() + Duration::from_secs(60);
             let status = loop {
                 if child.as_mut().unwrap().try_wait()?.is_some() {
-                    return Err(Error::new(
-                        503,
+                    return Err(Error::unavailable(
                         "Firecracker exited before the guest was ready. Check the VM boot log.",
                     ));
                 }
@@ -704,19 +696,19 @@ impl Vm {
                     deadline = tokio::time::Instant::now() + Duration::from_secs(60);
                 }
                 if tokio::time::Instant::now() > deadline {
-                    return Err(Error::new(503, "Guest startup timed out."));
+                    return Err(Error::unavailable("Guest startup timed out."));
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             };
             if status["version"] != 1 {
-                return Err(Error::new(503, "Unsupported guest protocol."));
+                return Err(Error::unavailable("Unsupported guest protocol."));
             }
 
             Ok(())
         };
         let result = tokio::select! {
             r = operation => r,
-            _ = stop.cancelled() => Err(Error::new(503,"VM preparation stopped."))
+            _ = stop.cancelled() => Err(Error::unavailable("VM preparation stopped."))
         };
         if let Err(error) = result {
             vm.shutdown().await;
@@ -738,9 +730,9 @@ impl Vm {
             ),
         )
         .await
-        .map_err(|_| Error::new(503, "Guest clock synchronization timed out."))??;
+        .map_err(|_| Error::unavailable("Guest clock synchronization timed out."))??;
         if status["ok"] != true {
-            return Err(Error::new(503, "Guest clock synchronization failed."));
+            return Err(Error::unavailable("Guest clock synchronization failed."));
         }
         Ok(())
     }
@@ -951,10 +943,7 @@ impl Vm {
                     }
                 };
                 let event = event?.ok_or_else(|| {
-                    Error::new(
-                        503,
-                        "Guest disconnected. Its workspace disk has been preserved.",
-                    )
+                    Error::unavailable("Guest disconnected. Its workspace disk has been preserved.")
                 })?;
                 match text(&event, "type") {
                     "output" => {
@@ -1030,12 +1019,12 @@ async fn vm_state(state: &Path, attempt: &str, status: &str) -> Result<()> {
         let mut line = String::new();
         read.read_line(&mut line).await?;
         if !line.starts_with("HTTP/1.1 204 ") {
-            return Err(Error::new(503, "VM pause failed."));
+            return Err(Error::unavailable("VM pause failed."));
         }
         Ok(())
     })
     .await
-    .map_err(|_| Error::new(503, "VM pause timed out."))?
+    .map_err(|_| Error::unavailable("VM pause timed out."))?
 }
 
 #[cfg(test)]

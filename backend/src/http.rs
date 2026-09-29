@@ -193,7 +193,7 @@ async fn check_security(
     let host = header(headers, "host");
     let authority = host
         .parse::<axum::http::uri::Authority>()
-        .map_err(|_| Error::new(403, "Unexpected host."))?;
+        .map_err(|_| Error::forbidden("Unexpected host."))?;
     if ![
         origin.host_str().unwrap_or(""),
         "localhost",
@@ -202,7 +202,7 @@ async fn check_security(
     ]
     .contains(&authority.host())
     {
-        return Err(Error::new(403, "Unexpected host."));
+        return Err(Error::forbidden("Unexpected host."));
     }
     let public_artifact = crate::artifacts::sharing::public_read(path, method);
     let requested = header(headers, "origin");
@@ -212,7 +212,7 @@ async fn check_security(
         && !(std::env::var("NODE_ENV").unwrap_or_default() != "production"
             && ["http://localhost:5178", "http://127.0.0.1:5178"].contains(&requested))
     {
-        return Err(Error::new(403, "Unexpected origin."));
+        return Err(Error::forbidden("Unexpected origin."));
     }
     let specific = match path {
         "/api/setup" => Some((5, 60000)),
@@ -226,7 +226,9 @@ async fn check_security(
         if limits.len() > 10000 {
             limits.retain(|_, (expires, _)| *expires > now());
             if limits.len() > 10000 {
-                return Err(Error::new(429, "Too many requests. Try again later."));
+                return Err(Error::too_many_requests(
+                    "Too many requests. Try again later.",
+                ));
             }
         }
         for (key, max, window) in std::iter::once((
@@ -262,7 +264,9 @@ async fn check_security(
             }
             entry.1 += 1;
             if entry.1 > max {
-                return Err(Error::new(429, "Too many requests. Try again later."));
+                return Err(Error::too_many_requests(
+                    "Too many requests. Try again later.",
+                ));
             }
         }
     }
@@ -275,12 +279,11 @@ async fn check_security(
             .auth
             .read(&cookie(headers))
             .await?
-            .ok_or_else(|| Error::new(401, "Please sign in."))?;
+            .ok_or_else(|| Error::unauthorized("Please sign in."))?;
         if !["GET", "HEAD", "OPTIONS"].contains(&method)
             && !safe_equal(header(headers, "x-csrf-token"), text(&session, "csrf"))
         {
-            return Err(Error::new(
-                403,
+            return Err(Error::forbidden(
                 "Invalid CSRF token. Refresh the page and try again.",
             ));
         }
@@ -310,7 +313,7 @@ impl Input {
         };
         let bytes = to_bytes(body, limit)
             .await
-            .map_err(|_| Error::new(413, "Request body is too large."))?;
+            .map_err(|_| Error::too_large("Request body is too large."))?;
         let body = if bytes.is_empty() {
             Value::Null
         } else if header(&parts.headers, "content-type")
@@ -390,7 +393,7 @@ fn session_response(app: &App, session: Value) -> Response {
 
 async fn health(State(app): State<App>, request: Request) -> Result<Response> {
     if !["GET", "HEAD"].contains(&request.method().as_str()) {
-        return Err(Error::new(405, "Method not allowed."));
+        return Err(Error::method_not_allowed("Method not allowed."));
     }
     let env = |key: &str| std::env::var(key).ok();
     let commit = env("APP_COMMIT").unwrap_or_else(|| "development".into());
@@ -453,13 +456,13 @@ async fn health(State(app): State<App>, request: Request) -> Result<Response> {
 async fn lease(State(app): State<App>, request: Request) -> Result<Json<Value>> {
     let input = Input::read(request).await?;
     if !["POST", "DELETE"].contains(&input.method.as_str()) {
-        return Err(Error::new(405, "Method not allowed."));
+        return Err(Error::method_not_allowed("Method not allowed."));
     }
     if !safe_equal(
         header(&input.headers, "authorization"),
         &format!("Bearer {}", app.maintenance),
     ) {
-        return Err(Error::new(401, "Invalid maintenance credential."));
+        return Err(Error::unauthorized("Invalid maintenance credential."));
     }
     let owner = input.string("owner", 100)?.to_owned();
     uuid(&owner)?;
@@ -490,7 +493,7 @@ async fn api(State(app): State<App>, request: Request) -> Result<Response> {
     }
     if let ["", "api", "runs", run, "artifacts", artifact, "visibility"] = segments.as_slice() {
         if request.method() != "PUT" {
-            return Err(Error::new(405, "Method not allowed."));
+            return Err(Error::method_not_allowed("Method not allowed."));
         }
         let input = Input::read(request).await?;
         return Ok(Json(
@@ -540,7 +543,7 @@ async fn api(State(app): State<App>, request: Request) -> Result<Response> {
         ("POST", "/api/setup") => {
             let token = input.string("setupToken", 200)?;
             if s.config.setup_token.is_empty() || !safe_equal(token, &s.config.setup_token) {
-                return Err(Error::new(403, "Incorrect setup token."));
+                return Err(Error::forbidden("Incorrect setup token."));
             }
             s.auth.setup(input.string("password", 200)?).await?;
             s.store.audit("admin.setup", json!({})).await?;
@@ -677,14 +680,14 @@ async fn oauth(State(app): State<App>, request: Request) -> Result<Response> {
             .await?;
             json!({})
         }
-        _ => return Err(Error::new(404, "Not found")),
+        _ => return Err(Error::not_found("Not found")),
     };
     Ok(Json(result).into_response())
 }
 
 async fn metadata(State(app): State<App>, request: Request) -> Result<Json<Value>> {
     if request.method() != "GET" {
-        return Err(Error::new(405, "Method not allowed."));
+        return Err(Error::method_not_allowed("Method not allowed."));
     }
     let url = &app.service.config.public_url;
     match request.uri().path() {
@@ -709,6 +712,6 @@ async fn metadata(State(app): State<App>, request: Request) -> Result<Json<Value
             "token_endpoint_auth_methods_supported": ["none"],
             "scopes_supported": ["read", "run", "manage"],
         }))),
-        _ => Err(Error::new(404, "Not found")),
+        _ => Err(Error::not_found("Not found")),
     }
 }

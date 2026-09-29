@@ -61,8 +61,7 @@ pub async fn fence_process(identity: &Value) -> Result<()> {
     let deadline = now() + 5000;
     while matches(identity).await? {
         if now() >= deadline {
-            return Err(Error::new(
-                503,
+            return Err(Error::unavailable(
                 "Waiting for the previous run process to stop.",
             ));
         }
@@ -88,8 +87,7 @@ pub async fn fence(s: &Service, run: &Value) -> Result<()> {
             .await?
             .is_empty()
         {
-            return Err(Error::new(
-                503,
+            return Err(Error::unavailable(
                 "Waiting for the isolated runner before recovering this run.",
             ));
         }
@@ -132,8 +130,7 @@ pub async fn fence(s: &Service, run: &Value) -> Result<()> {
                         ),
                 );
             if !leased || tokio::time::Instant::now() < deadline + Duration::from_secs(20) {
-                return Err(Error::new(
-                    503,
+                return Err(Error::unavailable(
                     "Waiting for the previous VM execution lease to expire.",
                 ));
             }
@@ -154,8 +151,7 @@ pub async fn session(s: &Service, run: &Value, home: &Path, cwd: &Path) -> Resul
             .filter(|id| !id.is_empty())
             .map(str::to_owned)
             .ok_or_else(|| {
-                Error::new(
-                    409,
+                Error::conflict(
                     "The saved Claude session is unavailable. Working files were preserved.",
                 )
             });
@@ -219,8 +215,7 @@ pub async fn session(s: &Service, run: &Value, home: &Path, cwd: &Path) -> Resul
     }
     .await;
     result.map_err(|_| {
-        Error::new(
-            409,
+        Error::conflict(
             "The saved Codex conversation is unavailable. Working files were preserved; \
         review them before starting a new run.",
         )
