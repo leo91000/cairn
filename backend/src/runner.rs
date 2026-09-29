@@ -1,869 +1,49 @@
 //! Authenticated execution interface shared by chats, scheduled tasks and recovery.
+mod broker;
+mod client;
+mod routes;
+
+pub use client::client;
+
 use crate::{
-    auth::safe_equal,
-    config::now,
     error::{Error, Result},
-    microvm::{host, wire},
+    microvm::{host, pool::Pool},
     skills::{atomic_write, private_dir},
-    validation::{text, uuid},
 };
-use axum::{
-    Json, Router,
-    body::Body,
-    extract::{Request, State},
-    response::{IntoResponse, Response},
-    routing::any,
-};
-use base64::{Engine, engine::general_purpose::STANDARD};
-use bytes::Bytes;
-use futures_util::StreamExt;
-use serde_json::{Value, json};
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt, BufReader},
-    sync::{Mutex, watch},
-};
+use axum::{Router, routing::any};
+use broker::Broker;
+use std::{os::fd::AsRawFd, path::PathBuf};
 use tokio_util::sync::CancellationToken;
 
 pub const CONTROLLER_INTERRUPTED: i32 = 75;
 
-struct Attempt {
-    stop: CancellationToken,
-    done: watch::Receiver<bool>,
-    socket: Arc<tokio::sync::OnceCell<PathBuf>>,
-    plan: Value,
-    imports: Arc<Mutex<()>>,
-    control: Arc<Mutex<()>>,
+fn router(broker: Broker) -> Router {
+    Router::new()
+        .fallback(any(routes::handler))
+        .with_state(broker)
 }
 
-#[derive(Clone)]
-struct Broker {
-    data: PathBuf,
-    state: PathBuf,
-    pool: Arc<crate::microvm::pool::Pool>,
-    active: Arc<Mutex<HashMap<String, Attempt>>>,
-    stop: CancellationToken,
-    leases: Arc<Mutex<HashMap<String, u64>>>,
+fn env_path(name: &str, default: &str) -> PathBuf {
+    PathBuf::from(std::env::var(name).unwrap_or_else(|_| default.into()))
 }
 
-fn normalized(path: &Path) -> bool {
-    path.is_absolute()
-        && path.components().all(|p| {
-            !matches!(
-                p,
-                std::path::Component::ParentDir | std::path::Component::CurDir
-            )
-        })
-        && !path.to_string_lossy().contains("//")
-}
-
-fn validate(plan: &Value, id: &str, data: &Path) -> Result<()> {
-    uuid(text(plan, "runId"))?;
-    if plan["id"] != id
-        || !match plan.get("expires") {
-            Some(Value::Null) => true,
-            Some(value) => value
-                .as_i64()
-                .is_some_and(|n| n > now() && n <= now() + 13 * 3600000),
-            None => false,
-        }
-    {
-        return Err(Error::bad("Invalid or expired execution plan."));
-    }
-    let run_root = data.join("runs").join(text(plan, "runId"));
-    for import in plan["imports"]
-        .as_array()
-        .ok_or_else(|| Error::bad("Missing execution imports."))?
-    {
-        let source = Path::new(text(import, "source"));
-        let target = Path::new(text(import, "target"));
-        if !normalized(source)
-            || !source.starts_with(&run_root)
-            || !normalized(target)
-            || !(target.starts_with(&run_root)
-                || target == Path::new("/home/node")
-                || target == Path::new("/run/leo-chat"))
-        {
-            return Err(Error::bad(
-                "Execution import is outside its private workspace.",
-            ));
-        }
-    }
-    if !Path::new(text(plan, "cwd")).starts_with(&run_root) {
-        return Err(Error::bad("Invalid guest workspace."));
-    }
-    if let Some(output) = plan["chat"]["output"].as_str()
-        && Path::new(output) != run_root.join("output/result.md")
-    {
-        return Err(Error::bad("Invalid result destination."));
-    }
-    Ok(())
-}
-
-impl Broker {
-    async fn start(&self, id: &str) -> Result<()> {
-        if self.active.lock().await.contains_key(id) {
-            return Ok(());
-        }
-        if self.state.join(format!("{id}.stopped")).exists()
-            || self.state.join(format!("{id}.exit")).exists()
-        {
-            return Err(Error::conflict(
-                "This execution attempt has already stopped.",
-            ));
-        }
-        let file = tokio::fs::File::open(self.data.join("runner-plans").join(format!("{id}.json")))
-            .await?;
-        let mut bytes = Vec::new();
-        file.take(8_000_001).read_to_end(&mut bytes).await?;
-        if bytes.len() > 8_000_000 {
-            return Err(Error::bad("Execution plan exceeds limit."));
-        }
-        let plan: Value = serde_json::from_slice(&bytes)?;
-        validate(&plan, id, &self.data)?;
-        if plan["nodeLeaseRequired"] == true
-            && self
-                .leases
-                .lock()
-                .await
-                .get(id)
-                .is_none_or(|until| *until <= crate::nodes::boot_ms())
-        {
-            return Err(Error::conflict(
-                "Node execution lease is missing or expired.",
-            ));
-        }
-        // Imports must resolve to regular directories in this run; a symlink is not a scope grant.
-        for import in plan["imports"].as_array().unwrap() {
-            let path = Path::new(text(import, "source"));
-            if tokio::fs::canonicalize(path).await? != path {
-                return Err(Error::bad("Execution import changed location."));
-            }
-        }
-        if self
-            .active
-            .lock()
-            .await
-            .values()
-            .any(|a| a.plan["runId"] == plan["runId"])
-        {
-            return Err(Error::conflict(
-                "This workspace already has an active attempt.",
-            ));
-        }
-        let reservation = self.pool.reserve(text(&plan, "runId")).await?;
-        // Reservation can wait for preparation teardown. Keep health, stop and imports responsive.
-        let mut active = self.active.lock().await;
-        if active.contains_key(id) {
-            return Ok(());
-        }
-        if self.stop.is_cancelled()
-            || self.state.join(format!("{id}.stopped")).exists()
-            || self.state.join(format!("{id}.exit")).exists()
-        {
-            return Err(Error::conflict("This execution attempt has stopped."));
-        }
-        validate(&plan, id, &self.data)?;
-        if active.values().any(|a| a.plan["runId"] == plan["runId"]) {
-            return Err(Error::conflict(
-                "This workspace already has an active attempt.",
-            ));
-        }
-        // Keep the active attempt locked until this run is registered.
-        let socket = Arc::new(tokio::sync::OnceCell::new());
-        let control = Arc::new(Mutex::new(()));
-        let stop = self.stop.child_token();
-        let (done, receiver) = watch::channel(false);
-        atomic_write(
-            &self.state.join(format!("{id}.run")),
-            text(&plan, "runId").as_bytes(),
-        )
-        .await?;
-        atomic_write(&self.state.join(format!("{id}.active")), b"1").await?;
-        active.insert(
-            id.into(),
-            Attempt {
-                stop: stop.clone(),
-                done: receiver,
-                socket: socket.clone(),
-                plan: plan.clone(),
-                imports: Default::default(),
-                control: control.clone(),
-            },
-        );
-        let broker = self.clone();
-        let id = id.to_owned();
-        tokio::spawn(async move {
-            let deadline = plan["expires"].as_i64();
-            let expiry = stop.clone();
-            let leased = plan["nodeLeaseRequired"] == true;
-            let owner = broker.clone();
-            let attempt = id.clone();
-            let lease_expired = Arc::new(AtomicBool::new(false));
-            let expired = lease_expired.clone();
-            let disk_directory = broker.state.join("disks").join(text(&plan, "runId"));
-            let timer = tokio::spawn(async move {
-                loop {
-                    let lost_lease = leased
-                        && owner
-                            .leases
-                            .lock()
-                            .await
-                            .get(&attempt)
-                            .is_none_or(|d| *d <= crate::nodes::boot_ms());
-                    if deadline.is_some_and(|d| now() >= d) || lost_lease {
-                        expired.store(lost_lease, Ordering::SeqCst);
-                        // Cancellation releases an in-flight guest thaw before waiting
-                        // for its control lock. The timer never waits unboundedly.
-                        expiry.cancel();
-                        if let Some(volume) = crate::storage::runtime::live(&disk_directory) {
-                            volume.stop.cancel();
-                        }
-                        if leased {
-                            let _guard =
-                                tokio::time::timeout(Duration::from_secs(2), control.lock()).await;
-                            let _ = host::pause_attempt(&owner.state, &attempt).await;
-                        }
-                        break;
-                    }
-                    if let Some(volume) = crate::storage::runtime::live(&disk_directory)
-                        && let Ok(_guard) = control.try_lock()
-                    {
-                        if expiry.is_cancelled() {
-                            break;
-                        }
-                        if volume
-                            .enforce_limits(&owner.state, &attempt, &expiry)
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-            });
-            let result = reservation.execute(plan, socket, stop).await;
-            timer.abort();
-            let code = match result {
-                Ok(code) => code,
-                Err(error) => {
-                    let event = json!({
-                        "type": "output",
-                        "stderr": true,
-                        "data": STANDARD.encode(format!("{}\n",error.message))
-                    });
-                    if let Ok(mut log) = tokio::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(broker.state.join(format!("{id}.log")))
-                        .await
-                    {
-                        let _ = wire::write(&mut log, &event).await;
-                    }
-                    1
-                }
-            };
-            let code = if lease_expired.load(Ordering::SeqCst) {
-                CONTROLLER_INTERRUPTED
-            } else {
-                code
-            };
-            let _ = atomic_write(
-                &broker.state.join(format!("{id}.exit")),
-                code.to_string().as_bytes(),
-            )
-            .await;
-            let _ = tokio::fs::remove_file(broker.state.join(format!("{id}.active"))).await;
-            broker.active.lock().await.remove(&id);
-            let _ = done.send(true);
-        });
-        Ok(())
-    }
-
-    async fn open_project(&self, id: &str, project_id: &str, value: Value) -> Result<Value> {
-        uuid(project_id)?;
-        let (plan, stop, lock, socket) = {
-            let active = self.active.lock().await;
-            let attempt = active
-                .get(id)
-                .ok_or_else(|| Error::conflict("VM is not active."))?;
-            (
-                attempt.plan.clone(),
-                attempt.stop.clone(),
-                attempt.imports.clone(),
-                attempt.socket.clone(),
-            )
-        };
-        let _guard = lock.lock().await;
-        if stop.is_cancelled() || value["runId"] != plan["runId"] {
-            return Err(Error::conflict("VM attempt changed."));
-        }
-        let root = self.data.join("runs").join(text(&plan, "runId"));
-        let source = Path::new(text(&value, "source"));
-        let target = Path::new(text(&value, "target"));
-        if !normalized(source)
-            || !source.starts_with(&root)
-            || source != target
-            || source.file_name().and_then(|v| v.to_str()) != Some(project_id)
-            || tokio::fs::canonicalize(source).await? != source
-        {
-            return Err(Error::bad(
-                "Project import is outside its private workspace.",
-            ));
-        }
-        let socket = socket
-            .get()
-            .ok_or_else(|| Error::conflict("VM is still starting."))?;
-        tokio::select! {
-            _ = stop.cancelled() => Err(Error::conflict("VM stopped during project import.")),
-            result = tokio::time::timeout(
-                Duration::from_secs(290),
-                host::import_project(socket, source, text(&value, "target"), plan["sandbox"] == "read-only"),
-            ) => result.map_err(|_| Error::unavailable("Project import timed out."))?,
-        }
-    }
-
-    async fn stop(&self, id: &str) -> Result<()> {
-        atomic_write(&self.state.join(format!("{id}.stopped")), b"").await?;
-        let attempt = {
-            let active = self.active.lock().await;
-            active.get(id).map(|a| {
-                a.stop.cancel();
-                a.done.clone()
-            })
-        };
-        if let Some(mut done) = attempt {
-            let _ = tokio::time::timeout(Duration::from_secs(15), done.wait_for(|done| *done))
-                .await
-                .map_err(|_| Error::unavailable("Waiting for the previous VM to stop."))?;
-        }
-        Ok(())
-    }
-}
-
-async fn erase_attempt_content(broker: &Broker, run: &str) -> Result<()> {
-    let mut attempts = std::collections::HashSet::new();
-    let plans = broker.data.join("runner-plans");
-    if plans.is_dir() {
-        let mut entries = tokio::fs::read_dir(&plans).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let Some(attempt) = name.strip_suffix(".json").filter(|v| uuid(v).is_ok()) else {
-                continue;
-            };
-            let value: Value = serde_json::from_slice(&tokio::fs::read(entry.path()).await?)?;
-            if value["runId"] == run {
-                // Fence a delayed start before removing its short-lived credentials.
-                atomic_write(&broker.state.join(format!("{attempt}.stopped")), b"").await?;
-                tokio::fs::remove_file(entry.path()).await?;
-                attempts.insert(attempt.to_owned());
-            }
-        }
-    }
-    let mut entries = tokio::fs::read_dir(&broker.state).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some(attempt) = name.strip_suffix(".run").filter(|v| uuid(v).is_ok()) {
-            if tokio::fs::read_to_string(entry.path()).await? == run {
-                atomic_write(&broker.state.join(format!("{attempt}.stopped")), b"").await?;
-                attempts.insert(attempt.to_owned());
-                tokio::fs::remove_file(entry.path()).await?;
-            }
-            continue;
-        }
-        let Some(attempt) = name.strip_suffix(".vm.json").filter(|v| uuid(v).is_ok()) else {
-            continue;
-        };
-        let value: Value = serde_json::from_slice(&tokio::fs::read(entry.path()).await?)?;
-        if value["runId"] != run {
-            continue;
-        }
-        atomic_write(&broker.state.join(format!("{attempt}.stopped")), b"").await?;
-        attempts.insert(attempt.to_owned());
-        let vm = text(&value, "vmId");
-        if uuid(vm).is_ok() {
-            for suffix in ["boot.log", "vmm.log"] {
-                let path = broker.state.join(format!("{vm}.{suffix}"));
-                match tokio::fs::remove_file(path).await {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e.into()),
-                }
-            }
-        }
-        tokio::fs::remove_file(entry.path()).await?;
-    }
-    for attempt in attempts {
-        match tokio::fs::remove_file(broker.state.join(format!("{attempt}.log"))).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
+/// A controller container restart fences its entire PID namespace. Mark interrupted attempts
+/// exited, but retain all guest disks so the manager can launch replacement attempts.
+async fn fence_interrupted_attempts(state: &std::path::Path) -> Result<()> {
+    let mut files = tokio::fs::read_dir(state).await?;
+    while let Some(file) = files.next_entry().await? {
+        if file.path().extension().is_some_and(|s| s == "active") {
+            atomic_write(&file.path().with_extension("exit"), b"143").await?;
+            tokio::fs::remove_file(file.path()).await?;
         }
     }
     Ok(())
-}
-
-async fn handler(State(broker): State<Broker>, request: Request) -> Result<Response> {
-    if request.uri().path() == "/health" {
-        let mut runtimes = Vec::new();
-        if let Ok(mut entries) = tokio::fs::read_dir(broker.state.join("images")).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                if entry.path().join("root.ext4").exists() && entry.path().join("vmlinux").exists()
-                {
-                    runtimes.push(entry.file_name().to_string_lossy().into_owned());
-                }
-            }
-        }
-        return Ok(Json(json!({
-            "status": "ok",
-            "backend": "firecracker",
-            "runtimeId": std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_|"development".into()),
-            "nodeProtocol": 2,
-            "runtimes": runtimes,
-            "dataRoot": broker.data,
-            "activeRuns": broker.active.lock().await.len(),
-            "capabilities": crate::nodes::connector::capabilities(&broker.state).ok(),
-            "pool": broker.pool.health().await
-        }))
-        .into_response());
-    }
-    let credential = tokio::fs::read_to_string(broker.data.join("runner-secret")).await?;
-    let authorization = request
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if !safe_equal(authorization, &format!("Bearer {}", credential.trim())) {
-        return Err(Error::unauthorized("Invalid runner credential."));
-    }
-    let segments = request
-        .uri()
-        .path()
-        .trim_start_matches('/')
-        .split('/')
-        .collect::<Vec<_>>();
-    if segments.as_slice() == ["storage-policy"] {
-        if request.method() != "POST" {
-            return Err(Error::method_not_allowed("Method not allowed."));
-        }
-        let bytes = axum::body::to_bytes(request.into_body(), 16384)
-            .await
-            .map_err(|_| Error::bad("Invalid storage policy."))?;
-        let policy: crate::storage::policy::Policy = serde_json::from_slice(&bytes)?;
-        policy.validate()?;
-        let state = broker.state.clone();
-        tokio::task::spawn_blocking(move || crate::storage::fuse::probe(&state))
-            .await
-            .map_err(Error::internal)??;
-        atomic_write(
-            &broker.state.join("storage-policy.json"),
-            &serde_json::to_vec(&policy)?,
-        )
-        .await?;
-        return Ok(Json(json!({"ready": true})).into_response());
-    }
-    if let ["snapshots", snapshot, hash] = segments.as_slice() {
-        uuid(snapshot)?;
-        let directory = broker.state.join("snapshots").join(snapshot);
-        if request.method() == "DELETE" && *hash == "discard" {
-            tokio::fs::remove_dir_all(directory).await?;
-            return Ok(Json(json!({"ok": true})).into_response());
-        }
-        if request.method() == "POST" && *hash == "blocks" {
-            #[derive(serde::Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct Batch {
-                hashes: Vec<String>,
-            }
-            let body = axum::body::to_bytes(request.into_body(), 4096)
-                .await
-                .map_err(|_| Error::bad("Invalid snapshot block batch."))?;
-            let batch: Batch = serde_json::from_slice(&body)
-                .map_err(|_| Error::bad("Invalid snapshot block batch."))?;
-            let (length, body) =
-                crate::nodes::snapshots::served_batch(&directory, batch.hashes).await?;
-            return Ok(([("content-length", length.to_string())], body).into_response());
-        }
-        if request.method() != "GET" {
-            return Err(Error::method_not_allowed("Method not allowed."));
-        }
-        let bytes = crate::nodes::snapshots::served(&directory, hash).await?;
-        return Ok(([("content-length", bytes.len().to_string())], bytes).into_response());
-    }
-    if let ["disks", run, "snapshot"] = segments.as_slice() {
-        uuid(run)?;
-        if request.method() != "POST" {
-            return Err(Error::method_not_allowed("Method not allowed."));
-        }
-        let run = (*run).to_owned();
-        let baseline = snapshot_baseline(request).await?;
-        if broker
-            .active
-            .lock()
-            .await
-            .values()
-            .any(|a| a.plan["runId"] == *run)
-        {
-            return Err(Error::conflict(
-                "Use the active attempt for a running VM snapshot.",
-            ));
-        }
-        let state = broker.state.clone();
-        let stop = broker.stop.child_token();
-        let task = tokio::spawn(async move {
-            crate::nodes::checkpoint::capture(
-                &state,
-                &run,
-                None,
-                Arc::new(Mutex::new(())),
-                stop,
-                &run,
-                baseline.as_deref(),
-            )
-            .await
-        });
-        return Ok(Json(task.await.map_err(Error::internal)??).into_response());
-    }
-    if let ["disks", run, operation @ ("storage-status" | "published")] = segments.as_slice() {
-        uuid(run)?;
-        if request.method() != "POST" {
-            return Err(Error::method_not_allowed("Method not allowed."));
-        }
-        let directory = broker.state.join("disks").join(run);
-        if !crate::storage::runtime::exists(&directory) {
-            return Err(Error::conflict("Conversation has no S3-backed journal."));
-        }
-        let volume = crate::storage::runtime::load(&directory).await?;
-        if *operation == "storage-status" {
-            return Ok(Json(volume.inspect().await?).into_response());
-        }
-        let bytes = axum::body::to_bytes(request.into_body(), 16384)
-            .await
-            .map_err(|_| Error::bad("Invalid publication receipt."))?;
-        let value: Value = serde_json::from_slice(&bytes)?;
-        let generation = value["generation"]
-            .as_i64()
-            .ok_or_else(|| Error::bad("Missing generation."))?;
-        if value["grantId"] != volume.source.grant_id() {
-            return Err(Error::conflict("Publication belongs to a replaced disk."));
-        }
-        let backup_id = text(&value, "backupId").to_owned();
-        uuid(&backup_id)?;
-        let disk = volume.disk.clone();
-        tokio::task::spawn_blocking(move || disk.commit_published(generation, &backup_id))
-            .await
-            .map_err(Error::internal)??;
-        return Ok(Json(json!({"committed": true})).into_response());
-    }
-    if let ["disks", run, "restore"] = segments.as_slice() {
-        let run = (*run).to_owned();
-        if request.method() != "POST" {
-            return Err(Error::method_not_allowed("Method not allowed."));
-        }
-        let bytes = axum::body::to_bytes(
-            request.into_body(),
-            crate::nodes::snapshots::MAX_MANIFEST_BYTES,
-        )
-        .await
-        .map_err(|_| Error::bad("Restore manifest too large."))?;
-        let value = serde_json::from_slice(&bytes)?;
-        return Ok(
-            Json(crate::nodes::restore::controller(&broker.state, &run, value).await?)
-                .into_response(),
-        );
-    }
-    if let ["disks", run, action] = segments.as_slice() {
-        let run = (*run).to_owned();
-        let action = (*action).to_owned();
-        if request.method() != "POST" || !["delete", "prune"].contains(&action.as_str()) {
-            return Err(Error::method_not_allowed("Invalid workspace operation."));
-        }
-        uuid(&run)?;
-        let bytes = axum::body::to_bytes(request.into_body(), 4096)
-            .await
-            .map_err(|_| Error::bad("Invalid workspace request."))?;
-        let _: Value = serde_json::from_slice(&bytes)?;
-        let active = broker.active.lock().await;
-        if active.values().any(|a| a.plan["runId"] == run) {
-            return Err(Error::conflict("The workspace still has an active agent."));
-        }
-        let directory = broker.state.join("disks").join(&run);
-        private_dir(&directory).await?;
-        let _lock =
-            crate::file_lock::exclusive(&directory.join("lock"), "The workspace is still in use.")?;
-        let disk = directory.join("data.ext4");
-        if action == "prune" {
-            let mut retired_grants = Vec::new();
-            // Older copies set aside when a recovery point replaced this disk.
-            let mut entries = tokio::fs::read_dir(&directory).await?;
-            while let Some(entry) = entries.next_entry().await? {
-                if !entry.file_name().to_string_lossy().starts_with("stale-") {
-                    continue;
-                }
-                if entry.file_type().await?.is_dir() {
-                    if entry.path().join("journal.sqlite").exists() {
-                        let context = crate::storage::LazyDisk::context(&entry.path())?;
-                        retired_grants.push(crate::auth::digest(text(&context, "grant")));
-                    }
-                    tokio::fs::remove_dir_all(entry.path()).await?;
-                } else {
-                    tokio::fs::remove_file(entry.path()).await?;
-                }
-            }
-            return Ok(
-                Json(json!({"pruned": true,"retiredGrants": retired_grants})).into_response(),
-            );
-        }
-        if action == "delete" {
-            match tokio::fs::remove_file(&disk).await {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
-            }
-            erase_attempt_content(&broker, &run).await?;
-            let mut leftovers = tokio::fs::read_dir(&directory).await?;
-            while let Some(entry) = leftovers.next_entry().await? {
-                if entry.file_name() == "lock" {
-                    continue;
-                }
-                if entry.file_type().await?.is_dir() {
-                    tokio::fs::remove_dir_all(entry.path()).await?;
-                } else {
-                    tokio::fs::remove_file(entry.path()).await?;
-                }
-            }
-            // Preserve the lock inode: an overlapping boot must contend on it.
-            return Ok(Json(json!({"deleted": true})).into_response());
-        }
-        Err(Error::method_not_allowed("Invalid workspace operation."))
-    } else {
-        let id = segments
-            .get(1)
-            .filter(|_| segments.first() == Some(&"runs"))
-            .ok_or_else(|| Error::not_found("Not found"))?;
-        uuid(id)?;
-        match (request.method().as_str(), segments.as_slice()) {
-            ("POST", ["runs", id, "snapshot"]) => {
-                let id = (*id).to_owned();
-                let baseline = snapshot_baseline(request).await?;
-                let (run, socket, control, stop) = {
-                    let active = broker.active.lock().await;
-                    if let Some(attempt) = active.get(&id) {
-                        if attempt.stop.is_cancelled() {
-                            return Err(Error::conflict("VM is stopping."));
-                        }
-                        let socket = attempt
-                            .socket
-                            .get()
-                            .cloned()
-                            .ok_or_else(|| Error::conflict("VM is still starting."))?;
-                        (
-                            text(&attempt.plan, "runId").to_owned(),
-                            Some(socket),
-                            attempt.control.clone(),
-                            attempt.stop.clone(),
-                        )
-                    } else {
-                        (
-                            tokio::fs::read_to_string(broker.state.join(format!("{id}.run")))
-                                .await?,
-                            None,
-                            Arc::new(Mutex::new(())),
-                            CancellationToken::new(),
-                        )
-                    }
-                };
-                let state = broker.state.clone();
-                let task = tokio::spawn(async move {
-                    crate::nodes::checkpoint::capture(
-                        &state,
-                        &run,
-                        socket,
-                        control,
-                        stop,
-                        &id,
-                        baseline.as_deref(),
-                    )
-                    .await
-                });
-                Ok(Json(task.await.map_err(Error::internal)??).into_response())
-            }
-            ("POST", ["runs", id, "lease"]) => {
-                let id = (*id).to_owned();
-                let bytes = axum::body::to_bytes(request.into_body(), 1024)
-                    .await
-                    .map_err(|_| Error::bad("Invalid lease."))?;
-                let value: Value = serde_json::from_slice(&bytes)?;
-                let remaining = value["remainingMs"]
-                    .as_u64()
-                    .filter(|v| *v > 0 && *v <= 300000)
-                    .ok_or_else(|| Error::bad("Invalid lease duration."))?;
-                if broker.state.join(format!("{id}.stopped")).exists()
-                    || broker.state.join(format!("{id}.exit")).exists()
-                {
-                    return Err(Error::conflict("Attempt stopped."));
-                }
-                broker
-                    .leases
-                    .lock()
-                    .await
-                    .insert((*id).to_owned(), crate::nodes::boot_ms() + remaining);
-                Ok(Json(json!({"ok": true})).into_response())
-            }
-            ("POST", ["runs", id, "artifact"]) => {
-                let id = (*id).to_owned();
-                let bytes = axum::body::to_bytes(request.into_body(), 16384)
-                    .await
-                    .map_err(|_| Error::bad("Invalid artifact request."))?;
-                let value: Value = serde_json::from_slice(&bytes)?;
-                let (socket, run, stop) = {
-                    let active = broker.active.lock().await;
-                    let attempt = active
-                        .get(&id)
-                        .ok_or_else(|| Error::conflict("VM is not active."))?;
-                    if attempt.plan["runId"] != value["runId"] {
-                        return Err(Error::forbidden("Wrong artifact scope."));
-                    }
-                    (
-                        attempt
-                            .socket
-                            .get()
-                            .cloned()
-                            .ok_or_else(|| Error::conflict("VM is not ready."))?,
-                        text(&attempt.plan, "runId").to_owned(),
-                        attempt.stop.clone(),
-                    )
-                };
-                let root = broker.data.join("runs").join(run);
-                let (stream, size) = tokio::select! {
-                    _ = stop.cancelled() => return Err(Error::conflict("VM stopped.")),
-                    result = tokio::time::timeout(
-                        Duration::from_secs(10),
-                        host::export_artifact(&socket, text(&value, "path"), &root),
-                    ) => result.map_err(|_| Error::timeout("Artifact export timed out."))??,
-                };
-                let stream = tokio_util::io::ReaderStream::new(stream.take(size))
-                    .take_until(async move { stop.cancelled().await });
-                Ok((
-                    [(axum::http::header::CONTENT_LENGTH, size.to_string())],
-                    Body::from_stream(stream),
-                )
-                    .into_response())
-            }
-            ("POST", ["runs", id]) => {
-                broker.start(id).await?;
-                Ok(Json(json!({})).into_response())
-            }
-            ("POST", ["runs", id, "projects", project_id]) => {
-                let (id, project_id) = ((*id).to_owned(), (*project_id).to_owned());
-                let bytes = axum::body::to_bytes(request.into_body(), 16384)
-                    .await
-                    .map_err(|_| Error::bad("Invalid project request."))?;
-                let value = serde_json::from_slice(&bytes)?;
-                Ok(Json(broker.open_project(&id, &project_id, value).await?).into_response())
-            }
-            ("DELETE", ["runs", id]) => {
-                broker.stop(id).await?;
-                Ok(Json(json!({})).into_response())
-            }
-            ("GET", ["runs", id, "logs"]) => {
-                let id = (*id).to_owned();
-                let stream = futures_util::stream::try_unfold(
-                    (broker, id, 0_u64, Vec::new()),
-                    |(broker, id, offset, mut pending)| async move {
-                        let mut offset = offset;
-                        loop {
-                            if let Ok(mut file) =
-                                tokio::fs::File::open(broker.state.join(format!("{id}.log"))).await
-                            {
-                                use tokio::io::AsyncSeekExt;
-                                file.seek(std::io::SeekFrom::Start(offset)).await?;
-                                let mut chunk = vec![0; 65536];
-                                let count = file.read(&mut chunk).await?;
-                                pending.extend_from_slice(&chunk[..count]);
-                                offset += count as u64;
-                            }
-                            if let Some(end) = pending.iter().rposition(|b| *b == b'\n') {
-                                let rest = pending.split_off(end + 1);
-                                return Ok::<_, std::io::Error>(Some((
-                                    Bytes::from(pending),
-                                    (broker, id, offset, rest),
-                                )));
-                            }
-                            if broker.state.join(format!("{id}.exit")).exists()
-                                || broker.stop.is_cancelled()
-                            {
-                                return Ok(None);
-                            }
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                            if pending.is_empty() {
-                                return Ok(Some((
-                                    Bytes::from_static(b"{\"type\":\"heartbeat\"}\n"),
-                                    (broker, id, offset, pending),
-                                )));
-                            }
-                        }
-                    },
-                );
-                Ok((
-                    [("content-type", "application/x-ndjson")],
-                    Body::from_stream(stream),
-                )
-                    .into_response())
-            }
-            ("POST", ["runs", id, "wait"]) => {
-                let id = (*id).to_owned();
-                let stream = futures_util::stream::unfold(
-                    (broker, id, false),
-                    |(broker, id, done)| async move {
-                        if done {
-                            return None;
-                        }
-                        // The exit marker is durable before attempt cleanup. Do not
-                        // invite a resume while start() would still reject its workspace.
-                        if !broker.active.lock().await.contains_key(&id)
-                            && let Ok(code) =
-                                tokio::fs::read_to_string(broker.state.join(format!("{id}.exit")))
-                                    .await
-                        {
-                            return Some((
-                                Ok::<_, std::io::Error>(Bytes::from(
-                                    json!({"StatusCode": code.parse::<i32>().unwrap_or(1)})
-                                        .to_string(),
-                                )),
-                                (broker, id, true),
-                            ));
-                        }
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        let stop = broker.stop.is_cancelled();
-                        Some((Ok(Bytes::from_static(b" ")), (broker, id, stop)))
-                    },
-                );
-                Ok((
-                    [("content-type", "application/json")],
-                    Body::from_stream(stream),
-                )
-                    .into_response())
-            }
-            _ => Err(Error::method_not_allowed("Method not allowed.")),
-        }
-    }
 }
 
 pub async fn serve(stop: CancellationToken) -> Result<()> {
     let concurrency = crate::config::concurrency()?;
-    let data = PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| "/data".into()));
-    let state =
-        PathBuf::from(std::env::var("RUNNER_STATE_DIR").unwrap_or_else(|_| "/runner-state".into()));
+    let data = env_path("DATA_DIR", "/data");
+    let state = env_path("RUNNER_STATE_DIR", "/runner-state");
     private_dir(&state).await?;
     let controller = std::fs::OpenOptions::new()
         .create(true)
@@ -881,34 +61,15 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         tokio::fs::remove_dir_all(state.join("snapshots")).await?;
     }
     let image = host::assets(&state).await?;
-    // A controller container restart fences its entire PID namespace. Mark interrupted attempts
-    // exited, but retain all guest disks so the manager can launch replacement attempts.
-    let mut files = tokio::fs::read_dir(&state).await?;
-    while let Some(file) = files.next_entry().await? {
-        if file.path().extension().is_some_and(|s| s == "active") {
-            atomic_write(&file.path().with_extension("exit"), b"143").await?;
-            tokio::fs::remove_file(file.path()).await?;
-        }
-    }
-    let pool =
-        crate::microvm::pool::Pool::new(state.clone(), image, stop.clone(), concurrency).await?;
-    let broker = Broker {
-        data,
-        state,
-        pool,
-        active: Default::default(),
-        leases: Default::default(),
-        stop: stop.clone(),
-    };
+    fence_interrupted_attempts(&state).await?;
+    let pool = Pool::new(state.clone(), image, stop.clone(), concurrency).await?;
+    let broker = Broker::new(data, state, pool, stop.clone());
     let draining = broker.clone();
     let address = std::env::var("RUNNER_BIND").unwrap_or_else(|_| "0.0.0.0:4311".into());
     let listener = tokio::net::TcpListener::bind(address).await?;
-    axum::serve(
-        listener,
-        Router::new().fallback(any(handler)).with_state(broker),
-    )
-    .with_graceful_shutdown(stop.cancelled_owned())
-    .await?;
+    axum::serve(listener, router(broker))
+        .with_graceful_shutdown(stop.cancelled_owned())
+        .await?;
     let attempts = draining
         .active
         .lock()
@@ -924,161 +85,98 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     Ok(())
 }
 
-use std::os::fd::AsRawFd;
-
-pub async fn client(id: &str, stop: CancellationToken) -> Result<i32> {
-    uuid(id)?;
-    let base = std::env::var("RUNNER_URL").map_err(|_| Error::bad("Missing runner URL."))?;
-    let token =
-        std::env::var("RUNNER_TOKEN").map_err(|_| Error::bad("Missing runner credential."))?;
-    let url = format!("{base}/runs/{id}");
-    let http = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(Error::internal)?;
-    let operation = async {
-        let response = http
-            .post(&url)
-            .bearer_auth(&token)
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await
-            .map_err(|_| Error::unavailable("VM controller could not start the run."))?;
-        if !response.status().is_success() {
-            return Err(Error::unavailable("VM controller could not start the run."));
-        }
-        let logs = http
-            .get(format!("{url}/logs"))
-            .bearer_auth(&token)
-            .send()
-            .await
-            .map_err(|_| Error::unavailable("Could not read VM output."))?;
-        if !logs.status().is_success() {
-            return Err(Error::unavailable("Could not read VM output."));
-        }
-        let output = async {
-            let stream = logs
-                .bytes_stream()
-                .map(|r| r.map_err(std::io::Error::other));
-            let mut reader = BufReader::new(tokio_util::io::StreamReader::new(stream));
-            let mut stdout = tokio::io::stdout();
-            let mut stderr = tokio::io::stderr();
-            while let Some(event) = wire::read(&mut reader).await.map_err(|error| {
-                if error.status == 500 {
-                    Error::unavailable("VM output connection was interrupted.")
-                } else {
-                    error
-                }
-            })? {
-                if event["type"] == "heartbeat" {
-                    continue;
-                }
-                let bytes = STANDARD
-                    .decode(text(&event, "data"))
-                    .map_err(|_| Error::bad("Invalid VM output."))?;
-                if event["stderr"] == true {
-                    stderr.write_all(&bytes).await?;
-                } else {
-                    stdout.write_all(&bytes).await?;
-                }
-            }
-            stdout.flush().await?;
-            stderr.flush().await?;
-            Ok::<_, Error>(())
-        };
-        let wait = async {
-            let response = http
-                .post(format!("{url}/wait"))
-                .bearer_auth(&token)
-                .send()
-                .await
-                .map_err(|_| Error::unavailable("Could not wait for VM."))?;
-            let value: Value = response
-                .json()
-                .await
-                .map_err(|_| Error::unavailable("VM completion connection was interrupted."))?;
-            value["StatusCode"]
-                .as_i64()
-                .filter(|n| (0..=255).contains(n))
-                .map(|n| n as i32)
-                .ok_or_else(|| Error::bad("Invalid VM exit status."))
-        };
-        let (_, code) = tokio::try_join!(output, wait)?;
-        Ok(code)
-    };
-    let result = tokio::select! {_ = stop.cancelled() => Ok(143),result = operation => result};
-    let _ = http
-        .delete(url)
-        .bearer_auth(token)
-        .timeout(Duration::from_secs(17))
-        .send()
-        .await;
-    match result {
-        Err(error) if error.is_unavailable() => {
-            eprintln!("{}", error.message);
-            Ok(CONTROLLER_INTERRUPTED)
-        }
-        Ok(143) if !stop.is_cancelled() => Ok(CONTROLLER_INTERRUPTED),
-        result => result,
-    }
-}
-
-/// The latest recovery point the master published, which a capture may continue from.
-async fn snapshot_baseline(request: axum::extract::Request) -> Result<Option<String>> {
-    let bytes = axum::body::to_bytes(request.into_body(), 1024)
-        .await
-        .map_err(|_| Error::bad("Invalid snapshot request."))?;
-    Ok(serde_json::from_slice::<Value>(&bytes)
-        .ok()
-        .and_then(|body| body["baseline"].as_str().map(str::to_owned)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::microvm::plan::Plan;
+    use axum::body::Body;
+    use broker::Attempt;
+    use futures_util::StreamExt;
+    use serde_json::{Value, json};
+    use std::{
+        io::{Seek, SeekFrom, Write},
+        os::unix::fs::MetadataExt,
+        path::Path,
+        sync::Arc,
+        time::Duration,
+    };
+    use tokio::sync::watch;
+    use tower::ServiceExt;
+
+    const SECRET: &str = "synthetic-runner-secret";
+
+    /// Broker over private `data` and `state` directories under `root`.
+    async fn fixture_broker(root: &Path) -> Broker {
+        let data = root.join("data");
+        let state = root.join("state");
+        private_dir(&data).await.unwrap();
+        private_dir(&state).await.unwrap();
+        std::fs::write(data.join("runner-secret"), SECRET).unwrap();
+        let stop = CancellationToken::new();
+        let pool = Pool::new(state.clone(), root.into(), stop.clone(), 1)
+            .await
+            .unwrap();
+        Broker::new(data, state, pool, stop)
+    }
+
+    /// An attempt that is still starting: it has no guest socket yet.
+    fn starting_attempt(run: &str) -> (watch::Sender<bool>, Attempt) {
+        let (done, receiver) = watch::channel(false);
+        let attempt = Attempt {
+            stop: CancellationToken::new(),
+            done: receiver,
+            socket: Arc::default(),
+            plan: Plan::new(json!({
+                "runId": run
+            })),
+            imports: Arc::default(),
+            control: Arc::default(),
+        };
+        (done, attempt)
+    }
+
+    fn authorized_post(uri: String, body: Body) -> axum::http::Request<Body> {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("authorization", format!("Bearer {SECRET}"))
+            .body(body)
+            .unwrap()
+    }
 
     #[tokio::test]
     async fn snapshot_batch_reuses_one_journal_and_releases_the_stopped_disk() {
         use crate::storage::Disk;
-        use tower::ServiceExt;
         let root = tempfile::tempdir().unwrap();
-        let data = root.path().join("data");
-        let state = root.path().join("state");
-        private_dir(&data).await.unwrap();
-        private_dir(&state).await.unwrap();
-        std::fs::write(data.join("runner-secret"), "fixture").unwrap();
-        let stop = CancellationToken::new();
-        let pool =
-            crate::microvm::pool::Pool::new(state.clone(), root.path().into(), stop.clone(), 1)
-                .await
-                .unwrap();
-        let broker = Broker {
-            data,
-            state: state.clone(),
-            pool,
-            active: Default::default(),
-            stop,
-            leases: Default::default(),
-        };
+        let broker = fixture_broker(root.path()).await;
+        let state = broker.state.clone();
         let run = crate::config::id();
         let snapshot = crate::config::id();
         let directory = state.join("disks").join(&run);
         let block = crate::nodes::snapshots::BLOCK;
-        let base = json!({"version":1,"size":block+1024,"blockSize":block,
-            "blocks":[{"offset":0,"size":block,"hash":null},{"offset":block,"size":1024,"hash":null}]});
-        let disk = crate::storage::runtime::create(
-            &directory.join("lazy"),
-            &base,
-            &json!({"master":"http://127.0.0.1:9/","grant":"fixture"}),
-        )
-        .await
-        .unwrap();
+        let base = json!({
+            "version": 1,
+            "size": block + 1024,
+            "blockSize": block,
+            "blocks": [
+                { "offset": 0, "size": block, "hash": null },
+                { "offset": block, "size": 1024, "hash": null }
+            ]
+        });
+        let source = json!({
+            "master": "http://127.0.0.1:9/",
+            "grant": "fixture"
+        });
+        let disk = crate::storage::runtime::create(&directory.join("lazy"), &base, &source)
+            .await
+            .unwrap();
         disk.write_at(0, &vec![7; block as usize]).unwrap();
         disk.write_at(block, &[9; 1024]).unwrap();
         let generation = disk.seal().unwrap();
         let mut manifest = disk.capture(generation).unwrap();
         manifest["onDemand"] = true.into();
         manifest["generation"] = generation.into();
+
         // A later unpublished write must not replace data from the captured generation.
         disk.write_at(0, &[3; 4096]).unwrap();
         drop(disk);
@@ -1092,19 +190,13 @@ mod tests {
             .iter()
             .map(|v| v["hash"].clone())
             .collect();
-        let app = Router::new().fallback(any(handler)).with_state(broker);
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/snapshots/{snapshot}/blocks"))
-                    .header("authorization", "Bearer fixture")
-                    .body(Body::from(json!({"hashes":hashes}).to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let request = || {
+            let batch = json!({ "hashes": hashes }).to_string();
+            authorized_post(format!("/snapshots/{snapshot}/blocks"), Body::from(batch))
+        };
+        let app = router(broker);
+
+        let response = app.clone().oneshot(request()).await.unwrap();
         assert_eq!(response.status(), 200);
         let mut stream = response.into_body().into_data_stream();
         assert_eq!(
@@ -1129,14 +221,6 @@ mod tests {
         assert_eq!(bytes, [3; 4096]);
         drop(reopened);
 
-        let request = || {
-            Request::builder()
-                .method("POST")
-                .uri(format!("/snapshots/{snapshot}/blocks"))
-                .header("authorization", "Bearer fixture")
-                .body(Body::from(json!({"hashes":hashes}).to_string()))
-                .unwrap()
-        };
         let response = app.clone().oneshot(request()).await.unwrap();
         let mut stream = response.into_body().into_data_stream();
         stream.next().await.unwrap().unwrap();
@@ -1164,54 +248,18 @@ mod tests {
 
     #[tokio::test]
     async fn wait_does_not_report_completion_until_the_attempt_is_released() {
-        use tower::ServiceExt;
         let root = tempfile::tempdir().unwrap();
-        let data = root.path().join("data");
-        let state = root.path().join("state");
-        private_dir(&data).await.unwrap();
-        private_dir(&state).await.unwrap();
-        std::fs::write(data.join("runner-secret"), "fixture").unwrap();
-        let stop = CancellationToken::new();
-        let pool =
-            crate::microvm::pool::Pool::new(state.clone(), root.path().into(), stop.clone(), 1)
-                .await
-                .unwrap();
-        let broker = Broker {
-            data,
-            state: state.clone(),
-            pool,
-            active: Default::default(),
-            stop,
-            leases: Default::default(),
-        };
+        let broker = fixture_broker(root.path()).await;
         let id = crate::config::id();
-        let (_done, receiver) = watch::channel(false);
-        broker.active.lock().await.insert(
-            id.clone(),
-            Attempt {
-                stop: CancellationToken::new(),
-                done: receiver,
-                socket: Default::default(),
-                plan: json!({"runId":crate::config::id()}),
-                imports: Default::default(),
-                control: Default::default(),
-            },
-        );
+        let (_done, attempt) = starting_attempt(&crate::config::id());
+        broker.active.lock().await.insert(id.clone(), attempt);
+
         // Execution writes its exit marker before asynchronous attempt cleanup.
         // A caller may resume this workspace as soon as /wait returns its status.
-        std::fs::write(state.join(format!("{id}.exit")), "0").unwrap();
-        let app = Router::new()
-            .fallback(any(handler))
-            .with_state(broker.clone());
+        std::fs::write(broker.state.join(format!("{id}.exit")), "0").unwrap();
+        let app = router(broker.clone());
         let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/runs/{id}/wait"))
-                    .header("authorization", "Bearer fixture")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(authorized_post(format!("/runs/{id}/wait"), Body::empty()))
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
@@ -1222,6 +270,7 @@ mod tests {
                 .is_err(),
             "completion must not escape while the previous attempt still owns the workspace"
         );
+
         broker.active.lock().await.remove(&id);
         let bytes = tokio::time::timeout(Duration::from_secs(2), async {
             let mut bytes = Vec::new();
@@ -1234,56 +283,26 @@ mod tests {
         .unwrap();
         assert_eq!(
             serde_json::from_slice::<Value>(&bytes).unwrap(),
-            json!({"StatusCode":0})
+            json!({ "StatusCode": 0 })
         );
     }
 
     #[tokio::test]
     async fn snapshot_during_startup_is_deferred_without_touching_the_disk() {
-        use tower::ServiceExt;
         let root = tempfile::tempdir().unwrap();
-        let data = root.path().join("data");
-        let state = root.path().join("state");
-        private_dir(&data).await.unwrap();
-        private_dir(&state).await.unwrap();
-        std::fs::write(data.join("runner-secret"), "fixture").unwrap();
-        let stop = CancellationToken::new();
-        let pool =
-            crate::microvm::pool::Pool::new(state.clone(), root.path().into(), stop.clone(), 1)
-                .await
-                .unwrap();
-        let broker = Broker {
-            data,
-            state: state.clone(),
-            pool,
-            active: Default::default(),
-            stop,
-            leases: Default::default(),
-        };
-        let attempt = crate::config::id();
+        let broker = fixture_broker(root.path()).await;
+        let state = broker.state.clone();
+        let id = crate::config::id();
         let run = crate::config::id();
-        let (_done, receiver) = watch::channel(false);
-        broker.active.lock().await.insert(
-            attempt.clone(),
-            Attempt {
-                stop: CancellationToken::new(),
-                done: receiver,
-                socket: Default::default(),
-                plan: json!({"runId": run}),
-                imports: Default::default(),
-                control: Default::default(),
-            },
-        );
-        let app = Router::new().fallback(any(handler)).with_state(broker);
+        let (_done, attempt) = starting_attempt(&run);
+        broker.active.lock().await.insert(id.clone(), attempt);
+        let app = router(broker);
+
         let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/runs/{attempt}/snapshot"))
-                    .header("authorization", "Bearer fixture")
-                    .body(Body::from("{}"))
-                    .unwrap(),
-            )
+            .oneshot(authorized_post(
+                format!("/runs/{id}/snapshot"),
+                Body::from("{}"),
+            ))
             .await
             .unwrap();
         assert_eq!(response.status(), 409, "startup is not a storage failure");
@@ -1295,19 +314,37 @@ mod tests {
         assert!(!state.join("disks").join(run).exists());
     }
 
+    async fn request(
+        app: &Router,
+        run: &str,
+        action: &str,
+        transfer: &str,
+        credential: &str,
+    ) -> u16 {
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/disks/{run}/{action}"))
+            .header("authorization", format!("Bearer {credential}"))
+            .body(Body::from(json!({ "transfer": transfer }).to_string()))
+            .unwrap();
+        app.clone()
+            .oneshot(request)
+            .await
+            .unwrap()
+            .status()
+            .as_u16()
+    }
+
     #[tokio::test]
     async fn workspace_disk_deletion_uses_authenticated_http_and_preserves_the_lock() {
-        use std::io::{Seek, SeekFrom, Write};
-        use std::os::unix::fs::MetadataExt;
-        use tower::ServiceExt;
         let root = tempfile::TempDir::new().unwrap();
         let data = root.path().join("data");
         let state = root.path().join("state");
         private_dir(&data).await.unwrap();
         private_dir(&state).await.unwrap();
-        std::fs::write(data.join("runner-secret"), "synthetic-runner-secret").unwrap();
+        std::fs::write(data.join("runner-secret"), SECRET).unwrap();
         let stop = CancellationToken::new();
-        let pool = crate::microvm::pool::Pool::new(
+        let pool = Pool::new(
             state.clone(),
             root.path().join("unused-image"),
             stop.clone(),
@@ -1315,15 +352,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let broker = Broker {
-            data: data.clone(),
-            state: state.clone(),
-            pool,
-            active: Default::default(),
-            leases: Default::default(),
-            stop,
-        };
-        let app = Router::new().fallback(any(handler)).with_state(broker);
+        let app = router(Broker::new(data.clone(), state.clone(), pool, stop));
         let run = crate::config::id();
         let failed_attempt = crate::config::id();
         std::fs::write(state.join(format!("{failed_attempt}.run")), &run).unwrap();
@@ -1340,39 +369,12 @@ mod tests {
         file.write_all(b"native session and unpublished work")
             .unwrap();
         file.sync_all().unwrap();
-        async fn request(
-            app: &Router,
-            run: &str,
-            action: &str,
-            transfer: &str,
-            credential: &str,
-        ) -> u16 {
-            app.clone()
-                .oneshot(
-                    axum::http::Request::builder()
-                        .method("POST")
-                        .uri(format!("/disks/{run}/{action}"))
-                        .header("authorization", format!("Bearer {credential}"))
-                        .body(Body::from(json!({"transfer": transfer}).to_string()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
-                .status()
-                .as_u16()
-        }
         assert_eq!(request(&app, &run, "delete", &transfer, "wrong").await, 401);
         std::fs::write(directory.join("stale-older.ext4"), "older copy").unwrap();
-        assert_eq!(
-            request(&app, &run, "prune", &transfer, "synthetic-runner-secret").await,
-            200
-        );
+        assert_eq!(request(&app, &run, "prune", &transfer, SECRET).await, 200);
         assert!(!directory.join("stale-older.ext4").exists());
         assert!(directory.join("data.ext4").exists());
-        assert_eq!(
-            request(&app, &run, "export", &transfer, "synthetic-runner-secret").await,
-            405
-        );
+        assert_eq!(request(&app, &run, "export", &transfer, SECRET).await, 405);
         let lock = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -1382,17 +384,11 @@ mod tests {
             unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
             0
         );
-        assert_eq!(
-            request(&app, &run, "delete", &transfer, "synthetic-runner-secret").await,
-            409
-        );
+        assert_eq!(request(&app, &run, "delete", &transfer, SECRET).await, 409);
         let inode = lock.metadata().unwrap().ino();
         assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
         drop(lock);
-        assert_eq!(
-            request(&app, &run, "delete", &transfer, "synthetic-runner-secret").await,
-            200
-        );
+        assert_eq!(request(&app, &run, "delete", &transfer, SECRET).await, 200);
         assert!(!directory.join("data.ext4").exists());
         assert!(!state.join(format!("{failed_attempt}.log")).exists());
         assert!(state.join(format!("{failed_attempt}.stopped")).exists());
@@ -1400,56 +396,7 @@ mod tests {
             std::fs::metadata(directory.join("lock")).unwrap().ino(),
             inode
         );
-        assert_eq!(
-            request(&app, &run, "import", &transfer, "synthetic-runner-secret").await,
-            405
-        );
+        assert_eq!(request(&app, &run, "import", &transfer, SECRET).await, 405);
         assert!(!directory.join("data.ext4").exists());
-    }
-
-    #[test]
-    fn execution_plans_accept_unlimited_but_reject_invalid_or_expired_deadlines() {
-        let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-        let mut plan = json!({
-            "id": id,
-            "runId": id,
-            "expires": null,
-            "cwd": format!("/data/runs/{id}/workspace"),
-            "imports": []
-        });
-        assert!(validate(&plan, id, Path::new("/data")).is_ok());
-        for expiry in [
-            json!(0),
-            json!(now() - 1),
-            json!(now() + 14 * 3600000),
-            json!("unlimited"),
-        ] {
-            plan["expires"] = expiry;
-            assert!(validate(&plan, id, Path::new("/data")).is_err());
-        }
-        plan.as_object_mut().unwrap().remove("expires");
-        assert!(validate(&plan, id, Path::new("/data")).is_err());
-    }
-
-    #[test]
-    fn imports_cannot_grant_host_or_other_run_access() {
-        let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-        let mut plan = json!({
-            "id": id,
-            "runId": id,
-            "expires": now()+60000,
-            "cwd": format!("/data/runs/{id}/workspace"),
-            "imports": []
-        });
-        assert!(validate(&plan, id, Path::new("/data")).is_ok());
-        for source in [
-            "/data/private",
-            "/home/node",
-            "/data/runs/another/workspace",
-            "/data/runs/../private",
-        ] {
-            plan["imports"] = json!([{"source": source,"target": "/home/node"}]);
-            assert!(validate(&plan, id, Path::new("/data")).is_err());
-        }
     }
 }

@@ -1,0 +1,641 @@
+//! One booted Firecracker VM and the attempt it executes.
+use super::{
+    host::{self, call, connect, import, valid_runtime_name},
+    network::Network,
+    plan::{CHAT_INBOX, HOME, Import, Plan},
+    protocol::{Event, GuestRequest, GuestStatus, Reply},
+    wire,
+};
+use crate::{
+    error::{Error, Result},
+    nodes::Resources,
+    performance::Operation,
+    provider::Provider,
+    skills::{atomic_write, private_dir},
+    storage::Disk,
+};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::{
+    os::fd::AsRawFd,
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
+};
+use tokio::{
+    io::BufReader,
+    net::{UnixListener, UnixStream},
+    process::Command,
+    task::JoinHandle,
+};
+use tokio_util::sync::CancellationToken;
+
+/// Exit code of an attempt stopped by the controller.
+const STOPPED: i32 = 143;
+const MAX_OUTPUT_BYTES: usize = 100_000_000;
+
+/// `{attempt}.vm.json`: which VM executes an attempt, for pause and erasure.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AttemptRecord {
+    #[serde(default)]
+    pub vm_id: String,
+    #[serde(default)]
+    pub run_id: String,
+}
+
+/// `runtime.json` in a disk directory: the image a conversation's disk was created with.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeRecord {
+    #[serde(default)]
+    runtime_id: Option<String>,
+}
+
+/// Owns every resource of a booted VM. A prepared disk can be adopted once only.
+pub struct Vm {
+    pub socket: PathBuf,
+    jail: PathBuf,
+    lock: Option<std::fs::File>,
+    child: Option<tokio::process::Child>,
+    consoles: Vec<JoinHandle<()>>,
+    network: Network,
+    mounted: Option<crate::storage::fuse::MountedDisk>,
+    volume: Option<Arc<crate::storage::runtime::Volume>>,
+    uid: u32,
+}
+
+fn console(
+    mut stream: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+    path: PathBuf,
+) -> JoinHandle<()> {
+    use tokio::io::AsyncReadExt;
+    tokio::spawn(async move {
+        if let Ok(mut log) = tokio::fs::File::create(path).await {
+            let _ = tokio::io::copy(&mut (&mut stream).take(4 * 1024 * 1024), &mut log).await;
+        }
+        // Drain excess guest console output without allowing it to fill host storage.
+        let _ = tokio::io::copy(&mut stream, &mut tokio::io::sink()).await;
+    })
+}
+
+fn resources(resources: Option<&Value>) -> Result<Resources> {
+    let resources = match resources {
+        Some(value) => {
+            Resources::deserialize(value).map_err(|_| Error::bad("Invalid VM resources."))?
+        }
+        None => crate::nodes::placement::defaults(),
+    };
+    resources.validate()?;
+    Ok(resources)
+}
+
+fn lock_disk(disk_dir: &Path) -> Result<std::fs::File> {
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(disk_dir.join("lock"))?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(Error::conflict(
+            "The previous VM still owns this workspace.",
+        ));
+    }
+    Ok(lock)
+}
+
+/// A disk keeps booting the image it was created with; a new disk adopts `image`.
+async fn retained_image(state: &Path, image: &Path, disk_dir: &Path) -> Result<PathBuf> {
+    let runtime_file = disk_dir.join("runtime.json");
+    let retained = if runtime_file.exists() {
+        let runtime: RuntimeRecord =
+            serde_json::from_slice(&tokio::fs::read(&runtime_file).await?)?;
+        let name = runtime.runtime_id.unwrap_or_default();
+        if name.is_empty() || !valid_runtime_name(&name) {
+            return Err(Error::bad("Invalid retained runtime."));
+        }
+        state.join("images").join(name)
+    } else {
+        image.to_owned()
+    };
+    if !retained.join("root.ext4").exists() || !retained.join("vmlinux").exists() {
+        return Err(Error::conflict(
+            "The conversation requires an unavailable retained VM runtime.",
+        ));
+    }
+    if !runtime_file.exists() {
+        let record = RuntimeRecord {
+            runtime_id: retained
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned),
+        };
+        atomic_write(&runtime_file, &serde_json::to_vec(&record)?).await?;
+    }
+    Ok(retained)
+}
+
+fn firecracker_config(network: &Network, resources: &Resources, slot: usize) -> Value {
+    let boot_args = format!(
+        "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/sbin/leo-init ip={}::{}:255.255.255.252:leo:eth0:off",
+        network.guest, network.gateway
+    );
+    json!({
+        "boot-source": { "kernel_image_path": "vmlinux", "boot_args": boot_args },
+        "drives": [
+            {
+                "drive_id": "root",
+                "path_on_host": "root.ext4",
+                "is_root_device": true,
+                "is_read_only": true
+            },
+            {
+                "drive_id": "data",
+                "path_on_host": "disk/data.ext4",
+                "is_root_device": false,
+                "is_read_only": false,
+                "cache_type": "Writeback"
+            }
+        ],
+        "machine-config": {
+            "vcpu_count": resources.cpu,
+            "mem_size_mib": resources.memory_mi_b,
+            "smt": false
+        },
+        "network-interfaces": [
+            { "iface_id": "net", "host_dev_name": network.tap, "guest_mac": network.mac }
+        ],
+        "vsock": { "guest_cid": slot + 3, "uds_path": "v.sock" }
+    })
+}
+
+fn jailer(id: &str, uid: u32, state: &Path) -> Command {
+    let uid = uid.to_string();
+    let mut command = Command::new("/usr/local/bin/jailer");
+    command
+        .args([
+            "--id",
+            id,
+            "--exec-file",
+            "/usr/local/bin/firecracker",
+            "--uid",
+            &uid,
+            "--gid",
+            &uid,
+            "--cgroup-version",
+            "2",
+            "--chroot-base-dir",
+            state.join("jails").to_str().unwrap(),
+            "--resource-limit",
+            "fsize=34359738368",
+            "--resource-limit",
+            "no-file=256",
+            "--",
+            "--api-sock",
+            "api.sock",
+            "--config-file",
+            "config.json",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    command
+}
+
+/// Whether an earlier import already copied `source` to `target` as part of its tree.
+fn already_imported(imported: &[Import<'_>], source: &Path, target: &str) -> bool {
+    imported.iter().any(|parent| {
+        source
+            .strip_prefix(parent.source)
+            .is_ok_and(|relative| Path::new(parent.target).join(relative) == Path::new(target))
+    })
+}
+
+/// Relays the guest's provider authentication socket to this run's manager socket.
+fn auth_relay(
+    listener: UnixListener,
+    manager: Option<PathBuf>,
+    stop: CancellationToken,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let accepted = tokio::select! {
+                () = stop.cancelled() => break,
+                accepted = listener.accept() => accepted,
+            };
+            let Ok((mut guest, _)) = accepted else {
+                break;
+            };
+            let Some(path) = &manager else {
+                continue;
+            };
+            // Bound concurrency and lifetime; only this run's manager socket is reachable.
+            if let Ok(mut manager) = UnixStream::connect(path).await {
+                let relay = tokio::io::copy_bidirectional(&mut guest, &mut manager);
+                let _ = tokio::time::timeout(Duration::from_secs(45), relay).await;
+            }
+        }
+    })
+}
+
+impl Vm {
+    pub async fn boot(
+        state: &Path,
+        image: &Path,
+        disk_dir: PathBuf,
+        slot: usize,
+        stop: &CancellationToken,
+        resources: Option<&Value>,
+    ) -> Result<Self> {
+        let run_id = disk_dir.file_name().and_then(|v| v.to_str()).unwrap_or("");
+        let mut timing = Operation::new("vm_boot", run_id, "prepare");
+        let resources = self::resources(resources)?;
+        let network = Network::new(slot)?;
+        private_dir(&disk_dir).await?;
+        let lock = lock_disk(&disk_dir)?;
+        let id = crate::config::id();
+        let image = retained_image(state, image, &disk_dir).await?;
+        if disk_dir.join("restore.pending").exists() {
+            return Err(Error::conflict("VM restore is incomplete."));
+        }
+
+        timing.next("open_journal");
+        let volume = crate::storage::runtime::load(&disk_dir).await?;
+        if volume.disk.size() != resources.disk_mi_b * 1024 * 1024 {
+            return Err(Error::conflict(
+                "VM disk size does not match its S3-backed journal.",
+            ));
+        }
+        let jail = state.join("jails/firecracker").join(&id).join("root");
+        let mut vm = Self {
+            socket: jail.join("v.sock"),
+            jail,
+            lock: Some(lock),
+            child: None,
+            consoles: Vec::new(),
+            network,
+            mounted: None,
+            volume: Some(volume),
+            uid: 40000 + slot as u32,
+        };
+        let result = tokio::select! {
+            result = vm.launch(state, &image, &id, &resources, slot, &mut timing) => result,
+            () = stop.cancelled() => Err(Error::unavailable("VM preparation stopped.")),
+        };
+        if let Err(error) = result {
+            vm.shutdown().await;
+            return Err(Error::new(
+                error.status,
+                format!("{} (VM {id})", error.message),
+            ));
+        }
+        timing.finish();
+        Ok(vm)
+    }
+
+    async fn launch(
+        &mut self,
+        state: &Path,
+        image: &Path,
+        id: &str,
+        resources: &Resources,
+        slot: usize,
+        timing: &mut Operation,
+    ) -> Result<()> {
+        timing.next("mount_and_network");
+        let jail = &self.jail;
+        private_dir(jail).await?;
+        let target = jail.join("disk");
+        private_dir(&target).await?;
+        self.mounted = Some(crate::storage::fuse::mount_disk(
+            self.volume.as_ref().unwrap().clone(),
+            &target,
+            self.uid,
+        )?);
+        tokio::fs::hard_link(image.join("root.ext4"), jail.join("root.ext4")).await?;
+        tokio::fs::copy(image.join("vmlinux"), jail.join("vmlinux")).await?;
+        self.network.create(self.uid).await?;
+
+        timing.next("spawn_and_guest_ready");
+        let config = firecracker_config(&self.network, resources, slot);
+        atomic_write(&jail.join("config.json"), &serde_json::to_vec(&config)?).await?;
+        std::os::unix::fs::chown(jail.join("config.json"), Some(self.uid), Some(self.uid))?;
+        let child = self.child.insert(jailer(id, self.uid, state).spawn()?);
+        self.consoles.push(console(
+            child.stdout.take().unwrap(),
+            state.join(format!("{id}.boot.log")),
+        ));
+        self.consoles.push(console(
+            child.stderr.take().unwrap(),
+            state.join(format!("{id}.vmm.log")),
+        ));
+        let status = self.wait_for_guest().await?;
+        if status.version != 1 {
+            return Err(Error::unavailable("Unsupported guest protocol."));
+        }
+        Ok(())
+    }
+
+    async fn wait_for_guest(&mut self) -> Result<GuestStatus> {
+        let mut deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            if self.child.as_mut().unwrap().try_wait()?.is_some() {
+                return Err(Error::unavailable(
+                    "Firecracker exited before the guest was ready. Check the VM boot log.",
+                ));
+            }
+            let probe = host::status(&self.socket);
+            if let Ok(Ok(status)) = tokio::time::timeout(Duration::from_secs(1), probe).await {
+                return Ok(status);
+            }
+            // A remote disk read is still waiting; guest boot has not stalled.
+            if self.volume.as_ref().is_some_and(|v| v.source.waiting()) {
+                deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+            }
+            if tokio::time::Instant::now() > deadline {
+                return Err(Error::unavailable("Guest startup timed out."));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    async fn synchronize_clock(&self) -> Result<()> {
+        let request = GuestRequest::Clock {
+            epoch_ms: crate::config::now(),
+        };
+        let reply: Reply =
+            tokio::time::timeout(Duration::from_secs(5), call(&self.socket, &request))
+                .await
+                .map_err(|_| Error::unavailable("Guest clock synchronization timed out."))??;
+        if !reply.succeeded() {
+            return Err(Error::unavailable("Guest clock synchronization failed."));
+        }
+        Ok(())
+    }
+
+    pub async fn shutdown(&mut self) {
+        let id = self.id().to_owned();
+        let mut timing = Operation::new("vm_shutdown", &id, "guest_shutdown");
+        let blocked = self
+            .volume
+            .as_ref()
+            .is_some_and(|volume| volume.source.waiting() || volume.paused());
+        let mut acknowledged = false;
+        if !blocked {
+            // Healthy guests get a bounded graceful stop.
+            let request = call::<Reply>(&self.socket, &GuestRequest::Shutdown);
+            if let Ok(Ok(reply)) = tokio::time::timeout(Duration::from_secs(10), request).await {
+                acknowledged = reply.succeeded();
+            }
+        }
+        // A VMM blocked in FUSE may not exit even after SIGKILL until its read
+        // returns. Release remote reads and reserve waits before awaiting it.
+        // All previously acknowledged disk writes remain in the durable journal.
+        let volume = self.volume.take();
+        if let Some(volume) = &volume {
+            tracing::info!(target: "leo_performance", operation = "disk_io", id = id.as_str(),
+                metrics = %volume.disk.performance(), blocked, acknowledged);
+        }
+
+        timing.next("wait_vmm");
+        let cancel_reads = || {
+            if let Some(volume) = &volume {
+                volume.stop.cancel();
+            }
+        };
+        if let Some(mut child) = self.child.take() {
+            if !acknowledged {
+                cancel_reads();
+                let _ = child.start_kill();
+            }
+            if tokio::time::timeout(Duration::from_secs(8), child.wait())
+                .await
+                .is_err()
+            {
+                cancel_reads();
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+            }
+        }
+        cancel_reads();
+        drop(volume);
+        for console in self.consoles.drain(..) {
+            let _ = console.await;
+        }
+
+        timing.next("unmount");
+        if let Some(mounted) = self.mounted.take()
+            && let Ok(Err(error)) = tokio::task::spawn_blocking(move || mounted.close()).await
+        {
+            tracing::warn!(%error, "Could not unmount VM disk");
+        }
+
+        timing.next("network_cleanup");
+        self.network.remove().await;
+        if let Err(error) = tokio::fs::remove_dir_all(self.jail.parent().unwrap()).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, "Could not remove VM jail");
+        }
+        self.lock.take();
+        timing.finish();
+    }
+
+    fn id(&self) -> &str {
+        self.jail
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown")
+    }
+
+    pub async fn execute(
+        &mut self,
+        plan: &Plan,
+        state: &Path,
+        stop: CancellationToken,
+    ) -> Result<i32> {
+        let mut timing = Operation::new("guest_prepare", plan.run_id(), "clock_and_auth");
+        self.synchronize_clock().await?;
+        let record = AttemptRecord {
+            vm_id: self.id().to_owned(),
+            run_id: plan.run_id().to_owned(),
+        };
+        atomic_write(
+            &state.join(format!("{}.vm.json", plan.id())),
+            &serde_json::to_vec(&record)?,
+        )
+        .await?;
+        let relay_path = self.jail.join("v.sock_5201");
+        let listener = UnixListener::bind(&relay_path)?;
+        std::os::unix::fs::chown(&relay_path, Some(self.uid), Some(self.uid))?;
+        let auth_socket = match plan.chat_provider() {
+            Provider::Claude => ".claude/leo-auth.sock",
+            Provider::Codex => ".codex/leo-auth.sock",
+        };
+        let manager = plan
+            .import_to(HOME)
+            .map(|home| home.source.join(auth_socket));
+        let relay_stop = CancellationToken::new();
+        let relay = auth_relay(listener, manager, relay_stop.clone());
+        let socket = &self.socket;
+        let operation = async {
+            timing.next("imports");
+            if host::status(socket).await?.initialized {
+                refresh_imports(socket, plan).await?;
+            } else {
+                import_workspace(socket, plan).await?;
+            }
+            run(socket, plan, state, timing).await
+        };
+        let result = tokio::select! {
+            result = operation => result,
+            () = stop.cancelled() => Ok(STOPPED),
+        };
+        relay_stop.cancel();
+        relay.abort();
+        let _ = relay.await;
+        let _ = tokio::fs::remove_file(relay_path).await;
+        result
+    }
+}
+
+/// First boot of a disk: copy every import into the guest.
+async fn import_workspace(socket: &Path, plan: &Plan) -> Result<()> {
+    let mut imported = Vec::new();
+    for import in plan.imports() {
+        // The workspace root already includes its projects. Separate
+        // entries still carry their read-only policy, but need no second archive.
+        if already_imported(&imported, import.source, import.target) {
+            continue;
+        }
+        host::import(socket, import.source, import.target).await?;
+        imported.push(import);
+    }
+    Ok(())
+}
+
+/// Credentials and the volatile inbox are refreshed, never the saved workspaces.
+async fn refresh_imports(socket: &Path, plan: &Plan) -> Result<()> {
+    for import in plan.imports() {
+        if import.target == CHAT_INBOX {
+            host::import(socket, import.source, CHAT_INBOX).await?;
+        }
+        if import.target != HOME {
+            continue;
+        }
+        if plan.chat_provider() == Provider::Claude {
+            let source = import.source.join(".claude");
+            if source.exists() {
+                host::import(socket, &source, "/home/node/.claude").await?;
+            }
+        }
+        let source = import.source.join(".config/gh");
+        if source.exists() {
+            host::import(socket, &source, "/home/node/.config/gh").await?;
+        }
+    }
+    Ok(())
+}
+
+/// Starts the agent and records its output until the guest reports its exit.
+async fn run(socket: &Path, plan: &Plan, state: &Path, timing: Operation) -> Result<i32> {
+    let mut stream = connect(socket).await?;
+    let request = GuestRequest::Run {
+        plan: plan.for_guest(),
+    };
+    wire::write(stream.get_mut(), &request).await?;
+    timing.finish();
+
+    let mut inbox = Inbox::new(plan);
+    let mut logs = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(state.join(format!("{}.log", plan.id())))
+        .await?;
+    let mut total = 0usize;
+    loop {
+        let event = next_event(&mut stream, socket, &mut inbox).await?;
+        match event {
+            Event::Output { ref data, .. } => {
+                let bytes = STANDARD
+                    .decode(data)
+                    .map_err(|_| Error::bad("Invalid guest output."))?;
+                total += bytes.len();
+                if total > MAX_OUTPUT_BYTES {
+                    return Err(Error::bad("Guest output exceeded the run limit."));
+                }
+                wire::write(&mut logs, &event).await?;
+            }
+            Event::Exit { code, result } => {
+                let code = code
+                    .filter(|n| (0..=255).contains(n))
+                    .ok_or_else(|| Error::bad("Invalid guest exit status."))?;
+                if let Some(output) = plan.chat_output().filter(|output| !output.is_empty()) {
+                    atomic_write(Path::new(output), result.as_bytes()).await?;
+                    std::os::unix::fs::chown(output, Some(1000), Some(1000))?;
+                }
+                return Ok(code as i32);
+            }
+            Event::Heartbeat | Event::Unknown => return Err(Error::bad("Unknown guest event.")),
+        }
+    }
+}
+
+/// Reads the next run event while forwarding chat inbox changes to the guest.
+async fn next_event(
+    stream: &mut BufReader<UnixStream>,
+    socket: &Path,
+    inbox: &mut Inbox,
+) -> Result<Event> {
+    // Keep the read future alive across inbox ticks: dropping it halfway
+    // through a fragmented frame would discard already-consumed bytes.
+    let next = wire::read(stream);
+    tokio::pin!(next);
+    let event = loop {
+        tokio::select! {
+            event = &mut next => break event,
+            _ = inbox.timer.tick() => inbox.forward(socket).await?,
+        }
+    };
+    let event = event?.ok_or_else(|| {
+        Error::unavailable("Guest disconnected. Its workspace disk has been preserved.")
+    })?;
+    wire::decode(event, "Unknown guest event.")
+}
+
+struct Inbox {
+    timer: tokio::time::Interval,
+    source: Option<PathBuf>,
+    last: Vec<u8>,
+}
+
+impl Inbox {
+    fn new(plan: &Plan) -> Self {
+        Self {
+            timer: tokio::time::interval(Duration::from_millis(500)),
+            source: plan
+                .import_to(CHAT_INBOX)
+                .map(|import| import.source.to_owned()),
+            last: Vec::new(),
+        }
+    }
+
+    async fn forward(&mut self, socket: &Path) -> Result<()> {
+        let Some(source) = &self.source else {
+            return Ok(());
+        };
+        let content = tokio::fs::read(source.join("messages.json"))
+            .await
+            .unwrap_or_default();
+        if content != self.last {
+            import(socket, source, CHAT_INBOX).await?;
+            self.last = content;
+        }
+        Ok(())
+    }
+}
