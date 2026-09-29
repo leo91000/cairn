@@ -83,30 +83,9 @@ pub async fn prepare(
     }
     let disk = super::runtime::create_at_generation(&root, &empty, &context, generation).await?;
     let writer = disk.clone();
-    tokio::task::spawn_blocking(move || -> Result<()> {
-        let input = super::LocalDisk::open(&raw, false)?;
-        for block in manifest["blocks"].as_array().unwrap() {
-            if text(block, "hash").is_empty() {
-                continue;
-            }
-            let offset = block["offset"].as_u64().unwrap();
-            let mut bytes = vec![0; block["size"].as_u64().unwrap() as usize];
-            let _admission = super::cache::admission()?;
-            let (total, free) = super::policy::space(raw.parent().unwrap())?;
-            if free <= policy.reserve(total) + bytes.len() as u64 * 4 + 1048576 {
-                return Err(Error::new(
-                    507,
-                    "Free disk reserve prevents initializing the journal.",
-                ));
-            }
-            input.read_at(offset, &mut bytes)?;
-            writer.write_at(offset, &bytes)?;
-        }
-        writer.sync()?;
-        Ok(())
-    })
-    .await
-    .map_err(Error::internal)??;
+    tokio::task::spawn_blocking(move || copy_blocks(&raw, &manifest, &writer, &policy))
+        .await
+        .map_err(Error::internal)??;
     drop(disk);
     tokio::fs::rename(&root, directory.join("lazy")).await?;
     tokio::fs::File::open(directory).await?.sync_all().await?;
@@ -117,6 +96,35 @@ pub async fn prepare(
     if resize_source.exists() {
         tokio::fs::remove_dir_all(resize_source).await?;
     }
+    Ok(())
+}
+
+/// Copies the image's non-empty blocks into the journal, keeping the free-space reserve.
+fn copy_blocks(
+    raw: &Path,
+    manifest: &Value,
+    writer: &super::LazyDisk,
+    policy: &super::policy::Policy,
+) -> Result<()> {
+    let input = super::LocalDisk::open(raw, false)?;
+    for block in manifest["blocks"].as_array().unwrap() {
+        if text(block, "hash").is_empty() {
+            continue;
+        }
+        let offset = block["offset"].as_u64().unwrap();
+        let mut bytes = vec![0; block["size"].as_u64().unwrap() as usize];
+        let _admission = super::cache::admission()?;
+        let (total, free) = super::policy::space(raw.parent().unwrap())?;
+        if free <= policy.reserve(total) + bytes.len() as u64 * 4 + 1048576 {
+            return Err(Error::new(
+                507,
+                "Free disk reserve prevents initializing the journal.",
+            ));
+        }
+        input.read_at(offset, &mut bytes)?;
+        writer.write_at(offset, &bytes)?;
+    }
+    writer.sync()?;
     Ok(())
 }
 
@@ -151,11 +159,13 @@ mod tests {
     async fn interrupted_resize_restarts_from_the_original_journal() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("disks/conversation");
-        let context = json!({
-            "master": "http://127.0.0.1:1/",
-            "grant": "fixture",
-            "policy": super::super::policy::Policy {reserve_mi_b:64,reserve_percent:1,..Default::default()}
-        });
+        let policy = super::super::policy::Policy {
+            reserve_mi_b: 64,
+            reserve_percent: 1,
+            ..Default::default()
+        };
+        let context =
+            json!({ "master": "http://127.0.0.1:1/", "grant": "fixture", "policy": policy });
         let stop = CancellationToken::new();
         prepare(&directory, 128 * 1024 * 1024, &context, &stop)
             .await

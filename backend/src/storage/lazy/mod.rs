@@ -129,12 +129,12 @@ impl LazyDisk {
         initial: Option<(&Value, i64)>,
         source: Arc<dyn BlockSource>,
     ) -> io::Result<Self> {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         let timing = crate::performance::Operation::new(
             "journal_open",
             Self::identity(directory),
             "integrity_scan",
         );
-        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         if !directory.exists() {
             std::fs::DirBuilder::new()
                 .recursive(true)
@@ -223,11 +223,11 @@ impl LazyDisk {
             base: Mutex::new(Arc::new(manifest)),
             source,
             cache: Mutex::new(()),
-            fetching: Default::default(),
-            memory: Mutex::new(Default::default()),
+            fetching: Mutex::default(),
+            memory: Mutex::default(),
             publication: RwLock::new(()),
             _lock: lock,
-            metrics: Default::default(),
+            metrics: super::metrics::Metrics::default(),
         })
     }
 
@@ -396,7 +396,7 @@ impl LazyDisk {
             // share the node budget and can use its available working set.
             if node_reservation.is_none() {
                 let mut entries = std::fs::read_dir(&directory)?
-                    .filter_map(|entry| entry.ok())
+                    .filter_map(Result::ok)
                     .filter_map(|entry| {
                         entry.metadata().ok().map(|m| {
                             (
