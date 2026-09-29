@@ -11,6 +11,10 @@ use rand::RngCore;
 use serde_json::Value;
 use std::{io::Write, os::unix::fs::OpenOptionsExt, path::Path, sync::Arc};
 
+fn key(id: &str) -> String {
+    format!("mcp-secret:{id}")
+}
+
 #[derive(Clone)]
 pub struct Vault {
     key: Arc<[u8; 32]>,
@@ -42,6 +46,10 @@ impl Vault {
         })
     }
 
+    fn cipher(&self) -> Aes256Gcm {
+        Aes256Gcm::new(self.key.as_ref().into())
+    }
+
     pub fn encrypt(&self, id: &str, value: &Value) -> Result<Value> {
         Ok(STANDARD
             .encode(self.encrypt_bytes(id, &serde_json::to_vec(value)?)?)
@@ -52,8 +60,8 @@ impl Vault {
     pub fn encrypt_bytes(&self, id: &str, bytes: &[u8]) -> Result<Vec<u8>> {
         let mut iv = [0; 12];
         rand::rng().fill_bytes(&mut iv);
-        let cipher = Aes256Gcm::new_from_slice(self.key.as_ref()).unwrap();
-        let mut encrypted = cipher
+        let mut encrypted = self
+            .cipher()
             .encrypt(
                 Nonce::from_slice(&iv),
                 Payload {
@@ -82,8 +90,8 @@ impl Vault {
         }
         let mut ciphertext = bytes[28..].to_vec();
         ciphertext.extend(&bytes[12..28]);
-        let cipher = Aes256Gcm::new_from_slice(self.key.as_ref()).unwrap();
-        let plain = cipher
+        let plain = self
+            .cipher()
             .decrypt(
                 Nonce::from_slice(&bytes[..12]),
                 Payload {
@@ -97,7 +105,7 @@ impl Vault {
 
     pub async fn get(&self, id: &str) -> Result<Option<Value>> {
         self.store
-            .kv(&format!("mcp-secret:{id}"))
+            .kv(&key(id))
             .await?
             .map(|v| self.decrypt(id, &v))
             .transpose()
@@ -105,15 +113,15 @@ impl Vault {
 
     pub async fn set(&self, id: &str, value: &Value) -> Result<()> {
         self.store
-            .set(&format!("mcp-secret:{id}"), self.encrypt(id, value)?, None)
+            .set(&key(id), self.encrypt(id, value)?, None)
             .await
     }
 
     pub fn set_in(&self, db: &Db<'_>, id: &str, value: &Value) -> Result<()> {
-        db.set(&format!("mcp-secret:{id}"), &self.encrypt(id, value)?, None)
+        db.set(&key(id), &self.encrypt(id, value)?, None)
     }
 
     pub async fn delete(&self, id: &str) -> Result<()> {
-        self.store.delete(&format!("mcp-secret:{id}")).await
+        self.store.delete(&key(id)).await
     }
 }

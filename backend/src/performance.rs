@@ -1,6 +1,7 @@
 //! Local structured timings. Identities are run/VM IDs, never paths, URLs or credentials.
 use std::time::Instant;
 
+/// Times one operation and its phases; dropping it unfinished records `incomplete`.
 pub(crate) struct Operation {
     operation: &'static str,
     id: String,
@@ -24,11 +25,18 @@ impl Operation {
         }
     }
 
+    /// Closes the current phase and starts `phase`.
     pub(crate) fn next(&mut self, phase: &'static str) {
         self.record("phase_completed");
         self.phase = phase;
         self.phase_started = Instant::now();
-        tracing::info!(target: "leo_performance", operation = self.operation, id = self.id, phase, event = "started");
+        tracing::info!(
+            target: "leo_performance",
+            operation = self.operation,
+            id = self.id,
+            phase,
+            event = "started"
+        );
     }
 
     pub(crate) fn finish(mut self) {
@@ -37,9 +45,17 @@ impl Operation {
     }
 
     fn record(&self, event: &'static str) {
-        tracing::info!(target: "leo_performance", operation = self.operation, id = self.id,
-            phase = self.phase, event, phase_ms = self.phase_started.elapsed().as_millis() as u64,
-            total_ms = self.started.elapsed().as_millis() as u64);
+        let phase_ms = self.phase_started.elapsed().as_millis() as u64;
+        let total_ms = self.started.elapsed().as_millis() as u64;
+        tracing::info!(
+            target: "leo_performance",
+            operation = self.operation,
+            id = self.id,
+            phase = self.phase,
+            event,
+            phase_ms,
+            total_ms
+        );
     }
 }
 
