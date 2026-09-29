@@ -26,8 +26,7 @@ async fn service(root: &TempDir, origin: String, runner: String) -> Arc<Service>
         std::fs::create_dir_all(root.path().join("data")).unwrap();
         std::fs::write(
             root.path().join("data/storage-s3.json"),
-            json!({"bucket": "leo-node-test","endpoint": endpoint,"region": "us-east-1"})
-                .to_string(),
+            json!({"bucket": "leo-node-test","region": "us-east-1"}).to_string(),
         )
         .unwrap();
     }
@@ -248,6 +247,46 @@ async fn master_reuses_unchanged_blocks() {
             let manifest = data.read().await.clone();
             if request.uri().path().ends_with("/snapshot") {
                 return axum::Json(json!({"id": id(),"manifest": manifest})).into_response();
+            }
+            if request.uri().path().ends_with("/blocks") {
+                let body = axum::body::to_bytes(request.into_body(), 8192)
+                    .await
+                    .unwrap();
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                let hashes = body["hashes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|hash| hash.as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>();
+                assert!(!hashes.is_empty() && hashes.len() <= snapshots::READ_BATCH);
+                let length: u64 = hashes
+                    .iter()
+                    .map(|hash| {
+                        manifest["blocks"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .find(|block| block["hash"] == *hash)
+                            .unwrap()["size"]
+                            .as_u64()
+                            .unwrap()
+                    })
+                    .sum();
+                let stream = futures_util::stream::try_unfold(
+                    (source, manifest, hashes.into_iter()),
+                    |(source, manifest, mut hashes)| async move {
+                        let Some(hash) = hashes.next() else {
+                            return Ok::<_, leo_agent_manager::error::Error>(None);
+                        };
+                        let bytes = snapshots::block(&source, &manifest, &hash).await?;
+                        Ok(Some((bytes, (source, manifest, hashes))))
+                    },
+                );
+                return axum::http::Response::builder()
+                    .header("content-length", length)
+                    .body(axum::body::Body::from_stream(stream))
+                    .unwrap();
             }
             snapshots::block(
                 &source,

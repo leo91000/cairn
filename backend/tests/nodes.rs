@@ -7,6 +7,35 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
+async fn drain_remote_deletions(service: &Service) {
+    service
+        .store
+        .transaction(|db| {
+            db.0.execute(
+                "UPDATE shared_objects SET unused_at=0 WHERE unused_at IS NOT NULL",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    while leo_agent_manager::nodes::shared_blocks::collect(service)
+        .await
+        .unwrap()
+        > 0
+    {}
+}
+
+fn shared_object_key(manifest: &Value, hash: &str) -> String {
+    let block = manifest["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["hash"] == hash)
+        .unwrap();
+    leo_agent_manager::nodes::shared_blocks::key(hash, block["object"].as_str().unwrap())
+}
+
 struct Owner {
     service: std::sync::Arc<Service>,
     _root: TempDir,
@@ -2079,7 +2108,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
     let encrypted = leo_agent_manager::object_storage::Storage::configured(&owner.service)
         .unwrap()
         .download_bytes(
-            &format!("node-backups/{run}/blocks/{block}"),
+            &shared_object_key(&first_manifest, block),
             snapshots::BLOCK + 4096,
         )
         .await
@@ -2115,8 +2144,10 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         .upload_file_verified(&legacy_file, &key)
         .await
         .unwrap();
+    let mut legacy_point = retained.clone();
+    legacy_point.as_object_mut().unwrap().remove("blockFormat");
     assert_eq!(
-        publication::read_block(&owner.service, &retained, block)
+        publication::read_block(&owner.service, &legacy_point, block)
             .await
             .unwrap(),
         original[..4 * 1024 * 1024]
@@ -2228,8 +2259,9 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             .await
             .unwrap()
             .unwrap();
+        let current_manifest = publication::manifest(&owner.service, &point).await.unwrap();
         storage
-            .purge(&format!("node-backups/{run}/blocks/{block}"))
+            .purge_key(&shared_object_key(&current_manifest, block))
             .await
             .unwrap();
         assert_eq!(
@@ -2261,7 +2293,11 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         )
         .await
         .unwrap();
-        assert_eq!(third["uploadedBytes"], 4 * 1024 * 1024 + 128);
+        assert_eq!(
+            third["uploadedBytes"],
+            4 * 1024 * 1024,
+            "Only the invalidated shared object is uploaded again"
+        );
         let repaired = owner
             .service
             .store
@@ -2281,13 +2317,14 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
                 .await
                 .unwrap(),
             &original[..4 * 1024 * 1024],
-            "A valid S3 copy repairs damaged local ciphertext on restore"
+            "Shared reads ignore obsolete run-scoped ciphertext"
         );
         assert_eq!(
             owner.service.store.run(&run).await.unwrap()["backup"]["snapshotId"],
             third["snapshotId"],
             "A successful remote recovery keeps the incremental baseline"
         );
+        std::fs::remove_file(directory.join(block)).unwrap();
         // A local enabled node has one clean disk cache (the controller). Even
         // below its normal reserve, verified publication uses bounded memory.
         let local = leo_agent_manager::nodes::LOCAL_NODE_ID;
@@ -2364,6 +2401,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         "No rollback to a previous publication after the current manifest is damaged"
     );
     publication::purge(&owner.service, &run).await.unwrap();
+    drain_remote_deletions(&owner.service).await;
     assert!(
         owner
             .service
@@ -4328,9 +4366,12 @@ async fn interrupted_first_publication_is_collected_after_restart_without_anothe
             "node-backups/{run}/{}.json",
             pending["id"].as_str().unwrap()
         );
-        let block = format!(
-            "node-backups/{run}/blocks/{}",
-            manifest["blocks"][0]["hash"].as_str().unwrap()
+        let pending_manifest = publication::manifest(&owner.service, &pending)
+            .await
+            .unwrap();
+        let block = shared_object_key(
+            &pending_manifest,
+            manifest["blocks"][0]["hash"].as_str().unwrap(),
         );
         let storage = Storage::configured(&owner.service).unwrap();
         assert!(storage.download_bytes(&object, 65536).await.is_ok());
@@ -4353,6 +4394,7 @@ async fn interrupted_first_publication_is_collected_after_restart_without_anothe
             restarted.shutdown.cancel();
             maintenance.await.unwrap();
         }
+        drain_remote_deletions(&restarted).await;
         assert_eq!(
             storage
                 .download_bytes(&object, 65536)
@@ -4371,6 +4413,356 @@ async fn interrupted_first_publication_is_collected_after_restart_without_anothe
         );
         server.abort();
     }
+}
+
+#[tokio::test]
+#[ignore = "requires loopback S3; run tests/node_s3_test.py"]
+async fn shared_publications_reuse_across_runs_migrate_legacy_and_ignore_slow_cleanup() {
+    use axum::response::IntoResponse;
+    use leo_agent_manager::{
+        config::id,
+        nodes::{LOCAL_NODE_ID, publication, shared_blocks, snapshots},
+        object_storage::Storage,
+    };
+    use std::{
+        os::unix::fs::PermissionsExt,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+    let root = TempDir::new().unwrap();
+    let disk = root.path().join("source");
+    let original = vec![42u8; 4 * 1024 * 1024];
+    std::fs::write(&disk, &original).unwrap();
+    let manifest = snapshots::index(&disk).await.unwrap();
+    let state = Arc::new(tokio::sync::Mutex::new(manifest.clone()));
+    let requests = Arc::new(AtomicUsize::new(0));
+    let pause = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let entered_capture = Arc::new(tokio::sync::Notify::new());
+    let resume_capture = Arc::new(tokio::sync::Notify::new());
+    let gates = (
+        pause.clone(),
+        entered_capture.clone(),
+        resume_capture.clone(),
+    );
+    let racing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let upload_barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let upload_gate = (racing.clone(), upload_barrier);
+    let (data, count, source) = (state.clone(), requests.clone(), disk.clone());
+    let runner = axum::Router::new().fallback(move |request: axum::extract::Request| {
+        let (data, count, source) = (data.clone(), count.clone(), source.clone());
+        let gates = gates.clone();
+        let upload_gate = upload_gate.clone();
+        async move {
+            if request.method() == "DELETE" {
+                return axum::Json(json!({})).into_response();
+            }
+            if request.uri().path().ends_with("/snapshot") {
+                if gates.0.swap(false, Ordering::SeqCst) {
+                    gates.1.notify_one();
+                    gates.2.notified().await;
+                }
+                return axum::Json(json!({"id":id(),"manifest":data.lock().await.clone()}))
+                    .into_response();
+            }
+            if request.uri().path().ends_with("/blocks") {
+                return axum::http::StatusCode::NOT_FOUND.into_response();
+            }
+            count.fetch_add(1, Ordering::SeqCst);
+            if upload_gate.0.load(Ordering::SeqCst) {
+                upload_gate.1.wait().await;
+            }
+            snapshots::block(
+                &source,
+                &*data.lock().await,
+                request.uri().path().rsplit('/').next().unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_response()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, runner).await.unwrap() });
+    let owner = Owner::with_runner("localhost:4310".into(), url).await;
+    let s = &owner.service;
+    async fn run(s: &Service) -> Value {
+        let run = id();
+        let record = json!({"id":run,"taskId":run,"createdAt":0,"status":"succeeded","nodeId":LOCAL_NODE_ID});
+        let saved = record.clone();
+        s.store
+            .write(move |db| db.add_run(&saved, None))
+            .await
+            .unwrap();
+        s.store
+            .set(
+                &format!("run-checkpoint:{run}"),
+                json!({"nodeId":LOCAL_NODE_ID,"runnerId":id()}),
+                None,
+            )
+            .await
+            .unwrap();
+        record
+    }
+    let a = run(s).await;
+    let b = run(s).await;
+    let start = std::time::Instant::now();
+    let first = publication::capture(s, &a).await.unwrap();
+    let first_ms = start.elapsed().as_secs_f64() * 1000.;
+    let start = std::time::Instant::now();
+    let second = publication::capture(s, &b).await.unwrap();
+    let reused_ms = start.elapsed().as_secs_f64() * 1000.;
+    assert_eq!(first["uploadedBytes"], original.len());
+    assert_eq!(second["uploadedBytes"], 0);
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        1,
+        "Cross-run reuse does not request source bytes"
+    );
+    let first = s
+        .get("node-backups", first["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    let second = s
+        .get("node-backups", second["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    let first_manifest = publication::manifest(s, &first).await.unwrap();
+    let second_manifest = publication::manifest(s, &second).await.unwrap();
+    assert_eq!(first_manifest["blocks"], second_manifest["blocks"]);
+    let hash = manifest["blocks"][0]["hash"].as_str().unwrap();
+    let object = shared_object_key(&first_manifest, hash);
+    assert_eq!(
+        publication::read_block(s, &second, hash).await.unwrap(),
+        original
+    );
+    eprintln!(
+        "Shared publication 4MiB: unique={first_ms:.2}ms reused={reused_ms:.2}ms; source requests=1"
+    );
+
+    // A blocked prefix purge runs on its own worker. It holds no publication or
+    // disk-reader lock, and removing one owner cannot delete another owner's block.
+    let entered = root.path().join("delete-entered");
+    let release = root.path().join("delete-release");
+    let wrapper = root.path().join("slow-aws");
+    std::fs::write(&wrapper,format!("#!/usr/bin/env python3\nimport pathlib,time,subprocess,sys\npathlib.Path({}).touch()\nwhile not pathlib.Path({}).exists(): time.sleep(.01)\nsys.exit(subprocess.call(['aws']+sys.argv[1:]))\n",serde_json::to_string(&entered).unwrap(),serde_json::to_string(&release).unwrap())).unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(
+        s.config.data_dir.join("storage-s3.json"),
+        json!({"bucket":"leo-node-test","awsBinary":wrapper}).to_string(),
+    )
+    .unwrap();
+    publication::purge(s, a["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    let service = s.clone();
+    let gc = tokio::spawn(async move { shared_blocks::collect(&service).await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !entered.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let c = run(s).await;
+    let third = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        publication::capture(s, &c),
+    )
+    .await
+    .expect("Slow deletion must not block publication")
+    .unwrap();
+    assert_eq!(third["uploadedBytes"], 0);
+    assert_eq!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            publication::read_block(s, &second, hash)
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+        original
+    );
+    assert!(!gc.is_finished());
+    std::fs::write(&release, b"resume").unwrap();
+    gc.await.unwrap().unwrap();
+    publication::purge(s, b["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    drain_remote_deletions(s).await;
+    assert!(
+        Storage::configured(s)
+            .unwrap()
+            .download_bytes(&object, snapshots::BLOCK + 36)
+            .await
+            .is_ok()
+    );
+    publication::purge(s, c["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    drain_remote_deletions(s).await;
+    assert_eq!(
+        Storage::configured(s)
+            .unwrap()
+            .download_bytes(&object, snapshots::BLOCK + 36)
+            .await
+            .unwrap_err()
+            .status,
+        409
+    );
+    std::fs::remove_file(s.config.data_dir.join("storage-s3.json")).unwrap();
+
+    // A cancelled caller cannot release reservations while its owned capture is
+    // running. The operation completes before another collector can retire it.
+    let cancelled = run(s).await;
+    pause.store(true, Ordering::SeqCst);
+    let (service, record) = (s.clone(), cancelled.clone());
+    let caller = tokio::spawn(async move { publication::capture(&service, &record).await });
+    entered_capture.notified().await;
+    caller.abort();
+    let _ = caller.await;
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            s.node_backup_operation
+                .lock(cancelled["id"].as_str().unwrap())
+        )
+        .await
+        .is_err()
+    );
+    resume_capture.notify_one();
+    let guard = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        s.node_backup_operation
+            .lock(cancelled["id"].as_str().unwrap()),
+    )
+    .await
+    .unwrap();
+    drop(guard);
+    let committed = s
+        .store
+        .run(cancelled["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    let point = s
+        .get("node-backups", committed["backup"]["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        publication::read_block(s, &point, hash).await.unwrap(),
+        original
+    );
+    publication::purge(s, cancelled["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    drain_remote_deletions(s).await;
+
+    // Both disks reserve the same unseen hash before either source responds.
+    // Their first uploads must converge while preserving independent disk locks.
+    let parallel_a = run(s).await;
+    let parallel_b = run(s).await;
+    racing.store(true, Ordering::SeqCst);
+    let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        tokio::join!(
+            publication::capture(s, &parallel_a),
+            publication::capture(s, &parallel_b)
+        )
+    })
+    .await
+    .unwrap();
+    racing.store(false, Ordering::SeqCst);
+    let (a, b) = (a.unwrap(), b.unwrap());
+    assert_eq!(a["uploadedBytes"], original.len());
+    assert_eq!(b["uploadedBytes"], original.len());
+    let a = s
+        .get("node-backups", a["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    let b = s
+        .get("node-backups", b["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        publication::manifest(s, &a).await.unwrap()["blocks"],
+        publication::manifest(s, &b).await.unwrap()["blocks"]
+    );
+    publication::purge(s, parallel_a["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    drain_remote_deletions(s).await;
+    assert_eq!(
+        publication::read_block(s, &b, hash).await.unwrap(),
+        original
+    );
+    publication::purge(s, parallel_b["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    drain_remote_deletions(s).await;
+
+    // Legacy incremental captures can omit unchanged bytes on the node. Migrate
+    // them from their old authenticated object instead of requesting absent data.
+    let legacy_run = run(s).await;
+    let run_id = legacy_run["id"].as_str().unwrap();
+    let point_id = id();
+    let legacy_bytes = b"legacy unchanged block";
+    std::fs::write(&disk, legacy_bytes).unwrap();
+    let mut legacy_manifest = snapshots::index(&disk).await.unwrap();
+    legacy_manifest["incremental"] = true.into();
+    let hash = legacy_manifest["blocks"][0]["hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let old_key = format!("node-backups/{run_id}/blocks/{hash}");
+    let mut encoded = b"LEOBLK\x01\0".to_vec();
+    encoded.extend(s.vault.encrypt_bytes(&old_key, legacy_bytes).unwrap());
+    Storage::configured(s)
+        .unwrap()
+        .upload_bytes(encoded, &old_key)
+        .await
+        .unwrap();
+    let legacy = json!({"id":point_id,"runId":run_id,"destination":"s3","bucket":"leo-node-test","endpoint":null,"manifest":s.vault.encrypt(&format!("backup:{point_id}"),&legacy_manifest).unwrap()});
+    s.store.put("node-backups", legacy.clone()).await.unwrap();
+    s.store
+        .patch_run(run_id, json!({"backup":{"id":point_id,"snapshotId":id()}}))
+        .await
+        .unwrap();
+    let directory = s.config.data_dir.join("node-backups").join(run_id);
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join(format!("{point_id}.json")),
+        legacy.to_string(),
+    )
+    .unwrap();
+    *state.lock().await = legacy_manifest;
+    let before = requests.load(Ordering::SeqCst);
+    let migrated = publication::capture(s, &s.store.run(run_id).await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(migrated["blockFormat"], "shared-v1");
+    assert_eq!(requests.load(Ordering::SeqCst), before);
+    let migrated = s
+        .get("node-backups", migrated["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        publication::read_block(s, &migrated, &hash).await.unwrap(),
+        legacy_bytes
+    );
+    drain_remote_deletions(s).await;
+    assert_eq!(
+        Storage::configured(s)
+            .unwrap()
+            .download_bytes(&old_key, 65536)
+            .await
+            .unwrap_err()
+            .status,
+        409
+    );
+    publication::purge(s, run_id).await.unwrap();
+    drain_remote_deletions(s).await;
+    server.abort();
 }
 
 #[tokio::test]

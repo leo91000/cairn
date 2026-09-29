@@ -1,6 +1,6 @@
 //! Publish the current disk to S3, then collect unreachable generations.
-//! Persisted record and object names remain compatible with existing disks.
-use super::snapshots;
+//! New publications share immutable objects; existing run-scoped objects remain readable.
+use super::{shared_blocks, snapshots};
 use crate::{
     config::{id, now},
     error::{Error, Result},
@@ -94,7 +94,17 @@ fn key(run: &str, hash: &str) -> String {
 }
 
 pub async fn capture(s: &Service, run: &Value) -> Result<Value> {
-    let result = publish(s, run).await;
+    // Cancellation of an HTTP caller must not drop the operation lock while its
+    // PUTs are still executing. The owned task finishes publication or recovery
+    // bookkeeping; process death leaves durable reservations for the next boot.
+    let (s, run) = (s.clone(), run.clone());
+    tokio::spawn(async move { capture_owned(&s, &run).await })
+        .await
+        .map_err(Error::internal)?
+}
+
+async fn capture_owned(s: &Service, run: &Value) -> Result<Value> {
+    let result = Box::pin(publish(s, run)).await;
     tracing::info!(target: "leo_performance", operation = "s3_totals", id = text(run, "id"),
         success = result.is_ok(), metrics = %s.hot_s3.performance());
     // A capture continuing from a baseline may rely on blocks the master no longer
@@ -163,12 +173,10 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
     let snapshot_id = text(&snapshot, "id");
     crate::validation::uuid(snapshot_id)?;
     let result = async {
-        let manifest = &snapshot["manifest"];
-        snapshots::validate(manifest)?;
+        let mut manifest = snapshot["manifest"].clone();
+        snapshots::validate(&manifest)?;
         let directory = root(s, run_id);
         crate::skills::private_dir(&directory.join("blocks")).await?;
-        let published = published_blocks(s, run_id, &storage).await?;
-        let mut seen = HashSet::new();
         let mut uploaded = 0u64;
         let admission = s.node_backup_lock.lock().await;
         let occupied = used(s).await?;
@@ -193,8 +201,15 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
             "indexMs": manifest["indexMs"],
             "localBytesRead": manifest["localBytesRead"],
             "incremental": manifest["incremental"],
-            "manifest": s.vault.encrypt(&format!("backup:{backup_id}"),manifest)?
+            "blockFormat": "shared-v1"
         });
+        let point = value.clone();
+        let (reserved_manifest, objects) = s.store.transaction(move |db| {
+            let objects = shared_blocks::reserve(db, &point, &mut manifest)?;
+            Ok((manifest, objects))
+        }).await?;
+        let manifest = reserved_manifest;
+        value["manifest"] = s.vault.encrypt(&format!("backup:{backup_id}"), &manifest)?;
         let path = directory.join(format!("{backup_id}.json"));
         let intent = serde_json::to_vec(&value)?;
         if occupied.saturating_add(intent.len() as u64) > budget {
@@ -209,97 +224,52 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
             tokio::fs::File::open(parent).await?.sync_all().await?;
         }
         drop(admission);
-        let mut uploads = tokio::task::JoinSet::<Result<()>>::new();
-        let mut requested = HashSet::new();
-        let missing = manifest["blocks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|block| {
-                let hash = block["hash"].as_str()?;
-                let size = block["size"].as_u64()?;
-                (published.get(hash).copied() != Some(size)
-                    && !directory.join("blocks").join(hash).exists()
-                    && requested.insert(hash.to_owned()))
-                    .then(|| (hash.to_owned(), size))
-            })
-            .collect();
-        let mut reads = snapshots::Fetch::new(
-            s.http.clone(),
-            format!("{base}/snapshots/{snapshot_id}"),
-            credential.clone(),
-            missing,
-        );
         timing.next("transfer_blocks");
-        for block in manifest["blocks"].as_array().unwrap() {
-            let Some(hash) = block["hash"].as_str() else {
-                continue;
-            };
-            if !seen.insert(hash.to_owned()) {
-                continue;
-            }
-            let file = directory.join("blocks").join(hash);
-            if published.get(hash).copied() == block["size"].as_u64() {
-                // A committed immutable S3 copy remains usable after local
-                // cache and receipt eviction.
-                continue;
-            }
-            let mut verified = false;
-            if !file.exists() {
-                let bytes = reads.block(hash).await?;
-                if bytes.len() as u64 != block["size"].as_u64().unwrap()
-                    || hex::encode(Sha256::digest(&bytes)) != hash
-                {
-                    return Err(Error::bad("Backup block failed integrity verification."));
-                }
+        // The common all-reused path never loads other manifests. Incremental
+        // snapshots may omit old blocks, which migrate directly from S3.
+        let sources = if manifest["incremental"] == true && objects.iter().any(|object| !object.ready) {
+            source_blocks(s, run_id).await?
+        } else { HashMap::new() };
+        let missing = objects.iter().filter(|object| !object.ready && !sources.contains_key(&object.hash)).map(|object|(object.hash.clone(),object.size)).collect();
+        let mut reads = snapshots::Fetch::new(s.http.clone(), format!("{base}/snapshots/{snapshot_id}"), credential.clone(), missing);
+        let mut uploads = tokio::task::JoinSet::<Result<()>>::new();
+        let transfer = async {
+            for object in &objects {
+                if object.ready { continue; }
+                let bytes = source_block(s, object, &sources, &mut reads).await?;
+                let scope = shared_blocks::key(&object.hash, &object.id);
                 let vault = s.vault.clone();
-                let scope = key(run_id, hash);
-                let length = bytes.len() as u64;
+                let encryption_scope = scope.clone();
                 let encoded = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
                     let mut encoded = BINARY_BLOCK_HEADER.to_vec();
-                    encoded.extend(vault.encrypt_bytes(&scope, &bytes)?);
+                    encoded.extend(vault.encrypt_bytes(&encryption_scope, &bytes)?);
                     Ok(encoded)
-                })
-                .await
-                .map_err(Error::internal)??;
-                enqueue_verified_block(&mut uploads, &storage, &file, key(run_id, hash), encoded)
-                    .await?;
-                uploaded += length;
-                continue;
-            } else if published.get(hash).copied() != block["size"].as_u64() {
-                // Orphan files from interrupted publication have no retained proof.
-                // Published blocks are immutable and already validated at receipt.
-                let bytes = decode_block(s, run_id, hash, tokio::fs::read(&file).await?).await?;
-                if bytes.len() as u64 != block["size"].as_u64().unwrap() {
-                    return Err(Error::bad("Cached backup block has the wrong size."));
-                }
-                verified = true;
-            }
-            {
-                let location = json!({"destination": "s3","bucket": storage.bucket,"endpoint": storage.endpoint});
-                let mark = receipt(&file, &location)?;
-                if !mark.exists() {
-                    // Verify before copying an existing block to a new destination.
-                    let encoded = tokio::fs::read(&file).await?;
-                    if !verified {
-                        decode_block(s, run_id, hash, encoded.clone()).await?;
-                    }
-                    enqueue_verified_block(
-                        &mut uploads,
-                        &storage,
-                        &file,
-                        key(run_id, hash),
-                        encoded,
-                    )
-                    .await?;
+                }).await.map_err(Error::internal)??;
+                let destination = storage.clone();
+                uploads.spawn(async move { destination.upload_bytes(encoded, &scope).await });
+                uploaded += object.size;
+                if uploads.len() >= crate::object_storage::HOT_WRITE_CONCURRENCY {
+                    uploads.join_next().await.unwrap().map_err(Error::internal)??;
                 }
             }
-        }
+            Ok::<(),Error>(())
+        }.await;
+        // On failure, finish every already-started PUT before the operation lock
+        // can be released and its pending references retired by another capture.
+        let mut upload_result = transfer;
         while let Some(upload) = uploads.join_next().await {
-            upload.map_err(Error::internal)??;
+            if let Err(error) = upload.map_err(Error::internal).and_then(|r| r) { upload_result = Err(error); }
         }
-        tracing::info!(target: "leo_performance", operation = "disk_publication", id = run_id, uploaded_bytes = uploaded, referenced_blocks = seen.len());
+        upload_result?;
+        tracing::info!(target: "leo_performance", operation = "disk_publication", id = run_id, uploaded_bytes = uploaded, referenced_blocks = objects.len(), reused_blocks = objects.iter().filter(|o| o.ready).count());
         timing.next("publish_manifest");
+        let publication = backup_id.clone();
+        let manifest = s.store.transaction(move |db| {
+            let mut manifest = manifest;
+            shared_blocks::complete_uploads(db, &publication, &mut manifest)?;
+            Ok(manifest)
+        }).await?;
+        value["manifest"] = s.vault.encrypt(&format!("backup:{backup_id}"), &manifest)?;
         value["uploadedBytes"]=uploaded.into();
         crate::skills::atomic_write(&path,&serde_json::to_vec(&value)?).await?;
         upload_verified(&storage,&path,&format!("node-backups/{run_id}/{backup_id}.json")).await?;
@@ -317,6 +287,7 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
         s.store.transaction(move |db| {
             let current=db.kv(&format!("run-checkpoint:{owner_run}"))?.unwrap_or_default();
             if current["runnerId"]!=owner_attempt || current["nodeId"]!=owner_node {return Err(Error::new(409,"Disk owner changed during publication."));}
+            shared_blocks::verified(db, text(&point,"id"))?;
             db.put("node-backups",&point)?;db.patch_run(&owner_run,&patch)?;Ok(())
         }).await?;
         timing.next("acknowledge_journal");
@@ -353,62 +324,38 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
     result
 }
 
-/// Every upload path publishes its receipt only after remote read-back verification.
-async fn enqueue_verified_block(
-    uploads: &mut tokio::task::JoinSet<Result<()>>,
-    storage: &crate::object_storage::Storage,
-    file: &std::path::Path,
-    key: String,
-    encoded: Vec<u8>,
-) -> Result<()> {
-    let location =
-        json!({"destination": "s3","bucket": storage.bucket,"endpoint": storage.endpoint});
-    let mark = receipt(file, &location)?;
-    let receipt_bytes = serde_json::to_vec(&location)?;
-    let storage = storage.clone();
-    uploads.spawn(async move {
-        storage.upload_bytes(encoded, &key).await?;
-        crate::skills::atomic_write(&mark, &receipt_bytes).await
-    });
-    if uploads.len() >= crate::object_storage::HOT_WRITE_CONCURRENCY {
-        uploads
-            .join_next()
-            .await
-            .unwrap()
-            .map_err(Error::internal)??;
-    }
-    Ok(())
-}
+type Sources = HashMap<String, (std::sync::Arc<Value>, Value)>;
 
-/// A retained, authenticated manifest proves these immutable blocks were validated
-/// before publication. Read manifests, not payloads, on the incremental path.
-async fn published_blocks(
-    s: &Service,
-    run: &str,
-    storage: &crate::object_storage::Storage,
-) -> Result<HashMap<String, u64>> {
-    let mut blocks = HashMap::new();
-    if s.store.run(run).await?["backup"]["snapshotId"].is_null() {
-        // A failed remote read invalidates the previous publication as a
-        // deduplication source. The next capture must re-upload every block.
-        return Ok(blocks);
-    }
+async fn source_blocks(s: &Service, run: &str) -> Result<Sources> {
+    let mut index = HashMap::new();
     for point in s.store.node_backups_for_run(run).await? {
-        if point["destination"] != "s3"
-            || point["bucket"].as_str() != Some(storage.bucket.as_str())
-            || point["endpoint"].as_str() != storage.endpoint.as_deref()
-        {
-            continue;
-        }
         if let Ok(manifest) = manifest(s, &point).await {
+            let point = std::sync::Arc::new(point);
             for block in manifest["blocks"].as_array().unwrap() {
                 if let Some(hash) = block["hash"].as_str() {
-                    blocks.insert(hash.to_owned(), block["size"].as_u64().unwrap());
+                    index.insert(hash.to_owned(), (point.clone(), block.clone()));
                 }
             }
         }
     }
-    Ok(blocks)
+    Ok(index)
+}
+
+async fn source_block(
+    s: &Service,
+    object: &shared_blocks::Object,
+    sources: &Sources,
+    reads: &mut snapshots::Fetch,
+) -> Result<Vec<u8>> {
+    let bytes = if let Some((point, block)) = sources.get(&object.hash) {
+        read_manifest_block(s, point, block).await?
+    } else {
+        reads.block(&object.hash).await?
+    };
+    if bytes.len() as u64 != object.size || hex::encode(Sha256::digest(&bytes)) != object.hash {
+        return Err(Error::bad("Backup block failed integrity verification."));
+    }
+    Ok(bytes)
 }
 
 fn receipt(file: &std::path::Path, location: &Value) -> Result<PathBuf> {
@@ -434,6 +381,15 @@ pub async fn manifest(s: &Service, backup: &Value) -> Result<Value> {
         &backup["manifest"],
     )?;
     snapshots::validate(&value)?;
+    if backup["blockFormat"] == "shared-v1" {
+        for block in value["blocks"].as_array().unwrap() {
+            if block["hash"].is_string() {
+                crate::validation::uuid(text(block, "object"))?;
+            }
+        }
+    } else if !backup["blockFormat"].is_null() {
+        return Err(Error::bad("Unsupported disk block format."));
+    }
     Ok(value)
 }
 
@@ -441,6 +397,59 @@ pub async fn read_block(s: &Service, backup: &Value, hash: &str) -> Result<Vec<u
     if !snapshots::valid_hash(hash) {
         return Err(Error::bad("Invalid backup block."));
     }
+    if backup["blockFormat"] == "shared-v1" {
+        let manifest = manifest(s, backup).await?;
+        let block = manifest["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["hash"] == hash)
+            .ok_or_else(|| Error::new(403, "Block outside disk scope."))?;
+        return read_manifest_block(s, backup, block).await;
+    }
+    read_legacy_block(s, backup, hash).await
+}
+
+/// The authorized read handler already has this authenticated manifest block.
+/// Avoid decrypting the manifest twice and never consult the ownership inventory.
+pub(crate) async fn read_manifest_block(
+    s: &Service,
+    backup: &Value,
+    block: &Value,
+) -> Result<Vec<u8>> {
+    let hash = text(block, "hash");
+    if backup["blockFormat"] != "shared-v1" {
+        return read_legacy_block(s, backup, hash).await;
+    }
+    let object = text(block, "object");
+    crate::validation::uuid(object)?;
+    if !snapshots::valid_hash(hash) {
+        return Err(Error::bad("Invalid backup block."));
+    }
+    let scope = shared_blocks::key(hash, object);
+    let storage = storage_for(s, backup)?;
+    let result = async {
+        let encoded = storage
+            .download_bytes(&scope, snapshots::BLOCK + 36)
+            .await?;
+        let bytes = decode_scoped_block(s, &scope, hash, encoded).await?;
+        if Some(bytes.len() as u64) != block["size"].as_u64() {
+            return Err(Error::new(409, "Recovery block size mismatch."));
+        }
+        Ok(bytes)
+    }
+    .await;
+    if result
+        .as_ref()
+        .is_err_and(|error: &Error| matches!(error.status, 400 | 409))
+    {
+        shared_blocks::invalidate(s, object).await?;
+        forget_baseline(s, text(backup, "runId")).await?;
+    }
+    result
+}
+
+async fn read_legacy_block(s: &Service, backup: &Value, hash: &str) -> Result<Vec<u8>> {
     let run = text(backup, "runId");
     let path = root(s, run).join("blocks").join(hash);
     if let Ok(encoded) = tokio::fs::read(&path).await {
@@ -488,8 +497,17 @@ pub async fn read_block(s: &Service, backup: &Value, hash: &str) -> Result<Vec<u
 }
 
 async fn decode_block(s: &Service, run: &str, hash: &str, encoded: Vec<u8>) -> Result<Vec<u8>> {
+    decode_scoped_block(s, &key(run, hash), hash, encoded).await
+}
+
+async fn decode_scoped_block(
+    s: &Service,
+    scope: &str,
+    hash: &str,
+    encoded: Vec<u8>,
+) -> Result<Vec<u8>> {
     let vault = s.vault.clone();
-    let scope = key(run, hash);
+    let scope = scope.to_owned();
     let hash = hash.to_owned();
     tokio::task::spawn_blocking(move || {
         let bytes = if let Some(ciphertext) = encoded.strip_prefix(BINARY_BLOCK_HEADER) {
@@ -666,6 +684,9 @@ async fn collect_unused(s: &Service, run: &str) -> Result<()> {
         ));
     }
     for point in points.iter().filter(|p| keep.contains(text(p, "id"))) {
+        if point["blockFormat"] == "shared-v1" {
+            continue;
+        }
         // A damaged retained manifest must not prevent creating a fresh good point,
         // nor cause dependencies we cannot identify to be deleted.
         let Ok(manifest) = manifest(s, point).await else {
@@ -677,23 +698,29 @@ async fn collect_unused(s: &Service, run: &str) -> Result<()> {
             }
         }
     }
-    // Readers of retired grants have drained. This disk's operation lock still
-    // excludes publication/restoration; release cache/read locks before remote
-    // deletion so the current generation remains readable during cleanup.
+    // Drain readers only through metadata retirement. Filesystem maintenance and
+    // remote deletion must not hold the disk-reader lock.
     drop(_guard);
-    drop(_readers);
-    timing.next("delete_objects");
+    timing.next("retire_objects");
     for point in points.iter().filter(|p| !keep.contains(text(p, "id"))) {
         let point_id = text(point, "id").to_owned();
         if point["destination"] == "s3" && !root(s, run).join(format!("{point_id}.json")).exists() {
-            storage_for(s, point)?
-                .purge_key(&format!("node-backups/{run}/{}.json", text(point, "id")))
-                .await?;
+            queue_deletion(
+                s,
+                point,
+                &format!("node-backups/{run}/{}.json", text(point, "id")),
+                false,
+            )
+            .await?;
         }
         s.store
-            .write(move |db| db.remove("node-backups", &point_id))
+            .transaction(move |db| {
+                shared_blocks::release(db, &point_id)?;
+                db.remove("node-backups", &point_id)
+            })
             .await?;
     }
+    drop(_readers);
     // Local manifests also serve as upload intents. They precede every remote write,
     // including first publication, and remain discoverable if the DB commit never happened.
     if root(s, run).exists() {
@@ -712,24 +739,32 @@ async fn collect_unused(s: &Service, run: &str) -> Result<()> {
                     "Invalid publication upload inventory; cleanup deferred.",
                 ));
             }
-            let manifest = manifest(s, &point).await?;
             if point["destination"] == "s3" {
-                let storage = storage_for(s, &point)?;
-                let hashes = manifest["blocks"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter_map(|block| block["hash"].as_str())
-                    .collect::<HashSet<_>>();
-                for hash in hashes {
-                    if !needed.contains(hash)
-                        && !receipt(&root(s, run).join("blocks").join(hash), &point)?.exists()
-                    {
-                        storage.purge_key(&key(run, hash)).await?;
+                let mut keys = vec![format!("node-backups/{run}/{point_id}.json")];
+                if point["blockFormat"].is_null() {
+                    let manifest = manifest(s, &point).await?;
+                    let hashes = manifest["blocks"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter_map(|block| block["hash"].as_str())
+                        .collect::<HashSet<_>>();
+                    for hash in hashes {
+                        if !needed.contains(hash)
+                            && !receipt(&root(s, run).join("blocks").join(hash), &point)?.exists()
+                        {
+                            keys.push(key(run, hash));
+                        }
                     }
                 }
-                storage
-                    .purge_key(&format!("node-backups/{run}/{point_id}.json"))
+                let location = json!({"bucket":point["bucket"],"endpoint":point["endpoint"]});
+                s.store
+                    .transaction(move |db| {
+                        for key in keys {
+                            shared_blocks::queue(db, &location, &key, false)?;
+                        }
+                        Ok(())
+                    })
                     .await?;
             }
             tokio::fs::remove_file(entry.path()).await?;
@@ -747,15 +782,27 @@ async fn collect_unused(s: &Service, run: &str) -> Result<()> {
             if let Some((_, bucket)) = name.split_once(".s3-") {
                 let location = serde_json::from_slice(&tokio::fs::read(entry.path()).await?)
                     .unwrap_or_else(|_| json!({"destination": "s3","bucket": bucket}));
-                storage_for(s, &location)?
-                    .purge_key(&key(run, hash))
-                    .await?;
+                queue_deletion(s, &location, &key(run, hash), false).await?;
             }
             tokio::fs::remove_file(entry.path()).await?;
         }
     }
+    let run = run.to_owned();
+    s.store
+        .transaction(move |db| shared_blocks::release_run(db, &run, &keep))
+        .await?;
     timing.finish();
     Ok(())
+}
+
+async fn queue_deletion(s: &Service, point: &Value, key: &str, prefix: bool) -> Result<()> {
+    let (point, key) = (
+        json!({"bucket":point["bucket"],"endpoint":point["endpoint"]}),
+        key.to_owned(),
+    );
+    s.store
+        .transaction(move |db| shared_blocks::queue(db, &point, &key, prefix))
+        .await
 }
 
 /// Every isolated conversation uses the same continuous S3 publication path.
@@ -826,6 +873,17 @@ async fn collection_runs(s: &Service) -> Result<HashSet<String>> {
         .iter()
         .filter_map(|point| point["runId"].as_str().map(str::to_owned))
         .collect::<HashSet<_>>();
+    let pending = s
+        .store
+        .read(|db| {
+            let mut stmt =
+                db.0.prepare_cached("SELECT DISTINCT run_id FROM shared_publications")?;
+            Ok(stmt
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+        .await?;
+    runs.extend(pending);
     let root = s.config.data_dir.join("node-backups");
     if root.exists() {
         let mut entries = tokio::fs::read_dir(root).await?;
@@ -944,7 +1002,7 @@ pub async fn maintain(s: std::sync::Arc<Service>) {
     }
 }
 
-fn storage_for(s: &Service, backup: &Value) -> Result<crate::object_storage::Storage> {
+pub(crate) fn storage_for(s: &Service, backup: &Value) -> Result<crate::object_storage::Storage> {
     if backup["destination"] != "s3" {
         return Err(Error::new(503, "Local recovery block is missing."));
     }
@@ -976,7 +1034,7 @@ async fn upload_verified(
     storage.upload_file_verified(path, key).await
 }
 
-/// Explicit conversation purge removes every recovery dependency, including orphan uploads.
+/// Retire a conversation's recovery references and durably queue remote reclamation.
 pub async fn purge(s: &Service, run: &str) -> Result<()> {
     if run.is_empty() {
         return Ok(());
@@ -1028,7 +1086,7 @@ pub async fn purge(s: &Service, run: &str) -> Result<()> {
     for location in locations {
         let storage = storage_for(s, &location)?;
         if deleted.insert((storage.endpoint.clone(), storage.bucket.clone())) {
-            storage.purge(&format!("node-backups/{run}/")).await?;
+            queue_deletion(s, &location, &format!("node-backups/{run}/"), true).await?;
         }
     }
     let directory = root(s, run);
@@ -1040,6 +1098,7 @@ pub async fn purge(s: &Service, run: &str) -> Result<()> {
     let run = run.to_owned();
     s.store
         .transaction(move |db| {
+            shared_blocks::release_run(db, &run, &HashSet::new())?;
             for point in points {
                 db.remove("node-backups", text(&point, "id"))?;
             }

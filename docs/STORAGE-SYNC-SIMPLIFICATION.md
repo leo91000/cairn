@@ -18,6 +18,8 @@ Décision utilisateur du 28 septembre 2026, applicable au-dessus de la PR nodes 
 
 Le module `nodes::publication` porte la capture, publication vérifiée et collecte. Le module `object_storage` porte les accès S3 partagés. `conversation_deletion` ne porte que l’effacement des fichiers, disques et enregistrements. Les clés persistées `node-backups` et les anciens alias de configuration S3 restent lisibles pour les données S3 déjà publiées. Les anciens disques locaux ne sont plus exécutables.
 
+Le partage entre disques utilise désormais un inventaire de références dans `nodes::shared_blocks` et une collecte distante indépendante de la synchronisation. Les blocs restent protégés par leurs références même si un manifeste partagé est illisible. La suppression logique d’une conversation précède la récupération physique des objets devenus inutilisés. Voir [la décision](adr/0010-shared-block-incarnations.md) et [le fonctionnement, la migration et les validations](SHARED-S3-BLOCKS.md).
+
 ## Vérifications
 
 Tests aux interfaces existantes : HTTP conversation et contrôleur, publication/lecture/collecte du disque, parcours de déplacement via relais avec S3 de test. Couvrir absence d’archivage malgré une ancienne politique, purge de corbeille, blocs partagés, lecteurs encore présents, suppression après libération, horloge non monotone, corruption et publication interrompue. Exécuter la suite normale et `tests/node_s3_test.py` ; les parcours qui publiaient auparavant vers le master requièrent désormais cette validation S3 explicite. Les interruptions après PUT et avant enregistrement sont nettoyables après redémarrage et lors de la suppression de conversation, même sans reçu local.
