@@ -30,98 +30,81 @@ fn command(program: &str) -> Command {
     cmd
 }
 
-pub async fn prepare(s: Service, mut artifact: Value) -> Result<()> {
-    if artifact["previewStatus"] != "pending" {
+/// Reads dimensions and duration of a media file into the record.
+async fn probe(path: &Path, artifact: &mut Value) -> Result<()> {
+    let output = command("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "format=duration:stream=width,height",
+            "-of",
+            "json",
+        ])
+        .arg(path)
+        .output()
+        .await?;
+    if !output.status.success() || output.stdout.len() >= 16384 {
         return Ok(());
     }
-    let _permit = JOBS.acquire().await.map_err(Error::internal)?;
-    let run = text(&artifact, "runId").to_owned();
-    if s.store
-        .read(move |db| crate::conversation_lifecycle::require_active_run(db, &run))
-        .await
-        .is_err()
+    let info: Value = serde_json::from_slice(&output.stdout)?;
+    artifact["width"] = info["streams"][0]["width"].clone();
+    artifact["height"] = info["streams"][0]["height"].clone();
+    if let Ok(duration) = text(&info["format"], "duration").parse::<f64>()
+        && duration.is_finite()
+        && duration >= 0.0
     {
-        return Ok(());
+        artifact["duration"] = duration.into();
     }
-    let directory = s.config.data_dir.join("artifacts");
-    let path = directory.join(text(&artifact, "id"));
-    let target = directory.join(format!("{}.jpg", text(&artifact, "id")));
-    let job = async {
-        if artifact["kind"] != "pdf" {
-            let output = command("ffprobe")
-                .args([
-                    "-v",
-                    "error",
-                    "-protocol_whitelist",
-                    "file,pipe",
-                    "-select_streams",
-                    "v:0",
-                    "-show_entries",
-                    "format=duration:stream=width,height",
-                    "-of",
-                    "json",
-                ])
-                .arg(&path)
-                .output()
-                .await?;
-            if output.status.success() && output.stdout.len() < 16384 {
-                let info: Value = serde_json::from_slice(&output.stdout)?;
-                artifact["width"] = info["streams"][0]["width"].clone();
-                artifact["height"] = info["streams"][0]["height"].clone();
-                if let Ok(duration) = text(&info["format"], "duration").parse::<f64>()
-                    && duration.is_finite()
-                    && duration >= 0.0
-                {
-                    artifact["duration"] = json!(duration);
-                }
-            }
-        }
-        if artifact["kind"] == "audio" {
-            return Ok::<bool, Error>(false);
-        }
-        let status = if artifact["kind"] == "pdf" {
-            command("pdftoppm")
-                .args(["-f", "1", "-singlefile", "-scale-to", "960", "-jpeg"])
-                .arg(&path)
-                .arg(target.with_extension(""))
-                .status()
-                .await?
-        } else {
-            command("ffmpeg")
-                .args([
-                    "-v",
-                    "error",
-                    "-nostdin",
-                    "-y",
-                    "-protocol_whitelist",
-                    "file,pipe",
-                    "-threads",
-                    "1",
-                    "-i",
-                ])
-                .arg(&path)
-                .args([
-                    "-frames:v",
-                    "1",
-                    "-vf",
-                    "scale=960:960:force_original_aspect_ratio=decrease",
-                    "-threads",
-                    "1",
-                    "-f",
-                    "image2",
-                ])
-                .arg(&target)
-                .status()
-                .await?
-        };
-        Ok(status.success() && target.is_file())
+    Ok(())
+}
+
+/// Renders a 960px JPEG of the first PDF page or video frame.
+async fn thumbnail(pdf: bool, path: &Path, target: &Path) -> Result<bool> {
+    let status = if pdf {
+        command("pdftoppm")
+            .args(["-f", "1", "-singlefile", "-scale-to", "960", "-jpeg"])
+            .arg(path)
+            .arg(target.with_extension(""))
+            .status()
+            .await?
+    } else {
+        command("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-nostdin",
+                "-y",
+                "-protocol_whitelist",
+                "file,pipe",
+                "-threads",
+                "1",
+                "-i",
+            ])
+            .arg(path)
+            .args([
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=960:960:force_original_aspect_ratio=decrease",
+                "-threads",
+                "1",
+                "-f",
+                "image2",
+            ])
+            .arg(target)
+            .status()
+            .await?
     };
-    artifact["previewStatus"] = match tokio::time::timeout(Duration::from_secs(25), job).await {
-        Ok(Ok(true)) => "ready",
-        Ok(Ok(false)) if artifact["kind"] == "audio" => "none",
-        _ => "unavailable",
-    }
-    .into();
+    Ok(status.success() && target.is_file())
+}
+
+/// Copies the preview fields onto the stored record, if it still exists.
+async fn store(s: &Service, artifact: Value) -> Result<()> {
     s.store
         .transaction(move |db| {
             let key = format!(
@@ -129,29 +112,69 @@ pub async fn prepare(s: Service, mut artifact: Value) -> Result<()> {
                 text(&artifact, "runId"),
                 text(&artifact, "id")
             );
-            if let Some(mut current) = db.kv(&key)? {
-                for field in ["previewStatus", "width", "height", "duration"] {
-                    if let Some(value) = artifact.get(field) {
-                        current[field] = value.clone();
-                    }
+            let Some(mut current) = db.kv(&key)? else {
+                return Ok(());
+            };
+            for field in ["previewStatus", "width", "height", "duration"] {
+                if let Some(value) = artifact.get(field) {
+                    current[field] = value.clone();
                 }
-                db.set(&key, &current, None)?;
             }
-            Ok(())
+            db.set(&key, &current, None)
         })
         .await
+}
+
+pub async fn prepare(s: Service, mut artifact: Value) -> Result<()> {
+    if artifact["previewStatus"] != PreviewStatus::Pending.as_str() {
+        return Ok(());
+    }
+    let _permit = JOBS.acquire().await.map_err(Error::internal)?;
+    let run = text(&artifact, "runId").to_owned();
+    let active = s
+        .store
+        .read(move |db| crate::conversation_lifecycle::require_active_run(db, &run))
+        .await;
+    if active.is_err() {
+        return Ok(());
+    }
+    let directory = s.config.data_dir.join("artifacts");
+    let path = directory.join(text(&artifact, "id"));
+    let target = directory.join(format!("{}.jpg", text(&artifact, "id")));
+    let kind = text(&artifact, "kind").to_owned();
+    let job = async {
+        if kind != "pdf" {
+            probe(&path, &mut artifact).await?;
+        }
+        if kind == "audio" {
+            return Ok(false);
+        }
+        thumbnail(kind == "pdf", &path, &target).await
+    };
+    let status = match tokio::time::timeout(Duration::from_secs(25), job).await {
+        Ok(Ok(true)) => PreviewStatus::Ready,
+        Ok(Ok(false)) if kind == "audio" => PreviewStatus::None,
+        _ => PreviewStatus::Unavailable,
+    };
+    artifact["previewStatus"] = status.as_str().into();
+    store(&s, artifact).await
 }
 
 pub async fn recover(s: Arc<Service>) {
     // A request/process can disappear between fsync and the SQLite commit. Only
     // collect unreferenced files older than any allowed transfer, under the commit
     // lock; recent in-flight publications and every committed version are retained.
-    let _ = reconcile(&s).await;
-    if let Ok(items) = s.store.keys("artifact:").await {
-        for (_, item) in items {
-            if item["previewStatus"] == "pending" {
-                let _ = prepare((*s).clone(), item).await;
-            }
+    if let Err(error) = reconcile(&s).await {
+        tracing::warn!(error = %error, "artifact file reconciliation failed");
+    }
+    let Ok(items) = s.store.keys("artifact:").await else {
+        return;
+    };
+    for (_, item) in items {
+        if item["previewStatus"] == PreviewStatus::Pending.as_str()
+            && let Err(error) = prepare((*s).clone(), item).await
+        {
+            tracing::warn!(error = %error, "artifact preview failed");
         }
     }
 }

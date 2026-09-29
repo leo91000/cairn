@@ -2,7 +2,10 @@
 use crate::error::{Error, Result};
 use std::{
     ffi::CString,
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd},
+        unix::ffi::OsStrExt,
+    },
     path::{Component, Path},
 };
 
@@ -20,7 +23,6 @@ pub fn open_export(path: &Path, root: &Path) -> Result<std::fs::File> {
         let Component::Normal(name) = component else {
             return Err(Error::bad("Invalid artifact path."));
         };
-        use std::os::unix::ffi::OsStrExt;
         let name =
             CString::new(name.as_bytes()).map_err(|_| Error::bad("Invalid artifact path."))?;
         let directory = index + 1 < components.len();
