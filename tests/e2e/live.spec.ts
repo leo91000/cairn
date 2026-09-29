@@ -2,6 +2,85 @@ import type { BrowserContext, Page } from '@playwright/test'
 import { randomUUID } from 'node:crypto'
 import { expect, expectChatReady, expectSingleScroll, initializeRepository, test } from './fixtures'
 
+for (const kind of ['chat', 'task'] as const) {
+  test(`${kind} automatically fills folded history without a click or scroll`, async ({ page, workspace }) => {
+    await page.setViewportSize(kind === 'chat' ? { width: 390, height: 844 } : { width: 1440, height: 1100 })
+    let run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
+    let path = `/runs/${run.id}`
+    if (kind === 'chat') {
+      const chat = await workspace.api('/api/chats', 'POST', {})
+      await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Short history fixture' })
+      await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
+      const detail = await workspace.api(`/api/chats/${chat.id}`)
+      run = workspace.service.store.run(detail.run.id)!
+      path = `/chats/${chat.id}`
+    }
+    for (let i = 0; i < 100; i++) {
+      const text = `Buffered message ${i}: earlier conversation context.`
+      workspace.service.store.event(run.id, 'item.completed', text, { item: { id: `buffer-${i}`, type: 'agent_message', text } })
+    }
+    // Several API pages collapse into one tool group, leaving no scrollbar.
+    for (let i = 0; i < 250; i++) {
+      workspace.service.store.event(run.id, 'item.completed', 'Checked a file', { item: { id: `fold-${i}`, type: 'command_execution', command: 'cat README.md', exit_code: 0 } })
+    }
+    workspace.service.store.event(run.id, 'item.completed', 'Latest short answer', { item: { id: 'latest-short', type: 'agent_message', text: 'Latest short answer' } })
+    const requests: string[] = []
+    page.on('request', (request) => {
+      if (request.url().includes('/history?'))
+        requests.push(request.url())
+    })
+    await page.goto(`${workspace.url}${path}`)
+    await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+    await expect(page.locator('.activity-message').filter({ hasText: 'Latest short answer' })).toBeVisible()
+    await expect(page.locator('.activity-message').filter({ hasText: 'Buffered message 99:' })).toBeAttached()
+    expect(requests.length).toBeGreaterThanOrEqual(2)
+    expect(new Set(requests).size).toBe(requests.length)
+    // Loading older pages must keep following the latest output.
+    const scroller = page.getByRole('region', { name: 'Activity output' })
+    await expect.poll(() => scroller.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(2)
+    if (kind === 'chat')
+      await expect(page.getByRole('button', { name: 'Follow output', exact: true, includeHidden: true })).toHaveAttribute('aria-pressed', 'true')
+    else
+      await expect(page.getByLabel('Follow output')).toBeChecked()
+    await page.screenshot({ path: test.info().outputPath(`${kind}-automatic-history.png`), animations: 'disabled' })
+  })
+}
+
+test('automatic history pauses on errors and resumes only after retry', async ({ page, workspace }) => {
+  const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
+  for (let i = 0; i < 220; i++)
+    workspace.service.store.event(run.id, 'item.completed', 'Checked a file', { item: { id: `retry-${i}`, type: 'command_execution', command: 'cat README.md', exit_code: 0 } })
+  let requests = 0
+  let fail = true
+  await page.route('**/history?**', async (route) => {
+    requests++
+    if (fail)
+      await route.fulfill({ status: 503, json: { error: 'History temporarily unavailable' } })
+    else
+      await route.continue()
+  })
+  await page.goto(`${workspace.url}/runs/${run.id}`)
+  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  const retry = page.getByRole('button', { name: 'Retry', exact: true })
+  await expect(retry).toBeVisible()
+  expect(requests).toBe(1)
+  // Both resize and scroll normally trigger prefetch; neither should retry errors.
+  await page.setViewportSize({ width: 1440, height: 1100 })
+  await page.getByRole('region', { name: 'Activity output' }).evaluate(async (el) => {
+    el.dispatchEvent(new Event('scroll'))
+    await new Promise(requestAnimationFrame)
+    await new Promise(requestAnimationFrame)
+  })
+  expect(requests).toBe(1)
+  fail = false
+  await retry.click()
+  await expect(retry).not.toBeVisible()
+  await expect.poll(() => requests).toBeGreaterThanOrEqual(3)
+  await expect(page.getByLabel('Follow output')).toBeChecked()
+})
+
 test('signing out closes live subscriptions before the session is revoked', async ({ page, workspace }) => {
   await page.goto(workspace.url)
   await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
@@ -251,8 +330,11 @@ test('recent history loads older pages without moving the reader and survives a 
     await route.continue()
   })
   const scroller = page.getByRole('region', { name: 'Activity output' })
-  await scroller.evaluate(el => el.scrollTop = 0)
+  // Prefetch before reaching the start, as on Android.
+  await scroller.evaluate(el => el.scrollTop = 2 * el.clientHeight)
   await expect.poll(() => requested).toBe(true)
+  // Continue scrolling while the older page is in flight.
+  await scroller.evaluate(el => el.scrollTop -= 120)
   const anchor = page.locator('.activity-message').filter({ hasText: 'Paged line 250' })
   const top = (await anchor.boundingBox())!.y
   release()
