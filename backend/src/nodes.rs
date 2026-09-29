@@ -23,18 +23,78 @@ use crate::{
     config::{id, now},
     error::{Error, Result},
     http::{App, Input},
+    run_status::RunStatus,
     service::Service,
+    storage::policy::Policy,
+    store::Db,
     validation::text,
 };
 use axum::{
     Json,
     extract::{Request, State},
+    http::HeaderMap,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::path::PathBuf;
 
 pub const LOCAL_NODE_ID: &str = "00000000-0000-4000-8000-000000000002";
 const HEARTBEAT_TIMEOUT_MS: i64 = 60_000;
+const HEARTBEAT_INTERVAL_MS: i64 = 10_000;
+const ENROLLMENT_TTL_MS: i64 = 600_000;
+/// Storage mode of journal-backed disks mounted from their published S3 state.
+pub(crate) const ON_DEMAND: &str = "on-demand";
+
+/// Execution progress of a conversation relative to its node, persisted in `run.nodeState`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum NodeState {
+    Pausing,
+    Saving,
+    Restoring,
+    Resuming,
+    Updating,
+    WaitingForNode,
+}
+
+/// Connection state reported to owners; derived, never persisted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NodeStatus {
+    Revoked,
+    Local,
+    Online,
+    Offline,
+}
+
+impl NodeStatus {
+    fn of(node: &Value) -> Self {
+        if node["revoked"] == true {
+            Self::Revoked
+        } else if node["local"] == true {
+            Self::Local
+        } else if seen_within(node, HEARTBEAT_TIMEOUT_MS) {
+            Self::Online
+        } else {
+            Self::Offline
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Revoked => "revoked",
+            Self::Local => "local",
+            Self::Online => "online",
+            Self::Offline => "offline",
+        }
+    }
+}
+
+/// Whether the node sent a heartbeat less than `max_age_ms` ago.
+pub(crate) fn seen_within(node: &Value, max_age_ms: i64) -> bool {
+    node["lastSeen"]
+        .as_i64()
+        .is_some_and(|seen| now() - seen < max_age_ms)
+}
 
 /// Fail before queueing only when no execution location is authorized.
 pub fn require_node(agent: &Value) -> Result<()> {
@@ -49,7 +109,97 @@ pub fn require_node(agent: &Value) -> Result<()> {
     Ok(())
 }
 
-#[derive(Deserialize, serde::Serialize, Clone)]
+/// Whether the agent's current grants allow execution on `node`.
+pub(crate) fn agent_allows(agent: &Value, node: &str) -> bool {
+    crate::service::allowed(&crate::service::policy(agent)["nodes"], node)
+}
+
+/// The node of a run, publication or grant; records without one belong to the local runner.
+pub(crate) fn owner_node(record: &Value) -> &str {
+    record["nodeId"].as_str().unwrap_or(LOCAL_NODE_ID)
+}
+
+/// The id of the agent a run was started with.
+pub(crate) fn run_agent(run: &Value) -> &str {
+    text(&run["snapshot"]["agent"], "id")
+}
+
+pub(crate) fn checkpoint_key(run: &str) -> String {
+    format!("run-checkpoint:{run}")
+}
+
+/// The run's resume checkpoint, or `null` when none was recorded.
+pub(crate) async fn checkpoint(s: &Service, run: &str) -> Result<Value> {
+    Ok(s.store.kv(&checkpoint_key(run)).await?.unwrap_or_default())
+}
+
+pub(crate) fn db_checkpoint(db: &Db<'_>, run: &str) -> Result<Value> {
+    Ok(db.kv(&checkpoint_key(run))?.unwrap_or_default())
+}
+
+pub(crate) async fn runner_secret(s: &Service) -> Result<String> {
+    crate::execution::secret(&s.config.data_dir, "runner-secret").await
+}
+
+/// The controller of `node`: the local runner, or the master's relay to a remote node.
+pub(crate) fn controller_url(s: &Service, node: &str) -> String {
+    if node == LOCAL_NODE_ID {
+        s.config.runner_url.clone()
+    } else {
+        format!("{}/internal/execution/{node}", s.config.public_url)
+    }
+}
+
+/// The data root shared by the master and node processes (`DATA_DIR`).
+pub(crate) fn node_data_dir() -> PathBuf {
+    PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| "/data".into()))
+}
+
+pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+}
+
+/// Tags accepted on nodes and in capacity requests.
+pub(crate) fn valid_tag(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag.len() <= 40
+        && tag
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_:./".contains(&b))
+}
+
+/// Operator tags followed by detected system tags.
+pub(crate) fn node_tags(node: &Value) -> impl Iterator<Item = &Value> {
+    node["tags"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(node["systemTags"].as_array().into_iter().flatten())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResourceKind {
+    Cpu,
+    Memory,
+    Disk,
+}
+
+impl ResourceKind {
+    pub(crate) const ALL: [Self; 3] = [Self::Cpu, Self::Memory, Self::Disk];
+
+    pub(crate) const fn key(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Memory => "memoryMiB",
+            Self::Disk => "diskMiB",
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Resources {
     pub cpu: u32,
@@ -67,9 +217,17 @@ impl Resources {
         }
         Ok(())
     }
+
+    pub(crate) fn amount(&self, kind: ResourceKind) -> u64 {
+        match kind {
+            ResourceKind::Cpu => u64::from(self.cpu),
+            ResourceKind::Memory => self.memory_mi_b,
+            ResourceKind::Disk => self.disk_mi_b,
+        }
+    }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Capabilities {
     os: String,
@@ -92,7 +250,7 @@ impl Capabilities {
         self.resources().validate()
     }
 
-    fn resources(&self) -> Resources {
+    const fn resources(&self) -> Resources {
         Resources {
             cpu: self.cpu,
             memory_mi_b: self.memory_mi_b,
@@ -108,22 +266,12 @@ impl Capabilities {
         }
     }
 
-    fn tags(&self) -> Value {
+    fn tags(&self) -> Vec<&'static str> {
         if self.kvm {
-            json!(["linux", "x86_64", "kvm"])
+            vec!["linux", "x86_64", "kvm"]
         } else {
-            json!(["linux", "x86_64"])
+            vec!["linux", "x86_64"]
         }
-    }
-
-    fn value(&self) -> Value {
-        let mut value = json!(self.resources());
-        value["os"] = self.os.clone().into();
-        value["arch"] = self.arch.clone().into();
-        value["kvm"] = self.kvm.into();
-        value["fuse"] = self.fuse.into();
-        value["diskTotalMiB"] = self.disk_total_mi_b.into();
-        value
     }
 }
 
@@ -150,65 +298,141 @@ fn name(value: &str) -> Result<String> {
 }
 
 fn public(mut node: Value) -> Value {
-    node["status"] = if node["revoked"] == true {
-        "revoked"
-    } else if node["local"] == true {
-        "local"
-    } else if node["lastSeen"]
-        .as_i64()
-        .is_some_and(|seen| now() - seen < HEARTBEAT_TIMEOUT_MS)
-    {
-        "online"
-    } else {
-        "offline"
-    }
-    .into();
+    node["status"] = NodeStatus::of(&node).as_str().into();
     node
+}
+
+pub(crate) fn is_active_attempt(attempt: &Value) -> bool {
+    attempt["released"] != true
+}
+
+/// A disk kept on a node that no conversation needs there any more.
+struct StaleDisk {
+    volume: Value,
+    /// The whole disk is stale, not only older copies set aside beside it.
+    whole: bool,
+    mi_b: u64,
 }
 
 /// Disk kept on nodes that no conversation needs there any more: the whole disk of a
 /// conversation now running elsewhere (it may hold changes newer than the recovery
 /// point used to resume it), or older copies set aside beside a current disk.
-/// Returns the volume, whether the whole disk is stale, and the stale size in MiB.
-async fn stale_disks(
-    s: &Service,
-    volumes: &[Value],
-    attempts: &[Value],
-) -> Result<Vec<(Value, bool, u64)>> {
+async fn stale_disks(s: &Service, volumes: &[Value], attempts: &[Value]) -> Result<Vec<StaleDisk>> {
     let mut stale = Vec::new();
     for volume in volumes.iter().filter(|v| v["materialized"] == true) {
-        let (run, node) = (
-            volume["runId"].as_str().unwrap_or_default(),
-            volume["nodeId"].as_str().unwrap_or_default(),
-        );
+        let run = volume["runId"].as_str().unwrap_or_default();
+        let node = volume["nodeId"].as_str().unwrap_or_default();
         let record = s.store.run(run).await.ok();
-        let busy = attempts
+        let executing = attempts
             .iter()
-            .any(|a| a["runId"] == run && a["nodeId"] == node && a["released"] != true)
-            || record
-                .as_ref()
-                .is_some_and(|r| r["moveRequest"].is_object() || r["moveReservation"].is_string());
-        if busy {
+            .any(|a| a["runId"] == run && a["nodeId"] == node && is_active_attempt(a));
+        let moving = record
+            .as_ref()
+            .is_some_and(|r| r["moveRequest"].is_object() || r["moveReservation"].is_string());
+        if executing || moving {
             continue;
         }
-        let checkpoint = s
-            .store
-            .kv(&format!("run-checkpoint:{run}"))
-            .await?
-            .unwrap_or_default();
+        let checkpoint = checkpoint(s, run).await?;
         let total = volume["diskMiB"].as_u64().unwrap_or(0);
         let elsewhere = checkpoint["nodeId"]
             .as_str()
             .is_some_and(|current| current != node);
         if record.is_none() || elsewhere {
-            stale.push((volume.clone(), true, total));
+            stale.push(StaleDisk {
+                volume: volume.clone(),
+                whole: true,
+                mi_b: total,
+            });
         } else if let Some(active) = volume["activeDiskMiB"].as_u64()
             && total > active
         {
-            stale.push((volume.clone(), false, total - active));
+            stale.push(StaleDisk {
+                volume: volume.clone(),
+                whole: false,
+                mi_b: total - active,
+            });
         }
     }
     Ok(stale)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StaleSummary {
+    count: usize,
+    disk_mi_b: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentGrant<'a> {
+    id: &'a Value,
+    name: &'a Value,
+    all_nodes: bool,
+}
+
+struct Usage<'a> {
+    attempts: &'a [Value],
+    volumes: &'a [Value],
+    agents: &'a [Value],
+    stale: &'a [StaleDisk],
+}
+
+impl Usage<'_> {
+    fn reserved(&self, node: &Value, kind: ResourceKind) -> u64 {
+        if kind == ResourceKind::Disk {
+            return self
+                .volumes
+                .iter()
+                .filter(|v| v["nodeId"] == node["id"])
+                .map(|v| v["diskMiB"].as_u64().unwrap_or(0))
+                .sum();
+        }
+        self.attempts
+            .iter()
+            .filter(|a| a["nodeId"] == node["id"] && is_active_attempt(a))
+            .map(|a| a["resources"][kind.key()].as_u64().unwrap_or(0))
+            .sum()
+    }
+
+    fn stale_summary(&self, node: &Value) -> StaleSummary {
+        let stale = self
+            .stale
+            .iter()
+            .filter(|disk| disk.volume["nodeId"] == node["id"]);
+        StaleSummary {
+            count: stale.clone().count(),
+            disk_mi_b: stale.map(|disk| disk.mi_b).sum(),
+        }
+    }
+
+    fn granted_agents(&self, node: &Value) -> Vec<AgentGrant<'_>> {
+        if node["revoked"] == true {
+            return Vec::new();
+        }
+        let id = text(node, "id");
+        self.agents
+            .iter()
+            .filter(|agent| agent_allows(agent, id))
+            .map(|agent| AgentGrant {
+                id: &agent["id"],
+                name: &agent["name"],
+                all_nodes: crate::service::policy(agent)["nodes"].is_null(),
+            })
+            .collect()
+    }
+
+    fn describe(&self, mut node: Value) -> Result<Value> {
+        for kind in ResourceKind::ALL {
+            let used = self.reserved(&node, kind);
+            let limit = node["limits"][kind.key()].as_u64().unwrap_or(0);
+            node["reserved"][kind.key()] = used.into();
+            node["available"][kind.key()] = limit.saturating_sub(used).into();
+        }
+        node["staleDisks"] = serde_json::to_value(self.stale_summary(&node))?;
+        node["agents"] = serde_json::to_value(self.granted_agents(&node))?;
+        Ok(public(node))
+    }
 }
 
 /// Nodes with their reserved and available resources, and the agents allowed to use them.
@@ -217,53 +441,18 @@ pub async fn inventory(s: &Service) -> Result<Vec<Value>> {
     let volumes = s.store.list("node-volumes").await?;
     let agents = s.store.list("agents").await?;
     let stale = stale_disks(s, &volumes, &attempts).await?;
-    Ok(s.store
+    let usage = Usage {
+        attempts: &attempts,
+        volumes: &volumes,
+        agents: &agents,
+        stale: &stale,
+    };
+    s.store
         .list("nodes")
         .await?
         .into_iter()
-        .map(|mut node| {
-            for key in ["cpu", "memoryMiB", "diskMiB"] {
-                let used = if key == "diskMiB" {
-                    volumes
-                        .iter()
-                        .filter(|v| v["nodeId"] == node["id"])
-                        .map(|v| v["diskMiB"].as_u64().unwrap_or(0))
-                        .sum::<u64>()
-                } else {
-                    attempts
-                        .iter()
-                        .filter(|a| a["nodeId"] == node["id"] && a["released"] != true)
-                        .map(|a| a["resources"][key].as_u64().unwrap_or(0))
-                        .sum::<u64>()
-                };
-                node["reserved"][key] = used.into();
-                node["available"][key] = node["limits"][key]
-                    .as_u64()
-                    .unwrap_or(0)
-                    .saturating_sub(used)
-                    .into();
-            }
-            let id = node["id"].as_str().unwrap_or_default().to_owned();
-            let old = stale.iter().filter(|(v, _, _)| v["nodeId"] == node["id"]);
-            node["staleDisks"] = json!({"count": old.clone().count(),"diskMiB": old.map(|(_, _, mib)| mib).sum::<u64>()});
-            node["agents"] = agents
-                .iter()
-                .filter(|agent| {
-                    node["revoked"] != true
-                        && crate::service::allowed(&crate::service::policy(agent)["nodes"], &id)
-                })
-                .map(|agent| {
-                    json!({
-                        "id": agent["id"],
-                        "name": agent["name"],
-                        "allNodes": crate::service::policy(agent)["nodes"].is_null()
-                    })
-                })
-                .collect::<Vec<_>>()
-                .into();
-            public(node)
-        })
-        .collect())
+        .map(|node| usage.describe(node))
+        .collect()
 }
 
 pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
@@ -273,26 +462,18 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
         .split('/')
         .collect::<Vec<_>>();
     if input.method == "GET" {
+        // Nodes stay listed from their last record while the local runner is unreachable.
         let _ = refresh_local(s).await;
     }
     match (input.method.as_str(), segments.as_slice()) {
         ("GET" | "PUT", ["nodes", "placement", run]) => {
-            placement::configure(
-                s,
-                run,
-                if input.method == "PUT" {
-                    Some(input.body.clone())
-                } else {
-                    None
-                },
-            )
-            .await
+            let selection = (input.method == "PUT").then(|| input.body.clone());
+            placement::configure(s, run, selection).await
         }
         ("POST", ["nodes", "placement", run, "move"]) => {
             crate::validation::uuid(run)?;
             moves::request(s, &s.store.run(run).await?, &input.body).await
         }
-
         ("GET", ["nodes", "alerts"]) => alerts::recent(s).await,
         ("GET", ["nodes", "settings"]) => {
             let mut value = publication::settings(s).await?;
@@ -300,258 +481,258 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
             Ok(value)
         }
         ("PUT", ["nodes", "settings"]) => publication::configure(s, input.body.clone()).await,
-        ("GET", ["nodes", "backups", run]) => {
-            crate::validation::uuid(run)?;
-            Ok(s.store
-                .list("node-backups")
-                .await?
-                .into_iter()
-                .filter(|point| point["runId"] == *run)
-                .map(publication::public)
-                .collect::<Vec<_>>()
-                .into())
-        }
-
-        ("PUT", ["nodes", node, "storage"]) => {
-            crate::validation::uuid(node)?;
-            if input.body["enabled"] == false {
-                return Err(Error::bad(
-                    "S3-backed disk storage is required on every node.",
-                ));
-            }
-            let policy: crate::storage::policy::Policy = decode(input.body.clone())?;
-            policy.validate()?;
-            let record = s.get("nodes", node).await?;
-            if record["revoked"] == true {
-                return Err(Error::conflict("Node revoked."));
-            }
-            crate::object_storage::Storage::configured(s)?
-                .validate()
-                .await?;
-            let base = if *node == LOCAL_NODE_ID {
-                s.config.runner_url.clone()
-            } else {
-                format!("{}/internal/execution/{node}", s.config.public_url)
-            };
-            let response = s
-                .http
-                .post(format!("{base}/storage-policy"))
-                .bearer_auth(crate::execution::secret(&s.config.data_dir, "runner-secret").await?)
-                .json(&policy)
-                .timeout(std::time::Duration::from_secs(30))
-                .send()
-                .await
-                .map_err(|_| Error::unavailable("Node storage probe unavailable."))?;
-            if !response.status().is_success() {
-                return Err(Error::conflict("Node did not pass its FUSE storage probe."));
-            }
-            let node = (*node).to_owned();
-            let value = s
-                .store
-                .transaction(move |db| {
-                    let mut record = db
-                        .get("nodes", &node)?
-                        .ok_or_else(|| Error::not_found("Node missing."))?;
-                    record["storage"] = json!(policy);
-                    db.put("nodes", &record)
-                })
-                .await?;
-            Ok(public(value))
-        }
+        ("GET", ["nodes", "backups", run]) => backups(s, run).await,
+        ("PUT", ["nodes", node, "storage"]) => configure_storage(s, node, &input.body).await,
         ("GET", ["nodes"]) => Ok(inventory(s).await?.into()),
-        ("PUT", ["nodes", node]) => {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct Configuration {
-                name: String,
-                tags: Vec<String>,
-                limits: Resources,
-                accepting: bool,
-            }
-            let request: Configuration = decode(input.body.clone())?;
-            let label = name(&request.name)?;
-            request.limits.validate()?;
-            if request.tags.len() > 32
-                || request.tags.iter().any(|tag| {
-                    tag.is_empty()
-                        || tag.len() > 40
-                        || !tag
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b"-_:./".contains(&b))
-                })
-            {
-                return Err(Error::bad(
-                    "Use at most 32 tags of 1 to 40 letters, digits or -_:./.",
-                ));
-            }
-            let node = (*node).to_owned();
-            s.store
-                .transaction(move |db| {
-                    let mut record = db
-                        .get("nodes", &node)?
-                        .ok_or_else(|| Error::not_found("Node not found."))?;
-                    if record["revoked"] == true {
-                        return Err(Error::conflict("This node is revoked."));
-                    }
-                    let resources = json!(request.limits);
-                    for key in ["cpu", "memoryMiB", "diskMiB"] {
-                        if resources[key].as_u64() > record["capabilities"][key].as_u64() {
-                            return Err(Error::bad("Limits exceed the node's detected capacity."));
-                        }
-                    }
-                    record["name"] = label.into();
-                    record["tags"] = json!(request.tags);
-                    record["limits"] = resources;
-                    record["accepting"] = request.accepting.into();
-                    db.put("nodes", &record)?;
-                    db.audit("node.configured", &json!({"nodeId": node}))?;
-                    Ok(public(record))
-                })
-                .await
-        }
-        ("POST", ["nodes", "enrollments"]) => {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct Invitation {
-                name: String,
-            }
-            let request: Invitation = decode(input.body.clone())?;
-            let name = name(&request.name)?;
-            let code = token();
-            let expires = now() + 600_000;
-            s.store
-                .set(
-                    &format!("node-enrollment:{}", digest(&code)),
-                    json!({"name": name}),
-                    Some(expires),
-                )
-                .await?;
-            let install = maintenance::release()
-                .ok()
-                .and_then(|_| connector::master(&s.config.public_url).ok())
-                .map(|origin| {
-                    format!(
-                        "curl --fail --silent --show-error '{}' | sudo bash",
-                        format!("{}internal/nodes/install.sh", origin).replace('\'', "'\\''")
-                    )
-                });
-            Ok(json!({"code": code,"expiresAt": expires,"installCommand": install}))
-        }
-        ("POST", ["nodes", node, "stale-disks", "delete"]) => {
-            crate::validation::uuid(node)?;
-            let attempts = s.store.list("node-attempts").await?;
-            let volumes = s
-                .store
-                .list("node-volumes")
-                .await?
-                .into_iter()
-                .filter(|v| v["nodeId"] == *node)
-                .collect::<Vec<_>>();
-            let (mut freed, mut failed) = (0u64, 0usize);
-            for (volume, whole, mib) in stale_disks(s, &volumes, &attempts).await? {
-                match crate::conversation_deletion::discard_stale_disk(
-                    s,
-                    text(&volume, "runId"),
-                    node,
-                    whole,
-                )
-                .await
-                {
-                    Ok(()) => freed += mib,
-                    Err(_) => failed += 1,
-                }
-            }
-            s.store
-                .audit(
-                    "node.stale-disks.deleted",
-                    json!({"nodeId": node,"freedMiB": freed,"failed": failed}),
-                )
-                .await?;
-            Ok(json!({"freedMiB": freed,"failed": failed}))
-        }
-        ("PUT", ["nodes", node, "agents"]) => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct Grants {
-                agent_ids: Vec<String>,
-            }
-            let request: Grants = decode(input.body.clone())?;
-            for agent in &request.agent_ids {
-                crate::validation::uuid(agent)?;
-            }
-            let node = (*node).to_owned();
-            s.store
-                .transaction(move |db| {
-                    let record = db
-                        .get("nodes", &node)?
-                        .ok_or_else(|| Error::not_found("Node not found."))?;
-                    if record["revoked"] == true {
-                        return Err(Error::conflict("This node is revoked."));
-                    }
-                    // Agents allowed on every node keep that broader grant.
-                    for mut agent in db.list("agents")? {
-                        let granted = request.agent_ids.iter().any(|id| agent["id"] == *id);
-                        let mut nodes = match crate::service::policy(&agent)["nodes"].as_array() {
-                            Some(nodes) => nodes.clone(),
-                            None => continue,
-                        };
-                        let present = nodes.iter().any(|id| id == &node);
-                        if granted == present {
-                            continue;
-                        }
-                        if granted {
-                            nodes.push(node.clone().into());
-                        } else {
-                            nodes.retain(|id| id != &node);
-                        }
-                        if !agent["access"].is_object() {
-                            agent["access"] = json!({});
-                        }
-                        agent["access"]["nodes"] = nodes.into();
-                        db.put("agents", &agent)?;
-                    }
-                    db.audit(
-                        "node.agents.configured",
-                        &json!({"nodeId": node,"agentIds": request.agent_ids}),
-                    )?;
-                    Ok(json!({"nodeId": node}))
-                })
-                .await
-        }
-        ("POST", ["nodes", node, "revoke"]) => {
-            let node = (*node).to_owned();
-            s.store
-                .transaction(move |db| {
-                    let mut record = db
-                        .get("nodes", &node)?
-                        .ok_or_else(|| Error::not_found("Node not found."))?;
-                    if record["local"] == true {
-                        return Err(Error::bad("The local runner cannot be revoked."));
-                    }
-                    record["revoked"] = true.into();
-                    record["accepting"] = false.into();
-                    for (key, value) in db.keys("node-token:")? {
-                        if value == node {
-                            db.delete(&key)?;
-                        }
-                    }
-                    for mut agent in db.list("agents")? {
-                        if let Some(nodes) = agent["access"]["nodes"].as_array_mut() {
-                            let before = nodes.len();
-                            nodes.retain(|id| id != &node);
-                            if nodes.len() != before {
-                                db.put("agents", &agent)?;
-                            }
-                        }
-                    }
-                    db.put("nodes", &record)?;
-                    db.audit("node.revoked", &json!({"nodeId": node}))?;
-                    Ok(public(record))
-                })
-                .await
-        }
+        ("PUT", ["nodes", node]) => configure_node(s, node, input.body.clone()).await,
+        ("POST", ["nodes", "enrollments"]) => invite(s, input.body.clone()).await,
+        ("POST", ["nodes", node, "stale-disks", "delete"]) => delete_stale_disks(s, node).await,
+        ("PUT", ["nodes", node, "agents"]) => grant_agents(s, node, input.body.clone()).await,
+        ("POST", ["nodes", node, "revoke"]) => revoke(s, node).await,
         _ => Err(Error::not_found("Not found")),
     }
+}
+
+async fn backups(s: &Service, run: &str) -> Result<Value> {
+    crate::validation::uuid(run)?;
+    Ok(s.store
+        .list("node-backups")
+        .await?
+        .into_iter()
+        .filter(|point| point["runId"] == run)
+        .map(publication::public)
+        .collect::<Vec<_>>()
+        .into())
+}
+
+async fn configure_storage(s: &Service, node: &str, body: &Value) -> Result<Value> {
+    crate::validation::uuid(node)?;
+    if body["enabled"] == false {
+        return Err(Error::bad(
+            "S3-backed disk storage is required on every node.",
+        ));
+    }
+    let policy: Policy = decode(body.clone())?;
+    policy.validate()?;
+    if s.get("nodes", node).await?["revoked"] == true {
+        return Err(Error::conflict("Node revoked."));
+    }
+    crate::object_storage::Storage::configured(s)?
+        .validate()
+        .await?;
+    let response = s
+        .http
+        .post(format!("{}/storage-policy", controller_url(s, node)))
+        .bearer_auth(runner_secret(s).await?)
+        .json(&policy)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|_| Error::unavailable("Node storage probe unavailable."))?;
+    if !response.status().is_success() {
+        return Err(Error::conflict("Node did not pass its FUSE storage probe."));
+    }
+    let node = node.to_owned();
+    let value = s
+        .store
+        .transaction(move |db| {
+            let mut record = db
+                .get("nodes", &node)?
+                .ok_or_else(|| Error::not_found("Node missing."))?;
+            record["storage"] = serde_json::to_value(&policy)?;
+            db.put("nodes", &record)
+        })
+        .await?;
+    Ok(public(value))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Configuration {
+    name: String,
+    tags: Vec<String>,
+    limits: Resources,
+    accepting: bool,
+}
+
+async fn configure_node(s: &Service, node: &str, body: Value) -> Result<Value> {
+    let request: Configuration = decode(body)?;
+    let label = name(&request.name)?;
+    request.limits.validate()?;
+    if request.tags.len() > 32 || !request.tags.iter().all(|tag| valid_tag(tag)) {
+        return Err(Error::bad(
+            "Use at most 32 tags of 1 to 40 letters, digits or -_:./.",
+        ));
+    }
+    let node = node.to_owned();
+    s.store
+        .transaction(move |db| {
+            let mut record = db
+                .get("nodes", &node)?
+                .ok_or_else(|| Error::not_found("Node not found."))?;
+            if record["revoked"] == true {
+                return Err(Error::conflict("This node is revoked."));
+            }
+            // A capacity the node never reported counts as exceeded.
+            let exceeds_capacity = ResourceKind::ALL.iter().any(|kind| {
+                Some(request.limits.amount(*kind)) > record["capabilities"][kind.key()].as_u64()
+            });
+            if exceeds_capacity {
+                return Err(Error::bad("Limits exceed the node's detected capacity."));
+            }
+            record["name"] = label.into();
+            record["tags"] = request.tags.into();
+            record["limits"] = serde_json::to_value(&request.limits)?;
+            record["accepting"] = request.accepting.into();
+            db.put("nodes", &record)?;
+            db.audit("node.configured", &json!({ "nodeId": node }))?;
+            Ok(public(record))
+        })
+        .await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Invitation {
+    name: String,
+}
+
+async fn invite(s: &Service, body: Value) -> Result<Value> {
+    let request: Invitation = decode(body)?;
+    let name = name(&request.name)?;
+    let code = token();
+    let expires = now() + ENROLLMENT_TTL_MS;
+    s.store
+        .set(
+            &format!("node-enrollment:{}", digest(&code)),
+            json!({ "name": name }),
+            Some(expires),
+        )
+        .await?;
+    let install = maintenance::release()
+        .ok()
+        .and_then(|_| connector::master(&s.config.public_url).ok())
+        .map(|origin| {
+            let script = format!("{origin}internal/nodes/install.sh").replace('\'', "'\\''");
+            format!("curl --fail --silent --show-error '{script}' | sudo bash")
+        });
+    Ok(json!({ "code": code, "expiresAt": expires, "installCommand": install }))
+}
+
+async fn delete_stale_disks(s: &Service, node: &str) -> Result<Value> {
+    crate::validation::uuid(node)?;
+    let attempts = s.store.list("node-attempts").await?;
+    let volumes = s
+        .store
+        .list("node-volumes")
+        .await?
+        .into_iter()
+        .filter(|v| v["nodeId"] == node)
+        .collect::<Vec<_>>();
+    let (mut freed, mut failed) = (0u64, 0usize);
+    for disk in stale_disks(s, &volumes, &attempts).await? {
+        let run = text(&disk.volume, "runId");
+        match crate::conversation_deletion::discard_stale_disk(s, run, node, disk.whole).await {
+            Ok(()) => freed += disk.mi_b,
+            Err(_) => failed += 1,
+        }
+    }
+    s.store
+        .audit(
+            "node.stale-disks.deleted",
+            json!({ "nodeId": node, "freedMiB": freed, "failed": failed }),
+        )
+        .await?;
+    Ok(json!({ "freedMiB": freed, "failed": failed }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Grants {
+    agent_ids: Vec<String>,
+}
+
+async fn grant_agents(s: &Service, node: &str, body: Value) -> Result<Value> {
+    let request: Grants = decode(body)?;
+    for agent in &request.agent_ids {
+        crate::validation::uuid(agent)?;
+    }
+    let node = node.to_owned();
+    s.store
+        .transaction(move |db| {
+            let record = db
+                .get("nodes", &node)?
+                .ok_or_else(|| Error::not_found("Node not found."))?;
+            if record["revoked"] == true {
+                return Err(Error::conflict("This node is revoked."));
+            }
+            for agent in db.list("agents")? {
+                let granted = request.agent_ids.iter().any(|id| agent["id"] == *id);
+                set_node_grant(db, agent, &node, granted)?;
+            }
+            db.audit(
+                "node.agents.configured",
+                &json!({ "nodeId": node, "agentIds": request.agent_ids }),
+            )?;
+            Ok(json!({ "nodeId": node }))
+        })
+        .await
+}
+
+fn set_node_grant(db: &Db<'_>, mut agent: Value, node: &str, granted: bool) -> Result<()> {
+    // Agents allowed on every node keep that broader grant.
+    let Some(mut nodes) = crate::service::policy(&agent)["nodes"].as_array().cloned() else {
+        return Ok(());
+    };
+    let present = nodes.iter().any(|id| id == node);
+    if granted == present {
+        return Ok(());
+    }
+    if granted {
+        nodes.push(node.into());
+    } else {
+        nodes.retain(|id| id != node);
+    }
+    if !agent["access"].is_object() {
+        agent["access"] = json!({});
+    }
+    agent["access"]["nodes"] = nodes.into();
+    db.put("agents", &agent)?;
+    Ok(())
+}
+
+async fn revoke(s: &Service, node: &str) -> Result<Value> {
+    let node = node.to_owned();
+    s.store
+        .transaction(move |db| {
+            let mut record = db
+                .get("nodes", &node)?
+                .ok_or_else(|| Error::not_found("Node not found."))?;
+            if record["local"] == true {
+                return Err(Error::bad("The local runner cannot be revoked."));
+            }
+            record["revoked"] = true.into();
+            record["accepting"] = false.into();
+            for (key, value) in db.keys("node-token:")? {
+                if value == node {
+                    db.delete(&key)?;
+                }
+            }
+            for mut agent in db.list("agents")? {
+                let Some(nodes) = agent["access"]["nodes"].as_array_mut() else {
+                    continue;
+                };
+                let before = nodes.len();
+                nodes.retain(|id| id != &node);
+                if nodes.len() != before {
+                    db.put("agents", &agent)?;
+                }
+            }
+            db.put("nodes", &record)?;
+            db.audit("node.revoked", &json!({ "nodeId": node }))?;
+            Ok(public(record))
+        })
+        .await
 }
 
 pub async fn internal(State(app): State<App>, request: Request) -> Result<Json<Value>> {
@@ -560,190 +741,238 @@ pub async fn internal(State(app): State<App>, request: Request) -> Result<Json<V
     if input.method != "POST" {
         return Err(Error::method_not_allowed("Method not allowed."));
     }
-    match input.path.as_str() {
+    let value = match input.path.as_str() {
         "/internal/nodes/maintenance" => {
             let node = transport::authenticate(s, &input.headers).await?;
-            Ok(Json(maintenance::request(s, &node, &input.body).await?))
+            maintenance::request(s, &node, &input.body).await?
         }
-        "/internal/nodes/poll" | "/internal/nodes/reply" => {
+        "/internal/nodes/poll" => {
             let node = transport::authenticate(s, &input.headers).await?;
-            Ok(Json(if input.path.ends_with("/poll") {
-                s.node_transport.poll(&node).await?
-            } else {
-                s.node_transport.reply(&node, input.body).await?
-            }))
+            s.node_transport.poll(&node).await?
         }
-        "/internal/nodes/enroll" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct Enrollment {
-                code: String,
-                name: String,
-                protocol: u32,
-                capabilities: Capabilities,
-                runtime_id: String,
-            }
-            let request: Enrollment = decode(input.body)?;
-            if request.protocol != 1 {
-                return Err(Error::conflict("Unsupported node protocol."));
-            }
-            request.capabilities.validate()?;
-            name(&request.name)?;
-            let runtime = name(&request.runtime_id)?;
-            if request.code.len() != 43 {
-                return Err(Error::unauthorized("Invalid or expired enrollment code."));
-            }
-            let key = format!("node-enrollment:{}", digest(&request.code));
-            let node_id = id();
-            let credential = token();
-            let token_key = format!("node-token:{}", digest(&credential));
-            let value = s
-                .store
-                .transaction(move |db| {
-                    let invitation = db.kv(&key)?.ok_or_else(|| {
-                        Error::unauthorized("Invalid or expired enrollment code.")
-                    })?;
-                    db.delete(&key)?;
-                    let node = json!({
-                        "id": node_id,
-                        "name": invitation["name"],
-                        "local": false,
-                        "accepting": false,
-                        "revoked": false,
-                        "tags": [],
-                        "systemTags": request.capabilities.tags(),
-                        "capabilities": request.capabilities.value(),
-                        "limits": request.capabilities.limits(),
-                        "storage": crate::storage::policy::Policy::default(),
-                        "runtimeId": runtime,
-                        "lastSeen": now(),
-                        "createdAt": now()
-                    });
-                    db.put("nodes", &node)?;
-                    db.set(&token_key, &json!(node_id), None)?;
-                    db.audit("node.enrolled", &json!({"nodeId": node_id}))?;
-                    Ok(json!({
-                        "nodeId": node_id,
-                        "token": credential,
-                        "heartbeatIntervalMs": 10_000,
-                        "disconnectTimeoutMs": HEARTBEAT_TIMEOUT_MS
-                    }))
-                })
-                .await?;
-            Ok(Json(value))
+        "/internal/nodes/reply" => {
+            let node = transport::authenticate(s, &input.headers).await?;
+            s.node_transport.reply(&node, input.body).await?
         }
-        "/internal/nodes/heartbeat" => {
-            let credential = input
-                .headers
-                .get("authorization")
-                .and_then(|h| h.to_str().ok())
-                .and_then(|h| h.strip_prefix("Bearer "))
-                .filter(|token| token.len() == 43)
-                .ok_or_else(|| Error::unauthorized("Invalid node identity."))?;
-            let key = format!("node-token:{}", digest(credential));
-            let capabilities = if input.body["capabilities"].is_object() {
-                let value: Capabilities = decode(input.body["capabilities"].clone())?;
-                value.validate()?;
-                Some(value.value())
-            } else {
-                None
-            };
-            let expected_data = s.config.data_dir.to_string_lossy().into_owned();
-            let expected_image = maintenance::release().ok().map(|r| r["image"].clone());
-            let lease_ms = publication::settings(s).await?["disconnectTimeoutSeconds"]
-                .as_i64()
-                .unwrap_or(60)
-                * 1000;
-            let value = s
-                .store
-                .transaction(move |db| {
-                    let node_id = db
-                        .kv(&key)?
-                        .and_then(|v| v.as_str().map(str::to_owned))
-                        .ok_or_else(|| Error::unauthorized("Invalid node identity."))?;
-                    let mut node = db
-                        .get("nodes", &node_id)?
-                        .filter(|v| v["revoked"] != true)
-                        .ok_or_else(|| Error::unauthorized("Invalid node identity."))?;
-                    if let Some(runtime) = input.body.get("runtimeId") {
-                        node["runtimeId"] = name(runtime.as_str().unwrap_or(""))?.into();
-                    }
-                    node["runtimes"] = input.body["runtimes"].clone();
-                    node["lastSeen"] = now().into();
-                    if let Some(capabilities) = capabilities {
-                        node["capabilities"] = capabilities;
-                    }
-                    node["storage"] =
-                        json!(crate::storage::policy::Policy::for_node(&node["storage"])?);
-                    node["imageDigest"] = input.body["imageDigest"].clone();
-                    node["executionReady"] = (input.body["executionReady"] == true
-                        && node["capabilities"]["fuse"] == true
-                        && input.body["dataRoot"] == expected_data
-                        && expected_image.as_ref().is_none_or(|image| {
-                            node["imageDigest"] == *image || node["updateError"].is_string()
-                        }))
-                    .into();
-                    db.put("nodes", &node)?;
-                    let mut leases = Vec::new();
-                    for mut attempt in db.list("node-attempts")? {
-                        if attempt["nodeId"] != node_id || attempt["released"] == true {
-                            continue;
-                        }
-                        let run = db
-                            .run(crate::validation::text(&attempt, "runId"))?
-                            .unwrap_or_default();
-                        let checkpoint = db
-                            .kv(&format!(
-                                "run-checkpoint:{}",
-                                crate::validation::text(&attempt, "runId")
-                            ))?
-                            .unwrap_or_default();
-                        let agent = db
-                            .get(
-                                "agents",
-                                crate::validation::text(&run["snapshot"]["agent"], "id"),
-                            )?
-                            .unwrap_or_default();
-                        if run["status"] == "running"
-                            && run["cancelRequestedAt"].is_null()
-                            && checkpoint["runnerId"] == attempt["id"]
-                            && crate::service::allowed(
-                                &crate::service::policy(&agent)["nodes"],
-                                &node_id,
-                            )
-                        {
-                            attempt["leaseExpiresAt"] = (now() + lease_ms).into();
-                            attempt["leaseDurationMs"] = attempt["leaseDurationMs"]
-                                .as_i64()
-                                .unwrap_or(0)
-                                .max(lease_ms)
-                                .into();
-                            db.put("node-attempts", &attempt)?;
-                            leases.push(json!({"id": attempt["id"],"remainingMs": lease_ms}));
-                        }
-                    }
-                    Ok(json!({
-                        "nodeId": node_id,
-                        "accepting": node["accepting"],
-                        "limits": node["limits"],
-                        "leases": leases,
-                        "heartbeatIntervalMs": 10_000,
-                        "disconnectTimeoutMs": HEARTBEAT_TIMEOUT_MS
-                    }))
-                })
-                .await?;
-            for lease in value["leases"].as_array().into_iter().flatten() {
-                record_lease(
-                    s,
-                    crate::validation::text(lease, "id"),
-                    lease["remainingMs"].as_u64().unwrap_or(60000),
-                )
-                .await;
-            }
-            Ok(Json(value))
-        }
-        _ => Err(Error::not_found("Not found")),
+        "/internal/nodes/enroll" => enroll(s, input.body).await?,
+        "/internal/nodes/heartbeat" => heartbeat(s, &input).await?,
+        _ => return Err(Error::not_found("Not found")),
+    };
+    Ok(Json(value))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Enrollment {
+    code: String,
+    name: String,
+    protocol: u32,
+    capabilities: Capabilities,
+    runtime_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnrolledNode {
+    id: String,
+    name: Value,
+    local: bool,
+    accepting: bool,
+    revoked: bool,
+    tags: Vec<String>,
+    system_tags: Vec<&'static str>,
+    capabilities: Capabilities,
+    limits: Resources,
+    storage: Policy,
+    runtime_id: String,
+    last_seen: i64,
+    created_at: i64,
+}
+
+async fn enroll(s: &Service, body: Value) -> Result<Value> {
+    let request: Enrollment = decode(body)?;
+    if request.protocol != 1 {
+        return Err(Error::conflict("Unsupported node protocol."));
     }
+    request.capabilities.validate()?;
+    name(&request.name)?;
+    let runtime = name(&request.runtime_id)?;
+    if request.code.len() != 43 {
+        return Err(Error::unauthorized("Invalid or expired enrollment code."));
+    }
+    let key = format!("node-enrollment:{}", digest(&request.code));
+    let node_id = id();
+    let credential = token();
+    let token_key = format!("node-token:{}", digest(&credential));
+    s.store
+        .transaction(move |db| {
+            let invitation = db
+                .kv(&key)?
+                .ok_or_else(|| Error::unauthorized("Invalid or expired enrollment code."))?;
+            db.delete(&key)?;
+            let capabilities = request.capabilities;
+            let node = EnrolledNode {
+                id: node_id.clone(),
+                name: invitation["name"].clone(),
+                local: false,
+                accepting: false,
+                revoked: false,
+                tags: Vec::new(),
+                system_tags: capabilities.tags(),
+                limits: capabilities.limits(),
+                capabilities,
+                storage: Policy::default(),
+                runtime_id: runtime,
+                last_seen: now(),
+                created_at: now(),
+            };
+            db.put("nodes", &serde_json::to_value(node)?)?;
+            db.set(&token_key, &Value::from(node_id.clone()), None)?;
+            db.audit("node.enrolled", &json!({ "nodeId": node_id }))?;
+            Ok(json!({
+                "nodeId": node_id,
+                "token": credential,
+                "heartbeatIntervalMs": HEARTBEAT_INTERVAL_MS,
+                "disconnectTimeoutMs": HEARTBEAT_TIMEOUT_MS,
+            }))
+        })
+        .await
+}
+
+/// What the master expects from a node before it may execute conversations.
+struct Expectations {
+    data_root: String,
+    image: Option<String>,
+    lease_ms: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Lease {
+    id: String,
+    remaining_ms: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HeartbeatReply {
+    node_id: String,
+    accepting: Value,
+    limits: Value,
+    leases: Vec<Lease>,
+    heartbeat_interval_ms: i64,
+    disconnect_timeout_ms: i64,
+}
+
+async fn heartbeat(s: &Service, input: &Input) -> Result<Value> {
+    let credential = bearer(&input.headers)
+        .filter(|token| token.len() == 43)
+        .ok_or_else(|| Error::unauthorized("Invalid node identity."))?;
+    let key = format!("node-token:{}", digest(credential));
+    let capabilities = if input.body["capabilities"].is_object() {
+        let value: Capabilities = decode(input.body["capabilities"].clone())?;
+        value.validate()?;
+        Some(serde_json::to_value(value)?)
+    } else {
+        None
+    };
+    let expected = Expectations {
+        data_root: s.config.data_dir.to_string_lossy().into_owned(),
+        image: maintenance::release().ok().map(|release| release.image),
+        lease_ms: publication::lease_ms(s).await?,
+    };
+    let body = input.body.clone();
+    let reply = s
+        .store
+        .transaction(move |db| record_heartbeat(db, &key, &body, capabilities, &expected))
+        .await?;
+    for lease in &reply.leases {
+        record_lease(s, &lease.id, lease.remaining_ms).await;
+    }
+    Ok(serde_json::to_value(reply)?)
+}
+
+fn record_heartbeat(
+    db: &Db<'_>,
+    key: &str,
+    body: &Value,
+    capabilities: Option<Value>,
+    expected: &Expectations,
+) -> Result<HeartbeatReply> {
+    let node_id = db
+        .kv(key)?
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .ok_or_else(|| Error::unauthorized("Invalid node identity."))?;
+    let mut node = db
+        .get("nodes", &node_id)?
+        .filter(|v| v["revoked"] != true)
+        .ok_or_else(|| Error::unauthorized("Invalid node identity."))?;
+    if let Some(runtime) = body.get("runtimeId") {
+        node["runtimeId"] = name(runtime.as_str().unwrap_or(""))?.into();
+    }
+    node["runtimes"] = body["runtimes"].clone();
+    node["lastSeen"] = now().into();
+    if let Some(capabilities) = capabilities {
+        node["capabilities"] = capabilities;
+    }
+    node["storage"] = serde_json::to_value(Policy::for_node(&node["storage"])?)?;
+    node["imageDigest"] = body["imageDigest"].clone();
+    node["executionReady"] = execution_ready(&node, body, expected).into();
+    db.put("nodes", &node)?;
+    let leases = renew_leases(db, &node_id, expected.lease_ms)?;
+    Ok(HeartbeatReply {
+        node_id,
+        accepting: node["accepting"].clone(),
+        limits: node["limits"].clone(),
+        leases,
+        heartbeat_interval_ms: HEARTBEAT_INTERVAL_MS,
+        disconnect_timeout_ms: HEARTBEAT_TIMEOUT_MS,
+    })
+}
+
+fn execution_ready(node: &Value, body: &Value, expected: &Expectations) -> bool {
+    // A node whose update failed keeps running its previous image.
+    let current_image = expected
+        .image
+        .as_ref()
+        .is_none_or(|image| node["imageDigest"] == *image || node["updateError"].is_string());
+    body["executionReady"] == true
+        && node["capabilities"]["fuse"] == true
+        && body["dataRoot"] == expected.data_root
+        && current_image
+}
+
+/// Extends the leases of attempts this node still owns and may keep running.
+fn renew_leases(db: &Db<'_>, node_id: &str, lease_ms: u64) -> Result<Vec<Lease>> {
+    let mut leases = Vec::new();
+    for mut attempt in db.list("node-attempts")? {
+        if attempt["nodeId"] != node_id || !is_active_attempt(&attempt) {
+            continue;
+        }
+        let run_id = text(&attempt, "runId");
+        let run = db.run(run_id)?.unwrap_or_default();
+        let checkpoint = db_checkpoint(db, run_id)?;
+        let agent = db.get("agents", run_agent(&run))?.unwrap_or_default();
+        let owns_execution = run["status"] == RunStatus::Running
+            && run["cancelRequestedAt"].is_null()
+            && checkpoint["runnerId"] == attempt["id"]
+            && agent_allows(&agent, node_id);
+        if !owns_execution {
+            continue;
+        }
+        attempt["leaseExpiresAt"] = (now() + lease_ms as i64).into();
+        attempt["leaseDurationMs"] = attempt["leaseDurationMs"]
+            .as_u64()
+            .unwrap_or(0)
+            .max(lease_ms)
+            .into();
+        db.put("node-attempts", &attempt)?;
+        leases.push(Lease {
+            id: text(&attempt, "id").to_owned(),
+            remaining_ms: lease_ms,
+        });
+    }
+    Ok(leases)
 }
 
 pub async fn refresh_local(s: &Service) -> Result<()> {
@@ -767,8 +996,9 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
     let detected: Capabilities = decode(capabilities.clone())?;
     s.store
         .transaction(move |db| {
-            let mut record = db.get("nodes", LOCAL_NODE_ID)?.unwrap_or_else(|| {
-                json!({
+            let mut record = match db.get("nodes", LOCAL_NODE_ID)? {
+                Some(record) => record,
+                None => json!({
                     "id": LOCAL_NODE_ID,
                     "name": "Current runner",
                     "local": true,
@@ -776,16 +1006,14 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
                     "accepting": true,
                     "tags": [],
                     "createdAt": now(),
-                    "limits": detected.limits()
-                })
-            });
-            record["systemTags"] = detected.tags();
+                    "limits": detected.limits(),
+                }),
+            };
+            record["systemTags"] = detected.tags().into();
             record["runtimes"] = health["runtimes"].clone();
             record["capabilities"] = capabilities;
             record["runtimeId"] = health["runtimeId"].clone();
-            record["storage"] = json!(crate::storage::policy::Policy::for_node(
-                &record["storage"]
-            )?);
+            record["storage"] = serde_json::to_value(Policy::for_node(&record["storage"])?)?;
             record["executionReady"] = (health["status"] == "ok" && detected.fuse).into();
             record["lastSeen"] = now().into();
             db.put("nodes", &record)?;
@@ -815,8 +1043,12 @@ pub async fn daemon(
     let connector_stop = stop.child_token();
     let mut connector =
         tokio::spawn(async move { connector::connect(&directory, connector_stop).await });
-    let (runner_first, result) = tokio::select! {result = &mut runner => (true,result),result = &mut connector => (false,result)};
+    let (runner_first, result) = tokio::select! {
+        result = &mut runner => (true, result),
+        result = &mut connector => (false, result),
+    };
     stop.cancel();
+    // Only the first task's result is reported; the other just has to finish.
     if runner_first {
         let _ = connector.await;
     } else {
