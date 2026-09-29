@@ -66,7 +66,7 @@ refreshes OS packages. It never updates itself inside a running agent process.
 Container tests exercise every managed tool, real Rust compilation, a Python venv,
 project version selection, packageManager pins, and all three browser engines.
 Runner tests exercise the toolkit inside actual workspace-write/read-only sandboxes.
-The existing idle-worker lease, concurrent-release check, health verification and
+The deployment lease, concurrent-release check, health verification and
 rollback apply to the entire toolbox update. See [CLI updates](CLI-UPDATES.md).
 
 After changing the catalogue or runner integration, deploy a new application image

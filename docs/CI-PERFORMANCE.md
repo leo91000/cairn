@@ -33,8 +33,9 @@ took **8m53s** (528 aggregate runner seconds), without deployment.
   group, and the image job succeed.
 - On a release, reuse only a successful `push` run of this workflow on this
   repository's `main`, at the exact commit. Its `validated-image` artifact must
-  match the repository, commit, run ID, schema, and SHA-256 digest. PRs and manual
-  runs cannot supply release proof. Missing or invalid proof runs full CI.
+  match the repository, commit, run ID, schema, SHA-256 digest, and Codex/GitHub CLI
+  versions freshly resolved for the release. PRs and manual runs cannot supply
+  release proof. Missing proof or older tool versions runs full CI with a new image.
 - Wait for concurrent main validation instead of starting a duplicate build.
   Completed evidence is retained for 90 days. The image wait is bounded at 40
   minutes, covering the main image job's 35-minute limit. If main is still pending

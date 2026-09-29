@@ -101,7 +101,7 @@ jobs:
       - uses: actions/download-artifact@v8.0.1
         with:
           name: cli-update-plan
-      - name: Deploy only when idle, verify runtime, and roll back on failure
+      - name: Restart with recovery, verify runtime, and roll back on failure
         run: node scripts/cli-updates.mjs deploy
         env:
           COOLIFY_URL: ${{ vars.COOLIFY_URL }}

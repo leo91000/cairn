@@ -35,10 +35,12 @@ ARG PLAYWRIGHT_VERSION=1.63.0
 # Keep this layer independent of application code and package versions.
 RUN npm exec --yes --package="playwright@${PLAYWRIGHT_VERSION}" -- playwright install-deps chromium firefox webkit \
     && rm -rf /var/lib/apt/lists/* /root/.npm
-ARG GH_VERSION=2.100.0
-ARG CODEX_VERSION=0.156.1
+# Resolve stable tool versions before building, then validate this exact image.
+ARG GH_VERSION
+ARG CODEX_VERSION
 ARG CLAUDE_VERSION=2.1.280
 ARG TARGETARCH
+RUN test -n "$CODEX_VERSION" && test -n "$GH_VERSION"
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=4310 DATA_DIR=/data AGENT_HOME=/home/node WORKSPACE_ROOTS=/workspaces
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl wget git git-lfs openssh-client python3 awscli build-essential bubblewrap socat \
     zip unzip xz-utils zstd bzip2 rsync file less tree sqlite3 postgresql-client \
