@@ -42,6 +42,56 @@ fn published_journal_reclaims_disk_space() {
 }
 
 #[test]
+fn publication_retires_obsolete_clean_cache_without_evicting_current_blocks() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("disks/conversation/lazy");
+    let mut policy = super::super::policy::Policy {
+        reserve_mi_b: 64,
+        ..Default::default()
+    };
+    std::fs::write(
+        root.path().join("storage-policy.json"),
+        serde_json::to_vec(&policy).unwrap(),
+    )
+    .unwrap();
+    let source = Arc::new(Source {
+        reads: AtomicUsize::new(0),
+    });
+    let hash = block_digest(&vec![7; BLOCK as usize]);
+    let manifest = serde_json::json!({"version":1,"size":2*BLOCK,"blockSize":BLOCK,
+        "blocks":[{"offset":0,"size":BLOCK,"hash":hash},
+                  {"offset":BLOCK,"size":BLOCK,"hash":null}]});
+    let disk = LazyDisk::create(&directory, &manifest, source).unwrap();
+    disk.read_at(0, &mut [0]).unwrap();
+    let obsolete = "a".repeat(64);
+    let old_file = directory.join("cache").join(&obsolete);
+    std::fs::write(&old_file, b"obsolete verified cache").unwrap();
+    // Register the historical file as an existing clean cache entry.
+    let node = root.path();
+    let reservation = super::super::cache::reserve(node, &policy, 0)
+        .unwrap()
+        .unwrap();
+    reservation
+        .filled(&old_file, std::fs::metadata(&old_file).unwrap().len())
+        .unwrap();
+    drop(reservation);
+    let generation = disk.seal().unwrap();
+    disk.capture(generation).unwrap();
+    disk.write_at(BLOCK, b"unpublished").unwrap();
+    disk.commit_published(generation, "new-base").unwrap();
+    assert!(
+        !old_file.exists(),
+        "obsolete clean generations should not fill the node cache"
+    );
+    policy.cache_mi_b = 4;
+    super::super::cache::make_room(node, &policy, 0).unwrap();
+    assert!(directory.join("cache").join(hash).exists());
+    let mut bytes = [0; 11];
+    disk.read_at(BLOCK, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"unpublished");
+}
+
+#[test]
 fn legacy_journal_conversion_waits_for_all_unpublished_writes() {
     let root = tempfile::tempdir().unwrap();
     let source = Arc::new(Source {

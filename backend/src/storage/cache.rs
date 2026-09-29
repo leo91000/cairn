@@ -111,6 +111,45 @@ pub(crate) fn touched(state: &Path, path: &Path, modified: SystemTime) -> io::Re
     Ok(())
 }
 
+/// Publication has drained readers of the old base. Retire only clean block
+/// files no longer referenced by the current manifest, updating the shared index.
+/// The caller must release its journal mutex before taking cache admission.
+pub(super) fn retire(
+    state: Option<&Path>,
+    directory: &Path,
+    needed: &std::collections::HashSet<&str>,
+) -> io::Result<u64> {
+    let _admission = admission()?;
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut indexes = indexes()
+        .lock()
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    let mut index = state.and_then(|state| indexes.get_mut(state));
+    let mut removed = 0;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !crate::nodes::snapshots::valid_hash(&name)
+            || needed.contains(name.as_ref())
+            || !entry.file_type()?.is_file()
+        {
+            continue;
+        }
+        let bytes = entry.metadata()?.len();
+        std::fs::remove_file(entry.path())?;
+        if let Some(index) = &mut index {
+            index.remove(&entry.path());
+        }
+        removed += bytes;
+    }
+    Ok(removed)
+}
+
 pub fn make_room(state: &Path, policy: &Policy, incoming: u64) -> io::Result<bool> {
     Ok(reserve(state, policy, incoming)?.is_some())
 }

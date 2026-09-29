@@ -160,12 +160,34 @@ impl LazyDisk {
             .map_err(failure)?;
         tx.execute("INSERT INTO settings(key,value) VALUES ('published',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[receipt.to_string()]).map_err(failure)?;
         tx.commit().map_err(failure)?;
-        *base = next_base;
+        *base = next_base.clone();
         timing.next("reclaim");
         Self::reclaim_empty_legacy_journal(&db)?;
         db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
             .map_err(failure)?;
         File::open(&self.directory)?.sync_all()?;
+        // Writers acquire node cache admission before the journal mutex. Drop
+        // both local guards before retiring cache files to preserve that order.
+        drop(base);
+        drop(db);
+        timing.next("retire_clean_cache");
+        let needed = next_base["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|block| block["hash"].as_str())
+            .collect();
+        match super::super::cache::retire(self.node_state(), &self.directory.join("cache"), &needed)
+        {
+            Ok(bytes) => {
+                tracing::info!(target: "leo_performance", operation = "cache_retired", id = Self::identity(&self.directory), bytes)
+            }
+            // Clean cache eviction is optional; a local eviction failure must
+            // not report an already durable publication as unacknowledged.
+            Err(error) => {
+                tracing::warn!(target: "leo_performance", operation = "cache_retire_failed", id = Self::identity(&self.directory), kind = ?error.kind())
+            }
+        }
         timing.finish();
         Ok(())
     }

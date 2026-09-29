@@ -83,3 +83,10 @@ before WAL. Existing journals convert only when all writes have been published,
 or when reopened already clean. Unpublished writes are retained and never vacuumed
 by the compatibility conversion. This repairs retained free pages; it does not
 delete legacy disks or reduce the configured clean-cache budget.
+
+At 08:01 UTC, a separate cache inventory also found about 2.5 GiB of clean blocks
+not referenced by their disk's current base manifest. Publication now retires
+these obsolete cache files after draining old-base readers. It keeps current-base
+cache blocks and updates the node cache index under its admission lock. Dirty
+journals never participate in this eviction. Cleanup failures are logged without
+invalidating an already durable publication.
