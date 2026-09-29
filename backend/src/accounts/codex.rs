@@ -1,6 +1,10 @@
 //! Codex: ChatGPT sign-in through the app-server device code, credentials in the encrypted
 //! vault, usage from `account/rateLimits/read`, and banked resets redeemed at 2% remaining.
-use super::{Driver, KIND, Lease, Login, broker, remove_directory, remove_file, usage};
+use super::{
+    Account, AccountState, Driver, KIND, Lease, Login, broker, lenient, remove_directory,
+    remove_file, save,
+    usage::{self, Resets, Usage},
+};
 use crate::{
     auth::hex_digest,
     config::{id, now},
@@ -9,12 +13,13 @@ use crate::{
     rpc::{Incoming, Session},
     service::Service,
     skills::{atomic_write, private_dir},
-    store::merge,
-    validation::text,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -24,6 +29,12 @@ pub const MANAGED: &str = "codex-accounts-enabled";
 const CONFIG: &[u8] = b"cli_auth_credentials_store = \"file\"\nforced_login_method = \"chatgpt\"\n";
 /// Banked resets are redeemed when the limiting window reaches this remaining percentage.
 const RESET_AT: f64 = 2.;
+const INVALID_USAGE: &str = "Codex returned invalid usage data.";
+
+const API_KEYS_UNSUPPORTED: &str =
+    "Connect a ChatGPT subscription account. API keys are not supported here.";
+
+const RESET_PENDING: &str = "Banked reset redeemed; waiting for refreshed capacity.";
 
 fn secret(id: &str) -> String {
     format!("codex-account:{id}")
@@ -33,117 +44,234 @@ fn reset_key(id: &str) -> String {
     format!("codex-reset:{id}")
 }
 
-fn subject(token: &str) -> String {
-    token
-        .split('.')
-        .nth(1)
-        .and_then(|s| URL_SAFE_NO_PAD.decode(s).ok())
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        .and_then(|v| v["sub"].as_str().map(str::to_owned))
-        .unwrap_or_default()
+/// The tokens of Codex's `auth.json`. The file itself is stored and written back verbatim.
+#[derive(Default, Deserialize)]
+struct Tokens {
+    #[serde(default, deserialize_with = "lenient::string")]
+    access_token: String,
+    #[serde(default, deserialize_with = "lenient::string")]
+    refresh_token: String,
+    #[serde(default, deserialize_with = "lenient::string")]
+    id_token: String,
+    #[serde(default, deserialize_with = "lenient::string")]
+    account_id: String,
+}
+
+impl Tokens {
+    fn of(auth: &Value) -> Self {
+        Self::deserialize(&auth["tokens"]).unwrap_or_default()
+    }
+
+    /// The ID token's subject.
+    fn subject(&self) -> String {
+        self.id_token
+            .split('.')
+            .nth(1)
+            .and_then(|s| URL_SAFE_NO_PAD.decode(s).ok())
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .and_then(|v| v["sub"].as_str().map(str::to_owned))
+            .unwrap_or_default()
+    }
+
+    /// Whether `other` may belong to another identity than these tokens.
+    fn differs_from(&self, other: &Self) -> bool {
+        let subject = self.subject();
+        (!self.account_id.is_empty() && other.account_id != self.account_id)
+            || (!subject.is_empty() && subject != other.subject())
+    }
 }
 
 fn auth_input(value: Value) -> Result<Value> {
-    if text(&value["tokens"], "access_token").is_empty() {
-        return Err(Error::bad(
-            "Connect a ChatGPT subscription account. API keys are not supported here.",
-        ));
+    if Tokens::of(&value).access_token.is_empty() {
+        return Err(Error::bad(API_KEYS_UNSUPPORTED));
     }
     Ok(value)
 }
 
-fn limits_input(value: Value) -> Result<Value> {
-    if !value["rateLimits"].is_object() {
-        return Err(Error::bad_gateway("Codex returned invalid usage data."));
+/// `account/rateLimits/read`: a general bucket and one bucket per limited model.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RateLimits {
+    #[serde(default)]
+    rate_limits: Option<Bucket>,
+    #[serde(default)]
+    rate_limits_by_limit_id: Option<BTreeMap<String, Bucket>>,
+    #[serde(default)]
+    ordinary_usage_allowed: Option<Value>,
+    #[serde(default)]
+    rate_limit_reset_credits: Option<Value>,
+    #[serde(default, deserialize_with = "lenient::string")]
+    account_id: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Bucket {
+    #[serde(default, deserialize_with = "lenient::string")]
+    limit_name: String,
+    #[serde(default, deserialize_with = "lenient::string")]
+    limit_id: String,
+    #[serde(default, deserialize_with = "lenient::string")]
+    normal_model_slug: String,
+    #[serde(default, deserialize_with = "lenient::string")]
+    rate_limit_reached_type: String,
+    #[serde(default, deserialize_with = "lenient::flag")]
+    spend_control_reached: bool,
+    #[serde(default)]
+    primary: Option<RawWindow>,
+    #[serde(default)]
+    secondary: Option<RawWindow>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawWindow {
+    #[serde(default)]
+    used_percent: Option<serde_json::Number>,
+    #[serde(default, deserialize_with = "lenient::integer")]
+    window_duration_mins: Option<i64>,
+    #[serde(default, deserialize_with = "lenient::integer")]
+    resets_at: Option<i64>,
+}
+
+impl RawWindow {
+    fn valid(&self) -> bool {
+        self.used_percent
+            .as_ref()
+            .and_then(serde_json::Number::as_f64)
+            .is_some_and(|n| n.is_finite() && n >= 0.)
     }
-    let mut all = vec![&value["rateLimits"]];
-    if let Some(b) = value["rateLimitsByLimitId"].as_object() {
-        all.extend(b.values());
+}
+
+impl Bucket {
+    fn windows(&self) -> impl Iterator<Item = (&'static str, &RawWindow)> {
+        [("primary", &self.primary), ("secondary", &self.secondary)]
+            .into_iter()
+            .filter_map(|(slot, window)| window.as_ref().map(|w| (slot, w)))
     }
-    for bucket in all {
-        for key in ["primary", "secondary"] {
-            let window = &bucket[key];
-            if !window.is_null()
-                && window["usedPercent"]
-                    .as_f64()
-                    .is_none_or(|n| !n.is_finite() || n < 0.)
-            {
-                return Err(Error::bad_gateway("Codex returned invalid usage data."));
+
+    fn reached(&self) -> bool {
+        !self.rate_limit_reached_type.is_empty() || self.spend_control_reached
+    }
+
+    /// The models a per-model bucket limits, by every name Codex gives them.
+    fn models(&self, key: &str) -> Vec<String> {
+        let mut models = Vec::<String>::new();
+        for model in [self.normal_model_slug.as_str(), &self.limit_id, key] {
+            if !model.is_empty() && !models.iter().any(|m| m == model) {
+                models.push(model.to_owned());
             }
         }
+        models
     }
-    Ok(value)
+
+    fn add_windows(&self, key: &str, models: &[String], windows: &mut Vec<usage::Window>) {
+        for (slot, window) in self.windows() {
+            let minutes = window.window_duration_mins;
+            let label = if models.is_empty() || self.limit_name.is_empty() {
+                usage::duration_label(minutes)
+            } else {
+                format!("{} · {}", self.limit_name, usage::duration_label(minutes))
+            };
+            windows.push(usage::Window {
+                id: format!("{key}:{slot}"),
+                label,
+                used_percent: window.used_percent.clone(),
+                resets_at: window.resets_at,
+                duration_mins: minutes,
+                models: models.to_vec(),
+                reached: self.reached(),
+            });
+        }
+    }
+}
+
+impl RateLimits {
+    fn parse(value: Value) -> Result<Self> {
+        let limits = Self::deserialize(value).map_err(|_| Error::bad_gateway(INVALID_USAGE))?;
+        let Some(general) = &limits.rate_limits else {
+            return Err(Error::bad_gateway(INVALID_USAGE));
+        };
+        let buckets = std::iter::once(general).chain(limits.buckets().map(|(_, b)| b));
+        for bucket in buckets {
+            if !bucket.windows().all(|(_, window)| window.valid()) {
+                return Err(Error::bad_gateway(INVALID_USAGE));
+            }
+        }
+        Ok(limits)
+    }
+
+    fn buckets(&self) -> impl Iterator<Item = (&String, &Bucket)> {
+        self.rate_limits_by_limit_id.iter().flatten()
+    }
+
+    fn usage(&self) -> Usage {
+        let mut windows = Vec::new();
+        if let Some(general) = &self.rate_limits {
+            general.add_windows("main", &[], &mut windows);
+        }
+        for (key, bucket) in self.buckets() {
+            bucket.add_windows(key, &bucket.models(key), &mut windows);
+        }
+        let resets = self
+            .rate_limit_reset_credits
+            .as_ref()
+            .filter(|credits| credits.is_object())
+            .map(|credits| Resets {
+                available: credits["availableCount"].as_u64().unwrap_or(0),
+                credits: credits["credits"].as_array().cloned().unwrap_or_default(),
+            });
+        Usage {
+            allowed: self
+                .ordinary_usage_allowed
+                .as_ref()
+                .is_none_or(|v| v != false),
+            windows,
+            checked_at: Some(now()),
+            resets,
+            ..Usage::default()
+        }
+    }
 }
 
 /// Codex reports a general bucket and one bucket per limited model, each with a short and
 /// a long window.
 pub fn normalize(limits: &Value) -> Value {
-    let mut windows = Vec::new();
-    let mut add = |key: &str, bucket: &Value, models: Vec<String>| {
-        for slot in ["primary", "secondary"] {
-            let window = &bucket[slot];
-            if window.is_null() {
-                continue;
-            }
-            let minutes = window["windowDurationMins"].as_i64();
-            let name = text(bucket, "limitName");
-            let label = if models.is_empty() || name.is_empty() {
-                usage::duration_label(minutes)
-            } else {
-                format!("{name} · {}", usage::duration_label(minutes))
-            };
-            windows.push(json!({
-                "id": format!("{key}:{slot}"),
-                "label": label,
-                "usedPercent": window["usedPercent"],
-                "resetsAt": window["resetsAt"],
-                "durationMins": minutes,
-                "models": models,
-                "reached": !text(bucket,"rateLimitReachedType").is_empty() || bucket["spendControlReached"]==true
-            }));
-        }
-    };
-    add("main", &limits["rateLimits"], Vec::new());
-    for (key, bucket) in limits["rateLimitsByLimitId"]
-        .as_object()
-        .into_iter()
-        .flatten()
-    {
-        let mut models = Vec::new();
-        for model in [
-            text(bucket, "normalModelSlug"),
-            text(bucket, "limitId"),
-            key,
-        ] {
-            if !model.is_empty() && !models.iter().any(|m| m == model) {
-                models.push(model.to_owned());
-            }
-        }
-        add(key, bucket, models);
-    }
-    let credits = &limits["rateLimitResetCredits"];
-    json!({
-        "allowed": limits["ordinaryUsageAllowed"] != false,
-        "windows": windows,
-        "checkedAt": now(),
-        "resets": if credits.is_object() {json!({
-            "available": credits["availableCount"].as_u64().unwrap_or(0),
-            "credits": credits["credits"].as_array().cloned().unwrap_or_default()
-        })} else {Value::Null}
-    })
+    RateLimits::deserialize(limits)
+        .unwrap_or_default()
+        .usage()
+        .to_value()
 }
 
-async fn read_limits(rpc: &mut Session, auth: &Value) -> Result<Value> {
-    let limits = limits_input(rpc.request("account/rateLimits/read", json!({})).await?)?;
-    if !text(&limits, "accountId").is_empty()
-        && !text(&auth["tokens"], "account_id").is_empty()
-        && limits["accountId"] != auth["tokens"]["account_id"]
-    {
+async fn read_limits(rpc: &mut Session, tokens: &Tokens) -> Result<RateLimits> {
+    let limits = RateLimits::parse(rpc.request("account/rateLimits/read", json!({})).await?)?;
+    let different = !limits.account_id.is_empty()
+        && !tokens.account_id.is_empty()
+        && limits.account_id != tokens.account_id;
+    if different {
         return Err(Error::conflict(
             "Codex returned usage for a different account. Reconnect this account.",
         ));
     }
     Ok(limits)
+}
+
+/// `account/read`.
+#[derive(Debug, Default, Deserialize)]
+struct Identity {
+    #[serde(default)]
+    account: IdentityAccount,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IdentityAccount {
+    #[serde(default, rename = "type", deserialize_with = "lenient::string")]
+    kind: String,
+    #[serde(default, deserialize_with = "lenient::optional_string")]
+    email: Option<String>,
+    #[serde(default, deserialize_with = "lenient::optional_string")]
+    plan_type: Option<String>,
 }
 
 /// Saves the credentials a Codex home holds, refusing a sign-in to a different account.
@@ -162,16 +290,11 @@ async fn capture(s: &Service, id: &str, home: &Path) -> Result<()> {
         })?;
     let auth = auth_input(serde_json::from_slice(&bytes)?)?;
     if let Some(previous) = s.vault.get(&secret(id)).await?
-        && ((!text(&previous["tokens"], "account_id").is_empty()
-            && auth["tokens"]["account_id"] != previous["tokens"]["account_id"])
-            || (!subject(text(&previous["tokens"], "id_token")).is_empty()
-                && subject(text(&previous["tokens"], "id_token"))
-                    != subject(text(&auth["tokens"], "id_token"))))
+        && Tokens::of(&previous).differs_from(&Tokens::of(&auth))
     {
         return Err(super::different_account());
     }
     s.vault.set(&secret(id), &auth).await?;
-    use std::os::unix::fs::PermissionsExt;
     tokio::fs::set_permissions(
         home.join("auth.json"),
         std::fs::Permissions::from_mode(0o600),
@@ -235,30 +358,11 @@ pub async fn discover_models(s: &Service, id: &str) -> Result<Value> {
     .await
 }
 
-async fn read_usage(
-    s: &Service,
-    id: &str,
-    home: &Path,
-    model: &str,
-    rpc: &mut Session,
-) -> Result<()> {
-    let identity = rpc
-        .request("account/read", json!({"refreshToken": false}))
-        .await?;
-    if identity["account"]["type"] != "chatgpt" {
-        return Err(Error::bad(
-            "Connect a ChatGPT subscription account. API keys are not supported here.",
-        ));
-    }
-    let auth = auth_input(serde_json::from_slice(
-        &tokio::fs::read(home.join("auth.json")).await?,
-    )?)?;
-    let limits = read_limits(rpc, &auth).await?;
-    let current = normalize(&limits);
-    let mut account = s.accounts.get(s, id).await?;
-    let subject = subject(text(&auth["tokens"], "id_token"));
+/// The fingerprint of the signed-in identity: its ID token subject, or its email.
+fn fingerprint(tokens: &Tokens, identity: &IdentityAccount, limits: &RateLimits) -> Result<String> {
+    let subject = tokens.subject();
     let subject = if subject.is_empty() {
-        text(&identity["account"], "email")
+        identity.email.as_deref().unwrap_or_default()
     } else {
         &subject
     };
@@ -267,53 +371,135 @@ async fn read_usage(
             "Codex did not return an account identity. Reconnect this account.",
         ));
     }
-    let account_id = text(&auth["tokens"], "account_id");
-    let account_id = if account_id.is_empty() {
-        text(&limits, "accountId")
+    let account_id = if tokens.account_id.is_empty() {
+        &limits.account_id
     } else {
-        account_id
+        &tokens.account_id
     };
-    let fingerprint = hex_digest(&format!("{account_id}:{subject}"));
-    if account["identity"].is_string() && account["identity"] != fingerprint {
+    Ok(hex_digest(&format!("{account_id}:{subject}")))
+}
+
+async fn read_usage(
+    s: &Service,
+    id: &str,
+    home: &Path,
+    model: &str,
+    rpc: &mut Session,
+) -> Result<()> {
+    let identity = rpc
+        .request("account/read", json!({ "refreshToken": false }))
+        .await?;
+    let identity = Identity::deserialize(&identity).unwrap_or_default().account;
+    if identity.kind != "chatgpt" {
+        return Err(Error::bad(API_KEYS_UNSUPPORTED));
+    }
+    let auth = auth_input(serde_json::from_slice(
+        &tokio::fs::read(home.join("auth.json")).await?,
+    )?)?;
+    let tokens = Tokens::of(&auth);
+    let limits = read_limits(rpc, &tokens).await?;
+    let current = limits.usage();
+    let mut account = s.accounts.account(s, id).await?;
+    let fingerprint = fingerprint(&tokens, &identity, &limits)?;
+    if account.identity.as_ref().is_some_and(|i| *i != fingerprint) {
         return Err(super::different_account());
     }
-    merge(
-        &mut account,
-        &json!({
-            "identity": fingerprint,
-            "email": identity["account"]["email"],
-            "plan": identity["account"]["planType"],
-            "state": "ready",
-            "checkedAt": now(),
-            "error": "",
-            "usage": current
-        }),
-    );
+    account.identity = Some(fingerprint);
+    account.email = identity.email;
+    account.plan = identity.plan_type;
+    account.mark_ready();
+    account.usage = Some(current);
     // A natural reset comes first: it leaves banked resets for later.
     super::replenish(&mut account, &Codex);
     super::claim(s, account.clone()).await?;
-    let model = if account["exhausted"].is_null() {
-        model
-    } else {
-        text(&account["exhausted"], "model")
-    };
-    let (current, reset_error, confirmed) = reset(s, &account, model, rpc, &auth).await?;
-    let mut account = s.accounts.get(s, id).await?;
-    let model = text(&account["exhausted"], "model").to_owned();
+    let model = account.exhausted_model(model);
+    let redemption = reset(s, &account, model, rpc, &tokens).await?;
+    let mut account = s.accounts.account(s, id).await?;
     // A confirmed banked reset restores capacity before usage reports lower readings.
-    if confirmed
-        && !usage::blocked(&current, &model)
-        && usage::remaining(&current, &model).unwrap_or(0.) > 0.
-    {
-        account["exhausted"] = Value::Null;
+    if redemption.confirmed && redemption.usage.available(account.exhausted_model("")) {
+        account.exhausted = None;
     }
-    merge(
-        &mut account,
-        &json!({"usage": current,"resetError": reset_error}),
-    );
+    account.usage = Some(redemption.usage);
+    account.reset_error = Some(redemption.error);
     super::replenish(&mut account, &Codex);
-    s.store.put(KIND, account).await?;
-    Ok(())
+    save(s, &account).await
+}
+
+/// A banked reset request, persisted until its outcome is known.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ResetAttempt {
+    params: ResetParams,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    confirmed: bool,
+}
+
+/// `account/rateLimitResetCredit/consume`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResetParams {
+    idempotency_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    credit_id: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResetResult {
+    outcome: Outcome,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum Outcome {
+    Reset,
+    AlreadyRedeemed,
+    NothingToReset,
+    NoCredit,
+}
+
+/// A Codex banked reset credit.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Credit {
+    #[serde(default)]
+    id: Value,
+    #[serde(default, deserialize_with = "lenient::string")]
+    status: String,
+    #[serde(default, deserialize_with = "lenient::string")]
+    reset_type: String,
+    #[serde(default, deserialize_with = "lenient::integer")]
+    expires_at: Option<i64>,
+}
+
+impl Credit {
+    fn usable(&self) -> bool {
+        self.status == "available"
+            && self.reset_type == "codexRateLimits"
+            && self.expires_at.is_none_or(|t| t * 1000 > now())
+    }
+}
+
+/// The usage after a reset check, why capacity is still pending, and whether a redemption
+/// was confirmed.
+struct Redemption {
+    usage: Usage,
+    error: String,
+    confirmed: bool,
+}
+
+impl Redemption {
+    fn new(usage: Usage, error: &str, confirmed: bool) -> Self {
+        Self {
+            usage,
+            error: error.into(),
+            confirmed,
+        }
+    }
+}
+
+fn restored(usage: &Usage, model: &str) -> bool {
+    !usage.blocked(model) && usage.remaining(model).unwrap_or(0.) > RESET_AT
 }
 
 /// Redeems one banked reset when the limiting window reaches 2% remaining. A persisted request
@@ -321,120 +507,146 @@ async fn read_usage(
 /// credit until fresh usage shows capacity again.
 async fn reset(
     s: &Service,
-    account: &Value,
+    account: &Account,
     model: &str,
     rpc: &mut Session,
-    auth: &Value,
-) -> Result<(Value, String, bool)> {
-    let mut current = account["usage"].clone();
-    let key = reset_key(text(account, "id"));
-    let mut attempt = s.store.kv(&key).await?;
-    let restored = |current: &Value, model: &str| {
-        !usage::blocked(current, model) && usage::remaining(current, model).unwrap_or(0.) > RESET_AT
-    };
-    if let Some(a) = &attempt {
-        if account["exhausted"].is_null() && restored(&current, text(a, "model")) {
-            s.store.delete(&key).await?;
-            return Ok((current, String::new(), a["confirmed"] == true));
-        }
-        if a["confirmed"] == true {
-            if !restored(&current, text(a, "model")) {
-                return Ok((
-                    current,
-                    "Banked reset redeemed; waiting for refreshed capacity.".into(),
-                    false,
-                ));
-            }
-            s.store.delete(&key).await?;
-            return Ok((current, String::new(), true));
-        }
-    }
-    if account["enabled"] != true
-        || (account["exhausted"].is_null()
-            && usage::remaining(&current, model).is_none_or(|n| n > RESET_AT))
+    tokens: &Tokens,
+) -> Result<Redemption> {
+    let current = account.usage();
+    let key = reset_key(&account.id);
+    let attempt = s
+        .store
+        .kv(&key)
+        .await?
+        .and_then(|value| ResetAttempt::deserialize(&value).ok());
+    if let Some(attempt) = &attempt
+        && let Some(settled) = settle(s, &key, account, attempt, &current).await?
     {
-        return Ok((current, String::new(), false));
+        return Ok(settled);
     }
-    if attempt.is_none() && current["resets"]["available"].as_u64().unwrap_or(0) == 0 {
-        return Ok((current, String::new(), false));
+    let low =
+        account.exhausted.is_some() || current.remaining(model).is_some_and(|n| n <= RESET_AT);
+    if !account.enabled || !low {
+        return Ok(Redemption::new(current, "", false));
     }
-    if attempt.is_none() {
-        let credit = current["resets"]["credits"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|c| {
-                c["status"] == "available"
-                    && c["resetType"] == "codexRateLimits"
-                    && c["expiresAt"].as_i64().is_none_or(|t| t * 1000 > now())
-            })
-            .min_by_key(|c| c["expiresAt"].as_i64().unwrap_or(i64::MAX));
-        let mut value =
-            json!({"params": {"idempotencyKey": id()},"model": model,"confirmed": false});
-        if let Some(credit) = credit {
-            value["params"]["creditId"] = credit["id"].clone();
+    let attempt = match attempt {
+        Some(attempt) => attempt,
+        None if current.available_resets() == 0 => {
+            return Ok(Redemption::new(current, "", false));
         }
-        s.store.set(&key, value.clone(), None).await?;
-        attempt = Some(value);
-    }
-    let mut attempt = attempt.unwrap();
-    let result = async {
-        let result = rpc
-            .request(
-                "account/rateLimitResetCredit/consume",
-                attempt["params"].clone(),
-            )
-            .await?;
-        match text(&result, "outcome") {
-            outcome @ ("nothingToReset" | "noCredit") => {
-                s.store.delete(&key).await?;
-                Ok((
-                    current.clone(),
-                    if outcome == "nothingToReset" {
-                        "Banked reset is not eligible yet; checking again automatically."
-                    } else {
-                        "No banked reset available; waiting for capacity or another account."
-                    }
-                    .into(),
-                    false,
-                ))
-            }
-            "reset" | "alreadyRedeemed" => {
-                attempt["confirmed"] = true.into();
-                s.store.set(&key, attempt.clone(), None).await?;
-                s.store
-                    .audit(
-                        "account.reset",
-                        json!({"id": account["id"],"outcome": result["outcome"]}),
-                    )
-                    .await?;
-                current = normalize(&read_limits(rpc, auth).await?);
-                let confirmed = restored(&current, text(&attempt, "model"));
-                if confirmed {
-                    s.store.delete(&key).await?;
-                }
-                Ok((
-                    current.clone(),
-                    if confirmed {
-                        String::new()
-                    } else {
-                        "Banked reset redeemed; waiting for refreshed capacity.".into()
-                    },
-                    confirmed,
-                ))
-            }
-            _ => Err(Error::bad_gateway("Invalid reset result")),
+        None => {
+            let attempt = new_attempt(&current, model);
+            s.store
+                .set(&key, serde_json::to_value(&attempt)?, None)
+                .await?;
+            attempt
         }
-    }
-    .await;
-    Ok(result.unwrap_or_else(|_: Error| {
-        (
-            account["usage"].clone(),
-            "Unable to confirm banked reset. Retrying automatically without spending another reset."
-                .into(),
+    };
+    let redeemed = redeem(s, &key, account, attempt, current, rpc, tokens).await;
+    Ok(redeemed.unwrap_or_else(|_| {
+        Redemption::new(
+            account.usage(),
+            "Unable to confirm banked reset. Retrying automatically without spending another reset.",
             false,
         )
     }))
+}
+
+/// Settles an earlier attempt once usage shows its outcome.
+async fn settle(
+    s: &Service,
+    key: &str,
+    account: &Account,
+    attempt: &ResetAttempt,
+    current: &Usage,
+) -> Result<Option<Redemption>> {
+    let restored = restored(current, &attempt.model);
+    if account.exhausted.is_none() && restored {
+        s.store.delete(key).await?;
+        return Ok(Some(Redemption::new(
+            current.clone(),
+            "",
+            attempt.confirmed,
+        )));
+    }
+    if !attempt.confirmed {
+        return Ok(None);
+    }
+    if !restored {
+        return Ok(Some(Redemption::new(current.clone(), RESET_PENDING, false)));
+    }
+    s.store.delete(key).await?;
+    Ok(Some(Redemption::new(current.clone(), "", true)))
+}
+
+/// A new request for the usable credit that expires first.
+fn new_attempt(current: &Usage, model: &str) -> ResetAttempt {
+    let credit = current
+        .resets
+        .iter()
+        .flat_map(|r| &r.credits)
+        .map(|c| Credit::deserialize(c).unwrap_or_default())
+        .filter(Credit::usable)
+        .min_by_key(|c| c.expires_at.unwrap_or(i64::MAX));
+    ResetAttempt {
+        params: ResetParams {
+            idempotency_key: id(),
+            credit_id: credit.map(|c| c.id),
+        },
+        model: model.into(),
+        confirmed: false,
+    }
+}
+
+async fn redeem(
+    s: &Service,
+    key: &str,
+    account: &Account,
+    mut attempt: ResetAttempt,
+    current: Usage,
+    rpc: &mut Session,
+    tokens: &Tokens,
+) -> Result<Redemption> {
+    let result = rpc
+        .request(
+            "account/rateLimitResetCredit/consume",
+            serde_json::to_value(&attempt.params)?,
+        )
+        .await?;
+    let outcome = ResetResult::deserialize(&result)
+        .map_err(|_| Error::bad_gateway("Invalid reset result"))?
+        .outcome;
+    match outcome {
+        Outcome::NothingToReset => {
+            s.store.delete(key).await?;
+            let waiting = "Banked reset is not eligible yet; checking again automatically.";
+            Ok(Redemption::new(current, waiting, false))
+        }
+        Outcome::NoCredit => {
+            s.store.delete(key).await?;
+            let waiting = "No banked reset available; waiting for capacity or another account.";
+            Ok(Redemption::new(current, waiting, false))
+        }
+        Outcome::Reset | Outcome::AlreadyRedeemed => {
+            attempt.confirmed = true;
+            s.store
+                .set(key, serde_json::to_value(&attempt)?, None)
+                .await?;
+            s.store
+                .audit(
+                    "account.reset",
+                    json!({ "id": account.id, "outcome": outcome }),
+                )
+                .await?;
+            let current = read_limits(rpc, tokens).await?.usage();
+            let confirmed = restored(&current, &attempt.model);
+            if confirmed {
+                s.store.delete(key).await?;
+            }
+            let error = if confirmed { "" } else { RESET_PENDING };
+            Ok(Redemption::new(current, error, confirmed))
+        }
+    }
 }
 
 /// Records written before usage was normalized kept Codex's raw rate limits.
@@ -451,14 +663,70 @@ async fn upgrade_records(s: &Service) -> Result<()> {
             usage["checkedAt"] = object.get("checkedAt").cloned().unwrap_or(Value::Null);
             object.insert("usage".into(), usage);
         }
-        if let Some(exhausted) = object.get_mut("exhausted").filter(|e| e.is_object())
-            && let Some(limits) = exhausted.as_object_mut().unwrap().remove("limits")
+        if let Some(exhausted) = object.get_mut("exhausted").and_then(Value::as_object_mut)
+            && let Some(limits) = exhausted.remove("limits")
         {
-            exhausted["usage"] = normalize(&limits);
+            exhausted.insert("usage".into(), normalize(&limits));
         }
         s.store.put(KIND, account).await?;
     }
     Ok(())
+}
+
+/// Recovers credentials a manager session may have rotated just before a crash.
+async fn recover_sessions(s: &Service) -> Result<()> {
+    for account in s.accounts.of(s, Provider::Codex).await? {
+        for purpose in ["codex-monitor", "codex-model-discovery"] {
+            let home = s.config.data_dir.join(purpose).join(&account.id);
+            if home.join("auth.json").exists() {
+                capture(s, &account.id, &home).await?;
+            }
+            remove_directory(&home).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Adopts an existing ChatGPT login of the host once. The CLI's own file stays untouched.
+async fn import_host_login(s: &Service) -> Result<()> {
+    let home = s.config.home.join(".codex");
+    let Ok(bytes) = tokio::fs::read(home.join("auth.json")).await else {
+        return Ok(());
+    };
+    let signed_in = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|v| auth_input(v).ok())
+        .is_some();
+    if !signed_in {
+        return Ok(());
+    }
+    let account = Account::new(Provider::Codex, "Primary account", AccountState::Ready);
+    let imported = account.to_value();
+    s.store
+        .transaction(move |db| {
+            db.put(KIND, &imported)?;
+            Codex.added(db)
+        })
+        .await?;
+    capture(s, &account.id, &home).await?;
+    s.store
+        .audit(
+            "account.imported",
+            json!({ "id": account.id, "provider": "codex" }),
+        )
+        .await
+}
+
+/// What a run receives from its broker: Codex app-server external tokens.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExternalTokens {
+    #[serde(default, deserialize_with = "lenient::string")]
+    access_token: String,
+    #[serde(default, deserialize_with = "lenient::string")]
+    chatgpt_account_id: String,
+    #[serde(default, deserialize_with = "lenient::optional_string")]
+    chatgpt_plan_type: Option<String>,
 }
 
 pub struct Codex;
@@ -469,47 +737,11 @@ impl Driver for Codex {
         upgrade_records(s).await?;
         // Earlier versions signed in here; an unfinished sign-in never survives a restart.
         remove_directory(&s.config.data_dir.join("codex-login")).await?;
-        // Recover credentials a manager session may have rotated just before a crash.
-        for account in s.accounts.records(s, Provider::Codex).await? {
-            let id = text(&account, "id");
-            for purpose in ["codex-monitor", "codex-model-discovery"] {
-                let home = s.config.data_dir.join(purpose).join(id);
-                if home.join("auth.json").exists() {
-                    capture(s, id, &home).await?;
-                }
-                remove_directory(&home).await?;
-            }
-        }
+        recover_sessions(s).await?;
         if s.store.kv(MANAGED).await?.is_some() {
             return Ok(());
         }
-        // Adopt an existing ChatGPT login of the host once. The CLI's own file stays untouched.
-        let home = s.config.home.join(".codex");
-        let Ok(bytes) = tokio::fs::read(home.join("auth.json")).await else {
-            return Ok(());
-        };
-        if serde_json::from_slice::<Value>(&bytes)
-            .ok()
-            .and_then(|v| auth_input(v).ok())
-            .is_none()
-        {
-            return Ok(());
-        }
-        let account = super::record(Provider::Codex, "Primary account", "ready");
-        let imported = account.clone();
-        s.store
-            .transaction(move |db| {
-                db.put(KIND, &imported)?;
-                Codex.added(db)
-            })
-            .await?;
-        capture(s, text(&account, "id"), &home).await?;
-        s.store
-            .audit(
-                "account.imported",
-                json!({"id": account["id"],"provider": "codex"}),
-            )
-            .await
+        import_host_login(s).await
     }
 
     async fn managed(&self, s: &Service) -> Result<bool> {
@@ -518,7 +750,7 @@ impl Driver for Codex {
 
     /// From the first added account on, Codex runs need a managed account, never the host login.
     fn added(&self, db: &mut crate::store::Db<'_>) -> Result<()> {
-        db.set(MANAGED, &json!(true), None)
+        db.set(MANAGED, &Value::Bool(true), None)
     }
 
     async fn authorize(&self, s: &Service, home: &Path, login: &Login) -> Result<()> {
@@ -544,13 +776,14 @@ impl Driver for Codex {
     }
 
     async fn refresh(&self, s: &Service, id: &str, models: &[String]) -> Result<()> {
-        let account = s.accounts.get(s, id).await?;
+        let usage = s.accounts.account(s, id).await?.usage();
         // Watch the model closest to exhaustion among the account's runs.
         let model = models
             .iter()
             .min_by(|a, b| {
-                usage::remaining(&account["usage"], a)
-                    .partial_cmp(&usage::remaining(&account["usage"], b))
+                usage
+                    .remaining(a)
+                    .partial_cmp(&usage.remaining(b))
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
             .cloned()
@@ -567,28 +800,19 @@ impl Driver for Codex {
         .await
     }
 
-    async fn due(&self, s: &Service, account: &Value, attempted: i64) -> Result<bool> {
-        let id = text(account, "id");
-        let model = s
-            .accounts
-            .active(id)
-            .await
-            .first()
-            .map(|l| l.model.clone())
-            .unwrap_or_else(|| text(&account["exhausted"], "model").into());
-        let pending = s.store.kv(&reset_key(id)).await?.is_some();
-        let attention = !account["exhausted"].is_null()
+    async fn due(&self, s: &Service, account: &Account, attempted: i64) -> Result<bool> {
+        let model = s.accounts.active(&account.id).await.first().map_or_else(
+            || account.exhausted_model("").to_owned(),
+            |l| l.model.clone(),
+        );
+        let pending = s.store.kv(&reset_key(&account.id)).await?.is_some();
+        let usage = account.usage();
+        let attention = account.exhausted.is_some()
             || pending
-            || usage::remaining(&account["usage"], &model).is_some_and(|n| n <= super::LOW);
+            || usage.remaining(&model).is_some_and(|n| n <= super::LOW);
+        let redeemable = pending || usage.available_resets() > 0;
         // Poll quickly near exhaustion while a banked reset can restore capacity.
-        let interval = if account["enabled"] == true
-            && attention
-            && (pending
-                || account["usage"]["resets"]["available"]
-                    .as_u64()
-                    .unwrap_or(0)
-                    > 0)
-        {
+        let interval = if account.enabled && attention && redeemable {
             15_000
         } else {
             60_000
@@ -630,54 +854,48 @@ impl Driver for Codex {
         Ok(())
     }
 
-    async fn access(&self, s: &Service, lease: &Lease, request: &Value) -> Result<Value> {
+    async fn access(&self, s: &Service, lease: &Lease, request: &broker::Request) -> Result<Value> {
         // Rotation is serialized with usage monitoring; ordinary reads only need the vault.
-        let _rotation = if request["refresh"] == true {
+        let _rotation = if request.refresh {
             Some(s.accounts.lock(&lease.account_id).await)
         } else {
             None
         };
-        let mut auth = required(
-            s.vault.get(&secret(&lease.account_id)).await?,
-            "Reconnect this account.",
-        )?;
+        let stored = async || {
+            required(
+                s.vault.get(&secret(&lease.account_id)).await?,
+                "Reconnect this account.",
+            )
+        };
+        let mut tokens = Tokens::of(&stored().await?);
         // Different runs reporting the same expired token share one refresh.
-        if request["refresh"] == true
-            && request["previous"] == hex_digest(text(&auth["tokens"], "access_token"))
-        {
+        if request.refresh && request.previous == hex_digest(&tokens.access_token) {
             with_session(s, &lease.account_id, "codex-monitor", async |session, _| {
                 session
-                    .request("account/read", json!({"refreshToken": true}))
+                    .request("account/read", json!({ "refreshToken": true }))
                     .await
             })
             .await?;
-            auth = required(
-                s.vault.get(&secret(&lease.account_id)).await?,
-                "Reconnect this account.",
-            )?;
+            tokens = Tokens::of(&stored().await?);
         }
-        let account = s.accounts.get(s, &lease.account_id).await?;
-        let account_id = text(&auth["tokens"], "account_id");
-        if account_id.is_empty() {
+        let account = s.accounts.account(s, &lease.account_id).await?;
+        if tokens.account_id.is_empty() {
             return Err(Error::bad("Reconnect this account to verify its identity."));
         }
-        Ok(json!({
-            "accessToken": auth["tokens"]["access_token"],
-            "chatgptAccountId": account_id,
-            "chatgptPlanType": account["plan"]
-        }))
+        let external = ExternalTokens {
+            access_token: tokens.access_token,
+            chatgpt_account_id: tokens.account_id,
+            chatgpt_plan_type: account.plan,
+        };
+        Ok(serde_json::to_value(external)?)
     }
 
     async fn redactions(&self, s: &Service, id: &str) -> Result<Vec<String>> {
         let auth = s.vault.get(&secret(id)).await?.unwrap_or(Value::Null);
-        Ok(["access_token", "refresh_token", "id_token"]
-            .iter()
-            .filter_map(|key| {
-                auth["tokens"][key]
-                    .as_str()
-                    .filter(|v| !v.is_empty())
-                    .map(str::to_owned)
-            })
+        let tokens = Tokens::of(&auth);
+        Ok([tokens.access_token, tokens.refresh_token, tokens.id_token]
+            .into_iter()
+            .filter(|token| !token.is_empty())
             .collect())
     }
 
@@ -714,20 +932,18 @@ impl Client {
     }
 
     pub async fn tokens(&mut self, refresh: bool) -> Result<Value> {
-        let result = broker::request(
-            &self.path,
-            &json!({"refresh": refresh,"previous": self.previous}),
-            Duration::from_secs(9),
-        )
-        .await?;
-        if text(&result, "accessToken").is_empty()
-            || text(&result, "chatgptAccountId").is_empty()
-            || (!self.account.is_empty() && result["chatgptAccountId"] != self.account)
-        {
+        let request = broker::Request {
+            refresh,
+            previous: self.previous.clone(),
+        };
+        let result = broker::request(&self.path, &request, Duration::from_secs(9)).await?;
+        let tokens = ExternalTokens::deserialize(&result).unwrap_or_default();
+        let switched = !self.account.is_empty() && tokens.chatgpt_account_id != self.account;
+        if tokens.access_token.is_empty() || tokens.chatgpt_account_id.is_empty() || switched {
             return Err(Error::unavailable("Account authentication is unavailable."));
         }
-        self.previous = hex_digest(text(&result, "accessToken"));
-        self.account = text(&result, "chatgptAccountId").into();
+        self.previous = hex_digest(&tokens.access_token);
+        self.account = tokens.chatgpt_account_id;
         Ok(result)
     }
 
@@ -748,9 +964,8 @@ impl Client {
             .id
             .clone()
             .ok_or_else(|| Error::bad("Invalid account refresh request."))?;
-        if incoming.params["previousAccountId"].is_string()
-            && incoming.params["previousAccountId"] != self.account
-        {
+        let previous = &incoming.params["previousAccountId"];
+        if previous.is_string() && *previous != self.account {
             return rpc.reject(id).await;
         }
         match self.tokens(true).await {
