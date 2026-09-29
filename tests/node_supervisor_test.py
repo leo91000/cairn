@@ -1,16 +1,19 @@
 """Exercise the shipped supervisor CLI against the master protocol and a fixture Docker CLI."""
 import http.server
+import importlib.util
 import json
 import os
 from pathlib import Path
 import queue
 import signal
+import shlex
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 SOURCE = Path(__file__).resolve().parents[1] / 'deploy/nodes/host.py'
 OLD = 'registry.example/leo@sha256:' + '1' * 64
@@ -40,6 +43,26 @@ elif args[0]=='stop':
 
 
 class Supervisor(unittest.TestCase):
+    def test_health_checks_accept_idle_on_demand_nodes(self):
+        spec = importlib.util.spec_from_file_location('node_supervisor', SOURCE)
+        host = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(host)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'data/node').mkdir(parents=True)
+            (root / 'data/node/identity.json').write_text(json.dumps({'nodeId': 'fixture-node'}))
+            with patch.object(host, 'ROOT', root), patch.object(host, 'remove'), patch.object(host, 'command') as command:
+                host.launch(NEW)
+            launch = command.call_args_list[0].args[0]
+            probe = command.call_args_list[1].args[0][3:]
+            self.assertIn('--health-cmd', launch)
+            self.assertEqual(shlex.split(launch[launch.index('--health-cmd') + 1]), probe)
+            health = {'status': 'ok', 'nodeProtocol': 2, 'pool': {'capacity': 4, 'ready': 0, 'occupied': 0}}
+            shim = 'globalThis.fetch=async()=>({ok:true,json:async()=>JSON.parse(process.argv[1])});'
+            for value, expected in [(health, 0), ({**health, 'nodeProtocol': 1}, 1), ({**health, 'status': 'error'}, 1), ({**health, 'pool': {'capacity': 0}}, 1)]:
+                result = subprocess.run(['node', '-e', shim + probe[-1], json.dumps(value)], capture_output=True)
+                self.assertEqual(result.returncode, expected, result.stderr.decode())
+
     def scenario(self, fail, lost_completion=False, retained=False):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
