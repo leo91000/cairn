@@ -1,8 +1,11 @@
+mod common;
+
 use leo_agent_manager::{config::Config, github_projects, service::Service};
 use serde_json::json;
 use std::{os::unix::fs::PermissionsExt, process::Command, sync::Arc};
 use tempfile::TempDir;
 
+/// A service whose `gh` lists and describes `fixture/repo`, a local repository.
 async fn fixture() -> (TempDir, Arc<Service>) {
     let root = TempDir::new().unwrap();
     let home = root.path().join("home");
@@ -50,20 +53,8 @@ esac
 "##).unwrap();
     std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700)).unwrap();
     let s = Service::new(Config {
-        data_dir: root.path().join("data"),
-        home,
-        workspace_roots: vec![root.path().to_owned()],
-        public_url: "http://localhost:4310".into(),
-        host: "127.0.0.1".into(),
-        port: 0,
-        setup_token: "fixture".into(),
-        codex_bin: "codex".into(),
-        claude_bin: "claude".into(),
         gh_bin: gh.to_string_lossy().into_owned(),
-        concurrency: 1,
-        logger: false,
-        worker_enabled: false,
-        runner_url: String::new(),
+        ..common::config(root.path())
     })
     .await
     .unwrap();
@@ -81,15 +72,10 @@ async fn lists_imports_default_branch_and_reuses_existing_project() {
     assert_eq!(page["repositories"][0]["stars"], 42);
     assert_eq!(page["repositories"][0]["fork"], true);
     assert_eq!(page["repositories"][0]["pushedAt"], "2026-09-01T10:00:00Z");
-    assert_eq!(page["nextPage"], serde_json::Value::Null);
-    let project = github_projects::import(
-        &s,
-        json!({
-            "repository": "fixture/repo"
-        }),
-    )
-    .await
-    .unwrap();
+    assert!(page["nextPage"].is_null());
+    let project = github_projects::import(&s, json!({ "repository": "fixture/repo" }))
+        .await
+        .unwrap();
     assert_eq!(project["baseBranch"], "trunk");
     assert!(
         std::path::Path::new(project["path"].as_str().unwrap())
@@ -101,14 +87,9 @@ async fn lists_imports_default_branch_and_reuses_existing_project() {
         true
     );
     assert_eq!(
-        github_projects::import(
-            &s,
-            json!({
-                "repository": "fixture/repo"
-            })
-        )
-        .await
-        .unwrap()["id"],
+        github_projects::import(&s, json!({ "repository": "fixture/repo" }))
+            .await
+            .unwrap()["id"],
         project["id"]
     );
     assert_eq!(s.store.list("projects").await.unwrap().len(), 1);
@@ -117,35 +98,22 @@ async fn lists_imports_default_branch_and_reuses_existing_project() {
 #[tokio::test]
 async fn failures_leave_no_project_or_partial_checkout_and_hide_cli_output() {
     let (root, s) = fixture().await;
-    let error = github_projects::import(
-        &s,
-        json!({
-            "repository": "fixture/missing"
-        }),
-    )
-    .await
-    .unwrap_err();
+    let error = github_projects::import(&s, json!({ "repository": "fixture/missing" }))
+        .await
+        .unwrap_err();
     assert!(!error.message.contains("secret-must-not-leak"));
     assert!(
         github_projects::import(
             &s,
-            json!({
-                "repository": "fixture/repo",
-                "baseBranch": "missing"
-            })
+            json!({ "repository": "fixture/repo", "baseBranch": "missing" })
         )
         .await
         .is_err()
     );
     assert!(
-        github_projects::import(
-            &s,
-            json!({
-                "repository": "../repo"
-            })
-        )
-        .await
-        .is_err()
+        github_projects::import(&s, json!({ "repository": "../repo" }))
+            .await
+            .is_err()
     );
     assert!(s.store.list("projects").await.unwrap().is_empty());
     assert!(!std::fs::read_dir(root.path()).unwrap().any(|p| {

@@ -1,5 +1,11 @@
+mod common;
+
+use axum::http::StatusCode;
 use leo_agent_manager::{
-    config::{Config, MAIN_AGENT_ID},
+    config::{Config, MAIN_AGENT_ID, id},
+    error::Error,
+    http::router,
+    run_status::RunStatus,
     service::Service,
     validation::text,
 };
@@ -10,6 +16,7 @@ use std::{
 };
 use tempfile::TempDir;
 
+/// A queued run served over HTTP, with an owner session to stream it.
 struct Fixture {
     _root: TempDir,
     service: Arc<Service>,
@@ -22,33 +29,16 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let root = TempDir::new().unwrap();
-        std::fs::create_dir_all(root.path().join("home/.codex")).unwrap();
-        std::fs::write(root.path().join("home/.codex/leo-managed-auth"), "1").unwrap();
+        common::managed_codex_home(&root.path().join("home"));
         let config = Config {
-            data_dir: root.path().join("data"),
-            home: root.path().join("home"),
-            workspace_roots: vec![root.path().to_owned()],
-            public_url: "http://localhost:4310".into(),
-            host: "127.0.0.1".into(),
-            port: 0,
             setup_token: "test".into(),
-            codex_bin: "codex".into(),
-            claude_bin: "claude".into(),
-            gh_bin: "gh".into(),
-            concurrency: 1,
-            logger: false,
-            worker_enabled: false,
-            runner_url: String::new(),
+            ..common::config(root.path())
         };
         let service = Service::new(config).await.unwrap();
         let token = text(&service.auth.session().await.unwrap(), "value").to_owned();
         let task = service
             .task(
-                json!({
-                    "name": "Live test",
-                    "prompt": "Test",
-                    "agentId": MAIN_AGENT_ID
-                }),
+                json!({ "name": "Live test", "prompt": "Test", "agentId": MAIN_AGENT_ID }),
                 None,
             )
             .await
@@ -85,7 +75,7 @@ impl Fixture {
             request = request.header("Last-Event-ID", last);
         }
         let response = request.send().await.unwrap();
-        assert_eq!(response.status(), 200);
+        assert_eq!(response.status(), StatusCode::OK);
         assert!(
             response.headers()["content-type"]
                 .to_str()
@@ -99,6 +89,20 @@ impl Fixture {
         }
     }
 
+    /// Requests one page of the run history, as the owner.
+    async fn history(&self, query: &str) -> reqwest::Response {
+        reqwest::Client::new()
+            .get(format!(
+                "{}/api/runs/{}/history?{query}",
+                self.url, self.run
+            ))
+            .header("cookie", format!("leo_session={}", self.token))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    /// Appends `count` output events to the run in one transaction.
     async fn append(&self, count: usize) {
         let run = self.run.clone();
         self.service
@@ -122,15 +126,20 @@ impl Drop for Fixture {
 }
 
 async fn serve(service: Arc<Service>) -> (String, tokio::task::JoinHandle<()>) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let router = leo_agent_manager::http::router(service).await.unwrap();
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
-    });
-    (url, server)
+    common::serve_locally(router(service).await.unwrap()).await
 }
 
+/// The ids of a list of events.
+fn event_ids(events: &Value) -> Vec<i64> {
+    events
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["id"].as_i64().unwrap())
+        .collect()
+}
+
+/// A server-sent event stream that yields its `batch` frames.
 struct Stream {
     response: reqwest::Response,
     pending: String,
@@ -174,13 +183,7 @@ impl Stream {
         let mut ids = Vec::new();
         loop {
             let (id, batch) = self.batch().await;
-            ids.extend(
-                batch["events"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|e| e["id"].as_i64().unwrap()),
-            );
+            ids.extend(event_ids(&batch["events"]));
             if id >= end {
                 return ids;
             }
@@ -258,12 +261,7 @@ async fn writes_during_replay_and_slow_readers_do_not_block_or_lose_events() {
         .unwrap();
     assert!(start.elapsed() < Duration::from_secs(5));
     let all = ids(&f).await;
-    let mut received: Vec<_> = first["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v["id"].as_i64().unwrap())
-        .collect();
+    let mut received = event_ids(&first["events"]);
     received.extend(reader.through(*all.last().unwrap()).await);
     assert_eq!(received, all);
     drop(slow);
@@ -274,7 +272,7 @@ async fn writes_during_replay_and_slow_readers_do_not_block_or_lose_events() {
         .store
         .transaction(move |db| {
             db.event(&run, "output", "must not escape", None)?;
-            Err::<(), _>(leo_agent_manager::error::Error::bad("rollback"))
+            Err::<(), _>(Error::bad("rollback"))
         })
         .await;
     assert!(result.is_err());
@@ -320,10 +318,7 @@ async fn metadata_auth_revocation_and_invalid_requests() {
         .store
         .patch_run(
             &f.run,
-            json!({
-                "status": "succeeded",
-                "result": "Done"
-            }),
+            json!({ "status": RunStatus::Succeeded, "result": "Done" }),
         )
         .await
         .unwrap();
@@ -342,16 +337,16 @@ async fn metadata_auth_revocation_and_invalid_requests() {
             .await
             .unwrap()
             .status(),
-        401
+        StatusCode::UNAUTHORIZED
     );
     let token = text(&f.service.auth.session().await.unwrap(), "value").to_owned();
     for (path, code) in [
-        (format!("/api/runs/{}/stream?after=-1", f.run), 400),
-        ("/api/runs/not-an-id/stream".into(), 400),
         (
-            format!("/api/runs/{}/stream", leo_agent_manager::config::id()),
-            404,
+            format!("/api/runs/{}/stream?after=-1", f.run),
+            StatusCode::BAD_REQUEST,
         ),
+        ("/api/runs/not-an-id/stream".into(), StatusCode::BAD_REQUEST),
+        (format!("/api/runs/{}/stream", id()), StatusCode::NOT_FOUND),
     ] {
         assert_eq!(
             client
@@ -389,10 +384,7 @@ async fn chat_state_questions_and_artifacts_update_without_text_events() {
         .store
         .set(
             &format!("chat-question:{chat_id}:question"),
-            json!({
-                "id": "question",
-                "status": "pending"
-            }),
+            json!({ "id": "question", "status": "pending" }),
             None,
         )
         .await
@@ -405,10 +397,7 @@ async fn chat_state_questions_and_artifacts_update_without_text_events() {
         .store
         .set(
             &format!("artifact:{}:file", f.run),
-            json!({
-                "id": "file",
-                "previewStatus": "pending"
-            }),
+            json!({ "id": "file", "previewStatus": "pending" }),
             None,
         )
         .await
@@ -421,10 +410,7 @@ async fn chat_state_questions_and_artifacts_update_without_text_events() {
         .store
         .set(
             &format!("artifact:{}:file", f.run),
-            json!({
-                "id": "file",
-                "previewStatus": "ready"
-            }),
+            json!({ "id": "file", "previewStatus": "ready" }),
             None,
         )
         .await
@@ -473,11 +459,7 @@ async fn wire_deltas_reestablish_baselines_after_reconnect_and_keep_rest_compati
                 "item.updated",
                 content,
                 Some(json!({
-                    "item": {
-                        "id": "message",
-                        "type": "agent_message",
-                        "text": content
-                    }
+                    "item": { "id": "message", "type": "agent_message", "text": content },
                 })),
             )
             .await
@@ -585,31 +567,14 @@ async fn recent_window_pages_backwards_without_gaps_and_keeps_live_cursor() {
     assert_eq!(batch["events"].as_array().unwrap().len(), 100);
     let history = batch["history"].as_str().unwrap();
     let mut before = batch["oldest"].as_i64().unwrap();
-    let mut collected: Vec<_> = batch["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v["id"].as_i64().unwrap())
-        .collect();
-    let client = reqwest::Client::new();
+    let mut collected = event_ids(&batch["events"]);
     loop {
-        let response = client
-            .get(format!(
-                "{}/api/runs/{}/history?before={before}&history={history}",
-                f.url, f.run
-            ))
-            .header("cookie", format!("leo_session={}", f.token))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), 200);
+        let response = f
+            .history(&format!("before={before}&history={history}"))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
         let page: Value = response.json().await.unwrap();
-        let mut previous: Vec<_> = page["events"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v["id"].as_i64().unwrap())
-            .collect();
+        let mut previous = event_ids(&page["events"]);
         assert!(previous.iter().all(|id| *id < before));
         previous.extend(collected);
         collected = previous;
@@ -625,19 +590,13 @@ async fn recent_window_pages_backwards_without_gaps_and_keeps_live_cursor() {
     assert_eq!(update["events"].as_array().unwrap().len(), 1);
     assert!(update.get("oldest").is_none());
     for (query, expected) in [
-        ("before=0&history=x", 400),
-        ("before=5&history=v1:foreign:1", 409),
-        ("before=5", 400),
+        ("before=0&history=x", StatusCode::BAD_REQUEST),
+        ("before=5&history=v1:foreign:1", StatusCode::CONFLICT),
+        ("before=5", StatusCode::BAD_REQUEST),
     ] {
-        let response = client
-            .get(format!("{}/api/runs/{}/history?{query}", f.url, f.run))
-            .header("cookie", format!("leo_session={}", f.token))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), expected);
+        assert_eq!(f.history(query).await.status(), expected);
     }
-    let response = client
+    let response = reqwest::Client::new()
         .get(format!(
             "{}/api/runs/{}/history?history={history}",
             f.url, f.run
@@ -645,7 +604,7 @@ async fn recent_window_pages_backwards_without_gaps_and_keeps_live_cursor() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), 401);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -665,7 +624,7 @@ async fn paginated_chat_metadata_keeps_pending_messages_without_replaying_delive
                     "chatId": chat_id,
                     "createdAt": 1,
                     "status": status,
-                    "text": "A message"
+                    "text": "A message",
                 }))?;
             }
             Ok(())
@@ -706,11 +665,7 @@ async fn profile_long_answer_delivery_with_small_wire_deltas() {
                     "item.updated",
                     value,
                     Some(json!({
-                        "item": {
-                            "id": "profile",
-                            "type": "agent_message",
-                            "text": value
-                        }
+                        "item": { "id": "profile", "type": "agent_message", "text": value },
                     })),
                 )
                 .await
@@ -730,17 +685,15 @@ async fn profile_long_answer_delivery_with_small_wire_deltas() {
             assert_eq!(batch["events"][0]["payload"]["item"]["delta"], suffix);
             bytes.push(serde_json::to_vec(&batch).unwrap().len());
         }
-        times.sort_by(|a, b| a.total_cmp(b));
-        println!(
-            "STREAM_SERVER_PROFILE {}",
-            json!({
-                "characters": length,
-                "samples": times.len(),
-                "p50_ms": times[9],
-                "p95_ms": times[17],
-                "max_batch_bytes": bytes.into_iter().max()
-            })
-        );
+        times.sort_by(f64::total_cmp);
+        let profile = json!({
+            "characters": length,
+            "samples": times.len(),
+            "p50_ms": times[9],
+            "p95_ms": times[17],
+            "max_batch_bytes": bytes.into_iter().max(),
+        });
+        println!("STREAM_SERVER_PROFILE {profile}");
     }
 }
 
@@ -757,11 +710,7 @@ async fn backwards_pages_skip_superseded_long_answers_but_keep_reused_ids_in_old
                 "item.completed",
                 "previous turn",
                 Some(&json!({
-                    "item": {
-                        "id": "m",
-                        "type": "agent_message",
-                        "text": "previous turn"
-                    }
+                    "item": { "id": "m", "type": "agent_message", "text": "previous turn" },
                 })),
             )?;
             db.event(&run, "turn.completed", "", None)?;
@@ -774,11 +723,7 @@ async fn backwards_pages_skip_superseded_long_answers_but_keep_reused_ids_in_old
                     "item.updated",
                     &text,
                     Some(&json!({
-                        "item": {
-                            "id": "m",
-                            "type": "agent_message",
-                            "text": text
-                        }
+                        "item": { "id": "m", "type": "agent_message", "text": text },
                     })),
                 )?;
             }
@@ -800,15 +745,9 @@ async fn backwards_pages_skip_superseded_long_answers_but_keep_reused_ids_in_old
     assert_eq!(first["hasOlder"], true);
     let before = first["oldest"].as_i64().unwrap();
     let history = first["history"].as_str().unwrap();
-    let page: Value = reqwest::Client::new()
-        .get(format!(
-            "{}/api/runs/{}/history?before={before}&history={history}",
-            f.url, f.run
-        ))
-        .header("cookie", format!("leo_session={}", f.token))
-        .send()
+    let page: Value = f
+        .history(&format!("before={before}&history={history}"))
         .await
-        .unwrap()
         .json()
         .await
         .unwrap();

@@ -1,243 +1,201 @@
-use axum::{
-    body::{Body, to_bytes},
-    http::Request,
-};
-use leo_agent_manager::{config::Config, http::router, service::Service};
-use serde_json::{Value, json};
-use tempfile::TempDir;
-use tower::ServiceExt;
+mod common;
 
-async fn app() -> (TempDir, axum::Router, std::sync::Arc<Service>) {
+use axum::{
+    Router,
+    body::Body,
+    http::{Request, StatusCode, request::Builder},
+    response::Response,
+};
+use common::{Credentials, Session, read_bytes, read_json, read_text, request, send};
+use leo_agent_manager::{
+    attachments::MAX_FILE,
+    auth::hex_digest,
+    config::{Config, MAIN_AGENT_ID, id, now},
+    http::router,
+    service::Service,
+};
+use serde_json::{Value, json};
+use std::{collections::HashMap, sync::Arc};
+use tempfile::TempDir;
+use tokio_util::sync::CancellationToken;
+
+async fn app() -> (TempDir, Router, Arc<Service>) {
     let root = TempDir::new().unwrap();
     let config = Config {
-        data_dir: root.path().join("data"),
-        home: root.path().join("home"),
-        workspace_roots: vec![root.path().to_owned()],
-        public_url: "http://localhost:4310".into(),
-        host: "127.0.0.1".into(),
-        port: 0,
         setup_token: "test-setup".into(),
-        codex_bin: "codex".into(),
-        claude_bin: "claude".into(),
-        gh_bin: "gh".into(),
-        concurrency: 1,
-        logger: false,
-        worker_enabled: false,
-        runner_url: String::new(),
+        ..common::config(root.path())
     };
     let service = Service::new(config).await.unwrap();
     let app = router(service.clone()).await.unwrap();
     (root, app, service)
 }
 
-fn request(method: &str, path: &str, body: Value) -> axum::http::request::Builder {
-    let _ = body;
-    Request::builder()
-        .method(method)
-        .uri(path)
-        .header("host", "localhost:4310")
-        .header("content-type", "application/json")
+/// A request as the application sends it from its own origin.
+fn json_request(method: &str, path: &str) -> Builder {
+    request(method, path).header("content-type", "application/json")
+}
+
+fn setup_request() -> Builder {
+    json_request("POST", "/api/setup")
+}
+
+fn setup_body() -> Body {
+    let setup = json!({ "setupToken": "test-setup", "password": "password-long-enough" });
+    Body::from(setup.to_string())
+}
+
+/// Reads the owner session that a successful setup response opens.
+async fn setup_session(response: Response) -> Session {
+    let cookie = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let body = read_json(response).await;
+    Session {
+        cookie,
+        csrf: body["csrf"].as_str().unwrap().to_owned(),
+    }
+}
+
+async fn set_up_owner(app: &Router) -> Session {
+    setup_session(send(app, setup_request().body(setup_body()).unwrap()).await).await
+}
+
+async fn health(app: &Router) -> Value {
+    read_json(
+        send(
+            app,
+            json_request("GET", "/health").body(Body::empty()).unwrap(),
+        )
+        .await,
+    )
+    .await
 }
 
 #[tokio::test]
 async fn http_authentication_csrf_host_origin_and_cookie_contracts() {
     let (_root, app, _service) = app().await;
-    let response = app
-        .clone()
-        .oneshot(
-            request("GET", "/api/projects", Value::Null)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 401);
+    let response = send(
+        &app,
+        json_request("GET", "/api/projects")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(response.headers()["cache-control"], "no-store");
     assert_eq!(response.headers()["x-frame-options"], "DENY");
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/session")
-                .header("host", "attacker.example")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
+    let foreign_host = Request::builder()
+        .uri("/api/session")
+        .header("host", "attacker.example")
+        .body(Body::empty())
         .unwrap();
-    assert_eq!(response.status(), 403);
-    let response = app
-        .clone()
-        .oneshot(
-            request("POST", "/api/setup", Value::Null)
-                .header("origin", "https://attacker.example")
-                .body(Body::from(
-                    json!({
-                        "setupToken": "test-setup",
-                        "password": "password-long-enough",
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
+    assert_eq!(
+        send(&app, foreign_host).await.status(),
+        StatusCode::FORBIDDEN
+    );
+    let foreign_origin = setup_request()
+        .header("origin", "https://attacker.example")
+        .body(setup_body())
         .unwrap();
-    assert_eq!(response.status(), 403);
-    let response = app
-        .clone()
-        .oneshot(
-            request("POST", "/api/setup", Value::Null)
-                .body(Body::from(
-                    json!({
-                        "setupToken": "test-setup",
-                        "password": "password-long-enough",
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 200);
-    let cookie = response.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .to_owned();
+    assert_eq!(
+        send(&app, foreign_origin).await.status(),
+        StatusCode::FORBIDDEN
+    );
+    let response = send(&app, setup_request().body(setup_body()).unwrap()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = response.headers()["set-cookie"].to_str().unwrap();
     assert!(cookie.contains("HttpOnly"));
     assert!(cookie.contains("SameSite=Lax"));
-    let cookie = cookie.split(';').next().unwrap();
-    let body: Value =
-        serde_json::from_slice(&to_bytes(response.into_body(), 10000).await.unwrap()).unwrap();
-    let csrf = body["csrf"].as_str().unwrap();
-    let response = app
-        .clone()
-        .oneshot(
-            request("POST", "/api/chats", Value::Null)
-                .header("cookie", cookie)
-                .body(Body::from("{}"))
-                .unwrap(),
-        )
-        .await
+    let session = setup_session(response).await;
+    let chats = |method: &str, credentials: Credentials| {
+        credentials.apply(json_request(method, "/api/chats"))
+    };
+    let response = send(
+        &app,
+        chats("POST", Credentials::Cookie(&session))
+            .body(Body::from("{}"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = send(
+        &app,
+        chats("POST", Credentials::Owner(&session))
+            .body(Body::from("{}"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = send(
+        &app,
+        chats("GET", Credentials::Cookie(&session))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(read_json(response).await.as_array().unwrap().len(), 1);
+    let logout = session
+        .authorize(json_request("POST", "/api/logout"))
+        .body(Body::from("{}"))
         .unwrap();
-    assert_eq!(response.status(), 403);
-    let response = app
-        .clone()
-        .oneshot(
-            request("POST", "/api/chats", Value::Null)
-                .header("cookie", cookie)
-                .header("x-csrf-token", csrf)
-                .body(Body::from("{}"))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 200);
-    let response = app
-        .clone()
-        .oneshot(
-            request("GET", "/api/chats", Value::Null)
-                .header("cookie", cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 200);
-    let chats: Value =
-        serde_json::from_slice(&to_bytes(response.into_body(), 10000).await.unwrap()).unwrap();
-    assert_eq!(chats.as_array().unwrap().len(), 1);
-    let response = app
-        .clone()
-        .oneshot(
-            request("POST", "/api/logout", Value::Null)
-                .header("cookie", cookie)
-                .header("x-csrf-token", csrf)
-                .body(Body::from("{}"))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 200);
-    let response = app
-        .oneshot(
-            request("GET", "/api/chats", Value::Null)
-                .header("cookie", cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 401);
+    assert_eq!(send(&app, logout).await.status(), StatusCode::OK);
+    let response = send(
+        &app,
+        chats("GET", Credentials::Cookie(&session))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
 async fn login_limits_ignore_forged_forwarded_ips() {
     let (_root, app, _service) = app().await;
     for n in 0..11 {
-        let response = app
-            .clone()
-            .oneshot(
-                request("POST", "/api/login", Value::Null)
-                    .header("x-forwarded-for", format!("192.0.2.{n}"))
-                    .body(Body::from("{\"password\":\"test\"}"))
-                    .unwrap(),
-            )
-            .await
+        let login = json_request("POST", "/api/login")
+            .header("x-forwarded-for", format!("192.0.2.{n}"))
+            .body(Body::from(r#"{"password":"test"}"#))
             .unwrap();
-        assert_eq!(response.status(), if n < 10 { 401 } else { 429 });
+        let expected = if n < 10 {
+            StatusCode::UNAUTHORIZED
+        } else {
+            StatusCode::TOO_MANY_REQUESTS
+        };
+        assert_eq!(send(&app, login).await.status(), expected);
     }
 }
 
 #[tokio::test]
 async fn health_and_deployment_lease_report_live_worker_ownership() {
     let (_root, app, service) = app().await;
-    service
-        .store
-        .write(|db| {
-            db.add_run(
-                &json!({
-                    "id": "saved-run",
-                    "taskId": "task",
-                    "projectId": "project",
-                    "status": "running",
-                    "createdAt": 1,
-                }),
-                None,
-            )
-        })
-        .await
-        .unwrap();
-    let response = app
-        .clone()
-        .oneshot(
-            request("GET", "/health", Value::Null)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let health: Value =
-        serde_json::from_slice(&to_bytes(response.into_body(), 10000).await.unwrap()).unwrap();
+    let saved = json!({
+        "id": "saved-run",
+        "taskId": "task",
+        "projectId": "project",
+        "status": "running",
+        "createdAt": 1,
+    });
+    common::add_run(&service.store, &saved).await;
     assert_eq!(
-        health["activeRuns"], 0,
+        health(&app).await["activeRuns"],
+        0,
         "Persisted runs are not live processes when the worker is disabled"
     );
-    service.worker.active.lock().await.insert(
-        "preparing-run".into(),
-        tokio_util::sync::CancellationToken::new(),
-    );
-    let response = app
-        .oneshot(
-            request("GET", "/health", Value::Null)
-                .body(Body::empty())
-                .unwrap(),
-        )
+    service
+        .worker
+        .active
+        .lock()
         .await
-        .unwrap();
-    let health: Value =
-        serde_json::from_slice(&to_bytes(response.into_body(), 10000).await.unwrap()).unwrap();
+        .insert("preparing-run".into(), CancellationToken::new());
     assert_eq!(
-        health["activeRuns"], 1,
+        health(&app).await["activeRuns"],
+        1,
         "Preparing attempts already belong to the live worker"
     );
     let result = service
@@ -245,13 +203,7 @@ async fn health_and_deployment_lease_report_live_worker_ownership() {
         .deployment_lease(&service, "owner".into(), false)
         .await
         .unwrap();
-    assert_eq!(
-        result,
-        json!({
-            "paused": true,
-            "activeRuns": 1
-        })
-    );
+    assert_eq!(result, json!({ "paused": true, "activeRuns": 1 }));
     assert_eq!(
         service.store.kv("deployment-lease").await.unwrap(),
         Some(json!("owner"))
@@ -280,210 +232,42 @@ async fn health_and_deployment_lease_report_live_worker_ownership() {
     );
 }
 
-#[tokio::test]
-async fn attachments_are_private_scoped_bounded_and_durable() {
-    let (_root, app, service) = app().await;
-    let session = service.auth.session().await.unwrap();
-    let chat = service.chat_create(json!({})).await.unwrap();
-    let other = service.chat_create(json!({})).await.unwrap();
-    let id = leo_agent_manager::config::id();
-    let chat_id = chat["id"].as_str().unwrap();
-    let url = format!("/api/chats/{chat_id}/attachments/{id}?name=design.png");
-    async fn call(
-        app: &axum::Router,
-        session: &Value,
-        method: &str,
-        url: &str,
-        bytes: Vec<u8>,
-        csrf: bool,
-    ) -> axum::response::Response {
-        let mut req = Request::builder()
-            .method(method)
-            .uri(url)
-            .header("host", "localhost:4310");
-        if !session.is_null() {
-            req = req.header(
-                "cookie",
-                format!("leo_session={}", session["value"].as_str().unwrap()),
-            );
-        }
-        if csrf {
-            req = req.header("x-csrf-token", session["csrf"].as_str().unwrap());
-        }
-        app.clone()
-            .oneshot(req.body(Body::from(bytes)).unwrap())
-            .await
-            .unwrap()
-    }
-    let png = b"\x89PNG\r\n\x1a\nfixture".to_vec();
-    assert_eq!(
-        call(&app, &Value::Null, "PUT", &url, png.clone(), false)
-            .await
-            .status(),
-        401
-    );
-    assert_eq!(
-        call(&app, &session, "PUT", &url, png.clone(), false)
-            .await
-            .status(),
-        403
-    );
-    assert_eq!(
-        call(
-            &app,
-            &session,
-            "PUT",
-            &url,
-            vec![0; leo_agent_manager::attachments::MAX_FILE + 1],
-            true
-        )
-        .await
-        .status(),
-        413
-    );
-    let response = call(&app, &session, "PUT", &url, png.clone(), true).await;
-    assert_eq!(response.status(), 200);
-    let attachment: Value =
-        serde_json::from_slice(&to_bytes(response.into_body(), 10000).await.unwrap()).unwrap();
-    assert_eq!(attachment["kind"], "image");
-    assert_eq!(
-        call(&app, &session, "PUT", &url, png.clone(), true)
-            .await
-            .status(),
-        200
-    );
-    assert_eq!(
-        call(&app, &session, "PUT", &url, b"different".to_vec(), true)
-            .await
-            .status(),
-        409
-    );
-    assert_eq!(
-        call(&app, &Value::Null, "GET", &url, vec![], false)
-            .await
-            .status(),
-        401
-    );
-    let other_url = format!(
-        "/api/chats/{}/attachments/{id}",
-        other["id"].as_str().unwrap()
-    );
-    assert_eq!(
-        call(&app, &session, "GET", &other_url, vec![], false)
-            .await
-            .status(),
-        404
-    );
-    assert!(
-        service
-            .chat_send(
-                other["id"].as_str().unwrap(),
-                json!({
-                    "id": leo_agent_manager::config::id(),
-                    "attachmentIds": [id]
-                })
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        service
-            .chat_send(
-                chat_id,
-                json!({
-                    "id": leo_agent_manager::config::id(),
-                    "attachmentIds": [id, id]
-                })
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        service
-            .chat_send(
-                chat_id,
-                json!({
-                    "id": leo_agent_manager::config::id(),
-                    "text": ""
-                })
-            )
-            .await
-            .is_err()
-    );
-    let message_id = leo_agent_manager::config::id();
-    let message = service
-        .chat_send(
-            chat_id,
-            json!({
-                "id": message_id,
-                "attachmentIds": [id],
-            }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(message["attachments"][0], attachment);
-    assert_eq!(
-        service.chat_detail(chat_id).await.unwrap()["title"],
-        "design.png"
-    );
-    assert!(
-        service
-            .chat_send(
-                chat_id,
-                json!({
-                    "id": message_id,
-                    "text": "changed",
-                    "attachmentIds": []
-                })
-            )
-            .await
-            .is_err()
-    );
-    let reopened = Service::new(service.config.clone()).await.unwrap();
-    assert_eq!(
-        reopened.chat_detail(chat_id).await.unwrap()["messages"][0]["attachments"][0],
-        attachment
-    );
-    let response = call(&app, &session, "GET", &url, vec![], false).await;
-    assert_eq!(response.headers()["cache-control"], "no-store");
-    assert_eq!(response.headers()["content-type"], "image/png");
-    assert_eq!(
-        to_bytes(response.into_body(), 10000)
-            .await
-            .unwrap()
-            .as_ref(),
-        png
-    );
+/// Sends `bytes` to an attachment endpoint.
+async fn attachment(
+    app: &Router,
+    credentials: Credentials<'_>,
+    method: &str,
+    url: &str,
+    bytes: Vec<u8>,
+) -> Response {
+    let request = credentials.apply(request(method, url));
+    send(app, request.body(Body::from(bytes)).unwrap()).await
+}
+
+/// A hostile name cannot escape the chat directory, and active content is only
+/// ever served as a sandboxed download.
+async fn assert_hostile_uploads_are_neutralized(app: &Router, session: &Session, chat_id: &str) {
+    let (owner, cookie) = (Credentials::Owner(session), Credentials::Cookie(session));
     let evil = format!(
         "/api/chats/{chat_id}/attachments/{}?name=..%2F..%2Ffile.svg",
-        leo_agent_manager::config::id()
+        id()
     );
-    let response = call(
-        &app,
-        &session,
-        "PUT",
-        &evil,
-        b"<svg onload='alert(1)'/>".to_vec(),
-        true,
-    )
-    .await;
-    assert_eq!(response.status(), 200);
-    let data: Value =
-        serde_json::from_slice(&to_bytes(response.into_body(), 10000).await.unwrap()).unwrap();
+    let svg = b"<svg onload='alert(1)'/>".to_vec();
+    let response = attachment(app, owner, "PUT", &evil, svg).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let data = read_json(response).await;
     assert!(!data["name"].as_str().unwrap().contains('/'));
-    let response = call(&app, &session, "GET", &evil, vec![], false).await;
-    assert_eq!(
-        response.headers()["content-type"],
-        "application/octet-stream"
-    );
+    let response = attachment(app, cookie, "GET", &evil, vec![]).await;
+    let headers = response.headers();
+    assert_eq!(headers["content-type"], "application/octet-stream");
     assert!(
-        response.headers()["content-disposition"]
+        headers["content-disposition"]
             .to_str()
             .unwrap()
             .starts_with("attachment;")
     );
     assert!(
-        response.headers()["content-security-policy"]
+        headers["content-security-policy"]
             .to_str()
             .unwrap()
             .contains("sandbox")
@@ -491,126 +275,175 @@ async fn attachments_are_private_scoped_bounded_and_durable() {
 }
 
 #[tokio::test]
-async fn native_mcp_callback_requires_the_initiating_session_and_csrf_to_finish() {
-    use leo_agent_manager::{auth::hex_digest, config::now};
+async fn attachments_are_private_scoped_bounded_and_durable() {
     let (_root, app, service) = app().await;
-    let session = service.auth.session().await.unwrap();
-    let other = service.auth.session().await.unwrap();
-    let id = "00000000-0000-4000-8000-000000000099";
+    let session = Session::new(&service.auth.session().await.unwrap());
+    let (anonymous, cookie, owner) = (
+        Credentials::Anonymous,
+        Credentials::Cookie(&session),
+        Credentials::Owner(&session),
+    );
+    let chat = service.chat_create(json!({})).await.unwrap();
+    let other = service.chat_create(json!({})).await.unwrap();
+    let attachment_id = id();
+    let chat_id = chat["id"].as_str().unwrap();
+    let other_id = other["id"].as_str().unwrap();
+    let url = format!("/api/chats/{chat_id}/attachments/{attachment_id}?name=design.png");
+    let png = b"\x89PNG\r\n\x1a\nfixture".to_vec();
+    let put = async |credentials: Credentials<'_>, bytes: Vec<u8>| {
+        attachment(&app, credentials, "PUT", &url, bytes)
+            .await
+            .status()
+    };
+    assert_eq!(put(anonymous, png.clone()).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(put(cookie, png.clone()).await, StatusCode::FORBIDDEN);
+    assert_eq!(
+        put(owner, vec![0; MAX_FILE + 1]).await,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    let response = attachment(&app, owner, "PUT", &url, png.clone()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let uploaded = read_json(response).await;
+    assert_eq!(uploaded["kind"], "image");
+    assert_eq!(put(owner, png.clone()).await, StatusCode::OK);
+    assert_eq!(
+        put(owner, b"different".to_vec()).await,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        attachment(&app, anonymous, "GET", &url, vec![])
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let other_url = format!("/api/chats/{other_id}/attachments/{attachment_id}");
+    assert_eq!(
+        attachment(&app, cookie, "GET", &other_url, vec![])
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    for (chat, message) in [
+        (
+            other_id,
+            json!({ "id": id(), "attachmentIds": [attachment_id] }),
+        ),
+        (
+            chat_id,
+            json!({ "id": id(), "attachmentIds": [attachment_id, attachment_id] }),
+        ),
+        (chat_id, json!({ "id": id(), "text": "" })),
+    ] {
+        assert!(service.chat_send(chat, message).await.is_err());
+    }
+    let message_id = id();
+    let message = service
+        .chat_send(
+            chat_id,
+            json!({ "id": message_id, "attachmentIds": [attachment_id] }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(message["attachments"][0], uploaded);
+    assert_eq!(
+        service.chat_detail(chat_id).await.unwrap()["title"],
+        "design.png"
+    );
+    let changed = json!({ "id": message_id, "text": "changed", "attachmentIds": [] });
+    assert!(service.chat_send(chat_id, changed).await.is_err());
+    let reopened = Service::new(service.config.clone()).await.unwrap();
+    assert_eq!(
+        reopened.chat_detail(chat_id).await.unwrap()["messages"][0]["attachments"][0],
+        uploaded
+    );
+    let response = attachment(&app, cookie, "GET", &url, vec![]).await;
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["content-type"], "image/png");
+    assert_eq!(read_bytes(response).await.as_ref(), png);
+    assert_hostile_uploads_are_neutralized(&app, &session, chat_id).await;
+}
+
+#[tokio::test]
+async fn native_mcp_callback_requires_the_initiating_session_and_csrf_to_finish() {
+    let (_root, app, service) = app().await;
+    let initiating = service.auth.session().await.unwrap();
+    let session = Session::new(&initiating);
+    let other = Session::new(&service.auth.session().await.unwrap());
+    let connection = "00000000-0000-4000-8000-000000000099";
     let nonce = "native-callback-test-nonce";
     let key = format!("mcp-oauth:{}", hex_digest(nonce));
-    let expires = now() + 600000;
+    let expires = now() + 600_000;
+    let pending = json!({
+        "native": true,
+        "connectionId": connection,
+        "session": hex_digest(&session.csrf),
+        "nonce": nonce,
+        "expiresAt": expires,
+    });
     service
         .store
-        .set(
-            &key,
-            json!({
-                "native": true,
-                "connectionId": id,
-                "session": hex_digest(session["csrf"].as_str().unwrap()),
-                "nonce": nonce,
-                "expiresAt": expires,
-            }),
-            Some(expires),
-        )
+        .set(&key, pending, Some(expires))
         .await
         .unwrap();
-    let response = app
-        .clone()
-        .oneshot(
-            request(
-                "GET",
-                &format!("/oauth/mcp/callback?state={nonce}&code=private-code"),
-                Value::Null,
-            )
-            .body(Body::empty())
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 200);
+    let callback = format!("/oauth/mcp/callback?state={nonce}&code=private-code");
+    let response = send(
+        &app,
+        json_request("GET", &callback).body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["referrer-policy"], "no-referrer");
     assert_eq!(response.headers()["cache-control"], "no-store");
-    let html = String::from_utf8(
-        to_bytes(response.into_body(), 10000)
-            .await
-            .unwrap()
-            .to_vec(),
-    )
-    .unwrap();
+    let html = read_text(response).await;
     assert!(html.contains("Revenez dans Leo"));
     assert!(!html.contains("private-code"));
     assert!(!html.contains(nonce));
     let pending = service.store.kv(&key).await.unwrap().unwrap();
     assert_eq!(pending["callback"]["code"], "private-code");
     assert_eq!(pending["expiresAt"], expires);
-    for (credentials, csrf, status) in [
-        (Value::Null, false, 401),
-        (session.clone(), false, 403),
-        (other.clone(), true, 200),
+    let finish = format!("/api/mcps/{connection}/callback");
+    let finish_as = async |credentials: Credentials<'_>| {
+        let request = credentials.apply(json_request("POST", &finish));
+        send(&app, request.body(Body::from("{}")).unwrap()).await
+    };
+    for (credentials, status) in [
+        (Credentials::Anonymous, StatusCode::UNAUTHORIZED),
+        (Credentials::Cookie(&session), StatusCode::FORBIDDEN),
+        (Credentials::Owner(&other), StatusCode::OK),
     ] {
-        let mut req = request("POST", &format!("/api/mcps/{id}/callback"), Value::Null);
-        if let Some(cookie) = credentials["value"].as_str() {
-            req = req.header("cookie", format!("leo_session={cookie}"));
-        }
-        if csrf {
-            req = req.header("x-csrf-token", credentials["csrf"].as_str().unwrap());
-        }
-        let response = app
-            .clone()
-            .oneshot(req.body(Body::from("{}")).unwrap())
-            .await
-            .unwrap();
+        let response = finish_as(credentials).await;
         assert_eq!(response.status(), status);
-        if status == 200 {
-            let body: Value =
-                serde_json::from_slice(&to_bytes(response.into_body(), 10000).await.unwrap())
-                    .unwrap();
+        if status == StatusCode::OK {
             assert_eq!(
-                body,
-                json!({
-                    "pending": false,
-                    "result": "expired"
-                })
+                read_json(response).await,
+                json!({ "pending": false, "result": "expired" })
             );
         }
         assert!(service.store.kv(&key).await.unwrap().is_some());
     }
     service
         .auth
-        .logout(session["value"].as_str().unwrap())
+        .logout(initiating["value"].as_str().unwrap())
         .await
         .unwrap();
-    let response = app
-        .oneshot(
-            request("POST", &format!("/api/mcps/{id}/callback"), Value::Null)
-                .header(
-                    "cookie",
-                    format!("leo_session={}", session["value"].as_str().unwrap()),
-                )
-                .header("x-csrf-token", session["csrf"].as_str().unwrap())
-                .body(Body::from("{}"))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 401);
+    assert_eq!(
+        finish_as(Credentials::Owner(&session)).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
     // Expiration is enforced by the store, including capture attempts from the browser.
     service
         .store
         .set(&key, pending, Some(now() - 1))
         .await
         .unwrap();
+    let replacement = HashMap::from([
+        ("state".into(), nonce.into()),
+        ("code".into(), "replacement".into()),
+    ]);
     assert!(
         !service
             .mcps
-            .capture_native_callback(
-                &service,
-                &std::collections::HashMap::from([
-                    ("state".into(), nonce.into()),
-                    ("code".into(), "replacement".into())
-                ])
-            )
+            .capture_native_callback(&service, &replacement)
             .await
             .unwrap()
     );
@@ -619,85 +452,41 @@ async fn native_mcp_callback_requires_the_initiating_session_and_csrf_to_finish(
 #[tokio::test]
 async fn onepassword_management_requires_owner_session_and_csrf() {
     let (_root, app, _) = app().await;
-    for (method, path) in [("GET", "/api/onepassword"), ("POST", "/api/onepassword")] {
-        let response = app
-            .clone()
-            .oneshot(
-                request(method, path, Value::Null)
-                    .body(Body::from("{}"))
-                    .unwrap(),
-            )
-            .await
+    for method in ["GET", "POST"] {
+        let request = json_request(method, "/api/onepassword")
+            .body(Body::from("{}"))
             .unwrap();
-        assert_eq!(response.status(), 401);
+        assert_eq!(send(&app, request).await.status(), StatusCode::UNAUTHORIZED);
     }
-    let response = app
-        .clone()
-        .oneshot(
-            request("POST", "/api/setup", Value::Null)
-                .body(Body::from(
-                    json!({
-                        "setupToken": "test-setup",
-                        "password": "password-long-enough",
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let cookie = response.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_owned();
-    let body: Value =
-        serde_json::from_slice(&to_bytes(response.into_body(), 10000).await.unwrap()).unwrap();
+    let session = set_up_owner(&app).await;
     let input = json!({
         "name": "Fixture",
         "token": "ops_http_fixture",
         "enabled": true,
         "agentIds": [],
     });
-    let response = app
-        .clone()
-        .oneshot(
-            request("POST", "/api/onepassword", Value::Null)
-                .header("cookie", &cookie)
-                .body(Body::from(input.to_string()))
-                .unwrap(),
-        )
-        .await
+    let save = |credentials: Credentials| {
+        credentials
+            .apply(json_request("POST", "/api/onepassword"))
+            .body(Body::from(input.to_string()))
+            .unwrap()
+    };
+    assert_eq!(
+        send(&app, save(Credentials::Cookie(&session)))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let response = send(&app, save(Credentials::Owner(&session))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!read_text(response).await.contains("ops_http_fixture"));
+    let listed = Credentials::Cookie(&session)
+        .apply(json_request("GET", "/api/onepassword"))
+        .body(Body::empty())
         .unwrap();
-    assert_eq!(response.status(), 403);
-    let response = app
-        .clone()
-        .oneshot(
-            request("POST", "/api/onepassword", Value::Null)
-                .header("cookie", &cookie)
-                .header("x-csrf-token", body["csrf"].as_str().unwrap())
-                .body(Body::from(input.to_string()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 200);
-    let bytes = to_bytes(response.into_body(), 10000).await.unwrap();
-    assert!(!String::from_utf8_lossy(&bytes).contains("ops_http_fixture"));
-    let response = app
-        .oneshot(
-            request("GET", "/api/onepassword", Value::Null)
-                .header("cookie", &cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 200);
-    let bytes = to_bytes(response.into_body(), 10000).await.unwrap();
-    assert!(!String::from_utf8_lossy(&bytes).contains("ops_http_fixture"));
+    let response = send(&app, listed).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!read_text(response).await.contains("ops_http_fixture"));
 }
 
 #[tokio::test]
@@ -707,127 +496,55 @@ async fn github_projects_require_owner_session_and_csrf() {
         ("GET", "/api/github/repositories"),
         ("POST", "/api/projects/github"),
     ] {
-        let response = app
-            .clone()
-            .oneshot(
-                request(method, path, Value::Null)
-                    .body(Body::from("{}"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), 401);
+        let request = json_request(method, path).body(Body::from("{}")).unwrap();
+        assert_eq!(send(&app, request).await.status(), StatusCode::UNAUTHORIZED);
     }
-    let response = app
-        .clone()
-        .oneshot(
-            request("POST", "/api/setup", Value::Null)
-                .body(Body::from(
-                    json!({
-                        "setupToken": "test-setup",
-                        "password": "password-long-enough",
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
+    let session = set_up_owner(&app).await;
+    let import = Credentials::Cookie(&session)
+        .apply(json_request("POST", "/api/projects/github"))
+        .body(Body::from(r#"{"repository":"fixture/repo"}"#))
         .unwrap();
-    let cookie = response.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_owned();
-    let response = app
-        .oneshot(
-            request("POST", "/api/projects/github", Value::Null)
-                .header("cookie", cookie)
-                .body(Body::from("{\"repository\":\"fixture/repo\"}"))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 403);
+    assert_eq!(send(&app, import).await.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
 async fn agents_default_to_unlimited_and_migrate_only_the_main_agents_old_default() {
-    use leo_agent_manager::config::MAIN_AGENT_ID;
     let (_root, _app, s) = app().await;
-    let main = s.get("agents", MAIN_AGENT_ID).await.unwrap();
-    assert_eq!(main["timeoutMinutes"], 0);
+    let timeout_of_main = async |service: &Service| {
+        service.get("agents", MAIN_AGENT_ID).await.unwrap()["timeoutMinutes"].clone()
+    };
+    assert_eq!(timeout_of_main(&s).await, 0);
     assert_eq!(
-        s.agent(
-            json!({
-                "name": "New agent"
-            }),
-            None
-        )
-        .await
-        .unwrap()["timeoutMinutes"],
+        s.agent(json!({ "name": "New agent" }), None).await.unwrap()["timeoutMinutes"],
         0
     );
     for minutes in [0, 1, 720] {
+        let configured = json!({ "name": "Configured", "timeoutMinutes": minutes });
         assert_eq!(
-            s.agent(
-                json!({
-                    "name": "Configured",
-                    "timeoutMinutes": minutes
-                }),
-                None
-            )
-            .await
-            .unwrap()["timeoutMinutes"],
+            s.agent(configured, None).await.unwrap()["timeoutMinutes"],
             minutes
         );
     }
     for minutes in [-1, 721] {
-        assert!(
-            s.agent(
-                json!({
-                    "name": "Invalid",
-                    "timeoutMinutes": minutes
-                }),
-                None
-            )
-            .await
-            .is_err()
-        );
+        let invalid = json!({ "name": "Invalid", "timeoutMinutes": minutes });
+        assert!(s.agent(invalid, None).await.is_err());
     }
+    let main_agent = |minutes: i64| json!({ "name": "Main agent", "timeoutMinutes": minutes });
     for (previous, expected) in [(90, 90), (120, 0)] {
-        s.agent(
-            json!({
-                "name": "Main agent",
-                "timeoutMinutes": previous,
-            }),
-            Some(MAIN_AGENT_ID),
-        )
-        .await
-        .unwrap();
+        s.agent(main_agent(previous), Some(MAIN_AGENT_ID))
+            .await
+            .unwrap();
         s.store
             .write(|db| db.delete("migration:main-agent-unlimited"))
             .await
             .unwrap();
         let restarted = Service::new(s.config.clone()).await.unwrap();
-        assert_eq!(
-            restarted.get("agents", MAIN_AGENT_ID).await.unwrap()["timeoutMinutes"],
-            expected
-        );
+        assert_eq!(timeout_of_main(&restarted).await, expected);
     }
-    s.agent(
-        json!({
-            "name": "Main agent",
-            "timeoutMinutes": 120,
-        }),
-        Some(MAIN_AGENT_ID),
-    )
-    .await
-    .unwrap();
+    s.agent(main_agent(120), Some(MAIN_AGENT_ID)).await.unwrap();
     let restarted = Service::new(s.config.clone()).await.unwrap();
     assert_eq!(
-        restarted.get("agents", MAIN_AGENT_ID).await.unwrap()["timeoutMinutes"],
+        timeout_of_main(&restarted).await,
         120,
         "An explicit choice after migration must survive restart"
     );
