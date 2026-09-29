@@ -81,6 +81,7 @@ import net from 'node:net';
 import { execFileSync } from 'node:child_process';
 const root=${JSON.stringify(runRoot)};
 const mode=process.argv[2];
+if(mode!=='first'){const disk=fs.statfsSync(root+'/workspace');assert.ok(disk.blocks*disk.bsize>32*1024**3,'grown workspace exceeds the old jailer file limit');}
 assert.ok(Math.abs(Date.now()-Number(process.argv[3])) < 30000,'clock repaired before execution');
 const project=root+'/workspace/'+${JSON.stringify(projectId)};
 if(mode==='first')execFileSync('cc',['-Wall','-Wextra','-Werror','-O2',root+'/workspace/nested-kvm.c','-o',root+'/workspace/nested-kvm'],{timeout:30000});
@@ -172,7 +173,7 @@ console.log('probe.done');
         id,
         runId,
         storage,
-        resources: { cpu: 2, memoryMiB: 4096, diskMiB: 1024 },
+        resources: { cpu: 2, memoryMiB: 4096, diskMiB: mode === 'first' ? 1024 : 65536 },
         expires: Date.now() + 300000,
         sandbox: 'yolo',
         cwd: `${runRoot}/workspace`,

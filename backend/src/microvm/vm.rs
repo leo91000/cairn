@@ -172,8 +172,11 @@ fn firecracker_config(network: &Network, resources: &Resources, slot: usize) -> 
     })
 }
 
-fn jailer(id: &str, uid: u32, state: &Path) -> Command {
+fn jailer(id: &str, uid: u32, state: &Path, disk_bytes: u64) -> Command {
     let uid = uid.to_string();
+    // Firecracker writes a regular FUSE file at guest block offsets. A fixed
+    // limit below the retained disk size terminates the VMM with SIGXFSZ.
+    let file_limit = format!("fsize={disk_bytes}");
     let mut command = Command::new("/usr/local/bin/jailer");
     command
         .args([
@@ -190,7 +193,7 @@ fn jailer(id: &str, uid: u32, state: &Path) -> Command {
             "--chroot-base-dir",
             state.join("jails").to_str().unwrap(),
             "--resource-limit",
-            "fsize=34359738368",
+            &file_limit,
             "--resource-limit",
             "no-file=256",
             "--",
@@ -324,7 +327,10 @@ impl Vm {
         let config = firecracker_config(&self.network, resources, slot);
         atomic_write(&jail.join("config.json"), &serde_json::to_vec(&config)?).await?;
         std::os::unix::fs::chown(jail.join("config.json"), Some(self.uid), Some(self.uid))?;
-        let child = self.child.insert(jailer(id, self.uid, state).spawn()?);
+        let disk_bytes = self.volume.as_ref().unwrap().disk.size();
+        let child = self
+            .child
+            .insert(jailer(id, self.uid, state, disk_bytes).spawn()?);
         self.consoles.push(console(
             child.stdout.take().unwrap(),
             state.join(format!("{id}.boot.log")),
@@ -637,5 +643,60 @@ impl Inbox {
             self.last = content;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::process::CommandExt;
+
+    #[test]
+    fn jailer_allows_writes_to_the_end_of_a_grown_disk() {
+        let directory = tempfile::tempdir().unwrap();
+        let disk_bytes = 64_u64 * 1024 * 1024 * 1024;
+        let disk = directory.path().join("data.ext4");
+        std::fs::File::create(&disk)
+            .unwrap()
+            .set_len(disk_bytes)
+            .unwrap();
+        let command = jailer("test", 1000, directory.path(), disk_bytes);
+        let limit = command
+            .as_std()
+            .get_args()
+            .find_map(|arg| arg.to_str()?.strip_prefix("fsize="))
+            .unwrap()
+            .parse::<libc::rlim_t>()
+            .unwrap();
+        let mut write = std::process::Command::new("dd");
+        write
+            .args([
+                "if=/dev/zero",
+                "bs=1",
+                "count=1",
+                "conv=notrunc",
+                "status=none",
+            ])
+            .arg(format!("of={}", disk.display()))
+            .arg(format!("seek={}", disk_bytes - 1));
+        // Apply the actual jailer limit only in the child performing the write.
+        unsafe {
+            write.pre_exec(move || {
+                let limits = libc::rlimit {
+                    rlim_cur: limit,
+                    rlim_max: limit,
+                };
+                if libc::setrlimit(libc::RLIMIT_FSIZE, &limits) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let result = write.output().unwrap();
+        assert!(
+            result.status.success(),
+            "disk write failed: {:?}",
+            result.status
+        );
     }
 }
