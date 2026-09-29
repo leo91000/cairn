@@ -212,6 +212,7 @@ impl Volume {
             value = tokio::time::timeout(Duration::from_secs(1), self.needs_pause()) => value.ok().and_then(std::result::Result::ok).unwrap_or(true),
         };
         if blocked != self.paused() {
+            tracing::info!(target: "leo_performance", operation = "storage_backpressure", id = attempt, paused = blocked);
             let result = if blocked {
                 host::pause_attempt(state, attempt).await
             } else {
@@ -248,6 +249,7 @@ impl Volume {
         let mut status = self.health()?;
         status["localBytes"] = allocated(&self.directory)?.into();
         status["activeLocalBytes"] = allocated(&self.directory.join("lazy"))?.into();
+        status["performance"] = self.disk.performance();
         Ok(status)
     }
     fn health(&self) -> Result<Value> {

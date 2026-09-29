@@ -20,7 +20,8 @@ Run it on a VPS so schedules keep working when your laptop is off.
 
 The application serves one private owner workspace. The repository is public;
 your credentials, projects, task instructions, and run history stay on your server.
-There is no telemetry or external font/CDN dependency.
+There is no external telemetry or font/CDN dependency. Storage and VM performance
+timings stay in local service logs; disk I/O counters are available in storage status.
 
 Appearance is available from the top bar, the sign-in screen, and **Settings → Appearance**.
 [Theme implementation and browser QA](docs/THEMES.md) cover the palette and checks.

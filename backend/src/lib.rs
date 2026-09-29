@@ -58,4 +58,5 @@ pub mod github_projects;
 pub mod conversation_deletion;
 pub mod object_storage;
 
+mod performance;
 pub mod storage;

@@ -5,6 +5,7 @@ mod device;
 pub use device::{Disk, LocalDisk, export};
 
 mod lazy;
+pub(crate) mod metrics;
 pub use lazy::{BlockSource, LazyDisk};
 pub mod fuse;
 

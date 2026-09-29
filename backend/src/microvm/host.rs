@@ -508,6 +508,8 @@ impl Vm {
         stop: &CancellationToken,
         resources: Option<&Value>,
     ) -> Result<Self> {
+        let run_id = disk_dir.file_name().and_then(|v| v.to_str()).unwrap_or("");
+        let mut timing = crate::performance::Operation::new("vm_boot", run_id, "prepare");
         let resources: crate::nodes::Resources = serde_json::from_value(
             resources
                 .cloned()
@@ -560,6 +562,7 @@ impl Vm {
         if disk_dir.join("restore.pending").exists() {
             return Err(Error::new(409, "VM restore is incomplete."));
         }
+        timing.next("open_journal");
         let volume = crate::storage::runtime::load(&disk_dir).await?;
         use crate::storage::Disk;
         if volume.disk.size() != resources.disk_mi_b * 1024 * 1024 {
@@ -591,6 +594,7 @@ impl Vm {
         let mounted = &mut vm.mounted;
         let volume = &vm.volume;
         let operation = async {
+            timing.next("mount_and_network");
             private_dir(jail).await?;
             let target = jail.join("disk");
             private_dir(&target).await?;
@@ -602,6 +606,7 @@ impl Vm {
             tokio::fs::hard_link(image.join("root.ext4"), jail.join("root.ext4")).await?;
             tokio::fs::copy(image.join("vmlinux"), jail.join("vmlinux")).await?;
             network.create(uid).await?;
+            timing.next("spawn_and_guest_ready");
             let config = json!({
                 "boot-source":{"kernel_image_path":"vmlinux","boot_args":format!("console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/sbin/leo-init ip={}::{}:255.255.255.252:leo:eth0:off",network.guest,network.gateway)},
                 "drives":[{"drive_id":"root","path_on_host":"root.ext4","is_root_device":true,"is_read_only":true},{"drive_id":"data","path_on_host":"disk/data.ext4","is_root_device":false,"is_read_only":false,"cache_type":"Writeback"}],
@@ -688,6 +693,7 @@ impl Vm {
                 format!("{} (VM {id})", error.message),
             ));
         }
+        timing.finish();
         Ok(vm)
     }
     async fn synchronize_clock(&self) -> Result<()> {
@@ -706,6 +712,13 @@ impl Vm {
         Ok(())
     }
     pub async fn shutdown(&mut self) {
+        let id = self
+            .jail
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|v| v.to_str())
+            .unwrap_or("");
+        let mut timing = crate::performance::Operation::new("vm_shutdown", id, "guest_shutdown");
         let blocked = self
             .volume
             .as_ref()
@@ -726,6 +739,11 @@ impl Vm {
         // returns. Release remote reads and reserve waits before awaiting it.
         // All previously acknowledged disk writes remain in the durable journal.
         let volume = self.volume.take();
+        if let Some(volume) = &volume {
+            tracing::info!(target: "leo_performance", operation = "disk_io", id,
+                metrics = %volume.disk.performance(), blocked, acknowledged);
+        }
+        timing.next("wait_vmm");
         let cancel_reads = || {
             if let Some(volume) = &volume {
                 volume.stop.cancel();
@@ -750,12 +768,15 @@ impl Vm {
         for console in self.consoles.drain(..) {
             let _ = console.await;
         }
+        timing.next("unmount");
         if let Some(mounted) = self.mounted.take() {
             let _ = tokio::task::spawn_blocking(move || mounted.close()).await;
         }
+        timing.next("network_cleanup");
         self.network.remove().await;
         let _ = tokio::fs::remove_dir_all(self.jail.parent().unwrap()).await;
         self.lock.take();
+        timing.finish();
     }
     pub async fn execute(
         &mut self,
@@ -763,6 +784,11 @@ impl Vm {
         state: &Path,
         stop: CancellationToken,
     ) -> Result<i32> {
+        let mut timing = crate::performance::Operation::new(
+            "guest_prepare",
+            text(plan, "runId"),
+            "clock_and_auth",
+        );
         self.synchronize_clock().await?;
         let id = text(plan, "id");
         let vm_id = self
@@ -813,6 +839,7 @@ impl Vm {
         });
 
         let operation = async {
+            timing.next("imports");
             let status = guest_request(socket, &json!({"op":"status"})).await?;
             if status["initialized"] != true {
                 let mut imported = Vec::<(&Path, &str)>::new();
@@ -854,6 +881,7 @@ impl Vm {
             let mut guest_plan = plan.clone();
             guest_plan.as_object_mut().unwrap().remove("storage");
             wire::write(stream.get_mut(), &json!({"op":"run","plan":guest_plan})).await?;
+            timing.finish();
             let mut timer = tokio::time::interval(Duration::from_millis(500));
             let inbox = plan["imports"]
                 .as_array()

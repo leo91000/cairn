@@ -35,6 +35,7 @@ pub struct LazyDisk {
     memory: Mutex<std::collections::VecDeque<(String, Arc<Vec<u8>>)>>,
     publication: RwLock<()>,
     _lock: File,
+    metrics: super::metrics::Metrics,
 }
 
 fn validate(manifest: &Value) -> io::Result<u64> {
@@ -69,6 +70,15 @@ fn validate(manifest: &Value) -> io::Result<u64> {
 }
 
 impl LazyDisk {
+    fn identity(directory: &Path) -> &str {
+        directory
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .filter(|name| uuid::Uuid::parse_str(name).is_ok())
+            .unwrap_or("")
+    }
+
     fn node_state(&self) -> Option<&Path> {
         if self
             .directory
@@ -113,6 +123,11 @@ impl LazyDisk {
         initial: Option<(&Value, i64)>,
         source: Arc<dyn BlockSource>,
     ) -> io::Result<Self> {
+        let timing = crate::performance::Operation::new(
+            "journal_open",
+            Self::identity(directory),
+            "integrity_scan",
+        );
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         if !directory.exists() {
             std::fs::DirBuilder::new()
@@ -137,7 +152,7 @@ impl LazyDisk {
         }
         let db = Connection::open(&path).map_err(failure)?;
         db.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA auto_vacuum=FULL;",
+            "PRAGMA auto_vacuum=FULL; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
         )
         .map_err(failure)?;
         if let Some((manifest, generation)) = initial {
@@ -193,6 +208,8 @@ impl LazyDisk {
                 }
             }
         }
+        Self::reclaim_empty_legacy_journal(&db)?;
+        timing.finish();
         Ok(Self {
             directory: directory.to_owned(),
             size,
@@ -203,6 +220,7 @@ impl LazyDisk {
             memory: Mutex::new(Default::default()),
             publication: RwLock::new(()),
             _lock: lock,
+            metrics: Default::default(),
         })
     }
     fn record(row: &rusqlite::Row<'_>, size: u64) -> io::Result<(u64, Vec<u8>)> {
@@ -287,6 +305,9 @@ impl LazyDisk {
             .as_str()
             .ok_or_else(|| failure("Missing base block hash"))?;
         if let Some(bytes) = self.cached(hash)? {
+            self.metrics
+                .memory_hits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Ok(bytes);
         }
         let directory = self.directory.join("cache");
@@ -296,6 +317,9 @@ impl LazyDisk {
             let mut bytes = Vec::new();
             (&file).take(BLOCK + 1).read_to_end(&mut bytes)?;
             if bytes.len() == length && block_digest(&bytes) == hash {
+                self.metrics
+                    .disk_hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let now = std::time::SystemTime::now();
                 if file.set_modified(now).is_ok()
                     && let Some(state) = self.node_state()
@@ -306,10 +330,12 @@ impl LazyDisk {
             }
             let _ = std::fs::remove_file(&target);
         }
+        let fetch = self.metrics.remote.start();
         let bytes = self.source.fetch(hash)?;
         if bytes.len() != length || block_digest(&bytes) != hash {
             return Err(failure("Remote block integrity check failed"));
         }
+        fetch.finish(bytes.len());
         // Cache persistence is optional: it never determines whether an acknowledged
         // write survives. Refusing a cache fill must not turn a valid read into EIO.
         let _ = (|| -> io::Result<()> {
@@ -366,6 +392,30 @@ impl LazyDisk {
     }
 }
 impl LazyDisk {
+    /// Older journals enabled auto-vacuum after entering WAL mode, which left it
+    /// disabled. Convert only an empty journal: never copy unsynchronized blobs
+    /// or make startup proportional to the dirty working set.
+    fn reclaim_empty_legacy_journal(db: &Connection) -> io::Result<()> {
+        let mode: u32 = db
+            .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))
+            .map_err(failure)?;
+        if mode != 0 {
+            return Ok(());
+        }
+        let dirty: bool = db
+            .query_row("SELECT EXISTS(SELECT 1 FROM writes)", [], |r| r.get(0))
+            .map_err(failure)?;
+        if dirty {
+            return Ok(());
+        }
+        let timing =
+            crate::performance::Operation::new("journal_reclaim", "", "empty_legacy_journal");
+        db.execute_batch("PRAGMA auto_vacuum=FULL; VACUUM; PRAGMA wal_checkpoint(TRUNCATE)")
+            .map_err(failure)?;
+        timing.finish();
+        Ok(())
+    }
+
     fn read_generation(&self, generation: i64, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
         self.check(offset, bytes.len())?;
         if bytes.is_empty() {
@@ -388,6 +438,9 @@ impl LazyDisk {
                 .query(params![start, end + MAX_IO as i64, end, generation])
                 .map_err(failure)?;
             while let Some(row) = rows.next().map_err(failure)? {
+                self.metrics
+                    .journal_rows
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let (start, data) = self.cached_record(row)?;
                 let begin = (start.max(offset) - offset) as usize;
                 let end = ((start + data.len() as u64).min(offset + bytes.len() as u64) - offset)
@@ -465,12 +518,17 @@ impl Disk for LazyDisk {
         self.size
     }
     fn read_at(&self, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
+        let sample = self.metrics.reads.start();
         let _publication = self.publication.read().map_err(failure)?;
-        self.read_generation(i64::MAX, offset, bytes)
+        self.read_generation(i64::MAX, offset, bytes)?;
+        sample.finish(bytes.len());
+        Ok(())
     }
     fn write_at(&self, offset: u64, bytes: &[u8]) -> io::Result<()> {
+        let sample = self.metrics.writes.start();
         self.check(offset, bytes.len())?;
         if bytes.is_empty() {
+            sample.finish(0);
             return Ok(());
         }
         let mut db = self.db.lock().map_err(failure)?;
@@ -504,13 +562,18 @@ impl Disk for LazyDisk {
         .map_err(failure)?;
         tx.execute("UPDATE state SET next_sequence=?1 WHERE id=1", [next])
             .map_err(failure)?;
-        tx.commit().map_err(failure)
+        tx.commit().map_err(failure)?;
+        sample.finish(bytes.len());
+        Ok(())
     }
     fn sync(&self) -> io::Result<()> {
+        let sample = self.metrics.syncs.start();
         let db = self.db.lock().map_err(failure)?;
         db.execute_batch("PRAGMA wal_checkpoint(FULL)")
             .map_err(failure)?;
-        File::open(&self.directory)?.sync_all()
+        File::open(&self.directory)?.sync_all()?;
+        sample.finish(0);
+        Ok(())
     }
 }
 #[cfg(test)]

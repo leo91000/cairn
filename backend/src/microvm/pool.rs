@@ -105,6 +105,11 @@ impl Reservation {
             return Ok(143);
         }
         let operation = async {
+            let mut timing = crate::performance::Operation::new(
+                "conversation_start",
+                text(&plan, "runId"),
+                "prepare_disk",
+            );
             if !plan["storage"].is_object() {
                 return Err(Error::new(
                     409,
@@ -113,6 +118,7 @@ impl Reservation {
             }
             let size = plan["resources"]["diskMiB"].as_u64().unwrap_or(32768) * 1024 * 1024;
             crate::storage::bootstrap::prepare(&disk, size, &plan["storage"], &stop).await?;
+            timing.next("boot_vm");
             self.vm = Some(
                 Vm::boot(
                     &self.pool.state,
@@ -126,6 +132,7 @@ impl Reservation {
             );
             let vm = self.vm.as_mut().unwrap();
             let _ = socket.set(vm.socket.clone());
+            timing.finish();
             vm.execute(&plan, &self.pool.state, stop.clone()).await
         };
         // Do not drop boot or cleanup futures on cancellation: their resource ownership must drain.

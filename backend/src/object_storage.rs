@@ -34,6 +34,9 @@ pub struct HotS3 {
     reads: Semaphore,
     writes: Semaphore,
     pending: Mutex<HashMap<ReadKey, Weak<PendingRead>>>,
+    get_metrics: crate::storage::metrics::Counter,
+    put_metrics: crate::storage::metrics::Counter,
+    purge_metrics: crate::storage::metrics::Counter,
 }
 
 impl HotS3 {
@@ -43,7 +46,15 @@ impl HotS3 {
             reads: Semaphore::new(8),
             writes: Semaphore::new(HOT_WRITE_CONCURRENCY),
             pending: Mutex::new(HashMap::new()),
+            get_metrics: Default::default(),
+            put_metrics: Default::default(),
+            purge_metrics: Default::default(),
         }
+    }
+
+    pub(crate) fn performance(&self) -> Value {
+        json!({"get":self.get_metrics.snapshot(),"put":self.put_metrics.snapshot(),
+            "purgeKey":self.purge_metrics.snapshot()})
     }
 
     async fn client(&self, endpoint: Option<&str>, region: &str) -> aws_sdk_s3::Client {
@@ -325,6 +336,7 @@ impl Storage {
         format!("s3://{}/{key}", self.bucket)
     }
     pub async fn upload_bytes(&self, bytes: Vec<u8>, key: &str) -> Result<()> {
+        let sample = self.hot.put_metrics.start();
         let _permit = self.hot.writes.acquire().await.map_err(Error::internal)?;
         let client = self
             .hot
@@ -342,6 +354,7 @@ impl Storage {
             .map_err(|_| {
                 Error::new(503, "Recovery block upload failed; local data is retained.")
             })?;
+        sample.finish(bytes.len());
         self.verify_bytes(key, &bytes).await
     }
     async fn verify_bytes(&self, key: &str, bytes: &[u8]) -> Result<()> {
@@ -394,12 +407,13 @@ impl Storage {
     }
 
     async fn fetch_bytes(&self, key: &str, limit: u64) -> Result<Vec<u8>> {
+        let sample = self.hot.get_metrics.start();
         let _permit = self.hot.reads.acquire().await.map_err(Error::internal)?;
         let client = self
             .hot
             .client(self.endpoint.as_deref(), &self.region)
             .await;
-        tokio::time::timeout(Duration::from_secs(60), async {
+        let bytes = tokio::time::timeout(Duration::from_secs(60), async {
             let output = client
                 .get_object()
                 .bucket(&self.bucket)
@@ -454,12 +468,15 @@ impl Storage {
                 503,
                 "Recovery block transfer timed out; the read will retry.",
             )
-        })?
+        })??;
+        sample.finish(bytes.len());
+        Ok(bytes)
     }
     /// Collect one immutable publication object, including versions and delete markers.
     /// Exact-key filtering prevents a prefix match from deleting a sibling object.
     /// Publication uses PutObject only, so this path has no multipart uploads to abort.
     pub async fn purge_key(&self, key: &str) -> Result<()> {
+        let sample = self.hot.purge_metrics.start();
         use aws_sdk_s3::types::{Delete, ObjectIdentifier};
         let client = self
             .hot
@@ -501,6 +518,7 @@ impl Storage {
                 }
             }
             if objects.is_empty() {
+                sample.finish(0);
                 return Ok(());
             }
             {

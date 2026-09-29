@@ -1,6 +1,9 @@
 //! Durable connection context and accounting independent of the mounted view.
 use super::*;
 impl LazyDisk {
+    pub fn performance(&self) -> Value {
+        self.metrics.snapshot()
+    }
     /// Private controller context, never included in exported recovery manifests.
     pub fn set_context(&self, value: &Value) -> io::Result<()> {
         let encoded = value.to_string();
@@ -55,8 +58,18 @@ impl LazyDisk {
             .transpose()
             .map_err(failure)?
             .unwrap_or(Value::Null);
+        let pages: i64 = db
+            .query_row("PRAGMA page_count", [], |r| r.get(0))
+            .map_err(failure)?;
+        let free: i64 = db
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+            .map_err(failure)?;
+        let page_size: i64 = db
+            .query_row("PRAGMA page_size", [], |r| r.get(0))
+            .map_err(failure)?;
         Ok(
-            serde_json::json!({"dirtyBytes":dirty,"dirtySince":since,"generation":generation,"published":published}),
+            serde_json::json!({"dirtyBytes":dirty,"dirtySince":since,"generation":generation,"published":published,
+                "journalBytes":pages * page_size,"journalFreeBytes":free * page_size}),
         )
     }
 }

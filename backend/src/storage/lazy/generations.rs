@@ -20,6 +20,11 @@ impl LazyDisk {
         Ok(generation)
     }
     pub fn capture(&self, generation: i64) -> io::Result<Value> {
+        let timing = crate::performance::Operation::new(
+            "journal_capture",
+            Self::identity(&self.directory),
+            "reconstruct_blocks",
+        );
         let _publication = self.publication.read().map_err(failure)?;
         let (mut manifest, changed) = {
             let db = self.db.lock().map_err(failure)?;
@@ -31,7 +36,9 @@ impl LazyDisk {
                 )
                 .map_err(failure)?;
             if let Some(manifest) = previous {
-                return serde_json::from_str(&manifest).map_err(failure);
+                let manifest = serde_json::from_str(&manifest).map_err(failure)?;
+                timing.finish();
+                return Ok(manifest);
             }
             let manifest: String = db
                 .query_row("SELECT manifest FROM state WHERE id=1", [], |r| r.get(0))
@@ -51,6 +58,7 @@ impl LazyDisk {
                 changed,
             )
         };
+        let changed_blocks = changed.len();
         for index in changed {
             let offset = index * BLOCK;
             let mut bytes = vec![0; (self.size - offset).min(BLOCK) as usize];
@@ -69,6 +77,8 @@ impl LazyDisk {
                 params![manifest.to_string(), generation],
             )
             .map_err(failure)?;
+        tracing::info!(target: "leo_performance", operation = "journal_capture", generation, changed_blocks);
+        timing.finish();
         Ok(manifest)
     }
     pub fn captured_block(&self, generation: i64, hash: &str) -> io::Result<Vec<u8>> {
@@ -107,7 +117,10 @@ impl LazyDisk {
     /// Call only after the master has durably published every dependency and
     /// authorized reads of the new base. Completion drains readers of the old base.
     pub fn commit_published(&self, generation: i64, backup_id: &str) -> io::Result<()> {
+        let mut timing =
+            crate::performance::Operation::new("journal_publish", backup_id, "reader_lock");
         let _publication = self.publication.write().map_err(failure)?;
+        timing.next("commit");
         let mut db = self.db.lock().map_err(failure)?;
         let tx = db.transaction().map_err(failure)?;
         use rusqlite::OptionalExtension;
@@ -124,6 +137,7 @@ impl LazyDisk {
             .as_ref()
             .is_some_and(|p| serde_json::from_str::<Value>(p).is_ok_and(|p| p == receipt))
         {
+            timing.finish();
             return Ok(());
         }
         let manifest: String = tx
@@ -147,8 +161,12 @@ impl LazyDisk {
         tx.execute("INSERT INTO settings(key,value) VALUES ('published',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[receipt.to_string()]).map_err(failure)?;
         tx.commit().map_err(failure)?;
         *base = next_base;
+        timing.next("reclaim");
+        Self::reclaim_empty_legacy_journal(&db)?;
         db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
             .map_err(failure)?;
-        File::open(&self.directory)?.sync_all()
+        File::open(&self.directory)?.sync_all()?;
+        timing.finish();
+        Ok(())
     }
 }

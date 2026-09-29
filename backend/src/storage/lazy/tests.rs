@@ -11,6 +11,81 @@ use std::{
 struct Source {
     reads: AtomicUsize,
 }
+
+#[test]
+fn published_journal_reclaims_disk_space() {
+    let root = tempfile::tempdir().unwrap();
+    let source = Arc::new(Source {
+        reads: AtomicUsize::new(0),
+    });
+    let manifest = serde_json::json!({"version":1,"size":BLOCK,"blockSize":BLOCK,
+        "blocks":[{"offset":0,"size":BLOCK,"hash":null}]});
+    let disk = LazyDisk::create(root.path(), &manifest, source).unwrap();
+    disk.write_at(0, &vec![7; BLOCK as usize]).unwrap();
+    disk.sync().unwrap();
+    let before = std::fs::metadata(root.path().join("journal.sqlite"))
+        .unwrap()
+        .len();
+    let generation = disk.seal().unwrap();
+    disk.capture(generation).unwrap();
+    disk.commit_published(generation, "published").unwrap();
+    let after = std::fs::metadata(root.path().join("journal.sqlite"))
+        .unwrap()
+        .len();
+    assert!(
+        after < before / 4,
+        "published journal retained {after} of {before} bytes"
+    );
+    let mut bytes = [0; 4];
+    disk.read_at(0, &mut bytes).unwrap();
+    assert_eq!(bytes, [7; 4]);
+}
+
+#[test]
+fn legacy_journal_conversion_waits_for_all_unpublished_writes() {
+    let root = tempfile::tempdir().unwrap();
+    let source = Arc::new(Source {
+        reads: AtomicUsize::new(0),
+    });
+    let manifest = serde_json::json!({"version":1,"size":BLOCK,"blockSize":BLOCK,
+        "blocks":[{"offset":0,"size":BLOCK,"hash":null}]});
+    let disk = LazyDisk::create(root.path(), &manifest, source.clone()).unwrap();
+    disk.write_at(0, &vec![7; BLOCK as usize]).unwrap();
+    drop(disk);
+    let db = Connection::open(root.path().join("journal.sqlite")).unwrap();
+    db.execute_batch("PRAGMA auto_vacuum=NONE; VACUUM;")
+        .unwrap();
+    drop(db);
+    let disk = LazyDisk::open(root.path(), source.clone()).unwrap();
+    let mode = || {
+        disk.db
+            .lock()
+            .unwrap()
+            .query_row::<u32, _, _>("PRAGMA auto_vacuum", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(mode(), 0, "opening a dirty legacy disk must not vacuum it");
+    let first = disk.seal().unwrap();
+    disk.capture(first).unwrap();
+    disk.write_at(1, &[7]).unwrap();
+    disk.commit_published(first, "first").unwrap();
+    assert_eq!(mode(), 0, "a newer write still needs its journal");
+    let second = disk.seal().unwrap();
+    disk.capture(second).unwrap();
+    disk.commit_published(second, "second").unwrap();
+    assert_eq!(mode(), 1);
+    assert!(
+        std::fs::metadata(root.path().join("journal.sqlite"))
+            .unwrap()
+            .len()
+            < BLOCK / 4
+    );
+    drop(disk);
+    let reopened = LazyDisk::open(root.path(), source).unwrap();
+    let mut bytes = [0; 8];
+    reopened.read_at(0, &mut bytes).unwrap();
+    assert_eq!(bytes, [7; 8]);
+}
 impl BlockSource for Source {
     fn fetch(&self, _hash: &str) -> io::Result<Vec<u8>> {
         self.reads.fetch_add(1, Ordering::SeqCst);

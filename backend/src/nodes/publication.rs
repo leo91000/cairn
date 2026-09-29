@@ -86,6 +86,8 @@ fn key(run: &str, hash: &str) -> String {
 }
 pub async fn capture(s: &Service, run: &Value) -> Result<Value> {
     let result = publish(s, run).await;
+    tracing::info!(target: "leo_performance", operation = "s3_totals", id = text(run, "id"),
+        success = result.is_ok(), metrics = %s.hot_s3.performance());
     // A capture continuing from a baseline may rely on blocks the master no longer
     // holds: forget the baseline so the next capture copies the whole disk.
     if result.as_ref().is_err_and(|error| error.status != 425)
@@ -99,7 +101,10 @@ async fn forget_baseline(s: &Service, run_id: &str) -> Result<()> {
     update_status(s, run_id, json!({"snapshotId":null})).await
 }
 async fn publish(s: &Service, run: &Value) -> Result<Value> {
+    let mut timing =
+        crate::performance::Operation::new("disk_publication", text(run, "id"), "queue");
     let _operation = s.node_backup_operation.lock().await;
+    timing.next("collect_before");
     let run_id = text(run, "id");
     crate::validation::uuid(run_id)?;
     let checkpoint = s
@@ -112,6 +117,7 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
     let settings = settings(s).await?;
     let storage = crate::object_storage::Storage::configured(s)?;
     collect_unused(s, run_id).await?;
+    timing.next("snapshot");
     let base = super::transport::url(s, run_id).await?;
     let credential = crate::execution::secret(&s.config.data_dir, "runner-secret").await?;
     let capture_path = if run["status"] != "running" || run["moveRequest"]["idle"] == true {
@@ -141,6 +147,7 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
         return Err(Error::new(503, "Unable to capture a coherent VM snapshot."));
     }
     let snapshot: Value = response.json().await.map_err(Error::internal)?;
+    timing.next("prepare_upload");
     let snapshot_id = text(&snapshot, "id");
     crate::validation::uuid(snapshot_id)?;
     let result=async {
@@ -162,6 +169,7 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
             tokio::fs::File::open(parent).await?.sync_all().await?;
         }
         let mut uploads = tokio::task::JoinSet::<Result<()>>::new();
+        timing.next("transfer_blocks");
         for block in manifest["blocks"].as_array().unwrap() {
             let Some(hash)=block["hash"].as_str() else {continue};
             if !seen.insert(hash.to_owned()) {continue;}
@@ -208,6 +216,8 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
         while let Some(upload) = uploads.join_next().await {
             upload.map_err(Error::internal)??;
         }
+        tracing::info!(target: "leo_performance", operation = "disk_publication", id = run_id, uploaded_bytes = uploaded, referenced_blocks = seen.len());
+        timing.next("publish_manifest");
         value["uploadedBytes"]=uploaded.into();
         crate::skills::atomic_write(&path,&serde_json::to_vec(&value)?).await?;
         upload_verified(&storage,&path,&format!("node-backups/{run_id}/{backup_id}.json")).await?;
@@ -218,6 +228,7 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
             if current["runnerId"]!=owner_attempt || current["nodeId"]!=owner_node {return Err(Error::new(409,"Disk owner changed during publication."));}
             db.put("node-backups",&point)?;db.patch_run(&owner_run,&patch)?;Ok(())
         }).await?;
+        timing.next("acknowledge_journal");
         if manifest["onDemand"]==true {
             super::disk_grants::extend(s,text(&snapshot,"grantId"),&value).await?;
             let response=s.http.post(format!("{base}/disks/{run_id}/published")).bearer_auth(&credential).json(&json!({"generation":manifest["generation"],"backupId":backup_id,"grantId":snapshot["grantId"]})).timeout(Duration::from_secs(120)).send().await.map_err(|_|Error::new(503,"Disk publication acknowledgement interrupted."))?;
@@ -227,9 +238,13 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
             // journal counters so their UI does not retain an old dirty count.
             let _ = super::storage::refresh(s, run).await;
         }
+        timing.next("collect_after");
         collect_unused(s,run_id).await?;
         Ok(public(value))
     }.await;
+    if result.is_ok() {
+        timing.next("discard_snapshot");
+    }
     let _ = s
         .http
         .delete(format!("{base}/snapshots/{snapshot_id}/discard"))
@@ -237,6 +252,9 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
         .timeout(Duration::from_secs(20))
         .send()
         .await;
+    if result.is_ok() {
+        timing.finish();
+    }
     result
 }
 
@@ -506,7 +524,9 @@ pub async fn collect(s: &Service, run: &str) -> Result<()> {
 }
 
 async fn collect_unused(s: &Service, run: &str) -> Result<()> {
+    let mut timing = crate::performance::Operation::new("disk_collection", run, "reader_lock");
     let _readers = s.node_disk_reads.write().await;
+    timing.next("inventory");
     let pinned = super::disk_grants::pinned(s, run).await?;
     let _guard = s.node_backup_lock.lock().await;
     let points = s.store.node_backups_for_run(run).await?;
@@ -551,6 +571,7 @@ async fn collect_unused(s: &Service, run: &str) -> Result<()> {
     // unrelated mounted disks can keep reading while S3 cleanup is slow.
     drop(_guard);
     drop(_readers);
+    timing.next("delete_objects");
     for point in points.iter().filter(|p| !keep.contains(text(p, "id"))) {
         let point_id = text(point, "id").to_owned();
         if point["destination"] == "s3" && !root(s, run).join(format!("{point_id}.json")).exists() {
@@ -622,6 +643,7 @@ async fn collect_unused(s: &Service, run: &str) -> Result<()> {
             tokio::fs::remove_file(entry.path()).await?;
         }
     }
+    timing.finish();
     Ok(())
 }
 

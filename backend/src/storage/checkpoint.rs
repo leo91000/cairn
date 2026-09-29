@@ -20,9 +20,11 @@ pub async fn capture(
     stop: CancellationToken,
     attempt: &str,
 ) -> Result<Value> {
+    let mut timing = crate::performance::Operation::new("disk_snapshot", run, "open_journal");
     let directory = state.join("disks").join(run);
     let volume = super::runtime::load(&directory).await?;
     let _stopped_reads = socket.is_none().then(|| volume.stop.clone().drop_guard());
+    timing.next("control_lock");
     let guard = control.lock().await;
     if stop.is_cancelled() {
         return Err(Error::new(409, "VM stopped during capture."));
@@ -38,6 +40,8 @@ pub async fn capture(
     }
     let mut emergency = waiting.is_some();
     let mut frozen = false;
+    let paused_at = std::time::Instant::now();
+    timing.next("freeze_and_pause");
     if let Some(socket) = &socket {
         if !emergency {
             let reply = tokio::time::timeout(
@@ -84,6 +88,7 @@ pub async fn capture(
         }
     }
     let captured_at = crate::config::now();
+    timing.next("seal_and_resume");
     let generation = volume.seal().await;
     if socket.is_some() && !stop.is_cancelled() && !emergency {
         if let Err(error) = host::resume_attempt(state, attempt).await {
@@ -96,6 +101,7 @@ pub async fn capture(
     // Guest thaw can itself wait on remote I/O. Leave lease enforcement and
     // storage pause/resume free to operate while the ordered thaw is pending.
     drop(guard);
+    timing.next("thaw");
     if frozen {
         if emergency {
             let socket = socket.as_ref().unwrap().clone();
@@ -107,12 +113,26 @@ pub async fn capture(
             thaw(socket.as_ref().unwrap(), &stop).await?;
         }
     }
+    // An emergency capture leaves the guest paused until protection recovers;
+    // its final pause duration is not known when this manifest is constructed.
+    let pause_ms = if socket.is_none() {
+        json!(0)
+    } else if emergency {
+        Value::Null
+    } else {
+        json!(paused_at.elapsed().as_millis() as u64)
+    };
     let generation = generation?;
+    timing.next("reconstruct_manifest");
+    let indexed_at = std::time::Instant::now();
     let disk = volume.disk.clone();
     let mut manifest = tokio::select! {
         _ = stop.cancelled() => return Err(Error::new(409, "Disk capture stopped.")),
         result = tokio::task::spawn_blocking(move || disk.capture(generation)) => result.map_err(Error::internal)??,
     };
+    manifest["indexMs"] = (indexed_at.elapsed().as_millis() as u64).into();
+    manifest["pauseMs"] = pause_ms;
+    timing.next("persist_snapshot");
     manifest["runtime"] =
         serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
     manifest["capturedAt"] = captured_at.into();
@@ -128,6 +148,7 @@ pub async fn capture(
         &serde_json::to_vec(&manifest)?,
     )
     .await?;
+    timing.finish();
     Ok(json!({"id":id,"manifest":manifest,"grantId":volume.source.grant_id()}))
 }
 async fn thaw(socket: &Path, stop: &CancellationToken) -> Result<()> {
