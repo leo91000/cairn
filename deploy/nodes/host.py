@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -18,6 +19,7 @@ NAME = 'leo-execution-node'
 STOP = False
 STOP_AT = None
 IMAGE = re.compile(r'^[a-z0-9][a-z0-9./:_-]*@sha256:[a-f0-9]{64}$')
+HEALTH_CHECK = "fetch('http://127.0.0.1:4311/health').then(r=>{if(!r.ok)throw Error();return r.json()}).then(v=>{if(v.status!=='ok'||v.nodeProtocol!==2||!(v.pool?.capacity>0))process.exit(1)}).catch(()=>process.exit(1))"
 
 
 def atomic(path, value):
@@ -129,6 +131,7 @@ def launch(image):
         raise ValueError('Invalid immutable image')
     remove()
     command(['docker', 'run', '-d', '--name', NAME, '--init', '--user', '0:0', '--read-only',
+             '--health-cmd', '/usr/local/bin/node -e ' + shlex.quote(HEALTH_CHECK),
              '--restart=unless-stopped', '--label', 'dev.leo.node.owner=' + json.loads((ROOT / 'data/node/identity.json').read_text())['nodeId'], '--cap-drop=ALL', *['--cap-add=' + cap for cap in ('SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE')],
              '--security-opt=apparmor:unconfined', '--security-opt=seccomp:unconfined',
              '--device=/dev/kvm', '--device=/dev/net/tun', *(['--device=/dev/fuse'] if Path('/dev/fuse').exists() else []), '--sysctl=net.ipv4.ip_forward=1',
@@ -142,7 +145,7 @@ def launch(image):
     while time.monotonic() < deadline and not STOP:
         try:
             command(['docker', 'exec', NAME, '/usr/local/bin/node', '-e',
-                     "fetch('http://127.0.0.1:4311/health').then(r=>r.json()).then(v=>{if(v.nodeProtocol!==2||v.pool.ready+v.pool.occupied<1)process.exit(1)}).catch(()=>process.exit(1))"], timeout=5)
+                     HEALTH_CHECK], timeout=5)
             return
         except RuntimeError:
             state = container()
