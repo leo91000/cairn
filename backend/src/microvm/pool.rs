@@ -74,6 +74,11 @@ impl Pool {
             tokio::fs::remove_dir_all(&prepared).await?;
         }
         private_dir(&state.join("disks")).await?;
+        // Retain the guest OS and toolchains, but never pin the chat adapter to
+        // an obsolete image. Copy once per controller, then import into tmpfs.
+        let entrypoint = state.join("entrypoint");
+        private_dir(&entrypoint).await?;
+        tokio::fs::copy(std::env::current_exe()?, entrypoint.join("leo")).await?;
         Ok(Arc::new(Self {
             capacity,
             state,

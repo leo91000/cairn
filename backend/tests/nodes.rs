@@ -878,6 +878,117 @@ async fn concurrent_admission_reserves_capacity_once_and_preserves_agent_grants(
 }
 
 #[tokio::test]
+async fn queued_automatic_conversations_reserve_another_node_without_discarding_the_source() {
+    let owner = Owner::new().await;
+    let (run, agent, source, destination) = (id(), id(), id(), id());
+    for (node, cpu) in [(&source, 1), (&destination, 12)] {
+        let mut record = schedulable_node(node, &limits(cpu, 32768, 131072));
+        record["runtimes"] = json!(["fixture"]);
+        owner.put("nodes", record).await;
+    }
+    owner
+        .grant_nodes(&agent, json!([source, destination]))
+        .await;
+    let mut record = run_record(&run, RunStatus::Queued);
+    record["snapshot"] = json!({ "agent": { "id": agent } });
+    record["resources"] = limits(4, 12288, 65536);
+    record["nodeId"] = source.clone().into();
+    owner.add_run(&record).await;
+    owner
+        .set_checkpoint(&run, json!({ "nodeId": source, "runtimeId": "fixture" }))
+        .await;
+    assert!(placement::is_no_capacity(
+        &placement::check(&owner.service, &record).await.unwrap_err()
+    ));
+    assert!(
+        moves::queue_capacity_move(&owner.service, &record)
+            .await
+            .unwrap()
+    );
+    let pending = owner.run(&run).await;
+    assert_eq!(
+        pending["nodeId"], source,
+        "source stays authoritative until transfer completes"
+    );
+    assert_eq!(pending["moveRequest"]["nodeId"], destination);
+    assert_eq!(
+        pending["moveRequest"]["automatic"], false,
+        "capture the latest source disk, never use a stale backup"
+    );
+    assert!(pending["moveRequest"]["backupId"].is_null());
+    assert_eq!(pending["recoveryPending"], true);
+    let reservation = pending["moveRequest"]["reservation"].as_str().unwrap();
+    assert_eq!(
+        owner.stored("node-attempts", reservation).await.unwrap()["released"],
+        false
+    );
+    assert!(
+        !moves::queue_capacity_move(&owner.service, &pending)
+            .await
+            .unwrap()
+    );
+    let mut cancelled = pending;
+    cancelled["cancelRequestedAt"] = now().into();
+    assert!(moves::advance(&owner.service, &cancelled).await.unwrap());
+}
+
+#[tokio::test]
+async fn capacity_moves_keep_pinned_unauthorized_and_running_conversations_in_place() {
+    let owner = Owner::new().await;
+    let (run, agent, source, destination) = (id(), id(), id(), id());
+    owner
+        .put(
+            "nodes",
+            schedulable_node(&source, &limits(1, 32768, 131072)),
+        )
+        .await;
+    owner
+        .put(
+            "nodes",
+            schedulable_node(&destination, &limits(12, 32768, 131072)),
+        )
+        .await;
+    owner.grant_nodes(&agent, json!([source])).await;
+    let mut record = run_record(&run, RunStatus::Queued);
+    record["snapshot"] = json!({ "agent": { "id": agent } });
+    record["resources"] = limits(4, 12288, 65536);
+    owner.add_run(&record).await;
+    owner
+        .set_checkpoint(&run, json!({ "nodeId": source }))
+        .await;
+    assert!(
+        !moves::queue_capacity_move(&owner.service, &record)
+            .await
+            .unwrap()
+    );
+    owner
+        .grant_nodes(&agent, json!([source, destination]))
+        .await;
+    record["pinnedNodeId"] = source.clone().into();
+    assert!(
+        !moves::queue_capacity_move(&owner.service, &record)
+            .await
+            .unwrap()
+    );
+    record["pinnedNodeId"] = Value::Null;
+    record["status"] = RunStatus::Running.into();
+    assert!(
+        !moves::queue_capacity_move(&owner.service, &record)
+            .await
+            .unwrap()
+    );
+    assert!(
+        owner
+            .service
+            .store
+            .list("node-attempts")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn retained_s3_disks_charge_local_cache_and_cancellation_releases_destination() {
     let owner = Owner::new().await;
     let (node, agent, run, attempt) = (id(), id(), id(), id());
@@ -2040,6 +2151,12 @@ fn movement_controller(
             if request.method() == "DELETE" {
                 return Json(json!({ "ok": true })).into_response();
             }
+            if route.ends_with("/storage-status") {
+                let volume = runtime::load(&state.join("disks").join(&run))
+                    .await
+                    .unwrap();
+                return Json(volume.status().unwrap()).into_response();
+            }
             if route.ends_with("/snapshot") {
                 assert_eq!(
                     route,
@@ -2184,6 +2301,7 @@ async fn connect_node(
     enrolled["revoked"] = false.into();
     enrolled["runtimeId"] = "fixture".into();
     enrolled["runtimeIds"] = json!(["fixture"]);
+    enrolled["runtimes"] = json!(["fixture"]);
     enrolled["storage"] = json!(small_reserve());
     owner.put("nodes", enrolled).await;
     owner.authorize_node(node, &token).await;
@@ -2343,6 +2461,112 @@ async fn pending_movement_retries_a_lost_stop_without_stopping_a_later_execution
     moves::pause_pending(&owner.service, &run).await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     server.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires loopback S3; run tests/node_s3_test.py"]
+async fn queued_capacity_transfer_carries_unpublished_writes_and_keeps_the_source_after_failure() {
+    let (listener, address) = common::bind().await;
+    let owner = Owner::at(address.to_string()).await;
+    let (run, agent, source, destination, attempt) = (id(), id(), id(), id(), id());
+    owner
+        .grant_nodes(&agent, json!([source, destination]))
+        .await;
+    let mut record = run_record(&run, RunStatus::Queued);
+    record["isolated"] = true.into();
+    record["sessionId"] = "retained-session".into();
+    record["nodeId"] = source.clone().into();
+    record["resources"] = limits(2, 512, 128);
+    record["snapshot"] = json!({ "agent": { "id": agent } });
+    owner.add_run(&record).await;
+    owner
+        .set_checkpoint(
+            &run,
+            json!({
+                "nodeId": source,
+                "runnerId": attempt,
+                "runtimeId": "fixture",
+                "prepared": { "backend": "firecracker", "isolated": true },
+            }),
+        )
+        .await;
+    let stop = CancellationToken::new();
+    let faults = MoveFaults {
+        failed: Arc::new(AtomicBool::new(true)),
+        cancel_during_capture: Arc::new(AtomicBool::new(false)),
+    };
+    let mut tasks = Vec::new();
+    for node in [&source, &destination] {
+        tasks.extend(
+            connect_node(
+                &owner,
+                &record,
+                node,
+                address,
+                &faults,
+                &stop,
+                node == &source,
+            )
+            .await,
+        );
+    }
+    tasks.push(owner.serve(listener));
+    let mut busy = agent_run(&id(), &agent);
+    busy["pinnedNodeId"] = source.clone().into();
+    busy["resources"] = limits(1, 128, 128);
+    placement::reserve(&owner.service, &busy, &id())
+        .await
+        .unwrap();
+    for fail in [true, false] {
+        faults.failed.store(fail, Ordering::SeqCst);
+        let current = owner.run(&run).await;
+        assert!(
+            moves::queue_capacity_move(&owner.service, &current)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !moves::advance(&owner.service, &owner.run(&run).await)
+                .await
+                .unwrap()
+        );
+        let current = owner.run(&run).await;
+        assert_eq!(
+            current["nodeId"],
+            if fail {
+                source.as_str()
+            } else {
+                destination.as_str()
+            }
+        );
+        assert_eq!(current["status"], RunStatus::Queued);
+        if fail {
+            assert!(current["movementError"].is_string());
+            assert!(current["moveRequest"].is_null());
+        } else {
+            assert!(current["movementError"].is_null());
+            assert_eq!(current["sessionId"], "retained-session");
+        }
+        let node = if fail { &source } else { &destination };
+        let directory = owner.root().join(node).join("disks").join(&run);
+        let volume = runtime::load(&directory).await.unwrap();
+        let bytes = tokio::task::spawn_blocking(move || {
+            let mut bytes = vec![0; MOVED_CONTENTS.len()];
+            volume.read_at(0, &mut bytes).unwrap();
+            bytes
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            bytes, MOVED_CONTENTS,
+            "all previously unpublished data preserved on {node}"
+        );
+    }
+    assert!(owner.root().join(&source).join("disks").join(&run).exists());
+    stop.cancel();
+    for task in tasks {
+        task.abort();
+    }
 }
 
 #[tokio::test]

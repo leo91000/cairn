@@ -160,6 +160,18 @@ and updates independently; the deployment check does not wait for every remote
 node to finish. Production still needs working S3 credentials and `/dev/fuse`
 on each node host.
 
+Retained VM disks keep their original kernel, guest OS and installed toolchains.
+At each attempt the controller imports its current Leo runner into guest `/run`
+and launches that program, so chat adapter fixes also reach old conversations.
+This does not replace the saved filesystem or provider session. Custom probe
+commands remain unchanged. The controller and retained guest must use compatible
+binary dependencies; the published images share the Debian Bookworm runtime.
+
+Automatic placement can move a queued conversation when its original node lacks
+CPU or memory and another authorized node has room. The destination is reserved,
+the source execution is fenced, and its current disk is published before restore.
+Failure retains the source disk; a fixed placement waits for its chosen node.
+
 To release the current main commit, choose an unused version tag:
 
 ```sh

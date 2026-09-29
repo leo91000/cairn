@@ -372,7 +372,11 @@ impl Rpc {
         };
         let result = tokio::time::timeout(Duration::from_secs(20), result)
             .await
-            .unwrap_or_else(|_| Err(Error::gateway_timeout("Codex account request timed out.")));
+            .unwrap_or_else(|_| {
+                Err(Error::gateway_timeout(format!(
+                    "Codex {method} request timed out."
+                )))
+            });
         self.pending.lock().await.remove(&id);
         result
     }

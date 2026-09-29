@@ -2,7 +2,7 @@
 use super::{
     host::{self, call, connect, import, valid_runtime_name},
     network::Network,
-    plan::{CHAT_INBOX, HOME, Import, Plan},
+    plan::{CHAT_INBOX, ENTRYPOINT, HOME, Import, Plan},
     protocol::{Event, GuestRequest, GuestStatus, Reply},
     wire,
 };
@@ -495,6 +495,11 @@ impl Vm {
                 refresh_imports(socket, plan).await?;
             } else {
                 import_workspace(socket, plan).await?;
+            }
+            if plan.command().is_none() {
+                timing.next("current_entrypoint");
+                let target = Path::new(ENTRYPOINT).parent().unwrap().to_str().unwrap();
+                host::import(socket, &state.join("entrypoint"), target).await?;
             }
             run(socket, plan, state, timing).await
         };

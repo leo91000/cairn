@@ -233,7 +233,12 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
         required_tags: Some(&selecting["requiredTags"]),
         backup_id: None,
     })?;
-    if let Err(error) = record_request(s, run_id, move_request, idle).await {
+    let expected = if idle {
+        RunStatus::Succeeded
+    } else {
+        RunStatus::Running
+    };
+    if let Err(error) = record_request(s, run_id, move_request, idle, expected).await {
         super::placement::release(s, &reservation).await?;
         return Err(error);
     }
@@ -303,21 +308,23 @@ async fn wait_for_capacity(
 }
 
 /// Records the move unless the conversation changed while capacity was reserved.
-async fn record_request(s: &Service, run_id: &str, move_request: Value, idle: bool) -> Result<()> {
+async fn record_request(
+    s: &Service,
+    run_id: &str,
+    move_request: Value,
+    idle: bool,
+    expected: RunStatus,
+) -> Result<()> {
     let owner = run_id.to_owned();
     s.store
         .transaction(move |db| {
             let current = db
                 .run(&owner)?
                 .ok_or_else(|| Error::not_found("Conversation removed."))?;
-            let expected = if idle {
-                RunStatus::Succeeded
-            } else {
-                RunStatus::Running
-            };
             if current["moveRequest"].is_object()
                 || !current["cancelRequestedAt"].is_null()
                 || current["status"] != expected
+                || (expected == RunStatus::Queued && current["pinnedNodeId"].is_string())
             {
                 return Err(Error::conflict(
                     "Conversation changed while reserving capacity.",
@@ -329,7 +336,7 @@ async fn record_request(s: &Service, run_id: &str, move_request: Value, idle: bo
                 "moveRequest": move_request,
                 "nodeState": NodeState::Pausing,
             });
-            if idle {
+            if idle || expected == RunStatus::Queued {
                 patch["status"] = RunStatus::Queued.into();
                 patch["recoveryPending"] = true.into();
             }
@@ -401,6 +408,63 @@ enum Recovery {
 }
 
 const WAITING_TITLE: &str = "Conversation waiting for its node";
+
+/// Plans a lossless move of queued work when its retained node has no room.
+pub async fn queue_capacity_move(s: &Service, run: &Value) -> Result<bool> {
+    if run["status"] != RunStatus::Queued
+        || run["pinnedNodeId"].is_string()
+        || run["moveRequest"].is_object()
+        || !run["cancelRequestedAt"].is_null()
+    {
+        return Ok(false);
+    }
+    let run_id = text(run, "id");
+    let checkpoint = super::checkpoint(s, run_id).await?;
+    let Some(source) = checkpoint["nodeId"].as_str() else {
+        return Ok(false);
+    };
+    // A normal resume still prefers the intact local disk. Only a capacity
+    // shortage starts a full, fenced transfer; unavailable nodes use recovery.
+    match super::placement::check(s, run).await {
+        Err(error) if super::placement::is_no_capacity(&error) => {}
+        _ => return Ok(false),
+    }
+    let mut selecting = run.clone();
+    selecting["placementTransition"] = true.into();
+    let reservation = id();
+    let selected = match super::placement::reserve(s, &selecting, &reservation).await {
+        Ok(selected) => selected,
+        Err(error) if super::placement::is_no_capacity(&error) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if selected["nodeId"] == source {
+        super::placement::release(s, &reservation).await?;
+        return Ok(false);
+    }
+    let movement = serde_json::to_value(MoveRequest {
+        reservation: &reservation,
+        node_id: &selected["nodeId"],
+        resources: &selected["resources"],
+        requested_at: None,
+        // Healthy source: capture all current writes after fencing, rather than
+        // restoring an older published recovery point.
+        automatic: false,
+        idle: None,
+        required_tags: None,
+        backup_id: None,
+    })?;
+    if let Err(error) = record_request(s, run_id, movement, false, RunStatus::Queued).await {
+        super::placement::release(s, &reservation).await?;
+        return Err(error);
+    }
+    s.store.event(
+        run_id,
+        "status",
+        "The current node has no capacity. Saving the full environment before resuming on another authorized node.",
+        None,
+    ).await?;
+    Ok(true)
+}
 
 async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
     let run_id = text(current, "id");

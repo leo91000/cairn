@@ -111,6 +111,11 @@ impl Worker {
             if let Err(error) = crate::nodes::placement::check(s, &current).await
                 && error.is_unavailable()
             {
+                if crate::nodes::placement::is_no_capacity(&error)
+                    && crate::nodes::moves::queue_capacity_move(s, &current).await?
+                {
+                    return Ok(());
+                }
                 return report_capacity_wait(s, &current, &error.message).await;
             }
         }

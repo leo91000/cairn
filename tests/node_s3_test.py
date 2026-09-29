@@ -54,7 +54,7 @@ def main():
                        cwd=Path(__file__).resolve().parents[1], env=env, check=True)
         remaining = client.list_objects_v2(Bucket='leo-node-test')
         assert remaining.get('KeyCount', 0) == 0, 'Conversation purge must remove all remote recovery objects'
-        for case in ['idle_conversations_move_twice', 'active_captures_name', 'obsolete_object_collection', 'interrupted_first_publication', 'shared_publications']:
+        for case in ['idle_conversations_move_twice', 'queued_capacity_transfer', 'active_captures_name', 'obsolete_object_collection', 'interrupted_first_publication', 'shared_publications']:
             subprocess.run(['pnpm', 'test:backend', '--test', 'nodes', case, '--', '--ignored'],
                            cwd=Path(__file__).resolve().parents[1], env=env, check=True)
 

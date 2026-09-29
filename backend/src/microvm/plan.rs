@@ -7,6 +7,8 @@ use std::path::Path;
 pub const HOME: &str = "/home/node";
 /// Volatile chat inbox refreshed during a run.
 pub const CHAT_INBOX: &str = "/run/leo-chat";
+/// Volatile runner code supplied by the current controller, outside the saved disk.
+pub const ENTRYPOINT: &str = "/run/leo-entrypoint/leo";
 
 /// Typed view of the plan document. The document itself is forwarded unchanged
 /// (except for storage credentials) to the guest entrypoint.
@@ -108,7 +110,30 @@ impl Plan {
         let mut plan = self.0.clone();
         if let Some(plan) = plan.as_object_mut() {
             plan.remove("storage");
+            if self.command().is_none() {
+                plan.insert(
+                    "command".into(),
+                    serde_json::json!([ENTRYPOINT, "runner-entry"]),
+                );
+            }
         }
         plan
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn retained_guests_use_current_runner_code_without_exposing_storage_or_overwriting_commands() {
+        let plan = Plan::new(json!({ "id": "attempt", "storage": { "grant": "private" } }));
+        let guest = plan.for_guest();
+        assert_eq!(guest["command"], json!([ENTRYPOINT, "runner-entry"]));
+        assert!(guest.get("storage").is_none());
+        assert!(plan.as_value().get("command").is_none());
+        let custom = Plan::new(json!({ "command": ["/usr/local/bin/node", "probe.mjs"] }));
+        assert_eq!(custom.for_guest()["command"], custom.as_value()["command"]);
     }
 }

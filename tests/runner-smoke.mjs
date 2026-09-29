@@ -14,6 +14,7 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
+import { entrypointSmoke } from './runner-entrypoint-smoke.mjs'
 import { prepareStorageOrigin, storageSmoke } from './runner-storage-smoke.mjs'
 
 async function main() {
@@ -329,6 +330,8 @@ console.log('probe.done');
       await api(`/runs/${id}`, 'DELETE')
       process.stdout.write(`${JSON.stringify({ mode, durationMs: Date.now() - start, status: 'passed' })}\n`)
     }
+
+    await entrypointSmoke({ root, api, storage })
 
     // Independent disks must run concurrently and enforce each guest policy.
     const probes = []
