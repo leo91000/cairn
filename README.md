@@ -35,7 +35,10 @@ See [microVM requirements and architecture](docs/MICROVMS.md).
 ```sh
 cp .env.example .env
 # Set PUBLIC_URL to your HTTPS origin when deploying behind a reverse proxy.
-docker compose up -d --build
+codex_version=$(npm view @openai/codex version)
+gh_version=$(gh api repos/cli/cli/releases/latest --jq '.tag_name | ltrimstr("v")')
+docker compose build --build-arg CODEX_VERSION="$codex_version" --build-arg GH_VERSION="$gh_version"
+docker compose up -d
 # Read the generated bootstrap token locally; enter it in the setup screen.
 docker compose exec manager cat /data/setup-token
 ```

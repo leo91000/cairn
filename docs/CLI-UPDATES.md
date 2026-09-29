@@ -19,12 +19,15 @@ three browser engines, and exercises runner authentication, isolation, sandbox
 write denial, output streaming, and cancellation. Failed candidates are not deployed.
 Candidate images have `cli-RUN-ATTEMPT` tags; these are not application releases.
 
-Before deployment, a short authenticated lease pauses new task starts. If an agent
-is already running, the workflow releases the lease and defers until the next check.
-It also defers if an application release changed production during the build.
-Newly queued tasks wait while an idle deployment completes. The lease is stored in
-SQLite, survives container replacement, and expires after 20 minutes if the updater
-crashes. Existing active work is never cancelled by a CLI update.
+Before deployment, a short authenticated lease pauses new task starts. Active
+conversations pause during the container restart and resume automatically after
+the lease is released, using their saved workspace and session. An active agent
+does not defer an update. The workflow still defers if an application release
+changed production during the build. Newly queued tasks wait during deployment.
+The lease is stored in SQLite, survives container replacement, and expires after
+20 minutes if the updater
+crashes. An interrupted shell command may need repair after recovery; see
+[restart recovery](RESTART-RECOVERY.md).
 
 The updater verifies both the application commit and a unique runtime ID, so an
 old container with the same app version cannot falsely satisfy the health check.
@@ -70,8 +73,15 @@ use the generated name, such as `manager-SERVICE_UUID`.
 
 To pause automatic updates, run `sudo systemctl disable --now leo-cli-update.timer`.
 The workflow can still be triggered manually from Actions. Normal app version tags
-continue to deploy their own validated image with the CLI versions pinned in the
-Dockerfile; the next daily check updates those tools when newer versions exist.
+continue to deploy their own validated image. Every CI run, including every tag
+release, resolves the latest stable Codex and GitHub CLI versions before deciding
+whether to reuse an image. There are no default Codex/GitHub CLI version numbers
+in the Dockerfile. The resolved versions are passed to the build and recorded in
+its validation evidence. A tag reuses the tested image for its exact commit only
+when both tool versions match the latest discovery; otherwise it builds and tests
+a fresh image. Tools never change after image validation.
+Direct Docker builds must pass the resolved `CODEX_VERSION` and `GH_VERSION` build
+arguments. For local Compose, see [deployment setup](DEPLOYMENT.md).
 Application version tags remain immutable.
 
 Sources: [Codex CLI](https://learn.chatgpt.com/docs/codex/cli),

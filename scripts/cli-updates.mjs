@@ -3,7 +3,6 @@ import { randomUUID } from 'node:crypto'
 import { appendFile, readFile, writeFile } from 'node:fs/promises'
 import process from 'node:process'
 import { newerTool } from '../deploy/toolkit/versions.mjs'
-import { deploy } from './deploy-coolify.mjs'
 
 const stable = /^\d+\.\d+\.\d+$/
 export function newer(current, available) {
@@ -43,18 +42,33 @@ export async function currentImage(config) {
   return validImage(image?.value, config.repository)
 }
 
+async function latestVersions(current, { request = json, githubToken } = {}) {
+  const [codex, github] = await Promise.all([
+    request('https://registry.npmjs.org/@openai/codex/latest'),
+    request('https://api.github.com/repos/cli/cli/releases/latest', { headers: { Accept: 'application/vnd.github+json', ...(githubToken ? { authorization: `Bearer ${githubToken}` } : {}) } }),
+  ])
+  if (github.draft || github.prerelease)
+    throw new Error('GitHub CLI latest release is not stable.')
+
+  const versions = { codex: codex.version, gh: github.tag_name?.replace(/^v/, '') }
+  for (const [tool, version] of Object.entries(versions))
+    versions[tool] = newer(current ? current[tool] : version, version)
+
+  return versions
+}
+
+export async function buildVersions(options) {
+  return latestVersions(null, options)
+}
+
 export async function discover(config) {
-  const [image, health, codex, github] = await Promise.all([
+  const [image, health] = await Promise.all([
     currentImage(config),
     json(`${config.publicUrl}/health`),
-    json('https://registry.npmjs.org/@openai/codex/latest'),
-    json('https://api.github.com/repos/cli/cli/releases/latest', { headers: { Accept: 'application/vnd.github+json', ...(config.githubToken ? { authorization: `Bearer ${config.githubToken}` } : {}) } }),
   ])
   if (health.status !== 'ok' || !/^[a-f0-9]{40}$/.test(health.commit) || !health.runtimeId)
     throw new Error('The deployed application does not report its runtime identity. Deploy the CLI updater release first.')
-  if (github.draft || github.prerelease)
-    throw new Error('GitHub CLI latest release is not stable.')
-  const versions = { codex: newer(health.tools?.codex, codex.version), gh: newer(health.tools?.gh, github.tag_name?.replace(/^v/, '')) }
+  const versions = await latestVersions(health.tools ?? {}, config)
   return {
     installedToolkit: health.toolkit || null,
     image,
@@ -67,15 +81,14 @@ export async function discover(config) {
 }
 
 export async function deployUpdate(config, plan, image, options = { timeoutMs: 300000 }) {
+  const { deploy } = await import('./deploy-coolify.mjs')
   validImage(image, config.repository)
   const owner = randomUUID()
   const lease = method => json(`${config.publicUrl}/internal/deployment-lease`, { method, headers: { 'authorization': `Bearer ${config.maintenanceToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ owner }) })
   if (await currentImage(config) !== plan.image)
     return { deployed: false, reason: 'Deployment changed while this update was being tested. Retry on the next check.' }
-  const paused = await lease('POST')
+  await lease('POST')
   try {
-    if (paused.activeRuns !== 0)
-      return { deployed: false, reason: 'An agent is running. Update deferred; queued work can continue.' }
     const health = await json(`${config.publicUrl}/health`)
     if (health.commit !== plan.commit || health.runtimeId !== plan.previousRuntimeId || await currentImage(config) !== plan.image)
       return { deployed: false, reason: 'Runtime changed before deployment. Update deferred.' }
@@ -150,34 +163,42 @@ function configuration() {
 
 if (import.meta.main) {
   try {
-    const config = configuration()
-    if (process.argv[2] === 'check') {
-      const plan = await discover(config)
-      if (plan.installedToolkit) {
-        const available = JSON.parse(execFileSync('docker', ['run', '--rm', '--env', 'GITHUB_TOKEN', '--entrypoint', '/usr/local/bin/node', plan.image, '/opt/leo-toolkit/manage.mjs', 'resolve'], {
-          env: { ...process.env, GITHUB_TOKEN: config.githubToken || '' },
-          encoding: 'utf8',
-          timeout: 240000,
-          maxBuffer: 1024 * 1024,
-        }))
-        Object.assign(plan, toolkitUpdate(plan, available))
-      }
-
-      await writeFile('cli-update-plan.json', JSON.stringify(plan, null, 2))
+    if (process.argv[2] === 'build-versions') {
+      const versions = await buildVersions({ githubToken: process.env.GH_TOKEN })
       if (process.env.GITHUB_OUTPUT)
-        await appendFile(process.env.GITHUB_OUTPUT, `changed=${plan.changed}\nbase_image=${plan.baseImage}\ncommit=${plan.commit}\ncodex=${plan.versions.codex}\ngh=${plan.versions.gh}\n`)
-      console.log(JSON.stringify({ changed: plan.changed, versions: plan.versions, commit: plan.commit }))
-    }
-    else if (process.argv[2] === 'deploy') {
-      if (!config.maintenanceToken || !/^cli-\d+-\d+$/.test(config.runtimeId))
-        throw new Error('Missing maintenance credential or invalid update identity.')
-      const result = await deployUpdate(config, JSON.parse(await readFile('cli-update-plan.json', 'utf8')), process.env.UPDATE_IMAGE)
-      console.log(JSON.stringify(result))
-      if (process.env.GITHUB_STEP_SUMMARY)
-        await appendFile(process.env.GITHUB_STEP_SUMMARY, `CLI update: ${JSON.stringify(result)}\n`)
+        await appendFile(process.env.GITHUB_OUTPUT, `codex=${versions.codex}\ngh=${versions.gh}\n`)
+      console.log(JSON.stringify(versions))
     }
     else {
-      throw new Error('Usage: cli-updates.mjs check|deploy')
+      const config = configuration()
+      if (process.argv[2] === 'check') {
+        const plan = await discover(config)
+        if (plan.installedToolkit) {
+          const available = JSON.parse(execFileSync('docker', ['run', '--rm', '--env', 'GITHUB_TOKEN', '--entrypoint', '/usr/local/bin/node', plan.image, '/opt/leo-toolkit/manage.mjs', 'resolve'], {
+            env: { ...process.env, GITHUB_TOKEN: config.githubToken || '' },
+            encoding: 'utf8',
+            timeout: 240000,
+            maxBuffer: 1024 * 1024,
+          }))
+          Object.assign(plan, toolkitUpdate(plan, available))
+        }
+
+        await writeFile('cli-update-plan.json', JSON.stringify(plan, null, 2))
+        if (process.env.GITHUB_OUTPUT)
+          await appendFile(process.env.GITHUB_OUTPUT, `changed=${plan.changed}\nbase_image=${plan.baseImage}\ncommit=${plan.commit}\ncodex=${plan.versions.codex}\ngh=${plan.versions.gh}\n`)
+        console.log(JSON.stringify({ changed: plan.changed, versions: plan.versions, commit: plan.commit }))
+      }
+      else if (process.argv[2] === 'deploy') {
+        if (!config.maintenanceToken || !/^cli-\d+-\d+$/.test(config.runtimeId))
+          throw new Error('Missing maintenance credential or invalid update identity.')
+        const result = await deployUpdate(config, JSON.parse(await readFile('cli-update-plan.json', 'utf8')), process.env.UPDATE_IMAGE)
+        console.log(JSON.stringify(result))
+        if (process.env.GITHUB_STEP_SUMMARY)
+          await appendFile(process.env.GITHUB_STEP_SUMMARY, `CLI update: ${JSON.stringify(result)}\n`)
+      }
+      else {
+        throw new Error('Usage: cli-updates.mjs build-versions|check|deploy')
+      }
     }
   }
   catch (error) {

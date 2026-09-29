@@ -7,7 +7,9 @@ import {
   expect,
   it,
 } from 'vitest'
+import { parse } from 'yaml'
 import {
+  buildVersions,
   currentImage,
   deployUpdate,
   newer,
@@ -105,11 +107,11 @@ describe('cLI update deployment and rollback', () => {
     await expect(currentImage(config)).rejects.toThrow('read:sensitive permission')
     expect(restarts).toBe(0)
   })
-  it('defers busy workers without restarting or leaving a lease behind', async () => {
+  it('updates busy workers using restart recovery and releases the lease afterwards', async () => {
     activeRuns = 1
-    expect(await deployUpdate(config, plan, candidate)).toMatchObject({ deployed: false })
-    expect(restarts).toBe(0)
-    expect(selectedImage).toBe(previous)
+    expect(await deployUpdate(config, plan, candidate, { intervalMs: 0, timeoutMs: 1000 })).toMatchObject({ deployed: true })
+    expect(restarts).toBe(1)
+    expect(selectedImage).toBe(candidate)
     expect(releases).toBe(1)
   })
   it('does not overwrite an application release that happened during the build', async () => {
@@ -119,11 +121,63 @@ describe('cLI update deployment and rollback', () => {
     expect(releases).toBe(0)
   })
   it('restores and verifies the previous image when the candidate remains unhealthy or stale', async () => {
+    activeRuns = 1
     failCandidate = true
     await expect(deployUpdate(config, plan, candidate, { intervalMs: 1, timeoutMs: 50 })).rejects.toThrow('previous image was restored')
     expect(selectedImage).toBe(previous)
     expect(restarts).toBe(2)
     expect(releases).toBe(1)
+  })
+})
+
+describe('application image tool versions', () => {
+  const releases = {
+    codex: { version: '0.159.0' },
+    gh: { tag_name: 'v2.101.0', draft: false, prerelease: false },
+  }
+  const request = async url => url.includes('registry.npmjs.org') ? releases.codex : releases.gh
+
+  it('resolves the latest stable tools without Dockerfile version defaults', async () => {
+    expect(await buildVersions({ request })).toEqual({ codex: '0.159.0', gh: '2.101.0' })
+    const dockerfile = readFileSync(new URL('../Dockerfile', import.meta.url), 'utf8')
+    expect(dockerfile).toMatch(/^ARG CODEX_VERSION$/m)
+    expect(dockerfile).toMatch(/^ARG GH_VERSION$/m)
+  })
+
+  it('passes the resolved exact versions into the CI image that is smoke-tested', () => {
+    const jobs = parse(readFileSync(new URL('../.github/workflows/ci.yaml', import.meta.url), 'utf8')).jobs
+    const steps = jobs.image.steps
+    const resolve = jobs.resolve.steps.find(step => step.id === 'tools')
+    const build = steps.find(step => step.id === 'build')
+    expect(resolve.run).toBe('node scripts/cli-updates.mjs build-versions')
+    // eslint-disable-next-line no-template-curly-in-string -- GitHub Actions resolves these expressions.
+    expect(build.with['build-args']).toContain('CODEX_VERSION=${{ needs.resolve.outputs.codex }}\nGH_VERSION=${{ needs.resolve.outputs.gh }}')
+    // eslint-disable-next-line no-template-curly-in-string -- GitHub Actions resolves these expressions.
+    expect(jobs.resolve.outputs.codex).toBe('${{ steps.tools.outputs.codex }}')
+    // eslint-disable-next-line no-template-curly-in-string -- GitHub Actions resolves these expressions.
+    expect(jobs.resolve.outputs.gh).toBe('${{ steps.tools.outputs.gh }}')
+    const release = jobs.resolve.steps.find(step => step.id === 'resolve')
+    expect(release.env.CODEX_VERSION).toBe(jobs.resolve.outputs.codex)
+    expect(release.env.GH_VERSION).toBe(jobs.resolve.outputs.gh)
+    expect(jobs.resolve.steps.indexOf(resolve)).toBeLessThan(jobs.resolve.steps.indexOf(release))
+    const record = jobs.publish.steps.find(step => step.name === 'Record the validated image')
+    expect(record.run).toContain('tools:')
+    // eslint-disable-next-line no-template-curly-in-string -- GitHub Actions resolves this expression.
+    expect(record.env.CODEX_VERSION).toBe('${{ needs.resolve.outputs.codex }}')
+    // eslint-disable-next-line no-template-curly-in-string -- GitHub Actions resolves this expression.
+    expect(record.env.GH_VERSION).toBe('${{ needs.resolve.outputs.gh }}')
+  })
+
+  it('rejects unstable releases and failed discovery before building', async () => {
+    await expect(buildVersions({
+      request: async () => {
+        throw new Error('Registry unavailable')
+      },
+    })).rejects.toThrow('Registry unavailable')
+    await expect(buildVersions({ request: async url => url.includes('registry.npmjs.org') ? { version: '0.159.0-beta' } : releases.gh })).rejects.toThrow(/stable/)
+    for (const flag of ['draft', 'prerelease']) {
+      await expect(buildVersions({ request: async url => url.includes('registry.npmjs.org') ? releases.codex : { ...releases.gh, [flag]: true } })).rejects.toThrow(/not stable/)
+    }
   })
 })
 

@@ -57,7 +57,11 @@ export async function resolveRelease(config, {
       try {
         await gh(['run', 'download', successful.id.toString(), '--repo', config.repository, '--name', artifactName, '--dir', directory])
         const evidence = JSON.parse(await readFile(path.join(directory, 'image.json'), 'utf8'))
-        return { digest: verifiedImage(evidence, config, successful.id), runId: successful.id }
+        const digest = verifiedImage(evidence, config, successful.id)
+        if (config.tools && Object.entries(config.tools).some(([tool, version]) => evidence.tools?.[tool] !== version))
+          return null
+
+        return { digest, runId: successful.id }
       }
       finally {
         await rm(directory, { recursive: true, force: true })
@@ -80,7 +84,13 @@ export async function resolveRelease(config, {
 }
 
 if (import.meta.main) {
-  const config = { repository: process.env.GITHUB_REPOSITORY, commit: process.env.GITHUB_SHA }
+  if (!process.env.CODEX_VERSION || !process.env.GH_VERSION)
+    throw new Error('Missing resolved stable tool versions')
+  const config = {
+    repository: process.env.GITHUB_REPOSITORY,
+    commit: process.env.GITHUB_SHA,
+    tools: { codex: process.env.CODEX_VERSION, gh: process.env.GH_VERSION },
+  }
   let result = null
   if (process.env.GITHUB_REF_TYPE === 'tag') {
     try {

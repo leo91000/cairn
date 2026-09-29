@@ -8,7 +8,7 @@ import {
   verifiedImage,
 } from '../scripts/resolve-release.mjs'
 
-const config = { repository: 'leo91000/leo-agent-manager', commit: 'a'.repeat(40) }
+const config = { repository: 'leo91000/leo-agent-manager', commit: 'a'.repeat(40), tools: { codex: '0.159.0', gh: '2.101.0' } }
 const digest = `sha256:${'b'.repeat(64)}`
 const run = {
   id: 123,
@@ -26,6 +26,7 @@ const evidence = {
   commit: config.commit,
   digest,
   runId: run.id,
+  tools: config.tools,
 }
 
 describe('release validation reuse', () => {
@@ -50,6 +51,18 @@ describe('release validation reuse', () => {
     })
     expect(requests).toBe(2)
     expect(result).toEqual({ digest, runId: run.id })
+  })
+  it('rebuilds a release if the validated image has older or unrecorded tools', async () => {
+    for (const tools of [undefined, { ...config.tools, codex: '0.156.1' }, { ...config.tools, gh: '2.100.0' }]) {
+      expect(await resolveRelease(config, {
+        gh: async (args) => {
+          if (args[0] === 'api')
+            return JSON.stringify({ workflow_runs: [run] })
+          await writeFile(path.join(args.at(-1), 'image.json'), JSON.stringify({ ...evidence, tools }))
+          return ''
+        },
+      })).toBeNull()
+    }
   })
   it('never reuses failed, foreign, missing, or mismatched validation', async () => {
     for (const runs of [[], [{ ...run, conclusion: 'failure' }], [{ ...run, head_sha: 'c'.repeat(40) }]]) {

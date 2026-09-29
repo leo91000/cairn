@@ -26,14 +26,23 @@ jobs:
     outputs:
       reuse: ${{ steps.resolve.outputs.reuse }}
       digest: ${{ steps.resolve.outputs.digest }}
+      codex: ${{ steps.tools.outputs.codex }}
+      gh: ${{ steps.tools.outputs.gh }}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: ./.github/actions/setup-pnpm
         with:
           install: false
+      - name: Resolve current stable agent tools
+        id: tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/cli-updates.mjs build-versions
       - id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
+          CODEX_VERSION: ${{ steps.tools.outputs.codex }}
+          GH_VERSION: ${{ steps.tools.outputs.gh }}
         run: node scripts/resolve-release.mjs
   quality:
     needs: resolve
@@ -206,7 +215,10 @@ jobs:
           tags: ${{ github.event_name == 'pull_request' && 'leo-agent-manager:test' || '' }}
           outputs: ${{ github.event_name != 'pull_request' && format('type=image,name=ghcr.io/{0},push-by-digest=true,name-canonical=true,push=true', github.repository) || '' }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: VCS_REF=${{ github.sha }}
+          build-args: |
+            VCS_REF=${{ github.sha }}
+            CODEX_VERSION=${{ needs.resolve.outputs.codex }}
+            GH_VERSION=${{ needs.resolve.outputs.gh }}
           # GHCR deduplicates layers across main builds. PRs read the trusted
           # main cache but skip the expensive cache upload on their critical path.
           cache-from: |
@@ -264,11 +276,13 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           IMAGE_DIGEST: ${{ needs.image.outputs.digest }}
+          CODEX_VERSION: ${{ needs.resolve.outputs.codex }}
+          GH_VERSION: ${{ needs.resolve.outputs.gh }}
         run: |
           mkdir -p release-evidence
           node --input-type=module <<'JS'
           import { writeFileSync } from 'node:fs'
-          writeFileSync('release-evidence/image.json', JSON.stringify({ schema: 1, repository: process.env.GITHUB_REPOSITORY.toLowerCase(), commit: process.env.GITHUB_SHA, digest: process.env.IMAGE_DIGEST, runId: Number(process.env.GITHUB_RUN_ID) }))
+          writeFileSync('release-evidence/image.json', JSON.stringify({ schema: 1, repository: process.env.GITHUB_REPOSITORY.toLowerCase(), commit: process.env.GITHUB_SHA, digest: process.env.IMAGE_DIGEST, runId: Number(process.env.GITHUB_RUN_ID), tools: { codex: process.env.CODEX_VERSION, gh: process.env.GH_VERSION } }))
           JS
       - uses: actions/upload-artifact@v7.0.1
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

@@ -7,7 +7,16 @@ copy `.env.example` to `.env`, and set `PUBLIC_URL=https://agents.example.com`.
 The URL must be an origin without a path and must match the address used by browsers
 and MCP clients. Keep one manager replica per SQLite data volume.
 
-Run `docker compose up -d --build`. For published images, use
+For a local build, resolve current stable CLI versions and pass them to Docker:
+
+```sh
+codex_version=$(npm view @openai/codex version)
+gh_version=$(gh api repos/cli/cli/releases/latest --jq '.tag_name | ltrimstr("v")')
+docker compose build --build-arg CODEX_VERSION="$codex_version" --build-arg GH_VERSION="$gh_version"
+docker compose up -d
+```
+
+For published images, use
 `docker compose pull && docker compose up -d` and pin `LEO_IMAGE` to a verified
 `ghcr.io/leo91000/leo-agent-manager:sha-<full-commit>` tag for controlled upgrades.
 Only expose port 4310 through your HTTPS reverse proxy. Preserve the public Host
@@ -202,7 +211,9 @@ and [Codex authentication](https://learn.chatgpt.com/docs/auth) for the underlyi
 ## Automatic CLI updates
 
 [Daily CLI updates](CLI-UPDATES.md) build and test new Codex/GitHub CLI versions,
-then replace both services when idle, with runtime verification and rollback.
+then replace both services, pausing and recovering active work, with runtime
+verification and rollback. CI application images also resolve current stable
+Codex/GitHub CLI versions before building and validating them.
 The VPS timer runs independently of your computer and does not change app versions.
 
 ### Local Intel qualification
