@@ -1,12 +1,334 @@
-use axum::{
-    body::{Body, to_bytes},
-    http::Request,
-};
-use leo_agent_manager::{config::Config, http::router, service::Service};
-use serde_json::{Value, json};
-use tempfile::TempDir;
-use tower::ServiceExt;
+mod common;
 
+use axum::{
+    Json, Router,
+    body::{Body, to_bytes},
+    http::{Request, StatusCode, request::Builder},
+    response::IntoResponse,
+};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use common::Session;
+use leo_agent_manager::{
+    auth,
+    config::{Config, MAIN_AGENT_ID, id, now},
+    http::router,
+    microvm::wire,
+    nodes::{
+        LOCAL_NODE_ID, alerts, checkpoint, disk_grants, files, moves, placement, publication,
+        relay, restore, shared_blocks, snapshots, workspace,
+    },
+    object_storage::Storage,
+    recovery,
+    run_status::RunStatus,
+    service::Service,
+    storage::{Disk, LazyDisk, bootstrap, policy::Policy, remote::RemoteSource, runtime},
+    validation::parse,
+};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::{
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+use tempfile::TempDir;
+use tokio::{
+    io::{AsyncWriteExt, BufReader},
+    net::{UnixListener, UnixStream},
+};
+use tokio_util::sync::CancellationToken;
+
+const ENROLL: &str = "/internal/nodes/enroll";
+const HEARTBEAT: &str = "/internal/nodes/heartbeat";
+const REPLY: &str = "/internal/nodes/reply";
+const NODE_SETTINGS: &str = "/api/nodes/settings";
+/// Written by `publication::capture` but never readable in a disk block.
+const PRIVATE_CONTENTS: &[u8] = b"private-untracked-contents!";
+const MIB: usize = 1024 * 1024;
+
+/// A master service, its router and an authenticated owner session.
+struct Owner {
+    service: Arc<Service>,
+    root: TempDir,
+    app: Router,
+    session: Session,
+    host: String,
+}
+
+impl Owner {
+    async fn new() -> Self {
+        Self::at(common::HOST.into()).await
+    }
+
+    async fn at(host: String) -> Self {
+        Self::with_runner(host, String::new()).await
+    }
+
+    async fn with_runner(host: String, runner_url: String) -> Self {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir(root.path().join("home")).unwrap();
+        let service = Service::new(Config {
+            public_url: format!("http://{host}"),
+            gh_bin: "false".into(),
+            concurrency: 4,
+            runner_url,
+            ..common::config(root.path())
+        })
+        .await
+        .unwrap();
+        if std::env::var_os("LEO_NODE_TEST_S3_ENDPOINT").is_some() {
+            std::fs::write(
+                service.config.data_dir.join("archive-s3.json"),
+                json!({ "bucket": "leo-node-test" }).to_string(),
+            )
+            .unwrap();
+        }
+        let session = Session::new(&service.auth.session().await.unwrap());
+        Self {
+            app: router(service.clone()).await.unwrap(),
+            service,
+            host,
+            root,
+            session,
+        }
+    }
+
+    fn root(&self) -> &Path {
+        self.root.path()
+    }
+
+    /// A request to the master, addressed to its public host.
+    fn request(&self, method: &str, path: &str) -> Builder {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header("host", &self.host)
+    }
+
+    /// Calls the master with the owner session on `/api/` paths, and the node
+    /// credential `token` when given.
+    async fn call(
+        &self,
+        method: &str,
+        path: &str,
+        body: Value,
+        token: Option<&str>,
+    ) -> (StatusCode, Value) {
+        let mut request = self
+            .request(method, path)
+            .header("content-type", "application/json");
+        if path.starts_with("/api/") {
+            request = self.session.authorize(request);
+        }
+        if let Some(token) = token {
+            request = request.header("authorization", bearer(token));
+        }
+        let response = common::send(
+            &self.app,
+            request.body(Body::from(body.to_string())).unwrap(),
+        )
+        .await;
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    /// Calls an owner endpoint.
+    async fn send(&self, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
+        self.call(method, path, body, None).await
+    }
+
+    async fn get(&self, path: &str) -> (StatusCode, Value) {
+        self.send("GET", path, Value::Null).await
+    }
+
+    async fn invite(&self, name: &str) -> Value {
+        let (status, invitation) = self
+            .send("POST", "/api/nodes/enrollments", json!({ "name": name }))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{invitation}");
+        invitation
+    }
+
+    /// Invites and enrolls a node, and returns its identity.
+    async fn enroll(&self, name: &str, capabilities: &Value) -> Value {
+        let invitation = self.invite(name).await;
+        self.call(
+            "POST",
+            ENROLL,
+            enrollment(&invitation, name, capabilities),
+            None,
+        )
+        .await
+        .1
+    }
+
+    async fn put(&self, kind: &str, document: Value) {
+        self.service.store.put(kind, document).await.unwrap();
+    }
+
+    async fn stored(&self, kind: &str, id: &str) -> Option<Value> {
+        self.service.store.get(kind, id).await.unwrap()
+    }
+
+    async fn run(&self, id: &str) -> Value {
+        self.service.store.run(id).await.unwrap()
+    }
+
+    async fn add_run(&self, record: &Value) {
+        common::add_run(&self.service.store, record).await;
+    }
+
+    async fn set_checkpoint(&self, run: &str, checkpoint: Value) {
+        common::set_checkpoint(&self.service.store, run, checkpoint).await;
+    }
+
+    /// Lets `token` authenticate as `node`.
+    async fn authorize_node(&self, node: &str, token: &str) {
+        self.service
+            .store
+            .set(
+                &format!("node-token:{}", auth::digest(token)),
+                json!(node),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    /// Records an enrolled node reachable with `token`.
+    async fn register_node(&self, node: &str, token: &str) {
+        self.put("nodes", json!({ "id": node, "revoked": false }))
+            .await;
+        self.authorize_node(node, token).await;
+    }
+
+    async fn grant_nodes(&self, agent: &str, nodes: Value) {
+        self.put(
+            "agents",
+            json!({ "id": agent, "access": { "nodes": nodes } }),
+        )
+        .await;
+    }
+
+    /// Encrypts a recovery point manifest as the master stores it.
+    fn encrypt_manifest(&self, point: &str, manifest: &Value) -> Value {
+        self.service
+            .vault
+            .encrypt(&format!("backup:{point}"), manifest)
+            .unwrap()
+    }
+
+    /// Where the master keeps the recovery points of `run`.
+    fn backup_directory(&self, run: &str) -> PathBuf {
+        self.service.config.data_dir.join("node-backups").join(run)
+    }
+
+    /// Serves the router on `listener` until the task is aborted.
+    fn serve(&self, listener: tokio::net::TcpListener) -> tokio::task::JoinHandle<()> {
+        common::serve(listener, self.app.clone())
+    }
+}
+
+fn bearer(token: &str) -> String {
+    format!("Bearer {token}")
+}
+
+fn capabilities(kvm: bool, cpu: u32, memory: u32, disk: u32) -> Value {
+    json!({
+        "os": "linux",
+        "arch": "x86_64",
+        "kvm": kvm,
+        "cpu": cpu,
+        "memoryMiB": memory,
+        "diskMiB": disk,
+    })
+}
+
+fn enrollment(invitation: &Value, name: &str, capabilities: &Value) -> Value {
+    json!({
+        "code": invitation["code"],
+        "name": name,
+        "protocol": 1,
+        "capabilities": capabilities,
+        "runtimeId": "fixture",
+    })
+}
+
+fn limits(cpu: u32, memory: u32, disk: u32) -> Value {
+    json!({ "cpu": cpu, "memoryMiB": memory, "diskMiB": disk })
+}
+
+/// A connected node that accepts VM work within `limits`.
+fn schedulable_node(id: &str, limits: &Value) -> Value {
+    json!({
+        "id": id,
+        "accepting": true,
+        "executionReady": true,
+        "lastSeen": now(),
+        "capabilities": { "kvm": true, "fuse": true },
+        "limits": limits,
+    })
+}
+
+/// A run owned by `agent`, as seen by placement.
+fn agent_run(run: &str, agent: &str) -> Value {
+    json!({ "id": run, "snapshot": { "agent": { "id": agent } } })
+}
+
+/// A persisted run record in `status`.
+fn run_record(run: &str, status: RunStatus) -> Value {
+    json!({ "id": run, "taskId": "fixture", "createdAt": 0, "status": status })
+}
+
+/// A storage policy with a small reserve, so fixtures fit on any disk.
+fn small_reserve() -> Policy {
+    Policy {
+        reserve_mi_b: 64,
+        reserve_percent: 1,
+        ..Policy::default()
+    }
+}
+
+fn mode(path: &Path) -> u32 {
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+fn find_by_id(list: &Value, id: &str) -> Value {
+    list.as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == id)
+        .unwrap()
+        .clone()
+}
+
+/// Indexes `disk` as a controller snapshot of the fixture runtime.
+async fn controller_manifest(disk: &Path) -> Value {
+    let mut manifest = snapshots::index(disk).await.unwrap();
+    manifest["capturedAt"] = now().into();
+    manifest["runtime"] = json!({ "runtimeId": "fixture" });
+    manifest
+}
+
+async fn wait_for_path(path: &Path) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !path.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+/// Makes every unused shared object collectable and collects them all.
 async fn drain_remote_deletions(service: &Service) {
     service
         .store
@@ -19,346 +341,138 @@ async fn drain_remote_deletions(service: &Service) {
         })
         .await
         .unwrap();
-    while leo_agent_manager::nodes::shared_blocks::collect(service)
-        .await
-        .unwrap()
-        > 0
-    {}
+    while shared_blocks::collect(service).await.unwrap() > 0 {}
 }
 
+/// The S3 key of the shared object holding block `hash` of `manifest`.
 fn shared_object_key(manifest: &Value, hash: &str) -> String {
     let block = manifest["blocks"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|b| b["hash"] == hash)
+        .find(|block| block["hash"] == hash)
         .unwrap();
-    leo_agent_manager::nodes::shared_blocks::key(hash, block["object"].as_str().unwrap())
-}
-
-struct Owner {
-    service: std::sync::Arc<Service>,
-    _root: TempDir,
-    app: axum::Router,
-    cookie: String,
-    csrf: String,
-    host: String,
-}
-
-impl Owner {
-    async fn new() -> Self {
-        Self::at("localhost:4310".into()).await
-    }
-
-    async fn at(host: String) -> Self {
-        Self::with_runner(host, String::new()).await
-    }
-
-    async fn with_runner(host: String, runner_url: String) -> Self {
-        let root = TempDir::new().unwrap();
-        std::fs::create_dir(root.path().join("home")).unwrap();
-        let s = Service::new(Config {
-            data_dir: root.path().join("data"),
-            home: root.path().join("home"),
-            workspace_roots: vec![root.path().into()],
-            public_url: format!("http://{host}"),
-            host: "127.0.0.1".into(),
-            port: 0,
-            setup_token: "fixture".into(),
-            codex_bin: "codex".into(),
-            claude_bin: "claude".into(),
-            gh_bin: "false".into(),
-            concurrency: 4,
-            logger: false,
-            worker_enabled: false,
-            runner_url,
-        })
-        .await
-        .unwrap();
-        if std::env::var_os("LEO_NODE_TEST_S3_ENDPOINT").is_some() {
-            std::fs::write(
-                s.config.data_dir.join("archive-s3.json"),
-                json!({"bucket": "leo-node-test"}).to_string(),
-            )
-            .unwrap();
-        }
-        let session = s.auth.session().await.unwrap();
-        Self {
-            service: s.clone(),
-            host,
-            _root: root,
-            app: router(s).await.unwrap(),
-            cookie: format!("leo_session={}", session["value"].as_str().unwrap()),
-            csrf: session["csrf"].as_str().unwrap().into(),
-        }
-    }
-
-    async fn call(
-        &self,
-        method: &str,
-        path: &str,
-        body: Value,
-        token: Option<&str>,
-    ) -> (u16, Value) {
-        let mut request = Request::builder()
-            .method(method)
-            .uri(path)
-            .header("host", &self.host)
-            .header("content-type", "application/json");
-        if path.starts_with("/api/") {
-            request = request
-                .header("cookie", &self.cookie)
-                .header("x-csrf-token", &self.csrf);
-        }
-        if let Some(token) = token {
-            request = request.header("authorization", format!("Bearer {token}"));
-        }
-        let response = self
-            .app
-            .clone()
-            .oneshot(request.body(Body::from(body.to_string())).unwrap())
-            .await
-            .unwrap();
-        let status = response.status().as_u16();
-        let bytes = to_bytes(response.into_body(), 1_000_000).await.unwrap();
-        (
-            status,
-            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
-        )
-    }
+    shared_blocks::key(hash, block["object"].as_str().unwrap())
 }
 
 #[tokio::test]
 async fn enrollment_is_single_use_and_revocation_removes_node_access() {
     let owner = Owner::new().await;
-    let (status, invitation) = owner
-        .call(
-            "POST",
-            "/api/nodes/enrollments",
-            json!({"name": "Desktop"}),
-            None,
-        )
-        .await;
-    assert_eq!(status, 200, "{invitation}");
-    let input = json!({
-        "code": invitation["code"],
-        "name": "Desktop",
-        "protocol": 1,
-        "capabilities": {
-            "os": "linux",
-            "arch": "x86_64",
-            "kvm": true,
-            "cpu": 16,
-            "memoryMiB": 32768,
-            "diskMiB": 131072
-        },
-        "runtimeId": "fixture"
-    });
-    let (status, identity) = owner
-        .call("POST", "/internal/nodes/enroll", input.clone(), None)
-        .await;
-    assert_eq!(status, 200, "{identity}");
+    let invitation = owner.invite("Desktop").await;
+    let input = enrollment(
+        &invitation,
+        "Desktop",
+        &capabilities(true, 16, 32768, 131_072),
+    );
+    let (status, identity) = owner.call("POST", ENROLL, input.clone(), None).await;
+    assert_eq!(status, StatusCode::OK, "{identity}");
     let token = identity["token"].as_str().unwrap();
     assert_eq!(
-        owner
-            .call("POST", "/internal/nodes/enroll", input, None)
-            .await
-            .0,
-        401
+        owner.call("POST", ENROLL, input, None).await.0,
+        StatusCode::UNAUTHORIZED
     );
-    let (status, nodes) = owner.call("GET", "/api/nodes", Value::Null, None).await;
-    assert_eq!(status, 200);
+    let (status, nodes) = owner.get("/api/nodes").await;
+    assert_eq!(status, StatusCode::OK);
     assert!(!nodes.to_string().contains(token));
-    assert_eq!(
-        owner
-            .call(
-                "POST",
-                "/internal/nodes/heartbeat",
-                json!({"runtimeId":"fixture"}),
-                Some(token)
-            )
-            .await
-            .0,
-        200
-    );
+    let (status, _) = owner
+        .call(
+            "POST",
+            HEARTBEAT,
+            json!({ "runtimeId": "fixture" }),
+            Some(token),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
     let node = identity["nodeId"].as_str().unwrap();
+    let (status, _) = owner
+        .send("POST", &format!("/api/nodes/{node}/revoke"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(
         owner
-            .call(
-                "POST",
-                &format!("/api/nodes/{node}/revoke"),
-                json!({}),
-                None
-            )
+            .call("POST", HEARTBEAT, json!({}), Some(token))
             .await
             .0,
-        200
-    );
-    assert_eq!(
-        owner
-            .call("POST", "/internal/nodes/heartbeat", json!({}), Some(token))
-            .await
-            .0,
-        401
+        StatusCode::UNAUTHORIZED
     );
 }
 
 #[tokio::test]
 async fn node_configuration_validates_capacity_and_never_grants_agent_access() {
     let owner = Owner::new().await;
-    let (_, invitation) = owner
-        .call(
-            "POST",
-            "/api/nodes/enrollments",
-            json!({"name": "Small node"}),
-            None,
-        )
-        .await;
-    let (_, identity) = owner
-        .call(
-            "POST",
-            "/internal/nodes/enroll",
-            json!({
-                "code": invitation["code"],
-                "name": "ignored",
-                "protocol": 1,
-                "capabilities": {
-                    "os": "linux",
-                    "arch": "x86_64",
-                    "kvm": true,
-                    "cpu": 8,
-                    "memoryMiB": 8192,
-                    "diskMiB": 65536
-                },
-                "runtimeId": "fixture"
-            }),
-            None,
-        )
-        .await;
+    let invitation = owner.invite("Small node").await;
+    let input = enrollment(&invitation, "ignored", &capabilities(true, 8, 8192, 65536));
+    let (_, identity) = owner.call("POST", ENROLL, input, None).await;
     let node = identity["nodeId"].as_str().unwrap();
     let path = format!("/api/nodes/{node}");
     let config = json!({
         "name": "My node",
         "tags": ["fast"],
         "accepting": true,
-        "limits": {"cpu": 4,"memoryMiB": 4096,"diskMiB": 32768}
+        "limits": limits(4, 4096, 32768),
     });
-    let (status, saved) = owner.call("PUT", &path, config.clone(), None).await;
-    assert_eq!(status, 200, "{saved}");
+    let (status, saved) = owner.send("PUT", &path, config.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
     let mut invalid = config;
     invalid["limits"]["cpu"] = 9.into();
-    assert_eq!(owner.call("PUT", &path, invalid, None).await.0, 400);
+    assert_eq!(
+        owner.send("PUT", &path, invalid).await.0,
+        StatusCode::BAD_REQUEST
+    );
     let (_, beat) = owner
-        .call(
-            "POST",
-            "/internal/nodes/heartbeat",
-            json!({}),
-            identity["token"].as_str(),
-        )
+        .call("POST", HEARTBEAT, json!({}), identity["token"].as_str())
         .await;
     assert_eq!(beat["limits"]["cpu"], 4);
-    let (_, agents) = owner.call("GET", "/api/agents", Value::Null, None).await;
+    let (_, agents) = owner.get("/api/agents").await;
     for agent in agents.as_array().unwrap() {
-        assert_eq!(
-            agent["access"]["nodes"],
-            json!(["00000000-0000-4000-8000-000000000002"])
-        );
+        assert_eq!(agent["access"]["nodes"], json!([LOCAL_NODE_ID]));
     }
 }
 
 #[tokio::test]
 async fn main_node_policy_survives_an_update_from_an_older_client() {
     let owner = Owner::new().await;
-    let path = "/api/agents/00000000-0000-4000-8000-000000000001";
-    let (status, restricted) = owner
-        .call(
-            "PUT",
-            path,
-            json!({"name": "Main","access": {"nodes": []}}),
-            None,
-        )
-        .await;
-    assert_eq!(status, 200, "{restricted}");
-    let (status, saved) = owner
-        .call(
-            "PUT",
-            path,
-            json!({
-                "name": "Renamed main",
-                "access": {
-                    "projects": null,
-                    "skills": null,
-                    "mcps": null,
-                    "github": true
-                }
-            }),
-            None,
-        )
-        .await;
-    assert_eq!(status, 200, "{saved}");
+    let path = format!("/api/agents/{MAIN_AGENT_ID}");
+    let restricted = json!({ "name": "Main", "access": { "nodes": [] } });
+    let (status, restricted) = owner.send("PUT", &path, restricted).await;
+    assert_eq!(status, StatusCode::OK, "{restricted}");
+    let older_client = json!({
+        "name": "Renamed main",
+        "access": { "projects": null, "skills": null, "mcps": null, "github": true },
+    });
+    let (status, saved) = owner.send("PUT", &path, older_client).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
     assert_eq!(saved["access"]["nodes"], json!([]));
-    let (status, _) = owner
-        .call(
-            "PUT",
-            path,
-            json!({"name": "Main","access": {"nodes": ["10000000-0000-4000-8000-000000000000"]}}),
-            None,
-        )
-        .await;
-    assert_eq!(status, 404);
+    let unknown_node = json!({
+        "name": "Main",
+        "access": { "nodes": ["10000000-0000-4000-8000-000000000000"] },
+    });
+    let (status, _) = owner.send("PUT", &path, unknown_node).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn concurrent_enrollment_has_exactly_one_winner() {
     let owner = Owner::new().await;
-    let (_, invitation) = owner
-        .call(
-            "POST",
-            "/api/nodes/enrollments",
-            json!({"name": "Race"}),
-            None,
-        )
-        .await;
-    let input = json!({
-        "code": invitation["code"],
-        "name": "Race",
-        "protocol": 1,
-        "capabilities": {
-            "os": "linux",
-            "arch": "x86_64",
-            "kvm": true,
-            "cpu": 2,
-            "memoryMiB": 4096,
-            "diskMiB": 32768
-        },
-        "runtimeId": "fixture"
-    });
+    let invitation = owner.invite("Race").await;
+    let input = enrollment(&invitation, "Race", &capabilities(true, 2, 4096, 32768));
     let (first, second) = tokio::join!(
-        owner.call("POST", "/internal/nodes/enroll", input.clone(), None),
-        owner.call("POST", "/internal/nodes/enroll", input, None)
+        owner.call("POST", ENROLL, input.clone(), None),
+        owner.call("POST", ENROLL, input, None)
     );
     let mut statuses = [first.0, second.0];
     statuses.sort();
-    assert_eq!(statuses, [200, 401]);
+    assert_eq!(statuses, [StatusCode::OK, StatusCode::UNAUTHORIZED]);
 }
 
 #[tokio::test]
 async fn connector_enrolls_over_http_without_printing_or_exposing_its_token() {
-    use tokio::io::AsyncWriteExt;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let host = listener.local_addr().unwrap().to_string();
+    let (listener, address) = common::bind().await;
+    let host = address.to_string();
     let owner = Owner::at(host.clone()).await;
-    let app = owner.app.clone();
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let (_, invitation) = owner
-        .call(
-            "POST",
-            "/api/nodes/enrollments",
-            json!({"name": "Linux connector"}),
-            None,
-        )
-        .await;
-    let state = owner._root.path().join("node");
+    let server = owner.serve(listener);
+    let invitation = owner.invite("Linux connector").await;
+    let state = owner.root().join("node");
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_leo"))
         .args([
             "node-enroll",
@@ -380,26 +494,16 @@ async fn connector_enrolls_over_http_without_printing_or_exposing_its_token() {
         .unwrap();
     let output = child.wait_with_output().await.unwrap();
     server.abort();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let bytes = std::fs::read(state.join("identity.json")).unwrap();
-    let identity: Value = serde_json::from_slice(&bytes).unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    let identity_file = state.join("identity.json");
+    let identity: Value = serde_json::from_slice(&std::fs::read(&identity_file).unwrap()).unwrap();
     let token = identity["token"].as_str().unwrap();
-    assert!(!String::from_utf8_lossy(&output.stdout).contains(token));
-    assert!(!String::from_utf8_lossy(&output.stderr).contains(token));
-    use std::os::unix::fs::PermissionsExt;
-    assert_eq!(
-        std::fs::metadata(state.join("identity.json"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777,
-        0o600
-    );
-    let (_, nodes) = owner.call("GET", "/api/nodes", Value::Null, None).await;
+    assert!(!stdout.contains(token));
+    assert!(!stderr.contains(token));
+    assert_eq!(mode(&identity_file), 0o600);
+    let (_, nodes) = owner.get("/api/nodes").await;
     assert!(
         nodes
             .as_array()
@@ -412,299 +516,153 @@ async fn connector_enrolls_over_http_without_printing_or_exposing_its_token() {
 #[tokio::test]
 async fn a_task_cannot_use_the_local_runner_without_node_permission() {
     let owner = Owner::new().await;
-    let main = "00000000-0000-4000-8000-000000000001";
-    assert_eq!(
-        owner
-            .call(
-                "PUT",
-                &format!("/api/agents/{main}"),
-                json!({"name":"Main","access":{"nodes":[]}}),
-                None
-            )
-            .await
-            .0,
-        200
-    );
-    let (status, task) = owner
-        .call(
-            "POST",
-            "/api/tasks",
-            json!({
-                "name": "Restricted node task",
-                "prompt": "Do nothing",
-                "agentId": main,
-                "enabled": false
-            }),
-            None,
+    let (status, _) = owner
+        .send(
+            "PUT",
+            &format!("/api/agents/{MAIN_AGENT_ID}"),
+            json!({ "name": "Main", "access": { "nodes": [] } }),
         )
         .await;
-    assert_eq!(status, 200, "{task}");
-    let (status, error) = owner
-        .call(
-            "POST",
-            &format!("/api/tasks/{}/run", task["id"].as_str().unwrap()),
-            json!({}),
-            None,
-        )
-        .await;
-    assert_eq!(status, 403, "{error}");
+    assert_eq!(status, StatusCode::OK);
+    let task = json!({
+        "name": "Restricted node task",
+        "prompt": "Do nothing",
+        "agentId": MAIN_AGENT_ID,
+        "enabled": false,
+    });
+    let (status, task) = owner.send("POST", "/api/tasks", task).await;
+    assert_eq!(status, StatusCode::OK, "{task}");
+    let path = format!("/api/tasks/{}/run", task["id"].as_str().unwrap());
+    let (status, error) = owner.send("POST", &path, json!({})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
 }
 
 #[tokio::test]
 async fn node_credentials_cannot_administer_nodes_and_owner_sessions_cannot_impersonate_a_node() {
     let owner = Owner::new().await;
-    let (_, invitation) = owner
-        .call(
-            "POST",
-            "/api/nodes/enrollments",
-            json!({"name": "Scoped"}),
-            None,
-        )
+    let identity = owner
+        .enroll("Scoped", &capabilities(false, 2, 4096, 32768))
         .await;
-    let (_, identity) = owner
-        .call(
-            "POST",
-            "/internal/nodes/enroll",
-            json!({
-                "code": invitation["code"],
-                "name": "Scoped",
-                "protocol": 1,
-                "capabilities": {
-                    "os": "linux",
-                    "arch": "x86_64",
-                    "kvm": false,
-                    "cpu": 2,
-                    "memoryMiB": 4096,
-                    "diskMiB": 32768
-                },
-                "runtimeId": "fixture"
-            }),
-            None,
-        )
-        .await;
-    let request = Request::builder()
-        .method("GET")
-        .uri("/api/nodes")
-        .header("host", &owner.host)
-        .header(
-            "authorization",
-            format!("Bearer {}", identity["token"].as_str().unwrap()),
-        )
+    let request = owner
+        .request("GET", "/api/nodes")
+        .header("authorization", bearer(identity["token"].as_str().unwrap()))
         .body(Body::empty())
         .unwrap();
-    let response = owner.app.clone().oneshot(request).await.unwrap();
-    assert_eq!(response.status().as_u16(), 401);
     assert_eq!(
-        owner
-            .call("POST", "/internal/nodes/heartbeat", json!({}), None)
-            .await
-            .0,
-        401
+        common::send(&owner.app, request).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        owner.call("POST", HEARTBEAT, json!({}), None).await.0,
+        StatusCode::UNAUTHORIZED
     );
     assert_eq!(
         owner
-            .call(
-                "POST",
-                "/internal/nodes/heartbeat",
-                json!({}),
-                Some("not-a-node-token")
-            )
+            .call("POST", HEARTBEAT, json!({}), Some("not-a-node-token"))
             .await
             .0,
-        401
+        StatusCode::UNAUTHORIZED
     );
 }
 
 #[tokio::test]
 async fn revocation_removes_node_grants_without_blocking_later_agent_edits() {
     let owner = Owner::new().await;
-    let (_, invitation) = owner
-        .call(
-            "POST",
-            "/api/nodes/enrollments",
-            json!({"name": "Revocation"}),
-            None,
-        )
-        .await;
-    let (_, identity) = owner
-        .call(
-            "POST",
-            "/internal/nodes/enroll",
-            json!({
-                "code": invitation["code"],
-                "name": "Revocation",
-                "protocol": 1,
-                "capabilities": {
-                    "os": "linux",
-                    "arch": "x86_64",
-                    "kvm": true,
-                    "cpu": 2,
-                    "memoryMiB": 4096,
-                    "diskMiB": 32768
-                },
-                "runtimeId": "fixture"
-            }),
-            None,
-        )
+    let identity = owner
+        .enroll("Revocation", &capabilities(true, 2, 4096, 32768))
         .await;
     let node = identity["nodeId"].as_str().unwrap();
-    let main = "/api/agents/00000000-0000-4000-8000-000000000001";
-    let local = "00000000-0000-4000-8000-000000000002";
-    assert_eq!(
-        owner
-            .call(
-                "PUT",
-                main,
-                json!({"name":"Main","access":{"nodes":[local,node]}}),
-                None
-            )
-            .await
-            .0,
-        200
-    );
-    assert_eq!(
-        owner
-            .call(
-                "POST",
-                &format!("/api/nodes/{node}/revoke"),
-                json!({}),
-                None
-            )
-            .await
-            .0,
-        200
-    );
-    let (_, agents) = owner.call("GET", "/api/agents", Value::Null, None).await;
-    let mut main_agent = agents
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| a["id"] == "00000000-0000-4000-8000-000000000001")
-        .unwrap()
-        .clone();
-    assert_eq!(main_agent["access"]["nodes"], json!([local]));
+    let main = format!("/api/agents/{MAIN_AGENT_ID}");
+    let grant = json!({ "name": "Main", "access": { "nodes": [LOCAL_NODE_ID, node] } });
+    assert_eq!(owner.send("PUT", &main, grant).await.0, StatusCode::OK);
+    let (status, _) = owner
+        .send("POST", &format!("/api/nodes/{node}/revoke"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, agents) = owner.get("/api/agents").await;
+    let mut main_agent = find_by_id(&agents, MAIN_AGENT_ID);
+    assert_eq!(main_agent["access"]["nodes"], json!([LOCAL_NODE_ID]));
     main_agent["name"] = "Renamed after revocation".into();
-    assert_eq!(owner.call("PUT", main, main_agent, None).await.0, 200);
+    assert_eq!(owner.send("PUT", &main, main_agent).await.0, StatusCode::OK);
 }
 
 #[test]
 fn mcp_agent_updates_preserve_omitted_node_permissions() {
-    use leo_agent_manager::validation::parse;
     let update = parse(
         "mcp:update_agent",
-        json!({"id": "00000000-0000-4000-8000-000000000001","agent": {"access": {"mcps": []}}}),
+        json!({ "id": MAIN_AGENT_ID, "agent": { "access": { "mcps": [] } } }),
     )
     .unwrap();
     assert!(update["agent"]["access"].get("nodes").is_none());
     let restricted = parse(
         "mcp:update_agent",
-        json!({"id": "00000000-0000-4000-8000-000000000001","agent": {"access": {"nodes": []}}}),
+        json!({ "id": MAIN_AGENT_ID, "agent": { "access": { "nodes": [] } } }),
     )
     .unwrap();
     assert_eq!(restricted["agent"]["access"]["nodes"], json!([]));
-    let created = parse("mcp:save_agent", json!({"name": "Default"})).unwrap();
-    assert_eq!(
-        created["access"]["nodes"],
-        json!(["00000000-0000-4000-8000-000000000002"])
-    );
+    let created = parse("mcp:save_agent", json!({ "name": "Default" })).unwrap();
+    assert_eq!(created["access"]["nodes"], json!([LOCAL_NODE_ID]));
 }
 
 #[tokio::test]
 async fn outbound_transport_streams_only_to_the_authenticated_node() {
-    use leo_agent_manager::execution::secret;
     let owner = Owner::new().await;
-    let (_, invite) = owner
-        .call(
-            "POST",
-            "/api/nodes/enrollments",
-            json!({"name": "Worker"}),
-            None,
-        )
+    let identity = owner
+        .enroll("Worker", &capabilities(true, 4, 8192, 65536))
         .await;
-    let (_, identity) = owner
-        .call(
-            "POST",
-            "/internal/nodes/enroll",
-            json!({
-                "code": invite["code"],
-                "name": "Worker",
-                "protocol": 1,
-                "capabilities": {
-                    "os": "linux",
-                    "arch": "x86_64",
-                    "kvm": true,
-                    "cpu": 4,
-                    "memoryMiB": 8192,
-                    "diskMiB": 65536
-                },
-                "runtimeId": "fixture"
-            }),
-            None,
+    let credential =
+        leo_agent_manager::execution::secret(&owner.root().join("data"), "runner-secret")
+            .await
+            .unwrap();
+    let request = owner
+        .request(
+            "GET",
+            &format!(
+                "/internal/execution/{}/health",
+                identity["nodeId"].as_str().unwrap()
+            ),
         )
-        .await;
-    let credential = secret(&owner._root.path().join("data"), "runner-secret")
-        .await
-        .unwrap();
-    let request = Request::builder()
-        .uri(format!(
-            "/internal/execution/{}/health",
-            identity["nodeId"].as_str().unwrap()
-        ))
-        .header("host", &owner.host)
-        .header("authorization", format!("Bearer {credential}"))
+        .header("authorization", bearer(&credential))
         .body(Body::empty())
         .unwrap();
     let app = owner.app.clone();
     let waiting = tokio::spawn(async move {
-        let response = app.oneshot(request).await.unwrap();
-        let status = response.status().as_u16();
-        let bytes = to_bytes(response.into_body(), 1024).await.unwrap();
-        (status, bytes)
+        let response = common::send(&app, request).await;
+        let status = response.status();
+        (status, to_bytes(response.into_body(), 1024).await.unwrap())
     });
     let token = identity["token"].as_str().unwrap();
     let (status, command) = owner
         .call("POST", "/internal/nodes/poll", json!({}), Some(token))
         .await;
-    assert_eq!(status, 200, "{command}");
+    assert_eq!(status, StatusCode::OK, "{command}");
     assert_eq!(command["path"], "/health");
+    let reply = json!({ "id": command["id"], "status": 200, "data": "b2s=", "done": true });
+    let forged = "x".repeat(43);
     assert_eq!(
         owner
-            .call(
-                "POST",
-                "/internal/nodes/reply",
-                json!({"id":command["id"],"status":200,"data":"b2s=","done":true}),
-                Some("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
-            )
+            .call("POST", REPLY, reply.clone(), Some(&forged))
             .await
             .0,
-        401
+        StatusCode::UNAUTHORIZED
     );
     assert_eq!(
-        owner
-            .call(
-                "POST",
-                "/internal/nodes/reply",
-                json!({"id":command["id"],"status":200,"data":"b2s=","done":true}),
-                Some(token)
-            )
-            .await
-            .0,
-        200
+        owner.call("POST", REPLY, reply, Some(token)).await.0,
+        StatusCode::OK
     );
     let (status, bytes) = waiting.await.unwrap();
-    assert_eq!(status, 200);
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(&bytes[..], b"ok");
 }
 
 #[tokio::test]
 async fn workspace_transfer_preserves_files_and_links_without_following_them() {
-    use leo_agent_manager::nodes::files;
-    use std::os::unix::fs::PermissionsExt;
     let root = TempDir::new().unwrap();
     let source = root.path().join("source");
     let target = root.path().join("target");
+    let tool = b"#!/bin/sh\nexit 0\n";
     std::fs::create_dir_all(source.join("nested")).unwrap();
-    std::fs::write(source.join("nested/tool"), b"#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::write(source.join("nested/tool"), tool).unwrap();
     std::fs::set_permissions(
         source.join("nested/tool"),
         std::fs::Permissions::from_mode(0o755),
@@ -716,22 +674,12 @@ async fn workspace_transfer_preserves_files_and_links_without_following_them() {
     files::receive(&mut bytes.as_slice(), &target, 1024)
         .await
         .unwrap();
-    assert_eq!(
-        std::fs::read(target.join("nested/tool")).unwrap(),
-        b"#!/bin/sh\nexit 0\n"
-    );
+    assert_eq!(std::fs::read(target.join("nested/tool")).unwrap(), tool);
     assert_eq!(
         std::fs::read_link(target.join("external")).unwrap(),
-        std::path::Path::new("/etc")
+        Path::new("/etc")
     );
-    assert_eq!(
-        std::fs::metadata(target.join("nested/tool"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777,
-        0o755
-    );
+    assert_eq!(mode(&target.join("nested/tool")), 0o755);
     let malicious =
         b"{\"path\":\"external/passwd\",\"kind\":\"file\",\"size\":0}\n{\"complete\":true}\n";
     assert!(
@@ -749,27 +697,10 @@ async fn workspace_transfer_preserves_files_and_links_without_following_them() {
 
 #[tokio::test]
 async fn binary_node_responses_are_scoped_and_never_hide_truncation() {
-    use leo_agent_manager::{auth, config::id};
     let owner = Owner::new().await;
     let (node, token, stranger, stranger_token) = (id(), auth::token(), id(), auth::token());
-    for (node, token) in [(&node, &token), (&stranger, &stranger_token)] {
-        owner
-            .service
-            .store
-            .put("nodes", json!({"id": node,"revoked": false}))
-            .await
-            .unwrap();
-        owner
-            .service
-            .store
-            .set(
-                &format!("node-token:{}", auth::digest(token)),
-                json!(node),
-                None,
-            )
-            .await
-            .unwrap();
-    }
+    owner.register_node(&node, &token).await;
+    owner.register_node(&stranger, &stranger_token).await;
     for (broken, unknown_length) in [(false, false), (true, false), (true, true)] {
         let (hub, target) = (owner.service.node_transport.clone(), node.clone());
         let waiting = tokio::spawn(async move {
@@ -777,7 +708,7 @@ async fn binary_node_responses_are_scoped_and_never_hide_truncation() {
                 .request(&target, "GET", "/health", vec![])
                 .await
                 .unwrap();
-            to_bytes(response.into_body(), 1024 * 1024).await
+            to_bytes(response.into_body(), MIB).await
         });
         let command = owner.service.node_transport.poll(&node).await.unwrap();
         assert_eq!(
@@ -785,39 +716,31 @@ async fn binary_node_responses_are_scoped_and_never_hide_truncation() {
             "Master must advertise continuous body support"
         );
         let call = command["id"].as_str().unwrap();
+        let length = if unknown_length {
+            Value::Null
+        } else {
+            json!(262_144)
+        };
+        let head = json!({ "id": call, "sequence": 0, "status": 200, "length": length });
         assert_eq!(
-            owner
-                .call(
-                    "POST",
-                    "/internal/nodes/reply",
-                    json!({"id":call,"sequence":0,"status":200,"length":if unknown_length {Value::Null}else{json!(262144)}}),
-                    Some(&token)
-                )
-                .await
-                .0,
-            200
+            owner.call("POST", REPLY, head, Some(&token)).await.0,
+            StatusCode::OK
         );
-        let request = |token: &str, body: Body| {
-            Request::builder()
-                .method("POST")
-                .uri(format!("/internal/nodes/stream/{call}"))
-                .header("host", &owner.host)
-                .header("authorization", format!("Bearer {token}"))
+        let stream = |token: &str, body: Body| {
+            owner
+                .request("POST", &format!("/internal/nodes/stream/{call}"))
+                .header("authorization", bearer(token))
                 .body(body)
                 .unwrap()
         };
         // Even another valid node identity cannot write this response.
         assert_eq!(
-            owner
-                .app
-                .clone()
-                .oneshot(request(&stranger_token, Body::empty()))
+            common::send(&owner.app, stream(&stranger_token, Body::empty()))
                 .await
-                .unwrap()
                 .status(),
-            409
+            StatusCode::CONFLICT
         );
-        let bytes = vec![53u8; if broken { 1024 } else { 262144 }];
+        let bytes = vec![53u8; if broken { 1024 } else { 262_144 }];
         let body = if unknown_length {
             Body::from_stream(futures_util::stream::iter([
                 Ok(bytes::Bytes::copy_from_slice(&bytes)),
@@ -826,14 +749,9 @@ async fn binary_node_responses_are_scoped_and_never_hide_truncation() {
         } else {
             Body::from(bytes.clone())
         };
-        let response = owner
-            .app
-            .clone()
-            .oneshot(request(&token, body))
-            .await
-            .unwrap();
+        let response = common::send(&owner.app, stream(&token, body)).await;
         assert_eq!(response.status().is_success(), !broken);
-        let result = tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
+        let result = tokio::time::timeout(Duration::from_secs(2), waiting)
             .await
             .unwrap()
             .unwrap();
@@ -843,43 +761,20 @@ async fn binary_node_responses_are_scoped_and_never_hide_truncation() {
             assert_eq!(result.unwrap(), bytes);
         }
         assert_eq!(
-            owner
-                .app
-                .clone()
-                .oneshot(request(&token, Body::empty()))
+            common::send(&owner.app, stream(&token, Body::empty()))
                 .await
-                .unwrap()
                 .status(),
-            409
+            StatusCode::CONFLICT
         );
     }
 }
 
 #[tokio::test]
 async fn bulk_stream_backpressure_and_reader_cancellation_bound_the_upload() {
-    use leo_agent_manager::{auth, config::id};
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
     let owner = Owner::new().await;
     let (node, token) = (id(), auth::token());
-    owner
-        .service
-        .store
-        .put("nodes", json!({"id": node}))
-        .await
-        .unwrap();
-    owner
-        .service
-        .store
-        .set(
-            &format!("node-token:{}", auth::digest(&token)),
-            json!(node),
-            None,
-        )
-        .await
-        .unwrap();
+    owner.put("nodes", json!({ "id": node })).await;
+    owner.authorize_node(&node, &token).await;
     let (hub, target) = (owner.service.node_transport.clone(), node.clone());
     let waiting = tokio::spawn(async move {
         hub.request(&target, "GET", "/health", vec![])
@@ -890,17 +785,10 @@ async fn bulk_stream_backpressure_and_reader_cancellation_bound_the_upload() {
         .as_str()
         .unwrap()
         .to_owned();
+    let head = json!({ "id": call, "sequence": 0, "status": 200 });
     assert_eq!(
-        owner
-            .call(
-                "POST",
-                "/internal/nodes/reply",
-                json!({"id":call,"sequence":0,"status":200}),
-                Some(&token)
-            )
-            .await
-            .0,
-        200
+        owner.call("POST", REPLY, head, Some(&token)).await.0,
+        StatusCode::OK
     );
     let response = waiting.await.unwrap();
     let produced = Arc::new(AtomicUsize::new(0));
@@ -916,16 +804,14 @@ async fn bulk_stream_backpressure_and_reader_cancellation_bound_the_upload() {
             Some((Ok::<_, std::io::Error>(data), count + 1))
         }
     });
-    let request = Request::builder()
-        .method("POST")
-        .uri(format!("/internal/nodes/stream/{call}"))
-        .header("host", &owner.host)
-        .header("authorization", format!("Bearer {token}"))
+    let request = owner
+        .request("POST", &format!("/internal/nodes/stream/{call}"))
+        .header("authorization", bearer(&token))
         .body(Body::from_stream(stream))
         .unwrap();
     let app = owner.app.clone();
-    let upload = tokio::spawn(async move { app.oneshot(request).await.unwrap() });
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    let upload = tokio::spawn(async move { common::send(&app, request).await });
+    tokio::time::timeout(Duration::from_secs(2), async {
         while produced.load(Ordering::SeqCst) < 9 {
             tokio::task::yield_now().await;
         }
@@ -938,19 +824,16 @@ async fn bulk_stream_backpressure_and_reader_cancellation_bound_the_upload() {
         "Only eight queued frames plus the pending frame may be read"
     );
     drop(response);
-    assert_eq!(
-        tokio::time::timeout(std::time::Duration::from_secs(2), upload)
-            .await
-            .unwrap()
-            .unwrap()
-            .status(),
-        409
-    );
+    let upload = tokio::time::timeout(Duration::from_secs(2), upload)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(upload.status(), StatusCode::CONFLICT);
     assert!(
         owner
             .service
             .node_transport
-            .reply(&node, json!({"id":call,"sequence":1,"done":true}))
+            .reply(&node, json!({ "id": call, "sequence": 1, "done": true }))
             .await
             .is_err()
     );
@@ -958,53 +841,25 @@ async fn bulk_stream_backpressure_and_reader_cancellation_bound_the_upload() {
 
 #[tokio::test]
 async fn concurrent_admission_reserves_capacity_once_and_preserves_agent_grants() {
-    use leo_agent_manager::{
-        config::{id, now},
-        nodes::{LOCAL_NODE_ID, placement},
-    };
     let owner = Owner::new().await;
-    let node = id();
-    let agent = id();
-    let run_a = id();
-    let run_b = id();
-    owner
-        .service
-        .store
-        .put(
-            "nodes",
-            json!({
-                "id": node,
-                "local": false,
-                "accepting": true,
-                "executionReady": true,
-                "lastSeen": now(),
-                "capabilities": {"kvm": true,"fuse": true},
-                "limits": {"cpu": 2,"memoryMiB": 4096,"diskMiB": 65536}
-            }),
-        )
-        .await
-        .unwrap();
-    owner
-        .service
-        .store
-        .put("agents", json!({"id": agent,"access": {"nodes": [node]}}))
-        .await
-        .unwrap();
-    let a = json!({"id": run_a,"snapshot": {"agent": {"id": agent}}});
-    let b = json!({"id": run_b,"snapshot": {"agent": {"id": agent}}});
-    let attempt_a = id();
-    let attempt_b = id();
+    let (node, agent) = (id(), id());
+    let mut record = schedulable_node(&node, &limits(2, 4096, 65536));
+    record["local"] = false.into();
+    owner.put("nodes", record).await;
+    owner.grant_nodes(&agent, json!([node])).await;
+    let a = agent_run(&id(), &agent);
+    let b = agent_run(&id(), &agent);
+    let (attempt_a, attempt_b) = (id(), id());
     let (first, second) = tokio::join!(
         placement::reserve(&owner.service, &a, &attempt_a),
         placement::reserve(&owner.service, &b, &attempt_b)
     );
     assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
-    let winner = if first.is_ok() {
-        &attempt_a
+    let (winner, loser) = if first.is_ok() {
+        (&attempt_a, &b)
     } else {
-        &attempt_b
+        (&attempt_b, &a)
     };
-    let loser = if first.is_ok() { &b } else { &a };
     placement::release(&owner.service, winner).await.unwrap();
     assert_eq!(
         placement::reserve(&owner.service, loser, &id())
@@ -1012,57 +867,25 @@ async fn concurrent_admission_reserves_capacity_once_and_preserves_agent_grants(
             .unwrap()["nodeId"],
         node
     );
-    owner
-        .service
-        .store
-        .put("agents", json!({"id": agent,"access": {"nodes": []}}))
-        .await
-        .unwrap();
+    owner.grant_nodes(&agent, json!([])).await;
+    let mut local = agent_run(&id(), &agent);
+    local["preferredNodeId"] = LOCAL_NODE_ID.into();
     assert!(
-        placement::reserve(
-            &owner.service,
-            &json!({"id":id(),"snapshot":{"agent":{"id":agent}},"preferredNodeId":LOCAL_NODE_ID}),
-            &id()
-        )
-        .await
-        .is_err()
+        placement::reserve(&owner.service, &local, &id())
+            .await
+            .is_err()
     );
 }
 
 #[tokio::test]
 async fn retained_s3_disks_charge_local_cache_and_cancellation_releases_destination() {
-    use leo_agent_manager::{
-        config::{id, now},
-        nodes::{moves, placement},
-    };
     let owner = Owner::new().await;
-    let node = id();
-    let agent = id();
-    let run = id();
-    let attempt = id();
+    let (node, agent, run, attempt) = (id(), id(), id(), id());
     owner
-        .service
-        .store
-        .put(
-            "nodes",
-            json!({
-                "id": node,
-                "accepting": true,
-                "executionReady": true,
-                "lastSeen": now(),
-                "capabilities": {"kvm": true,"fuse": true},
-                "limits": {"cpu": 4,"memoryMiB": 8192,"diskMiB": 32768}
-            }),
-        )
-        .await
-        .unwrap();
-    owner
-        .service
-        .store
-        .put("agents", json!({"id": agent,"access": {"nodes": [node]}}))
-        .await
-        .unwrap();
-    let execution = json!({"id": run,"snapshot": {"agent": {"id": agent}}});
+        .put("nodes", schedulable_node(&node, &limits(4, 8192, 32768)))
+        .await;
+    owner.grant_nodes(&agent, json!([node])).await;
+    let execution = agent_run(&run, &agent);
     placement::reserve(&owner.service, &execution, &attempt)
         .await
         .unwrap();
@@ -1071,21 +894,14 @@ async fn retained_s3_disks_charge_local_cache_and_cancellation_releases_destinat
         .unwrap();
     placement::release(&owner.service, &attempt).await.unwrap();
     let retained = owner
-        .service
-        .store
-        .get("node-volumes", &format!("{run}:{node}"))
+        .stored("node-volumes", &format!("{run}:{node}"))
         .await
-        .unwrap()
         .unwrap();
     assert_eq!(retained["diskMiB"], 128);
     let other = id();
-    placement::reserve(
-        &owner.service,
-        &json!({"id": id(),"snapshot": {"agent": {"id": agent}}}),
-        &other,
-    )
-    .await
-    .expect("An idle S3 disk should leave capacity for another conversation");
+    placement::reserve(&owner.service, &agent_run(&id(), &agent), &other)
+        .await
+        .expect("An idle S3 disk should leave capacity for another conversation");
     placement::release(&owner.service, &other).await.unwrap();
     let retry = id();
     placement::reserve(&owner.service, &execution, &retry)
@@ -1094,8 +910,6 @@ async fn retained_s3_disks_charge_local_cache_and_cancellation_releases_destinat
     placement::release(&owner.service, &retry).await.unwrap();
     let pending = id();
     owner
-        .service
-        .store
         .put(
             "node-attempts",
             json!({
@@ -1103,120 +917,66 @@ async fn retained_s3_disks_charge_local_cache_and_cancellation_releases_destinat
                 "nodeId": node,
                 "runId": run,
                 "role": "destination",
-                "released": false
+                "released": false,
             }),
         )
-        .await
-        .unwrap();
-    let cancelled =
-        json!({"id": run,"cancelRequestedAt": now(),"moveRequest": {"reservation": pending}});
+        .await;
+    let cancelled = json!({
+        "id": run,
+        "cancelRequestedAt": now(),
+        "moveRequest": { "reservation": pending },
+    });
     assert!(moves::advance(&owner.service, &cancelled).await.unwrap());
     assert_eq!(
-        owner
-            .service
-            .store
-            .get("node-attempts", &pending)
-            .await
-            .unwrap()
-            .unwrap()["released"],
+        owner.stored("node-attempts", &pending).await.unwrap()["released"],
         true
     );
 }
 
 #[tokio::test]
 async fn requesting_a_smaller_disk_is_rejected_before_moving() {
-    use leo_agent_manager::{config::id, nodes::moves};
     let owner = Owner::new().await;
-    let run = json!({"id": id(),"resources": {"cpu": 2,"memoryMiB": 4096,"diskMiB": 32768}});
-    let error = moves::request(
-        &owner.service,
-        &run,
-        &json!({"cpu": 2,"memoryMiB": 4096,"diskMiB": 128}),
-    )
-    .await
-    .unwrap_err();
+    let run = json!({ "id": id(), "resources": limits(2, 4096, 32768) });
+    let error = moves::request(&owner.service, &run, &limits(2, 4096, 128))
+        .await
+        .unwrap_err();
     assert_eq!(error.status, 400);
     assert!(error.message.contains("shrink"));
 }
 
 #[tokio::test]
 async fn a_moved_disk_requires_a_node_with_fuse() {
-    use leo_agent_manager::{
-        config::{id, now},
-        nodes::placement,
-    };
     let owner = Owner::new().await;
-    let agent = id();
-    let local_only = id();
-    let unknown = id();
-    let s3_ready = id();
+    let (agent, local_only, unknown, s3_ready) = (id(), id(), id(), id());
     for (node, fuse) in [(&local_only, false), (&s3_ready, true)] {
-        owner
-            .service
-            .store
-            .put(
-                "nodes",
-                json!({
-                    "id": node,
-                    "accepting": true,
-                    "executionReady": true,
-                    "lastSeen": now(),
-                    "storage": {"enabled": false,"reserveMiB": 64,"reservePercent": 1},
-                    "capabilities": {
-                        "kvm": true,
-                        "fuse": fuse,
-                        "diskMiB": 32768,
-                        "diskTotalMiB": 32768
-                    },
-                    "limits": {"cpu": 4,"memoryMiB": 8192,"diskMiB": 32768}
-                }),
-            )
-            .await
-            .unwrap();
+        let mut record = schedulable_node(node, &limits(4, 8192, 32768));
+        record["storage"] = json!({ "enabled": false, "reserveMiB": 64, "reservePercent": 1 });
+        record["capabilities"] = json!({
+            "kvm": true,
+            "fuse": fuse,
+            "diskMiB": 32768,
+            "diskTotalMiB": 32768,
+        });
+        owner.put("nodes", record).await;
     }
+    let mut record = schedulable_node(&unknown, &limits(4, 8192, 32768));
+    record["capabilities"] = json!({ "kvm": true });
+    owner.put("nodes", record).await;
     owner
-        .service
-        .store
-        .put(
-            "nodes",
-            json!({
-                "id": unknown,
-                "accepting": true,
-                "executionReady": true,
-                "lastSeen": now(),
-                "capabilities": {"kvm": true},
-                "limits": {"cpu": 4,"memoryMiB": 8192,"diskMiB": 32768}
-            }),
-        )
-        .await
-        .unwrap();
-    owner
-        .service
-        .store
-        .put(
-            "agents",
-            json!({"id": agent,"access": {"nodes": [local_only,unknown,s3_ready]}}),
-        )
-        .await
-        .unwrap();
-    let mut run =
-        json!({"id": id(),"snapshot": {"agent": {"id": agent}},"placementTransition": true});
-    run["targetNodeId"] = local_only.into();
-    assert_eq!(
-        placement::reserve(&owner.service, &run, &id())
-            .await
-            .unwrap_err()
-            .status,
-        503
-    );
-    run["targetNodeId"] = unknown.into();
-    assert_eq!(
-        placement::reserve(&owner.service, &run, &id())
-            .await
-            .unwrap_err()
-            .status,
-        503
-    );
+        .grant_nodes(&agent, json!([local_only, unknown, s3_ready]))
+        .await;
+    let mut run = agent_run(&id(), &agent);
+    run["placementTransition"] = true.into();
+    for target in [&local_only, &unknown] {
+        run["targetNodeId"] = target.clone().into();
+        assert_eq!(
+            placement::reserve(&owner.service, &run, &id())
+                .await
+                .unwrap_err()
+                .status,
+            503
+        );
+    }
     run["targetNodeId"] = s3_ready.clone().into();
     assert_eq!(
         placement::reserve(&owner.service, &run, &id())
@@ -1229,10 +989,8 @@ async fn a_moved_disk_requires_a_node_with_fuse() {
 #[tokio::test]
 async fn recovery_settings_validate_and_preserve_the_last_good_configuration() {
     let owner = Owner::new().await;
-    let (status, initial) = owner
-        .call("GET", "/api/nodes/settings", Value::Null, None)
-        .await;
-    assert_eq!(status, 200);
+    let (status, initial) = owner.get(NODE_SETTINGS).await;
+    assert_eq!(status, StatusCode::OK);
     assert!(initial.get("destination").is_none());
     assert!(initial.get("retention").is_none());
     let settings = json!({
@@ -1240,85 +998,42 @@ async fn recovery_settings_validate_and_preserve_the_last_good_configuration() {
         "budgetMiB": 4096,
         "disconnectTimeoutSeconds": 60,
         "shutdownTimeoutSeconds": 300,
-        "maxCapacityWaitSeconds": 3600
+        "maxCapacityWaitSeconds": 3600,
     });
     assert_eq!(
-        owner
-            .call("PUT", "/api/nodes/settings", settings.clone(), None)
-            .await
-            .0,
-        200
+        owner.send("PUT", NODE_SETTINGS, settings.clone()).await.0,
+        StatusCode::OK
     );
     let mut bad = settings.clone();
     bad["intervalSeconds"] = 0.into();
     assert_eq!(
-        owner.call("PUT", "/api/nodes/settings", bad, None).await.0,
-        400
+        owner.send("PUT", NODE_SETTINGS, bad).await.0,
+        StatusCode::BAD_REQUEST
     );
-    assert_eq!(
-        owner
-            .call("GET", "/api/nodes/settings", Value::Null, None)
-            .await
-            .1,
-        {
-            // The S3 status is reported alongside the settings but never stored.
-            let mut expected = settings;
-            expected["s3Configured"] = false.into();
-            expected
-        }
-    );
+    // The S3 status is reported alongside the settings but never stored.
+    let mut expected = settings;
+    expected["s3Configured"] = false.into();
+    assert_eq!(owner.get(NODE_SETTINGS).await.1, expected);
 }
 
 #[tokio::test]
 async fn tags_filter_authorized_nodes_without_granting_access() {
-    use leo_agent_manager::{
-        config::{id, now},
-        nodes::placement,
-    };
     let owner = Owner::new().await;
-    let fast = id();
-    let other = id();
-    let agent = id();
+    let (fast, other, agent) = (id(), id(), id());
     for (node, tags) in [(&fast, json!(["fast"])), (&other, json!(["slow"]))] {
-        owner
-            .service
-            .store
-            .put(
-                "nodes",
-                json!({
-                    "id": node,
-                    "tags": tags,
-                    "accepting": true,
-                    "executionReady": true,
-                    "lastSeen": now(),
-                    "capabilities": {"kvm": true,"fuse": true},
-                    "limits": {"cpu": 4,"memoryMiB": 8192,"diskMiB": 65536}
-                }),
-            )
-            .await
-            .unwrap();
+        let mut record = schedulable_node(node, &limits(4, 8192, 65536));
+        record["tags"] = tags;
+        owner.put("nodes", record).await;
     }
-    owner
-        .service
-        .store
-        .put("agents", json!({"id": agent,"access": {"nodes": [other]}}))
-        .await
-        .unwrap();
-    let run = json!({"id": id(),"snapshot": {"agent": {"id": agent}},"requiredTags": ["fast"]});
+    owner.grant_nodes(&agent, json!([other])).await;
+    let mut run = agent_run(&id(), &agent);
+    run["requiredTags"] = json!(["fast"]);
     assert!(
         placement::reserve(&owner.service, &run, &id())
             .await
             .is_err()
     );
-    owner
-        .service
-        .store
-        .put(
-            "agents",
-            json!({"id": agent,"access": {"nodes": [fast,other]}}),
-        )
-        .await
-        .unwrap();
+    owner.grant_nodes(&agent, json!([fast, other])).await;
     assert_eq!(
         placement::reserve(&owner.service, &run, &id())
             .await
@@ -1330,42 +1045,28 @@ async fn tags_filter_authorized_nodes_without_granting_access() {
 #[tokio::test]
 async fn a_remote_only_agent_prepares_a_private_vm_without_a_local_controller() {
     let owner = Owner::new().await;
-    std::fs::create_dir_all(owner.service.config.home.join(".codex")).unwrap();
-    std::fs::write(
-        owner.service.config.home.join(".codex/leo-managed-auth"),
-        "1",
-    )
-    .unwrap();
+    common::managed_codex_home(&owner.service.config.home);
     let run = json!({
         "id": "e2000000-0000-4000-8000-000000000001",
         "snapshot": {
             "agent": {
-                "id": "00000000-0000-4000-8000-000000000001",
-                "access": {"nodes": ["e2000000-0000-4000-8000-000000000002"]}
+                "id": MAIN_AGENT_ID,
+                "access": { "nodes": ["e2000000-0000-4000-8000-000000000002"] },
             },
             "projects": [],
             "skills": [],
-            "task": {}
-        }
+            "task": {},
+        },
     });
-    owner
-        .service
-        .store
-        .put("agents", run["snapshot"]["agent"].clone())
-        .await
-        .unwrap();
+    owner.put("agents", run["snapshot"]["agent"].clone()).await;
     let prepared =
         leo_agent_manager::execution::prepare(&run, &owner.service.config, None, None, None)
             .await
             .unwrap();
     assert_eq!(prepared["backend"], "firecracker");
     assert_eq!(prepared["isolated"], true);
-    let placement = leo_agent_manager::nodes::placement::reserve(
-        &owner.service,
-        &run,
-        "e2000000-0000-4000-8000-000000000003",
-    )
-    .await;
+    let placement =
+        placement::reserve(&owner.service, &run, "e2000000-0000-4000-8000-000000000003").await;
     assert!(
         placement.is_err(),
         "An unavailable VM must never fall back to the shared host"
@@ -1375,143 +1076,89 @@ async fn a_remote_only_agent_prepares_a_private_vm_without_a_local_controller() 
 #[tokio::test]
 async fn owner_placement_obeys_agent_grants_and_preserves_last_good_selection() {
     let owner = Owner::new().await;
-    let run = leo_agent_manager::config::id();
-    let main = "00000000-0000-4000-8000-000000000001";
-    let local = leo_agent_manager::nodes::LOCAL_NODE_ID;
-    let record = json!({
-        "id": run,
-        "taskId": "fixture",
-        "createdAt": 0,
-        "status": "succeeded",
-        "snapshot": {"agent": {"id": main}}
-    });
-    owner
-        .service
-        .store
-        .write(move |db| db.add_run(&record, None))
+    let run = id();
+    let mut record = run_record(&run, RunStatus::Succeeded);
+    record["snapshot"] = json!({ "agent": { "id": MAIN_AGENT_ID } });
+    owner.add_run(&record).await;
+    let path = format!("/api/nodes/placement/{run}");
+    let pin = |node: Value| json!({ "pinnedNodeId": node, "preferredNodeId": null });
+    let (status, _) = owner.send("PUT", &path, pin(LOCAL_NODE_ID.into())).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = owner.send("PUT", &path, pin(id().into())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, value) = owner.get(&path).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(value["pinnedNodeId"], LOCAL_NODE_ID);
+    let prefer = json!({ "pinnedNodeId": null, "preferredNodeId": LOCAL_NODE_ID });
+    let (status, _) = owner.send("PUT", &path, prefer).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, value) = owner.get(&path).await;
+    assert!(value["pinnedNodeId"].is_null());
+    assert_eq!(value["preferredNodeId"], LOCAL_NODE_ID);
+}
+
+/// Sends a refresh request through the relayed authentication socket.
+async fn refresh_through(socket: &Path) -> Option<Value> {
+    let mut stream = BufReader::new(UnixStream::connect(socket).await.unwrap());
+    wire::write(stream.get_mut(), &json!({ "method": "refresh" }))
         .await
         .unwrap();
-    let path = format!("/api/nodes/placement/{run}");
-    let (status, _) = owner
-        .call(
-            "PUT",
-            &path,
-            json!({"pinnedNodeId": local,"preferredNodeId": null}),
-            None,
-        )
-        .await;
-    assert_eq!(status, 200);
-    let (status, _) = owner
-        .call(
-            "PUT",
-            &path,
-            json!({"pinnedNodeId": leo_agent_manager::config::id(),"preferredNodeId": null}),
-            None,
-        )
-        .await;
-    assert_eq!(status, 403);
-    let (status, value) = owner.call("GET", &path, Value::Null, None).await;
-    assert_eq!(status, 200);
-    assert_eq!(value["pinnedNodeId"], local);
-    let (status, _) = owner
-        .call(
-            "PUT",
-            &path,
-            json!({"pinnedNodeId": null,"preferredNodeId": local}),
-            None,
-        )
-        .await;
-    assert_eq!(status, 200);
-    let (_, value) = owner.call("GET", &path, Value::Null, None).await;
-    assert!(value["pinnedNodeId"].is_null());
-    assert_eq!(value["preferredNodeId"], local);
+    tokio::time::timeout(Duration::from_secs(2), wire::read(&mut stream))
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+/// Answers two refresh requests on the run's native authentication socket.
+fn serve_native_refreshes(provider: UnixListener) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        for generation in 1..=2 {
+            let (stream, _) = provider.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            assert_eq!(
+                wire::read(&mut stream).await.unwrap().unwrap()["method"],
+                "refresh"
+            );
+            wire::write(
+                stream.get_mut(),
+                &json!({ "accessToken": format!("synthetic-{generation}") }),
+            )
+            .await
+            .unwrap();
+        }
+    })
 }
 
 #[tokio::test]
 async fn native_auth_relays_refresh_both_protocols_and_stop_after_grant_revocation() {
-    use leo_agent_manager::{auth, config::id, microvm::wire, nodes::workspace};
-    use tokio::{
-        io::BufReader,
-        net::{TcpListener, UnixListener, UnixStream},
-    };
     for claude in [false, true] {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let (listener, address) = common::bind().await;
         let owner = Owner::at(address.to_string()).await;
-        let node = id();
-        let attempt = id();
-        let run = id();
-        let token = auth::token();
-        let main = "00000000-0000-4000-8000-000000000001";
+        let (node, attempt, run, token) = (id(), id(), id(), auth::token());
+        owner.register_node(&node, &token).await;
+        owner.grant_nodes(MAIN_AGENT_ID, json!([node])).await;
         owner
-            .service
-            .store
-            .put("nodes", json!({"id": node,"revoked": false}))
-            .await
-            .unwrap();
-        owner
-            .service
-            .store
-            .set(
-                &format!("node-token:{}", auth::digest(&token)),
-                json!(node),
-                None,
-            )
-            .await
-            .unwrap();
-        owner
-            .service
-            .store
-            .put("agents", json!({"id": main,"access": {"nodes": [node]}}))
-            .await
-            .unwrap();
-        owner
-            .service
-            .store
             .put(
                 "node-attempts",
-                json!({
-                    "id": attempt,
-                    "runId": run,
-                    "nodeId": node,
-                    "released": false
-                }),
+                json!({ "id": attempt, "runId": run, "nodeId": node, "released": false }),
             )
-            .await
-            .unwrap();
-        let record = json!({
-            "id": run,
-            "taskId": "fixture",
-            "createdAt": 0,
-            "status": "running",
-            "snapshot": {"agent": {"id": main}}
-        });
+            .await;
+        let mut record = run_record(&run, RunStatus::Running);
+        record["snapshot"] = json!({ "agent": { "id": MAIN_AGENT_ID } });
+        owner.add_run(&record).await;
         owner
-            .service
-            .store
-            .write(move |db| db.add_run(&record, None))
-            .await
-            .unwrap();
-        owner
-            .service
-            .store
-            .set(
-                &format!("run-checkpoint:{run}"),
-                json!({"nodeId": node,"runnerId": attempt}),
-                None,
-            )
-            .await
-            .unwrap();
+            .set_checkpoint(&run, json!({ "nodeId": node, "runnerId": attempt }))
+            .await;
         let plans = owner.service.config.data_dir.join("runner-plans");
         std::fs::create_dir_all(&plans).unwrap();
-        std::fs::write(
-            plans.join(format!("{attempt}.json")),
-            json!({
-                "runId": run,
-                "chat": {"provider": if claude {"claude"} else {"codex"},"claudeManagedAuth": claude}
-            }).to_string(),
-        )
-        .unwrap();
+        let plan = json!({
+            "runId": run,
+            "chat": {
+                "provider": if claude { "claude" } else { "codex" },
+                "claudeManagedAuth": claude,
+            },
+        });
+        std::fs::write(plans.join(format!("{attempt}.json")), plan.to_string()).unwrap();
         let home = owner
             .service
             .config
@@ -1521,79 +1168,27 @@ async fn native_auth_relays_refresh_both_protocols_and_stop_after_grant_revocati
             .join("home")
             .join(if claude { ".claude" } else { ".codex" });
         std::fs::create_dir_all(&home).unwrap();
-        let provider = UnixListener::bind(home.join("leo-auth.sock")).unwrap();
-        let native = tokio::spawn(async move {
-            for generation in 1..=2 {
-                let (stream, _) = provider.accept().await.unwrap();
-                let mut stream = BufReader::new(stream);
-                {
-                    assert_eq!(
-                        wire::read(&mut stream).await.unwrap().unwrap()["method"],
-                        "refresh"
-                    );
-                }
-                wire::write(
-                    stream.get_mut(),
-                    &json!({"accessToken": format!("synthetic-{generation}")}),
-                )
-                .await
-                .unwrap();
-            }
-        });
-        let app = owner.app.clone();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let stop = tokio_util::sync::CancellationToken::new();
-        let path = owner._root.path().join("remote.sock");
+        let native =
+            serve_native_refreshes(UnixListener::bind(home.join("leo-auth.sock")).unwrap());
+        let server = owner.serve(listener);
+        let stop = CancellationToken::new();
+        let socket = owner.root().join("remote.sock");
         let relay = tokio::spawn(workspace::auth_listener(
-            path.clone(),
+            socket.clone(),
             reqwest::Client::new(),
             format!("http://{address}").parse().unwrap(),
             token,
             attempt,
             stop.clone(),
         ));
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while !path.exists() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        wait_for_path(&socket).await;
         for generation in 1..=2 {
-            let mut stream = BufReader::new(UnixStream::connect(&path).await.unwrap());
-            {
-                wire::write(stream.get_mut(), &json!({"method": "refresh"}))
-                    .await
-                    .unwrap();
-            }
-            let value =
-                tokio::time::timeout(std::time::Duration::from_secs(2), wire::read(&mut stream))
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .unwrap();
+            let value = refresh_through(&socket).await.unwrap();
             assert_eq!(value["accessToken"], format!("synthetic-{generation}"));
         }
         native.await.unwrap();
-        owner
-            .service
-            .store
-            .put("agents", json!({"id": main,"access": {"nodes": []}}))
-            .await
-            .unwrap();
-        let mut stream = BufReader::new(UnixStream::connect(&path).await.unwrap());
-        {
-            wire::write(stream.get_mut(), &json!({"method": "refresh"}))
-                .await
-                .unwrap();
-        }
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(2), wire::read(&mut stream))
-                .await
-                .unwrap()
-                .unwrap()
-                .is_none()
-        );
+        owner.grant_nodes(MAIN_AGENT_ID, json!([])).await;
+        assert!(refresh_through(&socket).await.is_none());
         stop.cancel();
         relay.await.unwrap().unwrap();
         server.abort();
@@ -1602,146 +1197,88 @@ async fn native_auth_relays_refresh_both_protocols_and_stop_after_grant_revocati
 
 #[tokio::test]
 async fn completed_run_storage_refresh_clears_stale_dirty_counts() {
-    use leo_agent_manager::{
-        config::id,
-        nodes::{LOCAL_NODE_ID, storage},
-    };
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            axum::Router::new().fallback(|| async {
-                axum::Json(json!({
-                    "mode": "on-demand",
-                    "dirtyBytes": 0,
-                    "dirtySince": null,
-                    "localBytes": 4096,
-                    "activeLocalBytes": 4096
-                }))
-            }),
-        )
-        .await
-        .unwrap();
+    use leo_agent_manager::nodes::storage;
+
+    let runner = Router::new().fallback(|| async {
+        Json(json!({
+            "mode": "on-demand",
+            "dirtyBytes": 0,
+            "dirtySince": null,
+            "localBytes": 4096,
+            "activeLocalBytes": 4096,
+        }))
     });
-    let owner = Owner::with_runner("localhost:4310".into(), format!("http://{address}")).await;
+    let (runner_url, server) = common::serve_locally(runner).await;
+    let owner = Owner::with_runner(common::HOST.into(), runner_url).await;
     let run = id();
-    let record = json!({
-        "id": run,
-        "taskId": "fixture",
-        "createdAt": 0,
-        "status": "succeeded",
-        "nodeId": LOCAL_NODE_ID,
-        "storage": {"mode": "on-demand","dirtyBytes": 1048576,"dirtySince": 1}
-    });
-    let saved = record.clone();
+    let volume = format!("{run}:{LOCAL_NODE_ID}");
+    let mut record = run_record(&run, RunStatus::Succeeded);
+    record["nodeId"] = LOCAL_NODE_ID.into();
+    record["storage"] = json!({ "mode": "on-demand", "dirtyBytes": 1_048_576, "dirtySince": 1 });
+    owner.add_run(&record).await;
     owner
-        .service
-        .store
-        .write(move |db| db.add_run(&saved, None))
-        .await
-        .unwrap();
-    owner
-        .service
-        .store
         .put(
             "node-volumes",
-            json!({
-                "id": format!("{run}:{LOCAL_NODE_ID}"),
-                "runId": run,
-                "nodeId": LOCAL_NODE_ID,
-                "diskMiB": 100
-            }),
+            json!({ "id": volume, "runId": run, "nodeId": LOCAL_NODE_ID, "diskMiB": 100 }),
         )
-        .await
-        .unwrap();
+        .await;
+
     storage::refresh(&owner.service, &record).await.unwrap();
-    let current = owner.service.store.run(&run).await.unwrap();
-    assert_eq!(current["status"], "succeeded");
+    let current = owner.run(&run).await;
+    assert_eq!(current["status"], RunStatus::Succeeded);
     assert_eq!(current["storage"]["dirtyBytes"], 0);
     assert!(current["storage"]["dirtySince"].is_null());
-    let volume = owner
-        .service
-        .store
-        .get("node-volumes", &format!("{run}:{LOCAL_NODE_ID}"))
-        .await
-        .unwrap()
-        .unwrap();
+    let volume = owner.stored("node-volumes", &volume).await.unwrap();
     assert_eq!(volume["diskMiB"], 1);
+
     // A late reply from the old owner cannot overwrite the destination's state.
     owner
         .service
         .store
-        .patch_run(&run, json!({"nodeId": id(),"storage": {"dirtyBytes": 42}}))
+        .patch_run(
+            &run,
+            json!({ "nodeId": id(), "storage": { "dirtyBytes": 42 } }),
+        )
         .await
         .unwrap();
     storage::refresh(&owner.service, &record).await.unwrap();
-    assert_eq!(
-        owner.service.store.run(&run).await.unwrap()["storage"]["dirtyBytes"],
-        42
-    );
+    assert_eq!(owner.run(&run).await["storage"]["dirtyBytes"], 42);
     server.abort();
 }
 
 #[tokio::test]
 async fn starting_vm_defers_publication_without_a_sync_failure() {
-    use leo_agent_manager::{config::id, nodes::publication};
-    let captures = std::sync::Arc::new(tokio::sync::Notify::new());
+    let captures = Arc::new(tokio::sync::Notify::new());
     let captured = captures.clone();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            axum::Router::new().fallback(move || {
-                let captured = captured.clone();
-                async move {
-                    captured.notify_one();
-                    (
-                        axum::http::StatusCode::CONFLICT,
-                        axum::Json(json!({"error": "VM is still starting."})),
-                    )
-                }
-            }),
-        )
-        .await
-        .unwrap();
+    let runner = Router::new().fallback(move || {
+        let captured = captured.clone();
+        async move {
+            captured.notify_one();
+            (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "VM is still starting." })),
+            )
+        }
     });
-    let owner = Owner::with_runner("localhost:4310".into(), format!("http://{address}")).await;
+    let (runner_url, server) = common::serve_locally(runner).await;
+    let owner = Owner::with_runner(common::HOST.into(), runner_url).await;
     std::fs::write(
         owner.service.config.data_dir.join("storage-s3.json"),
-        r#"{"bucket":"fixture"}"#,
+        json!({ "bucket": "fixture" }).to_string(),
     )
     .unwrap();
     let run = id();
     let previous_snapshot = id();
-    let record = json!({
-        "id": run,
-        "taskId": "fixture",
-        "createdAt": 0,
-        "status": "running",
-        "isolated": true,
-        "backup": {"snapshotId": previous_snapshot}
-    });
-    let saved = record.clone();
+    let mut record = run_record(&run, RunStatus::Running);
+    record["isolated"] = true.into();
+    record["backup"] = json!({ "snapshotId": previous_snapshot });
+    owner.add_run(&record).await;
     owner
-        .service
-        .store
-        .write(move |db| db.add_run(&saved, None))
-        .await
-        .unwrap();
-    owner
-        .service
-        .store
-        .set(
-            &format!("run-checkpoint:{run}"),
-            json!({"runnerId": id()}),
-            None,
-        )
-        .await
-        .unwrap();
+        .set_checkpoint(&run, json!({ "runnerId": id() }))
+        .await;
+
     publication::attempt(&owner.service, &record).await;
-    let current = owner.service.store.run(&run).await.unwrap();
+    let current = owner.run(&run).await;
     assert!(
         current["backup"]["error"].is_null(),
         "{}",
@@ -1750,17 +1287,21 @@ async fn starting_vm_defers_publication_without_a_sync_failure() {
     assert_eq!(current["backup"]["status"], "pending");
     assert_eq!(current["backup"]["snapshotId"], previous_snapshot);
     captures.notified().await;
+
     owner
         .service
         .store
         .patch_run(
             &run,
-            json!({"status": "succeeded","storage": {"mode": "on-demand","dirtyBytes": 0}}),
+            json!({
+                "status": RunStatus::Succeeded,
+                "storage": { "mode": "on-demand", "dirtyBytes": 0 },
+            }),
         )
         .await
         .unwrap();
     let maintenance = tokio::spawn(publication::maintain(owner.service.clone()));
-    tokio::time::timeout(std::time::Duration::from_secs(8), captures.notified())
+    tokio::time::timeout(Duration::from_secs(8), captures.notified())
         .await
         .expect("a deferred final capture must retry after the run has completed");
     maintenance.abort();
@@ -1778,32 +1319,17 @@ async fn starting_vm_defers_publication_without_a_sync_failure() {
 
 #[tokio::test]
 async fn retired_audit_errors_do_not_force_full_download_before_demand_resume() {
-    use leo_agent_manager::{
-        config::id,
-        nodes::{moves, publication, snapshots},
-    };
     let owner = Owner::new().await;
-    let run = id();
-    let point = id();
-    let record = json!({
-        "id": run,
-        "taskId": "fixture",
-        "createdAt": 0,
-        "status": "queued",
-        "storage": {"mode": "on-demand"}
-    });
-    owner
-        .service
-        .store
-        .write(move |db| db.add_run(&record, None))
-        .await
-        .unwrap();
+    let (run, point) = (id(), id());
+    let mut record = run_record(&run, RunStatus::Queued);
+    record["storage"] = json!({ "mode": "on-demand" });
+    owner.add_run(&record).await;
     owner
         .service
         .store
         .set(
             &format!("node-backup-audit:{run}"),
-            json!({"error": "historical audit failure"}),
+            json!({ "error": "historical audit failure" }),
             None,
         )
         .await
@@ -1812,16 +1338,10 @@ async fn retired_audit_errors_do_not_force_full_download_before_demand_resume() 
         "version": 1,
         "size": 4096,
         "blockSize": snapshots::BLOCK,
-        "blocks": [{"offset": 0,"size": 4096,"hash": "a".repeat(64)}]
+        "blocks": [{ "offset": 0, "size": 4096, "hash": "a".repeat(64) }],
     });
-    let encrypted = owner
-        .service
-        .vault
-        .encrypt(&format!("backup:{point}"), &manifest)
-        .unwrap();
+    let encrypted = owner.encrypt_manifest(&point, &manifest);
     owner
-        .service
-        .store
         .put(
             "node-backups",
             json!({
@@ -1830,17 +1350,16 @@ async fn retired_audit_errors_do_not_force_full_download_before_demand_resume() 
                 "sessionId": "saved-session",
                 "capturedAt": 1,
                 "destination": "s3",
-                "manifest": encrypted
+                "manifest": encrypted,
             }),
         )
-        .await
-        .unwrap();
+        .await;
     // No S3 credentials or local payload: selecting verified metadata cannot
     // download the disk. Reads will validate the remote blocks when requested.
     owner
         .service
         .store
-        .patch_run(&run, json!({"backup": {"id": point}}))
+        .patch_run(&run, json!({ "backup": { "id": point } }))
         .await
         .unwrap();
     let selected = moves::latest(&owner.service, &run)
@@ -1856,138 +1375,206 @@ async fn retired_audit_errors_do_not_force_full_download_before_demand_resume() 
     );
 }
 
+/// A runner controller that serves snapshots of `disk` and can corrupt blocks.
+/// It sets `batched` once a publication reads blocks in a batch.
+fn snapshot_controller(
+    disk: PathBuf,
+    manifest: Arc<tokio::sync::Mutex<Value>>,
+    corrupt: Arc<AtomicBool>,
+    batched: Arc<AtomicBool>,
+    snapshot: String,
+) -> Router {
+    Router::new().fallback(axum::routing::any(move |request: Request<Body>| {
+        let (disk, manifest, corrupt, batched, snapshot) = (
+            disk.clone(),
+            manifest.clone(),
+            corrupt.clone(),
+            batched.clone(),
+            snapshot.clone(),
+        );
+        async move {
+            assert_eq!(
+                request.headers()["authorization"],
+                "Bearer controller-fixture"
+            );
+            if request.method() == "DELETE" {
+                return Json(json!({ "ok": true })).into_response();
+            }
+            if request.uri().path().ends_with("/snapshot") {
+                let manifest = manifest.lock().await.clone();
+                return Json(json!({ "id": snapshot, "manifest": manifest })).into_response();
+            }
+            if request.uri().path().ends_with("/blocks") {
+                batched.store(true, Ordering::SeqCst);
+                let body = to_bytes(request.into_body(), 4096).await.unwrap();
+                let batch: Value = serde_json::from_slice(&body).unwrap();
+                let manifest = manifest.lock().await;
+                let mut bytes = Vec::new();
+                for hash in batch["hashes"].as_array().unwrap() {
+                    bytes.extend(
+                        snapshots::block(&disk, &manifest, hash.as_str().unwrap())
+                            .await
+                            .unwrap(),
+                    );
+                }
+                if corrupt.load(Ordering::SeqCst) {
+                    bytes[0] ^= 255;
+                }
+                return bytes.into_response();
+            }
+            let hash = request.uri().path().rsplit('/').next().unwrap();
+            let mut bytes = snapshots::block(&disk, &*manifest.lock().await, hash)
+                .await
+                .unwrap();
+            if corrupt.load(Ordering::SeqCst) {
+                bytes[0] ^= 255;
+            }
+            bytes.into_response()
+        }
+    }))
+}
+
+/// Points the archive at `endpoint` through a wrapper that isolates the AWS CLI.
+async fn configure_loopback_s3(owner: &Owner, endpoint: &str) {
+    let parsed: url::Url = endpoint.parse().unwrap();
+    assert_eq!(parsed.host_str(), Some("127.0.0.1"));
+    assert_eq!(parsed.scheme(), "http");
+    let wrapper = owner.root().join("aws-fixture-client");
+    let script = format!(
+        "#!/usr/bin/env python3\nimport os,subprocess,sys\nenv={{k:v for k,v in os.environ.items() if not k.startswith('AWS_')}}\nenv.update(AWS_ACCESS_KEY_ID='node-fixture',AWS_SECRET_ACCESS_KEY='node-fixture-secret',AWS_DEFAULT_REGION='us-east-1',AWS_EC2_METADATA_DISABLED='true',AWS_CONFIG_FILE='/dev/null',AWS_SHARED_CREDENTIALS_FILE='/dev/null')\nsys.exit(subprocess.run(['aws','--endpoint-url',{}]+sys.argv[1:],env=env).returncode)\n",
+        serde_json::to_string(endpoint).unwrap()
+    );
+    std::fs::write(&wrapper, script).unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(
+        owner.service.config.data_dir.join("archive-s3.json"),
+        json!({ "bucket": "leo-node-test", "awsBinary": wrapper }).to_string(),
+    )
+    .unwrap();
+    let (status, value) = owner
+        .send(
+            "PUT",
+            NODE_SETTINGS,
+            json!({ "intervalSeconds": 60, "budgetMiB": 128 }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+}
+
+/// An S3 outage fails reads with a retryable status, without dropping the
+/// upload receipts nor the incremental baseline of the first recovery point.
+async fn assert_s3_outage_is_transient(
+    owner: &Owner,
+    run: &str,
+    blocks: &Path,
+    retained: &Value,
+    first: &Value,
+    hash: &str,
+) {
+    std::fs::remove_dir_all(blocks).unwrap();
+    let config_path = owner.service.config.data_dir.join("archive-s3.json");
+    let original_config = std::fs::read(&config_path).unwrap();
+    let mut disconnected_config: Value = serde_json::from_slice(&original_config).unwrap();
+    disconnected_config["endpoint"] = json!("https://127.0.0.1:1");
+    std::fs::write(&config_path, disconnected_config.to_string()).unwrap();
+    let mut disconnected_point = retained.clone();
+    disconnected_point["endpoint"] = json!("https://127.0.0.1:1");
+    let location = json!({
+        "destination": "s3",
+        "bucket": "leo-node-test",
+        "endpoint": "https://127.0.0.1:1",
+    });
+    let receipt = blocks.join(format!(
+        "{hash}.s3-{}",
+        hex::encode(Sha256::digest(serde_json::to_vec(&location).unwrap()))
+    ));
+    std::fs::create_dir_all(receipt.parent().unwrap()).unwrap();
+    std::fs::write(&receipt, b"verified before outage").unwrap();
+    assert_eq!(
+        publication::read_block(&owner.service, &disconnected_point, hash)
+            .await
+            .unwrap_err()
+            .status,
+        503
+    );
+    assert!(
+        receipt.exists(),
+        "a transient outage retains the upload receipt"
+    );
+    assert_eq!(
+        owner.run(run).await["backup"]["snapshotId"],
+        first["snapshotId"],
+        "a transient outage keeps the incremental baseline"
+    );
+    std::fs::remove_file(receipt).unwrap();
+    std::fs::write(&config_path, original_config).unwrap();
+}
+
+/// The previous JSON/base64 envelope and the binary format can coexist: a
+/// recovery point without a block format reads the run-scoped `key`.
+async fn assert_legacy_block_envelope_is_readable(
+    owner: &Owner,
+    key: &str,
+    retained: &Value,
+    block: &str,
+    original: &[u8],
+) {
+    let legacy = owner
+        .service
+        .vault
+        .encrypt(key, &json!(STANDARD.encode(&original[..4 * MIB])))
+        .unwrap();
+    let legacy_file = owner.root().join("legacy-block.json");
+    std::fs::write(&legacy_file, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    Storage::configured(&owner.service)
+        .unwrap()
+        .upload_file_verified(&legacy_file, key)
+        .await
+        .unwrap();
+    let mut legacy_point = retained.clone();
+    legacy_point.as_object_mut().unwrap().remove("blockFormat");
+    assert_eq!(
+        publication::read_block(&owner.service, &legacy_point, block)
+            .await
+            .unwrap(),
+        original[..4 * MIB]
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires loopback S3; run tests/node_s3_test.py"]
 async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplete_publication() {
-    use axum::response::IntoResponse;
-    use leo_agent_manager::{
-        auth,
-        config::{id, now},
-        nodes::{publication, relay, snapshots},
-    };
-    use sha2::{Digest, Sha256};
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
+    let (listener, address) = common::bind().await;
     let owner = Owner::at(address.to_string()).await;
-    let node = id();
-    let attempt = id();
-    let run = id();
-    let token = auth::token();
+    let (node, attempt, run, token) = (id(), id(), id(), auth::token());
+    owner.register_node(&node, &token).await;
+    let mut record = run_record(&run, RunStatus::Running);
+    record["sessionId"] = "synthetic-native-session".into();
+    owner.add_run(&record).await;
     owner
-        .service
-        .store
-        .put("nodes", json!({"id": node,"revoked": false}))
-        .await
-        .unwrap();
-    owner
-        .service
-        .store
-        .set(
-            &format!("node-token:{}", auth::digest(&token)),
-            json!(node),
-            None,
-        )
-        .await
-        .unwrap();
-    let record = json!({
-        "id": run,
-        "taskId": "fixture",
-        "createdAt": 0,
-        "status": "running",
-        "sessionId": "synthetic-native-session"
-    });
-    let owned = record.clone();
-    owner
-        .service
-        .store
-        .write(move |db| db.add_run(&owned, None))
-        .await
-        .unwrap();
-    owner
-        .service
-        .store
-        .set(
-            &format!("run-checkpoint:{run}"),
-            json!({"nodeId": node,"runnerId": attempt}),
-            None,
-        )
-        .await
-        .unwrap();
-    let source = owner._root.path().join("source-disk");
-    let mut original = vec![0u8; 4 * 1024 * 1024 + 128];
-    original[..27].copy_from_slice(b"private-untracked-contents!");
-    original[4 * 1024 * 1024] = 1;
+        .set_checkpoint(&run, json!({ "nodeId": node, "runnerId": attempt }))
+        .await;
+    let source = owner.root().join("source-disk");
+    let mut original = vec![0u8; 4 * MIB + 128];
+    original[..PRIVATE_CONTENTS.len()].copy_from_slice(PRIVATE_CONTENTS);
+    original[4 * MIB] = 1;
     std::fs::write(&source, &original).unwrap();
-    let mut manifest = snapshots::index(&source).await.unwrap();
-    manifest["capturedAt"] = now().into();
-    manifest["runtime"] = json!({"runtimeId": "fixture"});
-    let snapshot = id();
-    let state = Arc::new(tokio::sync::Mutex::new(manifest));
+    let state = Arc::new(tokio::sync::Mutex::new(controller_manifest(&source).await));
     let corrupt = Arc::new(AtomicBool::new(false));
     let batched = Arc::new(AtomicBool::new(false));
-    let fixture = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let controller = fixture.local_addr().unwrap();
-    let (disk, data, bad) = (source.clone(), state.clone(), corrupt.clone());
-    let batches = batched.clone();
-    let controller_app = axum::Router::new().fallback(axum::routing::any(
-        move |request: axum::extract::Request| {
-            let (disk, data, bad, snapshot) =
-                (disk.clone(), data.clone(), bad.clone(), snapshot.clone());
-            let batches = batches.clone();
-            async move {
-                assert_eq!(
-                    request.headers()["authorization"],
-                    "Bearer controller-fixture"
-                );
-                if request.method() == "DELETE" {
-                    return axum::Json(json!({"ok": true})).into_response();
-                }
-                if request.uri().path().ends_with("/snapshot") {
-                    return axum::Json(
-                        json!({"id": snapshot,"manifest": data.lock().await.clone()}),
-                    )
-                    .into_response();
-                }
-                if request.uri().path().ends_with("/blocks") {
-                    batches.store(true, Ordering::SeqCst);
-                    let body = axum::body::to_bytes(request.into_body(), 4096)
-                        .await
-                        .unwrap();
-                    let batch: Value = serde_json::from_slice(&body).unwrap();
-                    let manifest = data.lock().await;
-                    let mut bytes = Vec::new();
-                    for hash in batch["hashes"].as_array().unwrap() {
-                        bytes.extend(
-                            snapshots::block(&disk, &manifest, hash.as_str().unwrap())
-                                .await
-                                .unwrap(),
-                        );
-                    }
-                    if bad.load(Ordering::SeqCst) {
-                        bytes[0] ^= 255;
-                    }
-                    return bytes.into_response();
-                }
-                let hash = request.uri().path().rsplit('/').next().unwrap();
-                let mut bytes = snapshots::block(&disk, &*data.lock().await, hash)
-                    .await
-                    .unwrap();
-                if bad.load(Ordering::SeqCst) {
-                    bytes[0] ^= 255;
-                }
-                bytes.into_response()
-            }
-        },
-    ));
-    let controller_task =
-        tokio::spawn(async move { axum::serve(fixture, controller_app).await.unwrap() });
-    let app = owner.app.clone();
-    let master_task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let stop = tokio_util::sync::CancellationToken::new();
+    let (fixture, controller) = common::bind().await;
+    let controller_task = common::serve(
+        fixture,
+        snapshot_controller(
+            source.clone(),
+            state.clone(),
+            corrupt.clone(),
+            batched.clone(),
+            id(),
+        ),
+    );
+    let master_task = owner.serve(listener);
+    let stop = CancellationToken::new();
     let relay_task = tokio::spawn(relay::run(
         format!("http://{address}").parse().unwrap(),
         token,
@@ -1999,104 +1586,27 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
     // loopback S3 fixture, with synthetic credentials and no inherited AWS config.
     let s3 = std::env::var("LEO_NODE_TEST_S3_ENDPOINT").ok();
     if let Some(endpoint) = &s3 {
-        use std::os::unix::fs::PermissionsExt;
-        let parsed: url::Url = endpoint.parse().unwrap();
-        assert_eq!(parsed.host_str(), Some("127.0.0.1"));
-        assert_eq!(parsed.scheme(), "http");
-        let wrapper = owner._root.path().join("aws-fixture-client");
-        let script = format!(
-            "#!/usr/bin/env python3\nimport os,subprocess,sys\nenv={{k:v for k,v in \
-                os.environ.items() if not \
-                k.startswith('AWS_')}}\nenv.update(AWS_ACCESS_KEY_ID='node-fixture',AWS_SECRET_ACCESS_KEY='node-fixture-secret',AWS_DEFAULT_REGION='us-east-1',AWS_EC2_METADATA_DISABLED='true',AWS_CONFIG_FILE='/dev/null',AWS_SHARED_CREDENTIALS_FILE='/dev/null')\nsys.exit(subprocess.run(['aws','--endpoint-url',{}]+sys.argv[1:],env=env).returncode)\n",
-            serde_json::to_string(endpoint).unwrap()
-        );
-        std::fs::write(&wrapper, script).unwrap();
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::write(
-            owner.service.config.data_dir.join("archive-s3.json"),
-            json!({"bucket": "leo-node-test","awsBinary": wrapper}).to_string(),
-        )
-        .unwrap();
-        let (status, value) = owner
-            .call(
-                "PUT",
-                "/api/nodes/settings",
-                json!({"intervalSeconds": 60,"budgetMiB": 128}),
-                None,
-            )
-            .await;
-        assert_eq!(status, 200, "{value}");
+        configure_loopback_s3(&owner, endpoint).await;
     }
+    let blocks = owner.backup_directory(&run).join("blocks");
     let first = publication::capture(&owner.service, &record).await.unwrap();
     assert!(
         batched.load(Ordering::SeqCst),
         "remote publication must exercise batching"
     );
-    assert_eq!(first["uploadedBytes"], 4 * 1024 * 1024 + 128);
+    assert_eq!(first["uploadedBytes"], 4 * MIB + 128);
     let retained = owner
-        .service
-        .store
-        .get("node-backups", first["id"].as_str().unwrap())
+        .stored("node-backups", first["id"].as_str().unwrap())
         .await
-        .unwrap()
         .unwrap();
     let first_manifest = publication::manifest(&owner.service, &retained)
         .await
         .unwrap();
     if s3.is_some() {
-        std::fs::remove_dir_all(
-            owner
-                .service
-                .config
-                .data_dir
-                .join("node-backups")
-                .join(&run)
-                .join("blocks"),
-        )
-        .unwrap();
         let hash = first_manifest["blocks"][0]["hash"].as_str().unwrap();
-        let config_path = owner.service.config.data_dir.join("archive-s3.json");
-        let original_config = std::fs::read(&config_path).unwrap();
-        let mut disconnected_config: serde_json::Value =
-            serde_json::from_slice(&original_config).unwrap();
-        disconnected_config["endpoint"] = json!("https://127.0.0.1:1");
-        std::fs::write(&config_path, disconnected_config.to_string()).unwrap();
-        let mut disconnected_point = retained.clone();
-        disconnected_point["endpoint"] = json!("https://127.0.0.1:1");
-        let location = json!({"destination": "s3","bucket": "leo-node-test","endpoint": "https://127.0.0.1:1"});
-        let receipt = owner
-            .service
-            .config
-            .data_dir
-            .join("node-backups")
-            .join(&run)
-            .join("blocks")
-            .join(format!(
-                "{hash}.s3-{}",
-                hex::encode(Sha256::digest(serde_json::to_vec(&location).unwrap()))
-            ));
-        std::fs::create_dir_all(receipt.parent().unwrap()).unwrap();
-        std::fs::write(&receipt, b"verified before outage").unwrap();
-        assert_eq!(
-            publication::read_block(&owner.service, &disconnected_point, hash)
-                .await
-                .unwrap_err()
-                .status,
-            503
-        );
-        assert!(
-            receipt.exists(),
-            "a transient outage retains the upload receipt"
-        );
-        assert_eq!(
-            owner.service.store.run(&run).await.unwrap()["backup"]["snapshotId"],
-            first["snapshotId"],
-            "a transient outage keeps the incremental baseline"
-        );
-        std::fs::remove_file(receipt).unwrap();
-        std::fs::write(&config_path, original_config).unwrap();
+        assert_s3_outage_is_transient(&owner, &run, &blocks, &retained, &first, hash).await;
     }
-    let restored = owner._root.path().join("restored-disk");
+    let restored = owner.root().join("restored-disk");
     snapshots::restore(&restored, &first_manifest, |hash| {
         let (service, backup) = (owner.service.clone(), retained.clone());
         async move { publication::read_block(&service, &backup, &hash).await }
@@ -2105,7 +1615,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
     .unwrap();
     assert_eq!(std::fs::read(restored).unwrap(), original);
     let block = first_manifest["blocks"][0]["hash"].as_str().unwrap();
-    let encrypted = leo_agent_manager::object_storage::Storage::configured(&owner.service)
+    let encrypted = Storage::configured(&owner.service)
         .unwrap()
         .download_bytes(
             &shared_object_key(&first_manifest, block),
@@ -2115,11 +1625,11 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         .unwrap();
     assert!(
         !encrypted
-            .windows(27)
-            .any(|v| v == b"private-untracked-contents!")
+            .windows(PRIVATE_CONTENTS.len())
+            .any(|window| window == PRIVATE_CONTENTS)
     );
     assert!(
-        encrypted.len() <= 4 * 1024 * 1024 + 64,
+        encrypted.len() <= 4 * MIB + 64,
         "A 4 MiB backup block occupies {} bytes",
         encrypted.len()
     );
@@ -2127,37 +1637,14 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         publication::read_block(&owner.service, &retained, block)
             .await
             .unwrap(),
-        original[..4 * 1024 * 1024],
+        original[..4 * MIB],
     );
-    // The previous JSON/base64 envelope and the binary format can coexist.
-    use base64::{Engine, engine::general_purpose::STANDARD};
-    let key = format!("node-backups/{run}/blocks/{block}");
-    let legacy = owner
-        .service
-        .vault
-        .encrypt(&key, &json!(STANDARD.encode(&original[..4 * 1024 * 1024])))
-        .unwrap();
-    let legacy_file = owner._root.path().join("legacy-block.json");
-    std::fs::write(&legacy_file, serde_json::to_vec(&legacy).unwrap()).unwrap();
-    leo_agent_manager::object_storage::Storage::configured(&owner.service)
-        .unwrap()
-        .upload_file_verified(&legacy_file, &key)
-        .await
-        .unwrap();
-    let mut legacy_point = retained.clone();
-    legacy_point.as_object_mut().unwrap().remove("blockFormat");
-    assert_eq!(
-        publication::read_block(&owner.service, &legacy_point, block)
-            .await
-            .unwrap(),
-        original[..4 * 1024 * 1024]
-    );
-    original[4 * 1024 * 1024] = 2;
+    let legacy_key = format!("node-backups/{run}/blocks/{block}");
+    assert_legacy_block_envelope_is_readable(&owner, &legacy_key, &retained, block, &original)
+        .await;
+    original[4 * MIB] = 2;
     std::fs::write(&source, &original).unwrap();
-    let mut second = snapshots::index(&source).await.unwrap();
-    second["capturedAt"] = now().into();
-    second["runtime"] = json!({"runtimeId": "fixture"});
-    *state.lock().await = second;
+    *state.lock().await = controller_manifest(&source).await;
     corrupt.store(true, Ordering::SeqCst);
     assert!(publication::capture(&owner.service, &record).await.is_err());
     assert_eq!(
@@ -2170,20 +1657,14 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             .len(),
         1
     );
-    assert_eq!(
-        owner.service.store.run(&run).await.unwrap()["backup"]["id"],
-        first["id"]
-    );
+    assert_eq!(owner.run(&run).await["backup"]["id"], first["id"]);
     corrupt.store(false, Ordering::SeqCst);
     let second = publication::capture(&owner.service, &record).await.unwrap();
     assert_eq!(second["uploadedBytes"], 128);
     assert!(
         owner
-            .service
-            .store
-            .get("node-backups", first["id"].as_str().unwrap())
+            .stored("node-backups", first["id"].as_str().unwrap())
             .await
-            .unwrap()
             .is_none()
     );
     assert_eq!(
@@ -2207,10 +1688,10 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         .set_len(128 * 1024 * 1024)
         .unwrap();
     let settings = json!({
-        "destination": if s3.is_some() {"s3"} else {"master"},
+        "destination": if s3.is_some() { "s3" } else { "master" },
         "intervalSeconds": 60,
         "retention": 2,
-        "budgetMiB": 128
+        "budgetMiB": 128,
     });
     owner
         .service
@@ -2225,39 +1706,22 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             .status,
         507
     );
-    assert_eq!(
-        owner.service.store.run(&run).await.unwrap()["backup"]["id"],
-        second["id"]
-    );
+    assert_eq!(owner.run(&run).await["backup"]["id"], second["id"]);
     std::fs::remove_file(filler).unwrap();
     let mut third = publication::capture(&owner.service, &record).await.unwrap();
     assert_eq!(third["uploadedBytes"], 0);
     assert!(
         owner
-            .service
-            .store
-            .get("node-backups", first["id"].as_str().unwrap())
+            .stored("node-backups", first["id"].as_str().unwrap())
             .await
-            .unwrap()
             .is_none(),
         "Retention removes the oldest manifest while keeping shared blocks"
     );
     if s3.is_some() {
-        let storage =
-            leo_agent_manager::object_storage::Storage::configured(&owner.service).unwrap();
-        let directory = owner
-            .service
-            .config
-            .data_dir
-            .join("node-backups")
-            .join(&run)
-            .join("blocks");
+        let storage = Storage::configured(&owner.service).unwrap();
         let point = owner
-            .service
-            .store
-            .get("node-backups", third["id"].as_str().unwrap())
+            .stored("node-backups", third["id"].as_str().unwrap())
             .await
-            .unwrap()
             .unwrap();
         let current_manifest = publication::manifest(&owner.service, &point).await.unwrap();
         storage
@@ -2273,10 +1737,10 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             "A missing S3 object requires repair, unlike a retryable storage outage"
         );
         assert!(
-            owner.service.store.run(&run).await.unwrap()["backup"]["snapshotId"].is_null(),
+            owner.run(&run).await["backup"]["snapshotId"].is_null(),
             "A failed restore must request a full next capture"
         );
-        let mut entries = std::fs::read_dir(&directory).unwrap();
+        let mut entries = std::fs::read_dir(&blocks).unwrap();
         assert!(
             !entries.any(|entry| {
                 entry
@@ -2287,117 +1751,91 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             }),
             "A missing remote copy must lose its upload receipt"
         );
-        third = publication::capture(
-            &owner.service,
-            &owner.service.store.run(&run).await.unwrap(),
-        )
-        .await
-        .unwrap();
+        third = publication::capture(&owner.service, &owner.run(&run).await)
+            .await
+            .unwrap();
         assert_eq!(
             third["uploadedBytes"],
-            4 * 1024 * 1024,
+            4 * MIB,
             "Only the invalidated shared object is uploaded again"
         );
         let repaired = owner
-            .service
-            .store
-            .get("node-backups", third["id"].as_str().unwrap())
+            .stored("node-backups", third["id"].as_str().unwrap())
             .await
-            .unwrap()
             .unwrap();
         assert_eq!(
             publication::read_block(&owner.service, &repaired, block)
                 .await
                 .unwrap(),
-            &original[..4 * 1024 * 1024]
+            &original[..4 * MIB]
         );
-        std::fs::write(directory.join(block), b"damaged ciphertext").unwrap();
+        std::fs::write(blocks.join(block), b"damaged ciphertext").unwrap();
         assert_eq!(
             publication::read_block(&owner.service, &repaired, block)
                 .await
                 .unwrap(),
-            &original[..4 * 1024 * 1024],
+            &original[..4 * MIB],
             "Shared reads ignore obsolete run-scoped ciphertext"
         );
         assert_eq!(
-            owner.service.store.run(&run).await.unwrap()["backup"]["snapshotId"],
+            owner.run(&run).await["backup"]["snapshotId"],
             third["snapshotId"],
             "A successful remote recovery keeps the incremental baseline"
         );
-        std::fs::remove_file(directory.join(block)).unwrap();
+        std::fs::remove_file(blocks.join(block)).unwrap();
         // A local enabled node has one clean disk cache (the controller). Even
         // below its normal reserve, verified publication uses bounded memory.
-        let local = leo_agent_manager::nodes::LOCAL_NODE_ID;
-        let mut node = owner
-            .service
-            .store
-            .get("nodes", local)
+        let mut local = owner
+            .stored("nodes", LOCAL_NODE_ID)
             .await
-            .unwrap()
-            .unwrap_or_else(|| json!({"id": local}));
-        node["storage"] = json!(leo_agent_manager::storage::policy::Policy {
-            reserve_mi_b: 16777216,
-            ..Default::default()
+            .unwrap_or_else(|| json!({ "id": LOCAL_NODE_ID }));
+        local["storage"] = json!(Policy {
+            reserve_mi_b: 16_777_216,
+            ..Policy::default()
         });
-        owner.service.store.put("nodes", node).await.unwrap();
+        owner.put("nodes", local).await;
         publication::maintain_local_cache(&owner.service)
             .await
             .unwrap();
         assert!(
-            !directory.join(block).exists(),
+            !blocks.join(block).exists(),
             "duplicate S3 cache is reclaimed"
         );
-        original[4 * 1024 * 1024] = 3;
+        original[4 * MIB] = 3;
         std::fs::write(&source, &original).unwrap();
-        let mut memory = snapshots::index(&source).await.unwrap();
-        memory["capturedAt"] = now().into();
-        memory["runtime"] = json!({"runtimeId": "fixture"});
+        let memory = controller_manifest(&source).await;
         let changed = memory["blocks"][1]["hash"].as_str().unwrap().to_owned();
         *state.lock().await = memory;
         third = publication::capture(&owner.service, &record).await.unwrap();
         assert_eq!(third["uploadedBytes"], 128);
         assert!(
-            !directory.join(&changed).exists(),
+            !blocks.join(&changed).exists(),
             "memory publication retains no second cache"
         );
         let published = owner
-            .service
-            .store
-            .get("node-backups", third["id"].as_str().unwrap())
+            .stored("node-backups", third["id"].as_str().unwrap())
             .await
-            .unwrap()
             .unwrap();
         assert_eq!(
             publication::read_block(&owner.service, &published, &changed)
                 .await
                 .unwrap(),
-            original[4 * 1024 * 1024..]
+            original[4 * MIB..]
         );
         assert!(
-            !directory.join(changed).exists(),
+            !blocks.join(changed).exists(),
             "reads also avoid duplicate cache"
         );
     }
     let mut damaged = owner
-        .service
-        .store
-        .get("node-backups", third["id"].as_str().unwrap())
+        .stored("node-backups", third["id"].as_str().unwrap())
         .await
-        .unwrap()
         .unwrap();
     damaged["capturedAt"] = (now() + 1000).into();
-    damaged["manifest"] = json!({"corrupt": true});
-    owner
-        .service
-        .store
-        .put("node-backups", damaged)
-        .await
-        .unwrap();
+    damaged["manifest"] = json!({ "corrupt": true });
+    owner.put("node-backups", damaged).await;
     assert!(
-        leo_agent_manager::nodes::moves::latest(&owner.service, &run)
-            .await
-            .unwrap()
-            .is_none(),
+        moves::latest(&owner.service, &run).await.unwrap().is_none(),
         "No rollback to a previous publication after the current manifest is damaged"
     );
     publication::purge(&owner.service, &run).await.unwrap();
@@ -2411,15 +1849,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
             .unwrap()
             .is_empty()
     );
-    assert!(
-        !owner
-            .service
-            .config
-            .data_dir
-            .join("node-backups")
-            .join(&run)
-            .exists()
-    );
+    assert!(!owner.backup_directory(&run).exists());
     stop.cancel();
     relay_task.await.unwrap().unwrap();
     controller_task.abort();
@@ -2428,46 +1858,20 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
 
 #[tokio::test]
 async fn an_unreachable_owner_is_fenced_only_after_its_last_lease_and_cannot_renew_after_release() {
-    use leo_agent_manager::{auth, config::id, recovery};
-    for node in [id(), leo_agent_manager::nodes::LOCAL_NODE_ID.to_owned()] {
-        let owner = Owner::with_runner(
-            "127.0.0.1:1".into(),
-            if node == leo_agent_manager::nodes::LOCAL_NODE_ID {
-                "http://127.0.0.1:1".into()
-            } else {
-                String::new()
-            },
-        )
-        .await;
-        let run = id();
-        let attempt = id();
-        let token = auth::token();
-        let main = "00000000-0000-4000-8000-000000000001";
+    for node in [id(), LOCAL_NODE_ID.to_owned()] {
+        let runner_url = if node == LOCAL_NODE_ID {
+            "http://127.0.0.1:1".into()
+        } else {
+            String::new()
+        };
+        let owner = Owner::with_runner("127.0.0.1:1".into(), runner_url).await;
+        let (run, attempt, token) = (id(), id(), auth::token());
         owner
-            .service
-            .store
-            .put("nodes", json!({"id": node,"revoked": false}))
-            .await
-            .unwrap();
+            .put("nodes", json!({ "id": node, "revoked": false }))
+            .await;
+        owner.grant_nodes(MAIN_AGENT_ID, json!([node])).await;
+        owner.authorize_node(&node, &token).await;
         owner
-            .service
-            .store
-            .put("agents", json!({"id": main,"access": {"nodes": [node]}}))
-            .await
-            .unwrap();
-        owner
-            .service
-            .store
-            .set(
-                &format!("node-token:{}", auth::digest(&token)),
-                json!(node),
-                None,
-            )
-            .await
-            .unwrap();
-        owner
-            .service
-            .store
             .put(
                 "node-attempts",
                 json!({
@@ -2475,45 +1879,34 @@ async fn an_unreachable_owner_is_fenced_only_after_its_last_lease_and_cannot_ren
                     "nodeId": node,
                     "runId": run,
                     "released": false,
-                    "leaseRequired": true
+                    "leaseRequired": true,
                 }),
             )
-            .await
-            .unwrap();
-        let record = json!({
-            "id": run,
-            "taskId": "fixture",
-            "createdAt": 0,
-            "status": "running",
-            "isolated": true,
-            "snapshot": {"agent": {"id": main}}
-        });
-        let saved = record.clone();
+            .await;
+        let mut record = run_record(&run, RunStatus::Running);
+        record["isolated"] = true.into();
+        record["snapshot"] = json!({ "agent": { "id": MAIN_AGENT_ID } });
+        owner.add_run(&record).await;
         owner
-            .service
-            .store
-            .write(move |db| db.add_run(&saved, None))
-            .await
-            .unwrap();
-        owner
-            .service
-            .store
-            .set(
-                &format!("run-checkpoint:{run}"),
+            .set_checkpoint(
+                &run,
                 json!({
                     "nodeId": node,
                     "runnerId": attempt,
                     "launched": true,
-                    "prepared": {"isolated": true}
+                    "prepared": { "isolated": true },
                 }),
-                None,
             )
-            .await
-            .unwrap();
-        owner.service.node_lease_deadlines.lock().await.insert(
-            attempt.clone(),
-            tokio::time::Instant::now() + std::time::Duration::from_secs(60),
-        );
+            .await;
+        let lease_deadline = async |deadline: tokio::time::Instant| {
+            owner
+                .service
+                .node_lease_deadlines
+                .lock()
+                .await
+                .insert(attempt.clone(), deadline);
+        };
+        lease_deadline(tokio::time::Instant::now() + Duration::from_secs(60)).await;
         assert_eq!(
             recovery::fence(&owner.service, &record)
                 .await
@@ -2522,66 +1915,33 @@ async fn an_unreachable_owner_is_fenced_only_after_its_last_lease_and_cannot_ren
             503
         );
         assert_eq!(
-            owner
-                .service
-                .store
-                .get("node-attempts", &attempt)
-                .await
-                .unwrap()
-                .unwrap()["released"],
+            owner.stored("node-attempts", &attempt).await.unwrap()["released"],
             false
         );
-        owner.service.node_lease_deadlines.lock().await.insert(
-            attempt.clone(),
-            tokio::time::Instant::now() - std::time::Duration::from_secs(21),
-        );
+        lease_deadline(tokio::time::Instant::now() - Duration::from_secs(21)).await;
         recovery::fence(&owner.service, &record).await.unwrap();
         let (status, heartbeat) = owner
             .call(
                 "POST",
-                "/internal/nodes/heartbeat",
-                json!({"runtimeId": "fixture"}),
+                HEARTBEAT,
+                json!({ "runtimeId": "fixture" }),
                 Some(&token),
             )
             .await;
-        assert_eq!(status, 200);
+        assert_eq!(status, StatusCode::OK);
         assert!(heartbeat["leases"].as_array().unwrap().is_empty());
     }
 }
 
 #[tokio::test]
 async fn abandoned_return_to_a_node_releases_only_the_unmaterialized_disk_reservation() {
-    use leo_agent_manager::{
-        config::{id, now},
-        nodes::placement,
-    };
     let owner = Owner::new().await;
-    let node = id();
-    let agent = id();
-    let run = id();
+    let (node, agent, run) = (id(), id(), id());
     owner
-        .service
-        .store
-        .put(
-            "nodes",
-            json!({
-                "id": node,
-                "accepting": true,
-                "executionReady": true,
-                "lastSeen": now(),
-                "capabilities": {"kvm": true,"fuse": true},
-                "limits": {"cpu": 4,"memoryMiB": 8192,"diskMiB": 65536}
-            }),
-        )
-        .await
-        .unwrap();
-    owner
-        .service
-        .store
-        .put("agents", json!({"id": agent,"access": {"nodes": [node]}}))
-        .await
-        .unwrap();
-    let original = json!({"id": run,"snapshot": {"agent": {"id": agent}}});
+        .put("nodes", schedulable_node(&node, &limits(4, 8192, 65536)))
+        .await;
+    owner.grant_nodes(&agent, json!([node])).await;
+    let original = agent_run(&run, &agent);
     let attempt = id();
     placement::reserve(&owner.service, &original, &attempt)
         .await
@@ -2590,23 +1950,14 @@ async fn abandoned_return_to_a_node_releases_only_the_unmaterialized_disk_reserv
         .await
         .unwrap();
     placement::release(&owner.service, &attempt).await.unwrap();
-    owner
-        .service
-        .store
-        .set(
-            &format!("run-checkpoint:{run}"),
-            json!({"nodeId": id()}),
-            None,
-        )
-        .await
-        .unwrap();
+    owner.set_checkpoint(&run, json!({ "nodeId": id() })).await;
     let mut returning = original.clone();
     returning["placementTransition"] = true.into();
     let pending = id();
     placement::reserve(&owner.service, &returning, &pending)
         .await
         .unwrap();
-    let other = json!({"id": id(),"snapshot": {"agent": {"id": agent}}});
+    let other = agent_run(&id(), &agent);
     let parallel = id();
     placement::reserve(&owner.service, &other, &parallel)
         .await
@@ -2619,13 +1970,9 @@ async fn abandoned_return_to_a_node_releases_only_the_unmaterialized_disk_reserv
         .await
         .expect("Cancellation must return the unused destination space");
     let thin = id();
-    placement::reserve(
-        &owner.service,
-        &json!({"id": id(),"snapshot": {"agent": {"id": agent}}}),
-        &thin,
-    )
-    .await
-    .expect("A retained S3 disk should consume only local cache headroom");
+    placement::reserve(&owner.service, &agent_run(&id(), &agent), &thin)
+        .await
+        .expect("A retained S3 disk should consume only local cache headroom");
     placement::release(&owner.service, &thin).await.unwrap();
     placement::release(&owner.service, &replacement)
         .await
@@ -2638,61 +1985,25 @@ async fn abandoned_return_to_a_node_releases_only_the_unmaterialized_disk_reserv
         .await
         .unwrap();
     placement::release(&owner.service, &restored).await.unwrap();
-    owner
-        .service
-        .store
-        .set(
-            &format!("run-checkpoint:{run}"),
-            json!({"nodeId": node}),
-            None,
-        )
-        .await
-        .unwrap();
+    owner.set_checkpoint(&run, json!({ "nodeId": node })).await;
 }
 
 #[tokio::test]
 async fn s3_disk_keeps_its_logical_size_while_cpu_and_memory_obey_node_limits() {
-    use leo_agent_manager::{
-        config::{id, now},
-        nodes::placement,
-    };
     let owner = Owner::new().await;
-    let node = id();
-    let agent = id();
-    let run = id();
+    let (node, agent, run) = (id(), id(), id());
     owner
-        .service
-        .store
-        .put(
-            "nodes",
-            json!({
-                "id": node,
-                "accepting": true,
-                "executionReady": true,
-                "lastSeen": now(),
-                "capabilities": {"kvm": true,"fuse": true},
-                "limits": {"cpu": 1,"memoryMiB": 1024,"diskMiB": 8192}
-            }),
-        )
-        .await
-        .unwrap();
-    owner
-        .service
-        .store
-        .put("agents", json!({"id": agent,"access": {"nodes": [node]}}))
-        .await
-        .unwrap();
-    let mut record = json!({"id": run,"snapshot": {"agent": {"id": agent}}});
+        .put("nodes", schedulable_node(&node, &limits(1, 1024, 8192)))
+        .await;
+    owner.grant_nodes(&agent, json!([node])).await;
+    let mut record = agent_run(&run, &agent);
     let attempt = id();
     let selected = placement::reserve(&owner.service, &record, &attempt)
         .await
         .unwrap();
-    assert_eq!(
-        selected["resources"],
-        json!({"cpu":1,"memoryMiB":1024,"diskMiB":32768})
-    );
+    assert_eq!(selected["resources"], limits(1, 1024, 32768));
     placement::release(&owner.service, &attempt).await.unwrap();
-    record["requestedResources"] = json!({"cpu": 2,"memoryMiB": 1024,"diskMiB": 8192});
+    record["requestedResources"] = limits(2, 1024, 8192);
     assert!(
         placement::reserve(&owner.service, &record, &id())
             .await
@@ -2700,347 +2011,295 @@ async fn s3_disk_keeps_its_logical_size_while_cpu_and_memory_obey_node_limits() 
     );
 }
 
-#[tokio::test]
-#[ignore = "requires loopback S3; run tests/node_s3_test.py"]
-async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_stay_idle() {
-    use axum::response::IntoResponse;
-    use leo_agent_manager::{
-        auth,
-        config::{id, now},
-        nodes::{checkpoint, disk_grants, moves, relay, restore, snapshots},
-        storage::{Disk, LazyDisk, policy::Policy, remote::RemoteSource, runtime},
-    };
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let owner = Owner::at(address.to_string()).await;
-    let run = id();
-    let agent = id();
-    let source = id();
-    let destination = id();
-    let attempt = id();
-    let resources = json!({"cpu": 1,"memoryMiB": 512,"diskMiB": 128});
-    owner
-        .service
-        .store
-        .put(
-            "agents",
-            json!({"id": agent,"access": {"nodes": [source,destination]}}),
+/// Contents written to the source disk that every move must carry.
+const MOVED_CONTENTS: &[u8] = b"complete environment, untracked files and native session";
+
+/// Flags that make the fixture controllers fail or cancel a movement.
+#[derive(Clone)]
+struct MoveFaults {
+    failed: Arc<AtomicBool>,
+    cancel_during_capture: Arc<AtomicBool>,
+}
+
+/// A node controller that captures, publishes and restores the disk of `run`.
+fn movement_controller(
+    state: PathBuf,
+    run: String,
+    faults: MoveFaults,
+    service: Arc<Service>,
+) -> Router {
+    Router::new().fallback(axum::routing::any(move |request: Request<Body>| {
+        let (state, run, faults, service) =
+            (state.clone(), run.clone(), faults.clone(), service.clone());
+        async move {
+            assert_eq!(
+                request.headers()["authorization"],
+                "Bearer controller-fixture"
+            );
+            let route = request.uri().path().to_owned();
+            if request.method() == "DELETE" {
+                return Json(json!({ "ok": true })).into_response();
+            }
+            if route.ends_with("/snapshot") {
+                assert_eq!(
+                    route,
+                    format!("/disks/{run}/snapshot"),
+                    "Idle movement must capture by disk, without destination attempt history"
+                );
+                if faults.cancel_during_capture.load(Ordering::SeqCst) {
+                    service
+                        .store
+                        .patch_run(
+                            &run,
+                            json!({ "cancelRequestedAt": now(), "status": RunStatus::Cancelled }),
+                        )
+                        .await
+                        .unwrap();
+                }
+                if faults.failed.load(Ordering::SeqCst) {
+                    return StatusCode::PRECONDITION_FAILED.into_response();
+                }
+                let snapshot = checkpoint::capture(
+                    &state,
+                    &run,
+                    None,
+                    Arc::new(tokio::sync::Mutex::new(())),
+                    CancellationToken::new(),
+                    &run,
+                    None,
+                )
+                .await
+                .unwrap();
+                return Json(snapshot).into_response();
+            }
+            if route.ends_with("/published") {
+                let body = to_bytes(request.into_body(), 1_000_000).await.unwrap();
+                let value: Value = serde_json::from_slice(&body).unwrap();
+                let volume = runtime::load(&state.join("disks").join(&run))
+                    .await
+                    .unwrap();
+                volume
+                    .disk
+                    .commit_published(
+                        value["generation"].as_i64().unwrap(),
+                        value["backupId"].as_str().unwrap(),
+                    )
+                    .unwrap();
+                return Json(json!({ "committed": true })).into_response();
+            }
+            if route.ends_with("/restore") {
+                let body = to_bytes(request.into_body(), 1_000_000).await.unwrap();
+                let value = serde_json::from_slice(&body).unwrap();
+                let restored = restore::controller(&state, &run, value).await.unwrap();
+                return Json(restored).into_response();
+            }
+            if route.starts_with("/snapshots/") {
+                let parts = route.split('/').collect::<Vec<_>>();
+                let directory = state.join("snapshots").join(parts[2]);
+                if request.method() == "DELETE" {
+                    tokio::fs::remove_dir_all(directory).await.unwrap();
+                    return Json(json!({ "ok": true })).into_response();
+                }
+                if request.method() == "POST" && parts[3] == "blocks" {
+                    let body = to_bytes(request.into_body(), 4096).await.unwrap();
+                    let value: Value = serde_json::from_slice(&body).unwrap();
+                    let hashes = serde_json::from_value(value["hashes"].clone()).unwrap();
+                    let (length, body) = snapshots::served_batch(&directory, hashes).await.unwrap();
+                    return ([("content-length", length.to_string())], body).into_response();
+                }
+                return snapshots::served(&directory, parts[3])
+                    .await
+                    .unwrap()
+                    .into_response();
+            }
+            panic!("Idle movement must not launch a provider: {route}");
+        }
+    }))
+}
+
+/// Creates the lazily restored disk that the source node holds for `record`.
+async fn seed_source_disk(owner: &Owner, state: &Path, record: &Value, node: &str, master: &str) {
+    let run = record["id"].as_str().unwrap();
+    let disk = state.join("disks").join(run);
+    std::fs::create_dir_all(&disk).unwrap();
+    std::fs::write(disk.join("runtime.json"), br#"{"runtimeId":"fixture"}"#).unwrap();
+    let grant = disk_grants::new_disk(&owner.service, record, node)
+        .await
+        .unwrap();
+    let context = json!({ "master": master, "grant": grant, "policy": small_reserve() });
+    let remote = Arc::new(
+        RemoteSource::new(
+            &context,
+            tokio::runtime::Handle::current(),
+            CancellationToken::default(),
+        )
+        .unwrap(),
+    );
+    let manifest = json!({
+        "version": 1,
+        "size": 4096,
+        "blockSize": 4_194_304,
+        "blocks": [{ "offset": 0, "size": 4096, "hash": null }],
+    });
+    let journal = LazyDisk::create(&disk.join("lazy"), &manifest, remote).unwrap();
+    journal.set_context(&context).unwrap();
+    journal.write_at(0, MOVED_CONTENTS).unwrap();
+    journal.sync().unwrap();
+}
+
+/// Requests a move of `run` to `target` and lets it settle.
+async fn move_to(owner: &Owner, run: &str, resources: &Value, target: &str) {
+    let mut args = resources.clone();
+    args["nodeId"] = json!(target);
+    moves::request(&owner.service, &owner.run(run).await, &args)
+        .await
+        .unwrap();
+    moves::advance(&owner.service, &owner.run(run).await)
+        .await
+        .unwrap();
+}
+
+/// Prepares the runtime of `node`, enrolls it, and connects its fixture
+/// controller to the master at `master` through an outbound relay.
+async fn connect_node(
+    owner: &Owner,
+    record: &Value,
+    node: &str,
+    master: std::net::SocketAddr,
+    faults: &MoveFaults,
+    stop: &CancellationToken,
+    seed: bool,
+) -> [tokio::task::JoinHandle<()>; 2] {
+    let run = record["id"].as_str().unwrap();
+    let state = owner.root().join(node);
+    let image = state.join("images/fixture");
+    std::fs::create_dir_all(&image).unwrap();
+    std::fs::write(image.join("root.ext4"), b"fixture runtime").unwrap();
+    std::fs::write(image.join("vmlinux"), b"fixture kernel").unwrap();
+    if seed {
+        seed_source_disk(owner, &state, record, node, &format!("http://{master}/")).await;
+    }
+    let token = auth::token();
+    let mut enrolled = schedulable_node(node, &limits(2, 1024, 1024));
+    enrolled["revoked"] = false.into();
+    enrolled["runtimeId"] = "fixture".into();
+    enrolled["runtimeIds"] = json!(["fixture"]);
+    enrolled["storage"] = json!(small_reserve());
+    owner.put("nodes", enrolled).await;
+    owner.authorize_node(node, &token).await;
+    let (controller, controller_address) = common::bind().await;
+    let app = movement_controller(state, run.to_owned(), faults.clone(), owner.service.clone());
+    let controller_task = common::serve(controller, app);
+    let stop = stop.clone();
+    let relay_task = tokio::spawn(async move {
+        relay::run(
+            format!("http://{master}").parse().unwrap(),
+            token,
+            format!("http://{controller_address}"),
+            "controller-fixture".into(),
+            stop,
         )
         .await
         .unwrap();
-    let record = json!({
-        "id": run,
-        "taskId": "fixture",
-        "createdAt": 0,
-        "status": "succeeded",
-        "isolated": true,
-        "sessionId": "retained-session",
-        "nodeId": source,
-        "resources": resources,
-        "snapshot": {"agent": {"id": agent}}
     });
-    let saved = record.clone();
+    [controller_task, relay_task]
+}
+
+/// The idle run settled on `target` with its session and disk contents.
+async fn assert_moved_with_its_disk(owner: &Owner, run: &str, target: &str) {
+    let settled = owner.run(run).await;
+    assert_eq!(settled["status"], RunStatus::Succeeded);
+    assert_eq!(settled["nodeId"], *target, "{settled}");
+    assert_eq!(settled["recoveryPending"], false);
+    assert_eq!(settled["sessionId"], "retained-session");
+    let directory = owner.root().join(target).join("disks").join(run);
+    let volume = runtime::load(&directory).await.unwrap();
+    let bytes = tokio::task::spawn_blocking(move || {
+        let mut bytes = vec![0; MOVED_CONTENTS.len()];
+        volume.read_at(0, &mut bytes).unwrap();
+        bytes
+    })
+    .await
+    .unwrap();
+    assert_eq!(bytes, MOVED_CONTENTS);
+    assert!(
+        owner
+            .service
+            .store
+            .list("node-attempts")
+            .await
+            .unwrap()
+            .iter()
+            .all(|attempt| attempt["released"] == true)
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires loopback S3; run tests/node_s3_test.py"]
+async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_stay_idle() {
+    let (listener, address) = common::bind().await;
+    let owner = Owner::at(address.to_string()).await;
+    let (run, agent, source, destination, attempt) = (id(), id(), id(), id(), id());
+    let resources = limits(1, 512, 128);
     owner
-        .service
-        .store
-        .write(move |db| db.add_run(&saved, None))
-        .await
-        .unwrap();
+        .grant_nodes(&agent, json!([source, destination]))
+        .await;
+    let mut record = run_record(&run, RunStatus::Succeeded);
+    record["isolated"] = true.into();
+    record["sessionId"] = "retained-session".into();
+    record["nodeId"] = source.clone().into();
+    record["resources"] = resources.clone();
+    record["snapshot"] = json!({ "agent": { "id": agent } });
+    owner.add_run(&record).await;
     owner
-        .service
-        .store
-        .set(
-            &format!("run-checkpoint:{run}"),
+        .set_checkpoint(
+            &run,
             json!({
                 "nodeId": source,
                 "runnerId": attempt,
                 "completed": true,
-                "prepared": {"backend": "firecracker","isolated": true}
+                "prepared": { "backend": "firecracker", "isolated": true },
             }),
-            None,
         )
-        .await
-        .unwrap();
-    let stop = tokio_util::sync::CancellationToken::new();
-    let failed = Arc::new(AtomicBool::new(false));
-    let cancel_during_capture = Arc::new(AtomicBool::new(false));
+        .await;
+    let stop = CancellationToken::new();
+    let faults = MoveFaults {
+        failed: Arc::new(AtomicBool::new(false)),
+        cancel_during_capture: Arc::new(AtomicBool::new(false)),
+    };
     let mut tasks = Vec::new();
     for node in [&source, &destination] {
-        let state = owner._root.path().join(node);
-        let image = state.join("images/fixture");
-        std::fs::create_dir_all(&image).unwrap();
-        std::fs::write(image.join("root.ext4"), b"fixture runtime").unwrap();
-        std::fs::write(image.join("vmlinux"), b"fixture kernel").unwrap();
-        if node == &source {
-            let disk = state.join("disks").join(&run);
-            std::fs::create_dir_all(&disk).unwrap();
-            std::fs::write(disk.join("runtime.json"), br#"{"runtimeId":"fixture"}"#).unwrap();
-            let grant = disk_grants::new_disk(&owner.service, &record, node)
-                .await
-                .unwrap();
-            let context = json!({
-                "master": format!("http://{address}/"),
-                "grant": grant,
-                "policy": Policy {reserve_mi_b:64,reserve_percent:1,..Default::default()}
-            });
-            let remote = Arc::new(
-                RemoteSource::new(
-                    &context,
-                    tokio::runtime::Handle::current(),
-                    Default::default(),
-                )
-                .unwrap(),
-            );
-            let journal = LazyDisk::create(
-                &disk.join("lazy"),
-                &json!({
-                    "version": 1,
-                    "size": 4096,
-                    "blockSize": 4194304,
-                    "blocks": [{"offset": 0,"size": 4096,"hash": null}]
-                }),
-                remote,
-            )
-            .unwrap();
-            journal.set_context(&context).unwrap();
-            journal
-                .write_at(
-                    0,
-                    b"complete environment, untracked files and native session",
-                )
-                .unwrap();
-            journal.sync().unwrap();
-        }
-        let token = auth::token();
-        owner
-            .service
-            .store
-            .put(
-                "nodes",
-                json!({
-                    "id": node,
-                    "revoked": false,
-                    "accepting": true,
-                    "executionReady": true,
-                    "lastSeen": now(),
-                    "runtimeId": "fixture",
-                    "runtimeIds": ["fixture"],
-                    "storage": Policy {reserve_mi_b:64,reserve_percent:1,..Default::default()},
-                    "capabilities": {"kvm": true,"fuse": true},
-                    "limits": {"cpu": 2,"memoryMiB": 1024,"diskMiB": 1024}
-                }),
-            )
-            .await
-            .unwrap();
-        owner
-            .service
-            .store
-            .set(
-                &format!("node-token:{}", auth::digest(&token)),
-                json!(node),
-                None,
-            )
-            .await
-            .unwrap();
-        let controller = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let controller_address = controller.local_addr().unwrap();
-        let (disk_state, failed_capture, run_id) = (state.clone(), failed.clone(), run.clone());
-        let cancellation = cancel_during_capture.clone();
-        let service = owner.service.clone();
-        let app = axum::Router::new().fallback(axum::routing::any(
-            move |request: axum::extract::Request| {
-                let (state, failed, run) =
-                    (disk_state.clone(), failed_capture.clone(), run_id.clone());
-                let (cancel, service) = (cancellation.clone(), service.clone());
-                async move {
-                    assert_eq!(
-                        request.headers()["authorization"],
-                        "Bearer controller-fixture"
-                    );
-                    let route = request.uri().path().to_owned();
-                    if request.method() == "DELETE" {
-                        return axum::Json(json!({"ok": true})).into_response();
-                    }
-                    if route.ends_with("/snapshot") {
-                        assert_eq!(
-                            route,
-                            format!("/disks/{run}/snapshot"),
-                            "Idle movement must capture by disk, without \
-                            destination attempt history"
-                        );
-                        if cancel.load(Ordering::SeqCst) {
-                            service
-                                .store
-                                .patch_run(
-                                    &run,
-                                    json!({"cancelRequestedAt": now(),"status": "cancelled"}),
-                                )
-                                .await
-                                .unwrap();
-                        }
-                        if failed.load(Ordering::SeqCst) {
-                            return axum::http::StatusCode::PRECONDITION_FAILED.into_response();
-                        }
-                        let snapshot = checkpoint::capture(
-                            &state,
-                            &run,
-                            None,
-                            Arc::new(tokio::sync::Mutex::new(())),
-                            tokio_util::sync::CancellationToken::new(),
-                            &run,
-                            None,
-                        )
-                        .await
-                        .unwrap();
-                        return axum::Json(snapshot).into_response();
-                    }
-                    if route.ends_with("/published") {
-                        let body = to_bytes(request.into_body(), 1000000).await.unwrap();
-                        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                        let volume = runtime::load(&state.join("disks").join(&run))
-                            .await
-                            .unwrap();
-                        volume
-                            .disk
-                            .commit_published(
-                                value["generation"].as_i64().unwrap(),
-                                value["backupId"].as_str().unwrap(),
-                            )
-                            .unwrap();
-                        return axum::Json(json!({"committed": true})).into_response();
-                    }
-                    if route.ends_with("/restore") {
-                        let body = to_bytes(request.into_body(), 1000000).await.unwrap();
-                        let value = serde_json::from_slice(&body).unwrap();
-                        return axum::Json(restore::controller(&state, &run, value).await.unwrap())
-                            .into_response();
-                    }
-                    if route.starts_with("/snapshots/") {
-                        let parts = route.split('/').collect::<Vec<_>>();
-                        let directory = state.join("snapshots").join(parts[2]);
-                        if request.method() == "DELETE" {
-                            tokio::fs::remove_dir_all(directory).await.unwrap();
-                            return axum::Json(json!({"ok": true})).into_response();
-                        }
-                        if request.method() == "POST" && parts[3] == "blocks" {
-                            let body = to_bytes(request.into_body(), 4096).await.unwrap();
-                            let value: Value = serde_json::from_slice(&body).unwrap();
-                            let hashes = serde_json::from_value(value["hashes"].clone()).unwrap();
-                            let (length, body) =
-                                snapshots::served_batch(&directory, hashes).await.unwrap();
-                            return ([("content-length", length.to_string())], body)
-                                .into_response();
-                        }
-                        return snapshots::served(&directory, parts[3])
-                            .await
-                            .unwrap()
-                            .into_response();
-                    }
-                    panic!("Idle movement must not launch a provider: {route}");
-                }
-            },
-        ));
-        tasks.push(tokio::spawn(async move {
-            axum::serve(controller, app).await.unwrap()
-        }));
-        let connector_stop = stop.clone();
-        tasks.push(tokio::spawn(async move {
-            relay::run(
-                format!("http://{address}").parse().unwrap(),
-                token,
-                format!("http://{controller_address}"),
-                "controller-fixture".into(),
-                connector_stop,
-            )
-            .await
-            .unwrap();
-        }));
+        let seed = node == &source;
+        tasks.extend(connect_node(&owner, &record, node, address, &faults, &stop, seed).await);
     }
-    let app = owner.app.clone();
-    tasks.push(tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap()
-    }));
+    tasks.push(owner.serve(listener));
     for target in [&destination, &source] {
-        let current = owner.service.store.run(&run).await.unwrap();
+        let current = owner.run(&run).await;
         let mut args = resources.clone();
         args["nodeId"] = json!(target);
         moves::request(&owner.service, &current, &args)
             .await
             .unwrap();
-        let pending = owner.service.store.run(&run).await.unwrap();
-        assert_eq!(pending["status"], "queued");
+        let pending = owner.run(&run).await;
+        assert_eq!(pending["status"], RunStatus::Queued);
         assert_eq!(pending["moveRequest"]["idle"], true);
         moves::advance(&owner.service, &pending).await.unwrap();
-        let settled = owner.service.store.run(&run).await.unwrap();
-        assert_eq!(settled["status"], "succeeded");
-        assert_eq!(settled["nodeId"], *target, "{settled}");
-        assert_eq!(settled["recoveryPending"], false);
-        assert_eq!(settled["sessionId"], "retained-session");
-        let directory = owner._root.path().join(target).join("disks").join(&run);
-        let volume = runtime::load(&directory).await.unwrap();
-        let bytes = tokio::task::spawn_blocking(move || {
-            let mut bytes =
-                vec![0; b"complete environment, untracked files and native session".len()];
-            volume.read_at(0, &mut bytes).unwrap();
-            bytes
-        })
-        .await
-        .unwrap();
-        assert_eq!(
-            bytes,
-            b"complete environment, untracked files and native session"
-        );
-        assert!(
-            owner
-                .service
-                .store
-                .list("node-attempts")
-                .await
-                .unwrap()
-                .iter()
-                .all(|a| a["released"] == true)
-        );
+        assert_moved_with_its_disk(&owner, &run, target).await;
     }
-    failed.store(true, Ordering::SeqCst);
-    let mut args = resources;
-    args["nodeId"] = json!(destination);
-    moves::request(
-        &owner.service,
-        &owner.service.store.run(&run).await.unwrap(),
-        &args,
-    )
-    .await
-    .unwrap();
-    moves::advance(
-        &owner.service,
-        &owner.service.store.run(&run).await.unwrap(),
-    )
-    .await
-    .unwrap();
-    let settled = owner.service.store.run(&run).await.unwrap();
-    assert_eq!(settled["status"], "succeeded");
+    faults.failed.store(true, Ordering::SeqCst);
+    move_to(&owner, &run, &resources, &destination).await;
+    let settled = owner.run(&run).await;
+    assert_eq!(settled["status"], RunStatus::Succeeded);
     assert_eq!(settled["recoveryPending"], false);
     assert_eq!(
         settled["movementError"],
         "Unable to capture a coherent VM snapshot."
     );
     assert_eq!(settled["nodeId"], source);
-    cancel_during_capture.store(true, Ordering::SeqCst);
-    moves::request(&owner.service, &settled, &args)
-        .await
-        .unwrap();
-    moves::advance(
-        &owner.service,
-        &owner.service.store.run(&run).await.unwrap(),
-    )
-    .await
-    .unwrap();
-    let cancelled = owner.service.store.run(&run).await.unwrap();
-    assert_eq!(cancelled["status"], "cancelled");
+    faults.cancel_during_capture.store(true, Ordering::SeqCst);
+    move_to(&owner, &run, &resources, &destination).await;
+    let cancelled = owner.run(&run).await;
+    assert_eq!(cancelled["status"], RunStatus::Cancelled);
     assert_eq!(cancelled["recoveryPending"], false);
     stop.cancel();
     for task in tasks {
@@ -3050,64 +2309,35 @@ async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_
 
 #[tokio::test]
 async fn pending_movement_retries_a_lost_stop_without_stopping_a_later_execution() {
-    use leo_agent_manager::{
-        config::{id, now},
-        nodes::moves,
-    };
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (listener, address) = common::bind().await;
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = calls.clone();
-    let app = axum::Router::new().fallback(axum::routing::delete(move || {
+    let app = Router::new().fallback(axum::routing::delete(move || {
         let counter = counter.clone();
         async move {
             if counter.fetch_add(1, Ordering::SeqCst) == 0 {
-                axum::http::StatusCode::SERVICE_UNAVAILABLE
+                StatusCode::SERVICE_UNAVAILABLE
             } else {
-                axum::http::StatusCode::NO_CONTENT
+                StatusCode::NO_CONTENT
             }
         }
     }));
-    let owner = Owner::with_runner(
-        "localhost:4310".into(),
-        format!("http://{}", listener.local_addr().unwrap()),
-    )
-    .await;
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let owner = Owner::with_runner(common::HOST.into(), format!("http://{address}")).await;
+    let server = common::serve(listener, app);
     let run = id();
-    let saved = json!({
-        "id": run,
-        "taskId": "fixture",
-        "createdAt": 0,
-        "status": "running",
-        "moveRequest": {"requestedAt": now()-3000}
-    });
+    let mut record = run_record(&run, RunStatus::Running);
+    record["moveRequest"] = json!({ "requestedAt": now() - 3000 });
+    owner.add_run(&record).await;
     owner
-        .service
-        .store
-        .write(move |db| db.add_run(&saved, None))
-        .await
-        .unwrap();
-    owner
-        .service
-        .store
-        .set(
-            &format!("run-checkpoint:{run}"),
-            json!({"runnerId": id()}),
-            None,
-        )
-        .await
-        .unwrap();
+        .set_checkpoint(&run, json!({ "runnerId": id() }))
+        .await;
     assert!(moves::pause_pending(&owner.service, &run).await.is_err());
     moves::pause_pending(&owner.service, &run).await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     owner
         .service
         .store
-        .patch_run(&run, json!({"moveRequest": null}))
+        .patch_run(&run, json!({ "moveRequest": null }))
         .await
         .unwrap();
     moves::pause_pending(&owner.service, &run).await.unwrap();
@@ -3117,42 +2347,22 @@ async fn pending_movement_retries_a_lost_stop_without_stopping_a_later_execution
 
 #[tokio::test]
 async fn automatic_placement_spreads_work_unless_a_node_is_preferred() {
-    use leo_agent_manager::{
-        config::{id, now},
-        nodes::placement,
-    };
     let owner = Owner::new().await;
-    let small = id();
-    let large = id();
-    let agent = id();
+    let (small, large, agent) = (id(), id(), id());
     for (node, cpu, memory) in [(&small, 4, 8192), (&large, 16, 65536)] {
         owner
-            .service
-            .store
             .put(
                 "nodes",
-                json!({
-                    "id": node,
-                    "accepting": true,
-                    "executionReady": true,
-                    "lastSeen": now(),
-                    "capabilities": {"kvm": true,"fuse": true},
-                    "limits": {"cpu": cpu,"memoryMiB": memory,"diskMiB": 262144}
-                }),
+                schedulable_node(node, &limits(cpu, memory, 262_144)),
             )
-            .await
-            .unwrap();
+            .await;
     }
-    owner
-        .service
-        .store
-        .put(
-            "agents",
-            json!({"id": agent,"access": {"nodes": [small,large]}}),
-        )
-        .await
-        .unwrap();
-    let run = |preferred: Value| json!({"id": id(),"snapshot": {"agent": {"id": agent}},"preferredNodeId": preferred});
+    owner.grant_nodes(&agent, json!([small, large])).await;
+    let run = |preferred: Value| {
+        let mut run = agent_run(&id(), &agent);
+        run["preferredNodeId"] = preferred;
+        run
+    };
     assert_eq!(
         placement::reserve(&owner.service, &run(Value::Null), &id())
             .await
@@ -3169,13 +2379,10 @@ async fn automatic_placement_spreads_work_unless_a_node_is_preferred() {
 
 #[tokio::test]
 async fn node_agent_grants_are_edited_from_the_node_without_narrowing_all_node_agents() {
-    use leo_agent_manager::config::{id, now};
     let owner = Owner::new().await;
     let node = id();
     let (explicit, everywhere) = (id(), id());
     owner
-        .service
-        .store
         .put(
             "nodes",
             json!({
@@ -3186,100 +2393,69 @@ async fn node_agent_grants_are_edited_from_the_node_without_narrowing_all_node_a
                 "accepting": true,
                 "tags": [],
                 "lastSeen": now(),
-                "capabilities": {"kvm": true,"fuse": true},
-                "limits": {"cpu": 4,"memoryMiB": 8192,"diskMiB": 65536}
+                "capabilities": { "kvm": true, "fuse": true },
+                "limits": limits(4, 8192, 65536),
             }),
         )
-        .await
-        .unwrap();
+        .await;
     for (agent, nodes) in [(&explicit, json!([])), (&everywhere, Value::Null)] {
         owner
-            .service
-            .store
             .put(
                 "agents",
-                json!({"id": agent,"name": agent,"access": {"nodes": nodes}}),
+                json!({ "id": agent, "name": agent, "access": { "nodes": nodes } }),
             )
-            .await
-            .unwrap();
+            .await;
     }
-    let granted = |nodes: &Value| {
-        nodes
+    let granted = async || {
+        let (_, nodes) = owner.get("/api/nodes").await;
+        let mut agents = find_by_id(&nodes, &node)["agents"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|n| n["id"] == node)
-            .unwrap()["agents"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|a| a["id"].as_str().unwrap().to_owned())
-            .collect::<Vec<_>>()
+            .map(|agent| agent["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        agents.sort();
+        agents
     };
-    let (_, nodes) = owner.call("GET", "/api/nodes", Value::Null, None).await;
-    assert_eq!(granted(&nodes), vec![everywhere.clone()]);
+    assert_eq!(granted().await, vec![everywhere.clone()]);
     let path = format!("/api/nodes/{node}/agents");
     let (status, body) = owner
-        .call("PUT", &path, json!({"agentIds": [explicit]}), None)
+        .send("PUT", &path, json!({ "agentIds": [explicit] }))
         .await;
-    assert_eq!(status, 200, "{body}");
-    let (_, nodes) = owner.call("GET", "/api/nodes", Value::Null, None).await;
-    let mut agents = granted(&nodes);
-    agents.sort();
+    assert_eq!(status, StatusCode::OK, "{body}");
     let mut expected = vec![explicit.clone(), everywhere.clone()];
     expected.sort();
-    assert_eq!(agents, expected);
-    owner
-        .call("PUT", &path, json!({"agentIds": []}), None)
-        .await;
-    let (_, nodes) = owner.call("GET", "/api/nodes", Value::Null, None).await;
-    assert_eq!(granted(&nodes), vec![everywhere.clone()]);
-    let agent = owner
-        .service
-        .store
-        .get("agents", &everywhere)
-        .await
-        .unwrap()
-        .unwrap();
+    assert_eq!(granted().await, expected);
+    owner.send("PUT", &path, json!({ "agentIds": [] })).await;
+    assert_eq!(granted().await, vec![everywhere.clone()]);
+    let agent = owner.stored("agents", &everywhere).await.unwrap();
     assert!(agent["access"]["nodes"].is_null());
 }
 
 #[tokio::test]
 async fn agents_cannot_request_more_than_their_limit_and_older_clients_keep_it() {
-    use leo_agent_manager::nodes::moves;
     let owner = Owner::new().await;
-    let (status, agent) = owner
-        .call(
-            "POST",
-            "/api/agents",
-            json!({
-                "name": "Limited",
-                "access": {"maxResources": {"cpu": 2,"memoryMiB": 4096,"diskMiB": 32768}}
-            }),
-            None,
-        )
-        .await;
-    assert_eq!(status, 200, "{agent}");
-    let id = agent["id"].as_str().unwrap();
+    let limited = json!({
+        "name": "Limited",
+        "access": { "maxResources": limits(2, 4096, 32768) },
+    });
+    let (status, agent) = owner.send("POST", "/api/agents", limited).await;
+    assert_eq!(status, StatusCode::OK, "{agent}");
+    let agent_id = agent["id"].as_str().unwrap();
     // An update that omits the limit, like an older client, keeps it.
     let (status, updated) = owner
-        .call(
+        .send(
             "PUT",
-            &format!("/api/agents/{id}"),
-            json!({"name": "Limited","access": {"nodes": null}}),
-            None,
+            &format!("/api/agents/{agent_id}"),
+            json!({ "name": "Limited", "access": { "nodes": null } }),
         )
         .await;
-    assert_eq!(status, 200, "{updated}");
+    assert_eq!(status, StatusCode::OK, "{updated}");
     assert_eq!(updated["access"]["maxResources"]["cpu"], 2);
-    let run = json!({"id": leo_agent_manager::config::id(),"snapshot": {"agent": {"id": id}}});
-    let error = moves::request_by_agent(
-        &owner.service,
-        &run,
-        &json!({"cpu": 8,"memoryMiB": 4096,"diskMiB": 32768}),
-    )
-    .await
-    .unwrap_err();
+    let run = agent_run(&id(), agent_id);
+    let error = moves::request_by_agent(&owner.service, &run, &limits(8, 4096, 32768))
+        .await
+        .unwrap_err();
     assert_eq!(error.status, 403);
     assert!(error.message.contains("at most 2 CPU"), "{}", error.message);
     let listed = moves::list(&owner.service, &run).await.unwrap();
@@ -3288,29 +2464,17 @@ async fn agents_cannot_request_more_than_their_limit_and_older_clients_keep_it()
 
 #[tokio::test]
 async fn node_alerts_reach_the_conversation_and_clients_without_repeating() {
-    use leo_agent_manager::{config::id, nodes::alerts};
     let owner = Owner::new().await;
-    let run = id();
-    let chat = id();
-    let record = json!({
-        "id": run,
-        "taskId": "fixture",
-        "createdAt": 0,
-        "status": "running",
-        "trigger": "chat"
-    });
+    let (run, chat) = (id(), id());
+    let mut record = run_record(&run, RunStatus::Running);
+    record["trigger"] = "chat".into();
+    owner.add_run(&record).await;
     owner
-        .service
-        .store
-        .write(move |db| db.add_run(&record, None))
-        .await
-        .unwrap();
-    owner
-        .service
-        .store
-        .put("chats", json!({"id": chat,"runId": run,"title": "Fixture"}))
-        .await
-        .unwrap();
+        .put(
+            "chats",
+            json!({ "id": chat, "runId": run, "title": "Fixture" }),
+        )
+        .await;
     for _ in 0..2 {
         alerts::raise(
             &owner.service,
@@ -3322,10 +2486,8 @@ async fn node_alerts_reach_the_conversation_and_clients_without_repeating() {
         .await
         .unwrap();
     }
-    let (status, listed) = owner
-        .call("GET", "/api/nodes/alerts", Value::Null, None)
-        .await;
-    assert_eq!(status, 200);
+    let (status, listed) = owner.get("/api/nodes/alerts").await;
+    assert_eq!(status, StatusCode::OK);
     let listed = listed.as_array().unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0]["chatId"], chat);
@@ -3345,28 +2507,22 @@ async fn node_alerts_reach_the_conversation_and_clients_without_repeating() {
 
 #[tokio::test]
 async fn stale_node_disks_are_reported_and_freed_on_request() {
-    use leo_agent_manager::{config::id, nodes::LOCAL_NODE_ID};
-    use std::sync::{Arc, Mutex};
     let calls = Arc::new(Mutex::new(Vec::<String>::new()));
     let recorded = calls.clone();
-    let runner = axum::Router::new().fallback(move |request: axum::extract::Request| {
+    let runner = Router::new().fallback(move |request: Request<Body>| {
         let recorded = recorded.clone();
         async move {
             recorded
                 .lock()
                 .unwrap()
                 .push(request.uri().path().to_owned());
-            axum::Json(json!({}))
+            Json(json!({}))
         }
     });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(listener, runner).await.unwrap() });
-    let owner = Owner::with_runner("localhost:4310".into(), url).await;
+    let (url, _runner) = common::serve_locally(runner).await;
+    let owner = Owner::with_runner(common::HOST.into(), url).await;
     let other = id();
     owner
-        .service
-        .store
         .put(
             "nodes",
             json!({
@@ -3376,42 +2532,19 @@ async fn stale_node_disks_are_reported_and_freed_on_request() {
                 "revoked": false,
                 "accepting": true,
                 "tags": [],
-                "capabilities": {"kvm": true,"fuse": true},
-                "limits": {"cpu": 4,"memoryMiB": 8192,"diskMiB": 65536}
+                "capabilities": { "kvm": true, "fuse": true },
+                "limits": limits(4, 8192, 65536),
             }),
         )
-        .await
-        .unwrap();
+        .await;
     let (moved, current) = (id(), id());
     for (run, node, total) in [
-        (&moved, &other, 1024),
-        (&current, &LOCAL_NODE_ID.to_owned(), 3072),
+        (&moved, other.as_str(), 1024),
+        (&current, LOCAL_NODE_ID, 3072),
     ] {
-        let record = json!({
-            "id": run,
-            "taskId": "fixture",
-            "createdAt": 0,
-            "status": "succeeded"
-        });
+        owner.add_run(&run_record(run, RunStatus::Succeeded)).await;
+        owner.set_checkpoint(run, json!({ "nodeId": node })).await;
         owner
-            .service
-            .store
-            .write(move |db| db.add_run(&record, None))
-            .await
-            .unwrap();
-        owner
-            .service
-            .store
-            .set(
-                &format!("run-checkpoint:{run}"),
-                json!({"nodeId": node}),
-                None,
-            )
-            .await
-            .unwrap();
-        owner
-            .service
-            .store
             .put(
                 "node-volumes",
                 json!({
@@ -3420,31 +2553,23 @@ async fn stale_node_disks_are_reported_and_freed_on_request() {
                     "nodeId": LOCAL_NODE_ID,
                     "materialized": true,
                     "diskMiB": total,
-                    "activeDiskMiB": 1024
+                    "activeDiskMiB": 1024,
                 }),
             )
-            .await
-            .unwrap();
+            .await;
     }
-    let (_, nodes) = owner.call("GET", "/api/nodes", Value::Null, None).await;
-    let local = nodes
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|n| n["id"] == LOCAL_NODE_ID)
-        .unwrap()
-        .clone();
-    assert_eq!(local["staleDisks"], json!({"count":2,"diskMiB":3072}));
+    let stale_disks =
+        async || find_by_id(&owner.get("/api/nodes").await.1, LOCAL_NODE_ID)["staleDisks"].clone();
+    assert_eq!(stale_disks().await, json!({ "count": 2, "diskMiB": 3072 }));
     let (status, freed) = owner
-        .call(
+        .send(
             "POST",
             &format!("/api/nodes/{LOCAL_NODE_ID}/stale-disks/delete"),
             json!({}),
-            None,
         )
         .await;
-    assert_eq!(status, 200, "{freed}");
-    assert_eq!(freed, json!({"freedMiB":3072,"failed":0}));
+    assert_eq!(status, StatusCode::OK, "{freed}");
+    assert_eq!(freed, json!({ "freedMiB": 3072, "failed": 0 }));
     let calls = calls.lock().unwrap().clone();
     assert!(
         calls.contains(&format!("/disks/{moved}/delete")),
@@ -3454,48 +2579,31 @@ async fn stale_node_disks_are_reported_and_freed_on_request() {
         calls.contains(&format!("/disks/{current}/prune")),
         "{calls:?}"
     );
-    let (_, nodes) = owner.call("GET", "/api/nodes", Value::Null, None).await;
-    let local = nodes
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|n| n["id"] == LOCAL_NODE_ID)
-        .unwrap()
-        .clone();
-    assert_eq!(local["staleDisks"], json!({"count":0,"diskMiB":0}));
+    assert_eq!(stale_disks().await, json!({ "count": 0, "diskMiB": 0 }));
+}
+
+/// A running isolated conversation placed on `node`.
+fn isolated_run(run: &str, node: &str) -> Value {
+    json!({
+        "id": run,
+        "taskId": run,
+        "createdAt": 0,
+        "status": RunStatus::Running,
+        "isolated": true,
+        "sessionId": "session",
+        "nodeId": node,
+    })
 }
 
 #[tokio::test]
 async fn isolated_conversations_synchronize_on_local_and_remote_nodes() {
-    use leo_agent_manager::{
-        config::id,
-        nodes::{LOCAL_NODE_ID, publication},
-    };
     let owner = Owner::new().await;
     let mut states = Vec::new();
     for node in [LOCAL_NODE_ID.to_owned(), id()] {
         let run = id();
-        let record = json!({
-            "id": run,
-            "taskId": run,
-            "createdAt": 0,
-            "status": "running",
-            "isolated": true,
-            "sessionId": "session",
-            "nodeId": node
-        });
-        owner
-            .service
-            .store
-            .write(move |db| db.add_run(&record, None))
-            .await
-            .unwrap();
-        publication::attempt(
-            &owner.service,
-            &owner.service.store.run(&run).await.unwrap(),
-        )
-        .await;
-        states.push(owner.service.store.run(&run).await.unwrap()["backup"].clone());
+        owner.add_run(&isolated_run(&run, &node)).await;
+        publication::attempt(&owner.service, &owner.run(&run).await).await;
+        states.push(owner.run(&run).await["backup"].clone());
     }
     // Both nodes try to publish, even before their first storage status report.
     // This fixture lacks a controller checkpoint, so both report the failure.
@@ -3504,230 +2612,90 @@ async fn isolated_conversations_synchronize_on_local_and_remote_nodes() {
     }
 }
 
-#[tokio::test]
-#[ignore = "requires loopback S3; run tests/node_s3_test.py"]
-async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
-    use axum::response::IntoResponse;
-    use leo_agent_manager::{
-        config::{id, now},
-        nodes::{LOCAL_NODE_ID, publication, snapshots},
-    };
-    use std::sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    };
-    let root = TempDir::new().unwrap();
-    let disk = root.path().join("disk");
-    std::fs::write(&disk, b"workspace blocks").unwrap();
-    let mut manifest = snapshots::index(&disk).await.unwrap();
-    manifest["capturedAt"] = now().into();
-    manifest["runtime"] = json!({"runtimeId": "fixture"});
-    // The controller records each capture request body and can be told to fail.
-    let bodies = Arc::new(Mutex::new(Vec::<Value>::new()));
-    let failing = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let lost_ack = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let grant_id = id();
-    let grant_for_runner = grant_id.clone();
-    let ack_for_runner = lost_ack.clone();
-    let snapshots_served = Arc::new(Mutex::new(Vec::<String>::new()));
-    let block_reads = Arc::new(AtomicUsize::new(0));
-    let (recorded, fail, served, reads, source, data) = (
-        bodies.clone(),
-        failing.clone(),
-        snapshots_served.clone(),
-        block_reads.clone(),
-        disk.clone(),
-        manifest.clone(),
-    );
-    let runner = axum::Router::new().fallback(move |request: axum::extract::Request| {
-        let (recorded, fail, served, reads, source, data) = (
-            recorded.clone(),
-            fail.clone(),
-            served.clone(),
-            reads.clone(),
-            source.clone(),
-            data.clone(),
-        );
-        let lost_ack = ack_for_runner.clone();
-        let grant = grant_for_runner.clone();
+/// What the capture controller of `active_captures_…` observed and how it fails.
+#[derive(Clone, Default)]
+struct CaptureLog {
+    bodies: Arc<Mutex<Vec<Value>>>,
+    snapshots: Arc<Mutex<Vec<String>>>,
+    block_reads: Arc<AtomicUsize>,
+    failing: Arc<AtomicBool>,
+    lost_ack: Arc<AtomicBool>,
+}
+
+/// A runner controller that records capture requests and never acknowledges publication.
+fn capture_controller(disk: PathBuf, manifest: Value, grant: String, log: CaptureLog) -> Router {
+    Router::new().fallback(move |request: Request<Body>| {
+        let (disk, manifest, grant, log) =
+            (disk.clone(), manifest.clone(), grant.clone(), log.clone());
         async move {
             let path = request.uri().path().to_owned();
             if request.method() == "DELETE" {
-                return axum::Json(json!({"ok": true})).into_response();
+                return Json(json!({ "ok": true })).into_response();
             }
             if path.ends_with("/published") {
-                return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "ack lost").into_response();
+                return (StatusCode::SERVICE_UNAVAILABLE, "ack lost").into_response();
             }
             if path.ends_with("/snapshot") {
-                let body = axum::body::to_bytes(request.into_body(), 4096)
-                    .await
-                    .unwrap();
-                recorded
+                let body = to_bytes(request.into_body(), 4096).await.unwrap();
+                log.bodies
                     .lock()
                     .unwrap()
                     .push(serde_json::from_slice(&body).unwrap_or(Value::Null));
-                if fail.load(std::sync::atomic::Ordering::SeqCst) {
-                    return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "down").into_response();
+                if log.failing.load(Ordering::SeqCst) {
+                    return (StatusCode::SERVICE_UNAVAILABLE, "down").into_response();
                 }
                 let snapshot = id();
-                served.lock().unwrap().push(snapshot.clone());
-                let mut data = data;
-                if lost_ack.load(std::sync::atomic::Ordering::SeqCst) {
-                    data["onDemand"] = true.into();
-                    data["generation"] = 1.into();
+                log.snapshots.lock().unwrap().push(snapshot.clone());
+                let mut manifest = manifest;
+                if log.lost_ack.load(Ordering::SeqCst) {
+                    manifest["onDemand"] = true.into();
+                    manifest["generation"] = 1.into();
                 }
-                return axum::Json(json!({"id": snapshot,"manifest": data,"grantId": grant}))
+                return Json(json!({ "id": snapshot, "manifest": manifest, "grantId": grant }))
                     .into_response();
             }
-            let hash = path.rsplit('/').next().unwrap();
             if request.method() != "GET" {
-                return axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response();
+                return StatusCode::METHOD_NOT_ALLOWED.into_response();
             }
-            reads.fetch_add(1, Ordering::SeqCst);
-            snapshots::block(&source, &data, hash)
+            let hash = path.rsplit('/').next().unwrap();
+            log.block_reads.fetch_add(1, Ordering::SeqCst);
+            snapshots::block(&disk, &manifest, hash)
                 .await
                 .unwrap()
                 .into_response()
         }
-    });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(listener, runner).await.unwrap() });
-    let owner = Owner::with_runner("localhost:4310".into(), url).await;
-    let (run, attempt) = (id(), id());
-    let record = json!({
-        "id": run,
-        "taskId": run,
-        "createdAt": 0,
-        "status": "running",
-        "isolated": true,
-        "sessionId": "session",
-        "nodeId": LOCAL_NODE_ID
-    });
-    owner
-        .service
-        .store
-        .write(move |db| db.add_run(&record, None))
-        .await
-        .unwrap();
-    owner
-        .service
-        .store
-        .set(
-            &format!("run-checkpoint:{run}"),
-            json!({"nodeId": LOCAL_NODE_ID,"runnerId": attempt}),
-            None,
-        )
-        .await
-        .unwrap();
-    let current = || async { owner.service.store.run(&run).await.unwrap() };
+    })
+}
 
-    publication::capture(&owner.service, &current().await)
-        .await
-        .unwrap();
-    let first = snapshots_served.lock().unwrap()[0].clone();
-    assert_eq!(current().await["backup"]["snapshotId"], first);
-    // An unchanged capture reuses the published S3 block without asking the
-    // controller to transfer it again after its local receipt is evicted.
-    let initial_reads = block_reads.load(Ordering::SeqCst);
-    let hash = manifest["blocks"][0]["hash"].as_str().unwrap();
-    let block = owner
-        .service
-        .config
-        .data_dir
-        .join("node-backups")
-        .join(&run)
-        .join("blocks")
-        .join(hash);
-    std::fs::remove_dir_all(block.parent().unwrap()).unwrap();
-    publication::capture(&owner.service, &current().await)
-        .await
-        .unwrap();
-    assert_eq!(block_reads.load(Ordering::SeqCst), initial_reads);
-    assert!(bodies.lock().unwrap()[0]["baseline"].is_null());
-    assert_eq!(bodies.lock().unwrap()[1]["baseline"], first);
-
-    // After a failed capture, the next one asks for a full copy.
-    failing.store(true, std::sync::atomic::Ordering::SeqCst);
-    assert!(
-        publication::capture(&owner.service, &current().await)
-            .await
-            .is_err()
-    );
-    failing.store(false, std::sync::atomic::Ordering::SeqCst);
-    publication::capture(&owner.service, &current().await)
-        .await
-        .unwrap();
-    assert!(
-        bodies.lock().unwrap()[3]["baseline"].is_null(),
-        "{:?}",
-        bodies.lock().unwrap()
-    );
-
-    // A damaged local cache is repaired from S3 without resetting the incremental baseline.
-    let backup = owner
-        .service
-        .store
-        .get(
-            "node-backups",
-            current().await["backup"]["id"].as_str().unwrap(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    let baseline = current().await["backup"]["snapshotId"].clone();
-    std::fs::create_dir_all(block.parent().unwrap()).unwrap();
-    std::fs::write(&block, b"damaged ciphertext").unwrap();
-    assert_eq!(
-        publication::read_block(&owner.service, &backup, hash)
-            .await
-            .unwrap(),
-        b"workspace blocks"
-    );
-    assert_eq!(current().await["backup"]["snapshotId"], baseline);
-    publication::capture(&owner.service, &current().await)
-        .await
-        .unwrap();
-    assert_eq!(bodies.lock().unwrap()[4]["baseline"], baseline);
-    let backup = owner
-        .service
-        .get(
-            "node-backups",
-            current().await["backup"]["id"].as_str().unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        publication::read_block(&owner.service, &backup, hash)
-            .await
-            .unwrap(),
-        b"workspace blocks"
-    );
-    // Losing the controller acknowledgement after S3 publication must preserve the new pointer.
-    let previous = current().await["backup"]["id"].clone();
+/// Losing the controller acknowledgement after S3 publication must preserve the new pointer.
+async fn assert_lost_acknowledgement_keeps_the_new_pointer(
+    owner: &Owner,
+    run: &str,
+    grant: &str,
+    log: &CaptureLog,
+    hash: &str,
+) {
+    let previous = owner.run(run).await["backup"]["id"].clone();
     owner
-        .service
-        .store
         .put(
             "node-disk-grants",
             json!({
-                "id": grant_id,
+                "id": grant,
                 "runId": run,
                 "nodeId": LOCAL_NODE_ID,
-                "backups": [previous]
+                "backups": [previous],
             }),
         )
-        .await
-        .unwrap();
+        .await;
     owner
         .service
         .store
-        .patch_run(&run, json!({"storage": {"mode": "on-demand"}}))
+        .patch_run(run, json!({ "storage": { "mode": "on-demand" } }))
         .await
         .unwrap();
-    lost_ack.store(true, std::sync::atomic::Ordering::SeqCst);
-    publication::attempt(&owner.service, &current().await).await;
-    let after = current().await;
+    log.lost_ack.store(true, Ordering::SeqCst);
+    publication::attempt(&owner.service, &owner.run(run).await).await;
+    let after = owner.run(run).await;
     assert_eq!(after["backup"]["status"], "error");
     assert!(
         after["backup"]["error"]
@@ -3747,52 +2715,147 @@ async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
             .unwrap(),
         b"workspace blocks"
     );
-    publication::collect(&owner.service, &run).await.unwrap();
+    publication::collect(&owner.service, run).await.unwrap();
     assert!(
         owner
-            .service
-            .store
-            .get("node-backups", after["backup"]["id"].as_str().unwrap())
+            .stored("node-backups", after["backup"]["id"].as_str().unwrap())
             .await
-            .unwrap()
             .is_some()
     );
 }
 
 #[tokio::test]
+#[ignore = "requires loopback S3; run tests/node_s3_test.py"]
+async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
+    let root = TempDir::new().unwrap();
+    let disk = root.path().join("disk");
+    std::fs::write(&disk, b"workspace blocks").unwrap();
+    let manifest = controller_manifest(&disk).await;
+    // The controller records each capture request body and can be told to fail.
+    let log = CaptureLog::default();
+    let grant_id = id();
+    let runner = capture_controller(
+        disk.clone(),
+        manifest.clone(),
+        grant_id.clone(),
+        log.clone(),
+    );
+    let (url, _runner) = common::serve_locally(runner).await;
+    let owner = Owner::with_runner(common::HOST.into(), url).await;
+    let (run, attempt) = (id(), id());
+    owner.add_run(&isolated_run(&run, LOCAL_NODE_ID)).await;
+    owner
+        .set_checkpoint(
+            &run,
+            json!({ "nodeId": LOCAL_NODE_ID, "runnerId": attempt }),
+        )
+        .await;
+    let current = || owner.run(&run);
+    let baseline_of = |index: usize| log.bodies.lock().unwrap()[index]["baseline"].clone();
+
+    publication::capture(&owner.service, &current().await)
+        .await
+        .unwrap();
+    let first = log.snapshots.lock().unwrap()[0].clone();
+    assert_eq!(current().await["backup"]["snapshotId"], first);
+    // An unchanged capture reuses the published S3 block without asking the
+    // controller to transfer it again after its local receipt is evicted.
+    let initial_reads = log.block_reads.load(Ordering::SeqCst);
+    let hash = manifest["blocks"][0]["hash"].as_str().unwrap();
+    let block = owner.backup_directory(&run).join("blocks").join(hash);
+    std::fs::remove_dir_all(block.parent().unwrap()).unwrap();
+    publication::capture(&owner.service, &current().await)
+        .await
+        .unwrap();
+    assert_eq!(log.block_reads.load(Ordering::SeqCst), initial_reads);
+    assert!(baseline_of(0).is_null());
+    assert_eq!(baseline_of(1), first);
+
+    // After a failed capture, the next one asks for a full copy.
+    log.failing.store(true, Ordering::SeqCst);
+    assert!(
+        publication::capture(&owner.service, &current().await)
+            .await
+            .is_err()
+    );
+    log.failing.store(false, Ordering::SeqCst);
+    publication::capture(&owner.service, &current().await)
+        .await
+        .unwrap();
+    assert!(baseline_of(3).is_null(), "{:?}", log.bodies.lock().unwrap());
+
+    // A damaged local cache is repaired from S3 without resetting the incremental baseline.
+    let backup = owner
+        .stored(
+            "node-backups",
+            current().await["backup"]["id"].as_str().unwrap(),
+        )
+        .await
+        .unwrap();
+    let baseline = current().await["backup"]["snapshotId"].clone();
+    std::fs::create_dir_all(block.parent().unwrap()).unwrap();
+    std::fs::write(&block, b"damaged ciphertext").unwrap();
+    assert_eq!(
+        publication::read_block(&owner.service, &backup, hash)
+            .await
+            .unwrap(),
+        b"workspace blocks"
+    );
+    assert_eq!(current().await["backup"]["snapshotId"], baseline);
+    publication::capture(&owner.service, &current().await)
+        .await
+        .unwrap();
+    assert_eq!(baseline_of(4), baseline);
+    let backup = owner
+        .service
+        .get(
+            "node-backups",
+            current().await["backup"]["id"].as_str().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        publication::read_block(&owner.service, &backup, hash)
+            .await
+            .unwrap(),
+        b"workspace blocks"
+    );
+    assert_lost_acknowledgement_keeps_the_new_pointer(&owner, &run, &grant_id, &log, hash).await;
+}
+
+/// A recovery point of `run` published by `node` for disk `generation`.
+fn published_point(run: &str, node: &str, generation: i64) -> Value {
+    json!({
+        "id": id(),
+        "runId": run,
+        "nodeId": node,
+        "destination": "s3",
+        "diskGeneration": generation,
+    })
+}
+
+#[tokio::test]
 async fn growing_a_disk_preserves_publication_identity_and_releases_its_previous_base() {
-    use leo_agent_manager::{
-        auth,
-        config::id,
-        nodes::{LOCAL_NODE_ID, disk_grants},
-        storage::{Disk, bootstrap, policy::Policy, runtime},
-    };
     let owner = Owner::new().await;
     let run = id();
-    let record = json!({"id": run});
+    let record = json!({ "id": run });
     let token = disk_grants::new_disk(&owner.service, &record, LOCAL_NODE_ID)
         .await
         .unwrap();
-    let directory = owner._root.path().join("disks").join(&run);
+    let directory = owner.root().join("disks").join(&run);
     let mut context = json!({
         "master": "http://127.0.0.1:1/",
         "grant": token,
-        "policy": Policy {reserve_mi_b:64,reserve_percent:1,..Default::default()}
+        "policy": small_reserve(),
     });
-    let stop = tokio_util::sync::CancellationToken::new();
+    let stop = CancellationToken::new();
     bootstrap::prepare(&directory, 128 * 1024 * 1024, &context, &stop)
         .await
         .unwrap();
     let volume = runtime::load(&directory).await.unwrap();
     volume.seal().await.unwrap();
     let generation = volume.seal().await.unwrap();
-    let previous = json!({
-        "id": id(),
-        "runId": run,
-        "nodeId": LOCAL_NODE_ID,
-        "destination": "s3",
-        "diskGeneration": generation
-    });
+    let previous = published_point(&run, LOCAL_NODE_ID, generation);
     disk_grants::acknowledged(&owner.service, &auth::digest(&token), &previous)
         .await
         .unwrap();
@@ -3816,13 +2879,7 @@ async fn growing_a_disk_preserves_publication_identity_and_releases_its_previous
         next > generation,
         "publication generations must remain monotone"
     );
-    let replacement = json!({
-        "id": id(),
-        "runId": run,
-        "nodeId": LOCAL_NODE_ID,
-        "destination": "s3",
-        "diskGeneration": next
-    });
+    let replacement = published_point(&run, LOCAL_NODE_ID, next);
     disk_grants::extend(&owner.service, &volume.source.grant_id(), &replacement)
         .await
         .unwrap();
@@ -3840,126 +2897,81 @@ async fn growing_a_disk_preserves_publication_identity_and_releases_its_previous
     assert!(pinned.contains(replacement["id"].as_str().unwrap()));
 }
 
-#[tokio::test]
-async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
-    use leo_agent_manager::{
-        config::id,
-        nodes::{disk_grants, snapshots},
-    };
-    use sha2::{Digest, Sha256};
-    async fn permits(owner: &Owner, credential: &str, point: &Value) -> bool {
-        disk_grants::authorize(&owner.service, credential)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|grant| grant["backups"].as_array().cloned())
-            .is_some_and(|backups| backups.contains(&point["id"]))
-    }
-    let owner = Owner::new().await;
-    let (run, node, next, agent) = (id(), id(), id(), id());
-    for node in [&node, &next] {
-        owner
-            .service
-            .store
-            .put("nodes", json!({"id": node,"revoked": false}))
-            .await
-            .unwrap();
-    }
-    owner
-        .service
-        .store
-        .put(
-            "agents",
-            json!({"id": agent,"access": {"nodes": [node,next]}}),
-        )
+/// Whether `credential` currently grants access to the recovery `point`.
+async fn permits(owner: &Owner, credential: &str, point: &Value) -> bool {
+    disk_grants::authorize(&owner.service, credential)
         .await
-        .unwrap();
-    let record = json!({
-        "id": run,
-        "taskId": "fixture",
-        "createdAt": 0,
-        "status": "succeeded",
-        "nodeId": node,
-        "snapshot": {"agent": {"id": agent}}
-    });
-    let record_copy = record.clone();
-    owner
-        .service
-        .store
-        .write(move |db| db.add_run(&record_copy, None))
-        .await
-        .unwrap();
+        .ok()
+        .flatten()
+        .and_then(|grant| grant["backups"].as_array().cloned())
+        .is_some_and(|backups| backups.contains(&point["id"]))
+}
+
+/// Publishes three single-block S3 recovery points of `run`, one per disk generation.
+async fn publish_s3_points(owner: &Owner, run: &str, node: &str) -> Vec<Value> {
     let mut points = Vec::new();
-    for byte in [7u8, 9u8, 11u8] {
-        let data = vec![byte; 4096];
-        let hash = hex::encode(Sha256::digest(&data));
-        let point = id();
+    for (generation, byte) in (1..).zip([7u8, 9u8, 11u8]) {
+        let hash = hex::encode(Sha256::digest(vec![byte; 4096]));
+        let mut point = published_point(run, node, generation);
         let manifest = json!({
             "version": 1,
             "size": 4096,
             "blockSize": snapshots::BLOCK,
-            "blocks": [{"offset": 0,"size": 4096,"hash": hash}]
+            "blocks": [{ "offset": 0, "size": 4096, "hash": hash }],
         });
-        let backup = json!({
-            "id": point,
-            "runId": run,
-            "nodeId": node,
-            "destination": "s3",
-            "diskGeneration": points.len()+1,
-            "bucket": "fixture",
-            "manifest": owner.service.vault.encrypt(&format!("backup:{point}"),&manifest).unwrap()
-        });
-        owner
-            .service
-            .store
-            .put("node-backups", backup.clone())
-            .await
-            .unwrap();
-        points.push(backup);
+        point["bucket"] = "fixture".into();
+        point["manifest"] = owner.encrypt_manifest(point["id"].as_str().unwrap(), &manifest);
+        owner.put("node-backups", point.clone()).await;
+        points.push(point);
     }
+    points
+}
+
+#[tokio::test]
+async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
+    let owner = Owner::new().await;
+    let (run, node, next, agent) = (id(), id(), id(), id());
+    for node in [&node, &next] {
+        owner
+            .put("nodes", json!({ "id": node, "revoked": false }))
+            .await;
+    }
+    owner.grant_nodes(&agent, json!([node, next])).await;
+    let mut record = run_record(&run, RunStatus::Succeeded);
+    record["nodeId"] = node.clone().into();
+    record["snapshot"] = json!({ "agent": { "id": agent } });
+    owner.add_run(&record).await;
+    let points = publish_s3_points(&owner, &run, &node).await;
     let credential = disk_grants::issue(&owner.service, &record, &node, &points[0])
         .await
         .unwrap();
+    let grant = auth::digest(&credential);
+    let pinned = async || {
+        disk_grants::pinned(&owner.service, &run)
+            .await
+            .unwrap()
+            .len()
+    };
     assert!(permits(&owner, &credential, &points[0]).await);
     assert!(!permits(&owner, &credential, &points[1]).await);
     let _stale = disk_grants::issue(&owner.service, &record, &node, &points[0])
         .await
         .unwrap();
-    disk_grants::extend(
-        &owner.service,
-        &leo_agent_manager::auth::digest(&credential),
-        &points[1],
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        disk_grants::pinned(&owner.service, &run)
-            .await
-            .unwrap()
-            .len(),
-        2
-    );
+    disk_grants::extend(&owner.service, &grant, &points[1])
+        .await
+        .unwrap();
+    assert_eq!(pinned().await, 2);
     assert!(permits(&owner, &credential, &points[1]).await);
-    disk_grants::acknowledged(
-        &owner.service,
-        &leo_agent_manager::auth::digest(&credential),
-        &points[1],
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        disk_grants::pinned(&owner.service, &run)
-            .await
-            .unwrap()
-            .len(),
-        2
-    );
+    disk_grants::acknowledged(&owner.service, &grant, &points[1])
+        .await
+        .unwrap();
+    assert_eq!(pinned().await, 2);
     assert!(!permits(&owner, &credential, &points[0]).await);
     // Reconciliation of a lost acknowledgement must retain an in-flight successor.
     let racing = disk_grants::issue(&owner.service, &record, &node, &points[0])
         .await
         .unwrap();
-    let racing_id = leo_agent_manager::auth::digest(&racing);
+    let racing_id = auth::digest(&racing);
     disk_grants::extend(&owner.service, &racing_id, &points[1])
         .await
         .unwrap();
@@ -3975,26 +2987,18 @@ async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
         .unwrap();
     assert!(!permits(&owner, &racing, &points[1]).await);
     // A delayed monitor receipt must not roll authorization back behind publication.
-    disk_grants::acknowledged(
-        &owner.service,
-        &leo_agent_manager::auth::digest(&credential),
-        &points[0],
-    )
-    .await
-    .unwrap();
-    disk_grants::extend(
-        &owner.service,
-        &leo_agent_manager::auth::digest(&credential),
-        &points[0],
-    )
-    .await
-    .unwrap();
+    disk_grants::acknowledged(&owner.service, &grant, &points[0])
+        .await
+        .unwrap();
+    disk_grants::extend(&owner.service, &grant, &points[0])
+        .await
+        .unwrap();
     assert!(permits(&owner, &credential, &points[1]).await);
     assert!(!permits(&owner, &credential, &points[0]).await);
     owner
         .service
         .store
-        .patch_run(&run, json!({"nodeId": next}))
+        .patch_run(&run, json!({ "nodeId": next }))
         .await
         .unwrap();
     assert!(!permits(&owner, &credential, &points[1]).await);
@@ -4008,29 +3012,17 @@ async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
             )
             .await
             .0,
-        403
+        StatusCode::FORBIDDEN
     );
 }
 
 #[tokio::test]
 async fn corrupted_recovery_ciphertext_is_terminal_and_invalidates_the_baseline() {
-    use leo_agent_manager::{config::id, nodes::publication};
-    use sha2::{Digest, Sha256};
     let owner = Owner::new().await;
     let run = id();
-    let record = json!({
-        "id": run,
-        "taskId": "fixture",
-        "createdAt": 0,
-        "status": "succeeded",
-        "backup": {"snapshotId": "previous"}
-    });
-    owner
-        .service
-        .store
-        .write(move |db| db.add_run(&record, None))
-        .await
-        .unwrap();
+    let mut record = run_record(&run, RunStatus::Succeeded);
+    record["backup"] = json!({ "snapshotId": "previous" });
+    owner.add_run(&record).await;
     let data = b"durable conversation work";
     let hash = hex::encode(Sha256::digest(data));
     let key = format!("node-backups/{run}/blocks/{hash}");
@@ -4042,7 +3034,7 @@ async fn corrupted_recovery_ciphertext_is_terminal_and_invalidates_the_baseline(
     std::fs::write(&path, encoded).unwrap();
     let error = publication::read_block(
         &owner.service,
-        &json!({"runId": run,"destination": "master"}),
+        &json!({ "runId": run, "destination": "master" }),
         &hash,
     )
     .await
@@ -4052,37 +3044,52 @@ async fn corrupted_recovery_ciphertext_is_terminal_and_invalidates_the_baseline(
         "corrupt ciphertext must not trigger an endless 5xx retry"
     );
     assert!(!path.exists());
-    assert!(owner.service.store.run(&run).await.unwrap()["backup"]["snapshotId"].is_null());
+    assert!(owner.run(&run).await["backup"]["snapshotId"].is_null());
+}
+
+/// Publishes one master recovery point per generation: `shared` plus its own block.
+/// Newer generations get older timestamps, so only the published pointer orders them.
+async fn publish_master_points(
+    owner: &Owner,
+    run: &str,
+    shared: &str,
+    generations: [&String; 2],
+) -> Vec<String> {
+    let mut ids = Vec::new();
+    for (generation, hash) in generations.into_iter().enumerate() {
+        let point = id();
+        let manifest = json!({
+            "version": 1,
+            "size": 2 * snapshots::BLOCK,
+            "blockSize": snapshots::BLOCK,
+            "blocks": [
+                { "offset": 0, "size": snapshots::BLOCK, "hash": shared },
+                { "offset": snapshots::BLOCK, "size": snapshots::BLOCK, "hash": hash },
+            ],
+        });
+        owner
+            .put(
+                "node-backups",
+                json!({
+                    "id": point,
+                    "runId": run,
+                    "destination": "master",
+                    "createdAt": 100 - generation,
+                    "manifest": owner.encrypt_manifest(&point, &manifest),
+                }),
+            )
+            .await;
+        ids.push(point);
+    }
+    ids
 }
 
 #[tokio::test]
 async fn publication_cleanup_preserves_current_and_in_use_blocks_then_reclaims_idle_generations() {
-    use leo_agent_manager::{
-        config::id,
-        nodes::{publication, snapshots},
-    };
-    use sha2::{Digest, Sha256};
     let owner = Owner::new().await;
     let run = id();
-    let record = json!({
-        "id": run,
-        "taskId": "fixture",
-        "createdAt": 0,
-        "status": "succeeded"
-    });
-    owner
-        .service
-        .store
-        .write(move |db| db.add_run(&record, None))
-        .await
-        .unwrap();
-    let directory = owner
-        .service
-        .config
-        .data_dir
-        .join("node-backups")
-        .join(&run)
-        .join("blocks");
+    owner.add_run(&run_record(&run, RunStatus::Succeeded)).await;
+    let directory = owner.backup_directory(&run).join("blocks");
     std::fs::create_dir_all(&directory).unwrap();
     let shared = hex::encode(Sha256::digest(b"shared"));
     let old = hex::encode(Sha256::digest(b"old"));
@@ -4090,51 +3097,24 @@ async fn publication_cleanup_preserves_current_and_in_use_blocks_then_reclaims_i
     for hash in [&shared, &old, &new] {
         std::fs::write(directory.join(hash), b"fixture").unwrap();
     }
-    let mut ids = Vec::new();
-    for (generation, hash) in [&old, &new].into_iter().enumerate() {
-        let point = id();
-        let manifest = json!({
-            "version": 1,
-            "size": 2*snapshots::BLOCK,
-            "blockSize": snapshots::BLOCK,
-            "blocks": [
-            {"offset": 0,"size": snapshots::BLOCK,"hash": shared},
-            {"offset": snapshots::BLOCK,"size": snapshots::BLOCK,"hash": hash}]
-        });
-        owner
-            .service
-            .store
-            .put("node-backups", json!({
-                "id": point,
-                "runId": run,
-                "destination": "master",
-                "createdAt": 100-generation,
-                "manifest": owner.service.vault.encrypt(&format!("backup:{point}"), &manifest).unwrap()
-            }))
-            .await
-            .unwrap();
-        ids.push(point);
-    }
+    let ids = publish_master_points(&owner, &run, &shared, [&old, &new]).await;
     owner
         .service
         .store
-        .patch_run(&run, json!({"backup": {"id": ids[1]}}))
+        .patch_run(&run, json!({ "backup": { "id": ids[1] } }))
         .await
         .unwrap();
     let grant = id();
     owner
-        .service
-        .store
         .put(
             "node-disk-grants",
-            json!({"id": grant,"runId": run,"backups": [ids[0]]}),
+            json!({ "id": grant, "runId": run, "backups": [ids[0]] }),
         )
-        .await
-        .unwrap();
+        .await;
     owner
         .service
         .store
-        .set("node-backup-settings", json!({"retention": 100}), None)
+        .set("node-backup-settings", json!({ "retention": 100 }), None)
         .await
         .unwrap();
     assert!(
@@ -4179,25 +3159,30 @@ async fn publication_cleanup_preserves_current_and_in_use_blocks_then_reclaims_i
     assert!(!directory.join(old).exists());
 }
 
+/// Runs `aws s3api` against the loopback bucket.
+fn s3api(args: &[&str]) -> std::process::Output {
+    std::process::Command::new("aws")
+        .arg("s3api")
+        .args(args)
+        .output()
+        .unwrap()
+}
+
 #[tokio::test]
 #[ignore = "requires loopback S3; run tests/node_s3_test.py"]
 async fn obsolete_object_collection_deletes_versions_without_deleting_prefix_neighbors() {
     let owner = Owner::new().await;
     assert!(std::env::var_os("LEO_NODE_TEST_S3_ENDPOINT").is_some());
-    let storage = leo_agent_manager::object_storage::Storage::configured(&owner.service).unwrap();
-    let versioning = std::process::Command::new("aws")
-        .args([
-            "s3api",
-            "put-bucket-versioning",
-            "--bucket",
-            "leo-node-test",
-            "--versioning-configuration",
-            "Status=Enabled",
-        ])
-        .output()
-        .unwrap();
+    let storage = Storage::configured(&owner.service).unwrap();
+    let versioning = s3api(&[
+        "put-bucket-versioning",
+        "--bucket",
+        "leo-node-test",
+        "--versioning-configuration",
+        "Status=Enabled",
+    ]);
     assert!(versioning.status.success());
-    let key = format!("collection/{}", leo_agent_manager::config::id());
+    let key = format!("collection/{}", id());
     let neighbor = format!("{key}-neighbor");
     storage.upload_bytes(b"first".to_vec(), &key).await.unwrap();
     storage
@@ -4208,32 +3193,18 @@ async fn obsolete_object_collection_deletes_versions_without_deleting_prefix_nei
         .upload_bytes(b"neighbor".to_vec(), &neighbor)
         .await
         .unwrap();
-    let marker = std::process::Command::new("aws")
-        .args([
-            "s3api",
-            "delete-object",
-            "--bucket",
-            "leo-node-test",
-            "--key",
-            &key,
-        ])
-        .output()
-        .unwrap();
+    let marker = s3api(&["delete-object", "--bucket", "leo-node-test", "--key", &key]);
     assert!(marker.status.success());
     storage.purge_key(&key).await.unwrap();
-    let listing = std::process::Command::new("aws")
-        .args([
-            "s3api",
-            "list-object-versions",
-            "--bucket",
-            "leo-node-test",
-            "--prefix",
-            &key,
-            "--output",
-            "json",
-        ])
-        .output()
-        .unwrap();
+    let listing = s3api(&[
+        "list-object-versions",
+        "--bucket",
+        "leo-node-test",
+        "--prefix",
+        &key,
+        "--output",
+        "json",
+    ]);
     assert!(listing.status.success());
     let listing: Value = serde_json::from_slice(&listing.stdout).unwrap();
     assert!(
@@ -4251,16 +3222,47 @@ async fn obsolete_object_collection_deletes_versions_without_deleting_prefix_nei
     storage.purge_key(&neighbor).await.unwrap();
 }
 
+/// A runner controller whose snapshot waits for `resume` after signalling `captured`.
+fn paused_capture_controller(
+    disk: PathBuf,
+    manifest: Value,
+    captured: Arc<tokio::sync::Notify>,
+    resume: Arc<tokio::sync::Notify>,
+) -> Router {
+    Router::new().fallback(move |request: Request<Body>| {
+        let (captured, resume, disk, manifest) = (
+            captured.clone(),
+            resume.clone(),
+            disk.clone(),
+            manifest.clone(),
+        );
+        async move {
+            if request.method() == "DELETE" {
+                return Json(json!({})).into_response();
+            }
+            if request.uri().path().ends_with("/snapshot") {
+                captured.notify_one();
+                resume.notified().await;
+                return Json(json!({ "id": id(), "manifest": manifest })).into_response();
+            }
+            if request.method() != "GET" {
+                return StatusCode::METHOD_NOT_ALLOWED.into_response();
+            }
+            snapshots::block(
+                &disk,
+                &manifest,
+                request.uri().path().rsplit('/').next().unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_response()
+        }
+    })
+}
+
 #[tokio::test]
 #[ignore = "requires loopback S3; run tests/node_s3_test.py"]
 async fn interrupted_first_publication_is_collected_after_restart_without_another_write() {
-    use axum::response::IntoResponse;
-    use leo_agent_manager::{
-        config::id,
-        nodes::{LOCAL_NODE_ID, publication, snapshots},
-        object_storage::Storage,
-    };
-    use std::sync::Arc;
     for explicit_purge in [false, true] {
         let root = TempDir::new().unwrap();
         let disk = root.path().join("disk");
@@ -4268,76 +3270,33 @@ async fn interrupted_first_publication_is_collected_after_restart_without_anothe
         let manifest = snapshots::index(&disk).await.unwrap();
         let captured = Arc::new(tokio::sync::Notify::new());
         let resume = Arc::new(tokio::sync::Notify::new());
-        let (signal, wait, data) = (captured.clone(), resume.clone(), manifest.clone());
-        let runner = axum::Router::new().fallback(move |request: axum::extract::Request| {
-            let (signal, wait, disk, data) =
-                (signal.clone(), wait.clone(), disk.clone(), data.clone());
-            async move {
-                if request.method() == "DELETE" {
-                    return axum::Json(json!({})).into_response();
-                }
-                if request.uri().path().ends_with("/snapshot") {
-                    signal.notify_one();
-                    wait.notified().await;
-                    return axum::Json(json!({"id": id(),"manifest": data})).into_response();
-                }
-                if request.method() != "GET" {
-                    return axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response();
-                }
-                snapshots::block(
-                    &disk,
-                    &data,
-                    request.uri().path().rsplit('/').next().unwrap(),
-                )
-                .await
-                .unwrap()
-                .into_response()
-            }
-        });
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move { axum::serve(listener, runner).await.unwrap() });
-        let owner = Owner::with_runner("localhost:4310".into(), url).await;
+        let runner =
+            paused_capture_controller(disk, manifest.clone(), captured.clone(), resume.clone());
+        let (url, server) = common::serve_locally(runner).await;
+        let owner = Owner::with_runner(common::HOST.into(), url).await;
         let (run, attempt) = (id(), id());
         let record = json!({
             "id": run,
             "taskId": run,
             "createdAt": 0,
-            "status": "succeeded",
+            "status": RunStatus::Succeeded,
             "sessionId": "session",
-            "nodeId": LOCAL_NODE_ID
+            "nodeId": LOCAL_NODE_ID,
         });
-        let saved = record.clone();
+        owner.add_run(&record).await;
         owner
-            .service
-            .store
-            .write(move |db| db.add_run(&saved, None))
-            .await
-            .unwrap();
-        owner
-            .service
-            .store
-            .set(
-                &format!("run-checkpoint:{run}"),
-                json!({"nodeId": LOCAL_NODE_ID,"runnerId": attempt}),
-                None,
+            .set_checkpoint(
+                &run,
+                json!({ "nodeId": LOCAL_NODE_ID, "runnerId": attempt }),
             )
-            .await
-            .unwrap();
-        let s = owner.service.clone();
-        let capture = tokio::spawn(async move { publication::capture(&s, &record).await });
+            .await;
+        let service = owner.service.clone();
+        let capture = tokio::spawn(async move { publication::capture(&service, &record).await });
         captured.notified().await;
         // The S3 writes finish, but the ownership fence rejects the database commit.
         owner
-            .service
-            .store
-            .set(
-                &format!("run-checkpoint:{run}"),
-                json!({"nodeId": LOCAL_NODE_ID,"runnerId": id()}),
-                None,
-            )
-            .await
-            .unwrap();
+            .set_checkpoint(&run, json!({ "nodeId": LOCAL_NODE_ID, "runnerId": id() }))
+            .await;
         resume.notify_one();
         assert_eq!(capture.await.unwrap().unwrap_err().status, 409);
         assert!(
@@ -4349,12 +3308,7 @@ async fn interrupted_first_publication_is_collected_after_restart_without_anothe
                 .unwrap()
                 .is_empty()
         );
-        let directory = owner
-            .service
-            .config
-            .data_dir
-            .join("node-backups")
-            .join(&run);
+        let directory = owner.backup_directory(&run);
         let intent = std::fs::read_dir(&directory)
             .unwrap()
             .filter_map(Result::ok)
@@ -4384,9 +3338,9 @@ async fn interrupted_first_publication_is_collected_after_restart_without_anothe
             assert!(!directory.exists());
         } else {
             let maintenance = tokio::spawn(publication::maintain(restarted.clone()));
-            tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            tokio::time::timeout(Duration::from_secs(30), async {
                 while intent.exists() {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             })
             .await
@@ -4395,119 +3349,118 @@ async fn interrupted_first_publication_is_collected_after_restart_without_anothe
             maintenance.await.unwrap();
         }
         drain_remote_deletions(&restarted).await;
-        assert_eq!(
-            storage
-                .download_bytes(&object, 65536)
-                .await
-                .unwrap_err()
-                .status,
-            409
-        );
-        assert_eq!(
-            storage
-                .download_bytes(&block, 65536)
-                .await
-                .unwrap_err()
-                .status,
-            409
-        );
+        for key in [&object, &block] {
+            assert_eq!(
+                storage.download_bytes(key, 65536).await.unwrap_err().status,
+                409
+            );
+        }
         server.abort();
     }
 }
 
-#[tokio::test]
-#[ignore = "requires loopback S3; run tests/node_s3_test.py"]
-async fn shared_publications_reuse_across_runs_migrate_legacy_and_ignore_slow_cleanup() {
-    use axum::response::IntoResponse;
-    use leo_agent_manager::{
-        config::id,
-        nodes::{LOCAL_NODE_ID, publication, shared_blocks, snapshots},
-        object_storage::Storage,
-    };
-    use std::{
-        os::unix::fs::PermissionsExt,
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
-    };
-    let root = TempDir::new().unwrap();
-    let disk = root.path().join("source");
-    let original = vec![42u8; 4 * 1024 * 1024];
-    std::fs::write(&disk, &original).unwrap();
-    let manifest = snapshots::index(&disk).await.unwrap();
-    let state = Arc::new(tokio::sync::Mutex::new(manifest.clone()));
-    let requests = Arc::new(AtomicUsize::new(0));
-    let pause = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let entered_capture = Arc::new(tokio::sync::Notify::new());
-    let resume_capture = Arc::new(tokio::sync::Notify::new());
-    let gates = (
-        pause.clone(),
-        entered_capture.clone(),
-        resume_capture.clone(),
-    );
-    let racing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+/// A succeeded run owned by the local node, whose task shares its id.
+fn local_run(run: &str) -> Value {
+    json!({
+        "id": run,
+        "taskId": run,
+        "createdAt": 0,
+        "status": RunStatus::Succeeded,
+        "nodeId": LOCAL_NODE_ID,
+    })
+}
+
+/// Stores `record` with a checkpoint that places it on the local node.
+async fn add_local_run(owner: &Owner, record: &Value) {
+    owner.add_run(record).await;
+    owner
+        .set_checkpoint(
+            record["id"].as_str().unwrap(),
+            json!({ "nodeId": LOCAL_NODE_ID, "runnerId": id() }),
+        )
+        .await;
+}
+
+/// Gates of the shared publication controller.
+#[derive(Clone, Default)]
+struct SharedPublicationGates {
+    /// Block reads served from the source disk.
+    requests: Arc<AtomicUsize>,
+    /// Holds the next snapshot until `resume_capture` once set.
+    pause: Arc<AtomicBool>,
+    entered_capture: Arc<tokio::sync::Notify>,
+    resume_capture: Arc<tokio::sync::Notify>,
+    /// Makes two block reads wait for each other.
+    racing: Arc<AtomicBool>,
+}
+
+/// A runner controller serving `disk` one block at a time, never in batches.
+fn shared_publication_controller(
+    disk: PathBuf,
+    manifest: Arc<tokio::sync::Mutex<Value>>,
+    gates: SharedPublicationGates,
+) -> Router {
     let upload_barrier = Arc::new(tokio::sync::Barrier::new(2));
-    let upload_gate = (racing.clone(), upload_barrier);
-    let (data, count, source) = (state.clone(), requests.clone(), disk.clone());
-    let runner = axum::Router::new().fallback(move |request: axum::extract::Request| {
-        let (data, count, source) = (data.clone(), count.clone(), source.clone());
-        let gates = gates.clone();
-        let upload_gate = upload_gate.clone();
+    Router::new().fallback(move |request: Request<Body>| {
+        let (disk, manifest, gates, upload_barrier) = (
+            disk.clone(),
+            manifest.clone(),
+            gates.clone(),
+            upload_barrier.clone(),
+        );
         async move {
             if request.method() == "DELETE" {
-                return axum::Json(json!({})).into_response();
+                return Json(json!({})).into_response();
             }
             if request.uri().path().ends_with("/snapshot") {
-                if gates.0.swap(false, Ordering::SeqCst) {
-                    gates.1.notify_one();
-                    gates.2.notified().await;
+                if gates.pause.swap(false, Ordering::SeqCst) {
+                    gates.entered_capture.notify_one();
+                    gates.resume_capture.notified().await;
                 }
-                return axum::Json(json!({"id":id(),"manifest":data.lock().await.clone()}))
-                    .into_response();
+                let manifest = manifest.lock().await.clone();
+                return Json(json!({ "id": id(), "manifest": manifest })).into_response();
             }
             if request.uri().path().ends_with("/blocks") {
-                return axum::http::StatusCode::NOT_FOUND.into_response();
+                return StatusCode::NOT_FOUND.into_response();
             }
-            count.fetch_add(1, Ordering::SeqCst);
-            if upload_gate.0.load(Ordering::SeqCst) {
-                upload_gate.1.wait().await;
+            gates.requests.fetch_add(1, Ordering::SeqCst);
+            if gates.racing.load(Ordering::SeqCst) {
+                upload_barrier.wait().await;
             }
             snapshots::block(
-                &source,
-                &*data.lock().await,
+                &disk,
+                &*manifest.lock().await,
                 request.uri().path().rsplit('/').next().unwrap(),
             )
             .await
             .unwrap()
             .into_response()
         }
-    });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let server = tokio::spawn(async move { axum::serve(listener, runner).await.unwrap() });
-    let owner = Owner::with_runner("localhost:4310".into(), url).await;
+    })
+}
+
+#[tokio::test]
+#[ignore = "requires loopback S3; run tests/node_s3_test.py"]
+async fn shared_publications_reuse_across_runs_migrate_legacy_and_ignore_slow_cleanup() {
+    let root = TempDir::new().unwrap();
+    let disk = root.path().join("source");
+    let original = vec![42u8; 4 * MIB];
+    std::fs::write(&disk, &original).unwrap();
+    let manifest = snapshots::index(&disk).await.unwrap();
+    let state = Arc::new(tokio::sync::Mutex::new(manifest.clone()));
+    let gates = SharedPublicationGates::default();
+    let runner = shared_publication_controller(disk.clone(), state.clone(), gates.clone());
+    let (url, server) = common::serve_locally(runner).await;
+    let owner = Owner::with_runner(common::HOST.into(), url).await;
     let s = &owner.service;
-    async fn run(s: &Service) -> Value {
-        let run = id();
-        let record = json!({"id":run,"taskId":run,"createdAt":0,"status":"succeeded","nodeId":LOCAL_NODE_ID});
-        let saved = record.clone();
-        s.store
-            .write(move |db| db.add_run(&saved, None))
-            .await
-            .unwrap();
-        s.store
-            .set(
-                &format!("run-checkpoint:{run}"),
-                json!({"nodeId":LOCAL_NODE_ID,"runnerId":id()}),
-                None,
-            )
-            .await
-            .unwrap();
+    let new_run = async || {
+        let record = local_run(&id());
+        add_local_run(&owner, &record).await;
         record
-    }
-    let a = run(s).await;
-    let b = run(s).await;
+    };
+
+    let a = new_run().await;
+    let b = new_run().await;
     let start = std::time::Instant::now();
     let first = publication::capture(s, &a).await.unwrap();
     let first_ms = start.elapsed().as_secs_f64() * 1000.;
@@ -4517,7 +3470,7 @@ async fn shared_publications_reuse_across_runs_migrate_legacy_and_ignore_slow_cl
     assert_eq!(first["uploadedBytes"], original.len());
     assert_eq!(second["uploadedBytes"], 0);
     assert_eq!(
-        requests.load(Ordering::SeqCst),
+        gates.requests.load(Ordering::SeqCst),
         1,
         "Cross-run reuse does not request source bytes"
     );
@@ -4547,11 +3500,21 @@ async fn shared_publications_reuse_across_runs_migrate_legacy_and_ignore_slow_cl
     let entered = root.path().join("delete-entered");
     let release = root.path().join("delete-release");
     let wrapper = root.path().join("slow-aws");
-    std::fs::write(&wrapper,format!("#!/usr/bin/env python3\nimport pathlib,time,subprocess,sys\npathlib.Path({}).touch()\nwhile not pathlib.Path({}).exists(): time.sleep(.01)\nsys.exit(subprocess.call(['aws']+sys.argv[1:]))\n",serde_json::to_string(&entered).unwrap(),serde_json::to_string(&release).unwrap())).unwrap();
+    let script = format!(
+        "#!/usr/bin/env python3
+import pathlib,time,subprocess,sys
+pathlib.Path({}).touch()
+while not pathlib.Path({}).exists(): time.sleep(.01)
+sys.exit(subprocess.call(['aws']+sys.argv[1:]))
+",
+        serde_json::to_string(&entered).unwrap(),
+        serde_json::to_string(&release).unwrap(),
+    );
+    std::fs::write(&wrapper, script).unwrap();
     std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::write(
         s.config.data_dir.join("storage-s3.json"),
-        json!({"bucket":"leo-node-test","awsBinary":wrapper}).to_string(),
+        json!({ "bucket": "leo-node-test", "awsBinary": wrapper }).to_string(),
     )
     .unwrap();
     publication::purge(s, a["id"].as_str().unwrap())
@@ -4559,25 +3522,22 @@ async fn shared_publications_reuse_across_runs_migrate_legacy_and_ignore_slow_cl
         .unwrap();
     let service = s.clone();
     let gc = tokio::spawn(async move { shared_blocks::collect(&service).await });
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         while !entered.exists() {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
     .unwrap();
-    let c = run(s).await;
-    let third = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        publication::capture(s, &c),
-    )
-    .await
-    .expect("Slow deletion must not block publication")
-    .unwrap();
+    let c = new_run().await;
+    let third = tokio::time::timeout(Duration::from_secs(5), publication::capture(s, &c))
+        .await
+        .expect("Slow deletion must not block publication")
+        .unwrap();
     assert_eq!(third["uploadedBytes"], 0);
     assert_eq!(
         tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+            Duration::from_secs(5),
             publication::read_block(s, &second, hash)
         )
         .await
@@ -4588,6 +3548,7 @@ async fn shared_publications_reuse_across_runs_migrate_legacy_and_ignore_slow_cl
     assert!(!gc.is_finished());
     std::fs::write(&release, b"resume").unwrap();
     gc.await.unwrap().unwrap();
+
     publication::purge(s, b["id"].as_str().unwrap())
         .await
         .unwrap();
@@ -4616,36 +3577,31 @@ async fn shared_publications_reuse_across_runs_migrate_legacy_and_ignore_slow_cl
 
     // A cancelled caller cannot release reservations while its owned capture is
     // running. The operation completes before another collector can retire it.
-    let cancelled = run(s).await;
-    pause.store(true, Ordering::SeqCst);
+    let cancelled = new_run().await;
+    let cancelled_id = cancelled["id"].as_str().unwrap();
+    gates.pause.store(true, Ordering::SeqCst);
     let (service, record) = (s.clone(), cancelled.clone());
     let caller = tokio::spawn(async move { publication::capture(&service, &record).await });
-    entered_capture.notified().await;
+    gates.entered_capture.notified().await;
     caller.abort();
     let _ = caller.await;
     assert!(
         tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            s.node_backup_operation
-                .lock(cancelled["id"].as_str().unwrap())
+            Duration::from_millis(50),
+            s.node_backup_operation.lock(cancelled_id)
         )
         .await
         .is_err()
     );
-    resume_capture.notify_one();
+    gates.resume_capture.notify_one();
     let guard = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        s.node_backup_operation
-            .lock(cancelled["id"].as_str().unwrap()),
+        Duration::from_secs(10),
+        s.node_backup_operation.lock(cancelled_id),
     )
     .await
     .unwrap();
     drop(guard);
-    let committed = s
-        .store
-        .run(cancelled["id"].as_str().unwrap())
-        .await
-        .unwrap();
+    let committed = s.store.run(cancelled_id).await.unwrap();
     let point = s
         .get("node-backups", committed["backup"]["id"].as_str().unwrap())
         .await
@@ -4654,17 +3610,15 @@ async fn shared_publications_reuse_across_runs_migrate_legacy_and_ignore_slow_cl
         publication::read_block(s, &point, hash).await.unwrap(),
         original
     );
-    publication::purge(s, cancelled["id"].as_str().unwrap())
-        .await
-        .unwrap();
+    publication::purge(s, cancelled_id).await.unwrap();
     drain_remote_deletions(s).await;
 
     // Both disks reserve the same unseen hash before either source responds.
     // Their first uploads must converge while preserving independent disk locks.
-    let parallel_a = run(s).await;
-    let parallel_b = run(s).await;
-    racing.store(true, Ordering::SeqCst);
-    let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+    let parallel_a = new_run().await;
+    let parallel_b = new_run().await;
+    gates.racing.store(true, Ordering::SeqCst);
+    let (a, b) = tokio::time::timeout(Duration::from_secs(15), async {
         tokio::join!(
             publication::capture(s, &parallel_a),
             publication::capture(s, &parallel_b)
@@ -4672,7 +3626,7 @@ async fn shared_publications_reuse_across_runs_migrate_legacy_and_ignore_slow_cl
     })
     .await
     .unwrap();
-    racing.store(false, Ordering::SeqCst);
+    gates.racing.store(false, Ordering::SeqCst);
     let (a, b) = (a.unwrap(), b.unwrap());
     assert_eq!(a["uploadedBytes"], original.len());
     assert_eq!(b["uploadedBytes"], original.len());
@@ -4703,7 +3657,7 @@ async fn shared_publications_reuse_across_runs_migrate_legacy_and_ignore_slow_cl
 
     // Legacy incremental captures can omit unchanged bytes on the node. Migrate
     // them from their old authenticated object instead of requesting absent data.
-    let legacy_run = run(s).await;
+    let legacy_run = new_run().await;
     let run_id = legacy_run["id"].as_str().unwrap();
     let point_id = id();
     let legacy_bytes = b"legacy unchanged block";
@@ -4722,13 +3676,23 @@ async fn shared_publications_reuse_across_runs_migrate_legacy_and_ignore_slow_cl
         .upload_bytes(encoded, &old_key)
         .await
         .unwrap();
-    let legacy = json!({"id":point_id,"runId":run_id,"destination":"s3","bucket":"leo-node-test","endpoint":null,"manifest":s.vault.encrypt(&format!("backup:{point_id}"),&legacy_manifest).unwrap()});
-    s.store.put("node-backups", legacy.clone()).await.unwrap();
+    let legacy = json!({
+        "id": point_id,
+        "runId": run_id,
+        "destination": "s3",
+        "bucket": "leo-node-test",
+        "endpoint": null,
+        "manifest": owner.encrypt_manifest(&point_id, &legacy_manifest),
+    });
+    owner.put("node-backups", legacy.clone()).await;
     s.store
-        .patch_run(run_id, json!({"backup":{"id":point_id,"snapshotId":id()}}))
+        .patch_run(
+            run_id,
+            json!({ "backup": { "id": point_id, "snapshotId": id() } }),
+        )
         .await
         .unwrap();
-    let directory = s.config.data_dir.join("node-backups").join(run_id);
+    let directory = owner.backup_directory(run_id);
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(
         directory.join(format!("{point_id}.json")),
@@ -4736,12 +3700,13 @@ async fn shared_publications_reuse_across_runs_migrate_legacy_and_ignore_slow_cl
     )
     .unwrap();
     *state.lock().await = legacy_manifest;
-    let before = requests.load(Ordering::SeqCst);
-    let migrated = publication::capture(s, &s.store.run(run_id).await.unwrap())
+
+    let before = gates.requests.load(Ordering::SeqCst);
+    let migrated = publication::capture(s, &owner.run(run_id).await)
         .await
         .unwrap();
     assert_eq!(migrated["blockFormat"], "shared-v1");
-    assert_eq!(requests.load(Ordering::SeqCst), before);
+    assert_eq!(gates.requests.load(Ordering::SeqCst), before);
     let migrated = s
         .get("node-backups", migrated["id"].as_str().unwrap())
         .await
@@ -4765,55 +3730,39 @@ async fn shared_publications_reuse_across_runs_migrate_legacy_and_ignore_slow_cl
     server.abort();
 }
 
+/// A local-node owner whose runner is `runner` and whose S3 is never reached.
+async fn owner_without_reachable_s3(runner: Router) -> (Owner, tokio::task::JoinHandle<()>) {
+    let (url, server) = common::serve_locally(runner).await;
+    let owner = Owner::with_runner(common::HOST.into(), url).await;
+    std::fs::write(
+        owner.service.config.data_dir.join("storage-s3.json"),
+        json!({ "bucket": "fixture-never-contacted" }).to_string(),
+    )
+    .unwrap();
+    (owner, server)
+}
+
 #[tokio::test]
 async fn stalled_sync_does_not_block_other_conversations_and_same_disk_stays_fenced() {
-    use leo_agent_manager::{
-        config::id,
-        nodes::{LOCAL_NODE_ID, moves, publication},
-    };
-    use std::{sync::Arc, time::Duration};
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let (signal, wait) = (entered.clone(), release.clone());
-    let app = axum::Router::new().fallback(move || {
+    let runner = Router::new().fallback(move || {
         let (signal, wait) = (signal.clone(), wait.clone());
         async move {
             signal.notify_one();
             wait.notified().await;
-            axum::http::StatusCode::SERVICE_UNAVAILABLE
+            StatusCode::SERVICE_UNAVAILABLE
         }
     });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let owner = Owner::with_runner("localhost:4310".into(), url).await;
-    std::fs::write(
-        owner.service.config.data_dir.join("storage-s3.json"),
-        json!({"bucket":"fixture-never-contacted"}).to_string(),
-    )
-    .unwrap();
+    let (owner, server) = owner_without_reachable_s3(runner).await;
     let (first, second) = (id(), id());
     for run in [&first, &second] {
-        let record = json!({"id":run,"taskId":run,"createdAt":0,"status":"succeeded","nodeId":LOCAL_NODE_ID});
-        owner
-            .service
-            .store
-            .write(move |db| db.add_run(&record, None))
-            .await
-            .unwrap();
-        owner
-            .service
-            .store
-            .set(
-                &format!("run-checkpoint:{run}"),
-                json!({"nodeId":LOCAL_NODE_ID,"runnerId":id()}),
-                None,
-            )
-            .await
-            .unwrap();
+        add_local_run(&owner, &local_run(run)).await;
     }
+
     let s = owner.service.clone();
-    let record = s.store.run(&first).await.unwrap();
+    let record = owner.run(&first).await;
     let pending = tokio::spawn(async move { publication::capture(&s, &record).await });
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
         .await
@@ -4831,6 +3780,7 @@ async fn stalled_sync_does_not_block_other_conversations_and_same_disk_stays_fen
     release.notify_one();
     assert!(pending.await.unwrap().is_err());
     server.abort();
+
     assert!(
         unrelated
             .expect("another conversation must not wait for this transfer")
@@ -4842,53 +3792,26 @@ async fn stalled_sync_does_not_block_other_conversations_and_same_disk_stays_fen
 
 #[tokio::test]
 async fn synchronization_scheduler_starts_two_disks_and_leaves_the_third_queued() {
-    use leo_agent_manager::{
-        config::id,
-        nodes::{LOCAL_NODE_ID, publication},
-    };
-    use std::{sync::Arc, time::Duration};
     let (entered, mut requests) = tokio::sync::mpsc::unbounded_channel();
     let release = Arc::new(tokio::sync::Semaphore::new(0));
     let wait = release.clone();
-    let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
+    let runner = Router::new().fallback(move |request: Request<Body>| {
         let (entered, wait) = (entered.clone(), wait.clone());
         async move {
             entered.send(request.uri().path().to_owned()).unwrap();
             wait.acquire().await.unwrap().forget();
-            axum::http::StatusCode::SERVICE_UNAVAILABLE
+            StatusCode::SERVICE_UNAVAILABLE
         }
     });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let owner = Owner::with_runner("localhost:4310".into(), url).await;
-    std::fs::write(
-        owner.service.config.data_dir.join("storage-s3.json"),
-        json!({"bucket":"fixture-never-contacted"}).to_string(),
-    )
-    .unwrap();
+    let (owner, server) = owner_without_reachable_s3(runner).await;
     for _ in 0..3 {
-        let run = id();
-        let record = json!({"id":run,"taskId":run,"createdAt":0,"status":"succeeded",
-            "nodeId":LOCAL_NODE_ID,"isolated":true,"sessionId":"fixture",
-            "storage":{"mode":"on-demand","dirtyBytes":4096}});
-        owner
-            .service
-            .store
-            .write(move |db| db.add_run(&record, None))
-            .await
-            .unwrap();
-        owner
-            .service
-            .store
-            .set(
-                &format!("run-checkpoint:{run}"),
-                json!({"nodeId":LOCAL_NODE_ID,"runnerId":id()}),
-                None,
-            )
-            .await
-            .unwrap();
+        let mut record = local_run(&id());
+        record["isolated"] = true.into();
+        record["sessionId"] = "fixture".into();
+        record["storage"] = json!({ "mode": "on-demand", "dirtyBytes": 4096 });
+        add_local_run(&owner, &record).await;
     }
+
     let scheduler = tokio::spawn(publication::maintain(owner.service.clone()));
     let first = tokio::time::timeout(Duration::from_secs(8), requests.recv())
         .await
@@ -4904,6 +3827,7 @@ async fn synchronization_scheduler_starts_two_disks_and_leaves_the_third_queued(
             .await
             .is_err()
     );
+
     release.add_permits(1);
     let third = tokio::time::timeout(Duration::from_secs(8), requests.recv())
         .await
@@ -4911,6 +3835,7 @@ async fn synchronization_scheduler_starts_two_disks_and_leaves_the_third_queued(
         .unwrap();
     assert_ne!(third, first);
     assert_ne!(third, second);
+
     owner.service.shutdown.cancel();
     tokio::time::timeout(Duration::from_secs(2), scheduler)
         .await
