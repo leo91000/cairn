@@ -342,29 +342,12 @@ console.log('probe.done');
       const lazyId = randomUUID()
       const lazy = `/data/runs/${runId}/projects/${lazyId}`
       const directory = path.join(root, 'data/runs', runId, 'workspace')
+      const inbox = path.join(root, 'data/runs', runId, 'chat-input')
       await mkdir(directory, { recursive: true })
+      await mkdir(inbox, { recursive: true })
+      await writeFile(path.join(inbox, 'messages.json'), '[]')
       await writeFile(path.join(directory, 'sentinel'), sandbox)
-      const code = `
-        const fs=require('node:fs'), assert=require('node:assert/strict');
-        const {spawnSync}=require('node:child_process');
-        assert.equal(process.getuid(),1000);
-        assert.notEqual(spawnSync('sudo',['-n','true']).status,0);
-        assert.equal(fs.readFileSync(${JSON.stringify(`${workspace}/sentinel`)},'utf8'),${JSON.stringify(sandbox)});
-        const write=()=>fs.writeFileSync(${JSON.stringify(`${workspace}/created`)},'guest only');
-        ${sandbox === 'read-only' ? 'assert.throws(write,e=>e.code===\'EROFS\');' : 'write();'}
-        console.log('parallel.ready');
-        const deadline=Date.now()+30000;
-        const timer=setInterval(()=>{
-          if(Date.now()>deadline)throw Error('lazy policy import timeout');
-          if(!fs.existsSync(${JSON.stringify(`${lazy}/sentinel`)}))return;
-          clearInterval(timer);
-          assert.equal(fs.readFileSync(${JSON.stringify(`${lazy}/sentinel`)},'utf8'),'lazy');
-          const write=()=>fs.writeFileSync(${JSON.stringify(`${lazy}/changed`)},'guest');
-          ${sandbox === 'read-only' ? 'assert.throws(write,e=>e.code===\'EROFS\');' : 'write();'}
-          console.log('parallel.done');
-        },100);
-
-      `
+      await writeFile(path.join(directory, 'policy-probe.mjs'), await readFile(new URL('./fixtures/vm-policy.mjs', import.meta.url)))
       const plan = {
         id,
         runId,
@@ -373,8 +356,11 @@ console.log('probe.done');
         expires: Date.now() + 60000,
         sandbox,
         cwd: workspace,
-        command: ['/usr/local/bin/node', '-e', code],
-        imports: [{ source: workspace, target: workspace, readOnly: sandbox === 'read-only' }],
+        command: ['/usr/local/bin/node', `${workspace}/policy-probe.mjs`, workspace, lazy, sandbox],
+        imports: [
+          { source: workspace, target: workspace, readOnly: sandbox === 'read-only' },
+          { source: `/data/runs/${runId}/chat-input`, target: '/run/leo-chat', readOnly: true },
+        ],
       }
       await writeFile(path.join(root, 'data/runner-plans', `${id}.json`), JSON.stringify(plan))
       await api(`/runs/${id}`, 'POST')
@@ -385,6 +371,7 @@ console.log('probe.done');
         directory,
         lazyId,
         lazy,
+        inbox,
       })
     }
 
@@ -395,6 +382,7 @@ console.log('probe.done');
       directory,
       lazyId,
       lazy,
+      inbox,
     }) => {
       await until(async () => {
         let logs
@@ -414,6 +402,7 @@ console.log('probe.done');
       await mkdir(lazySource, { recursive: true })
       await writeFile(path.join(lazySource, 'sentinel'), 'lazy')
       await api(`/runs/${id}/projects/${lazyId}`, 'POST', { runId, source: lazy, target: lazy })
+      await writeFile(path.join(inbox, 'messages.json'), '[{"text":"import-confirmed"}]')
       const response = await api(`/runs/${id}/logs`)
       const records = (await response.text()).trim().split('\n').map(line => JSON.parse(line))
       const output = records.filter(row => row.type === 'output').map(row => Buffer.from(row.data, 'base64').toString()).join('')
