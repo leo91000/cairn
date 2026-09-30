@@ -50,7 +50,7 @@ pub(super) async fn execute(
 ) -> Result<()> {
     let span =
         tracing::info_span!(target: "leo_performance", "agent_execution", run_id = text(run, "id"));
-    execute_inner(s, run, account, cancel, checkpoint, existing, sensitive)
+    execute_inner(s, run, admission, cancel, checkpoint, existing, sensitive)
         .instrument(span)
         .await
 }
@@ -58,7 +58,7 @@ pub(super) async fn execute(
 async fn execute_inner(
     s: &Arc<Service>,
     run: &mut Value,
-    account: &mut Option<Lease>,
+    admission: &mut Admission,
     cancel: &CancellationToken,
     checkpoint: &Checkpoint,
     existing: bool,
