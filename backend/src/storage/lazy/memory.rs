@@ -77,9 +77,11 @@ impl BytesCache {
     }
 }
 
+type SourceLocks = HashMap<(usize, String), Weak<Mutex<()>>>;
+
 pub(super) struct BlockCache {
     pub bytes: Mutex<BytesCache>,
-    fetching: Mutex<HashMap<String, Weak<Mutex<()>>>>,
+    fetching: Mutex<SourceLocks>,
 }
 
 impl BlockCache {
@@ -105,14 +107,23 @@ impl BlockCache {
         Ok(cache)
     }
 
-    pub fn fetching(&self, hash: &str) -> io::Result<Arc<Mutex<()>>> {
+    pub fn fetching(
+        &self,
+        hash: &str,
+        source: &Arc<dyn super::BlockSource>,
+    ) -> io::Result<Arc<Mutex<()>>> {
+        // A source can wait until its own conversation is cancelled. Only
+        // readers using that same source may inherit its in-flight transfer.
+        // The source stays alive through the read, so its address cannot be
+        // recycled while this lock is held. Verified bytes remain node-wide.
+        let key = (Arc::as_ptr(source).cast::<()>() as usize, hash.to_owned());
         let mut fetching = self.fetching.lock().map_err(failure)?;
-        if let Some(lock) = fetching.get(hash).and_then(Weak::upgrade) {
+        if let Some(lock) = fetching.get(&key).and_then(Weak::upgrade) {
             return Ok(lock);
         }
         fetching.retain(|_, lock| lock.strong_count() > 0);
         let lock = Arc::new(Mutex::new(()));
-        fetching.insert(hash.to_owned(), Arc::downgrade(&lock));
+        fetching.insert(key, Arc::downgrade(&lock));
         Ok(lock)
     }
 }

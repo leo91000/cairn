@@ -291,7 +291,7 @@ impl LazyDisk {
         }
         // Concurrent FUSE readers and snapshot reconstruction may need the same
         // cold block. Hold only its lock across I/O; unrelated blocks stay parallel.
-        let fetching = self.blocks.fetching(hash)?;
+        let fetching = self.blocks.fetching(hash, &self.source)?;
         let _fetching = fetching.lock().map_err(failure)?;
         if let Some(bytes) = self.cached_block(hash, foreground)? {
             if bytes.len() != length {

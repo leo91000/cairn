@@ -88,3 +88,77 @@ fn small_interleaved_reads_reuse_verified_blocks_across_conversation_disks() {
         "A cache hit cannot bypass extent verification"
     );
 }
+
+#[test]
+fn an_unavailable_conversation_source_does_not_block_another_owned_source() {
+    use std::sync::{Mutex, mpsc};
+    use std::time::Duration;
+
+    struct WaitingSource {
+        started: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl BlockSource for WaitingSource {
+        fn fetch(&self, _: &str) -> io::Result<Vec<u8>> {
+            self.started.send(()).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
+            Err(io::Error::other("Source remains unavailable"))
+        }
+    }
+
+    struct AvailableSource;
+
+    impl BlockSource for AvailableSource {
+        fn fetch(&self, _: &str) -> io::Result<Vec<u8>> {
+            Ok(vec![7; 4096])
+        }
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let hash = leo_agent_manager::storage::digest::block(&vec![7; 4096]);
+    let manifest = json!({
+        "version": 1, "size": 4096, "blockSize": 4 * 1024 * 1024,
+        "blocks": [{"offset": 0, "size": 4096, "hash": hash}]
+    });
+    let (started, waiting) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let first = LazyDisk::create(
+        &root.path().join("disks/unavailable/lazy"),
+        &manifest,
+        Arc::new(WaitingSource {
+            started,
+            release: Mutex::new(released),
+        }),
+    )
+    .unwrap();
+    let second = LazyDisk::create(
+        &root.path().join("disks/available/lazy"),
+        &manifest,
+        Arc::new(AvailableSource),
+    )
+    .unwrap();
+
+    std::thread::scope(|scope| {
+        let first = scope.spawn(|| first.read_at(0, &mut [0; 4096]));
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (completed, result) = mpsc::channel();
+        let second = scope.spawn(move || {
+            let mut bytes = [0; 4096];
+            let read = second.read_at(0, &mut bytes).map(|()| bytes);
+            completed.send(read).unwrap();
+        });
+        let independent = result.recv_timeout(Duration::from_secs(1));
+        // Always release and join the stalled source, including the failing
+        // baseline, so this test cannot strand a worker indefinitely.
+        release.send(()).unwrap();
+        assert!(first.join().unwrap().is_err());
+        second.join().unwrap();
+        assert_eq!(
+            independent
+                .expect("A separate source must not inherit another conversation's wait")
+                .unwrap(),
+            [7; 4096]
+        );
+    });
+}

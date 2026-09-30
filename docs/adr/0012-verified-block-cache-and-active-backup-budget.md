@@ -22,8 +22,10 @@ when its last disk closes. Standalone disks do not share outside their directory
 Only extents in an owned, validated disk manifest can request cached content.
 The node's existing disk ownership and execution leases still fence access.
 Size is checked on every cache hit; content is verified before admission.
-Concurrent cold readers coalesce by hash across the node, without holding the
-cache lock over I/O. Independent blocks remain parallel. Journal payloads use a
+Concurrent cold readers using the same source coalesce by hash, without holding
+the cache lock over I/O. Distinct sources remain independent: one conversation's
+unavailable source cannot strand another conversation or its cancellation.
+Verified bytes remain shared across the node. Independent blocks remain parallel. Journal payloads use a
 separate per-disk cache. Snapshot reads may reuse existing hot bytes but do not
 admit cold blocks or promote scan hits, preserving the foreground working set.
 
