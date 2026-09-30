@@ -13,6 +13,131 @@ impl BlockSource for Offline {
     }
 }
 
+#[test]
+fn publishing_a_foreground_block_keeps_its_verified_new_identity_local() {
+    const BLOCK: u64 = 4 * 1024 * 1024;
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("disks/conversation/lazy");
+    let manifest = json!({
+        "version": 1, "size": BLOCK, "blockSize": BLOCK,
+        "blocks": [{ "offset": 0, "size": BLOCK, "hash": null }]
+    });
+    let disk = LazyDisk::create(&directory, &manifest, Arc::new(Offline)).unwrap();
+    disk.write_at(0, &[37; 4096]).unwrap();
+    let mut bytes = [0; 4096];
+    disk.read_at(0, &mut bytes).unwrap();
+    assert_eq!(bytes, [37; 4096]);
+
+    // Final saves can reconstruct after the VM closes its mounted disk.
+    let owner = LazyDisk::create(
+        &root.path().join("disks/cache-owner/lazy"),
+        &manifest,
+        Arc::new(Offline),
+    )
+    .unwrap();
+    drop(disk);
+    let disk = LazyDisk::open(&directory, Arc::new(Offline)).unwrap();
+
+    let generation = disk.seal().unwrap();
+    disk.capture(generation).unwrap();
+    disk.commit_published(generation, "published-backup")
+        .unwrap();
+    disk.read_at(0, &mut bytes)
+        .expect("Publication must not download a block just read and uploaded on this node");
+    assert_eq!(bytes, [37; 4096]);
+
+    // Reopening the disk models the next VM while the same controller is alive.
+    drop(disk);
+    let resumed = LazyDisk::open(&directory, Arc::new(Offline)).unwrap();
+    resumed.read_at(0, &mut bytes).unwrap();
+    assert_eq!(bytes, [37; 4096]);
+    assert_eq!(resumed.performance()["remoteFetch"]["count"], 0);
+    drop(owner);
+}
+
+#[test]
+fn repeated_publications_keep_hot_bytes_and_later_writes_without_admitting_cold_scans() {
+    const BLOCK: u64 = 4 * 1024 * 1024;
+    let root = tempfile::tempdir().unwrap();
+    let manifest = json!({
+        "version": 1, "size": 2 * BLOCK, "blockSize": BLOCK,
+        "blocks": [
+            { "offset": 0, "size": BLOCK, "hash": null },
+            { "offset": BLOCK, "size": BLOCK, "hash": null }
+        ]
+    });
+    let disk = LazyDisk::create(root.path(), &manifest, Arc::new(Offline)).unwrap();
+    let mut bytes = [0; 4096];
+    disk.write_at(BLOCK, &[91; 4096]).unwrap();
+
+    for value in 1..=3 {
+        disk.write_at(0, &[value; 4096]).unwrap();
+        disk.read_at(0, &mut bytes).unwrap();
+        assert_eq!(bytes, [value; 4096]);
+        let generation = disk.seal().unwrap();
+        let point = disk.capture(generation).unwrap();
+        let hot = point["blocks"][0]["hash"].as_str().unwrap();
+        let cold = point["blocks"][1]["hash"].as_str().unwrap();
+        assert_eq!(
+            &disk.captured_block(generation, hot).unwrap()[..4096],
+            &[value; 4096]
+        );
+        // Upload scans must not populate the foreground cache.
+        if value == 1 {
+            assert_eq!(
+                &disk.captured_block(generation, cold).unwrap()[..4096],
+                &[91; 4096]
+            );
+        }
+        assert_eq!(disk.performance()["blockCache"]["entries"], value);
+
+        disk.write_at(2048, &[113; 1024]).unwrap();
+        disk.commit_published(generation, &format!("backup-{generation}"))
+            .unwrap();
+        disk.read_at(0, &mut bytes).unwrap();
+        assert_eq!(&bytes[..2048], &[value; 2048]);
+        assert_eq!(&bytes[2048..3072], &[113; 1024]);
+        assert_eq!(&bytes[3072..], &[value; 1024]);
+    }
+    assert_eq!(disk.performance()["remoteFetch"]["count"], 0);
+    assert!(
+        disk.read_at(BLOCK, &mut bytes).is_err(),
+        "The never-read cold block must remain unretained"
+    );
+}
+
+#[test]
+fn publication_after_a_smaller_cache_policy_retains_the_most_recent_extent() {
+    const BLOCK: u64 = 4 * 1024 * 1024;
+    let root = tempfile::tempdir().unwrap();
+    let manifest = json!({
+        "version": 1, "size": 3 * BLOCK, "blockSize": BLOCK,
+        "blocks": [
+            { "offset": 0, "size": BLOCK, "hash": null },
+            { "offset": BLOCK, "size": BLOCK, "hash": null },
+            { "offset": 2 * BLOCK, "size": BLOCK, "hash": null }
+        ]
+    });
+    let disk = LazyDisk::create(root.path(), &manifest, Arc::new(Offline)).unwrap();
+    for index in 0..3 {
+        disk.write_at(index * BLOCK, &[index as u8 + 1; 4096])
+            .unwrap();
+        disk.read_at(index * BLOCK, &mut [0; 4096]).unwrap();
+    }
+    disk.read_at(0, &mut [0; 4096]).unwrap();
+    disk.set_context(&json!({"policy": {"memoryCacheMiB": 4}}))
+        .unwrap();
+    let generation = disk.seal().unwrap();
+    disk.capture(generation).unwrap();
+    disk.commit_published(generation, "smaller-budget").unwrap();
+    assert_eq!(disk.performance()["blockCache"]["bytes"], BLOCK);
+    let mut bytes = [0; 4096];
+    disk.read_at(0, &mut bytes).unwrap();
+    assert_eq!(bytes, [1; 4096]);
+    assert!(disk.read_at(BLOCK, &mut bytes).is_err());
+    assert!(disk.read_at(2 * BLOCK, &mut bytes).is_err());
+}
+
 #[tokio::test]
 async fn controller_retains_verified_blocks_between_conversations_and_releases_them_on_shutdown() {
     use leo_agent_manager::microvm::pool::Pool;

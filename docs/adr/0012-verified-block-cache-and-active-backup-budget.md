@@ -30,6 +30,20 @@ Verified bytes remain shared across the node. Independent blocks remain parallel
 separate per-disk cache. Snapshot reads may reuse existing hot bytes but do not
 admit cold blocks or promote scan hits, preserving the foreground working set.
 
+Foreground reads also record recently used extents, including reads satisfied
+entirely by the journal. During reconstruction, changed foreground extents admit
+their newly computed immutable identities. Otherwise publication would retire
+the journal and force the next read to download bytes just uploaded by this node.
+Cold changed extents remain unretained; existing scan hits remain unpromoted.
+Admission follows foreground recency and the configured payload budget.
+
+The controller retains extent metadata for at most 64 recently opened disks,
+with each disk bounded by the block-cache capacity and the 8192-entry limit.
+This metadata survives guest shutdown so final saves can reopen the disk. It
+owns no disk, source, grant or VM; eviction and controller shutdown only lose
+the optimization. Publication receipts, journal reclamation and crash recovery
+continue to determine durability independently of the cache.
+
 New block identities are `b3-<64 lowercase hex digits>`. BLAKE3 identifies newly
 indexed and changed blocks. Plain 64-digit SHA-256 identities retain their exact
 meaning for older blocks. All upload, decode, restore and controller checks use

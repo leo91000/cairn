@@ -42,6 +42,7 @@ pub struct LazyDisk {
     cache: Mutex<()>,
     blocks: Arc<memory::BlockCache>,
     records: Mutex<memory::BytesCache>,
+    foreground: Arc<Mutex<memory::WorkingSet>>,
     publication: RwLock<()>,
     _lock: File,
     metrics: super::metrics::Metrics,
@@ -184,6 +185,8 @@ impl LazyDisk {
         let dirty_since = accounting["dirtySince"].as_i64().unwrap_or(-1);
         accounting["published"] = journal::published(&db)?;
         timing.finish();
+        let blocks = memory::BlockCache::for_directory(directory)?;
+        let foreground = blocks.working_set(directory)?;
         Ok(Self {
             directory: directory.to_owned(),
             size,
@@ -194,8 +197,9 @@ impl LazyDisk {
             base: Mutex::new(Arc::new(manifest)),
             source,
             cache: Mutex::new(()),
-            blocks: memory::BlockCache::for_directory(directory)?,
+            blocks,
             records: Mutex::new(memory::BytesCache::new(32 * 1024 * 1024)),
+            foreground,
             publication: RwLock::new(()),
             _lock: lock,
             metrics: super::metrics::Metrics::default(),
@@ -523,6 +527,11 @@ impl Disk for LazyDisk {
         let sample = self.metrics.reads.start();
         let _publication = self.publication.read().map_err(failure)?;
         self.read_generation(i64::MAX, offset, bytes)?;
+        let capacity = self.blocks.bytes.lock().map_err(failure)?.block_capacity();
+        self.foreground
+            .lock()
+            .map_err(failure)?
+            .record(offset, bytes.len(), capacity);
         sample.finish(bytes.len());
         Ok(())
     }

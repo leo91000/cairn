@@ -38,7 +38,7 @@ impl LazyDisk {
             "reconstruct_blocks",
         );
         let _publication = self.publication.read().map_err(failure)?;
-        let (mut manifest, changed) = {
+        let (mut manifest, mut changed) = {
             let journal = self.journal.lock().map_err(failure)?;
             let db = self.db.lock().map_err(failure)?;
             let previous: Option<String> = db
@@ -56,22 +56,37 @@ impl LazyDisk {
             let manifest: String = db
                 .query_row("SELECT manifest FROM state WHERE id=1", [], |r| r.get(0))
                 .map_err(failure)?;
-            let changed = journal.changed(generation);
+            let changed = journal.changed(generation).into_iter().collect::<Vec<_>>();
             (
                 serde_json::from_str::<Value>(&manifest).map_err(failure)?,
                 changed,
             )
         };
+        let capacity = self.blocks.bytes.lock().map_err(failure)?.block_capacity();
+        let foreground = self.foreground.lock().map_err(failure)?.ranks(capacity);
+        changed.sort_by_key(|index| foreground.get(index).map_or(0, |rank| rank + 1));
         let changed_blocks = changed.len();
+        let mut retained_blocks = 0;
         for index in changed {
             let offset = index * BLOCK;
             let mut bytes = vec![0; (self.size - offset).min(BLOCK) as usize];
             self.read_generation(generation, offset, &mut bytes)?;
-            manifest["blocks"][index as usize]["hash"] = if bytes.iter().all(|b| *b == 0) {
-                Value::Null
-            } else {
-                block_digest(&bytes).into()
-            };
+            if bytes.iter().all(|b| *b == 0) {
+                manifest["blocks"][index as usize]["hash"] = Value::Null;
+                continue;
+            }
+            let hash = block_digest(&bytes);
+            manifest["blocks"][index as usize]["hash"] = hash.clone().into();
+            if foreground.contains_key(&index) {
+                // These exact bytes produced the immutable identity. Retain its
+                // new version before publication retires the local journal.
+                // Existing hits remain unpromoted by this background scan.
+                let mut cache = self.blocks.bytes.lock().map_err(failure)?;
+                if cache.get(&hash, false).is_none() {
+                    cache.insert(&hash, bytes, true);
+                    retained_blocks += 1;
+                }
+            }
         }
         self.db
             .lock()
@@ -81,7 +96,7 @@ impl LazyDisk {
                 params![manifest.to_string(), generation],
             )
             .map_err(failure)?;
-        tracing::info!(target: "leo_performance", operation = "journal_capture", generation, changed_blocks);
+        tracing::info!(target: "leo_performance", operation = "journal_capture", generation, changed_blocks, retained_blocks);
         timing.finish();
         Ok(manifest)
     }

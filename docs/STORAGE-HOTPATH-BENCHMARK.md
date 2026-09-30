@@ -78,3 +78,31 @@ The fixture also independently verifies every transferred block. Its pure
 JavaScript BLAKE3 oracle took 810–850 ms for 14 blocks, versus about 22 ms for
 native SHA-256. That test-only work must be separated from runner timings when
 comparing total fixture publication time; the production BLAKE3 path is native Rust.
+
+## Retaining published foreground blocks
+
+A second real Firecracker/FUSE prototype closes its VM and publishes the disk
+after every native Codex initialization. Each turn changes and checks a small
+foreground file. The immutable loopback origin adds 500 ms per remote read;
+the controller has 6 GiB RAM and 3 CPUs. Two sequential baseline/candidate pairs
+use the same 512 MiB logical disk size, native tools and workload.
+
+| Attempt | Deployed v0.50.1 | Cache prototype | Remote reads, baseline / prototype |
+| --- | ---: | ---: | ---: |
+| First resume | 4.75–4.84 s | 3.13–3.33 s | 5 / 2 |
+| Second resume | 4.54 s | 1.92 s | 5 / 0 |
+| Third resume | 4.23–4.43 s | 1.82–1.92 s | 5 / 0 |
+
+The prototype admits the new immutable identities of recently read extents while
+reconstructing changed blocks. Extent metadata survives disk closure so final
+publication still recognizes the foreground working set. Previously journal
+retirement forced downloads of the node's newly uploaded bytes. Cold scans do
+not become foreground reads or fill the RAM cache.
+
+These timings include VM boot, guest preparation, native initialization, the
+checked foreground write and polling overhead of up to 100 ms. They exclude
+account authentication and model requests. They are not production conversation
+measurements or qualification of a release image. Publication timings include a
+JavaScript digest oracle and varied between rounds; no final-save gain is claimed.
+The raw four samples are in
+[`benchmarks/published-block-cache-2026-09-30.json`](benchmarks/published-block-cache-2026-09-30.json).

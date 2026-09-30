@@ -67,6 +67,10 @@ impl BytesCache {
         }
     }
 
+    pub fn block_capacity(&self) -> usize {
+        self.budget.div_ceil(super::BLOCK as usize).min(8192)
+    }
+
     pub fn status(&self) -> Value {
         json!({
             "bytes": self.used,
@@ -77,11 +81,55 @@ impl BytesCache {
     }
 }
 
+/// Recently read extents, including reads satisfied entirely by the journal.
+/// Writes and snapshot scans never expand the foreground working set.
+pub(super) struct WorkingSet {
+    blocks: LruCache<u64, ()>,
+}
+
+impl WorkingSet {
+    pub fn new() -> Self {
+        Self {
+            blocks: LruCache::unbounded(),
+        }
+    }
+
+    pub fn resize(&mut self, capacity: usize) {
+        while self.blocks.len() > capacity {
+            self.blocks.pop_lru();
+        }
+    }
+
+    pub fn record(&mut self, offset: u64, length: usize, capacity: usize) {
+        if length == 0 || capacity == 0 {
+            self.resize(capacity);
+            return;
+        }
+        let end = (offset + length as u64 - 1) / super::BLOCK;
+        for index in offset / super::BLOCK..=end {
+            self.blocks.put(index, ());
+        }
+        self.resize(capacity);
+    }
+
+    pub fn ranks(&mut self, capacity: usize) -> HashMap<u64, usize> {
+        self.resize(capacity);
+        // Reconstruct less recent blocks first so admission retains the hottest.
+        self.blocks
+            .iter()
+            .rev()
+            .enumerate()
+            .map(|(rank, (&index, ()))| (index, rank))
+            .collect()
+    }
+}
+
 type SourceLocks = HashMap<(usize, String), Weak<Mutex<()>>>;
 
 pub(super) struct BlockCache {
     pub bytes: Mutex<BytesCache>,
     fetching: Mutex<SourceLocks>,
+    foreground: Mutex<LruCache<PathBuf, Arc<Mutex<WorkingSet>>>>,
 }
 
 impl BlockCache {
@@ -102,9 +150,25 @@ impl BlockCache {
         let cache = Arc::new(Self {
             bytes: Mutex::new(BytesCache::new(256 * 1024 * 1024)),
             fetching: Mutex::default(),
+            foreground: Mutex::new(LruCache::unbounded()),
         });
         registry.insert(scope.to_owned(), Arc::downgrade(&cache));
         Ok(cache)
+    }
+
+    pub fn working_set(&self, directory: &Path) -> io::Result<Arc<Mutex<WorkingSet>>> {
+        let mut foreground = self.foreground.lock().map_err(failure)?;
+        if let Some(working_set) = foreground.get(directory) {
+            return Ok(working_set.clone());
+        }
+        // Final publication can reopen a disk after its guest has exited.
+        // Keep only bounded extent metadata; no disk, grant or source is retained.
+        while foreground.len() >= 64 {
+            foreground.pop_lru();
+        }
+        let working_set = Arc::new(Mutex::new(WorkingSet::new()));
+        foreground.put(directory.to_owned(), working_set.clone());
+        Ok(working_set)
     }
 
     pub fn fetching(
