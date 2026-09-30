@@ -305,7 +305,14 @@ impl Volume {
         }
         // No filesystem scan, policy read, journal lock, or blocking task belongs
         // in this CPU safety decision. Writers fence space admission themselves.
-        let reason = self.control_reason(now)?;
+        let reason = match self.control_reason(now) {
+            Ok(reason) => reason,
+            Err(error) => {
+                stop.cancel();
+                self.stop.cancel();
+                return Err(error);
+            }
+        };
         let blocked = reason.is_some();
         let pending = self.transition.lock().map_err(Error::internal)?.is_some();
         if blocked != self.paused() || pending {
