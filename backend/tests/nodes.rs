@@ -2700,6 +2700,38 @@ async fn queued_capacity_transfer_carries_unpublished_writes_and_keeps_the_sourc
 }
 
 #[tokio::test]
+async fn new_disks_use_the_default_size_within_shared_headroom_and_retained_disks_keep_their_size()
+{
+    let owner = Owner::new().await;
+    let (node, agent) = (id(), id());
+    owner.grant_nodes(&agent, json!([node])).await;
+    for (budget, expected) in [(400_844, 32_768), (8_192, 8_192)] {
+        owner
+            .put("nodes", schedulable_node(&node, &limits(7, 36_352, budget)))
+            .await;
+        let result = placement::reserve(&owner.service, &agent_run(&id(), &agent), &id())
+            .await
+            .unwrap();
+        assert_eq!(result["resources"]["diskMiB"], expected);
+        assert_eq!(result["resources"]["cpu"], 7);
+        assert_eq!(result["resources"]["memoryMiB"], 36_352);
+    }
+
+    owner
+        .put(
+            "nodes",
+            schedulable_node(&node, &limits(7, 36_352, 400_844)),
+        )
+        .await;
+    let mut retained = agent_run(&id(), &agent);
+    retained["resources"] = limits(2, 4_096, 400_844);
+    let result = placement::reserve(&owner.service, &retained, &id())
+        .await
+        .unwrap();
+    assert_eq!(result["resources"]["diskMiB"], 400_844);
+}
+
+#[tokio::test]
 async fn automatic_placement_spreads_work_unless_a_node_is_preferred() {
     let owner = Owner::new().await;
     let (small, large, agent) = (id(), id(), id());

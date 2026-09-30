@@ -42,9 +42,13 @@ journaux, les caches propres et les anciennes copies. Les volumes S3 restent
 privés et chargés à la demande. Les écritures utilisent l’admission commune et
 débitent une estimation conservatrice, réconciliée avec l’allocation physique une
 fois par seconde. La réserve du filesystem hôte est préservée en dehors du quota commun,
-même lorsque ce quota est inférieur à la réserve. Aucun journal non publié n’est évincé. Un nouveau volume ext4 possède
-une capacité logique égale au budget disque de sa node, sans réserver cette
-capacité locale ; un disque conservé garde sa taille lors des déplacements.
+même lorsque ce quota est inférieur à la réserve. Aucun journal non publié n’est évincé.
+Un nouveau volume ext4 possède une capacité logique de 32 Gio, plafonnée par le
+budget disque de sa node, sans réserver cette capacité locale. Formater le budget
+total de la node pour chaque nouvelle conversation multipliait les métadonnées
+ext4 et le travail de préparation. Un disque conservé garde sa taille lors des
+reprises et des déplacements ; le budget physique reste commun à toutes les
+conversations.
 
 `list_nodes` expose les budgets communs, les slots disponibles et la pression
 courante. `move_to_node` reçoit une destination et éventuellement un délai

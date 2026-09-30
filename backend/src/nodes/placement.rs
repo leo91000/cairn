@@ -172,7 +172,7 @@ impl<'a> Request<'a> {
         let disk = self.run["resources"]["diskMiB"]
             .as_u64()
             .or(self.checkpoint["resources"]["diskMiB"].as_u64())
-            .unwrap_or(limits.disk_mi_b);
+            .unwrap_or_else(|| defaults().disk_mi_b.min(limits.disk_mi_b));
         Some(Resources {
             cpu: limits.cpu.min(32),
             memory_mi_b: limits.memory_mi_b,
