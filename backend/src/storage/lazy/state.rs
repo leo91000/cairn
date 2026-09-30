@@ -3,11 +3,20 @@ use super::*;
 
 impl LazyDisk {
     pub fn performance(&self) -> Value {
-        self.metrics.snapshot()
+        let mut status = self.metrics.snapshot();
+        if let Ok(cache) = self.blocks.bytes.lock() {
+            status["blockCache"] = cache.status();
+        }
+        if let Ok(cache) = self.records.lock() {
+            status["journalCache"] = cache.status();
+        }
+        status
     }
 
     /// Private controller context, never included in exported recovery manifests.
     pub fn set_context(&self, value: &Value) -> io::Result<()> {
+        let policy = super::super::policy::Policy::for_node(&value["policy"]).map_err(failure)?;
+        self.memory_budget(policy.memory_cache_mi_b as usize * 1024 * 1024)?;
         let encoded = value.to_string();
         if encoded.len() > 16384 {
             return Err(failure("Disk connection context too large"));
@@ -49,10 +58,19 @@ impl LazyDisk {
         Ok(self.accounting.lock().map_err(failure)?.clone())
     }
 
+    pub(crate) fn dirty_since(&self) -> Option<i64> {
+        let at = self.dirty_since.load(Ordering::Acquire);
+        (at >= 0).then_some(at)
+    }
+
     pub(super) fn update_accounting(&self, journal: &journal::Journal) -> io::Result<()> {
         let mut accounting = self.accounting.lock().map_err(failure)?;
         let published = accounting["published"].take();
         *accounting = journal.stats();
+        self.dirty_since.store(
+            accounting["dirtySince"].as_i64().unwrap_or(-1),
+            Ordering::Release,
+        );
         accounting["published"] = published;
         Ok(())
     }

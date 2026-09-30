@@ -1,11 +1,11 @@
 name: Android
 on:
   pull_request:
-    paths: ['android/**', '.github/actions/setup-pnpm/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'tests/android-*.test.mjs']
+    paths: ['android/**', '.github/actions/setup-pnpm/**', '.github/actions/setup-android-emulator/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'tests/android-*.test.mjs']
   push:
     branches: [main]
     tags: ['v*']
-    paths: ['android/**', '.github/actions/setup-pnpm/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'tests/android-*.test.mjs']
+    paths: ['android/**', '.github/actions/setup-pnpm/**', '.github/actions/setup-android-emulator/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'tests/android-*.test.mjs']
   workflow_dispatch:
 permissions:
   contents: read
@@ -64,6 +64,7 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+      - uses: ./.github/actions/setup-android-emulator
       # These history tests take about half of the device-test time. The other
       # device classes run on a second emulator while captures stay here.
       - name: Check history and capture controls on Android 16
@@ -130,6 +131,7 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+      - uses: ./.github/actions/setup-android-emulator
       - name: Check the remaining Android controls
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
         with:

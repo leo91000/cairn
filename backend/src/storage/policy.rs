@@ -7,6 +7,7 @@ use std::path::Path;
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct Policy {
     pub cache_mi_b: u64,
+    pub memory_cache_mi_b: u64,
     pub reserve_mi_b: u64,
     pub reserve_percent: u64,
     pub backup_seconds: u64,
@@ -21,6 +22,7 @@ impl Default for Policy {
     fn default() -> Self {
         Self {
             cache_mi_b: 102400,
+            memory_cache_mi_b: 256,
             reserve_mi_b: 10240,
             reserve_percent: 5,
             backup_seconds: 60,
@@ -34,6 +36,7 @@ impl Default for Policy {
 impl Policy {
     pub fn validate(&self) -> Result<()> {
         if self.cache_mi_b > 16 * 1024 * 1024
+            || !(4..=4096).contains(&self.memory_cache_mi_b)
             || self.reserve_mi_b < 64
             || self.reserve_mi_b > 16 * 1024 * 1024
             || !(1..=50).contains(&self.reserve_percent)

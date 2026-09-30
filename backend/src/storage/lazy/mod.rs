@@ -7,7 +7,10 @@ use std::{
     fs::File,
     io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, RwLock},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicI64, Ordering},
+    },
 };
 
 const BLOCK: u64 = 4 * 1024 * 1024;
@@ -18,7 +21,7 @@ fn failure(error: impl std::fmt::Display) -> io::Error {
 }
 
 fn block_digest(bytes: &[u8]) -> String {
-    hex::encode(aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, bytes).as_ref())
+    super::digest::block(bytes)
 }
 
 /// Immutable plaintext blocks. Implementations must bound transfers and propagate
@@ -33,11 +36,12 @@ pub struct LazyDisk {
     db: Mutex<Connection>,
     journal: Mutex<journal::Journal>,
     accounting: Mutex<Value>,
+    dirty_since: AtomicI64,
     base: Mutex<Arc<Value>>,
     source: Arc<dyn BlockSource>,
     cache: Mutex<()>,
-    fetching: Mutex<std::collections::HashMap<String, std::sync::Weak<Mutex<()>>>>,
-    memory: Mutex<std::collections::VecDeque<(String, Arc<Vec<u8>>)>>,
+    blocks: Arc<memory::BlockCache>,
+    records: Mutex<memory::BytesCache>,
     publication: RwLock<()>,
     _lock: File,
     metrics: super::metrics::Metrics,
@@ -70,11 +74,7 @@ fn validate(manifest: &Value) -> io::Result<u64> {
         if block["offset"] != offset
             || block["size"] != (size - offset).min(BLOCK)
             || !(block["hash"].is_null()
-                || block["hash"].as_str().is_some_and(|h| {
-                    h.len() == 64
-                        && h.bytes()
-                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-                }))
+                || block["hash"].as_str().is_some_and(super::digest::valid))
         {
             return Err(failure("Invalid disk extent"));
         }
@@ -93,19 +93,12 @@ impl LazyDisk {
     }
 
     fn node_state(&self) -> Option<&Path> {
-        if self
-            .directory
-            .file_name()
-            .is_some_and(|name| name == "lazy")
-        {
-            self.directory
-                .parent()
-                .and_then(Path::parent)
-                .filter(|disks| disks.file_name().is_some_and(|name| name == "disks"))
-                .and_then(Path::parent)
-        } else {
-            None
-        }
+        node_state(&self.directory)
+    }
+
+    pub(crate) fn memory_budget(&self, bytes: usize) -> io::Result<()> {
+        self.blocks.bytes.lock().map_err(failure)?.resize(bytes);
+        Ok(())
     }
 
     pub fn create(
@@ -169,6 +162,7 @@ impl LazyDisk {
         let size = validate(&manifest)?;
         let journal = journal::Journal::open(directory, &db, size)?;
         let mut accounting = journal.stats();
+        let dirty_since = accounting["dirtySince"].as_i64().unwrap_or(-1);
         accounting["published"] = journal::published(&db)?;
         timing.finish();
         Ok(Self {
@@ -177,11 +171,12 @@ impl LazyDisk {
             db: Mutex::new(db),
             journal: Mutex::new(journal),
             accounting: Mutex::new(accounting),
+            dirty_since: AtomicI64::new(dirty_since),
             base: Mutex::new(Arc::new(manifest)),
             source,
             cache: Mutex::new(()),
-            fetching: Mutex::default(),
-            memory: Mutex::default(),
+            blocks: memory::BlockCache::for_directory(directory)?,
+            records: Mutex::new(memory::BytesCache::new(32 * 1024 * 1024)),
             publication: RwLock::new(()),
             _lock: lock,
             metrics: super::metrics::Metrics::default(),
@@ -228,46 +223,67 @@ impl LazyDisk {
         super::device::range(self.size, offset, length)
     }
 
-    fn cached(&self, key: &str) -> io::Result<Option<Arc<Vec<u8>>>> {
-        let mut memory = self.memory.lock().map_err(failure)?;
-        Ok(memory
-            .iter()
-            .position(|(stored, _)| stored == key)
-            .map(|index| {
-                let entry = memory.remove(index).unwrap();
-                let bytes = entry.1.clone();
-                memory.push_back(entry);
-                bytes
-            }))
-    }
-
-    fn cached_record(&self, record: &journal::Record) -> io::Result<(u64, Arc<Vec<u8>>)> {
+    fn cached_record(
+        &self,
+        record: &journal::Record,
+        foreground: bool,
+    ) -> io::Result<(u64, Arc<Vec<u8>>)> {
         let key = record.cache_key();
-        if let Some(bytes) = self.cached(&key)? {
+        if let Some(bytes) = self.records.lock().map_err(failure)?.get(&key, foreground) {
             return Ok((record.start, bytes));
         }
-        Ok((record.start, self.remember(&key, record.read(self.size)?)?))
+        let bytes = record.read(self.size)?;
+        let bytes = self
+            .records
+            .lock()
+            .map_err(failure)?
+            .insert(&key, bytes, foreground);
+        Ok((record.start, bytes))
     }
 
-    fn remember(&self, hash: &str, bytes: Vec<u8>) -> io::Result<Arc<Vec<u8>>> {
-        let bytes = Arc::new(bytes);
-        let mut memory = self.memory.lock().map_err(failure)?;
-        memory.retain(|(key, _)| key != hash);
-        while memory.iter().map(|(_, v)| v.len()).sum::<usize>() + bytes.len() > 32 * 1024 * 1024 {
-            memory.pop_front();
+    fn cached_block(&self, hash: &str, foreground: bool) -> io::Result<Option<Arc<Vec<u8>>>> {
+        Ok(self
+            .blocks
+            .bytes
+            .lock()
+            .map_err(failure)?
+            .get(hash, foreground))
+    }
+
+    fn remember_block(
+        &self,
+        hash: &str,
+        bytes: Vec<u8>,
+        foreground: bool,
+    ) -> io::Result<Arc<Vec<u8>>> {
+        Ok(self
+            .blocks
+            .bytes
+            .lock()
+            .map_err(failure)?
+            .insert(hash, bytes, foreground))
+    }
+
+    fn verified(&self, hash: &str, bytes: &[u8]) -> bool {
+        let sample = self.metrics.verification.start();
+        let valid = super::digest::matches(hash, bytes);
+        if valid {
+            sample.finish(bytes.len());
         }
-        memory.push_back((hash.to_owned(), bytes.clone()));
-        Ok(bytes)
+        valid
     }
 
-    fn base_block(&self, block: &Value) -> io::Result<Arc<Vec<u8>>> {
+    fn base_block(&self, block: &Value, foreground: bool) -> io::Result<Arc<Vec<u8>>> {
         let length = block["size"]
             .as_u64()
             .ok_or_else(|| failure("Invalid extent"))? as usize;
         let hash = block["hash"]
             .as_str()
             .ok_or_else(|| failure("Missing base block hash"))?;
-        if let Some(bytes) = self.cached(hash)? {
+        if let Some(bytes) = self.cached_block(hash, foreground)? {
+            if bytes.len() != length {
+                return Err(failure("Invalid cached block extent"));
+            }
             self.metrics
                 .memory_hits
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -275,19 +291,12 @@ impl LazyDisk {
         }
         // Concurrent FUSE readers and snapshot reconstruction may need the same
         // cold block. Hold only its lock across I/O; unrelated blocks stay parallel.
-        let fetching = {
-            let mut pending = self.fetching.lock().map_err(failure)?;
-            if let Some(lock) = pending.get(hash).and_then(std::sync::Weak::upgrade) {
-                lock
-            } else {
-                pending.retain(|_, lock| lock.strong_count() > 0);
-                let lock = Arc::new(Mutex::new(()));
-                pending.insert(hash.to_owned(), Arc::downgrade(&lock));
-                lock
-            }
-        };
+        let fetching = self.blocks.fetching(hash, &self.source)?;
         let _fetching = fetching.lock().map_err(failure)?;
-        if let Some(bytes) = self.cached(hash)? {
+        if let Some(bytes) = self.cached_block(hash, foreground)? {
+            if bytes.len() != length {
+                return Err(failure("Invalid cached block extent"));
+            }
             self.metrics
                 .coalesced_reads
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -302,7 +311,7 @@ impl LazyDisk {
             use std::io::Read;
             let mut bytes = Vec::new();
             (&file).take(BLOCK + 1).read_to_end(&mut bytes)?;
-            if bytes.len() == length && block_digest(&bytes) == hash {
+            if bytes.len() == length && self.verified(hash, &bytes) {
                 self.metrics
                     .disk_hits
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -312,13 +321,13 @@ impl LazyDisk {
                 {
                     let _ = super::cache::touched(state, &target, now);
                 }
-                return self.remember(hash, bytes);
+                return self.remember_block(hash, bytes, foreground);
             }
             let _ = std::fs::remove_file(&target);
         }
         let fetch = self.metrics.remote.start();
         let bytes = self.source.fetch(hash)?;
-        if bytes.len() != length || block_digest(&bytes) != hash {
+        if bytes.len() != length || !self.verified(hash, &bytes) {
             return Err(failure("Remote block integrity check failed"));
         }
         fetch.finish(bytes.len());
@@ -374,7 +383,7 @@ impl LazyDisk {
             }
             Ok(())
         })();
-        self.remember(hash, bytes)
+        self.remember_block(hash, bytes, foreground)
     }
 }
 
@@ -398,7 +407,7 @@ impl LazyDisk {
                 self.metrics
                     .journal_rows
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let (start, data) = self.cached_record(&record)?;
+                let (start, data) = self.cached_record(&record, generation == i64::MAX)?;
                 let begin = (start.max(offset) - offset) as usize;
                 let end = ((start + data.len() as u64).min(offset + bytes.len() as u64) - offset)
                     as usize;
@@ -447,7 +456,7 @@ impl LazyDisk {
                 let block = if extent["hash"].is_null() {
                     None
                 } else {
-                    Some(self.base_block(extent)?)
+                    Some(self.base_block(extent, generation == i64::MAX)?)
                 };
                 for &(from, to) in &missing {
                     let from = from.max(start);
@@ -469,8 +478,21 @@ impl LazyDisk {
     }
 }
 
+fn node_state(directory: &Path) -> Option<&Path> {
+    if directory.file_name().is_some_and(|name| name == "lazy") {
+        directory
+            .parent()
+            .and_then(Path::parent)
+            .filter(|disks| disks.file_name().is_some_and(|name| name == "disks"))
+            .and_then(Path::parent)
+    } else {
+        None
+    }
+}
+
 mod generations;
 mod journal;
+mod memory;
 mod state;
 
 impl Disk for LazyDisk {

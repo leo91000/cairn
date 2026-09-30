@@ -7,6 +7,7 @@ mod device;
 
 pub use device::{Disk, LocalDisk, export};
 
+pub mod digest;
 mod lazy;
 pub(crate) mod metrics;
 

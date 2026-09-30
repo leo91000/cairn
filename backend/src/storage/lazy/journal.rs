@@ -9,7 +9,8 @@ use std::{
 
 const HEADER: usize = 112;
 const SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
-const MAGIC: &[u8; 8] = b"LEOJNL02";
+const LEGACY_MAGIC: &[u8; 8] = b"LEOJNL02";
+const MAGIC: &[u8; 8] = b"LEOJNL03";
 
 #[cfg(test)]
 pub(super) fn crash_point(directory: &Path, phase: &str) {
@@ -95,7 +96,13 @@ impl Record {
     }
 }
 
-fn digest(header: &[u8], data: &[u8]) -> [u8; 32] {
+pub(super) fn digest(header: &[u8], data: &[u8]) -> [u8; 32] {
+    if &header[..8] == MAGIC {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(header);
+        hasher.update(data);
+        return *hasher.finalize().as_bytes();
+    }
     let mut context = aws_lc_rs::digest::Context::new(&aws_lc_rs::digest::SHA256);
     context.update(header);
     context.update(data);
@@ -285,7 +292,7 @@ impl Journal {
                 let start = integer(&header, 24);
                 let count = integer(&header, 32);
                 let written_at = integer(&header, 40);
-                if &header[..8] != MAGIC
+                if (&header[..8] != MAGIC && &header[..8] != LEGACY_MAGIC)
                     || sequence < *first
                     || sequence <= previous
                     || (position == 0 && sequence != *first)

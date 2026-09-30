@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import { execFileSync } from 'node:child_process'
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import {
   mkdir,
   mkdtemp,
@@ -14,6 +14,7 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
+import { blockDigest } from './block-digest.mjs'
 import { entrypointSmoke } from './runner-entrypoint-smoke.mjs'
 import { prepareStorageOrigin, storageSmoke } from './runner-storage-smoke.mjs'
 
@@ -265,7 +266,7 @@ console.log('probe.done');
                 const block = point.manifest.blocks.find(block => block.hash)
                 assert.ok(block, 'Active capture must contain durable guest data')
                 const bytes = Buffer.from(await (await api(`/snapshots/${point.id}/${block.hash}`)).arrayBuffer())
-                assert.equal(createHash('sha256').update(bytes).digest('hex'), block.hash)
+                assert.equal(blockDigest(bytes, block.hash), block.hash)
                 // New writes enter the next journal generation; the sealed one stays readable.
                 await writeFile(path.join(source, 'chat-input/messages.json'), '[{"text":"capture-update"}]')
                 await until(() => docker('exec', name, 'cat', `/runner-state/${id}.log`).split('\n').filter(Boolean).some(line => Buffer.from(JSON.parse(line).data || '', 'base64').toString().includes('probe.updated')))
@@ -281,7 +282,7 @@ console.log('probe.done');
                 const changed = next.manifest.blocks.find((block, index) => block.hash && block.hash !== point.manifest.blocks[index].hash)
                 assert.ok(changed, 'The next generation includes guest writes')
                 const written = Buffer.from(await (await api(`/snapshots/${next.id}/${changed.hash}`)).arrayBuffer())
-                assert.equal(createHash('sha256').update(written).digest('hex'), changed.hash)
+                assert.equal(blockDigest(written, changed.hash), changed.hash)
                 docker('exec', name, 'test', '!', '-e', `/runner-state/disks/${runId}/data.ext4`)
                 await api(`/snapshots/${next.id}/discard`, 'DELETE')
                 process.stdout.write(`${JSON.stringify({

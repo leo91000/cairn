@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import { execFileSync, spawn } from 'node:child_process'
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import {
   copyFile,
   link,
@@ -15,6 +15,7 @@ import { createServer } from 'node:http'
 import path from 'node:path'
 import process from 'node:process'
 import { setTimeout as delay } from 'node:timers/promises'
+import { blockDigest } from './block-digest.mjs'
 
 async function main() {
   const assets = path.resolve(process.argv[2] || '')
@@ -142,7 +143,7 @@ async function main() {
       if (!block.hash || blocks.has(block.hash))
         continue
       const bytes = Buffer.from(await (await request(44311, `/snapshots/${snapshot.id}/${block.hash}`)).arrayBuffer())
-      assert.equal(createHash('sha256').update(bytes).digest('hex'), block.hash)
+      assert.equal(blockDigest(bytes, block.hash), block.hash)
       blocks.set(block.hash, bytes)
     }
 
@@ -157,7 +158,7 @@ async function main() {
       if (!block.hash || blocks.has(block.hash))
         continue
       const bytes = Buffer.from(await (await request(44311, `/snapshots/${snapshot.id}/${block.hash}`)).arrayBuffer())
-      assert.equal(createHash('sha256').update(bytes).digest('hex'), block.hash)
+      assert.equal(blockDigest(bytes, block.hash), block.hash)
       blocks.set(block.hash, bytes)
       incrementalBytes += bytes.length
     }

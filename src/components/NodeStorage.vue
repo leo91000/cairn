@@ -18,6 +18,7 @@ function open() {
   const saved = props.node.storage
   policy.value = {
     cacheMiB: saved?.cacheMiB ?? 102400,
+    memoryCacheMiB: saved?.memoryCacheMiB ?? 256,
     reserveMiB: saved?.reserveMiB ?? 10240,
     reservePercent: saved?.reservePercent ?? 5,
     backupSeconds: saved?.backupSeconds ?? 60,
@@ -51,7 +52,13 @@ async function save() {
     <form class="storage-form" @submit.prevent="save">
       <p>Files are saved to S3 and loaded when needed. Conversations remain active when their local cache is freed.</p>
       <fieldset>
-        <legend>Local disk</legend><label>Clean cache budget (MiB)<input
+        <legend>Local disk</legend><label>Shared memory cache (MiB)<input
+          v-model.number="policy.memoryCacheMiB"
+          type="number"
+          min="4"
+          max="4096"
+          required
+        ></label><label>Clean disk cache budget (MiB)<input
           v-model.number="policy.cacheMiB"
           type="number"
           min="0"
@@ -81,13 +88,14 @@ async function save() {
           max="3600"
           required
         ></label>
-        <label>Pause after unsaved changes (seconds)<input
+        <label>Maximum active synchronization delay (seconds)<input
           v-model.number="policy.maxDirtySeconds"
           type="number"
           :min="policy.backupSeconds"
           max="86400"
           required
         ></label>
+        <p>Old unsaved work is synchronized first on resume. This limit bounds how long the resumed execution can continue without publication.</p>
       </fieldset><p v-if="error" role="alert" class="text-coral">
         {{ error }}
       </p>

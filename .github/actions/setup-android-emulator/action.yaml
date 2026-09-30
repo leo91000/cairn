@@ -1,0 +1,18 @@
+name: Prepare Android emulator packages
+description: Retry SDK downloads before starting device tests.
+runs:
+  using: composite
+  steps:
+    - name: Install emulator packages
+      shell: bash
+      run: |
+        for attempt in 1 2 3; do
+          if sdkmanager --install 'build-tools;37.0.0' 'platforms;android-36' emulator 'system-images;android-36;google_apis;x86_64' --channel=0; then
+            exit 0
+          fi
+          if [[ "$attempt" == 3 ]]; then
+            exit 1
+          fi
+          echo "SDK download failed; retrying installation (attempt $((attempt + 1))/3)."
+          sleep "$((attempt * 5))"
+        done
