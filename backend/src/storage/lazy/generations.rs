@@ -114,7 +114,7 @@ impl LazyDisk {
             .ok_or_else(|| failure("Invalid extent"))?;
         let mut bytes = vec![0; length as usize];
         self.read_generation(generation, offset, &mut bytes)?;
-        if block_digest(&bytes) != hash {
+        if !super::super::digest::matches(hash, &bytes) {
             return Err(failure("Captured generation changed"));
         }
         Ok(bytes)

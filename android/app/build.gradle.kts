@@ -4,7 +4,7 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
-val releaseVersion = providers.environmentVariable("LEO_ANDROID_VERSION").orElse("0.49.0").get()
+val releaseVersion = providers.environmentVariable("LEO_ANDROID_VERSION").orElse("0.50.0").get()
 
 require(Regex("(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)").matches(releaseVersion))
 

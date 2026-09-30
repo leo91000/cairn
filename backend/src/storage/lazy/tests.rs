@@ -13,6 +13,40 @@ struct Source {
     reads: AtomicUsize,
 }
 
+#[test]
+fn old_sha256_segment_and_new_blake3_frames_can_share_a_journal() {
+    let root = tempfile::tempdir().unwrap();
+    let source = Arc::new(Source {
+        reads: AtomicUsize::new(0),
+    });
+    let disk = LazyDisk::create(
+        root.path(),
+        &single_block(4096, BLOCK, &Value::Null),
+        source.clone(),
+    )
+    .unwrap();
+    disk.write_at(0, b"old payload").unwrap();
+    drop(disk);
+    let path = root.path().join("payload-1-1.segment");
+    let mut frame = std::fs::read(&path).unwrap();
+    frame[..8].copy_from_slice(b"LEOJNL02");
+    let header = Sha256::digest(&frame[..48]);
+    frame[48..80].copy_from_slice(&header);
+    let mut digest = Sha256::new();
+    digest.update(&frame[..80]);
+    digest.update(&frame[112..]);
+    frame[80..112].copy_from_slice(&digest.finalize());
+    std::fs::write(&path, frame).unwrap();
+    let disk = LazyDisk::open(root.path(), source.clone()).unwrap();
+    disk.write_at(20, b"new payload").unwrap();
+    drop(disk);
+    let disk = LazyDisk::open(root.path(), source).unwrap();
+    let mut bytes = [0; 31];
+    disk.read_at(0, &mut bytes).unwrap();
+    assert_eq!(&bytes[..11], b"old payload");
+    assert_eq!(&bytes[20..], b"new payload");
+}
+
 /// A single-block manifest; a `null` hash is an empty (zero) block.
 fn single_block(size: u64, block_size: u64, hash: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
@@ -340,7 +374,7 @@ fn interrupted_tail_is_trimmed_and_missing_acknowledged_segments_are_rejected() 
     // unacknowledged append; corrupt headers must not take this recovery path.
     let mut header = std::fs::read(&path).unwrap()[..112].to_vec();
     header[8..16].copy_from_slice(&2_i64.to_le_bytes());
-    let checksum = Sha256::digest(&header[..48]);
+    let checksum = journal::digest(&header[..48], &[]);
     header[48..80].copy_from_slice(&checksum);
     tail.write_all(&header).unwrap();
     tail.write_all(b"par").unwrap();

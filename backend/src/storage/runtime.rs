@@ -7,8 +7,8 @@ use std::{
     io,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, OnceLock, Weak,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock, RwLock, Weak,
+        atomic::{AtomicBool, AtomicI64, Ordering},
     },
 };
 use tokio_util::sync::CancellationToken;
@@ -25,17 +25,45 @@ fn registry() -> &'static Registry {
     REGISTRY.get_or_init(Default::default)
 }
 
+/// Apply node limits without policy-file reads in the CPU safety path.
+pub(crate) fn configure(state: &Path, policy: &Policy) -> Result<()> {
+    let registry = registry().lock().map_err(Error::internal)?;
+    for (directory, entry) in registry.iter() {
+        if directory.parent().and_then(Path::parent) != Some(state) {
+            continue;
+        }
+        let Entry::Open(volume) = entry else {
+            continue;
+        };
+        let Some(volume) = volume.upgrade() else {
+            continue;
+        };
+        *volume.control_policy.write().map_err(Error::internal)? = policy.clone();
+        let (total, free) = super::policy::space(directory)?;
+        volume
+            .space_pressure
+            .store(free <= policy.reserve(total), Ordering::Release);
+        volume
+            .disk
+            .memory_budget(policy.memory_cache_mi_b as usize * 1024 * 1024)?;
+    }
+    Ok(())
+}
+
 pub struct Volume {
     pub disk: Arc<LazyDisk>,
     pub source: Arc<RemoteSource>,
     pub stop: CancellationToken,
     directory: PathBuf,
     policy: Policy,
+    control_policy: RwLock<Policy>,
+    active_since: AtomicI64,
+    active_attempt: Mutex<String>,
     pressure: AtomicBool,
+    space_pressure: AtomicBool,
     fault: AtomicBool,
     paused: AtomicBool,
     transition: Mutex<Option<std::time::Instant>>,
-    health_probe: tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<bool>>>>,
 }
 
 impl Drop for Volume {
@@ -79,18 +107,23 @@ pub fn open(directory: &Path) -> Result<Arc<Volume>> {
     let disk = Arc::new(LazyDisk::open(&root, source.clone())?);
     let policy: Policy = serde_json::from_value(context["policy"].clone()).unwrap_or_default();
     policy.validate()?;
+    disk.memory_budget(policy.memory_cache_mi_b as usize * 1024 * 1024)?;
     let volume = Arc::new(Volume {
         disk,
         source,
         stop,
         directory: directory.to_owned(),
+        control_policy: RwLock::new(policy.clone()),
         policy,
+        active_since: AtomicI64::new(0),
+        active_attempt: Mutex::new(String::new()),
         pressure: AtomicBool::new(false),
+        space_pressure: AtomicBool::new(false),
         fault: AtomicBool::new(false),
         paused: AtomicBool::new(false),
         transition: Mutex::new(None),
-        health_probe: tokio::sync::Mutex::new(None),
     });
+    volume.health()?;
     registry.insert(directory.to_owned(), Entry::Open(Arc::downgrade(&volume)));
     Ok(volume)
 }
@@ -216,16 +249,28 @@ impl Volume {
     }
 
     pub async fn needs_pause(self: &Arc<Self>) -> Result<bool> {
-        // Keep a timed-out probe alive instead of queuing more blocking work on
-        // every monitor tick. It uses cached journal counters, never compaction.
-        let mut probe = self.health_probe.lock().await;
-        let task = probe.get_or_insert_with(|| {
-            let volume = self.clone();
-            tokio::task::spawn_blocking(move || Ok(!volume.health()?["waitingFor"].is_null()))
-        });
-        let result = task.await.map_err(Error::internal);
-        *probe = None;
-        result?
+        Ok(self.control_reason(crate::config::now())?.is_some())
+    }
+
+    fn control_reason(&self, now: i64) -> Result<Option<&'static str>> {
+        if self.fault.load(Ordering::SeqCst) {
+            return Ok(Some("integrity"));
+        }
+        if self.pressure.load(Ordering::SeqCst) || self.space_pressure.load(Ordering::Acquire) {
+            return Ok(Some("disk-space"));
+        }
+        if self.source.waiting() {
+            return Ok(Some("storage-unavailable"));
+        }
+        let policy = self.control_policy.read().map_err(Error::internal)?;
+        let active_since = self.active_since.load(Ordering::Acquire);
+        Ok(self
+            .disk
+            .dirty_since()
+            .filter(|&at| {
+                now.saturating_sub(at.max(active_since)) >= (policy.max_dirty_seconds * 1000) as i64
+            })
+            .map(|_| "backup-lag"))
     }
 
     /// Called under the attempt's control lock, shared with checkpoint capture.
@@ -245,15 +290,27 @@ impl Volume {
         ) {
             return Ok(());
         }
-        let blocked = tokio::select! {
-            () = stop.cancelled() => return Err(Error::conflict("Execution stopped.")),
-            value = tokio::time::timeout(Duration::from_secs(1), self.needs_pause()) => {
-                value.ok().and_then(std::result::Result::ok).unwrap_or(true)
+        if stop.is_cancelled() {
+            return Err(Error::conflict("Execution stopped."));
+        }
+        let now = crate::config::now();
+        // A resumed VM gets one bounded active synchronization window. Its
+        // original dirty timestamp is retained for backup urgency and telemetry.
+        {
+            let mut active = self.active_attempt.lock().map_err(Error::internal)?;
+            if active.as_str() != attempt {
+                self.active_since.store(now, Ordering::Release);
+                *active = attempt.to_owned();
             }
-        };
+        }
+        // No filesystem scan, policy read, journal lock, or blocking task belongs
+        // in this CPU safety decision. Writers fence space admission themselves.
+        let reason = self.control_reason(now)?;
+        let blocked = reason.is_some();
         let pending = self.transition.lock().map_err(Error::internal)?.is_some();
         if blocked != self.paused() || pending {
-            tracing::info!(target: "leo_performance", operation = "storage_backpressure", id = attempt, paused = blocked);
+            let transition_started = std::time::Instant::now();
+            tracing::info!(target: "leo_performance", operation = "storage_backpressure", id = attempt, phase = "requested", paused = blocked, reason = reason.unwrap_or("ready"));
             let result = if blocked {
                 host::pause_attempt(state, attempt).await
             } else {
@@ -278,6 +335,7 @@ impl Volume {
             }
             self.set_paused(blocked);
             *self.transition.lock().map_err(Error::internal)? = None;
+            tracing::info!(target: "leo_performance", operation = "storage_backpressure", id = attempt, phase = "confirmed", paused = blocked, reason = reason.unwrap_or("ready"), elapsed_ms = transition_started.elapsed().as_millis() as u64);
         }
         Ok(())
     }
@@ -318,7 +376,12 @@ impl Volume {
     fn health(&self) -> Result<Value> {
         let mut status = self.disk.accounting()?;
         let policy = self.policy()?;
+        *self.control_policy.write().map_err(Error::internal)? = policy.clone();
+        self.disk
+            .memory_budget(policy.memory_cache_mi_b as usize * 1024 * 1024)?;
         let (total, free) = super::policy::space(&self.directory)?;
+        self.space_pressure
+            .store(free <= policy.reserve(total), Ordering::Release);
         let reason = if self.fault.load(Ordering::SeqCst) {
             Some("integrity")
         } else if self.pressure.load(Ordering::SeqCst) {
@@ -329,7 +392,9 @@ impl Volume {
             policy.pause_reason(
                 total,
                 free,
-                status["dirtySince"].as_i64(),
+                status["dirtySince"]
+                    .as_i64()
+                    .map(|at| at.max(self.active_since.load(Ordering::Acquire))),
                 crate::config::now(),
             )
         };
@@ -339,6 +404,14 @@ impl Volume {
         status["freeBytes"] = free.into();
         status["reserveBytes"] = policy.reserve(total).into();
         status["backupSeconds"] = policy.backup_seconds.into();
+        status["maxDirtySeconds"] = policy.max_dirty_seconds.into();
+        status["activeSince"] = self.active_since.load(Ordering::Acquire).into();
+        status["backupUrgent"] = status["dirtySince"]
+            .as_i64()
+            .is_some_and(|at| {
+                crate::config::now().saturating_sub(at) >= (policy.backup_seconds * 1000) as i64
+            })
+            .into();
         Ok(status)
     }
 }
@@ -377,6 +450,7 @@ impl Disk for Volume {
                     .saturating_add(bytes.len() as u64 * 4 + 1024 * 1024)
             {
                 self.pressure.store(false, Ordering::SeqCst);
+                self.space_pressure.store(false, Ordering::Release);
                 let state = self
                     .directory
                     .parent()
@@ -463,6 +537,48 @@ pub async fn materialize(directory: &Path, stop: &CancellationToken) -> Result<(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn resumed_backlog_gets_one_active_window_without_hiding_its_age() {
+        let root = tempfile::tempdir().unwrap();
+        let (volume, _, _) = controller_fixture(root.path()).await;
+        volume.disk.write_at(0, b"durable backlog").unwrap();
+        let dirty_since = volume.disk.dirty_since().unwrap();
+        let resumed = dirty_since + 3_600_000;
+        volume.active_since.store(resumed, Ordering::Release);
+        assert_eq!(volume.control_reason(resumed + 299_999).unwrap(), None);
+        assert_eq!(
+            volume.control_reason(resumed + 300_000).unwrap(),
+            Some("backup-lag")
+        );
+        assert_eq!(volume.disk.accounting().unwrap()["dirtySince"], dirty_since);
+        volume.fault.store(true, Ordering::SeqCst);
+        assert_eq!(volume.control_reason(resumed).unwrap(), Some("integrity"));
+        volume.fault.store(false, Ordering::SeqCst);
+        volume.pressure.store(true, Ordering::SeqCst);
+        assert_eq!(volume.control_reason(resumed).unwrap(), Some("disk-space"));
+    }
+
+    #[tokio::test]
+    async fn slow_policy_files_do_not_suspend_a_safe_vm() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = tempfile::tempdir().unwrap();
+        let (volume, attempt, _) = controller_fixture(root.path()).await;
+        let path = root.path().join("storage-policy.json");
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        // Any policy-file read blocks indefinitely. CPU safety must rely on the
+        // configured policy, atomics and locally enforced write admission.
+        let stop = CancellationToken::new();
+        let started = std::time::Instant::now();
+        volume
+            .enforce_limits(root.path(), &attempt, &stop)
+            .await
+            .unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_millis(200));
+        assert!(!volume.paused());
+        assert!(!stop.is_cancelled());
+    }
 
     async fn controller_fixture(root: &Path) -> (Arc<Volume>, String, tokio::net::UnixListener) {
         let directory = root.join("disks/conversation");

@@ -2,7 +2,7 @@
 // replaces S3 here; encrypted S3 publication is covered by node_s3_test.py.
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import {
   mkdir,
   readFile,
@@ -12,6 +12,7 @@ import {
 import path from 'node:path'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
+import { blockDigest } from './block-digest.mjs'
 
 export async function prepareStorageOrigin({
   root,
@@ -170,7 +171,7 @@ export async function storageSmoke({
         continue
       hashes.add(block.hash)
       const bytes = Buffer.from(await (await api(`/snapshots/${point.id}/${block.hash}`)).arrayBuffer())
-      assert.equal(createHash('sha256').update(bytes).digest('hex'), block.hash)
+      assert.equal(blockDigest(bytes, block.hash), block.hash)
       await writeFile(path.join(origin, block.hash), bytes)
     }
 

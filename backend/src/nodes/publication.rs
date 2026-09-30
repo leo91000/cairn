@@ -641,7 +641,7 @@ async fn source_block(
     } else {
         reads.block(&object.hash).await?
     };
-    if bytes.len() as u64 != object.size || hex::encode(Sha256::digest(&bytes)) != object.hash {
+    if bytes.len() as u64 != object.size || !crate::storage::digest::matches(&object.hash, &bytes) {
         return Err(Error::bad("Backup block failed integrity verification."));
     }
     Ok(bytes)
@@ -809,7 +809,7 @@ async fn decode_scoped_block(
                 .decode(plaintext.as_str().unwrap_or(""))
                 .map_err(|_| Error::bad("Invalid backup ciphertext."))?
         };
-        if hex::encode(Sha256::digest(&bytes)) != hash {
+        if !crate::storage::digest::matches(&hash, &bytes) {
             return Err(Error::bad("Backup integrity check failed."));
         }
         Ok(bytes)
@@ -1314,9 +1314,14 @@ impl Scheduler {
             return;
         };
 
-        // Oldest scheduling time first, so a busy early row cannot starve
-        // conversations beyond the bounded worker slots.
-        runs.sort_by_key(|run| self.last.get(text(run, "id")).copied().unwrap_or(0));
+        // Overdue work first, oldest scheduling time within each class. Normal
+        // work also becomes overdue, so busy early rows cannot starve it.
+        runs.sort_by_key(|run| {
+            (
+                run["storage"]["backupUrgent"] != true,
+                self.last.get(text(run, "id")).copied().unwrap_or(0),
+            )
+        });
         for run in runs {
             if self.tasks.len() >= super::coordination::SYNC_CONCURRENCY {
                 break;
@@ -1391,7 +1396,12 @@ fn publication_due(run: &Value, since_last_ms: i64, default_interval_ms: i64) ->
         && (run["sessionId"].is_string() || on_demand)
         && !run["moveRequest"].is_object()
         && !synchronized
-        && since_last_ms >= interval
+        && since_last_ms
+            >= if run["storage"]["backupUrgent"] == true {
+                5000
+            } else {
+                interval
+            }
 }
 
 pub(crate) fn storage_for(s: &Service, backup: &Value) -> Result<Storage> {

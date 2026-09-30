@@ -116,6 +116,7 @@ export function nodeDiagnostics(node: ExecutionNode, now = Date.now()) {
 }
 
 export interface NodeStoragePolicy {
+  memoryCacheMiB?: number
   cacheMiB: number
   reserveMiB: number
   reservePercent: number

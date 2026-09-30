@@ -150,6 +150,7 @@ async fn storage_policy(broker: &Broker, request: Request) -> Result<Response> {
         &serde_json::to_vec(&policy)?,
     )
     .await?;
+    crate::storage::runtime::configure(&broker.state, &policy)?;
     json_response(json!({ "ready": true }))
 }
 

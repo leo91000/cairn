@@ -5,7 +5,6 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     future::Future,
     os::{
@@ -102,7 +101,7 @@ pub async fn index(path: &Path) -> Result<Value> {
                 file.read_exact_at(&mut buffer[..length], offset)?;
                 read += length as u64;
                 let data = &buffer[..length];
-                (!data.iter().all(|b| *b == 0)).then(|| hex::encode(Sha256::digest(data)))
+                (!data.iter().all(|b| *b == 0)).then(|| crate::storage::digest::block(data))
             };
             blocks.push(ManifestBlock {
                 offset,
@@ -152,10 +151,7 @@ pub fn validate(manifest: &Value) -> Result<()> {
 }
 
 pub fn valid_hash(hash: &str) -> bool {
-    hash.len() == 64
-        && hash
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    crate::storage::digest::valid(hash)
 }
 
 pub async fn block(path: &Path, manifest: &Value, hash: &str) -> Result<Vec<u8>> {
@@ -316,7 +312,7 @@ async fn block_where(
     .await?;
     let mut bytes = vec![0; size as usize];
     file.read_exact(&mut bytes).await?;
-    if hex::encode(Sha256::digest(&bytes)) != hash {
+    if !crate::storage::digest::matches(hash, &bytes) {
         return Err(Error::conflict("Backup data changed."));
     }
     Ok(bytes)
@@ -344,7 +340,7 @@ where
             continue;
         };
         let bytes = fetch(hash.clone()).await?;
-        if bytes.len() as u64 != block.size || hex::encode(Sha256::digest(&bytes)) != hash {
+        if bytes.len() as u64 != block.size || !crate::storage::digest::matches(&hash, &bytes) {
             return Err(Error::bad("Backup block integrity check failed."));
         }
         file.seek(std::io::SeekFrom::Start(block.offset)).await?;

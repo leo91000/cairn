@@ -337,6 +337,9 @@ async fn check_monitor(
                 serde_json::to_vec(&reserve(64)).unwrap(),
             )
             .unwrap();
+            // Policy files are applied by the settings endpoint and inspection,
+            // never reread by the controller's CPU safety decision.
+            volume.inspect().await.unwrap();
             volume.enforce_limits(root, attempt, &stop).await.unwrap();
             assert!(!volume.paused());
             assert!(!paused.load(Ordering::SeqCst));
