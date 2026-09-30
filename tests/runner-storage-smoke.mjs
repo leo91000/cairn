@@ -59,6 +59,7 @@ export async function storageSmoke({
   name,
   api,
   until,
+  reconnect,
   storageFixture,
 }) {
   const runId = randomUUID()
@@ -252,7 +253,11 @@ export async function storageSmoke({
   const restoredAt = Date.now()
   await api(`/disks/${runId}/restore`, 'POST', { ...storage, manifest: point.manifest, backupId })
   const metadataRestoreMs = Date.now() - restoredAt
-  const blocked = await start(false)
+  // The node can retain verified boot blocks after the sustained workload.
+  // An unavailable origin only blocks reads that actually need remote bytes.
+  // Read the unused file too, so this outage probe still reaches a cold extent.
+  await writeFile(path.join(inbox, 'messages.json'), '[{"text":"measure"}]')
+  const blocked = await start(false, { benchmark: true })
   await until(async () => (await status()).waitingFor === 'storage-unavailable')
   const cancelledAt = Date.now()
   await stop(blocked)
@@ -278,7 +283,8 @@ export async function storageSmoke({
   await until(async () => (await logs(resumed)).split('storage.tick').length > ticks)
   await stop(resumed)
   // Identical snapshot, guest command and read workload; each sample gets a new
-  // VM and empty disk directory. The host page cache is intentionally not flushed.
+  // controller, VM and empty disk directory. Restarting also clears the verified
+  // node cache; the host page cache is intentionally not flushed.
   const sizes = new Map(point.manifest.blocks.filter(block => block.hash).map(block => [block.hash, block.size]))
 
   async function downloaded() {
@@ -298,6 +304,9 @@ export async function storageSmoke({
       await writeFile(path.join(inbox, 'messages.json'), '[]')
       await writeFile(path.join(origin, 'latency'), String(mode.latencyMs))
       await writeFile(path.join(origin, 'reads'), '')
+      docker('restart', name)
+      docker('exec', '-d', name, '/usr/local/bin/node', '/data/storage-fixture/server.mjs')
+      await reconnect()
       const at = performance.now()
       await api(`/disks/${runId}/restore`, 'POST', { ...storage, manifest: point.manifest, backupId })
       const restoreMs = performance.now() - at
@@ -313,6 +322,7 @@ export async function storageSmoke({
         return match && JSON.parse(match[1])
       })
       const bytesAfterReads = await downloaded()
+      assert.ok(bytesAfterReads > bytesAtReady, 'cold read workload must fetch remote bytes')
       assert.ok(Number.isFinite(metrics.mibPerSecond) && metrics.mibPerSecond > 0)
       process.stdout.write(`${JSON.stringify({
         benchmark: 'conversation-disk',

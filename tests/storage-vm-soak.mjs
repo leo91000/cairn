@@ -48,7 +48,7 @@ async function main() {
     const capabilities = ['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE']
     docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(capability => ['--cap-add', capability]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '6g', '--cpus', '3', '-e', 'CONCURRENCY=1', '--entrypoint', '/usr/local/bin/leo', image, 'runner-broker')
     started = true
-    const address = docker('port', name, '4311/tcp').split('\n').find(value => value.startsWith('127.0.0.1:'))
+    let address
     const api = async (endpoint, method = 'GET', body) => {
       const response = await fetch(`http://${address}${endpoint}`, {
         method,
@@ -60,18 +60,24 @@ async function main() {
       return response
     }
 
-    await until(async () => {
-      try {
-        return (await api('/health')).ok
-      }
-      catch { return false }
-    })
+    async function reconnect() {
+      address = docker('port', name, '4311/tcp').split('\n').find(value => value.startsWith('127.0.0.1:'))
+      await until(async () => {
+        try {
+          return (await api('/health')).ok
+        }
+        catch { return false }
+      })
+    }
+
+    await reconnect()
     await storageSmoke({
       root,
       docker,
       name,
       api,
       until,
+      reconnect,
     })
   }
   catch (error) {

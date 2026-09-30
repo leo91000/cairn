@@ -55,6 +55,16 @@ async function main() {
     return response
   }
 
+  async function reconnect() {
+    url = `http://${await until(() => {
+      try {
+        return docker('port', name, '4311/tcp')
+      }
+      catch { return false }
+    }, 10000)}`
+    await until(() => fetch(`${url}/health`).then(r => r.ok).catch(() => false))
+  }
+
   try {
     for (const dir of ['data/runner-plans', 'state'])
       await mkdir(path.join(root, dir), { recursive: true })
@@ -153,15 +163,7 @@ console.log('probe.done');
     docker('network', 'connect', '--ip', '203.0.113.2', networkName, name)
     // First prove every listener is reachable outside the guest firewall.
     process.stdout.write(docker('exec', name, '/usr/local/bin/node', `${runRoot}/workspace/network-probe.mjs`, 'control', publicPeer, privatePeer))
-    url = `http://${await until(() => {
-      try {
-        return docker('port', name, '4311/tcp')
-      }
-      catch {
-        return false
-      }
-    }, 10000)}`
-    await until(() => fetch(`${url}/health`).then(r => r.ok).catch(() => false))
+    await reconnect()
     const storageFixture = await prepareStorageOrigin({
       root,
       docker,
@@ -300,15 +302,7 @@ console.log('probe.done');
                 docker('start', name)
                 // The test origin is an exec process, so container restart killed it too.
                 docker('exec', '-d', name, '/usr/local/bin/node', '/data/storage-fixture/server.mjs')
-                url = `http://${await until(() => {
-                  try {
-                    return docker('port', name, '4311/tcp')
-                  }
-                  catch {
-                    return false
-                  }
-                })}`
-                await until(() => fetch(`${url}/health`).then(r => r.ok).catch(() => false))
+                await reconnect()
               }
             }
           }
@@ -563,6 +557,7 @@ console.log('probe.done');
       name,
       api,
       until,
+      reconnect,
       storageFixture,
     })
   }

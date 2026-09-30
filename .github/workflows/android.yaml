@@ -1,11 +1,11 @@
 name: Android
 on:
   pull_request:
-    paths: ['android/**', '.github/actions/setup-pnpm/**', '.github/actions/setup-android-emulator/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'tests/android-*.test.mjs']
+    paths: ['android/**', '.github/actions/setup-pnpm/**', '.github/actions/setup-android-emulator/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'tests/android-*.test.mjs', tests/android-runner-smoke.mjs, tests/runner-storage-smoke.mjs]
   push:
     branches: [main]
     tags: ['v*']
-    paths: ['android/**', '.github/actions/setup-pnpm/**', '.github/actions/setup-android-emulator/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'tests/android-*.test.mjs']
+    paths: ['android/**', '.github/actions/setup-pnpm/**', '.github/actions/setup-android-emulator/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'tests/android-*.test.mjs', tests/android-runner-smoke.mjs, tests/runner-storage-smoke.mjs]
   workflow_dispatch:
 permissions:
   contents: read

@@ -16,8 +16,9 @@ Each node's private disk state shares a bounded LRU of verified immutable base
 blocks, initially 256 MiB. The setting is `memoryCacheMiB`, separate from the
 clean disk-cache limit. Lookup and recency updates are constant time. Retained
 payload bytes and entry count are bounded; in-flight readers can retain additional
-buffers temporarily. The registry holds weak references and releases the cache
-when its last disk closes. Standalone disks do not share outside their directory.
+buffers temporarily. The node controller retains the cache while idle. The
+registry holds weak references and releases it after the last controller and
+reader close. Standalone disks do not share outside their directory.
 
 Only extents in an owned, validated disk manifest can request cached content.
 The node's existing disk ownership and execution leases still fence access.
