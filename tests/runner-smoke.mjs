@@ -469,7 +469,8 @@ console.log('probe.done');
         command: ['/usr/local/bin/node', '-e', `
           const assert=require('node:assert/strict'),os=require('node:os');
           assert.equal(os.cpus().length,${Math.min(originalBudget.limits.cpu, 32)});
-          assert.ok(os.totalmem()>${(originalBudget.limits.memoryMiB - 256) * 1024 ** 2},'guest sees the shared ceiling despite legacy per-run requests');
+          const ceiling=${(originalBudget.limits.memoryMiB - 512) * 1024 ** 2};
+          assert.ok(os.totalmem()<=ceiling,'guest leaves controller memory headroom');
           console.log('slot.ready');setInterval(()=>{},1000);
         `],
         imports: [{ source: cwd, target: cwd }],
@@ -489,15 +490,21 @@ console.log('probe.done');
 
     assert.equal((await (await api('/health')).json()).pool.occupied, 5)
     await until(async () => {
-      try {
-        return held.every((id) => {
-          const logs = docker('exec', name, 'cat', `/runner-state/${id}.log`)
-          return logs.split('\n').filter(Boolean).some(line => Buffer.from(JSON.parse(line).data || '', 'base64').toString().includes('slot.ready'))
-        })
+      const states = JSON.parse(docker('exec', name, '/usr/local/bin/node', '-e', `
+        const fs=require('node:fs');
+        const states=${JSON.stringify(held)}.map(id=>{
+          const prefix='/runner-state/'+id;
+          const logs=fs.existsSync(prefix+'.log')?fs.readFileSync(prefix+'.log','utf8'):'';
+          const output=logs.split('\\n').filter(Boolean).map(line=>Buffer.from(JSON.parse(line).data||'','base64').toString()).join('');
+          return {id,output,exit:fs.existsSync(prefix+'.exit')?fs.readFileSync(prefix+'.exit','utf8'):null};
+        });
+        console.log(JSON.stringify(states));
+      `))
+      for (const state of states) {
+        assert.equal(state.exit, null, `Held VM ${state.id} exited before capacity validation: ${state.output}`)
       }
-      catch {
-        return false
-      }
+
+      return states.every(state => state.output.includes('slot.ready'))
     })
     const sharedHealth = await (await api('/health')).json()
     assert.ok(sharedHealth.usage.memoryMiB < originalBudget.limits.memoryMiB)
@@ -512,11 +519,15 @@ console.log('probe.done');
             let data='';res.on('data',part=>data+=part);res.on('end',()=>resolve(JSON.parse(data)));
           });req.on('error',reject);
         });
-        return {config:config.balloon,stats};
+        return {machine:config['machine-config'],config:config.balloon,stats};
       })).then(result=>console.log(JSON.stringify(result)));
     `))
     assert.equal(balloons.length, 5)
     for (const balloon of balloons) {
+      // MemTotal excludes kernel reservations and can shrink with the balloon.
+      // The VMM configuration proves the shared ceiling for every slot.
+      assert.equal(balloon.machine.mem_size_mib, originalBudget.limits.memoryMiB - 512)
+      assert.equal(balloon.machine.vcpu_count, Math.min(originalBudget.limits.cpu, 32))
       assert.equal(balloon.config.free_page_reporting, true)
       assert.equal(balloon.config.deflate_on_oom, true)
       assert.ok(balloon.stats.available_memory > 0, 'virtio balloon statistics reach Firecracker')
@@ -535,7 +546,7 @@ console.log('probe.done');
     const tooSmall = await fetch(`${url}/node-budget`, {
       method: 'POST',
       headers: { ...headers, 'content-type': 'application/json' },
-      body: JSON.stringify({ ...originalBudget, limits: { ...originalBudget.limits, memoryMiB: 256 } }),
+      body: JSON.stringify({ ...originalBudget, limits: { ...originalBudget.limits, memoryMiB: 640 } }),
     })
     assert.equal(tooSmall.status, 409, 'a RAM decrease cannot kill existing guests')
     assert.equal((await (await api('/health')).json()).pool.occupied, 5)
