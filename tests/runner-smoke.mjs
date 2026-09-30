@@ -525,10 +525,16 @@ console.log('probe.done');
     const reducedHealth = await (await api('/health')).json()
     assert.equal(reducedHealth.pool.capacity, 3)
     assert.equal(reducedHealth.pool.occupied, 5, 'lowering slots preserves active guests')
-    const tooSmall = await fetch(`${url}/node-budget`, {
+    const invalidBudget = await fetch(`${url}/node-budget`, {
       method: 'POST',
       headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({ ...originalBudget, limits: { ...originalBudget.limits, memoryMiB: 128 } }),
+    })
+    assert.equal(invalidBudget.status, 400, 'the controller reserve cannot be the entire RAM budget')
+    const tooSmall = await fetch(`${url}/node-budget`, {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ ...originalBudget, limits: { ...originalBudget.limits, memoryMiB: 256 } }),
     })
     assert.equal(tooSmall.status, 409, 'a RAM decrease cannot kill existing guests')
     assert.equal((await (await api('/health')).json()).pool.occupied, 5)
