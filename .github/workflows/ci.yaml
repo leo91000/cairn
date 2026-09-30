@@ -228,6 +228,9 @@ jobs:
           secrets: github_token=${{ github.token }}
           provenance: ${{ github.event_name != 'pull_request' && 'mode=max' || 'false' }}
           sbom: ${{ github.event_name != 'pull_request' }}
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          cache: true
       - name: Smoke-test the exact image
         env:
           GITHUB_TOKEN: ${{ github.token }}

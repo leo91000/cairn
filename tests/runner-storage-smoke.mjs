@@ -34,7 +34,7 @@ export async function prepareStorageOrigin({
       if(req.url==='/internal/node-restore/renew'){res.end('{}');return;}
       if(fs.existsSync(root+'/offline')){res.writeHead(503).end();return;}
       const hash=req.url.split('/').at(-1);
-      if(!/^[a-f0-9]{64}$/.test(hash)||!fs.existsSync(root+'/'+hash)){res.writeHead(404).end();return;}
+      if(!/^(?:b3-)?[a-f0-9]{64}$/.test(hash)||!fs.existsSync(root+'/'+hash)){res.writeHead(404).end();return;}
       const delay=Number(fs.existsSync(root+'/latency')?fs.readFileSync(root+'/latency','utf8'):0);
       setTimeout(()=>{const bytes=fs.readFileSync(root+'/'+hash);
         fs.appendFileSync(root+'/reads',hash+'\\n'); res.end(bytes);},delay);
