@@ -7,6 +7,7 @@ use super::{
 use crate::{
     error::{Error, Result},
     execution::Sandbox,
+    performance::{Operation, StreamMetrics},
     skills::atomic_write,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -18,7 +19,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
@@ -117,12 +118,14 @@ async fn handle(
             target,
             replace,
             encoding,
+            trace_id,
         } => {
             let import = ImportRequest {
                 target: &target,
                 replace,
                 read_only: false,
                 encoding,
+                trace_id: trace_id.as_deref(),
             };
             import_archive(&mut read, &mut write, &import).await
         }
@@ -130,12 +133,14 @@ async fn handle(
             target,
             read_only,
             encoding,
+            trace_id,
         } => {
             let import = ImportRequest {
                 target: &target,
                 replace: false,
                 read_only,
                 encoding,
+                trace_id: trace_id.as_deref(),
             };
             import_project(&mut read, &mut write, &import).await
         }
@@ -224,6 +229,15 @@ struct ImportRequest<'a> {
     replace: bool,
     read_only: bool,
     encoding: Encoding,
+    trace_id: Option<&'a str>,
+}
+
+impl ImportRequest<'_> {
+    fn trace_id(&self) -> &str {
+        self.trace_id
+            .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+            .unwrap_or("legacy")
+    }
 }
 
 fn import_target(target: &str) -> Result<&Path> {
@@ -243,9 +257,13 @@ async fn import_archive(
     write: &mut (impl AsyncWrite + Unpin),
     import: &ImportRequest<'_>,
 ) -> Result<()> {
+    let mut timing = Operation::new("guest_import", import.trace_id(), "extract");
     let target = import_target(import.target)?;
-    extract(read, target, import).await?;
-    wire::write(write, &Reply::ok(true)).await
+    extract(read, target, import, &mut timing).await?;
+    timing.next("send_reply");
+    wire::write(write, &Reply::ok(true)).await?;
+    timing.finish();
+    Ok(())
 }
 
 /// Projects are staged privately and published with their access policy applied.
@@ -254,11 +272,17 @@ async fn import_project(
     write: &mut (impl AsyncWrite + Unpin),
     import: &ImportRequest<'_>,
 ) -> Result<()> {
+    let mut timing = Operation::new("guest_project_import", import.trace_id(), "project_lock");
     let _guard = PROJECT_IMPORT_CONTROL.lock().await;
+    timing.next("reopen");
     let destination = import_target(import.target)?;
     if super::projects::reopen(destination, import.read_only).await? {
-        return wire::write(write, &Reply::ok(true)).await;
+        timing.next("send_reply");
+        wire::write(write, &Reply::ok(true)).await?;
+        timing.finish();
+        return Ok(());
     }
+    timing.next("prepare_staging");
     let staging = destination.with_file_name(format!(
         ".leo-import-{}",
         crate::auth::hex_digest(import.target)
@@ -268,27 +292,36 @@ async fn import_project(
     }
     std::fs::create_dir_all(staging.parent().unwrap())?;
     std::fs::DirBuilder::new().mode(0o700).create(&staging)?;
+    timing.next("send_ready");
     wire::write(write, &Reply::ready()).await?;
     let content = staging.join("content");
-    extract(read, &content, import).await?;
+    extract(read, &content, import, &mut timing).await?;
     // Publish only complete data with its access policy already applied.
+    timing.next("publish");
     super::projects::publish(&content, destination, import.read_only).await?;
     if !import.read_only {
         tokio::fs::remove_dir(&staging).await?;
     }
+    timing.next("sync");
     Command::new("sync").status().await?;
-    wire::write(write, &Reply::ok(true)).await
+    timing.next("send_reply");
+    wire::write(write, &Reply::ok(true)).await?;
+    timing.finish();
+    Ok(())
 }
 
 async fn extract(
     read: &mut (impl AsyncBufRead + Unpin),
     target: &Path,
     import: &ImportRequest<'_>,
+    timing: &mut Operation,
 ) -> Result<()> {
+    timing.next("prepare_target");
     if import.replace && target.exists() {
         tokio::fs::remove_dir_all(target).await?;
     }
     tokio::fs::create_dir_all(target).await?;
+    timing.next("spawn_tar");
     let mut child = Command::new("tar")
         .args(["--no-same-owner", "-xf", "-", "-C"])
         .arg(target)
@@ -298,14 +331,18 @@ async fn extract(
         .kill_on_drop(true)
         .spawn()?;
     let mut input = child.stdin.take().unwrap();
-    match import.encoding {
+    timing.next("receive_archive");
+    let metrics = match import.encoding {
         Encoding::Binary => receive_binary(read, &mut input).await?,
         Encoding::Json => receive_frames(read, &mut input).await?,
-    }
+    };
+    metrics.record(timing.id(), "guest");
     drop(input);
+    timing.next("wait_tar");
     if !child.wait().await?.success() {
         return Err(Error::bad("Guest import failed."));
     }
+    timing.next("chown");
     let chat = target == Path::new(CHAT_INBOX);
     let owner = if chat { "0:0" } else { "1000:1000" };
     let status = Command::new("chown")
@@ -317,6 +354,7 @@ async fn extract(
         return Err(Error::bad("Guest import ownership failed."));
     }
     if chat {
+        timing.next("chmod");
         Command::new("chmod")
             .args(["-R", "u=rwX,go=rX", CHAT_INBOX])
             .status()
@@ -328,33 +366,50 @@ async fn extract(
 async fn receive_binary(
     read: &mut (impl AsyncRead + Unpin),
     input: &mut (impl AsyncWrite + Unpin),
-) -> Result<()> {
+) -> Result<StreamMetrics> {
     let mut buffer = vec![0; wire::MAX_CHUNK];
+    let mut metrics = StreamMetrics::default();
     loop {
+        let read_started = Instant::now();
         let count = wire::read_chunk(read, &mut buffer).await?;
+        metrics.read += read_started.elapsed();
         if count == 0 {
-            return Ok(());
+            return Ok(metrics);
         }
+        let write_started = Instant::now();
         input.write_all(&buffer[..count]).await?;
+        metrics.write += write_started.elapsed();
+        metrics.bytes += count as u64;
+        metrics.chunks += 1;
     }
 }
 
 async fn receive_frames(
     read: &mut (impl AsyncBufRead + Unpin),
     input: &mut (impl AsyncWrite + Unpin),
-) -> Result<()> {
+) -> Result<StreamMetrics> {
+    let mut metrics = StreamMetrics::default();
     loop {
+        let read_started = Instant::now();
         let frame = wire::read(read)
             .await?
             .ok_or_else(|| Error::bad("Guest import was interrupted."))?;
         let data = match wire::decode(frame, "Invalid import chunk.")? {
-            ArchiveFrame::End => return Ok(()),
+            ArchiveFrame::End => {
+                metrics.read += read_started.elapsed();
+                return Ok(metrics);
+            }
             ArchiveFrame::Chunk { data } => data,
         };
         let bytes = STANDARD
             .decode(data)
             .map_err(|_| Error::bad("Invalid import bytes."))?;
+        metrics.read += read_started.elapsed();
+        let write_started = Instant::now();
         input.write_all(&bytes).await?;
+        metrics.write += write_started.elapsed();
+        metrics.bytes += bytes.len() as u64;
+        metrics.chunks += 1;
     }
 }
 
@@ -480,4 +535,63 @@ async fn read_result(plan: &Plan) -> Result<String> {
         return Err(Error::bad("Guest result exceeds limit."));
     }
     Ok(String::from_utf8_lossy(&data).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn measured_import_streams_preserve_bytes_and_reject_missing_end_markers() {
+        let chunks: [&[u8]; 2] = [b"archive\0\n{}", b"second chunk"];
+        for encoding in [Encoding::Binary, Encoding::Json] {
+            let mut encoded = Vec::new();
+            for chunk in chunks {
+                match encoding {
+                    Encoding::Binary => wire::write_chunk(&mut encoded, chunk).await.unwrap(),
+                    Encoding::Json => {
+                        let frame = ArchiveFrame::Chunk {
+                            data: STANDARD.encode(chunk),
+                        };
+                        wire::write(&mut encoded, &frame).await.unwrap();
+                    }
+                }
+            }
+            let truncated = encoded.clone();
+            match encoding {
+                Encoding::Binary => wire::write_chunk(&mut encoded, &[]).await.unwrap(),
+                Encoding::Json => wire::write(&mut encoded, &ArchiveFrame::End).await.unwrap(),
+            }
+            let mut output = Vec::new();
+            let mut read = encoded.as_slice();
+            let metrics = match encoding {
+                Encoding::Binary => receive_binary(&mut read, &mut output).await.unwrap(),
+                Encoding::Json => receive_frames(&mut read, &mut output).await.unwrap(),
+            };
+            assert_eq!(output, chunks.concat());
+            assert_eq!(metrics.bytes, output.len() as u64);
+            assert_eq!(metrics.chunks, chunks.len() as u64);
+
+            let mut read = truncated.as_slice();
+            let result = match encoding {
+                Encoding::Binary => receive_binary(&mut read, &mut Vec::new()).await,
+                Encoding::Json => receive_frames(&mut read, &mut Vec::new()).await,
+            };
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn guest_correlation_rejects_arbitrary_strings() {
+        for trace_id in [None, Some("credential-or-path"), Some("\nforged-log")] {
+            let import = ImportRequest {
+                target: "/run/example",
+                replace: false,
+                read_only: false,
+                encoding: Encoding::Binary,
+                trace_id,
+            };
+            assert_eq!(import.trace_id(), "legacy");
+        }
+    }
 }

@@ -16,6 +16,10 @@ Activity records have `side=adapter` (normalized events inside the agent process
 or `side=worker` (events received by the manager). Match run, attempt and the
 local turn counter when comparing these records. Existing VM boot, preparation,
 shutdown and storage records retain their current run/VM identities.
+Archive transfers add a UUID linking host and guest phases; see
+[VM import timings](VM-IMPORT-TIMINGS.md) for reading, transport, extraction and
+acknowledgement measurements. Guest measurements require the updated VM image;
+host measurements also work with retained older images.
 
 ## Timings
 

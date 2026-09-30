@@ -554,11 +554,13 @@ async fn refresh_imports(socket: &Path, plan: &Plan) -> Result<()> {
 }
 
 /// Starts the agent and records its output until the guest reports its exit.
-async fn run(socket: &Path, plan: &Plan, state: &Path, timing: Operation) -> Result<i32> {
+async fn run(socket: &Path, plan: &Plan, state: &Path, mut timing: Operation) -> Result<i32> {
+    timing.next("run_connect");
     let mut stream = connect(socket).await?;
     let request = GuestRequest::Run {
         plan: plan.for_guest(),
     };
+    timing.next("run_request");
     wire::write(stream.get_mut(), &request).await?;
     timing.finish();
 

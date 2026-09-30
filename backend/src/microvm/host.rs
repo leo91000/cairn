@@ -1,11 +1,12 @@
 //! Trusted host controller. Only the guest interprets its writable filesystem.
 use super::{
-    plan::HOME,
+    plan::{CHAT_INBOX, ENTRYPOINT, HOME},
     protocol::{ArchiveFrame, Encoding, GuestRequest, GuestStatus, Reply},
     wire,
 };
 use crate::{
     error::{Error, Result},
+    performance::{Operation, StreamMetrics},
     skills::private_dir,
     validation::text,
 };
@@ -16,7 +17,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Stdio,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -171,10 +172,40 @@ pub async fn export_artifact(
     Ok((stream, size))
 }
 
+fn import_timing(socket: &Path, operation: &'static str, import_kind: &'static str) -> Operation {
+    let trace_id = uuid::Uuid::new_v4().to_string();
+    let vm_id = socket
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .map_or("unknown", crate::performance::identity);
+    tracing::info!(
+        target: "leo_performance",
+        operation,
+        id = trace_id,
+        vm_id,
+        import_kind
+    );
+    Operation::new(operation, &trace_id, "guest_status")
+}
+
 /// Copies `source` over `target` in the guest.
 pub(super) async fn import(socket: &Path, source: &Path, target: &str) -> Result<()> {
+    let import_kind = if Path::new(ENTRYPOINT).parent() == Some(Path::new(target)) {
+        "entrypoint"
+    } else if target == HOME {
+        "home"
+    } else if target == CHAT_INBOX {
+        "chat_inbox"
+    } else {
+        "other"
+    };
+    let mut timing = import_timing(socket, "vm_import", import_kind);
     let binary = status(socket).await?.binary_imports;
+    timing.next("connect");
     let mut stream = connect(socket).await?;
+    timing.next("prepare_request");
     let empty = tokio::fs::read_dir(source)
         .await?
         .next_entry()
@@ -184,9 +215,11 @@ pub(super) async fn import(socket: &Path, source: &Path, target: &str) -> Result
         target: target.to_owned(),
         replace: empty,
         encoding: Encoding::of(binary),
+        trace_id: Some(timing.id().to_owned()),
     };
+    timing.next("send_request");
     wire::write(stream.get_mut(), &request).await?;
-    transfer(stream, source, target, binary).await
+    transfer(stream, source, target, binary, timing).await
 }
 
 /// The manager chooses all paths; guest replies never select a host import.
@@ -196,25 +229,31 @@ pub async fn import_project(
     target: &str,
     read_only: bool,
 ) -> Result<Value> {
+    let mut timing = import_timing(socket, "vm_project_import", "project");
     let binary = status(socket).await?.binary_imports;
+    timing.next("connect");
     let mut stream = connect(socket).await?;
     let request = GuestRequest::ProjectImport {
         target: target.to_owned(),
         read_only,
         encoding: Encoding::of(binary),
+        trace_id: Some(timing.id().to_owned()),
     };
+    timing.next("send_request");
     wire::write(stream.get_mut(), &request).await?;
+    timing.next("wait_ready");
     let response = wire::read(&mut stream)
         .await?
         .ok_or_else(|| Error::unavailable("Guest disconnected."))?;
     let response: Reply = wire::decode(response, "Guest refused project import.")?;
     if response.succeeded() {
+        timing.finish();
         return Ok(json!({ "ok": true, "reused": true }));
     }
     if !response.is_ready() {
         return Err(Error::bad("Guest refused project import."));
     }
-    transfer(stream, source, target, binary).await?;
+    transfer(stream, source, target, binary, timing).await?;
     Ok(json!({ "ok": true, "reused": false }))
 }
 
@@ -224,7 +263,9 @@ async fn transfer(
     source: &Path,
     target: &str,
     binary: bool,
+    mut timing: Operation,
 ) -> Result<()> {
+    timing.next("spawn_tar");
     let mut tar = Command::new("tar");
     tar.args(["--exclude=leo-auth.sock", "--exclude=*.sock"]);
     if target == HOME {
@@ -239,11 +280,16 @@ async fn transfer(
         .spawn()?;
     let mut archive = child.stdout.take().unwrap();
     let mut buffer = vec![0; wire::MAX_CHUNK];
+    let mut metrics = StreamMetrics::default();
+    timing.next("stream_archive");
     loop {
+        let read_started = Instant::now();
         let count = archive.read(&mut buffer).await?;
+        metrics.read += read_started.elapsed();
         if count == 0 {
             break;
         }
+        let write_started = Instant::now();
         if binary {
             wire::write_chunk(stream.get_mut(), &buffer[..count]).await?;
         } else {
@@ -252,20 +298,28 @@ async fn transfer(
             };
             wire::write(stream.get_mut(), &frame).await?;
         }
+        metrics.write += write_started.elapsed();
+        metrics.bytes += count as u64;
+        metrics.chunks += 1;
     }
+    metrics.record(timing.id(), "host");
+    timing.next("send_end");
     if binary {
         wire::write_chunk(stream.get_mut(), &[]).await?;
     } else {
         wire::write(stream.get_mut(), &ArchiveFrame::End).await?;
     }
+    timing.next("wait_tar");
     let code = child.wait().await?.code();
     if !matches!(code, Some(0 | 1)) {
         return Err(Error::bad("Workspace import failed."));
     }
+    timing.next("wait_guest_reply");
     let result = read_reply(&mut stream, "Guest import disconnected.").await?;
     if !result.succeeded() {
         return Err(Error::bad("Guest import failed."));
     }
+    timing.finish();
     Ok(())
 }
 
