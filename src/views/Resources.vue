@@ -3,7 +3,7 @@ import type { GithubRepository } from '../../shared/contracts'
 import type { ExecutionNode } from '../../shared/nodes'
 import { computed, ref } from 'vue'
 import { MAIN_AGENT_ID } from '../../shared/constants'
-import { DEFAULT_RESOURCES, LOCAL_NODE_ID } from '../../shared/nodes'
+import { LOCAL_NODE_ID } from '../../shared/nodes'
 import {
   api,
   notify,
@@ -71,25 +71,6 @@ const allNodes = computed({
     form.value.access.nodes = value ? null : []
   },
 })
-// The per-conversation limit is edited in GiB and stored in MiB.
-const limited = computed({
-  get: () => !!form.value.access?.maxResources,
-  set: (value: boolean) => {
-    form.value.access.maxResources = value ? { ...DEFAULT_RESOURCES } : null
-  },
-})
-
-function limitGiB(key: 'memoryMiB' | 'diskMiB') {
-  return computed({
-    get: () => form.value.access.maxResources[key] / 1024,
-    set: (value: number) => {
-      form.value.access.maxResources[key] = Math.round(value * 1024)
-    },
-  })
-}
-
-const limitMemoryGiB = limitGiB('memoryMiB')
-const limitDiskGiB = limitGiB('diskMiB')
 const projectMode = ref('local')
 const repository = ref('')
 
@@ -163,7 +144,6 @@ async function edit(item?: any) {
           timeoutMinutes: 0,
           access: {
             nodes: [LOCAL_NODE_ID],
-            maxResources: null,
             projects: null,
             skills: null,
             mcps: null,
@@ -434,30 +414,6 @@ async function remove() {
               <legend>Allowed nodes</legend>
               <label class="checkbox"><input v-model="form.access.nodes" type="checkbox" :value="LOCAL_NODE_ID">Current runner</label>
               <label v-for="node in nodes.filter(n => !n.local && !n.revoked)" :key="node.id" class="checkbox"><input v-model="form.access.nodes" type="checkbox" :value="node.id">{{ node.name }}</label>
-            </fieldset>
-            <label class="checkbox"><input v-model="limited" type="checkbox">Limit the resources this agent can request per conversation</label>
-            <fieldset v-if="limited" class="access-choices">
-              <legend>Largest conversation</legend>
-              <label>CPU<input
-                v-model.number="form.access.maxResources.cpu"
-                type="number"
-                min="1"
-                required
-              ></label>
-              <label>RAM (GiB)<input
-                v-model.number="limitMemoryGiB"
-                type="number"
-                min="0.125"
-                step="any"
-                required
-              ></label>
-              <label>Disk (GiB)<input
-                v-model.number="limitDiskGiB"
-                type="number"
-                min="0.125"
-                step="any"
-                required
-              ></label>
             </fieldset>
             <VirtualSelect
               v-model="form.access.sandbox"

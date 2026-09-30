@@ -36,6 +36,7 @@ it('formats node sizes, recovery ages and blocking reasons for people', () => {
     accepting: true,
     revoked: false,
     status: 'online',
+    slots: 4,
     tags: [],
     capabilities: {
       os: 'linux',

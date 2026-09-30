@@ -203,7 +203,7 @@ async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Resul
             let run = authorize(s, bearer).await?;
             ToolResult::from_result(crate::nodes::moves::list(s, &run).await, summary)
         }
-        "request_capacity" => {
+        "move_to_node" => {
             let run = authorize(s, bearer).await?;
             let result = crate::nodes::moves::request_by_agent(s, &run, args).await;
             ToolResult::from_result(result, summary)

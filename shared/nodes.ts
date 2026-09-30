@@ -1,8 +1,5 @@
 export const LOCAL_NODE_ID = '00000000-0000-4000-8000-000000000002'
 
-// The backend applies the same defaults when a conversation has not requested resources.
-export const DEFAULT_RESOURCES = { cpu: 2, memoryMiB: 4096, diskMiB: 32768 }
-
 export interface NodeResources {
   cpu: number
   memoryMiB: number
@@ -25,8 +22,11 @@ export interface ExecutionNode {
     fuse?: boolean
   }
   limits: NodeResources
-  reserved?: NodeResources
-  available?: NodeResources
+  slots: number
+  occupiedSlots?: number
+  availableSlots?: number
+  usage?: { memoryMiB: number, diskMiB: number }
+  pressure?: string | null
   executionReady?: boolean
   maintenance?: string | null
   maintenanceError?: string | null
@@ -105,6 +105,8 @@ export function nodeDiagnostics(node: ExecutionNode, now = Date.now()) {
     reasons.push(node.updateError ? `The runtime is not ready: ${node.updateError}` : 'The runtime is not ready yet or does not match the version approved by the master.')
   if (node.maintenance)
     reasons.push('Maintenance in progress: new work waits until the update finishes.')
+  if (node.pressure)
+    reasons.push(node.pressure === 'memory' ? 'Shared RAM is under pressure: new work waits for headroom.' : 'Shared disk space is low: new work waits for headroom.')
   if (!node.accepting)
     reasons.push('New work is paused on this machine (Configure → Accept new work).')
   if (!node.agents?.length)

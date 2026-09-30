@@ -335,7 +335,8 @@ abstract class NodePlacementCases {
                     .int,
             )
             compose.onNodeWithText("Configurer", substring = false).performScrollTo().performClick()
-            compose.onNodeWithText("Plafond CPU").performTextReplacement("3")
+            compose.onNodeWithText("Budget CPU partagé").performTextReplacement("3")
+            compose.onNodeWithText("Slots d’exécution").performTextReplacement("12")
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(10000) { writes.any { it.first == "/api/nodes/node" } }
             assertEquals(

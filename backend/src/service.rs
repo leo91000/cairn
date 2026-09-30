@@ -511,7 +511,7 @@ fn inherit_agent_settings(input: &mut Value, existing: &Value) {
     if !input["access"].is_object() {
         return;
     }
-    for key in ["nodes", "maxResources"] {
+    for key in ["nodes"] {
         if input["access"].get(key).is_none() {
             input["access"][key] = policy(existing)[key].clone();
         }
@@ -578,7 +578,6 @@ pub fn policy(agent: &Value) -> Value {
         "github": true,
         "sandbox": "yolo",
         "nodes": [crate::nodes::LOCAL_NODE_ID],
-        "maxResources": null,
     });
     merge(&mut value, &agent["access"]);
     // Agents restricted before MCP permissions existed get no MCP connection.

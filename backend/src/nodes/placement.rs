@@ -1,5 +1,5 @@
 //! Atomic admission and durable attempt ownership. Failed admission changes nothing.
-use super::{LOCAL_NODE_ID, ResourceKind, Resources, is_active_attempt};
+use super::{LOCAL_NODE_ID, Resources, is_active_attempt};
 use crate::{
     config::now,
     error::{Error, Result},
@@ -100,31 +100,16 @@ struct Request<'a> {
     run: &'a Value,
     access: &'a Value,
     checkpoint: &'a Value,
-    /// The run asked for these resources; defaults are bounded per node instead.
-    explicit: bool,
-    resources: Resources,
     moving: bool,
     required_runtime: Option<&'a str>,
 }
 
 impl<'a> Request<'a> {
     fn new(run: &'a Value, access: &'a Value, checkpoint: &'a Value) -> Result<Self> {
-        let requested = run
-            .get("requestedResources")
-            .filter(|v| v.is_object())
-            .or_else(|| run.get("resources").filter(|v| v.is_object()));
-        let resources = match requested {
-            Some(value) => serde_json::from_value(value.clone())
-                .map_err(|_| Error::bad("Invalid execution resources."))?,
-            None => defaults(),
-        };
-        resources.validate()?;
         Ok(Self {
             run,
             access,
             checkpoint,
-            explicit: requested.is_some(),
-            resources,
             moving: run["placementTransition"] == true,
             required_runtime: run["requiredRuntime"]
                 .as_str()
@@ -181,31 +166,18 @@ impl<'a> Request<'a> {
             && ready
     }
 
-    /// The resources to reserve on `node`, if the run fits its bounds at all.
+    /// VM address-space ceilings follow the node; they never reserve host capacity.
     fn resources_for(&self, node: &Value) -> Option<Resources> {
-        if self.explicit {
-            return Some(self.resources.clone());
-        }
-        // Defaults also respect the agent's own resource limit.
-        let bound = |kind: ResourceKind| {
-            let node_limit = if kind == ResourceKind::Disk {
-                u64::MAX
-            } else {
-                node["limits"][kind.key()].as_u64().unwrap_or(0)
-            };
-            let agent_limit = self.access["maxResources"][kind.key()]
-                .as_u64()
-                .unwrap_or(u64::MAX);
-            self.resources.amount(kind).min(node_limit).min(agent_limit)
-        };
-        let resources = Resources {
-            cpu: u32::try_from(bound(ResourceKind::Cpu)).unwrap_or(u32::MAX),
-            memory_mi_b: bound(ResourceKind::Memory),
-            disk_mi_b: bound(ResourceKind::Disk),
-        };
-        let usable =
-            resources.cpu >= 1 && resources.memory_mi_b >= 128 && resources.disk_mi_b >= 128;
-        usable.then_some(resources)
+        let limits: Resources = serde_json::from_value(node["limits"].clone()).ok()?;
+        let disk = self.run["resources"]["diskMiB"]
+            .as_u64()
+            .or(self.checkpoint["resources"]["diskMiB"].as_u64())
+            .unwrap_or(limits.disk_mi_b);
+        Some(Resources {
+            cpu: limits.cpu.min(32),
+            memory_mi_b: limits.memory_mi_b,
+            disk_mi_b: disk,
+        })
     }
 }
 
@@ -222,62 +194,33 @@ impl Fleet<'_> {
             .filter(move |a| a["nodeId"] == node && is_active_attempt(a))
     }
 
-    /// CPU or RAM left on `node` once other conversations' reservations are counted.
-    fn free(&self, request: &Request, node: &Value, kind: ResourceKind) -> u64 {
-        let id = text(node, "id");
-        // A moving conversation's own reservation is replaced, not added to.
+    /// Each live execution or pending destination owns one slot, atomically.
+    fn free_slots(&self, request: &Request, node: &Value) -> u64 {
         let used = self
-            .active_on(id)
-            .filter(|a| !(request.moving && a["runId"] == request.run["id"]))
-            .map(|a| a["resources"][kind.key()].as_u64().unwrap_or(0))
-            .fold(0u64, u64::saturating_add);
-        let limit = node["limits"][kind.key()].as_u64().unwrap_or(0);
-        limit.saturating_sub(used)
+            .active_on(text(node, "id"))
+            .filter(|attempt| !(request.moving && attempt["runId"] == request.run["id"]))
+            .count() as u64;
+        let capacity = super::slots(node).min(node["runtimeSlots"].as_u64().unwrap_or(u64::MAX));
+        capacity.saturating_sub(used)
     }
 
-    /// Remaining CPU/RAM headroom after this reservation, or `None` if it does not fit.
     fn fit(&self, request: &Request, node: &Value, resources: &Resources) -> Result<Option<f64>> {
-        let id = text(node, "id");
+        let free = self.free_slots(request, node);
         let storage_policy = Policy::for_node(&node["storage"])?;
-        let mut headroom = f64::MAX;
-        for kind in [ResourceKind::Cpu, ResourceKind::Memory] {
-            let current = if request.moving {
-                self.active_on(id)
-                    .filter(|a| a["runId"] == request.run["id"])
-                    .map(|a| a["resources"][kind.key()].as_u64().unwrap_or(0))
-                    .max()
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-            let needed = current.max(resources.amount(kind));
-            let free = self.free(request, node, kind);
-            if needed > free {
-                return Ok(None);
-            }
-            let limit = node["limits"][kind.key()].as_u64().unwrap_or(0);
-            if limit > 0 {
-                headroom = headroom.min((free - needed) as f64 / limit as f64);
-            }
+        if free == 0
+            || node["pressure"].is_string()
+            || !self.disk_fits(request, node, resources, &storage_policy)
+        {
+            return Ok(None);
         }
-        let disk_fits = self.disk_fits(request, node, resources, &storage_policy);
-        Ok(disk_fits.then_some(headroom))
+        Ok(Some(free as f64 / super::slots(node) as f64))
     }
 
-    /// What `node` could still offer, for a conversation that does not fit anywhere.
-    fn describe(&self, request: &Request, node: &Value, resources: &Resources) -> Result<String> {
+    fn describe(&self, request: &Request, node: &Value, _resources: &Resources) -> Result<String> {
         let name = node["name"].as_str().unwrap_or_else(|| text(node, "id"));
-        let cpu = self.free(request, node, ResourceKind::Cpu);
-        let memory = self.free(request, node, ResourceKind::Memory);
-        let storage_policy = Policy::for_node(&node["storage"])?;
-        let disk = if self.disk_fits(request, node, resources, &storage_policy) {
-            ""
-        } else {
-            ", not enough disk"
-        };
-        Ok(format!(
-            "{name} has {cpu} CPU and {memory} MiB RAM free{disk}"
-        ))
+        let free = self.free_slots(request, node);
+        let pressure = node["pressure"].as_str().unwrap_or("shared disk space");
+        Ok(format!("{name} has {free} free slots; check {pressure}"))
     }
 
     fn disk_fits(
@@ -295,7 +238,15 @@ impl Fleet<'_> {
                 .unwrap_or(free);
             let pending = self.active_on(id).count() as u64;
             let reserve = storage_policy.reserve(total.saturating_mul(1_048_576)) / 1_048_576;
-            return free > reserve + (pending + 1) * JOURNAL_MIB;
+            let budget_free = node["limits"]["diskMiB"]
+                .as_u64()
+                .unwrap_or(free)
+                .saturating_sub(node["usage"]["diskMiB"].as_u64().unwrap_or(0));
+            let budget_total = node["limits"]["diskMiB"].as_u64().unwrap_or(total);
+            let budget_reserve =
+                storage_policy.reserve(budget_total.saturating_mul(1_048_576)) / 1_048_576;
+            let journals = (pending + 1) * JOURNAL_MIB;
+            return free > reserve + journals && budget_free > budget_reserve + journals;
         }
         let run_id = &request.run["id"];
         let used = self
@@ -323,7 +274,7 @@ struct Candidate {
 }
 
 impl Candidate {
-    /// Automatic placement spreads work: a preferred node wins, otherwise the most CPU/RAM headroom.
+    /// Automatic placement spreads work by free-slot fraction; a preferred node wins.
     fn beats(&self, other: &Self) -> bool {
         (self.preferred && !other.preferred)
             || (self.preferred == other.preferred && self.headroom > other.headroom)
@@ -353,6 +304,7 @@ fn development_node(configured: bool) -> Value {
             "memoryMiB": 1_073_741_824u64,
             "diskMiB": 1_099_511_627_776u64,
         },
+        "slots": 4096,
         "capabilities": { "kvm": configured, "fuse": true },
         "runtimeId": "local",
     })
@@ -426,7 +378,7 @@ impl Snapshot {
                 best = Some(candidate);
             }
         }
-        best.ok_or_else(|| Error::unavailable(shortage(&request.resources, &full)))
+        best.ok_or_else(|| Error::unavailable(shortage(&full)))
     }
 }
 
@@ -438,17 +390,14 @@ pub fn is_no_capacity(error: &Error) -> bool {
     error.is_unavailable() && error.message.starts_with(NO_CAPACITY)
 }
 
-fn shortage(requested: &Resources, full: &[String]) -> String {
+fn shortage(full: &[String]) -> String {
     if full.is_empty() {
         return format!(
             "{NO_CAPACITY} is online and accepting this conversation. The existing environment is preserved."
         );
     }
     format!(
-        "{NO_CAPACITY} has the required capacity for {} CPU, {} MiB RAM and {} MiB disk: {}. The existing environment is preserved.",
-        requested.cpu,
-        requested.memory_mi_b,
-        requested.disk_mi_b,
+        "{NO_CAPACITY} has a free execution slot and enough shared headroom: {}. The existing environment is preserved.",
         full.join("; ")
     )
 }

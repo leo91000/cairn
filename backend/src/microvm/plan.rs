@@ -95,6 +95,11 @@ impl Plan {
         &self.0["storage"]
     }
 
+    pub fn set_vm_limits(&mut self, cpu: u32, memory: u64) {
+        self.0["resources"]["cpu"] = cpu.into();
+        self.0["resources"]["memoryMiB"] = memory.into();
+    }
+
     pub fn resources(&self) -> Option<&Value> {
         self.0.get("resources")
     }

@@ -93,6 +93,7 @@ pub(crate) struct Reservation {
 
 impl Reservation {
     pub(crate) fn filled(&self, path: &Path, size: u64) -> io::Result<()> {
+        crate::microvm::budget::charge_disk(&self.state, size.saturating_add(4095) / 4096 * 4096)?;
         let modified = std::fs::metadata(path)?
             .modified()
             .unwrap_or(SystemTime::UNIX_EPOCH);

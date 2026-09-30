@@ -1,11 +1,21 @@
 //! Bounded execution slots; each reservation boots its own S3-backed VM.
-use super::{host::Vm, plan::Plan};
+use super::{
+    budget::{self, Budget},
+    host::Vm,
+    plan::Plan,
+};
 use crate::{
     error::{Error, Result},
     skills::private_dir,
 };
 use serde::Serialize;
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 use tokio::sync::{Mutex, OnceCell};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -16,6 +26,9 @@ struct Slots {
 
 impl Slots {
     fn reserve(&mut self, capacity: usize) -> Option<usize> {
+        if self.occupied.iter().filter(|used| **used).count() >= capacity {
+            return None;
+        }
         let index = match self.occupied.iter().position(|v| !v) {
             Some(index) => index,
             None if self.occupied.len() < capacity => {
@@ -50,7 +63,10 @@ pub struct Reservation {
 }
 
 pub struct Pool {
-    capacity: usize,
+    capacity: AtomicUsize,
+    budget: Mutex<Option<Budget>>,
+    cgroup: OnceCell<PathBuf>,
+    hardware: OnceCell<serde_json::Value>,
     state: PathBuf,
     image: PathBuf,
     slots: Mutex<Slots>,
@@ -80,7 +96,10 @@ impl Pool {
         private_dir(&entrypoint).await?;
         tokio::fs::copy(std::env::current_exe()?, entrypoint.join("leo")).await?;
         Ok(Arc::new(Self {
-            capacity,
+            capacity: AtomicUsize::new(capacity),
+            budget: Mutex::new(None),
+            cgroup: OnceCell::new(),
+            hardware: OnceCell::new(),
             state,
             image,
             slots: Mutex::new(Slots::default()),
@@ -89,10 +108,120 @@ impl Pool {
         }))
     }
 
+    pub async fn initialize(&self, cgroup: PathBuf) -> Result<()> {
+        let original = self.state.join("node-capabilities.json");
+        let detected = if original.exists() {
+            serde_json::from_slice(&tokio::fs::read(&original).await?)?
+        } else {
+            let detected = crate::nodes::connector::capabilities(&self.state)?;
+            crate::skills::atomic_write(&original, &serde_json::to_vec(&detected)?).await?;
+            detected
+        };
+        let limits = crate::nodes::Resources {
+            cpu: detected["cpu"].as_u64().unwrap_or(1) as u32,
+            memory_mi_b: detected["memoryMiB"].as_u64().unwrap_or(128),
+            disk_mi_b: detected["diskMiB"].as_u64().unwrap_or(128),
+        };
+        self.hardware
+            .set(detected)
+            .map_err(|_| Error::conflict("Controller already initialized."))?;
+        self.cgroup
+            .set(cgroup)
+            .map_err(|_| Error::conflict("Controller already initialized."))?;
+        let persisted = self.state.join(budget::FILE);
+        let initial = if persisted.exists() {
+            serde_json::from_slice(&tokio::fs::read(persisted).await?)?
+        } else {
+            Budget {
+                slots: self.capacity.load(Ordering::SeqCst),
+                limits,
+            }
+        };
+        self.configure(initial).await
+    }
+
+    pub fn hardware(&self) -> Option<&serde_json::Value> {
+        self.hardware.get()
+    }
+
+    pub async fn budget(&self) -> Option<Budget> {
+        self.budget.lock().await.clone()
+    }
+
+    pub async fn configure(&self, next: Budget) -> Result<()> {
+        next.validate()?;
+        // Serialize budget changes with admission, always taking slots before budget.
+        let _slots = self.slots.lock().await;
+        let mut current = self.budget.lock().await;
+        let hardware = self
+            .hardware
+            .get()
+            .ok_or_else(|| Error::unavailable("Controller budgets are not initialized."))?;
+        if u64::from(next.limits.cpu) > hardware["cpu"].as_u64().unwrap_or(0)
+            || next.limits.memory_mi_b > hardware["memoryMiB"].as_u64().unwrap_or(0)
+        {
+            return Err(Error::bad("Shared budgets exceed controller capacity."));
+        }
+        let cgroup = self.cgroup.get().unwrap();
+        next.apply(cgroup)?;
+        let write = crate::skills::atomic_write(
+            &self.state.join(budget::FILE),
+            &serde_json::to_vec(&next)?,
+        )
+        .await;
+        if let Err(error) = write {
+            if let Some(previous) = current.as_ref() {
+                previous.apply(cgroup)?;
+            }
+            return Err(error);
+        }
+        self.capacity.store(next.slots, Ordering::SeqCst);
+        *current = Some(next);
+        Ok(())
+    }
+
+    pub async fn usage(&self) -> Result<(serde_json::Value, Option<&'static str>)> {
+        let Some(budget) = self.budget().await else {
+            return Ok((serde_json::Value::Null, None));
+        };
+        let memory = budget::memory_usage(self.cgroup.get().unwrap())? / 1_048_576;
+        let disk = budget::disk_bytes(&self.state)?;
+        let (total, free) = crate::storage::policy::space(&self.state)?;
+        let policy = match std::fs::read(self.state.join("storage-policy.json")) {
+            Ok(bytes) => serde_json::from_slice::<crate::storage::policy::Policy>(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                crate::storage::policy::Policy::default()
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let reserve = policy.reserve(total);
+        let pressure = budget::pressure(memory, budget.limits.memory_mi_b, free, reserve);
+        Ok((
+            serde_json::json!({ "memoryMiB": memory, "diskMiB": disk / 1_048_576 }),
+            pressure,
+        ))
+    }
+
+    pub async fn monitor(self: Arc<Self>) {
+        loop {
+            tokio::select! {
+                () = self.stop.cancelled() => return,
+                () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+            }
+            if let Ok((usage, _)) = self.usage().await
+                && let Some(budget) = self.budget().await
+                && usage["memoryMiB"].as_u64().unwrap_or(0) > budget.limits.memory_mi_b * 85 / 100
+                && let Err(error) = budget::reclaim(&self.state).await
+            {
+                tracing::warn!(message = %error.message, "Could not reclaim shared VM memory");
+            }
+        }
+    }
+
     pub async fn health(&self) -> Health {
         let slots = self.slots.lock().await;
         Health {
-            capacity: self.capacity,
+            capacity: self.capacity.load(Ordering::SeqCst),
             occupied: slots.occupied.iter().filter(|v| **v).count(),
             ready: 0,
             preparing: false,
@@ -104,8 +233,13 @@ impl Pool {
         if self.stop.is_cancelled() {
             return Err(Error::unavailable("VM controller is stopping."));
         }
+        if self.usage().await?.1.is_some() {
+            return Err(Error::unavailable(
+                "Shared node resources are under pressure.",
+            ));
+        }
         let slot = slots
-            .reserve(self.capacity)
+            .reserve(self.capacity.load(Ordering::SeqCst))
             .ok_or_else(|| Error::unavailable("All VM slots are occupied."))?;
         Ok(Reservation {
             pool: self.clone(),
@@ -124,7 +258,7 @@ impl Pool {
 impl Reservation {
     pub async fn execute(
         mut self,
-        plan: Plan,
+        mut plan: Plan,
         socket: Arc<OnceCell<PathBuf>>,
         stop: CancellationToken,
     ) -> Result<i32> {
@@ -143,6 +277,9 @@ impl Reservation {
                 return Err(Error::conflict(
                     "S3-backed storage is required for VM execution.",
                 ));
+            }
+            if let Some(budget) = self.pool.budget().await {
+                plan.set_vm_limits(budget.limits.cpu.min(32), budget.limits.memory_mi_b);
             }
             let disk_mib = plan.as_value()["resources"]["diskMiB"]
                 .as_u64()
@@ -206,6 +343,20 @@ impl Drop for Reservation {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn reducing_slots_keeps_occupied_work_and_blocks_reusing_a_free_index() {
+        let mut slots = Slots::default();
+        assert_eq!(slots.reserve(4), Some(1));
+        assert_eq!(slots.reserve(4), Some(2));
+        assert_eq!(slots.reserve(4), Some(3));
+        slots.occupied[0] = false;
+        assert_eq!(slots.reserve(2), None);
+        assert!(slots.occupied[1] && slots.occupied[2]);
+        slots.occupied[1] = false;
+        assert_eq!(slots.reserve(2), Some(1));
+        assert_eq!(slots.reserve(2), None);
+    }
 
     #[tokio::test]
     async fn finished_execution_cancels_captures_before_releasing_its_slot() {

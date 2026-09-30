@@ -698,6 +698,8 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
     if path == "/health" {
         return Json(json!({
             "status": "ok",
+            "sharedResources": true,
+            "budget": { "slots": 4, "limits": { "cpu": 7, "memoryMiB": 15872, "diskMiB": 104857 } },
             "runtimeId": "fixture",
             "runtimes": ["fixture"],
             "capabilities": {
@@ -1024,7 +1026,8 @@ async fn queued_work_waits_for_node_capacity_without_failing() {
             "executionReady": true,
             "lastSeen": now() + 60_000,
             "capabilities": {"kvm": true, "fuse": true},
-            "limits": {"cpu": 1, "memoryMiB": 8192, "diskMiB": 65536}
+            "limits": {"cpu": 1, "memoryMiB": 8192, "diskMiB": 65536},
+            "pressure": "memory"
         })
     };
     s.store.put("nodes", put_node("Laptop")).await.unwrap();
@@ -1034,7 +1037,7 @@ async fn queued_work_waits_for_node_capacity_without_failing() {
         .unwrap();
     agent["access"]["nodes"] = json!([node]);
     s.store.put("agents", agent).await.unwrap();
-    let run = fixture.enqueue("Needs more CPU than the node has").await;
+    let run = fixture.enqueue("Waits for shared RAM headroom").await;
     let run_id = text(&run, "id");
     let resources = json!({"cpu": 2, "memoryMiB": 4096, "diskMiB": 32768});
     s.store
@@ -1048,9 +1051,9 @@ async fn queued_work_waits_for_node_capacity_without_failing() {
         })
         .await;
     let reason = text(&waiting, "accountWaitReason");
-    assert!(reason.contains("2 CPU, 4096 MiB RAM"), "{reason}");
+    assert!(reason.contains("shared headroom"), "{reason}");
     assert!(
-        reason.contains("Laptop has 1 CPU and 8192 MiB RAM free"),
+        reason.contains("Laptop has 4 free slots; check memory"),
         "{reason}"
     );
     assert_eq!(waiting["status"], "queued");

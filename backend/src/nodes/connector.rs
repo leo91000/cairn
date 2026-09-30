@@ -44,6 +44,11 @@ struct HeartbeatRequest<'a> {
     data_root: &'a Value,
     capabilities: &'a Value,
     runtimes: &'a Value,
+    pool: &'a Value,
+    usage: &'a Value,
+    pressure: &'a Value,
+    shared_resources: bool,
+    budget: &'a Value,
 }
 
 pub(crate) fn master(input: &str) -> Result<url::Url> {
@@ -295,6 +300,11 @@ async fn heartbeat(
             data_root: &health["dataRoot"],
             capabilities: &health["capabilities"],
             runtimes: &health["runtimes"],
+            pool: &health["pool"],
+            usage: &health["usage"],
+            pressure: &health["pressure"],
+            shared_resources: health["sharedResources"] == true,
+            budget: &health["budget"],
         };
         let request = client
             .post(
@@ -322,6 +332,20 @@ async fn heartbeat(
                     .map_err(|_| Error::bad("Invalid master heartbeat."))?;
                 if ready {
                     forward_leases(client, &runner, &value, started).await?;
+                    let budget = json!({ "slots": value["slots"], "limits": value["limits"] });
+                    if health["budget"].is_object() && health["budget"] != budget {
+                        let response = client
+                            .post(format!("{}/node-budget", runner.trim_end_matches('/')))
+                            .bearer_auth(runner_credential().await?)
+                            .json(&budget)
+                            .send()
+                            .await;
+                        if !response.is_ok_and(|reply| reply.status().is_success()) {
+                            tracing::warn!(
+                                "Controller rejected shared node budget; retrying next heartbeat."
+                            );
+                        }
+                    }
                 }
             }
             _ => tracing::warn!("Node heartbeat failed; retrying without starting work."),

@@ -165,6 +165,12 @@ fn firecracker_config(network: &Network, resources: &Resources, slot: usize) -> 
             "mem_size_mib": resources.memory_mi_b,
             "smt": false
         },
+        "balloon": {
+            "amount_mib": 0,
+            "deflate_on_oom": true,
+            "stats_polling_interval_s": 1,
+            "free_page_reporting": true
+        },
         "network-interfaces": [
             { "iface_id": "net", "host_dev_name": network.tap, "guest_mac": network.mac }
         ],
@@ -261,6 +267,7 @@ impl Vm {
         private_dir(&disk_dir).await?;
         let lock = lock_disk(&disk_dir)?;
         let id = crate::config::id();
+        let current_kernel = image.join("vmlinux");
         let image = retained_image(state, image, &disk_dir).await?;
         if disk_dir.join("restore.pending").exists() {
             return Err(Error::conflict("VM restore is incomplete."));
@@ -286,7 +293,7 @@ impl Vm {
             uid: 40000 + slot as u32,
         };
         let result = tokio::select! {
-            result = vm.launch(state, &image, &id, &resources, slot, &mut timing) => result,
+            result = vm.launch(state, (&image, &current_kernel), &id, &resources, slot, &mut timing) => result,
             () = stop.cancelled() => Err(Error::unavailable("VM preparation stopped.")),
         };
         if let Err(error) = result {
@@ -303,7 +310,7 @@ impl Vm {
     async fn launch(
         &mut self,
         state: &Path,
-        image: &Path,
+        (image, kernel): (&Path, &Path),
         id: &str,
         resources: &Resources,
         slot: usize,
@@ -320,7 +327,7 @@ impl Vm {
             self.uid,
         )?);
         tokio::fs::hard_link(image.join("root.ext4"), jail.join("root.ext4")).await?;
-        tokio::fs::copy(image.join("vmlinux"), jail.join("vmlinux")).await?;
+        tokio::fs::copy(kernel, jail.join("vmlinux")).await?;
         self.network.create(self.uid).await?;
 
         timing.next("spawn_and_guest_ready");

@@ -43,10 +43,6 @@ fun NodePlacement(vm: LeoViewModel, run: Run) {
     var mode by remember(run.id) { mutableStateOf("automatic") }
     var selected by remember(run.id) { mutableStateOf(run.nodeId.orEmpty()) }
     var destination by remember(run.id) { mutableStateOf("") }
-    val initial = run.resources ?: DEFAULT_RESOURCES
-    var cpu by remember(run.id) { mutableStateOf(initial.cpu.toString()) }
-    var memory by remember(run.id) { mutableStateOf(gib(initial.memoryMiB)) }
-    var disk by remember(run.id) { mutableStateOf(gib(initial.diskMiB)) }
     var busy by remember(run.id) { mutableStateOf(false) }
     var error by remember(run.id) { mutableStateOf<String?>(null) }
     var saved by remember(run.id) { mutableStateOf<String?>(null) }
@@ -136,7 +132,6 @@ fun NodePlacement(vm: LeoViewModel, run: Run) {
             },
             supportingContent = {
                 Column {
-                    run.resources?.let { Text("${it.cpu} CPU · ${formatMiB(it.memoryMiB)} RAM") }
                     Text(sync, color = tone, style = MaterialTheme.typography.bodySmall)
                 }
             },
@@ -147,12 +142,6 @@ fun NodePlacement(vm: LeoViewModel, run: Run) {
         DetailSheet("Node d’exécution", { expanded = false }) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(current, style = MaterialTheme.typography.titleMedium)
-                run.resources?.let {
-                    Text(
-                        "${it.cpu} CPU · ${formatMiB(it.memoryMiB)} RAM",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
                 if (run.storage?.mode == "on-demand")
                     Text(
                         "Fichiers chargés à la demande",
@@ -231,7 +220,8 @@ fun NodePlacement(vm: LeoViewModel, run: Run) {
                     "preferred" ->
                         "Utilise cette node si elle est disponible, sinon reprend ailleurs."
                     "fixed" -> "Attend cette machine, sans bascule automatique."
-                    else -> "Choisit la node autorisée avec le plus de CPU et de RAM libres."
+                    else ->
+                        "Choisit la node autorisée avec des slots libres et des ressources disponibles."
                 } + " Cela ne déplace pas la conversation maintenant.",
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -287,28 +277,10 @@ fun NodePlacement(vm: LeoViewModel, run: Run) {
             Choice("Destination", destination, others.map { it.id to it.name }) {
                 if (!busy) destination = it
             }
-            Field(
-                "CPU",
-                cpu,
-                { cpu = it },
-                enabled = !busy,
-                keyboardOptions = InputKeyboards.Number,
-            )
-            Field("RAM (Gio)", memory, { memory = it }, enabled = !busy)
-            Field("Disque (Gio)", disk, { disk = it }, enabled = !busy)
-            val resources =
-                cpu.toIntOrNull()
-                    ?.takeIf { it > 0 }
-                    ?.let { c ->
-                        mib(memory)?.let { m -> mib(disk)?.let { d -> NodeResources(c, m, d) } }
-                    }
             TextButton(
                 enabled =
                     !busy &&
                         destination.isNotEmpty() &&
-                        resources != null &&
-                        resources.memoryMiB >= 128 &&
-                        resources.diskMiB >= initial.diskMiB &&
                         run.status in listOf("running", "succeeded") &&
                         run.sessionId != null &&
                         run.nodeState == null,
@@ -320,9 +292,6 @@ fun NodePlacement(vm: LeoViewModel, run: Run) {
                                 "/nodes/placement/${run.id}/move",
                                 buildJsonObject {
                                     put("nodeId", destination)
-                                    put("cpu", resources!!.cpu)
-                                    put("memoryMiB", resources.memoryMiB)
-                                    put("diskMiB", resources.diskMiB)
                                 },
                             )
                         },
@@ -333,7 +302,7 @@ fun NodePlacement(vm: LeoViewModel, run: Run) {
                 Text("Déplacer maintenant")
             }
             Text(
-                "Réserve la destination, suspend la conversation, transfère son environnement puis la reprend là-bas. Les commandes en cours sont interrompues. Le disque ne peut pas rétrécir.",
+                "Réserve la destination, suspend la conversation, transfère son environnement puis la reprend là-bas. Les commandes en cours sont interrompues. Les ressources sont partagées par les slots de la node.",
                 style = MaterialTheme.typography.bodySmall,
             )
             saved?.let { Text(it) }

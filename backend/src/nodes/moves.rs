@@ -1,5 +1,5 @@
 //! Durable pause/copy/resume coordination. Never changes a destination before fencing.
-use super::{NodeState, ResourceKind};
+use super::NodeState;
 use crate::{
     config::{id, now},
     error::{Error, Result},
@@ -11,22 +11,19 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::time::Duration;
 
-const REQUEST_CAPACITY_DESCRIPTION: &str = "Request CPU/RAM/disk for this conversation on an authorized node; call list_nodes first to see node ids, tags and available capacity. Failure leaves the current conversation running. A successful request schedules pause, full environment transfer and resume. Optional waitSeconds respects the configured limit (one hour by default); GPU is not supported.";
-const LIST_NODES_DESCRIPTION: &str = "List the execution nodes this conversation's agent may use, with their tags and currently available CPU/RAM/disk, and this agent's own resource limit if any. Use the returned ids and tags with request_capacity.";
+const MOVE_DESCRIPTION: &str = "Move this conversation to an authorized node. Call list_nodes first to see ids, tags, shared budgets and free slots. Failure leaves the current conversation running. Success saves, pauses and resumes on the destination, interrupting running commands. Optional waitSeconds respects the configured wait limit.";
+const LIST_NODES_DESCRIPTION: &str = "List authorized execution nodes with their tags, shared CPU/RAM/disk budgets, slot availability and current resource pressure. Use a returned node id with move_to_node. Resources are shared automatically; agents do not request allocations.";
 /// A requested move waits this long for the conversation to settle before pausing it.
 const PAUSE_DELAY_MS: i64 = 2000;
 const MAX_WAIT_SECONDS: u64 = 3600;
 
 pub fn tool() -> Value {
     json!({
-        "name": "request_capacity",
-        "description": REQUEST_CAPACITY_DESCRIPTION,
+        "name": "move_to_node",
+        "description": MOVE_DESCRIPTION,
         "inputSchema": {
             "type": "object",
             "properties": {
-                "cpu": { "type": "integer", "minimum": 1 },
-                "memoryMiB": { "type": "integer", "minimum": 128 },
-                "diskMiB": { "type": "integer", "minimum": 128 },
                 "requiredTags": {
                     "type": "array",
                     "maxItems": 32,
@@ -35,7 +32,7 @@ pub fn tool() -> Value {
                 "nodeId": { "type": "string", "format": "uuid" },
                 "waitSeconds": { "type": "integer", "minimum": 0 },
             },
-            "required": ["cpu", "memoryMiB", "diskMiB"],
+            "required": ["nodeId"],
             "additionalProperties": false,
         },
     })
@@ -62,7 +59,10 @@ struct NodeSummary<'a> {
     tags: Vec<&'a Value>,
     status: &'a Value,
     accepting_work: &'a Value,
-    available: &'a Value,
+    slots: u64,
+    available_slots: &'a Value,
+    usage: &'a Value,
+    pressure: &'a Value,
     limits: &'a Value,
     current: bool,
 }
@@ -109,7 +109,10 @@ pub async fn list(s: &Service, run: &Value) -> Result<Value> {
                 tags: super::node_tags(node).collect(),
                 status: &node["status"],
                 accepting_work: &node["accepting"],
-                available: &node["available"],
+                slots: super::slots(node),
+                available_slots: &node["availableSlots"],
+                usage: &node["usage"],
+                pressure: &node["pressure"],
                 limits: &node["limits"],
                 current: node["id"] == *current,
             })
@@ -118,8 +121,6 @@ pub async fn list(s: &Service, run: &Value) -> Result<Value> {
     Ok(json!({
         "nodes": nodes,
         "currentNodeId": current,
-        "currentResources": run["resources"],
-        "maxResources": access["maxResources"],
     }))
 }
 
@@ -128,48 +129,15 @@ pub async fn request(s: &Service, run: &Value, args: &Value) -> Result<Value> {
     requested(s, run, args, false).await
 }
 
-/// An agent's own request, bounded by the resource limit its owner configured.
+/// Agents choose a node; the runtime owns all resource sharing.
 pub async fn request_by_agent(s: &Service, run: &Value, args: &Value) -> Result<Value> {
-    let agent = run_agent(s, run).await?;
-    let limit = crate::service::policy(&agent)["maxResources"].clone();
-    let exceeds = |kind: &ResourceKind| args[kind.key()].as_u64() > limit[kind.key()].as_u64();
-    if limit.is_object() && ResourceKind::ALL.iter().any(exceeds) {
-        return Err(Error::forbidden(format!(
-            "This agent may request at most {} CPU, {} MiB RAM and {} MiB disk per conversation.",
-            limit["cpu"], limit["memoryMiB"], limit["diskMiB"]
-        )));
-    }
+    crate::validation::uuid(text(args, "nodeId"))?;
     requested(s, run, args, true).await.map_err(|mut error| {
-        // The agent decides whether to wait or ask for less.
         if super::placement::is_no_capacity(&error) {
-            error.message.push_str(
-                " The current conversation keeps running. Call request_capacity again with waitSeconds to wait for room, or request fewer resources.",
-            );
+            error.message.push_str(" The current conversation keeps running. Retry move_to_node with waitSeconds or choose another node.");
         }
         error
     })
-}
-
-/// The requested resources, which may not shrink the conversation's existing disk.
-fn requested_resources(run: &Value, args: &Value) -> Result<super::Resources> {
-    let fields = json!({
-        "cpu": args["cpu"],
-        "memoryMiB": args["memoryMiB"],
-        "diskMiB": args["diskMiB"],
-    });
-    let resources: super::Resources =
-        serde_json::from_value(fields).map_err(|_| Error::bad("Invalid capacity request."))?;
-    resources.validate()?;
-    let existing = run["resources"]["diskMiB"]
-        .as_u64()
-        .or(run["requestedResources"]["diskMiB"].as_u64())
-        .unwrap_or(super::placement::defaults().disk_mi_b);
-    if resources.disk_mi_b < existing {
-        return Err(Error::bad(
-            "An existing VM disk cannot shrink; request at least its current disk size.",
-        ));
-    }
-    Ok(resources)
 }
 
 fn validate_destination(args: &Value) -> Result<()> {
@@ -193,7 +161,14 @@ fn validate_destination(args: &Value) -> Result<()> {
 }
 
 async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Result<Value> {
-    let resources = requested_resources(run, args)?;
+    if ["cpu", "memoryMiB", "diskMiB"]
+        .iter()
+        .any(|key| args.get(key).is_some())
+    {
+        return Err(Error::bad(
+            "Choose a node; resource requests are no longer supported.",
+        ));
+    }
     let wait = args["waitSeconds"].as_u64().unwrap_or(0);
     let max_wait = super::publication::settings(s).await?["maxCapacityWaitSeconds"]
         .as_u64()
@@ -216,7 +191,6 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
     let reservation = id();
     let mut selecting = run.clone();
     selecting["placementTransition"] = true.into();
-    selecting["requestedResources"] = serde_json::to_value(&resources)?;
     selecting["targetNodeId"] = args["nodeId"].clone();
     selecting["requiredTags"] = args
         .get("requiredTags")
@@ -243,13 +217,9 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
         return Err(error);
     }
     let destination = destination_name(s, selected["nodeId"].as_str()).await?;
-    let size = &selected["resources"];
     // The owner sees in the conversation that the agent moved itself, and what it asked for.
     let message = if by_agent {
-        format!(
-            "The agent requested {} CPU, {} MiB RAM and {} MiB disk and is moving to {destination}. Running commands are interrupted.",
-            size["cpu"], size["memoryMiB"], size["diskMiB"]
-        )
+        format!("The agent is moving to {destination}. Running commands are interrupted.")
     } else {
         format!("Moving the conversation to {destination}. Running commands are interrupted.")
     };
@@ -257,7 +227,6 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
     Ok(json!({
         "status": "moving",
         "nodeId": selected["nodeId"],
-        "resources": selected["resources"],
     }))
 }
 
@@ -667,7 +636,6 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
         "accountWaitReason": null,
         "nodeId": node,
         "nodeState": node_state,
-        "requestedResources": movement["resources"],
         "resources": movement["resources"],
         "requiredTags": required_tags,
         "moveRequest": null,

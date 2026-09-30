@@ -67,6 +67,7 @@ pub(super) async fn handler(State(broker): State<Broker>, request: Request) -> R
     let path = request.uri().path().trim_start_matches('/').to_owned();
     let segments = path.split('/').collect::<Vec<_>>();
     match segments.as_slice() {
+        ["node-budget"] => node_budget(&broker, request).await,
         ["storage-policy"] => storage_policy(&broker, request).await,
         ["snapshots", snapshot, hash] => snapshot_file(&broker, request, snapshot, hash).await,
         ["disks", run, "snapshot"] => disk_snapshot(&broker, request, run).await,
@@ -92,17 +93,26 @@ async fn health(broker: &Broker) -> Result<Response> {
     }
     let runtime_id = std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into());
     let active_runs = broker.active.lock().await.len();
-    let capabilities = crate::nodes::connector::capabilities(&broker.state).ok();
+    let mut capabilities = crate::nodes::connector::capabilities(&broker.state).ok();
+    if let (Some(capabilities), Some(hardware)) = (&mut capabilities, broker.pool.hardware()) {
+        capabilities["cpu"] = hardware["cpu"].clone();
+        capabilities["memoryMiB"] = hardware["memoryMiB"].clone();
+    }
+    let (usage, pressure) = broker.pool.usage().await?;
     json_response(json!({
         "status": "ok",
         "backend": Backend::Firecracker,
         "runtimeId": runtime_id,
         "nodeProtocol": NODE_PROTOCOL,
+        "sharedResources": broker.pool.budget().await.is_some(),
         "runtimes": runtimes,
         "dataRoot": broker.data,
         "activeRuns": active_runs,
         "capabilities": capabilities,
         "pool": broker.pool.health().await,
+        "budget": broker.pool.budget().await,
+        "usage": usage,
+        "pressure": pressure,
     }))
 }
 
@@ -116,6 +126,14 @@ async fn authorize(broker: &Broker, headers: &axum::http::HeaderMap) -> Result<(
         return Err(Error::unauthorized("Invalid runner credential."));
     }
     Ok(())
+}
+
+async fn node_budget(broker: &Broker, request: Request) -> Result<Response> {
+    require_post(&request)?;
+    let bytes = body(request, 16384, "Invalid node budget.").await?;
+    let budget = decode(&bytes, "Invalid node budget.")?;
+    broker.pool.configure(budget).await?;
+    json_response(json!({ "ready": true }))
 }
 
 async fn storage_policy(broker: &Broker, request: Request) -> Result<Response> {

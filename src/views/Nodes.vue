@@ -6,7 +6,7 @@ import {
   onMounted,
   ref,
 } from 'vue'
-import { formatMiB, formatResources, nodeDiagnostics } from '../../shared/nodes'
+import { formatMiB, nodeDiagnostics } from '../../shared/nodes'
 import {
   api,
   notify,
@@ -119,6 +119,7 @@ function save() {
         name: node.name,
         tags: tags.value.split(',').map(tag => tag.trim()).filter(Boolean),
         limits,
+        slots: node.slots,
         accepting: node.accepting,
       }),
     })
@@ -254,10 +255,11 @@ function statusLabel(node: ExecutionNode) {
           </div><span class="node-status" :class="{ connected: !node.revoked && (node.local || node.status === 'online') }">{{ statusLabel(node) }}</span>
         </div>
         <template v-if="!node.revoked">
-          <div class="capacity-grid" aria-label="Available capacity">
-            <div><span>CPU available</span><strong>{{ (node.available || node.limits).cpu }} <small>cores</small></strong><span>of {{ node.limits.cpu }} allowed</span></div>
-            <div><span>RAM available</span><strong>{{ formatMiB((node.available || node.limits).memoryMiB) }}</strong><span>of {{ formatMiB(node.limits.memoryMiB) }} allowed</span></div>
-            <div><span>Disk available</span><strong>{{ formatMiB((node.available || node.limits).diskMiB) }}</strong><span>of {{ formatMiB(node.limits.diskMiB) }} allowed</span></div>
+          <div class="capacity-grid" aria-label="Shared capacity">
+            <div><span>Slots available</span><strong>{{ node.availableSlots ?? node.slots }} <small>of {{ node.slots }}</small></strong><span>{{ node.occupiedSlots ?? 0 }} active or reserved</span></div>
+            <div><span>Shared CPU</span><strong>{{ node.limits.cpu }} <small>cores</small></strong><span>shared by all slots</span></div>
+            <div><span>Shared RAM</span><strong>{{ formatMiB(node.limits.memoryMiB) }}</strong><span>{{ node.usage ? `${formatMiB(node.usage.memoryMiB)} in use` : 'usage unavailable' }}</span></div>
+            <div><span>Shared disk</span><strong>{{ formatMiB(node.limits.diskMiB) }}</strong><span>{{ node.usage ? `${formatMiB(node.usage.diskMiB)} on this node` : 'usage unavailable' }}</span></div>
           </div>
           <p v-if="node.agents?.length" class="mt-2 text-sm">
             Used by {{ node.agents.map(agent => agent.allNodes ? `${agent.name} (all nodes)` : agent.name).join(', ') }}
@@ -294,9 +296,6 @@ function statusLabel(node: ExecutionNode) {
             <summary>Technical details</summary>
             <p class="mt-2">
               Detected {{ node.capabilities.cpu }} CPU · {{ formatMiB(node.capabilities.memoryMiB) }} RAM · {{ formatMiB(node.capabilities.diskMiB) }} disk · {{ node.capabilities.os }} {{ node.capabilities.arch }} · KVM {{ node.capabilities.kvm ? 'available' : 'unavailable' }}
-            </p>
-            <p v-if="node.reserved">
-              Reserved {{ formatResources(node.reserved) }}
             </p>
             <p v-if="node.lastSeen">
               Last contact {{ new Date(node.lastSeen).toLocaleString() }}
@@ -482,8 +481,16 @@ function statusLabel(node: ExecutionNode) {
         ></label>
         <label>Tags, separated by commas<input v-model="tags" class="mt-1 block w-full"></label>
         <fieldset class="form-section">
-          <legend>Resource ceilings</legend><p>Maximum resources this machine may give to conversations.</p><div class="form-grid">
-            <label>CPU ceiling<input
+          <legend>Slots and shared budgets</legend><p>All slots share these budgets. Resources are used on demand.</p><div class="form-grid">
+            <label>Execution slots<input
+              v-model.number="editing.slots"
+              class="mt-1 block"
+              type="number"
+              min="1"
+              max="4096"
+              required
+            ></label>
+            <label>Shared CPU budget<input
               v-model.number="editing.limits.cpu"
               class="mt-1 block"
               type="number"
@@ -491,7 +498,7 @@ function statusLabel(node: ExecutionNode) {
               :max="editing.capabilities.cpu"
               required
             ></label>
-            <label>RAM ceiling (GiB)<input
+            <label>Shared RAM budget (GiB)<input
               v-model.number="memoryGiB"
               class="mt-1 block"
               type="number"
@@ -500,7 +507,7 @@ function statusLabel(node: ExecutionNode) {
               :max="editing.capabilities.memoryMiB / 1024"
               required
             ></label>
-            <label>Disk ceiling (GiB)<input
+            <label>Shared disk budget (GiB)<input
               v-model.number="diskGiB"
               class="mt-1 block"
               type="number"
@@ -527,7 +534,7 @@ function statusLabel(node: ExecutionNode) {
     >
       <div class="node-form">
         <p>{{ revoking.name }} will immediately lose access to the master, and agents lose their permission to use it.</p>
-        <p v-if="revoking.reserved?.cpu">
+        <p v-if="revoking.occupiedSlots">
           Conversations running there pause within the disconnection delay, then resume from their latest recovery point on another authorized machine when one has capacity. Conversations fixed to this machine, or without a recovery point, wait.
         </p>
         <p>Files stored on the machine are not deleted. To uninstall it, run on the machine:</p>
@@ -554,7 +561,7 @@ function statusLabel(node: ExecutionNode) {
 .node-symbol { display: grid; place-items: center; padding: 10px; border-radius: 12px; background: var(--color-inset); color: var(--color-accent); }
 .node-status { border: 1px solid var(--color-line); border-radius: 100px; padding: 4px 10px; font-size: 11px; white-space: nowrap; color: var(--color-muted); }
 .node-status.connected { color: var(--color-accent); background: var(--color-inset); }
-.capacity-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 1px; margin: 22px 0; border: 1px solid var(--color-line); border-radius: 12px; overflow: hidden; background: var(--color-line); }
+.capacity-grid { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 1px; margin: 22px 0; border: 1px solid var(--color-line); border-radius: 12px; overflow: hidden; background: var(--color-line); }
 .capacity-grid > div { display: grid; gap: 5px; background: var(--color-inset); padding: 14px; }
 .capacity-grid span { font-size: 11px; color: var(--color-muted); }
 .capacity-grid strong { font-size: 19px; font-weight: 600; }
@@ -569,5 +576,5 @@ function statusLabel(node: ExecutionNode) {
 .form-section p { color: var(--color-muted); font-size: 12px; margin-bottom: 12px; }
 .form-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
 .access-row { display: flex; align-items: center; gap: 12px; border: 1px solid var(--color-line); background: var(--color-inset); border-radius: 10px; padding: 14px; font-size: 13px; }
-@media (max-width: 640px) { .nodes-heading { align-items: start; flex-direction: column; gap: 16px; } .node-card { padding: 16px; } .capacity-grid strong { font-size: 15px; } .capacity-grid > div { padding: 10px; } .node-form { padding: 20px; } .form-grid { grid-template-columns: 1fr; } }
+@media (max-width: 640px) { .nodes-heading { align-items: start; flex-direction: column; gap: 16px; } .node-card { padding: 16px; } .capacity-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } .capacity-grid strong { font-size: 15px; } .capacity-grid > div { padding: 10px; } .node-form { padding: 20px; } .form-grid { grid-template-columns: 1fr; } }
 </style>

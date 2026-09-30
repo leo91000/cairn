@@ -199,7 +199,7 @@ impl ResourceKind {
     }
 }
 
-#[derive(Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Resources {
     pub cpu: u32,
@@ -258,7 +258,7 @@ impl Capabilities {
         }
     }
 
-    fn limits(&self) -> Resources {
+    pub(crate) fn limits(&self) -> Resources {
         Resources {
             cpu: self.cpu.saturating_sub(1).max(1),
             memory_mi_b: self.memory_mi_b.saturating_sub(512).max(128),
@@ -373,28 +373,11 @@ struct AgentGrant<'a> {
 
 struct Usage<'a> {
     attempts: &'a [Value],
-    volumes: &'a [Value],
     agents: &'a [Value],
     stale: &'a [StaleDisk],
 }
 
 impl Usage<'_> {
-    fn reserved(&self, node: &Value, kind: ResourceKind) -> u64 {
-        if kind == ResourceKind::Disk {
-            return self
-                .volumes
-                .iter()
-                .filter(|v| v["nodeId"] == node["id"])
-                .map(|v| v["diskMiB"].as_u64().unwrap_or(0))
-                .sum();
-        }
-        self.attempts
-            .iter()
-            .filter(|a| a["nodeId"] == node["id"] && is_active_attempt(a))
-            .map(|a| a["resources"][kind.key()].as_u64().unwrap_or(0))
-            .sum()
-    }
-
     fn stale_summary(&self, node: &Value) -> StaleSummary {
         let stale = self
             .stale
@@ -423,11 +406,18 @@ impl Usage<'_> {
     }
 
     fn describe(&self, mut node: Value) -> Result<Value> {
-        for kind in ResourceKind::ALL {
-            let used = self.reserved(&node, kind);
-            let limit = node["limits"][kind.key()].as_u64().unwrap_or(0);
-            node["reserved"][kind.key()] = used.into();
-            node["available"][kind.key()] = limit.saturating_sub(used).into();
+        let used = self
+            .attempts
+            .iter()
+            .filter(|attempt| attempt["nodeId"] == node["id"] && is_active_attempt(attempt))
+            .count() as u64;
+        let capacity = slots(&node);
+        node["slots"] = capacity.into();
+        node["occupiedSlots"] = used.into();
+        node["availableSlots"] = capacity.saturating_sub(used).into();
+        if let Some(object) = node.as_object_mut() {
+            object.remove("reserved");
+            object.remove("available");
         }
         node["staleDisks"] = serde_json::to_value(self.stale_summary(&node))?;
         node["agents"] = serde_json::to_value(self.granted_agents(&node))?;
@@ -435,7 +425,16 @@ impl Usage<'_> {
     }
 }
 
-/// Nodes with their reserved and available resources, and the agents allowed to use them.
+/// Legacy nodes inherit the runner's slot count, or the historical four slots.
+pub(crate) fn slots(node: &Value) -> u64 {
+    node["slots"]
+        .as_u64()
+        .or(node["runtimeSlots"].as_u64())
+        .unwrap_or(4)
+        .max(1)
+}
+
+/// Nodes with their shared budgets, free slots and authorized agents.
 pub async fn inventory(s: &Service) -> Result<Vec<Value>> {
     let attempts = s.store.list("node-attempts").await?;
     let volumes = s.store.list("node-volumes").await?;
@@ -443,7 +442,6 @@ pub async fn inventory(s: &Service) -> Result<Vec<Value>> {
     let stale = stale_disks(s, &volumes, &attempts).await?;
     let usage = Usage {
         attempts: &attempts,
-        volumes: &volumes,
         agents: &agents,
         stale: &stale,
     };
@@ -552,6 +550,8 @@ struct Configuration {
     name: String,
     tags: Vec<String>,
     limits: Resources,
+    #[serde(default)]
+    slots: Option<u64>,
     accepting: bool,
 }
 
@@ -559,6 +559,12 @@ async fn configure_node(s: &Service, node: &str, body: Value) -> Result<Value> {
     let request: Configuration = decode(body)?;
     let label = name(&request.name)?;
     request.limits.validate()?;
+    if request
+        .slots
+        .is_some_and(|slots| !(1..=4096).contains(&slots))
+    {
+        return Err(Error::bad("Use between 1 and 4096 execution slots."));
+    }
     if request.tags.len() > 32 || !request.tags.iter().all(|tag| valid_tag(tag)) {
         return Err(Error::bad(
             "Use at most 32 tags of 1 to 40 letters, digits or -_:./.",
@@ -580,9 +586,17 @@ async fn configure_node(s: &Service, node: &str, body: Value) -> Result<Value> {
             if exceeds_capacity {
                 return Err(Error::bad("Limits exceed the node's detected capacity."));
             }
+            let changed_budget = record["limits"] != serde_json::to_value(&request.limits)?
+                || request.slots.is_some_and(|count| count != slots(&record));
+            if changed_budget {
+                record["executionReady"] = false.into();
+            }
             record["name"] = label.into();
             record["tags"] = request.tags.into();
             record["limits"] = serde_json::to_value(&request.limits)?;
+            if let Some(slots) = request.slots {
+                record["slots"] = slots.into();
+            }
             record["accepting"] = request.accepting.into();
             db.put("nodes", &record)?;
             db.audit("node.configured", &json!({ "nodeId": node }))?;
@@ -858,6 +872,7 @@ struct Lease {
 struct HeartbeatReply {
     node_id: String,
     accepting: Value,
+    slots: u64,
     limits: Value,
     leases: Vec<Lease>,
     heartbeat_interval_ms: i64,
@@ -912,6 +927,9 @@ fn record_heartbeat(
     }
     node["runtimes"] = body["runtimes"].clone();
     node["lastSeen"] = now().into();
+    node["runtimeSlots"] = body["pool"]["capacity"].clone();
+    node["usage"] = body["usage"].clone();
+    node["pressure"] = body["pressure"].clone();
     if let Some(capabilities) = capabilities {
         node["capabilities"] = capabilities;
     }
@@ -923,6 +941,7 @@ fn record_heartbeat(
     Ok(HeartbeatReply {
         node_id,
         accepting: node["accepting"].clone(),
+        slots: slots(&node),
         limits: node["limits"].clone(),
         leases,
         heartbeat_interval_ms: HEARTBEAT_INTERVAL_MS,
@@ -937,6 +956,8 @@ fn execution_ready(node: &Value, body: &Value, expected: &Expectations) -> bool 
         .as_ref()
         .is_none_or(|image| node["imageDigest"] == *image || node["updateError"].is_string());
     body["executionReady"] == true
+        && body["sharedResources"] == true
+        && body["budget"] == json!({ "slots": slots(node), "limits": node["limits"] })
         && node["capabilities"]["fuse"] == true
         && body["dataRoot"] == expected.data_root
         && current_image
@@ -994,6 +1015,22 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
         return Ok(());
     }
     let detected: Capabilities = decode(capabilities.clone())?;
+    if let Some(record) = s.store.get("nodes", LOCAL_NODE_ID).await? {
+        let budget = json!({ "slots": slots(&record), "limits": record["limits"] });
+        if health["budget"].is_object() && health["budget"] != budget {
+            let response = s
+                .http
+                .post(format!("{}/node-budget", s.config.runner_url))
+                .bearer_auth(runner_secret(s).await?)
+                .json(&budget)
+                .send()
+                .await
+                .map_err(|_| Error::unavailable("Local shared budget unavailable."))?;
+            if !response.status().is_success() {
+                return Err(Error::unavailable("Local shared budget was rejected."));
+            }
+        }
+    }
     s.store
         .transaction(move |db| {
             let mut record = match db.get("nodes", LOCAL_NODE_ID)? {
@@ -1014,8 +1051,16 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
             record["capabilities"] = capabilities;
             record["runtimeId"] = health["runtimeId"].clone();
             record["storage"] = serde_json::to_value(Policy::for_node(&record["storage"])?)?;
-            record["executionReady"] = (health["status"] == "ok" && detected.fuse).into();
+            record["executionReady"] = (health["status"] == "ok"
+                && detected.fuse
+                && health["sharedResources"] == true
+                && health["budget"]
+                    == json!({ "slots": slots(&record), "limits": record["limits"] }))
+            .into();
             record["lastSeen"] = now().into();
+            record["runtimeSlots"] = health["pool"]["capacity"].clone();
+            record["usage"] = health["usage"].clone();
+            record["pressure"] = health["pressure"].clone();
             db.put("nodes", &record)?;
             Ok(())
         })
