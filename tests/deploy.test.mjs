@@ -135,7 +135,8 @@ describe('coolify deployment over HTTP', () => {
     delete document.services.runner.devices
     Object.assign(document.services.runner, { mem_limit: '4g', cpus: 2, pids_limit: 128 })
     const result = parse(firecrackerRunnerCompose(stringify(document)))
-    expect(result.services.runner).toMatchObject({ mem_limit: '20g', cpus: 8, pids_limit: 256 })
+    expect(result.services.runner).toMatchObject({ mem_limit: '20g', cpus: 8 })
+    expect(result.services.runner.pids_limit).toBeUndefined()
     expect(result.services.runner.devices).toContain('/dev/fuse:/dev/fuse')
   })
 

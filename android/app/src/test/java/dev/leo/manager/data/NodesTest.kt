@@ -42,6 +42,11 @@ class NodesTest {
     @Test
     fun diagnosticsExplainWhyANodeTakesNoWork() {
         assertEquals(emptyList<String>(), nodeDiagnostics(node))
+        assertTrue(
+            nodeDiagnostics(node.copy(executionReady = false, budgetError = "RAM trop basse"))
+                .first()
+                .contains("RAM trop basse")
+        )
         assertEquals(
             listOf("Aucun agent ne peut encore utiliser cette machine."),
             nodeDiagnostics(node.copy(agents = emptyList())),

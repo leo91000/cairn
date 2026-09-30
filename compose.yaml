@@ -61,7 +61,6 @@ services:
       start_period: 120s
     mem_limit: 20g
     cpus: 8
-    pids_limit: 256
 volumes:
   runner-state:
   data:

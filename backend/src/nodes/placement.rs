@@ -242,11 +242,8 @@ impl Fleet<'_> {
                 .as_u64()
                 .unwrap_or(free)
                 .saturating_sub(node["usage"]["diskMiB"].as_u64().unwrap_or(0));
-            let budget_total = node["limits"]["diskMiB"].as_u64().unwrap_or(total);
-            let budget_reserve =
-                storage_policy.reserve(budget_total.saturating_mul(1_048_576)) / 1_048_576;
             let journals = (pending + 1) * JOURNAL_MIB;
-            return free > reserve + journals && budget_free > budget_reserve + journals;
+            return free > reserve + journals && budget_free > journals;
         }
         let run_id = &request.run["id"];
         let used = self

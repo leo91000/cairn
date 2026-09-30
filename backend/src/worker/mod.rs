@@ -21,17 +21,24 @@ use std::{
     sync::{Arc, atomic::AtomicI64},
     time::Duration,
 };
-use tokio::sync::{Mutex, Notify, OnceCell};
+use tokio::sync::{Mutex, Notify, OnceCell, OwnedMutexGuard};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 #[derive(Default)]
 pub struct Worker {
     pub active: Mutex<HashMap<String, CancellationToken>>,
     tick_lock: Mutex<()>,
+    preparation: Arc<Mutex<()>>,
     wake: Notify,
     initialized: OnceCell<()>,
     maintenance: AtomicI64,
     tasks: TaskTracker,
+}
+
+/// The account lease and a short guard until VM placement becomes durable.
+struct Admission {
+    account: Option<crate::accounts::Lease>,
+    preparation: Option<OwnedMutexGuard<()>>,
 }
 
 impl Worker {

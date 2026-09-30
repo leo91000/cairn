@@ -35,6 +35,7 @@ data class ExecutionNode(
     val occupiedSlots: Int = 0,
     val availableSlots: Int = 4,
     val usage: NodeUsage? = null,
+    val budgetError: String? = null,
     val pressure: String? = null,
     val executionReady: Boolean = false,
     val maintenance: String? = null,
@@ -149,7 +150,8 @@ fun nodeDiagnostics(node: ExecutionNode, now: Long = System.currentTimeMillis())
             "KVM indisponible : activez la virtualisation dans le BIOS et chargez le module kvm."
     if (node.status != "offline" && !node.executionReady)
         reasons +=
-            node.updateError?.let { "Le runtime n’est pas prêt : $it" }
+            node.budgetError?.let { "Le budget partagé n’a pas pu être appliqué : $it" }
+                ?: node.updateError?.let { "Le runtime n’est pas prêt : $it" }
                 ?: "Le runtime n’est pas encore prêt ou ne correspond pas à la version approuvée par le master."
     if (node.maintenance != null)
         reasons += "Maintenance en cours : les nouveaux travaux attendent la fin de la mise à jour."

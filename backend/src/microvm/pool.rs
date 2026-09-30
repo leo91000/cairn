@@ -109,14 +109,9 @@ impl Pool {
     }
 
     pub async fn initialize(&self, cgroup: PathBuf) -> Result<()> {
-        let original = self.state.join("node-capabilities.json");
-        let detected = if original.exists() {
-            serde_json::from_slice(&tokio::fs::read(&original).await?)?
-        } else {
-            let detected = crate::nodes::connector::capabilities(&self.state)?;
-            crate::skills::atomic_write(&original, &serde_json::to_vec(&detected)?).await?;
-            detected
-        };
+        // Detect the container's current envelope on every restart. A previous
+        // shared leaf limit must not become the hardware ceiling after a resize.
+        let detected = crate::nodes::connector::capabilities(&self.state)?;
         let limits = crate::nodes::Resources {
             cpu: detected["cpu"].as_u64().unwrap_or(1) as u32,
             memory_mi_b: detected["memoryMiB"].as_u64().unwrap_or(128),
@@ -129,14 +124,17 @@ impl Pool {
             .set(cgroup)
             .map_err(|_| Error::conflict("Controller already initialized."))?;
         let persisted = self.state.join(budget::FILE);
-        let initial = if persisted.exists() {
+        let mut initial: Budget = if persisted.exists() {
             serde_json::from_slice(&tokio::fs::read(persisted).await?)?
         } else {
             Budget {
                 slots: self.capacity.load(Ordering::SeqCst),
-                limits,
+                limits: limits.clone(),
             }
         };
+        // The parent cgroup may have shrunk while the controller was stopped.
+        initial.limits.cpu = initial.limits.cpu.min(limits.cpu);
+        initial.limits.memory_mi_b = initial.limits.memory_mi_b.min(limits.memory_mi_b);
         self.configure(initial).await
     }
 
@@ -356,6 +354,74 @@ mod tests {
         slots.occupied[1] = false;
         assert_eq!(slots.reserve(2), Some(1));
         assert_eq!(slots.reserve(2), None);
+    }
+
+    #[tokio::test]
+    async fn restart_ignores_stale_capabilities_and_clamps_persisted_budgets() {
+        let root = tempfile::tempdir().unwrap();
+        let cgroup = root.path().join("cgroup");
+        std::fs::create_dir(&cgroup).unwrap();
+        std::fs::write(cgroup.join("memory.current"), "0").unwrap();
+        std::fs::write(cgroup.join("memory.max"), "max").unwrap();
+        std::fs::write(cgroup.join("cpu.max"), "max 100000").unwrap();
+        std::fs::write(
+            root.path().join("node-capabilities.json"),
+            b"{} garbage from a previous host",
+        )
+        .unwrap();
+        let desired = Budget {
+            slots: 12,
+            limits: crate::nodes::Resources {
+                cpu: 4096,
+                memory_mi_b: 1_073_741_824,
+                disk_mi_b: 32768,
+            },
+        };
+        std::fs::write(
+            root.path().join(budget::FILE),
+            serde_json::to_vec(&desired).unwrap(),
+        )
+        .unwrap();
+        let pool = Pool::new(
+            root.path().into(),
+            root.path().into(),
+            CancellationToken::new(),
+            4,
+        )
+        .await
+        .unwrap();
+        pool.initialize(cgroup.clone()).await.unwrap();
+        let hardware = pool.hardware().unwrap();
+        let applied = pool.budget().await.unwrap();
+        assert_eq!(
+            u64::from(applied.limits.cpu),
+            hardware["cpu"].as_u64().unwrap()
+        );
+        assert_eq!(
+            applied.limits.memory_mi_b,
+            hardware["memoryMiB"].as_u64().unwrap()
+        );
+        assert_eq!(applied.slots, 12);
+        let mut smaller = applied.clone();
+        smaller.limits.cpu = 1;
+        smaller.limits.memory_mi_b = 256;
+        pool.configure(smaller.clone()).await.unwrap();
+        drop(pool);
+        let restarted = Pool::new(
+            root.path().into(),
+            root.path().into(),
+            CancellationToken::new(),
+            4,
+        )
+        .await
+        .unwrap();
+        restarted.initialize(cgroup).await.unwrap();
+        assert_eq!(restarted.budget().await.unwrap(), smaller);
+        assert_eq!(
+            restarted.hardware().unwrap()["memoryMiB"],
+            applied.limits.memory_mi_b
+        );
+        restarted.configure(applied).await.unwrap();
     }
 
     #[tokio::test]

@@ -559,6 +559,11 @@ async fn configure_node(s: &Service, node: &str, body: Value) -> Result<Value> {
     let request: Configuration = decode(body)?;
     let label = name(&request.name)?;
     request.limits.validate()?;
+    if request.limits.memory_mi_b <= 128 {
+        return Err(Error::bad(
+            "Shared RAM must exceed the 128 MiB controller reserve.",
+        ));
+    }
     if request
         .slots
         .is_some_and(|slots| !(1..=4096).contains(&slots))
@@ -930,6 +935,7 @@ fn record_heartbeat(
     node["runtimeSlots"] = body["pool"]["capacity"].clone();
     node["usage"] = body["usage"].clone();
     node["pressure"] = body["pressure"].clone();
+    node["budgetError"] = body["budgetError"].clone();
     if let Some(capabilities) = capabilities {
         node["capabilities"] = capabilities;
     }
@@ -1015,20 +1021,18 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
         return Ok(());
     }
     let detected: Capabilities = decode(capabilities.clone())?;
+    let mut budget_error = Value::Null;
     if let Some(record) = s.store.get("nodes", LOCAL_NODE_ID).await? {
         let budget = json!({ "slots": slots(&record), "limits": record["limits"] });
         if health["budget"].is_object() && health["budget"] != budget {
-            let response = s
+            let result = s
                 .http
                 .post(format!("{}/node-budget", s.config.runner_url))
                 .bearer_auth(runner_secret(s).await?)
                 .json(&budget)
                 .send()
-                .await
-                .map_err(|_| Error::unavailable("Local shared budget unavailable."))?;
-            if !response.status().is_success() {
-                return Err(Error::unavailable("Local shared budget was rejected."));
-            }
+                .await;
+            budget_error = connector::budget_error(result).await;
         }
     }
     s.store
@@ -1057,6 +1061,7 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
                 && health["budget"]
                     == json!({ "slots": slots(&record), "limits": record["limits"] }))
             .into();
+            record["budgetError"] = budget_error;
             record["lastSeen"] = now().into();
             record["runtimeSlots"] = health["pool"]["capacity"].clone();
             record["usage"] = health["usage"].clone();

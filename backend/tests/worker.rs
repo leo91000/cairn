@@ -683,6 +683,8 @@ struct Controller {
     data: PathBuf,
     plans: tokio::sync::Mutex<Vec<Value>>,
     failures: usize,
+    slots: usize,
+    hold: std::sync::atomic::AtomicBool,
 }
 
 impl Controller {
@@ -699,7 +701,7 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
         return Json(json!({
             "status": "ok",
             "sharedResources": true,
-            "budget": { "slots": 4, "limits": { "cpu": 7, "memoryMiB": 15872, "diskMiB": 104857 } },
+            "budget": { "slots": state.slots, "limits": { "cpu": 7, "memoryMiB": 15872, "diskMiB": 104857 } },
             "runtimeId": "fixture",
             "runtimes": ["fixture"],
             "capabilities": {
@@ -713,6 +715,9 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
             },
         }))
         .into_response();
+    }
+    if path == "/node-budget" {
+        return (StatusCode::CONFLICT, Json(json!({ "error": "Shared RAM budget is below current usage plus the controller reserve." }))).into_response();
     }
     if path.ends_with("/lease") {
         return Json(json!({})).into_response();
@@ -734,6 +739,9 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
         return Body::from(format!("{frame}\n")).into_response();
     }
     if path.ends_with("/wait") {
+        while state.hold.load(std::sync::atomic::Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
         let code = if state.attempt_index(attempt).await < state.failures {
             143
         } else {
@@ -755,6 +763,162 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
 }
 
 #[tokio::test]
+async fn node_slots_exceed_manager_concurrency_without_overpreparing_the_queue() {
+    let mut fixture = Fixture::new().await;
+    fixture.stop(false).await;
+    let controller = Arc::new(Controller {
+        data: fixture.service.config.data_dir.clone(),
+        plans: tokio::sync::Mutex::new(Vec::new()),
+        failures: 0,
+        slots: 12,
+        hold: std::sync::atomic::AtomicBool::new(true),
+    });
+    let app = Router::new()
+        .fallback(any(serve_controller))
+        .with_state(controller.clone());
+    let (listener, address) = common::bind().await;
+    common::reconfigure(&mut fixture.service, |config| {
+        config.runner_url = format!("http://{address}");
+    })
+    .await;
+    let server = common::serve(listener, app);
+    let home = fixture.service.config.home.join(".codex");
+    tokio::fs::create_dir_all(&home).await.unwrap();
+    tokio::fs::write(home.join("auth.json"), "{}")
+        .await
+        .unwrap();
+    tokio::fs::write(
+        fixture.service.config.data_dir.join("storage-s3.json"),
+        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
+    )
+    .await
+    .unwrap();
+    leo_agent_manager::nodes::refresh_local(&fixture.service)
+        .await
+        .unwrap();
+    let mut node = fixture
+        .service
+        .store
+        .get("nodes", LOCAL_NODE_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    node["slots"] = 12.into();
+    fixture.service.store.put("nodes", node).await.unwrap();
+    let mut runs = Vec::new();
+    for _ in 0..13 {
+        runs.push(fixture.enqueue("Inspect the VM fixture").await);
+    }
+    fixture.start().await;
+    eventually(
+        Duration::from_secs(20),
+        Duration::from_millis(30),
+        async || (controller.plans.lock().await.len() == 12).then_some(()),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let mut queued = Vec::new();
+    let mut running = 0;
+    for run in &runs {
+        let current = fixture.service.store.run(text(run, "id")).await.unwrap();
+        if current["status"] == RunStatus::Queued {
+            queued.push(current);
+        } else {
+            assert_eq!(current["status"], RunStatus::Running, "{current}");
+            running += 1;
+        }
+    }
+    assert_eq!(running, 12);
+    assert_eq!(queued.len(), 1);
+    assert!(
+        queued[0]["startedAt"].is_null(),
+        "queued work must never enter recovery: {}",
+        queued[0]
+    );
+    assert_eq!(queued[0]["recoveryPending"], Value::Null);
+    assert_eq!(controller.plans.lock().await.len(), 12);
+    let attempts = fixture.service.store.list("node-attempts").await.unwrap();
+    assert_eq!(attempts.len(), 12);
+    controller
+        .hold
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    for run in &runs {
+        assert_eq!(
+            fixture.until_finished(text(run, "id")).await["status"],
+            RunStatus::Succeeded
+        );
+    }
+    assert_eq!(controller.plans.lock().await.len(), 13);
+    fixture.stop(false).await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn refused_local_budget_keeps_presence_and_exposes_the_reason() {
+    let mut fixture = Fixture::new().await;
+    fixture.stop(false).await;
+    let controller = Arc::new(Controller {
+        data: fixture.service.config.data_dir.clone(),
+        plans: tokio::sync::Mutex::new(Vec::new()),
+        failures: 0,
+        slots: 4,
+        hold: std::sync::atomic::AtomicBool::new(false),
+    });
+    let app = Router::new()
+        .fallback(any(serve_controller))
+        .with_state(controller);
+    let (listener, address) = common::bind().await;
+    common::reconfigure(&mut fixture.service, |config| {
+        config.runner_url = format!("http://{address}");
+    })
+    .await;
+    let server = common::serve(listener, app);
+    leo_agent_manager::nodes::refresh_local(&fixture.service)
+        .await
+        .unwrap();
+    let mut node = fixture
+        .service
+        .store
+        .get("nodes", LOCAL_NODE_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    node["limits"]["memoryMiB"] = 256.into();
+    node["lastSeen"] = 0.into();
+    fixture.service.store.put("nodes", node).await.unwrap();
+    leo_agent_manager::nodes::refresh_local(&fixture.service)
+        .await
+        .unwrap();
+    let node = fixture
+        .service
+        .store
+        .get("nodes", LOCAL_NODE_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(node["lastSeen"].as_i64().unwrap() > now() - 1000);
+    assert_eq!(node["executionReady"], false);
+    assert_eq!(node["capabilities"]["cpu"], 8);
+    assert!(text(&node, "budgetError").contains("below current usage"));
+    let mut restored = node;
+    restored["limits"]["memoryMiB"] = 15872.into();
+    fixture.service.store.put("nodes", restored).await.unwrap();
+    leo_agent_manager::nodes::refresh_local(&fixture.service)
+        .await
+        .unwrap();
+    let node = fixture
+        .service
+        .store
+        .get("nodes", LOCAL_NODE_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(node["executionReady"], true);
+    assert_eq!(node["budgetError"], Value::Null);
+    server.abort();
+}
+
+#[tokio::test]
 async fn controller_interruptions_resume_saved_threads_and_stop_after_three_recoveries() {
     for failures in [1, usize::MAX] {
         let mut fixture = Fixture::new().await;
@@ -763,6 +927,8 @@ async fn controller_interruptions_resume_saved_threads_and_stop_after_three_reco
             data: fixture.service.config.data_dir.clone(),
             plans: tokio::sync::Mutex::new(Vec::new()),
             failures,
+            slots: 4,
+            hold: std::sync::atomic::AtomicBool::new(false),
         });
         let app = Router::new()
             .fallback(any(serve_controller))

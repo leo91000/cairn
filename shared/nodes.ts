@@ -26,6 +26,7 @@ export interface ExecutionNode {
   occupiedSlots?: number
   availableSlots?: number
   usage?: { memoryMiB: number, diskMiB: number }
+  budgetError?: string | null
   pressure?: string | null
   executionReady?: boolean
   maintenance?: string | null
@@ -102,7 +103,7 @@ export function nodeDiagnostics(node: ExecutionNode, now = Date.now()) {
   if (!node.capabilities.fuse)
     reasons.push('FUSE is unavailable: this node cannot mount S3-backed conversation disks.')
   if (node.status !== 'offline' && node.executionReady === false)
-    reasons.push(node.updateError ? `The runtime is not ready: ${node.updateError}` : 'The runtime is not ready yet or does not match the version approved by the master.')
+    reasons.push(node.budgetError ? `The shared budget could not be applied: ${node.budgetError}` : node.updateError ? `The runtime is not ready: ${node.updateError}` : 'The runtime is not ready yet or does not match the version approved by the master.')
   if (node.maintenance)
     reasons.push('Maintenance in progress: new work waits until the update finishes.')
   if (node.pressure)

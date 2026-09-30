@@ -25,6 +25,11 @@ pub struct Budget {
 impl Budget {
     pub fn validate(&self) -> Result<()> {
         self.limits.validate()?;
+        if self.limits.memory_mi_b <= 128 {
+            return Err(Error::bad(
+                "Shared RAM must exceed the 128 MiB controller reserve.",
+            ));
+        }
         if !(1..=4096).contains(&self.slots) {
             return Err(Error::bad("Use between 1 and 4096 execution slots."));
         }
@@ -147,13 +152,19 @@ pub async fn cgroup() -> Result<PathBuf> {
 }
 
 pub fn allocated(directory: &Path) -> io::Result<u64> {
-    if !directory.exists() {
-        return Ok(0);
-    }
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
     let mut bytes = 0u64;
-    for entry in std::fs::read_dir(directory)? {
+    for entry in entries {
         let entry = entry?;
-        let metadata = std::fs::symlink_metadata(entry.path())?;
+        let metadata = match std::fs::symlink_metadata(entry.path()) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
         if metadata.is_dir() {
             bytes = bytes.saturating_add(allocated(&entry.path())?);
         } else if metadata.is_file() {
@@ -223,12 +234,11 @@ pub fn disk_space(path: &Path, total: u64, free: u64) -> io::Result<(u64, u64)> 
                 }
                 Err(error) => return Err(error),
             };
-        let physical_extra = policy
-            .reserve(total)
-            .saturating_sub(policy.reserve(total.min(limit)));
+        // Callers subtract the physical reserve from free space. Keep that
+        // reserve outside the quota, even when the quota is smaller than it.
         return Ok((
-            total.min(limit),
-            free.saturating_sub(physical_extra).min(remaining),
+            total,
+            free.min(policy.reserve(total).saturating_add(remaining)),
         ));
     }
     Ok((total, free))
@@ -370,9 +380,59 @@ mod tests {
         }
         assert_eq!(disk_bytes(root.path()).unwrap(), 2 * 1_048_576);
         charge_disk(root.path(), 4 * 1_048_576).unwrap();
-        let (total, free) =
-            disk_space(&root.path().join("disks/first"), 1_000_000_000, 900_000_000).unwrap();
-        assert_eq!(total, 128 * 1_048_576);
-        assert_eq!(free, 122 * 1_048_576);
+        let (total, free) = disk_space(
+            &root.path().join("disks/first"),
+            128 * 1024 * 1_048_576,
+            64 * 1024 * 1_048_576,
+        )
+        .unwrap();
+        assert_eq!(total, 128 * 1024 * 1_048_576);
+        assert_eq!(
+            free - crate::storage::policy::Policy::default().reserve(total),
+            122 * 1_048_576
+        );
+    }
+
+    #[test]
+    fn disk_quota_preserves_physical_reserve_without_reserving_it_twice() {
+        let root = tempfile::tempdir().unwrap();
+        let budget = Budget {
+            slots: 12,
+            limits: Resources {
+                cpu: 8,
+                memory_mi_b: 32768,
+                disk_mi_b: 5120,
+            },
+        };
+        std::fs::write(root.path().join(FILE), serde_json::to_vec(&budget).unwrap()).unwrap();
+        let total = 128 * 1024 * 1_048_576;
+        let reserve = crate::storage::policy::Policy::default().reserve(total);
+        let (_, free) = disk_space(root.path(), total, total / 2).unwrap();
+        assert_eq!(free - reserve, 5120 * 1_048_576);
+        assert_eq!(pressure(0, 32768, free, reserve), None);
+        charge_disk(root.path(), 5120 * 1_048_576).unwrap();
+        let (_, free) = disk_space(root.path(), total, total / 2).unwrap();
+        assert_eq!(pressure(0, 32768, free, reserve), Some("disk"));
+        let (_, free) = disk_space(root.path(), total, reserve - 1).unwrap();
+        assert_eq!(free, reserve - 1);
+    }
+
+    #[test]
+    fn allocation_scan_tolerates_concurrent_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for i in 0..1000 {
+                    let path = root.path().join(format!("disk-{i}"));
+                    std::fs::create_dir(&path).unwrap();
+                    std::fs::write(path.join("journal"), [1; 4096]).unwrap();
+                    std::fs::remove_dir_all(path).unwrap();
+                }
+            });
+            for _ in 0..1000 {
+                allocated(root.path()).unwrap();
+            }
+        });
+        assert_eq!(allocated(root.path()).unwrap(), 0);
     }
 }

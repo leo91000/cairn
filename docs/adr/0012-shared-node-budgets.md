@@ -36,8 +36,8 @@ Le budget disque porte sur les octets locaux des conversations, y compris les
 journaux, les caches propres et les anciennes copies. Les volumes S3 restent
 privés et chargés à la demande. Les écritures utilisent l’admission commune et
 débitent une estimation conservatrice, réconciliée avec l’allocation physique une
-fois par seconde. Les réserves du filesystem hôte et du budget commun sont
-préservées. Aucun journal non publié n’est évincé. Un nouveau volume ext4 possède
+fois par seconde. La réserve du filesystem hôte est préservée en dehors du quota commun,
+même lorsque ce quota est inférieur à la réserve. Aucun journal non publié n’est évincé. Un nouveau volume ext4 possède
 une capacité logique égale au budget disque de sa node, sans réserver cette
 capacité locale ; un disque conservé garde sa taille lors des déplacements.
 
@@ -57,3 +57,16 @@ reste compatible avec le superviseur déjà installé.
 
 Références : [Firecracker ballooning v1.17.0](https://github.com/firecracker-microvm/firecracker/blob/v1.17.0/docs/ballooning.md),
 [cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html).
+
+Les préparations initiales des VM sont sérialisées jusqu’à la réservation durable
+du slot ; les VM admises utilisent ensuite tous les slots des nodes, sans plafond
+global `CONCURRENCY`. Ce dernier reste applicable aux exécutions directes sur
+l’hôte en développement. Le plafond généré de 256 processus du conteneur est
+supprimé : il comptait les threads vCPU de Firecracker, pas les processus invités.
+Un plafond explicitement personnalisé est conservé par le migrateur Compose.
+
+Les capacités CPU/RAM sont détectées à chaque démarrage depuis l’enveloppe du
+conteneur, indépendamment du budget du cgroup partagé. Un budget conservé qui
+dépasse une nouvelle enveloppe plus petite est réduit au plafond réel ; les
+budgets demandés par le manager restent visibles avec le motif de refus tant
+qu’ils ne peuvent pas être appliqués. Les heartbeats continuent pendant ce refus.

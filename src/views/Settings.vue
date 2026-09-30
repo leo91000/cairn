@@ -174,7 +174,7 @@ async function copy(value: string) {
       <dl class="settings-facts grid grid-cols-[160px_1fr] gap-[17px] text-xs phone:grid-cols-[95px_minmax(0,_1fr)] phone:text-xs mx-0 my-[25px]">
         <dt>Version</dt>
         <dd>{{ settings.version }}</dd>
-        <dt>Concurrent runs</dt>
+        <dt>Host concurrency (development)</dt>
         <dd>{{ settings.concurrency }}</dd>
         <dt>Workspace roots</dt>
         <dd>

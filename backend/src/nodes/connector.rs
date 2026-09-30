@@ -49,6 +49,7 @@ struct HeartbeatRequest<'a> {
     pressure: &'a Value,
     shared_resources: bool,
     budget: &'a Value,
+    budget_error: &'a Value,
 }
 
 pub(crate) fn master(input: &str) -> Result<url::Url> {
@@ -113,6 +114,46 @@ fn memory_mi_b() -> Result<u64> {
     Ok(memory)
 }
 
+/// Read the namespace root quota, rather than the controller's configured leaf.
+fn cpu_capacity(affinity: usize, quota: &str) -> Result<usize> {
+    let mut fields = quota.split_whitespace();
+    let quota = fields
+        .next()
+        .ok_or_else(|| Error::bad("Invalid node CPU quota."))?;
+    let period = fields
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|period| *period > 0)
+        .ok_or_else(|| Error::bad("Invalid node CPU period."))?;
+    if quota == "max" {
+        return Ok(affinity);
+    }
+    let quota = quota.parse::<u64>().map_err(Error::internal)?;
+    Ok(affinity.min((quota / period).max(1) as usize))
+}
+
+fn cpu_count() -> Result<usize> {
+    let mut affinity = std::mem::MaybeUninit::<libc::cpu_set_t>::zeroed();
+    if unsafe {
+        libc::sched_getaffinity(
+            0,
+            std::mem::size_of::<libc::cpu_set_t>(),
+            affinity.as_mut_ptr(),
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let count = unsafe { libc::CPU_COUNT(&affinity.assume_init()) } as usize;
+    match std::fs::read_to_string("/sys/fs/cgroup/cpu.max") {
+        Ok(quota) => cpu_capacity(count, &quota),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(std::thread::available_parallelism()?.get())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn filesystem(path: &Path) -> Result<libc::statvfs> {
     let name = std::ffi::CString::new(path.as_os_str().as_bytes())
         .map_err(|_| Error::bad("Invalid node directory."))?;
@@ -140,7 +181,7 @@ pub fn capabilities(path: &Path) -> Result<Value> {
         .is_some_and(|file| unsafe { libc::ioctl(file.as_raw_fd(), 0xae00) } == 12);
     let memory = memory_mi_b()?;
     let stat = filesystem(path)?;
-    let cpu = std::thread::available_parallelism()?.get();
+    let cpu = cpu_count()?;
     let detected = Capabilities {
         os: "linux".into(),
         arch: "x86_64".into(),
@@ -279,12 +320,34 @@ async fn local_health(client: &reqwest::Client, runner: &str) -> Value {
     }
 }
 
+/// A refused desired budget must not hide a healthy controller's heartbeat.
+pub(super) async fn budget_error(
+    result: std::result::Result<reqwest::Response, reqwest::Error>,
+) -> Value {
+    match result {
+        Ok(response) if response.status().is_success() => Value::Null,
+        Ok(response) => {
+            let status = response.status();
+            let body = response.json::<Value>().await.unwrap_or_default();
+            body["error"]
+                .as_str()
+                .map_or_else(
+                    || format!("Controller rejected shared budget ({status}); retrying."),
+                    str::to_owned,
+                )
+                .into()
+        }
+        Err(_) => "Controller could not apply shared budget; retrying.".into(),
+    }
+}
+
 async fn heartbeat(
     client: &reqwest::Client,
     origin: &url::Url,
     identity: &Identity,
     stop: &CancellationToken,
 ) -> Result<()> {
+    let mut budget_error_value = Value::Null;
     loop {
         let started = super::boot_ms();
         let runner = std::env::var("RUNNER_URL").unwrap_or_default();
@@ -305,6 +368,7 @@ async fn heartbeat(
             pressure: &health["pressure"],
             shared_resources: health["sharedResources"] == true,
             budget: &health["budget"],
+            budget_error: &budget_error_value,
         };
         let request = client
             .post(
@@ -340,11 +404,9 @@ async fn heartbeat(
                             .json(&budget)
                             .send()
                             .await;
-                        if !response.is_ok_and(|reply| reply.status().is_success()) {
-                            tracing::warn!(
-                                "Controller rejected shared node budget; retrying next heartbeat."
-                            );
-                        }
+                        budget_error_value = budget_error(response).await;
+                    } else {
+                        budget_error_value = Value::Null;
                     }
                 }
             }
@@ -388,4 +450,19 @@ async fn forward_leases(
             .await;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+
+    #[test]
+    fn parent_cpu_capacity_tracks_resize_and_affinity_independently_of_leaf_budget() {
+        assert_eq!(cpu_capacity(32, "800000 100000").unwrap(), 8);
+        assert_eq!(cpu_capacity(32, "1600000 100000").unwrap(), 16);
+        assert_eq!(cpu_capacity(32, "400000 100000").unwrap(), 4);
+        assert_eq!(cpu_capacity(2, "800000 100000").unwrap(), 2);
+        assert_eq!(cpu_capacity(32, "max 100000").unwrap(), 32);
+        assert!(cpu_capacity(32, "800000 0").is_err());
+    }
 }

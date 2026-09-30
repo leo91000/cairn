@@ -1,5 +1,5 @@
 use super::{
-    Worker, audit,
+    Admission, Worker, audit,
     checkpoint::{RunCheckpoint, Settled},
 };
 use crate::{
@@ -55,8 +55,17 @@ impl Worker {
             projects.extend(locked_projects(s, &s.store.run(id).await?));
         }
         for run in s.store.read(|db| db.active()).await? {
-            if self.active.lock().await.len() >= s.config.concurrency {
-                break;
+            if !execution::uses_vm(&run, &s.config) {
+                let active_ids = self.active.lock().await.keys().cloned().collect::<Vec<_>>();
+                let mut host_runs = 0;
+                for id in active_ids {
+                    if !execution::uses_vm(&s.store.run(&id).await?, &s.config) {
+                        host_runs += 1;
+                    }
+                }
+                if host_runs >= s.config.concurrency {
+                    continue;
+                }
             }
             self.try_launch(s, run, &mut projects).await?;
         }
@@ -105,6 +114,16 @@ impl Worker {
         if recovering && !recover_or_wait(s, &run).await? {
             return Ok(());
         }
+        // Serialize only the preparation window, until placement has reserved
+        // the node slot. Running VMs use node slots without a global ceiling.
+        let preparation = if execution::uses_vm(&run, &s.config) {
+            let Ok(guard) = self.preparation.clone().try_lock_owned() else {
+                return Ok(());
+            };
+            Some(guard)
+        } else {
+            None
+        };
         // Waiting here keeps the account free and retries on every tick.
         if execution::uses_vm(&run, &s.config) {
             let current = s.store.run(&run_id).await?;
@@ -140,7 +159,16 @@ impl Worker {
         let worker = self.clone();
         let s = s.clone();
         self.tasks.spawn(async move {
-            run_to_completion(&s, run, account, cancel).await;
+            run_to_completion(
+                &s,
+                run,
+                Admission {
+                    account,
+                    preparation,
+                },
+                cancel,
+            )
+            .await;
             worker.active.lock().await.remove(&run_id);
             worker.notify();
         });
@@ -151,11 +179,11 @@ impl Worker {
 async fn run_to_completion(
     s: &Arc<Service>,
     run: Value,
-    account: Option<Lease>,
+    admission: Admission,
     cancel: CancellationToken,
 ) {
     let run_id = text(&run, "id").to_owned();
-    let Err(error) = super::execution::execute(s, run, account, cancel).await else {
+    let Err(error) = super::execution::execute(s, run, admission, cancel).await else {
         return;
     };
     // Keep the slot occupied until recovery is durable. A transient
