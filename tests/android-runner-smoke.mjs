@@ -147,8 +147,14 @@ async function main() {
     }
   }
   catch (error) {
-    process.stderr.write(docker('logs', name))
-    process.stderr.write(docker('exec', name, 'sh', '-c', 'tail -n 50 /runner-state/*.boot.log'))
+    try {
+      process.stderr.write(docker('logs', name))
+      process.stderr.write(docker('exec', name, 'sh', '-c', 'tail -n 50 /runner-state/*.boot.log'))
+    }
+    catch {
+      // Early boot failures can occur before a console log exists.
+    }
+
     throw error
   }
   finally {

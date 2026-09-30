@@ -96,6 +96,12 @@ impl Plan {
     }
 
     pub fn set_vm_limits(&mut self, cpu: u32, memory: u64) {
+        if self.resources().is_none() {
+            self.0["resources"] = serde_json::json!({
+                "diskMiB": crate::nodes::placement::defaults().disk_mi_b
+            });
+        }
+
         self.0["resources"]["cpu"] = cpu.into();
         self.0["resources"]["memoryMiB"] = memory.into();
     }
@@ -130,6 +136,32 @@ impl Plan {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn shared_limits_preserve_default_and_existing_disk_sizes() {
+        let mut default_plan = Plan::new(json!({ "id": "default-attempt" }));
+        default_plan.set_vm_limits(3, 7168);
+        let default_resources: crate::nodes::Resources =
+            serde_json::from_value(default_plan.resources().unwrap().clone()).unwrap();
+        default_resources.validate().unwrap();
+        assert_eq!(default_resources.cpu, 3);
+        assert_eq!(default_resources.memory_mi_b, 7168);
+        assert_eq!(
+            default_resources.disk_mi_b,
+            crate::nodes::placement::defaults().disk_mi_b
+        );
+
+        let mut retained_plan = Plan::new(json!({
+            "resources": { "cpu": 1, "memoryMiB": 512, "diskMiB": 512 }
+        }));
+        retained_plan.set_vm_limits(3, 7168);
+        let retained_resources: crate::nodes::Resources =
+            serde_json::from_value(retained_plan.resources().unwrap().clone()).unwrap();
+        retained_resources.validate().unwrap();
+        assert_eq!(retained_resources.disk_mi_b, 512);
+        assert_eq!(retained_resources.cpu, 3);
+        assert_eq!(retained_resources.memory_mi_b, 7168);
+    }
 
     #[test]
     fn retained_guests_use_current_runner_code_without_exposing_storage_or_overwriting_commands() {
