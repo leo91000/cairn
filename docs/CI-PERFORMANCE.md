@@ -47,11 +47,15 @@ took **8m53s** (528 aggregate runner seconds), without deployment.
   production rate limiters. Keep ordered persistence journeys together; run the
   four Chromium/WebKit light/dark layout matrices independently. This removes
   deliberate waits for one shared rate limiter without weakening that limiter.
-- In CI, use three runners for journeys, Chromium layouts, and WebKit layouts, with
-  at most two workers per runner. Share the quality job's built frontend through
-  an artifact, install only each group's browser, and retain separate evidence.
-- Run TypeScript checking once through `pnpm build` inside `pnpm check`. Install
-  the Chromium headless shell used by the tests, plus WebKit and their OS dependencies.
+- In CI, use separate runners for journeys, Chromium layouts, and two WebKit
+  shards, with at most two workers per runner. Share the quality job's built
+  frontend and Rust backend through artifacts and retain separate evidence.
+- Run browser jobs in the official Playwright Noble image, pinned by version and
+  digest to the installed `@playwright/test`. Check their versions before tests.
+  This removes repeated browser and OS-library installation: Ubuntu package
+  downloads took over seven minutes and exhausted the ten-minute job budget in
+  two successive attempts on 2026-09-30. Keep the test budget unchanged.
+- Run TypeScript checking once through `pnpm build` inside `pnpm check`.
 - Set commit metadata after stable Docker tool layers. Keep all runtime tools,
   UID 1000, health checks, persistence checks, and exact deployed-commit validation.
 - Check Docker health every second during startup and poll deployment health every

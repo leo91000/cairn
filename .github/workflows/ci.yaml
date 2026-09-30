@@ -97,6 +97,13 @@ jobs:
     if: needs.resolve.outputs.reuse != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    container:
+      # Match @playwright/test; browsers and system libraries are already installed.
+      image: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
+      options: --init --ipc=host
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -120,13 +127,19 @@ jobs:
       - uses: ./.github/actions/setup-pnpm
         with:
           cache: true
+      - name: Check browser image version
+        run: |
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs'
+          const installed = JSON.parse(readFileSync('node_modules/@playwright/test/package.json', 'utf8')).version
+          const preinstalled = JSON.parse(readFileSync('/ms-playwright/.docker-info', 'utf8')).driverVersion
+          if (installed !== preinstalled)
+            throw new Error(`Update the pinned browser image: Playwright package ${installed}, image ${preinstalled}`)
+          JS
       - uses: actions/download-artifact@v8.0.1
         with:
           name: browser-build
           path: dist/
-      - run: pnpm exec playwright install --with-deps --only-shell "$BROWSER"
-        env:
-          BROWSER: ${{ matrix.browser }}
       - uses: actions/download-artifact@v8.0.1
         with:
           name: browser-backend
