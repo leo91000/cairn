@@ -272,6 +272,7 @@ fn schedulable_node(id: &str, limits: &Value) -> Value {
         "id": id,
         "accepting": true,
         "executionReady": true,
+        "sharedResources": true,
         "lastSeen": now(),
         "capabilities": { "kvm": true, "fuse": true },
         "limits": limits,
@@ -353,6 +354,71 @@ fn shared_object_key(manifest: &Value, hash: &str) -> String {
         .find(|block| block["hash"] == hash)
         .unwrap();
     shared_blocks::key(hash, block["object"].as_str().unwrap())
+}
+
+#[tokio::test]
+async fn shared_budget_must_be_applied_before_admission_and_reconfiguration_pauses_admission() {
+    let owner = Owner::new().await;
+    let node = id();
+    let credential = auth::token();
+    let token = credential.as_str();
+    let shared_limits = limits(7, 7680, 52428);
+    let mut record = schedulable_node(&node, &shared_limits);
+    record["name"] = "Shared worker".into();
+    record["slots"] = 4.into();
+    record["capabilities"] = capabilities(true, 8, 8192, 65536);
+    record["capabilities"]["fuse"] = true.into();
+    owner.put("nodes", record).await;
+    owner.authorize_node(&node, token).await;
+    let mut heartbeat = json!({
+        "runtimeId": "fixture",
+        "executionReady": true,
+        "dataRoot": owner.service.config.data_dir,
+        "budget": { "slots": 4, "limits": shared_limits },
+    });
+    for (shared, applied_slots, ready) in [(false, 4, false), (true, 3, false), (true, 4, true)] {
+        heartbeat["sharedResources"] = shared.into();
+        heartbeat["budget"]["slots"] = applied_slots.into();
+        assert_eq!(
+            owner
+                .call("POST", HEARTBEAT, heartbeat.clone(), Some(token))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            owner.stored("nodes", &node).await.unwrap()["executionReady"],
+            ready
+        );
+    }
+    let (status, configured) = owner
+        .send(
+            "PUT",
+            &format!("/api/nodes/{node}"),
+            json!({
+                "name": "Shared worker", "tags": [], "accepting": true,
+                "slots": 12, "limits": shared_limits,
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{configured}");
+    assert_eq!(
+        owner.stored("nodes", &node).await.unwrap()["executionReady"],
+        false
+    );
+    owner
+        .call("POST", HEARTBEAT, heartbeat.clone(), Some(token))
+        .await;
+    assert_eq!(
+        owner.stored("nodes", &node).await.unwrap()["executionReady"],
+        false
+    );
+    heartbeat["budget"]["slots"] = 12.into();
+    owner.call("POST", HEARTBEAT, heartbeat, Some(token)).await;
+    assert_eq!(
+        owner.stored("nodes", &node).await.unwrap()["executionReady"],
+        true
+    );
 }
 
 #[tokio::test]
@@ -845,6 +911,7 @@ async fn concurrent_admission_reserves_capacity_once_and_preserves_agent_grants(
     let (node, agent) = (id(), id());
     let mut record = schedulable_node(&node, &limits(2, 4096, 65536));
     record["local"] = false.into();
+    record["slots"] = 1.into();
     owner.put("nodes", record).await;
     owner.grant_nodes(&agent, json!([node])).await;
     let a = agent_run(&id(), &agent);
@@ -884,6 +951,9 @@ async fn queued_automatic_conversations_reserve_another_node_without_discarding_
     for (node, cpu) in [(&source, 1), (&destination, 12)] {
         let mut record = schedulable_node(node, &limits(cpu, 32768, 131072));
         record["runtimes"] = json!(["fixture"]);
+        if node == &source {
+            record["pressure"] = "memory".into();
+        }
         owner.put("nodes", record).await;
     }
     owner
@@ -1045,14 +1115,18 @@ async fn retained_s3_disks_charge_local_cache_and_cancellation_releases_destinat
 }
 
 #[tokio::test]
-async fn requesting_a_smaller_disk_is_rejected_before_moving() {
+async fn explicit_resource_requests_are_rejected_before_moving() {
     let owner = Owner::new().await;
     let run = json!({ "id": id(), "resources": limits(2, 4096, 32768) });
     let error = moves::request(&owner.service, &run, &limits(2, 4096, 128))
         .await
         .unwrap_err();
     assert_eq!(error.status, 400);
-    assert!(error.message.contains("shrink"));
+    assert!(
+        error
+            .message
+            .contains("resource requests are no longer supported")
+    );
 }
 
 #[tokio::test]
@@ -2100,7 +2174,7 @@ async fn abandoned_return_to_a_node_releases_only_the_unmaterialized_disk_reserv
 }
 
 #[tokio::test]
-async fn s3_disk_keeps_its_logical_size_while_cpu_and_memory_obey_node_limits() {
+async fn legacy_disks_keep_their_size_and_resource_requests_do_not_reserve_capacity() {
     let owner = Owner::new().await;
     let (node, agent, run) = (id(), id(), id());
     owner
@@ -2108,18 +2182,27 @@ async fn s3_disk_keeps_its_logical_size_while_cpu_and_memory_obey_node_limits() 
         .await;
     owner.grant_nodes(&agent, json!([node])).await;
     let mut record = agent_run(&run, &agent);
-    let attempt = id();
-    let selected = placement::reserve(&owner.service, &record, &attempt)
+    record["resources"] = limits(8, 16384, 32768);
+    record["requestedResources"] = limits(16, 32768, 65536);
+    let selected = placement::reserve(&owner.service, &record, &id())
         .await
         .unwrap();
     assert_eq!(selected["resources"], limits(1, 1024, 32768));
-    placement::release(&owner.service, &attempt).await.unwrap();
-    record["requestedResources"] = limits(2, 1024, 8192);
-    assert!(
-        placement::reserve(&owner.service, &record, &id())
+    // All four slots share the one CPU and one GiB host budget.
+    for _ in 0..3 {
+        let another = agent_run(&id(), &agent);
+        assert_eq!(
+            placement::reserve(&owner.service, &another, &id())
+                .await
+                .unwrap()["resources"],
+            limits(1, 1024, 8192)
+        );
+    }
+    assert!(placement::is_no_capacity(
+        &placement::reserve(&owner.service, &agent_run(&id(), &agent), &id())
             .await
-            .is_err()
-    );
+            .unwrap_err()
+    ));
 }
 
 /// Contents written to the source disk that every move must carry.
@@ -2265,9 +2348,8 @@ async fn seed_source_disk(owner: &Owner, state: &Path, record: &Value, node: &st
 }
 
 /// Requests a move of `run` to `target` and lets it settle.
-async fn move_to(owner: &Owner, run: &str, resources: &Value, target: &str) {
-    let mut args = resources.clone();
-    args["nodeId"] = json!(target);
+async fn move_to(owner: &Owner, run: &str, _resources: &Value, target: &str) {
+    let args = json!({ "nodeId": target });
     moves::request(&owner.service, &owner.run(run).await, &args)
         .await
         .unwrap();
@@ -2393,8 +2475,7 @@ async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_
     tasks.push(owner.serve(listener));
     for target in [&destination, &source] {
         let current = owner.run(&run).await;
-        let mut args = resources.clone();
-        args["nodeId"] = json!(target);
+        let args = json!({ "nodeId": target });
         moves::request(&owner.service, &current, &args)
             .await
             .unwrap();
@@ -2511,6 +2592,9 @@ async fn queued_capacity_transfer_carries_unpublished_writes_and_keeps_the_sourc
         );
     }
     tasks.push(owner.serve(listener));
+    let mut source_node = owner.stored("nodes", &source).await.unwrap();
+    source_node["slots"] = 1.into();
+    owner.put("nodes", source_node).await;
     let mut busy = agent_run(&id(), &agent);
     busy["pinnedNodeId"] = source.clone().into();
     busy["resources"] = limits(1, 128, 128);
@@ -2587,6 +2671,11 @@ async fn automatic_placement_spreads_work_unless_a_node_is_preferred() {
         run["preferredNodeId"] = preferred;
         run
     };
+    let mut busy = run(json!(small));
+    busy["pinnedNodeId"] = small.clone().into();
+    placement::reserve(&owner.service, &busy, &id())
+        .await
+        .unwrap();
     assert_eq!(
         placement::reserve(&owner.service, &run(Value::Null), &id())
             .await
@@ -2657,33 +2746,30 @@ async fn node_agent_grants_are_edited_from_the_node_without_narrowing_all_node_a
 }
 
 #[tokio::test]
-async fn agents_cannot_request_more_than_their_limit_and_older_clients_keep_it() {
+async fn agents_choose_nodes_and_legacy_resource_limits_are_not_exposed() {
     let owner = Owner::new().await;
-    let limited = json!({
-        "name": "Limited",
-        "access": { "maxResources": limits(2, 4096, 32768) },
-    });
-    let (status, agent) = owner.send("POST", "/api/agents", limited).await;
-    assert_eq!(status, StatusCode::OK, "{agent}");
-    let agent_id = agent["id"].as_str().unwrap();
-    // An update that omits the limit, like an older client, keeps it.
-    let (status, updated) = owner
+    let (status, agent) = owner
         .send(
-            "PUT",
-            &format!("/api/agents/{agent_id}"),
-            json!({ "name": "Limited", "access": { "nodes": null } }),
+            "POST",
+            "/api/agents",
+            json!({
+                "name": "Agent", "access": { "nodes": null, "maxResources": limits(1, 128, 128) }
+            }),
         )
         .await;
-    assert_eq!(status, StatusCode::OK, "{updated}");
-    assert_eq!(updated["access"]["maxResources"]["cpu"], 2);
-    let run = agent_run(&id(), agent_id);
-    let error = moves::request_by_agent(&owner.service, &run, &limits(8, 4096, 32768))
+    assert_eq!(status, StatusCode::OK);
+    let run = agent_run(&id(), agent["id"].as_str().unwrap());
+    let listed = moves::list(&owner.service, &run).await.unwrap();
+    assert!(listed.get("maxResources").is_none());
+    assert!(listed.get("currentResources").is_none());
+    let tool = moves::tool();
+    assert_eq!(tool["name"], "move_to_node");
+    assert_eq!(tool["inputSchema"]["required"], json!(["nodeId"]));
+    assert!(tool["inputSchema"]["properties"].get("cpu").is_none());
+    let error = moves::request_by_agent(&owner.service, &run, &json!({ "nodeId": id(), "cpu": 8 }))
         .await
         .unwrap_err();
-    assert_eq!(error.status, 403);
-    assert!(error.message.contains("at most 2 CPU"), "{}", error.message);
-    let listed = moves::list(&owner.service, &run).await.unwrap();
-    assert_eq!(listed["maxResources"]["memoryMiB"], 4096);
+    assert_eq!(error.status, 400);
 }
 
 #[tokio::test]
@@ -4070,74 +4156,28 @@ async fn synchronization_scheduler_starts_two_disks_and_leaves_the_third_queued(
 }
 
 #[tokio::test]
-async fn capacity_shortage_reports_free_resources_and_check_reserves_nothing() {
-    use leo_agent_manager::{
-        config::{id, now},
-        nodes::placement,
-    };
+async fn slot_shortage_reports_free_slots_and_check_reserves_nothing() {
     let owner = Owner::new().await;
-    let node = id();
-    let agent = id();
-    owner
-        .service
-        .store
-        .put(
-            "nodes",
-            json!({
-                "id": node,
-                "name": "Server",
-                "accepting": true,
-                "executionReady": true,
-                "lastSeen": now(),
-                "capabilities": {"kvm": true,"fuse": true},
-                "limits": {"cpu": 7,"memoryMiB": 16384,"diskMiB": 131072}
-            }),
-        )
+    let (node, agent) = (id(), id());
+    let mut record = schedulable_node(&node, &limits(7, 16384, 131072));
+    record["name"] = "Server".into();
+    record["slots"] = 1.into();
+    owner.put("nodes", record).await;
+    owner.grant_nodes(&agent, json!([node])).await;
+    let attempt = id();
+    placement::reserve(&owner.service, &agent_run(&id(), &agent), &attempt)
         .await
         .unwrap();
-    owner
-        .service
-        .store
-        .put("agents", json!({"id": agent,"access": {"nodes": [node]}}))
-        .await
-        .unwrap();
-    let other = json!({"id": id(),"snapshot": {"agent": {"id": agent}}});
-    placement::reserve(&owner.service, &other, &id())
-        .await
-        .unwrap();
-    let large = json!({
-        "id": id(),
-        "snapshot": {"agent": {"id": agent}},
-        "requestedResources": {"cpu": 6,"memoryMiB": 12288,"diskMiB": 32768}
-    });
-    let error = placement::check(&owner.service, &large).await.unwrap_err();
-    assert!(placement::is_no_capacity(&error), "{}", error.message);
-    assert!(
-        error
-            .message
-            .contains("6 CPU, 12288 MiB RAM and 32768 MiB disk"),
-        "{}",
-        error.message
-    );
-    assert!(
-        error
-            .message
-            .contains("Server has 5 CPU and 12288 MiB RAM free"),
-        "{}",
-        error.message
-    );
-    let reserved = placement::reserve(&owner.service, &large, &id())
+    let another = agent_run(&id(), &agent);
+    let error = placement::check(&owner.service, &another)
         .await
         .unwrap_err();
-    assert_eq!(reserved.message, error.message);
-    let attempts = owner.service.store.list("node-attempts").await.unwrap();
-    assert_eq!(attempts.len(), 1);
-    let small = json!({
-        "id": id(),
-        "snapshot": {"agent": {"id": agent}},
-        "requestedResources": {"cpu": 5,"memoryMiB": 12288,"diskMiB": 32768}
-    });
-    placement::check(&owner.service, &small).await.unwrap();
+    assert!(placement::is_no_capacity(&error));
+    assert!(
+        error.message.contains("Server has 0 free slots"),
+        "{}",
+        error.message
+    );
     assert_eq!(
         owner
             .service
@@ -4148,4 +4188,20 @@ async fn capacity_shortage_reports_free_resources_and_check_reserves_nothing() {
             .len(),
         1
     );
+    placement::release(&owner.service, &attempt).await.unwrap();
+    placement::check(&owner.service, &another).await.unwrap();
+    assert_eq!(
+        owner
+            .service
+            .store
+            .list("node-attempts")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let (_, inventory) = owner.get("/api/nodes").await;
+    let node = find_by_id(&inventory, &node);
+    assert_eq!(node["availableSlots"], 1);
+    assert!(node.get("reserved").is_none());
 }

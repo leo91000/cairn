@@ -377,6 +377,12 @@ impl Disk for Volume {
                     .saturating_add(bytes.len() as u64 * 4 + 1024 * 1024)
             {
                 self.pressure.store(false, Ordering::SeqCst);
+                let state = self
+                    .directory
+                    .parent()
+                    .and_then(Path::parent)
+                    .ok_or_else(|| io::Error::other("Invalid disk path"))?;
+                crate::microvm::budget::charge_disk(state, bytes.len() as u64 * 4 + 4096)?;
                 let result = self.disk.write_at(offset, bytes);
                 if result.is_err() {
                     self.fault.store(true, Ordering::SeqCst);

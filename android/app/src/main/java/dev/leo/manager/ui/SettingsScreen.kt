@@ -90,7 +90,9 @@ fun SettingsScreen(vm: LeoViewModel, state: Workspace) {
             Panel {
                 Text("Serveur", style = MaterialTheme.typography.titleLarge)
                 Code(info.publicUrl)
-                Text("Version ${info.version} · ${info.concurrency} workers")
+                Text(
+                    "Version ${info.version} · concurrence hôte (développement) : ${info.concurrency}"
+                )
                 Code("Commit : ${info.commit}")
                 Text("Répertoire du worker")
                 Code(info.home)

@@ -1,4 +1,5 @@
 use super::{
+    Admission,
     checkpoint::{Checkpoint, RunCheckpoint},
     output,
 };
@@ -41,7 +42,7 @@ const RESUME_PROMPT: &str = "Continue the same task from the saved conversation 
 pub(super) async fn execute(
     s: &Arc<Service>,
     run: &mut Value,
-    account: &mut Option<Lease>,
+    admission: &mut Admission,
     cancel: &CancellationToken,
     checkpoint: &Checkpoint,
     existing: bool,
@@ -49,7 +50,7 @@ pub(super) async fn execute(
 ) -> Result<()> {
     let span =
         tracing::info_span!(target: "leo_performance", "agent_execution", run_id = text(run, "id"));
-    execute_inner(s, run, account, cancel, checkpoint, existing, sensitive)
+    execute_inner(s, run, admission, cancel, checkpoint, existing, sensitive)
         .instrument(span)
         .await
 }
@@ -57,7 +58,7 @@ pub(super) async fn execute(
 async fn execute_inner(
     s: &Arc<Service>,
     run: &mut Value,
-    account: &mut Option<Lease>,
+    admission: &mut Admission,
     cancel: &CancellationToken,
     checkpoint: &Checkpoint,
     existing: bool,
@@ -71,7 +72,8 @@ async fn execute_inner(
         directory: s.config.data_dir.join("runs").join(&id),
         id,
         run,
-        account,
+        account: &mut admission.account,
+        preparation: admission.preparation.take(),
         cancel,
         checkpoint,
         sensitive,
@@ -102,6 +104,7 @@ struct Execution<'a> {
     id: String,
     run: &'a mut Value,
     account: &'a mut Option<Lease>,
+    preparation: Option<tokio::sync::OwnedMutexGuard<()>>,
     cancel: &'a CancellationToken,
     checkpoint: &'a Checkpoint,
     sensitive: &'a mut Vec<String>,
@@ -573,7 +576,7 @@ impl Execution<'_> {
 
     /// Places the run on a node and routes the launch through its isolated runner.
     async fn prepare_runner(
-        &self,
+        &mut self,
         workspace: &mut Workspace,
         resume: Option<&str>,
         chat: Option<Value>,
@@ -595,6 +598,8 @@ impl Execution<'_> {
                 c.runtime_id = Some(Some(runtime_id));
             })
             .await?;
+        drop(self.preparation.take());
+        s.worker.notify();
         timing.next("plan");
         self.write_runner_plan(workspace, &runner, &placement, resume, chat, launch)
             .await?;

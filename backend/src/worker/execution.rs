@@ -1,4 +1,5 @@
 use super::{
+    Admission,
     checkpoint::{Checkpoint, RunCheckpoint, Settled},
     launch,
 };
@@ -24,7 +25,7 @@ const VM_STOP_WAIT_REASON: &str = "Waiting for the previous VM to stop.";
 pub(super) async fn execute(
     s: &Arc<Service>,
     mut run: Value,
-    mut account: Option<Lease>,
+    mut admission: Admission,
     cancel: CancellationToken,
 ) -> Result<()> {
     let run_id = text(&run, "id").to_owned();
@@ -44,7 +45,7 @@ pub(super) async fn execute(
     let result = launch::execute(
         s,
         &mut run,
-        &mut account,
+        &mut admission,
         &cancel,
         &checkpoint,
         existing,
@@ -58,7 +59,7 @@ pub(super) async fn execute(
     stop_heartbeat.cancel();
     let _ = heartbeat.await;
     checkpoint.persist().await?;
-    release(s, &checkpoint, account.as_ref(), fenced).await
+    release(s, &checkpoint, admission.account.as_ref(), fenced).await
 }
 
 /// Keeps the checkpoint, node lease and pending moves current while the run executes.

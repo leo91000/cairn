@@ -14,13 +14,13 @@ has not been merged, deployed or released.
 - Outbound controller transport, private workspace staging, project/artifact
   routing, chat/inbox streaming and scoped native-auth relays. Provider account
   refresh and 1Password access stay under master control.
-- CPU/RAM admission, persistent-disk accounting including retained stale disks,
-  resource requests, preferred/strict placement, bounded capacity waits and
+- Atomic slot admission, shared CPU/RAM/disk budgets including retained stale disks,
+  resource pressure, preferred/strict placement, bounded capacity waits and
   immediate request failure without ending the conversation.
-  Automatic placement picks the authorized node with the most free CPU/RAM
+  Automatic placement picks the authorized node with the largest free-slot fraction
   (a preferred node wins, ties keep the master runner). Agents discover their
-  authorized nodes, tags and free capacity with `list_nodes` before calling
-  `request_capacity`.
+  authorized nodes, tags, shared budgets and free slots with `list_nodes` before calling
+  `move_to_node` with a destination. Agents never request resource allocations.
 - Agent access can be granted from each node's card; a newly connected node
   asks for it right after enrollment and reports why it cannot take work.
   Conversations only show execution details once remote nodes are relevant.
@@ -30,8 +30,8 @@ has not been merged, deployed or released.
 - Old disks left on a node (conversations now running elsewhere, or copies set
   aside by a restore) are reported per node and freed only on explicit request,
   since a disk abandoned by failover can hold changes newer than its recovery point.
-- Agents can have a per-conversation resource limit that bounds their own
-  `request_capacity` calls; each move is announced in the conversation.
+- Each move is announced in the conversation. Slot counts and shared budgets are
+  configured per node; there are no per-conversation resource reservations.
 - Local and remote execution leases, fencing, durable movement requests, repeated
   stop attempts, full environment transfer and automatic recovery on compatible
   authorized nodes. Idle movements stay idle, explicit cancellation is preserved,

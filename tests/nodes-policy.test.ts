@@ -36,6 +36,7 @@ it('formats node sizes, recovery ages and blocking reasons for people', () => {
     accepting: true,
     revoked: false,
     status: 'online',
+    slots: 4,
     tags: [],
     capabilities: {
       os: 'linux',
@@ -53,6 +54,7 @@ it('formats node sizes, recovery ages and blocking reasons for people', () => {
     agents: [{ id: 'a', name: 'Main', allNodes: false }],
   }
   expect(nodeDiagnostics(node)).toEqual([])
+  expect(nodeDiagnostics({ ...node, executionReady: false, budgetError: 'RAM below current usage' })[0]).toContain('RAM below current usage')
   expect(nodeDiagnostics({ ...node, agents: [] })).toEqual(['No agent can use this machine yet.'])
   expect(nodeDiagnostics({ ...node, status: 'offline', lastSeen: 0 }, 10 * 60_000)[0]).toContain('No contact since 10 min ago')
 })

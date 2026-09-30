@@ -63,6 +63,9 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     let image = host::assets(&state).await?;
     fence_interrupted_attempts(&state).await?;
     let pool = Pool::new(state.clone(), image, stop.clone(), concurrency).await?;
+    pool.initialize(crate::microvm::budget::cgroup().await?)
+        .await?;
+    let memory_monitor = tokio::spawn(pool.clone().monitor());
     let broker = Broker::new(data, state, pool, stop.clone());
     let draining = broker.clone();
     let address = std::env::var("RUNNER_BIND").unwrap_or_else(|_| "0.0.0.0:4311".into());
@@ -81,6 +84,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         draining.stop(&id).await?;
     }
     draining.pool.drain().await;
+    memory_monitor.await.map_err(Error::internal)?;
     drop(controller);
     Ok(())
 }

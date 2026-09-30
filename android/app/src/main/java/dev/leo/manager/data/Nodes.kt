@@ -4,9 +4,6 @@ import kotlinx.serialization.Serializable
 
 const val LOCAL_NODE_ID = "00000000-0000-4000-8000-000000000002"
 
-/** The backend applies the same defaults when a conversation has not requested resources. */
-val DEFAULT_RESOURCES = NodeResources(cpu = 2, memoryMiB = 4096, diskMiB = 32768)
-
 @Serializable
 data class NodeAgent(val id: String, val name: String = "", val allNodes: Boolean = false)
 
@@ -34,8 +31,12 @@ data class ExecutionNode(
     val tags: List<String> = emptyList(),
     val capabilities: NodeCapabilities = NodeCapabilities(),
     val limits: NodeResources = NodeResources(),
-    val available: NodeResources? = null,
-    val reserved: NodeResources? = null,
+    val slots: Int = 4,
+    val occupiedSlots: Int = 0,
+    val availableSlots: Int = 4,
+    val usage: NodeUsage? = null,
+    val budgetError: String? = null,
+    val pressure: String? = null,
     val executionReady: Boolean = false,
     val maintenance: String? = null,
     val imageDigest: String? = null,
@@ -48,6 +49,8 @@ data class ExecutionNode(
     val staleDisks: StaleDisks = StaleDisks(),
     val storage: NodeStoragePolicy? = null,
 )
+
+@Serializable data class NodeUsage(val memoryMiB: Long = 0, val diskMiB: Long = 0)
 
 /** Disk kept on a node that no conversation needs there any more. */
 @Serializable data class StaleDisks(val count: Int = 0, val diskMiB: Long = 0)
@@ -91,6 +94,7 @@ data class NodeConfiguration(
     val accepting: Boolean,
     val tags: List<String>,
     val limits: NodeResources,
+    val slots: Int = 4,
 )
 
 @Serializable
@@ -146,10 +150,16 @@ fun nodeDiagnostics(node: ExecutionNode, now: Long = System.currentTimeMillis())
             "KVM indisponible : activez la virtualisation dans le BIOS et chargez le module kvm."
     if (node.status != "offline" && !node.executionReady)
         reasons +=
-            node.updateError?.let { "Le runtime n’est pas prêt : $it" }
+            node.budgetError?.let { "Le budget partagé n’a pas pu être appliqué : $it" }
+                ?: node.updateError?.let { "Le runtime n’est pas prêt : $it" }
                 ?: "Le runtime n’est pas encore prêt ou ne correspond pas à la version approuvée par le master."
     if (node.maintenance != null)
         reasons += "Maintenance en cours : les nouveaux travaux attendent la fin de la mise à jour."
+    if (node.pressure != null)
+        reasons +=
+            if (node.pressure == "memory")
+                "RAM partagée sous pression : les nouveaux travaux attendent."
+            else "Espace disque partagé insuffisant : les nouveaux travaux attendent."
     if (!node.accepting)
         reasons +=
             "Nouveaux travaux suspendus sur cette machine (Configurer → Accepter de nouveaux travaux)."

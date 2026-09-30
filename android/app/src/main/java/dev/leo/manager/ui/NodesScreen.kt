@@ -86,30 +86,35 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
                         )
                         return@Panel
                     }
-                    val available = node.available ?: node.limits
+                    val available = node.limits
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         NodeCapacity(
-                            "CPU libres",
+                            "CPU partagés",
                             available.cpu.toString(),
-                            "sur ${node.limits.cpu}",
+                            "pour tous les slots",
                             Modifier.weight(1f),
                         )
                         NodeCapacity(
-                            "RAM libre",
+                            "RAM partagée",
                             formatMiB(available.memoryMiB),
-                            "sur ${formatMiB(node.limits.memoryMiB)}",
+                            node.usage?.let { "${formatMiB(it.memoryMiB)} utilisés" }
+                                ?: "pour tous les slots",
                             Modifier.weight(1f),
                         )
                         NodeCapacity(
-                            "Disque libre",
+                            "Disque partagé",
                             formatMiB(available.diskMiB),
-                            "sur ${formatMiB(node.limits.diskMiB)}",
+                            node.usage?.let { "${formatMiB(it.diskMiB)} utilisés" }
+                                ?: "pour tous les slots",
                             Modifier.weight(1f),
                         )
                     }
+                    Text(
+                        "${node.availableSlots} slots libres sur ${node.slots} · ${node.occupiedSlots} occupés"
+                    )
                     if (node.agents.isNotEmpty())
                         Text(
                             "Utilisée par ${node.agents.joinToString(", ") { if (it.allNodes) "${it.name} (toutes les nodes)" else it.name }}"
@@ -145,9 +150,9 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
                             "Détecté : ${node.capabilities.cpu} CPU · ${formatMiB(node.capabilities.memoryMiB)} RAM · ${formatMiB(node.capabilities.diskMiB)} disque · KVM ${if (node.capabilities.kvm) "disponible" else "indisponible"}",
                             style = MaterialTheme.typography.bodySmall,
                         )
-                        node.reserved?.let {
+                        node.usage?.let {
                             Text(
-                                "Réservé : ${formatResources(it)}",
+                                "Utilisé : ${formatMiB(it.memoryMiB)} RAM · ${formatMiB(it.diskMiB)} disque",
                                 style = MaterialTheme.typography.bodySmall,
                             )
                         }
@@ -340,7 +345,7 @@ fun NodesScreen(vm: LeoViewModel, state: Workspace) {
         }
     }
     revoking?.let { node ->
-        val running = (node.reserved?.cpu ?: 0) > 0
+        val running = node.occupiedSlots > 0
         Confirm(
             "Révoquer ${node.name} ?",
             buildString {
@@ -413,6 +418,7 @@ private fun NodeEditor(
     var name by remember(node.id) { mutableStateOf(node.name) }
     var tags by remember(node.id) { mutableStateOf(node.tags.joinToString(", ")) }
     var accepting by remember(node.id) { mutableStateOf(node.accepting) }
+    var slots by remember(node.id) { mutableStateOf(node.slots.toString()) }
     var cpu by remember(node.id) { mutableStateOf(node.limits.cpu.toString()) }
     // Ceilings are edited in Gio and stored in Mio.
     var memory by remember(node.id) { mutableStateOf(gib(node.limits.memoryMiB)) }
@@ -427,6 +433,7 @@ private fun NodeEditor(
         valid =
             name.isNotBlank() &&
                 (cpu.toIntOrNull() ?: 0) > 0 &&
+                (slots.toIntOrNull() ?: 0) in 1..4096 &&
                 (memoryMiB ?: 0) >= 128 &&
                 (diskMiB ?: 0) >= 128,
         save = {
@@ -436,6 +443,7 @@ private fun NodeEditor(
                     accepting,
                     tags.split(',').map(String::trim).filter(String::isNotEmpty),
                     NodeResources(cpu.toInt(), memoryMiB!!, diskMiB!!),
+                    slots.toInt(),
                 )
             )
         },
@@ -447,10 +455,11 @@ private fun NodeEditor(
             Field("Tags séparés par des virgules", tags, { tags = it }, enabled = !state.busy)
         }
         Panel {
-            Text("Ressources autorisées", style = MaterialTheme.typography.titleSmall)
-            Field("Plafond CPU", cpu, { cpu = it }, enabled = !state.busy)
-            Field("Plafond RAM (Gio)", memory, { memory = it }, enabled = !state.busy)
-            Field("Plafond disque (Gio)", disk, { disk = it }, enabled = !state.busy)
+            Text("Slots et budgets partagés", style = MaterialTheme.typography.titleSmall)
+            Field("Slots d’exécution", slots, { slots = it }, enabled = !state.busy)
+            Field("Budget CPU partagé", cpu, { cpu = it }, enabled = !state.busy)
+            Field("Budget RAM partagé (Gio)", memory, { memory = it }, enabled = !state.busy)
+            Field("Budget disque partagé (Gio)", disk, { disk = it }, enabled = !state.busy)
             Text(
                 "Détecté sur cette machine : ${node.capabilities.cpu} CPU · ${formatMiB(node.capabilities.memoryMiB)} RAM · ${formatMiB(node.capabilities.diskMiB)} disque.",
                 style = MaterialTheme.typography.bodySmall,

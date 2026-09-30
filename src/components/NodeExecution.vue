@@ -10,9 +10,7 @@ import {
   watch,
 } from 'vue'
 import {
-  DEFAULT_RESOURCES,
   formatBytes,
-  formatMiB,
   LOCAL_NODE_ID,
   relativeAge,
 } from '../../shared/nodes'
@@ -55,16 +53,13 @@ const storageShort: Record<string, string> = {
   'integrity': 'Disk needs attention',
 }
 const modes: { value: Mode, label: string }[] = [{ value: 'automatic', label: 'Automatic' }, { value: 'preferred', label: 'Prefer a node' }, { value: 'fixed', label: 'Fix to a node' }]
-const modeHelp: Record<Mode, string> = { automatic: 'Picks the authorized node with the most free CPU and RAM.', preferred: 'Uses this node when it is available, otherwise fails over to another.', fixed: 'Waits for this machine; no automatic failover.' }
+const modeHelp: Record<Mode, string> = { automatic: 'Picks an authorized node with a free slot and shared resource headroom.', preferred: 'Uses this node when it is available, otherwise fails over to another.', fixed: 'Waits for this machine; no automatic failover.' }
 const node = computed(() => nodes.value.find(node => node.id === props.run.nodeId))
 const nodeName = computed(() => node.value?.name || (props.run.nodeId === LOCAL_NODE_ID ? 'Master runner' : 'Unknown node'))
 const selection = ref('')
 const mode = ref<Mode>('automatic')
 const savedPlacement = ref({ mode: 'automatic' as Mode, selection: '' })
 const destination = ref('')
-const cpu = ref(DEFAULT_RESOURCES.cpu)
-const memoryGiB = ref(DEFAULT_RESOURCES.memoryMiB / 1024)
-const diskGiB = ref(DEFAULT_RESOURCES.diskMiB / 1024)
 const busy = ref(false)
 const loaded = ref(false)
 const error = ref('')
@@ -86,8 +81,7 @@ const relevant = computed(() => (!!props.run.nodeId && props.run.nodeId !== LOCA
   || !!error.value
   || !!(props.run.nodeState || props.run.movementError || props.run.restoredAt || props.run.capacityWaitUntil || props.run.backup?.error))
 const destinations = computed(() => nodes.value.filter(candidate => candidate.id !== props.run.nodeId))
-const minimumDiskGiB = computed(() => (props.run.resources?.diskMiB ?? 128) / 1024)
-const canMove = computed(() => Number.isInteger(cpu.value) && cpu.value > 0 && Number.isFinite(memoryGiB.value) && memoryGiB.value >= 0.125 && Number.isFinite(diskGiB.value) && diskGiB.value >= minimumDiskGiB.value && !!props.run.sessionId && !busy.value && !!destination.value && destination.value !== props.run.nodeId && ['running', 'succeeded'].includes(props.run.status) && !props.run.nodeState)
+const canMove = computed(() => !!props.run.sessionId && !busy.value && !!destination.value && destination.value !== props.run.nodeId && ['running', 'succeeded'].includes(props.run.status) && !props.run.nodeState)
 const changed = computed(() => mode.value !== savedPlacement.value.mode || (mode.value !== 'automatic' && selection.value !== savedPlacement.value.selection))
 const dirtyBytes = computed(() => props.run.storage?.dirtyBytes || 0)
 const localBytes = computed(() => props.run.storage?.localBytes)
@@ -137,10 +131,6 @@ watch(() => props.run.id, async (runId, _, onCleanup) => {
   error.value = ''
   saved.value = ''
   loaded.value = false
-  const resources = props.run.resources || DEFAULT_RESOURCES
-  cpu.value = resources.cpu
-  memoryGiB.value = resources.memoryMiB / 1024
-  diskGiB.value = resources.diskMiB / 1024
   open.value = false
   moving.value = false
   try {
@@ -182,9 +172,6 @@ function move() {
       method: 'POST',
       body: JSON.stringify({
         nodeId: destination.value,
-        cpu: cpu.value,
-        memoryMiB: Math.round(memoryGiB.value * 1024),
-        diskMiB: Math.round(diskGiB.value * 1024),
       }),
     })
     moving.value = false
@@ -254,7 +241,7 @@ onUnmounted(() => {
       @click="toggle"
     >
       <Icon :name="Server" :size="13" class="shrink-0" />
-      <span class="truncate">{{ nodeName }}<template v-if="run.resources"> · {{ run.resources.cpu }} CPU · {{ formatMiB(run.resources.memoryMiB) }}</template></span>
+      <span class="truncate">{{ nodeName }}</span>
       <template v-if="status.label">
         <span aria-hidden="true" class="opacity-40">|</span>
         <Icon
@@ -295,11 +282,8 @@ onUnmounted(() => {
               {{ nodeName }}
             </h2>
             <p class="m-0! mt-0.5!">
-              <template v-if="run.resources">
-                {{ run.resources.cpu }} CPU · {{ formatMiB(run.resources.memoryMiB) }} RAM
-              </template>
               <template v-if="run.storage?.mode === 'on-demand'">
-                {{ run.resources ? ' · ' : '' }}Files load on demand
+                Files load on demand
               </template>
             </p>
             <p v-if="savedPlacement.mode === 'fixed'" class="m-0! mt-0.5!">
@@ -419,29 +403,6 @@ onUnmounted(() => {
       <form class="p-6 grid gap-4" @submit.prevent="move">
         <div class="grid grid-cols-2 gap-2">
           <label class="col-span-2 grid gap-1">Destination <select v-model="destination" :disabled="busy" class="rounded-lg border border-control bg-inset p-1.5 text-ink"><option value="" disabled>Select a node</option><option v-for="candidate in destinations" :key="candidate.id" :value="candidate.id">{{ candidate.name }}</option></select></label>
-          <label class="grid gap-1">CPU <input
-            v-model.number="cpu"
-            class="rounded-lg border border-control bg-inset p-1.5 text-ink"
-            type="number"
-            min="1"
-            :disabled="busy"
-          ></label>
-          <label class="grid gap-1">RAM (GiB) <input
-            v-model.number="memoryGiB"
-            class="rounded-lg border border-control bg-inset p-1.5 text-ink"
-            type="number"
-            min="0.125"
-            step="any"
-            :disabled="busy"
-          ></label>
-          <label class="grid gap-1">Disk (GiB) <input
-            v-model.number="diskGiB"
-            class="rounded-lg border border-control bg-inset p-1.5 text-ink"
-            type="number"
-            :min="minimumDiskGiB"
-            step="any"
-            :disabled="busy"
-          ></label>
         </div>
         <p class="m-0! mt-2!">
           Reserves the destination, pauses the conversation, transfers its environment and resumes it there. Running commands are interrupted. The disk cannot shrink.

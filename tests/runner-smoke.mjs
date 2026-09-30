@@ -168,6 +168,22 @@ console.log('probe.done');
       api,
     })
     const { storage } = storageFixture
+    const initialHealth = await (await api('/health')).json()
+    assert.equal(initialHealth.sharedResources, true)
+    assert.equal(initialHealth.budget.slots, 5)
+    const originalBudget = initialHealth.budget
+    const adjustedBudget = { slots: 6, limits: { ...originalBudget.limits, cpu: 2, memoryMiB: 4096 } }
+    const unauthenticatedBudget = await fetch(`${url}/node-budget`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(adjustedBudget),
+    })
+    assert.equal(unauthenticatedBudget.status, 401)
+    await api('/node-budget', 'POST', adjustedBudget)
+    assert.deepEqual((await (await api('/health')).json()).budget, adjustedBudget)
+    assert.equal(docker('exec', name, 'cat', '/run/leo-cgroup/leo-shared/cpu.max'), '200000 100000')
+    assert.equal(docker('exec', name, 'cat', '/run/leo-cgroup/leo-shared/memory.max'), String(4096 * 1024 ** 2))
+    await api('/node-budget', 'POST', originalBudget)
     for (const mode of ['first', 'resume', 'cancel', 'crash', 'recover', 'managed-claude', 'codex-return']) {
       const id = randomUUID()
       const plan = {
@@ -449,7 +465,12 @@ console.log('probe.done');
         expires: Date.now() + 60000,
         sandbox: 'yolo',
         cwd,
-        command: ['/usr/local/bin/node', '-e', 'console.log("slot.ready");setInterval(()=>{},1000)'],
+        command: ['/usr/local/bin/node', '-e', `
+          const assert=require('node:assert/strict'),os=require('node:os');
+          assert.equal(os.cpus().length,${Math.min(originalBudget.limits.cpu, 32)});
+          assert.ok(os.totalmem()>${(originalBudget.limits.memoryMiB - 256) * 1024 ** 2},'guest sees the shared ceiling despite legacy per-run requests');
+          console.log('slot.ready');setInterval(()=>{},1000);
+        `],
         imports: [{ source: cwd, target: cwd }],
       }
       await writeFile(path.join(root, 'data/runner-plans', `${id}.json`), JSON.stringify(plan))
@@ -477,11 +498,52 @@ console.log('probe.done');
         return false
       }
     })
+    const sharedHealth = await (await api('/health')).json()
+    assert.ok(sharedHealth.usage.memoryMiB < originalBudget.limits.memoryMiB)
+    const balloons = JSON.parse(docker('exec', name, '/usr/local/bin/node', '-e', `
+      const fs=require('node:fs'),http=require('node:http');
+      const root='/runner-state/jails/firecracker';
+      Promise.all(fs.readdirSync(root).map(async id=>{
+        const jail=root+'/'+id+'/root';
+        const config=JSON.parse(fs.readFileSync(jail+'/config.json'));
+        const stats=await new Promise((resolve,reject)=>{
+          const req=http.get({socketPath:jail+'/api.sock',path:'/balloon/statistics'},res=>{
+            let data='';res.on('data',part=>data+=part);res.on('end',()=>resolve(JSON.parse(data)));
+          });req.on('error',reject);
+        });
+        return {config:config.balloon,stats};
+      })).then(result=>console.log(JSON.stringify(result)));
+    `))
+    assert.equal(balloons.length, 5)
+    for (const balloon of balloons) {
+      assert.equal(balloon.config.free_page_reporting, true)
+      assert.equal(balloon.config.deflate_on_oom, true)
+      assert.ok(balloon.stats.available_memory > 0, 'virtio balloon statistics reach Firecracker')
+    }
+
+    await api('/node-budget', 'POST', { ...originalBudget, slots: 3 })
+    const reducedHealth = await (await api('/health')).json()
+    assert.equal(reducedHealth.pool.capacity, 3)
+    assert.equal(reducedHealth.pool.occupied, 5, 'lowering slots preserves active guests')
+    const invalidBudget = await fetch(`${url}/node-budget`, {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ ...originalBudget, limits: { ...originalBudget.limits, memoryMiB: 128 } }),
+    })
+    assert.equal(invalidBudget.status, 400, 'the controller reserve cannot be the entire RAM budget')
+    const tooSmall = await fetch(`${url}/node-budget`, {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ ...originalBudget, limits: { ...originalBudget.limits, memoryMiB: 256 } }),
+    })
+    assert.equal(tooSmall.status, 409, 'a RAM decrease cannot kill existing guests')
+    assert.equal((await (await api('/health')).json()).pool.occupied, 5)
     await Promise.all(held.map(id => api(`/runs/${id}`, 'DELETE')))
     await until(async () => {
       const health = await (await api('/health')).json()
       return health.activeRuns === 0 && health.pool.ready === 0 && health.pool.occupied === 0
     })
+    await api('/node-budget', 'POST', originalBudget)
     process.stdout.write(`${JSON.stringify({ mode: 'pool-capacity-cancel-refill', capacity: 5, status: 'passed' })}\n`)
     await storageSmoke({
       root,

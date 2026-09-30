@@ -171,7 +171,6 @@ export function firecrackerRunnerCompose(compose) {
     // Set defaults when migrating to VMs; preserve subsequent operator sizing.
     mem_limit: alreadyUsesVms ? runner.get('mem_limit') ?? '20g' : '20g',
     cpus: alreadyUsesVms ? runner.get('cpus') ?? 8 : 8,
-    pids_limit: alreadyUsesVms ? runner.get('pids_limit') ?? 256 : 256,
     healthcheck: {
       test: ['CMD', 'node', '-e', 'fetch(\'http://127.0.0.1:4311/health\').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))'],
       start_period: '120s',
@@ -182,6 +181,13 @@ export function firecrackerRunnerCompose(compose) {
       runner.set(key, value)
       changed = true
     }
+  }
+
+  // The old generated cap counted host vCPU threads, not guest processes.
+  // Preserve explicit operator limits, but remove the former default.
+  if (runner.has('pids_limit') && (!alreadyUsesVms || runner.get('pids_limit') === 256)) {
+    runner.delete('pids_limit')
+    changed = true
   }
 
   if (runner.has('privileged')) {

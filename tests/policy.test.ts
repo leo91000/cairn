@@ -27,7 +27,6 @@ describe('agent access and task inheritance', () => {
     const main = ctx.service.store.get('agents', MAIN_AGENT_ID)!
     expect(main.access).toEqual({
       nodes: [LOCAL_NODE_ID],
-      maxResources: null,
       projects: null,
       skills: null,
       mcps: null,
