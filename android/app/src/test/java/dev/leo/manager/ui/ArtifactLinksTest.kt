@@ -104,7 +104,10 @@ class ArtifactLinksTest {
                                 "/api/codex/models" -> "{}"
                                 else -> "[]"
                             }
-                        return MockResponse().setBody(body)
+                        return MockResponse().setBody(body).apply {
+                            if (path.endsWith("?download=1"))
+                                setBodyDelay(200, java.util.concurrent.TimeUnit.MILLISECONDS)
+                        }
                     }
                 }
             server.start()
@@ -140,7 +143,14 @@ class ArtifactLinksTest {
             compose.waitUntil(15000) {
                 compose.onAllNodesWithText("notes.md").fetchSemanticsNodes().isNotEmpty()
             }
-            compose.waitUntil(15000) { paths.contains("/api/runs/older/artifacts/file?download=1") }
+            // Receiving the request precedes loading the document and enabling save.
+            compose.waitUntil(15000) {
+                paths.contains("/api/runs/older/artifacts/file?download=1") &&
+                    compose
+                        .onAllNodes(hasContentDescription("Enregistrer") and isEnabled())
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+            }
             compose.onNodeWithContentDescription("Enregistrer").assertIsEnabled()
             compose.onNodeWithContentDescription("Lien public").performClick()
             compose.waitUntil(10000) {

@@ -187,6 +187,11 @@ abstract class NodePlacementCases {
                             // Keep the save busy while the subsequent node refresh is in flight.
                             if (path == "/api/nodes" && configured)
                                 setBodyDelay(1, java.util.concurrent.TimeUnit.SECONDS)
+                            else if (
+                                path == "/api/nodes" &&
+                                    writes.any { it.first == "/api/nodes/node/storage" }
+                            )
+                                setBodyDelay(200, java.util.concurrent.TimeUnit.MILLISECONDS)
                         }
                     }
                 }
@@ -246,7 +251,6 @@ abstract class NodePlacementCases {
             compose.waitUntil(10000) {
                 compose.onAllNodesWithText("Agent test").fetchSemanticsNodes().isNotEmpty()
             }
-            compose.onNodeWithText("Agent test").performClick()
             // A previous save can close its sheet before releasing the global busy state.
             compose.waitUntil(10000) {
                 compose
@@ -254,6 +258,7 @@ abstract class NodePlacementCases {
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
+            compose.onNodeWithText("Agent test").performClick()
             compose.onNodeWithText("Enregistrer").assertIsEnabled()
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(10000) {
