@@ -8,7 +8,6 @@ import {
   rm,
   writeFile,
 } from 'node:fs/promises'
-import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
@@ -18,7 +17,7 @@ async function main() {
   const image = process.argv[2]
   assert.ok(image, 'Usage: LEO_STORAGE_SOAK_SECONDS=300 node tests/storage-vm-soak.mjs IMAGE')
   assert.ok(Number(process.env.LEO_STORAGE_SOAK_SECONDS) >= 60)
-  const root = await mkdtemp(path.join(os.tmpdir(), 'leo-storage-qualification-'))
+  const root = await mkdtemp(path.join(process.env.VM_TEST_ROOT || '/var/tmp', 'leo-storage-qualification-'))
   const name = `leo-storage-${randomUUID().slice(0, 8)}`
   let started = false
 
