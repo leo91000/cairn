@@ -1,6 +1,40 @@
 //! Local structured timings. Identities are run/VM IDs, never paths, URLs or credentials.
 use std::time::Instant;
 
+mod activity;
+
+pub use activity::{Activity, heartbeat};
+
+/// Optional correlation fields from older plans may be absent. Never log arbitrary values.
+pub fn identity(value: &str) -> &str {
+    if uuid::Uuid::parse_str(value).is_ok() {
+        value
+    } else {
+        "unknown"
+    }
+}
+
+/// Observes slow awaits without timeouts, cancellation, or another database write.
+/// The enclosing tracing span supplies run/attempt correlation.
+pub async fn wait<T>(phase: &'static str, future: impl std::future::Future<Output = T>) -> T {
+    let started = tokio::time::Instant::now();
+    let mut heartbeat = heartbeat();
+    tokio::pin!(future);
+    let result = loop {
+        tokio::select! {
+            result = &mut future => break result,
+            _ = heartbeat.tick() => {
+                tracing::info!(target: "leo_performance", operation = "agent_wait", phase, event = "waiting", elapsed_ms = started.elapsed().as_millis() as u64);
+            }
+        }
+    };
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    if elapsed_ms >= 100 {
+        tracing::info!(target: "leo_performance", operation = "agent_wait", phase, event = "completed", elapsed_ms);
+    }
+    result
+}
+
 /// Times one operation and its phases; dropping it unfinished records `incomplete`.
 pub(crate) struct Operation {
     operation: &'static str,

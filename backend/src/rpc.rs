@@ -365,11 +365,22 @@ impl Rpc {
         };
         let started = Instant::now();
         let id = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        let operation = if self.jsonrpc { "mcp_rpc" } else { "codex_rpc" };
+        tracing::info!(
+            target: "leo_performance",
+            operation,
+            method,
+            request_id = id,
+            event = "started",
+            timeout_ms = timeout.as_millis() as u64,
+        );
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
+        let mut queue_ms = None;
         let result = async {
             let method = method.to_owned();
             self.send(Message::Request { id, method, params }).await?;
+            queue_ms = Some(started.elapsed().as_millis() as u64);
             tokio::select! {
                 () = self.closed.cancelled() => Err(self.failure().await),
                 result = rx => match result {
@@ -388,17 +399,17 @@ impl Rpc {
                 )))
             });
         self.pending.lock().await.remove(&id);
-        if started.elapsed() >= Duration::from_secs(1) || result.is_err() {
-            let operation = if self.jsonrpc { "mcp_rpc" } else { "codex_rpc" };
-            tracing::info!(
-                target: "leo_performance",
-                operation,
-                method,
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                timeout_ms = timeout.as_millis() as u64,
-                succeeded = result.is_ok(),
-            );
-        }
+        tracing::info!(
+            target: "leo_performance",
+            operation,
+            method,
+            request_id = id,
+            event = "completed",
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            queue_ms,
+            timeout_ms = timeout.as_millis() as u64,
+            succeeded = result.is_ok(),
+        );
         result
     }
 

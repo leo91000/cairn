@@ -22,6 +22,115 @@ use tokio_util::sync::CancellationToken;
 const FIRST_RUN: &str = "11111111-1111-4111-8111-111111111111";
 const SECOND_RUN: &str = "22222222-2222-4222-8222-222222222222";
 
+#[tokio::test]
+async fn chat_binary_correlates_native_rpc_and_activity_without_changing_stdout_or_logging_prompts()
+{
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+
+    let root = TempDir::new().unwrap();
+    let config = config(&root);
+    let config_file = root.path().join("config.json");
+    std::fs::write(&config_file, serde_json::to_vec(&config).unwrap()).unwrap();
+    let home = codex_home(&config);
+    let claude_home = root.path().join("claude");
+    std::fs::create_dir_all(&claude_home).unwrap();
+    std::fs::write(claude_home.join(".credentials.json"), "fixture").unwrap();
+    for provider in ["codex", "claude"] {
+        let mut output_types = Vec::new();
+        for correlated in [false, true] {
+            let mut plan = json!({
+                "provider": provider,
+                "cwd": root.path(),
+                "model": "fixture",
+                "reasoning": "medium",
+                "sandbox": "yolo",
+                "output": root.path().join(format!("reply-{provider}-{correlated}.md")),
+                "inputDirectory": root.path(),
+                "writableRoots": [],
+                "execution": {
+                    "messageId": "fixture-message",
+                    "text": "PRIVATE_PROMPT_MARKER",
+                    "attachments": [],
+                },
+            });
+            if correlated {
+                plan["runId"] = FIRST_RUN.into();
+                plan["attemptId"] = SECOND_RUN.into();
+            }
+            let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_leo"))
+                .args(["chat", &common::fixture(&format!("{provider}.mjs"))])
+                .env("LEO_CONFIG", &config_file)
+                .env("CODEX_HOME", &home)
+                .env("CLAUDE_CONFIG_DIR", root.path().join("claude"))
+                .env(
+                    "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+                    root.path().join("claude"),
+                )
+                .env("RUST_LOG", "warn,leo_performance=info")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let mut stdin = child.stdin.take().unwrap();
+            stdin.write_all(plan.to_string().as_bytes()).await.unwrap();
+            drop(stdin);
+            let output = tokio::time::timeout(Duration::from_secs(15), child.wait_with_output())
+                .await
+                .unwrap()
+                .unwrap();
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert!(output.status.success(), "{stderr}");
+            if provider == "codex" {
+                assert!(stderr.contains("codex_rpc"));
+                assert!(stderr.contains("initialize"));
+            } else {
+                assert!(stderr.contains("thread_initialized"));
+            }
+            assert!(stderr.contains("agent_activity"));
+            assert!(stderr.contains("first_message"));
+            assert!(!stderr.contains("PRIVATE_PROMPT_MARKER"));
+            assert!(!stderr.contains("rg --files src/components"));
+            assert!(!stderr.contains(&root.path().to_string_lossy().into_owned()));
+            if correlated {
+                assert!(stderr.contains(FIRST_RUN));
+                assert!(stderr.contains(SECOND_RUN));
+            } else {
+                assert!(stderr.contains("unknown"));
+            }
+            let events = String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(events.last().unwrap()["type"], "turn.completed");
+            assert!(!events.iter().any(|event| event["type"] == "diagnostic"));
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event["type"] == "chat.delivered")
+                    .count(),
+                1
+            );
+            output_types.push(
+                events
+                    .iter()
+                    // Delivery acknowledgement races the turn notification in
+                    // the native protocol; compare the ordered output stream.
+                    .filter(|event| event["type"] != "chat.delivered")
+                    .map(|event| event["type"].clone())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(
+            output_types[0], output_types[1],
+            "old plans and correlated plans keep the same protocol"
+        );
+    }
+}
+
 /// A service whose Codex binary is the repository fixture.
 fn config(root: &TempDir) -> Config {
     Config {
