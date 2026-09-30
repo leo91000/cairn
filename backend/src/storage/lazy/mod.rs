@@ -47,6 +47,25 @@ pub struct LazyDisk {
     metrics: super::metrics::Metrics,
 }
 
+/// Keeps the node's bounded verified cache alive while its controller is running,
+/// including intervals with no mounted conversation disks.
+pub(crate) struct NodeBlockCache {
+    blocks: Arc<memory::BlockCache>,
+}
+
+impl NodeBlockCache {
+    pub(crate) fn new(state: &Path) -> io::Result<Self> {
+        Ok(Self {
+            blocks: memory::BlockCache::for_directory(state)?,
+        })
+    }
+
+    pub(crate) fn resize(&self, bytes: usize) -> io::Result<()> {
+        self.blocks.bytes.lock().map_err(failure)?.resize(bytes);
+        Ok(())
+    }
+}
+
 impl Drop for LazyDisk {
     fn drop(&mut self) {
         // A concurrently forked child can briefly inherit the open description

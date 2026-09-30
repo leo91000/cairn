@@ -13,6 +13,61 @@ impl BlockSource for Offline {
     }
 }
 
+#[tokio::test]
+async fn controller_retains_verified_blocks_between_conversations_and_releases_them_on_shutdown() {
+    use leo_agent_manager::microvm::pool::Pool;
+    use tokio_util::sync::CancellationToken;
+
+    let root = tempfile::tempdir().unwrap();
+    let stop = CancellationToken::new();
+    let controller = Pool::new(
+        root.path().into(),
+        root.path().join("fixture-image"),
+        stop,
+        4,
+    )
+    .await
+    .unwrap();
+    let bytes = vec![37; 4 * 1024 * 1024];
+    let hash = hex::encode(Sha256::digest(&bytes));
+    let manifest = json!({
+        "version": 1,
+        "size": bytes.len(),
+        "blockSize": bytes.len(),
+        "blocks": [{ "offset": 0, "size": bytes.len(), "hash": hash }]
+    });
+    let first_directory = root.path().join("disks/first/lazy");
+    let first = LazyDisk::create(&first_directory, &manifest, Arc::new(Offline)).unwrap();
+    std::fs::create_dir(first_directory.join("cache")).unwrap();
+    let file = first_directory.join("cache").join(&hash);
+    std::fs::write(&file, bytes).unwrap();
+    let mut buffer = [0; 4096];
+    first.read_at(0, &mut buffer).unwrap();
+    assert_eq!(buffer, [37; 4096]);
+    std::fs::remove_file(file).unwrap();
+    drop(first);
+
+    let second = LazyDisk::create(
+        &root.path().join("disks/second/lazy"),
+        &manifest,
+        Arc::new(Offline),
+    )
+    .unwrap();
+    second.read_at(0, &mut buffer).unwrap();
+    assert_eq!(buffer, [37; 4096]);
+    assert_eq!(second.performance()["memoryHits"], 1);
+    drop(second);
+    drop(controller);
+
+    let after_shutdown = LazyDisk::create(
+        &root.path().join("disks/after-shutdown/lazy"),
+        &manifest,
+        Arc::new(Offline),
+    )
+    .unwrap();
+    assert!(after_shutdown.read_at(0, &mut buffer).is_err());
+}
+
 #[test]
 fn small_interleaved_reads_reuse_verified_blocks_across_conversation_disks() {
     const BLOCK: u64 = 4 * 1024 * 1024;

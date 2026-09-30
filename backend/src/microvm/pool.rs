@@ -72,6 +72,7 @@ pub struct Pool {
     slots: Mutex<Slots>,
     stop: CancellationToken,
     cleanup: TaskTracker,
+    _block_cache: crate::storage::NodeBlockCache,
 }
 
 impl Pool {
@@ -95,6 +96,7 @@ impl Pool {
         let entrypoint = state.join("entrypoint");
         private_dir(&entrypoint).await?;
         tokio::fs::copy(std::env::current_exe()?, entrypoint.join("leo")).await?;
+        let block_cache = crate::storage::NodeBlockCache::new(&state)?;
         Ok(Arc::new(Self {
             capacity: AtomicUsize::new(capacity),
             budget: Mutex::new(None),
@@ -105,6 +107,7 @@ impl Pool {
             slots: Mutex::new(Slots::default()),
             stop,
             cleanup: TaskTracker::new(),
+            _block_cache: block_cache,
         }))
     }
 

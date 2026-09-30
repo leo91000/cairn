@@ -1025,6 +1025,7 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
     if let Some(record) = s.store.get("nodes", LOCAL_NODE_ID).await? {
         let budget = json!({ "slots": slots(&record), "limits": record["limits"] });
         if health["budget"].is_object() && health["budget"] != budget {
+            let started = std::time::Instant::now();
             let result = s
                 .http
                 .post(format!("{}/node-budget", s.config.runner_url))
@@ -1032,7 +1033,21 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
                 .json(&budget)
                 .send()
                 .await;
+            let status = result
+                .as_ref()
+                .ok()
+                .map(|response| response.status().as_u16());
             budget_error = connector::budget_error(result).await;
+            tracing::info!(
+                target: "leo_performance",
+                operation = "node_budget_reconcile",
+                observed_slots = health["budget"]["slots"].as_u64(),
+                requested_slots = budget["slots"].as_u64(),
+                status,
+                accepted = budget_error.is_null(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "Local controller budget reconciliation"
+            );
         }
     }
     s.store

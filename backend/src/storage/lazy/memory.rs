@@ -149,4 +149,25 @@ mod tests {
         assert_eq!(cache.used, 4);
         assert_eq!(cache.entries.len(), 1);
     }
+
+    #[test]
+    fn node_policy_resizes_the_verified_cache_even_without_a_mounted_disk() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = crate::storage::NodeBlockCache::new(root.path()).unwrap();
+        {
+            let mut cache = owner.blocks.bytes.lock().unwrap();
+            cache.insert("first", vec![1; 4 * 1024 * 1024], true);
+            cache.insert("second", vec![2; 4 * 1024 * 1024], true);
+        }
+        let policy = crate::storage::policy::Policy {
+            memory_cache_mi_b: 4,
+            ..Default::default()
+        };
+        crate::storage::runtime::configure(root.path(), &policy).unwrap();
+        let mut cache = owner.blocks.bytes.lock().unwrap();
+        assert_eq!(cache.status()["budgetBytes"], 4 * 1024 * 1024);
+        assert_eq!(cache.status()["bytes"], 4 * 1024 * 1024);
+        assert!(cache.get("first", true).is_none());
+        assert!(cache.get("second", true).is_some());
+    }
 }

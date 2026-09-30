@@ -50,6 +50,14 @@ ext4 et le travail de préparation. Un disque conservé garde sa taille lors des
 reprises et des déplacements ; le budget physique reste commun à toutes les
 conversations.
 
+Le contrôleur conserve le cache des blocs immuables vérifiés pendant toute sa
+durée de vie, y compris lorsqu'aucune VM n'est montée. Les conversations restent
+autorisées par leur manifeste avant chaque accès au cache. Celui-ci conserve
+son plafond partagé (256 Mio par défaut), sans réadmission des lectures de
+sauvegarde. Une modification de la politique réduit aussi immédiatement le cache
+d'une node inactive. À l'arrêt du contrôleur, les octets sont libérés ; ils ne
+prolongent pas la durée de vie des sources distantes ou des conversations.
+
 `list_nodes` expose les budgets communs, les slots disponibles et la pression
 courante. `move_to_node` reçoit une destination et éventuellement un délai
 d’attente. Les agents ne demandent plus de CPU, RAM ou disque. Les contrôles par

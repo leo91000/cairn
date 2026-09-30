@@ -11,6 +11,7 @@ pub mod digest;
 mod lazy;
 pub(crate) mod metrics;
 
+pub(crate) use lazy::NodeBlockCache;
 pub use lazy::{BlockSource, LazyDisk};
 
 pub mod fuse;

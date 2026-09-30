@@ -27,6 +27,7 @@ fn registry() -> &'static Registry {
 
 /// Apply node limits without policy-file reads in the CPU safety path.
 pub(crate) fn configure(state: &Path, policy: &Policy) -> Result<()> {
+    super::NodeBlockCache::new(state)?.resize(policy.memory_cache_mi_b as usize * 1024 * 1024)?;
     let registry = registry().lock().map_err(Error::internal)?;
     for (directory, entry) in registry.iter() {
         if directory.parent().and_then(Path::parent) != Some(state) {
