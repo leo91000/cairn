@@ -1261,19 +1261,65 @@ async fn a_remote_only_agent_prepares_a_private_vm_without_a_local_controller() 
 #[tokio::test]
 async fn owner_placement_obeys_agent_grants_and_preserves_last_good_selection() {
     let owner = Owner::new().await;
+    let online = id();
+    let offline = id();
+    let revoked = id();
+    let denied = id();
+    for (node, local, last_seen, is_revoked) in [
+        (LOCAL_NODE_ID, true, 0, false),
+        (online.as_str(), false, now(), false),
+        (offline.as_str(), false, 0, false),
+        (revoked.as_str(), false, now(), true),
+        (denied.as_str(), false, now(), false),
+    ] {
+        owner
+            .put(
+                "nodes",
+                json!({
+                    "id": node,
+                    "name": "Placement fixture",
+                    "local": local,
+                    "lastSeen": last_seen,
+                    "revoked": is_revoked,
+                }),
+            )
+            .await;
+    }
+    owner
+        .grant_nodes(
+            MAIN_AGENT_ID,
+            json!([LOCAL_NODE_ID, online, offline, revoked]),
+        )
+        .await;
+
+    let assert_statuses = |value: &Value| {
+        let nodes = value["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 3);
+        for (node, expected) in [
+            (LOCAL_NODE_ID, "local"),
+            (online.as_str(), "online"),
+            (offline.as_str(), "offline"),
+        ] {
+            let listed = nodes.iter().find(|n| n["id"] == node).unwrap();
+            assert_eq!(listed["status"], expected);
+        }
+    };
+
     let run = id();
     let mut record = run_record(&run, RunStatus::Succeeded);
     record["snapshot"] = json!({ "agent": { "id": MAIN_AGENT_ID } });
     owner.add_run(&record).await;
     let path = format!("/api/nodes/placement/{run}");
     let pin = |node: Value| json!({ "pinnedNodeId": node, "preferredNodeId": null });
-    let (status, _) = owner.send("PUT", &path, pin(LOCAL_NODE_ID.into())).await;
+    let (status, value) = owner.send("PUT", &path, pin(LOCAL_NODE_ID.into())).await;
     assert_eq!(status, StatusCode::OK);
+    assert_statuses(&value);
     let (status, _) = owner.send("PUT", &path, pin(id().into())).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, value) = owner.get(&path).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(value["pinnedNodeId"], LOCAL_NODE_ID);
+    assert_statuses(&value);
     let prefer = json!({ "pinnedNodeId": null, "preferredNodeId": LOCAL_NODE_ID });
     let (status, _) = owner.send("PUT", &path, prefer).await;
     assert_eq!(status, StatusCode::OK);

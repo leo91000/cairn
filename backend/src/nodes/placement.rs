@@ -670,6 +670,7 @@ fn configure_in(db: &Db<'_>, run: &str, input: Option<Value>) -> Result<Value> {
         .list("nodes")?
         .into_iter()
         .filter(|n| n["revoked"] != true && allowed(&access["nodes"], text(n, "id")))
+        .map(super::public)
         .collect::<Vec<_>>();
     Ok(json!({
         "nodes": nodes,
