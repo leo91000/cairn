@@ -181,8 +181,8 @@ console.log('probe.done');
     assert.equal(unauthenticatedBudget.status, 401)
     await api('/node-budget', 'POST', adjustedBudget)
     assert.deepEqual((await (await api('/health')).json()).budget, adjustedBudget)
-    assert.equal(docker('exec', name, 'cat', '/run/leo-cgroup/cpu.max'), '200000 100000')
-    assert.equal(docker('exec', name, 'cat', '/run/leo-cgroup/memory.max'), String(4096 * 1024 ** 2))
+    assert.equal(docker('exec', name, 'cat', '/run/leo-cgroup/leo-shared/cpu.max'), '200000 100000')
+    assert.equal(docker('exec', name, 'cat', '/run/leo-cgroup/leo-shared/memory.max'), String(4096 * 1024 ** 2))
     await api('/node-budget', 'POST', originalBudget)
     for (const mode of ['first', 'resume', 'cancel', 'crash', 'recover', 'managed-claude', 'codex-return']) {
       const id = randomUUID()

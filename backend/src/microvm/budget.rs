@@ -95,7 +95,9 @@ pub fn memory_usage(cgroup: &Path) -> Result<u64> {
 /// Mount only the controller's private cgroup namespace, never the host hierarchy.
 pub async fn cgroup() -> Result<PathBuf> {
     let namespace = std::fs::read_to_string("/proc/self/cgroup")?;
-    if namespace.trim() != "0::/" || !Path::new("/sys/fs/cgroup/memory.max").exists() {
+    if !matches!(namespace.trim(), "0::/" | "0::/leo-shared")
+        || !Path::new("/sys/fs/cgroup/memory.max").exists()
+    {
         return Err(Error::unavailable(
             "Shared budgets require a private cgroup-v2 controller container.",
         ));
@@ -114,7 +116,19 @@ pub async fn cgroup() -> Result<PathBuf> {
         ],
     )
     .await?;
-    Ok(path)
+    // Namespace roots with nsdelegate only expose delegation controls. Put the
+    // controller and its children in a leaf, then enable CPU/memory controllers.
+    let shared = path.join("leo-shared");
+    std::fs::create_dir_all(&shared)?;
+    for pid in std::fs::read_to_string(path.join("cgroup.procs"))?.lines() {
+        if let Err(error) = std::fs::write(shared.join("cgroup.procs"), pid)
+            && error.raw_os_error() != Some(libc::ESRCH)
+        {
+            return Err(error.into());
+        }
+    }
+    std::fs::write(path.join("cgroup.subtree_control"), "+cpu +memory")?;
+    Ok(shared)
 }
 
 pub fn allocated(directory: &Path) -> io::Result<u64> {
