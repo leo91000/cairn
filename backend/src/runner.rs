@@ -288,6 +288,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn snapshot_before_attempt_registration_is_deferred_without_touching_disk() {
+        let root = tempfile::tempdir().unwrap();
+        let broker = fixture_broker(root.path()).await;
+        let state = broker.state.clone();
+        let id = crate::config::id();
+        let response = router(broker)
+            .oneshot(authorized_post(
+                format!("/runs/{id}/snapshot"),
+                Body::from("{}"),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            409,
+            "registration is not a storage failure"
+        );
+        assert!(
+            std::fs::read_dir(state.join("disks"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn snapshot_during_startup_is_deferred_without_touching_the_disk() {
         let root = tempfile::tempdir().unwrap();
         let broker = fixture_broker(root.path()).await;

@@ -370,8 +370,19 @@ async fn attempt_snapshot(broker: &Broker, request: Request, id: &str) -> Result
                 attempt.stop.clone(),
             )
         } else {
+            let run = match tokio::fs::read_to_string(broker.state_file(&id, "run")).await {
+                Ok(run) => run,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    // The manager records the attempt before the node accepts it.
+                    // Publication may arrive in that gap; no disk is safe to capture yet.
+                    return Err(Error::conflict(
+                        "VM attempt is not ready for synchronization.",
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            };
             (
-                tokio::fs::read_to_string(broker.state_file(&id, "run")).await?,
+                run,
                 None,
                 Arc::new(Mutex::new(())),
                 CancellationToken::new(),

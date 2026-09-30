@@ -228,8 +228,9 @@ verification and rollback. CI application images also resolve current stable
 Codex/GitHub CLI versions before building and validating them.
 The VPS timer runs independently of your computer and does not change app versions.
 
-Retained Codex sessions get a separate, bounded two-minute `thread/resume`
-deadline for loading their native context. Other Codex and MCP requests retain
+Codex `initialize` and retained-session `thread/resume` get separate, bounded
+two-minute deadlines for cold executable loading and native context recovery.
+Other Codex and MCP requests retain
 their 20-second deadline. Closing the session or canceling the conversation
 interrupts this wait immediately. Slow and failed RPC calls log the method,
 elapsed time and deadline, without request parameters or response contents.

@@ -354,11 +354,11 @@ impl Rpc {
     }
 
     pub async fn request(&self, method: &str, params: Value) -> Result<Value> {
-        // Resuming a retained native session loads its on-disk context before
-        // replying, even when the response excludes history. Cold disk reads
-        // can outlast an ordinary account or tool request under VM contention.
+        // Initialization first loads the executable and libraries from disk;
+        // resuming a retained native session then loads its on-disk context.
+        // Cold reads can outlast an ordinary account or tool request after a move.
         // Keep this startup bounded; closing the session still wakes it at once.
-        let timeout = if !self.jsonrpc && method == "thread/resume" {
+        let timeout = if !self.jsonrpc && matches!(method, "initialize" | "thread/resume") {
             Duration::from_secs(120)
         } else {
             Duration::from_secs(20)
@@ -448,6 +448,28 @@ mod tests {
             },
             output,
         )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cold_native_initialization_keeps_its_reply() {
+        let (rpc, mut output) = rpc(false);
+        let requesting = rpc.clone();
+        let request =
+            tokio::spawn(async move { requesting.request("initialize", json!({})).await });
+        output.recv().await.unwrap();
+
+        tokio::time::advance(Duration::from_secs(21)).await;
+        tokio::task::yield_now().await;
+        assert!(!request.is_finished());
+        rpc.pending
+            .lock()
+            .await
+            .remove(&1)
+            .unwrap()
+            .send(Ok(json!({})))
+            .unwrap();
+        assert_eq!(request.await.unwrap().unwrap(), json!({}));
+        assert!(rpc.pending.lock().await.is_empty());
     }
 
     #[tokio::test(start_paused = true)]
