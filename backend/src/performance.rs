@@ -1,5 +1,29 @@
-//! Local structured timings. Identities are run/VM IDs, never paths, URLs or credentials.
-use std::time::Instant;
+//! Local structured timings. Identities are run/VM/transfer IDs, never paths or credentials.
+use std::time::{Duration, Instant};
+
+/// Aggregate stream waits without emitting a log for every archive chunk.
+#[derive(Default)]
+pub(crate) struct StreamMetrics {
+    pub bytes: u64,
+    pub chunks: u64,
+    pub read: Duration,
+    pub write: Duration,
+}
+
+impl StreamMetrics {
+    pub(crate) fn record(&self, id: &str, side: &'static str) {
+        tracing::info!(
+            target: "leo_performance",
+            operation = "vm_archive_stream",
+            id,
+            side,
+            bytes = self.bytes,
+            chunks = self.chunks,
+            read_ms = self.read.as_millis() as u64,
+            write_ms = self.write.as_millis() as u64
+        );
+    }
+}
 
 /// Times one operation and its phases; dropping it unfinished records `incomplete`.
 pub(crate) struct Operation {
@@ -12,6 +36,10 @@ pub(crate) struct Operation {
 }
 
 impl Operation {
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
     pub(crate) fn new(operation: &'static str, id: &str, phase: &'static str) -> Self {
         let now = Instant::now();
         tracing::info!(target: "leo_performance", operation, id, phase, event = "started");
