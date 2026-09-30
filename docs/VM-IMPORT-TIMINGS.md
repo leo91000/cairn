@@ -14,7 +14,7 @@ The optional `traceId` in import requests links host and guest records by `id`.
 | --- | --- |
 | `guest_prepare` | Keeps `current_entrypoint` separate from `run_connect` and `run_request`. |
 | `vm_import` / `vm_project_import` | Guest status, connection, request, host `tar` startup, archive streaming, end marker, host `tar` exit and guest acknowledgement. Project imports also measure the ready/reused reply. |
-| `guest_import` / `guest_project_import` | Target preparation, guest `tar` startup, receiving the archive into `tar`, `tar` exit, ownership, permissions where applicable and acknowledgement. Project imports also measure reopening, publication and `sync`. |
+| `guest_import` / `guest_project_import` | Target preparation, guest `tar` startup, receiving the archive into `tar`, `tar` exit, ownership, permissions where applicable and acknowledgement. Project imports also measure lock acquisition, reopening, publication and `sync`. |
 | `vm_archive_stream` | Total archive `bytes`, `chunks`, cumulative `read_ms` and `write_ms`, labelled `side="host"` or `side="guest"`. |
 
 Host stream reads wait on the archive-producing process; host writes wait on the

@@ -272,8 +272,9 @@ async fn import_project(
     write: &mut (impl AsyncWrite + Unpin),
     import: &ImportRequest<'_>,
 ) -> Result<()> {
-    let mut timing = Operation::new("guest_project_import", import.trace_id(), "reopen");
+    let mut timing = Operation::new("guest_project_import", import.trace_id(), "project_lock");
     let _guard = PROJECT_IMPORT_CONTROL.lock().await;
+    timing.next("reopen");
     let destination = import_target(import.target)?;
     if super::projects::reopen(destination, import.read_only).await? {
         timing.next("send_reply");
@@ -534,4 +535,63 @@ async fn read_result(plan: &Plan) -> Result<String> {
         return Err(Error::bad("Guest result exceeds limit."));
     }
     Ok(String::from_utf8_lossy(&data).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn measured_import_streams_preserve_bytes_and_reject_missing_end_markers() {
+        let chunks: [&[u8]; 2] = [b"archive\0\n{}", b"second chunk"];
+        for encoding in [Encoding::Binary, Encoding::Json] {
+            let mut encoded = Vec::new();
+            for chunk in chunks {
+                match encoding {
+                    Encoding::Binary => wire::write_chunk(&mut encoded, chunk).await.unwrap(),
+                    Encoding::Json => {
+                        let frame = ArchiveFrame::Chunk {
+                            data: STANDARD.encode(chunk),
+                        };
+                        wire::write(&mut encoded, &frame).await.unwrap();
+                    }
+                }
+            }
+            let truncated = encoded.clone();
+            match encoding {
+                Encoding::Binary => wire::write_chunk(&mut encoded, &[]).await.unwrap(),
+                Encoding::Json => wire::write(&mut encoded, &ArchiveFrame::End).await.unwrap(),
+            }
+            let mut output = Vec::new();
+            let mut read = encoded.as_slice();
+            let metrics = match encoding {
+                Encoding::Binary => receive_binary(&mut read, &mut output).await.unwrap(),
+                Encoding::Json => receive_frames(&mut read, &mut output).await.unwrap(),
+            };
+            assert_eq!(output, chunks.concat());
+            assert_eq!(metrics.bytes, output.len() as u64);
+            assert_eq!(metrics.chunks, chunks.len() as u64);
+
+            let mut read = truncated.as_slice();
+            let result = match encoding {
+                Encoding::Binary => receive_binary(&mut read, &mut Vec::new()).await,
+                Encoding::Json => receive_frames(&mut read, &mut Vec::new()).await,
+            };
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn guest_correlation_rejects_arbitrary_strings() {
+        for trace_id in [None, Some("credential-or-path"), Some("\nforged-log")] {
+            let import = ImportRequest {
+                target: "/run/example",
+                replace: false,
+                read_only: false,
+                encoding: Encoding::Binary,
+                trace_id,
+            };
+            assert_eq!(import.trace_id(), "legacy");
+        }
+    }
 }

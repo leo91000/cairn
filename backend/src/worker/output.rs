@@ -4,7 +4,24 @@ use serde_json::Value;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     sync::mpsc,
+    time::Instant,
 };
+
+pub(super) struct Output {
+    pub diagnostic: bool,
+    pub raw: String,
+    pub received: Instant,
+}
+
+impl Output {
+    fn new(diagnostic: bool, raw: String) -> Self {
+        Self {
+            diagnostic,
+            raw,
+            received: Instant::now(),
+        }
+    }
+}
 
 /// Output recorded per run before tool and diagnostic events are dropped.
 const OUTPUT_BUDGET: usize = 5_000_000;
@@ -25,7 +42,7 @@ const CONVERSATION_EVENTS: [&str; 5] = [
 pub(super) async fn read_output(
     mut reader: impl AsyncRead + Unpin,
     diagnostic: bool,
-    events: mpsc::Sender<(bool, String)>,
+    events: mpsc::Sender<Output>,
 ) {
     let mut bytes = [0; 8192];
     let mut line = Vec::new();
@@ -36,7 +53,7 @@ pub(super) async fn read_output(
         };
         if diagnostic {
             let chunk = String::from_utf8_lossy(&bytes[..n]).into_owned();
-            if events.send((true, chunk)).await.is_err() {
+            if events.send(Output::new(true, chunk)).await.is_err() {
                 return;
             }
             continue;
@@ -49,7 +66,7 @@ pub(super) async fn read_output(
                 continue;
             }
             let complete = String::from_utf8_lossy(&line).into_owned();
-            if events.send((false, complete)).await.is_err() {
+            if events.send(Output::new(false, complete)).await.is_err() {
                 return;
             }
             line.clear();
@@ -58,7 +75,10 @@ pub(super) async fn read_output(
     if !line.is_empty() {
         // The receiver only disappears once the run stopped listening.
         let _ = events
-            .send((diagnostic, String::from_utf8_lossy(&line).into_owned()))
+            .send(Output::new(
+                diagnostic,
+                String::from_utf8_lossy(&line).into_owned(),
+            ))
             .await;
     }
 }
@@ -67,13 +87,14 @@ pub(super) async fn read_output(
 pub(super) async fn record(
     s: &Service,
     id: &str,
-    raw: &str,
-    diagnostic: bool,
+    output: &Output,
     checkpoint: &Checkpoint,
     secrets: &[String],
     total: &mut usize,
+    activity: &mut crate::performance::Activity,
 ) -> Result<bool> {
-    if diagnostic {
+    let raw = output.raw.as_str();
+    if output.diagnostic {
         record_raw(s, id, "diagnostic", raw, secrets, total).await?;
         return Ok(false);
     }
@@ -81,6 +102,7 @@ pub(super) async fn record(
         record_raw(s, id, "output", raw, secrets, total).await?;
         return Ok(false);
     };
+    activity.observe(&event);
     if handle_chat_control(s, id, &event).await? {
         return Ok(false);
     }

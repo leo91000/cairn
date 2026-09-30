@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use std::{path::Path, process::ExitCode, sync::Arc, time::Duration};
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 /// The supervisor passes its control socket as file descriptor 3.
 fn has_control_socket() -> bool {
@@ -284,23 +285,56 @@ async fn serve(stop: CancellationToken) -> Result<()> {
 async fn chat(config: &Config, plan: Value, stop: CancellationToken) -> Result<i32> {
     let home = std::env::var("CODEX_HOME").map_err(|_| Error::bad("Missing Codex home."))?;
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Value>(32);
-    let output = tokio::spawn(async move {
-        let mut stdout = tokio::io::stdout();
-        while let Some(value) = rx.recv().await {
-            let mut bytes = value.to_string().into_bytes();
-            bytes.push(b'\n');
-            stdout.write_all(&bytes).await?;
-        }
-        // Tokio stdout can still have a blocking write in flight. The final
-        // turn marker must reach the worker before this process reports success.
-        stdout.flush().await?;
-        Ok::<_, std::io::Error>(())
-    });
-    let result = if plan["provider"] == "claude" {
-        leo_agent_manager::claude_process::run(config, plan, tx.clone(), stop).await
+    let run_id = leo_agent_manager::performance::identity(text(&plan, "runId"));
+    let attempt_id = leo_agent_manager::performance::identity(text(&plan, "attemptId"));
+    let span = tracing::info_span!(target: "leo_performance", "agent_attempt", run_id, attempt_id);
+    let provider = if plan["provider"] == "claude" {
+        leo_agent_manager::provider::Provider::Claude
     } else {
-        leo_agent_manager::chat_process::run(config, Path::new(&home), plan, tx.clone(), stop).await
+        leo_agent_manager::provider::Provider::Codex
     };
+    let mut activity =
+        leo_agent_manager::performance::Activity::new(run_id, attempt_id, "adapter", provider);
+    let output = tokio::spawn(
+        async move {
+            let mut stdout = tokio::io::stdout();
+            let mut heartbeat = leo_agent_manager::performance::heartbeat();
+            loop {
+                let value = tokio::select! {
+                    value = rx.recv() => match value {
+                        Some(value) => value,
+                        None => break,
+                    },
+                    _ = heartbeat.tick() => {
+                        activity.heartbeat("receive_agent_event");
+                        continue;
+                    }
+                };
+                activity.output();
+                activity.observe(&value);
+                let mut bytes = value.to_string().into_bytes();
+                bytes.push(b'\n');
+                leo_agent_manager::performance::wait("stdout_write", stdout.write_all(&bytes))
+                    .await?;
+            }
+            // Tokio stdout can still have a blocking write in flight. The final
+            // turn marker must reach the worker before this process reports success.
+            leo_agent_manager::performance::wait("stdout_flush", stdout.flush()).await?;
+            activity.finish();
+            Ok::<_, std::io::Error>(())
+        }
+        .instrument(span.clone()),
+    );
+    let result = async {
+        if plan["provider"] == "claude" {
+            leo_agent_manager::claude_process::run(config, plan, tx.clone(), stop).await
+        } else {
+            leo_agent_manager::chat_process::run(config, Path::new(&home), plan, tx.clone(), stop)
+                .await
+        }
+    }
+    .instrument(span)
+    .await;
     if let Err(error) = &result {
         let failure = json!({
             "type": "turn.failed",

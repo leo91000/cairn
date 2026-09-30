@@ -34,7 +34,7 @@ pub mod notifications;
 pub mod object_storage;
 pub mod onepassword;
 pub mod outcome;
-mod performance;
+pub mod performance;
 pub mod process;
 pub mod project_git;
 pub mod project_workspaces;

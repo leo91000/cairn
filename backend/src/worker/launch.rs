@@ -8,6 +8,7 @@ use crate::{
     error::{Error, Result},
     execution,
     nodes::{self, placement},
+    performance::{Activity, Operation},
     process::Environment,
     provider::Provider,
     recovery, run_limits, run_output,
@@ -28,6 +29,7 @@ use std::{
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 /// Exit code reported for processes the worker had to stop.
 const STOPPED: i32 = 143;
@@ -45,7 +47,24 @@ pub(super) async fn execute(
     existing: bool,
     sensitive: &mut Vec<String>,
 ) -> Result<()> {
+    let span =
+        tracing::info_span!(target: "leo_performance", "agent_execution", run_id = text(run, "id"));
+    execute_inner(s, run, account, cancel, checkpoint, existing, sensitive)
+        .instrument(span)
+        .await
+}
+
+async fn execute_inner(
+    s: &Arc<Service>,
+    run: &mut Value,
+    account: &mut Option<Lease>,
+    cancel: &CancellationToken,
+    checkpoint: &Checkpoint,
+    existing: bool,
+    sensitive: &mut Vec<String>,
+) -> Result<()> {
     let id = text(run, "id").to_owned();
+    let mut timing = Operation::new("agent_prepare", &id, "mark_running");
     let mut execution = Execution {
         s,
         provider: Provider::of_run(run),
@@ -56,11 +75,16 @@ pub(super) async fn execute(
         cancel,
         checkpoint,
         sensitive,
+        attempt_id: String::new(),
     };
     execution.mark_running().await?;
+    timing.next("access");
     execution.refresh_access().await?;
+    timing.next("workspace");
     let mut workspace = execution.prepare(existing).await?;
+    timing.next("session_lookup");
     let mut resume = execution.resume_session(&workspace).await?;
+    timing.finish();
     let mut output_total = 0;
     loop {
         match execution
@@ -83,6 +107,7 @@ struct Execution<'a> {
     sensitive: &'a mut Vec<String>,
     provider: Provider,
     directory: PathBuf,
+    attempt_id: String,
 }
 
 /// The prepared execution environment shared by every launch attempt.
@@ -212,7 +237,9 @@ impl Execution<'_> {
 
     async fn prepare(&mut self, existing: bool) -> Result<Workspace> {
         let s = self.s;
+        let mut timing = Operation::new("workspace_prepare", &self.id, "execution");
         let prepared = self.prepare_execution(existing).await?;
+        timing.next("account_home");
         let codex_home = self.prepare_codex_home(&prepared).await?;
         let patch = json!({
             "workspace": prepared["cwd"],
@@ -221,9 +248,11 @@ impl Execution<'_> {
         });
         merge(self.run, &patch);
         s.store.patch_run(&self.id, patch).await?;
+        timing.next("environment");
         let mut env = self
             .environment(prepared["isolated"] == true, &codex_home)
             .await?;
+        timing.next("mcp_configuration");
         let mcp = s.mcps.run_configuration(s, self.run).await?;
         self.sensitive.extend(
             mcp["redactions"]
@@ -240,6 +269,7 @@ impl Execution<'_> {
         for (key, value) in mcp["env"].as_object().unwrap() {
             env.insert(key.clone(), value.as_str().unwrap_or("").into());
         }
+        timing.finish();
         Ok(Workspace {
             prepared,
             codex_home,
@@ -364,6 +394,7 @@ impl Execution<'_> {
         output_total: &mut usize,
     ) -> Result<Attempt> {
         let s = self.s;
+        self.attempt_id = crate::config::id();
         if self.stopping() {
             return Err(Error::conflict("Execution stopped."));
         }
@@ -501,6 +532,9 @@ impl Execution<'_> {
             &workspace.mcp,
             resume,
         );
+        // Optional fields: retained older adapters can ignore them.
+        chat["runId"] = self.id.clone().into();
+        chat["attemptId"] = self.attempt_id.clone().into();
         if claude {
             chat["claudeManagedAuth"] = self.account.is_some().into();
         }
@@ -547,8 +581,10 @@ impl Execution<'_> {
     ) -> Result<()> {
         let s = self.s;
         crate::object_storage::Storage::configured(s)?;
+        let mut timing = Operation::new("runner_prepare", &self.id, "placement");
         let runner = crate::config::id();
         let placement = placement::reserve(s, &s.store.run(&self.id).await?, &runner).await?;
+        timing.next("materialize");
         placement::materialize(s, &runner).await?;
         let node_id = placement["nodeId"].as_str().map(str::to_owned);
         let runtime_id = placement["runtimeId"].clone();
@@ -559,13 +595,16 @@ impl Execution<'_> {
                 c.runtime_id = Some(Some(runtime_id));
             })
             .await?;
+        timing.next("plan");
         self.write_runner_plan(workspace, &runner, &placement, resume, chat, launch)
             .await?;
+        timing.next("remote_prepare");
         let runner_url = nodes::transport::url(s, &self.id).await?;
         if placement["nodeId"] != nodes::LOCAL_NODE_ID {
             self.prepare_remote(&runner_url, &runner, text(&placement, "nodeId"))
                 .await?;
         }
+        timing.next("placement_commit");
         let patch = json!({
             "nodeId": placement["nodeId"],
             "resources": placement["resources"],
@@ -578,6 +617,7 @@ impl Execution<'_> {
         workspace.env.insert("RUNNER_TOKEN".into(), runner_token);
         launch.binary = current_exe()?;
         launch.args = vec!["runner-client".into(), runner];
+        timing.finish();
         Ok(())
     }
 
@@ -711,7 +751,11 @@ impl Execution<'_> {
             err.abort();
             return Err(error);
         }
-        let exit = self.wait(&mut child, &mut events, output_total).await?;
+        let span = tracing::info_span!(target: "leo_performance", "agent_attempt", run_id = self.id, attempt_id = self.attempt_id);
+        let exit = self
+            .wait(&mut child, &mut events, output_total)
+            .instrument(span)
+            .await?;
         let _ = out.await;
         let _ = err.await;
         Ok(exit)
@@ -720,13 +764,15 @@ impl Execution<'_> {
     async fn wait(
         &mut self,
         child: &mut Supervised,
-        events: &mut mpsc::Receiver<(bool, String)>,
+        events: &mut mpsc::Receiver<output::Output>,
         output_total: &mut usize,
     ) -> Result<Exit> {
         let s = self.s;
         let cancel = self.cancel;
         let mut exit = Exit::default();
         let mut open = true;
+        let mut activity = Activity::new(&self.id, &self.attempt_id, "worker", self.provider);
+        let mut heartbeat = crate::performance::heartbeat();
         let timeout = run_limits::wait_until(self.checkpoint.deadline);
         tokio::pin!(timeout);
         while exit.code.is_none() || open {
@@ -748,24 +794,32 @@ impl Execution<'_> {
                 code = child.child.wait(), if running => {
                     exit.code = Some(code?.code().unwrap_or(STOPPED));
                 }
+                _ = heartbeat.tick() => activity.heartbeat("receive_output"),
                 event = events.recv(), if open => match event {
-                    Some((diagnostic, raw)) => {
-                        self.refresh_redactions().await?;
-                        exit.exhausted |= output::record(
+                    Some(output) => {
+                        let queue_ms = output.received.elapsed().as_millis() as u64;
+                        if queue_ms >= 100 {
+                            tracing::info!(target: "leo_performance", operation = "agent_output", run_id = self.id, attempt_id = self.attempt_id, phase = "queue", elapsed_ms = queue_ms);
+                        }
+                        if !output.diagnostic {
+                            activity.output();
+                        }
+                        crate::performance::wait("refresh_redactions", self.refresh_redactions()).await?;
+                        exit.exhausted |= crate::performance::wait("persist_output", output::record(
                             s,
                             &self.id,
-                            &raw,
-                            diagnostic,
+                            &output,
                             self.checkpoint,
                             self.sensitive,
                             output_total,
-                        )
-                        .await?;
+                            &mut activity,
+                        )).await?;
                     }
                     None => open = false,
                 },
             }
         }
+        activity.finish();
         Ok(exit)
     }
 

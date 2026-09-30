@@ -179,7 +179,7 @@ fn import_timing(socket: &Path, operation: &'static str, import_kind: &'static s
         .and_then(Path::parent)
         .and_then(Path::file_name)
         .and_then(|name| name.to_str())
-        .unwrap_or("unknown");
+        .map_or("unknown", crate::performance::identity);
     tracing::info!(
         target: "leo_performance",
         operation,
