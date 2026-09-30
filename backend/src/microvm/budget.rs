@@ -120,15 +120,30 @@ pub async fn cgroup() -> Result<PathBuf> {
     // controller and its children in a leaf, then enable CPU/memory controllers.
     let shared = path.join("leo-shared");
     std::fs::create_dir_all(&shared)?;
-    for pid in std::fs::read_to_string(path.join("cgroup.procs"))?.lines() {
-        if let Err(error) = std::fs::write(shared.join("cgroup.procs"), pid)
-            && error.raw_os_error() != Some(libc::ESRCH)
-        {
-            return Err(error.into());
+    // Docker exec/health checks can start while the controller is restarting.
+    // Drain root processes again if one arrived between migration and enablement.
+    for _ in 0..250 {
+        for pid in std::fs::read_to_string(path.join("cgroup.procs"))?.lines() {
+            if pid == "0" {
+                continue;
+            }
+            if let Err(error) = std::fs::write(shared.join("cgroup.procs"), pid)
+                && error.raw_os_error() != Some(libc::ESRCH)
+            {
+                return Err(error.into());
+            }
+        }
+        match std::fs::write(path.join("cgroup.subtree_control"), "+cpu +memory") {
+            Ok(()) => return Ok(shared),
+            Err(error) if error.raw_os_error() == Some(libc::EBUSY) => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => return Err(error.into()),
         }
     }
-    std::fs::write(path.join("cgroup.subtree_control"), "+cpu +memory")?;
-    Ok(shared)
+    Err(Error::unavailable(
+        "Shared cgroup delegation is still busy.",
+    ))
 }
 
 pub fn allocated(directory: &Path) -> io::Result<u64> {
