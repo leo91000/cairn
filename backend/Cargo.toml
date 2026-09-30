@@ -1,6 +1,6 @@
 [package]
 name = "leo-agent-manager"
-version = "0.48.1"
+version = "0.48.2"
 edition = "2024"
 rust-version = "1.97"
 publish = false
@@ -85,6 +85,7 @@ aws-sdk-s3 = "1.150.0"
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = [ "util" ] }
+tokio = { version = "1", features = [ "test-util" ] }
 
 [lints.clippy]
 default_trait_access = "warn"

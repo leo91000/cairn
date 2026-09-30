@@ -15,7 +15,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader},
@@ -354,6 +354,16 @@ impl Rpc {
     }
 
     pub async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        // Resuming a retained native session loads its on-disk context before
+        // replying, even when the response excludes history. Cold disk reads
+        // can outlast an ordinary account or tool request under VM contention.
+        // Keep this startup bounded; closing the session still wakes it at once.
+        let timeout = if !self.jsonrpc && method == "thread/resume" {
+            Duration::from_secs(120)
+        } else {
+            Duration::from_secs(20)
+        };
+        let started = Instant::now();
         let id = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
@@ -370,7 +380,7 @@ impl Rpc {
                 },
             }
         };
-        let result = tokio::time::timeout(Duration::from_secs(20), result)
+        let result = tokio::time::timeout(timeout, result)
             .await
             .unwrap_or_else(|_| {
                 Err(Error::gateway_timeout(format!(
@@ -378,6 +388,17 @@ impl Rpc {
                 )))
             });
         self.pending.lock().await.remove(&id);
+        if started.elapsed() >= Duration::from_secs(1) || result.is_err() {
+            let operation = if self.jsonrpc { "mcp_rpc" } else { "codex_rpc" };
+            tracing::info!(
+                target: "leo_performance",
+                operation,
+                method,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                timeout_ms = timeout.as_millis() as u64,
+                succeeded = result.is_ok(),
+            );
+        }
         result
     }
 
@@ -408,4 +429,91 @@ fn unavailable() -> Error {
     Error::unavailable(
         "Codex disconnected before finishing the operation. Try again or resume the conversation.",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rpc(jsonrpc: bool) -> (Rpc, mpsc::Receiver<Frame>) {
+        let (outgoing, output) = mpsc::channel(32);
+        (
+            Rpc {
+                jsonrpc,
+                outgoing,
+                pending: Arc::default(),
+                sequence: Arc::new(AtomicU64::new(0)),
+                closed: CancellationToken::new(),
+                failure: Arc::default(),
+            },
+            output,
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_native_resume_keeps_its_reply_without_relaxing_account_requests() {
+        let (rpc, mut output) = rpc(false);
+        let resume_rpc = rpc.clone();
+        let resume =
+            tokio::spawn(async move { resume_rpc.request("thread/resume", json!({})).await });
+        output.recv().await.unwrap();
+        let account_rpc = rpc.clone();
+        let account =
+            tokio::spawn(async move { account_rpc.request("account/read", json!({})).await });
+        output.recv().await.unwrap();
+
+        tokio::time::advance(Duration::from_secs(21)).await;
+        assert_eq!(account.await.unwrap().unwrap_err().status, 504);
+        assert!(!resume.is_finished());
+        let reply = rpc.pending.lock().await.remove(&1).unwrap();
+        reply
+            .send(Ok(json!({ "thread": { "id": "saved-session" } })))
+            .unwrap();
+        assert_eq!(
+            resume.await.unwrap().unwrap()["thread"]["id"],
+            "saved-session"
+        );
+        assert!(rpc.pending.lock().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_native_resume_expires_and_releases_its_pending_reply() {
+        let (rpc, mut output) = rpc(false);
+        let requesting = rpc.clone();
+        let request =
+            tokio::spawn(async move { requesting.request("thread/resume", json!({})).await });
+        output.recv().await.unwrap();
+
+        tokio::time::advance(Duration::from_secs(121)).await;
+        let error = request.await.unwrap().unwrap_err();
+        assert_eq!(error.status, 504);
+        assert_eq!(error.message, "Codex thread/resume request timed out.");
+        assert!(rpc.pending.lock().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closing_a_session_interrupts_native_resume_immediately() {
+        let (rpc, mut output) = rpc(false);
+        let requesting = rpc.clone();
+        let request =
+            tokio::spawn(async move { requesting.request("thread/resume", json!({})).await });
+        output.recv().await.unwrap();
+
+        rpc.closed.cancel();
+        assert_eq!(request.await.unwrap().unwrap_err().status, 503);
+        assert!(rpc.pending.lock().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mcp_requests_keep_the_short_deadline_even_for_a_resume_named_method() {
+        let (rpc, mut output) = rpc(true);
+        let requesting = rpc.clone();
+        let request =
+            tokio::spawn(async move { requesting.request("thread/resume", json!({})).await });
+        output.recv().await.unwrap();
+
+        tokio::time::advance(Duration::from_secs(21)).await;
+        assert_eq!(request.await.unwrap().unwrap_err().status, 504);
+        assert!(rpc.pending.lock().await.is_empty());
+    }
 }
