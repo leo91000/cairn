@@ -139,8 +139,14 @@ async fn retained_image(state: &Path, image: &Path, disk_dir: &Path) -> Result<P
 }
 
 fn firecracker_config(network: &Network, resources: &Resources, slot: usize) -> Value {
+    // Virtio guests have no PS/2 devices. Keep warnings and errors on the
+    // serial console without paying for informational output during boot.
     let boot_args = format!(
-        "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/sbin/leo-init ip={}::{}:255.255.255.252:leo:eth0:off",
+        concat!(
+            "console=ttyS0 loglevel=5 i8042.nokbd i8042.noaux ",
+            "reboot=k panic=1 pci=off root=/dev/vda ro ",
+            "init=/sbin/leo-init ip={}::{}:255.255.255.252:leo:eth0:off"
+        ),
         network.guest, network.gateway
     );
     json!({

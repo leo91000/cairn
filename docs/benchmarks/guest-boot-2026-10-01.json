@@ -1,0 +1,3206 @@
+{
+  "scope": "Disposable real Firecracker/FUSE VMs; boot arguments injected before the actual jailer, same pinned v0.50.3 image per comparison, no model/authentication, no deployment proof",
+  "initialImageExtraction": "First readiness sample includes per-runner immutable root image extraction; the VM boot phase excludes that extraction and disk creation",
+  "comparisons": [
+    {
+      "name": "control",
+      "image": "ghcr.io/leo91000/leo-agent-manager@sha256:b1a368856922b7cbe686329f35b1d7b3e3a2a8d58257f54ff13bf468cc431612",
+      "cpu": 7,
+      "memoryMiB": 36352,
+      "bootArgs": "",
+      "samples": [
+        {
+          "index": 0,
+          "readyMs": 1613.78197,
+          "bootMs": 1070,
+          "completedMs": 2020.0654640000002,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "314",
+              "total_ms": "314"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "1",
+              "total_ms": "1"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "37",
+              "total_ms": "39"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "22",
+              "total_ms": "62"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "1007",
+              "total_ms": "1070"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "1070",
+              "total_ms": "1385"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "2",
+              "total_ms": "2"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "13",
+              "total_ms": "16"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "16"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "16"
+            }
+          ],
+          "initAtSeconds": 0.79903,
+          "bootLogBytes": 29648
+        },
+        {
+          "index": 1,
+          "readyMs": 1718.1953989999993,
+          "bootMs": 1170,
+          "completedMs": 2278.491279,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "352",
+              "total_ms": "352"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "1",
+              "total_ms": "1"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "47",
+              "total_ms": "48"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "24",
+              "total_ms": "72"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "1097",
+              "total_ms": "1170"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "1170",
+              "total_ms": "1523"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "2",
+              "total_ms": "2"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "6",
+              "total_ms": "8"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "8"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "8"
+            }
+          ],
+          "initAtSeconds": 0.843708,
+          "bootLogBytes": 29579
+        },
+        {
+          "index": 2,
+          "readyMs": 1714.5869089999997,
+          "bootMs": 1051,
+          "completedMs": 2219.300364999999,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "439",
+              "total_ms": "439"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "1",
+              "total_ms": "1"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "40",
+              "total_ms": "41"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "21",
+              "total_ms": "63"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "987",
+              "total_ms": "1051"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "1051",
+              "total_ms": "1491"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "1",
+              "total_ms": "1"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "4",
+              "total_ms": "6"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "6"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "6"
+            }
+          ],
+          "initAtSeconds": 0.830443,
+          "bootLogBytes": 29584
+        }
+      ],
+      "scope": "Real Firecracker/FUSE; newly formatted 32GiB disk, production-size VM, one Node readiness message, normal sync/shutdown, no native Codex/account/model. Polling adds up to 100ms."
+    },
+    {
+      "name": "warnings-only",
+      "image": "ghcr.io/leo91000/leo-agent-manager@sha256:b1a368856922b7cbe686329f35b1d7b3e3a2a8d58257f54ff13bf468cc431612",
+      "cpu": 7,
+      "memoryMiB": 36352,
+      "bootArgs": "loglevel=5",
+      "samples": [
+        {
+          "index": 0,
+          "readyMs": 2126.5953579999996,
+          "bootMs": 1048,
+          "completedMs": 2742.4839269999993,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "723",
+              "total_ms": "723"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "4",
+              "total_ms": "4"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "54",
+              "total_ms": "58"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "27",
+              "total_ms": "85"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "963",
+              "total_ms": "1048"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "1048",
+              "total_ms": "1772"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "5",
+              "total_ms": "5"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "22",
+              "total_ms": "27"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "28"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "28"
+            }
+          ],
+          "initAtSeconds": null,
+          "bootLogBytes": 10524
+        },
+        {
+          "index": 1,
+          "readyMs": 2224.96317,
+          "bootMs": 1101,
+          "completedMs": 2975.1347570000007,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "728",
+              "total_ms": "728"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "3",
+              "total_ms": "3"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "43",
+              "total_ms": "47"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "53",
+              "total_ms": "100"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "1000",
+              "total_ms": "1101"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "1101",
+              "total_ms": "1829"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "6",
+              "total_ms": "6"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "15",
+              "total_ms": "22"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "22"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "22"
+            }
+          ],
+          "initAtSeconds": null,
+          "bootLogBytes": 10366
+        },
+        {
+          "index": 2,
+          "readyMs": 2280.1890490000005,
+          "bootMs": 1060,
+          "completedMs": 3019.7581090000003,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "723",
+              "total_ms": "723"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "4",
+              "total_ms": "4"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "51",
+              "total_ms": "56"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "22",
+              "total_ms": "78"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "981",
+              "total_ms": "1060"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "1060",
+              "total_ms": "1783"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "6",
+              "total_ms": "6"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "17",
+              "total_ms": "23"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "24"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "24"
+            }
+          ],
+          "initAtSeconds": null,
+          "bootLogBytes": 10521
+        }
+      ],
+      "scope": "Real Firecracker/FUSE; newly formatted 32GiB disk, production-size VM, one Node readiness message, normal sync/shutdown, no native Codex/account/model. Polling adds up to 100ms."
+    },
+    {
+      "name": "no-keyboard",
+      "image": "ghcr.io/leo91000/leo-agent-manager@sha256:b1a368856922b7cbe686329f35b1d7b3e3a2a8d58257f54ff13bf468cc431612",
+      "cpu": 7,
+      "memoryMiB": 36352,
+      "bootArgs": "i8042.nokbd i8042.noaux",
+      "samples": [
+        {
+          "index": 0,
+          "readyMs": 1622.0127599999996,
+          "bootMs": 515,
+          "completedMs": 2253.795137,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "719",
+              "total_ms": "719"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "4",
+              "total_ms": "4"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "64",
+              "total_ms": "68"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "25",
+              "total_ms": "93"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "421",
+              "total_ms": "515"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "515",
+              "total_ms": "1235"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "5",
+              "total_ms": "5"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "17",
+              "total_ms": "23"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "23"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "23"
+            }
+          ],
+          "initAtSeconds": 0.267876,
+          "bootLogBytes": 29430
+        },
+        {
+          "index": 1,
+          "readyMs": 1619.4828130000005,
+          "bootMs": 554,
+          "completedMs": 2207.1407579999996,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "714",
+              "total_ms": "714"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "4",
+              "total_ms": "4"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "55",
+              "total_ms": "59"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "48",
+              "total_ms": "108"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "446",
+              "total_ms": "554"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "554",
+              "total_ms": "1269"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "6",
+              "total_ms": "6"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "20",
+              "total_ms": "26"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "27"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "27"
+            }
+          ],
+          "initAtSeconds": 0.273802,
+          "bootLogBytes": 29589
+        },
+        {
+          "index": 2,
+          "readyMs": 2021.5077,
+          "bootMs": 980,
+          "completedMs": 2619.660766000001,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "741",
+              "total_ms": "741"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "4",
+              "total_ms": "4"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "50",
+              "total_ms": "55"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "22",
+              "total_ms": "78"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "902",
+              "total_ms": "980"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "980",
+              "total_ms": "1722"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "4",
+              "total_ms": "4"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "4",
+              "total_ms": "8"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "8"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "8"
+            }
+          ],
+          "initAtSeconds": 0.297498,
+          "bootLogBytes": 29356
+        }
+      ],
+      "scope": "Real Firecracker/FUSE; newly formatted 32GiB disk, production-size VM, one Node readiness message, normal sync/shutdown, no native Codex/account/model. Polling adds up to 100ms."
+    },
+    {
+      "name": "combined",
+      "image": "ghcr.io/leo91000/leo-agent-manager@sha256:b1a368856922b7cbe686329f35b1d7b3e3a2a8d58257f54ff13bf468cc431612",
+      "cpu": 7,
+      "memoryMiB": 36352,
+      "bootArgs": "loglevel=5 i8042.nokbd i8042.noaux",
+      "samples": [
+        {
+          "index": 0,
+          "readyMs": 1720.5098779999998,
+          "bootMs": 510,
+          "completedMs": 2670.390488,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "936",
+              "total_ms": "936"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "2",
+              "total_ms": "2"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "51",
+              "total_ms": "53"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "21",
+              "total_ms": "74"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "435",
+              "total_ms": "510"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "510",
+              "total_ms": "1447"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "2",
+              "total_ms": "2"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "33",
+              "total_ms": "36"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "36"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "36"
+            }
+          ],
+          "initAtSeconds": null,
+          "bootLogBytes": 10251
+        },
+        {
+          "index": 1,
+          "readyMs": 2017.5424910000002,
+          "bootMs": 547,
+          "completedMs": 3345.5991570000006,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "954",
+              "total_ms": "954"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "4",
+              "total_ms": "4"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "61",
+              "total_ms": "65"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "29",
+              "total_ms": "95"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "452",
+              "total_ms": "547"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "547",
+              "total_ms": "1502"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "10",
+              "total_ms": "10"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "12",
+              "total_ms": "23"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "23"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "23"
+            }
+          ],
+          "initAtSeconds": null,
+          "bootLogBytes": 10247
+        },
+        {
+          "index": 2,
+          "readyMs": 1417.8305459999992,
+          "bootMs": 521,
+          "completedMs": 1966.2246699999996,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "559",
+              "total_ms": "559"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "4",
+              "total_ms": "4"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "58",
+              "total_ms": "62"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "28",
+              "total_ms": "90"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "430",
+              "total_ms": "521"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "521",
+              "total_ms": "1081"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "5",
+              "total_ms": "5"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "33",
+              "total_ms": "38"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "38"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "38"
+            }
+          ],
+          "initAtSeconds": null,
+          "bootLogBytes": 10251
+        }
+      ],
+      "scope": "Real Firecracker/FUSE; newly formatted 32GiB disk, production-size VM, one Node readiness message, normal sync/shutdown, no native Codex/account/model. Polling adds up to 100ms."
+    },
+    {
+      "name": "server-control",
+      "image": "ghcr.io/leo91000/leo-agent-manager@sha256:b1a368856922b7cbe686329f35b1d7b3e3a2a8d58257f54ff13bf468cc431612",
+      "cpu": 7,
+      "memoryMiB": 36352,
+      "bootArgs": "",
+      "samples": [
+        {
+          "index": 0,
+          "readyMs": 28244.434844000003,
+          "bootMs": 3751,
+          "completedMs": 29323.722087000002,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "5242",
+              "total_ms": "5242"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "9",
+              "total_ms": "9"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "137",
+              "total_ms": "146"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "72",
+              "total_ms": "219"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "3531",
+              "total_ms": "3751"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "3751",
+              "total_ms": "8993"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "407",
+              "total_ms": "407"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "19",
+              "total_ms": "426"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "427"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "427"
+            }
+          ],
+          "initAtSeconds": 2.414968,
+          "bootLogBytes": 29682
+        },
+        {
+          "index": 1,
+          "readyMs": 5739.001900000003,
+          "bootMs": 3208,
+          "completedMs": 6499.064571000003,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "2138",
+              "total_ms": "2138"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "8",
+              "total_ms": "8"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "194",
+              "total_ms": "203"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "66",
+              "total_ms": "269"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "2939",
+              "total_ms": "3208"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "3208",
+              "total_ms": "5347"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "4",
+              "total_ms": "4"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "20",
+              "total_ms": "24"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "25"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "25"
+            }
+          ],
+          "initAtSeconds": 2.524346,
+          "bootLogBytes": 29823
+        },
+        {
+          "index": 2,
+          "readyMs": 5645.787441,
+          "bootMs": 3181,
+          "completedMs": 6190.578744999999,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "1945",
+              "total_ms": "1945"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "6",
+              "total_ms": "6"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "166",
+              "total_ms": "173"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "78",
+              "total_ms": "251"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "2930",
+              "total_ms": "3181"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "3181",
+              "total_ms": "5127"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "4",
+              "total_ms": "4"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "80",
+              "total_ms": "84"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "85"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "85"
+            }
+          ],
+          "initAtSeconds": 2.44969,
+          "bootLogBytes": 29840
+        }
+      ],
+      "scope": "Real Firecracker/FUSE; newly formatted 32GiB disk, production-size VM, one Node readiness message, normal sync/shutdown, no native Codex/account/model. Polling adds up to 100ms."
+    },
+    {
+      "name": "server-warnings-only",
+      "image": "ghcr.io/leo91000/leo-agent-manager@sha256:b1a368856922b7cbe686329f35b1d7b3e3a2a8d58257f54ff13bf468cc431612",
+      "cpu": 7,
+      "memoryMiB": 36352,
+      "bootArgs": "loglevel=5",
+      "samples": [
+        {
+          "index": 0,
+          "readyMs": 5661.683805999994,
+          "bootMs": 2792,
+          "completedMs": 6328.864401999999,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "2263",
+              "total_ms": "2263"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "6",
+              "total_ms": "6"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "188",
+              "total_ms": "195"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "61",
+              "total_ms": "256"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "2536",
+              "total_ms": "2792"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "2792",
+              "total_ms": "5056"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "4",
+              "total_ms": "4"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "17",
+              "total_ms": "21"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "22"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "22"
+            }
+          ],
+          "initAtSeconds": null,
+          "bootLogBytes": 10651
+        },
+        {
+          "index": 1,
+          "readyMs": 5944.382651000007,
+          "bootMs": 2935,
+          "completedMs": 6586.818201000002,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "2539",
+              "total_ms": "2539"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "4",
+              "total_ms": "4"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "148",
+              "total_ms": "153"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "67",
+              "total_ms": "220"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "2714",
+              "total_ms": "2935"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "2935",
+              "total_ms": "5475"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "5",
+              "total_ms": "5"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "16",
+              "total_ms": "22"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "23"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "23"
+            }
+          ],
+          "initAtSeconds": null,
+          "bootLogBytes": 10806
+        },
+        {
+          "index": 2,
+          "readyMs": 5540.339140000004,
+          "bootMs": 2943,
+          "completedMs": 6312.395059000002,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "2230",
+              "total_ms": "2230"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "3",
+              "total_ms": "3"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "146",
+              "total_ms": "150"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "72",
+              "total_ms": "222"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "2720",
+              "total_ms": "2943"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "2943",
+              "total_ms": "5173"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "7",
+              "total_ms": "7"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "17",
+              "total_ms": "24"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "25"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "25"
+            }
+          ],
+          "initAtSeconds": null,
+          "bootLogBytes": 10651
+        }
+      ],
+      "scope": "Real Firecracker/FUSE; newly formatted 32GiB disk, production-size VM, one Node readiness message, normal sync/shutdown, no native Codex/account/model. Polling adds up to 100ms."
+    },
+    {
+      "name": "server-no-keyboard",
+      "image": "ghcr.io/leo91000/leo-agent-manager@sha256:b1a368856922b7cbe686329f35b1d7b3e3a2a8d58257f54ff13bf468cc431612",
+      "cpu": 7,
+      "memoryMiB": 36352,
+      "bootArgs": "i8042.nokbd i8042.noaux",
+      "samples": [
+        {
+          "index": 0,
+          "readyMs": 25129.350426,
+          "bootMs": 3982,
+          "completedMs": 26046.347249000002,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "2590",
+              "total_ms": "2590"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "12",
+              "total_ms": "12"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "148",
+              "total_ms": "160"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "64",
+              "total_ms": "224"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "3757",
+              "total_ms": "3982"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "3982",
+              "total_ms": "6573"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "277",
+              "total_ms": "277"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "43",
+              "total_ms": "320"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "321"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "321"
+            }
+          ],
+          "initAtSeconds": 1.937434,
+          "bootLogBytes": 30302
+        },
+        {
+          "index": 1,
+          "readyMs": 5448.998384000006,
+          "bootMs": 2467,
+          "completedMs": 6306.794743000006,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "2371",
+              "total_ms": "2371"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "8",
+              "total_ms": "8"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "164",
+              "total_ms": "172"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "59",
+              "total_ms": "232"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "2235",
+              "total_ms": "2467"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "2467",
+              "total_ms": "4839"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "10",
+              "total_ms": "10"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "32",
+              "total_ms": "43"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "44"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "44"
+            }
+          ],
+          "initAtSeconds": 1.859113,
+          "bootLogBytes": 29535
+        },
+        {
+          "index": 2,
+          "readyMs": 5047.135115000005,
+          "bootMs": 2469,
+          "completedMs": 5694.481279000007,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "2159",
+              "total_ms": "2159"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "3",
+              "total_ms": "3"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "139",
+              "total_ms": "143"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "68",
+              "total_ms": "211"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "2258",
+              "total_ms": "2469"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "2469",
+              "total_ms": "4629"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "3",
+              "total_ms": "3"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "19",
+              "total_ms": "23"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "24"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "24"
+            }
+          ],
+          "initAtSeconds": 1.856996,
+          "bootLogBytes": 29392
+        }
+      ],
+      "scope": "Real Firecracker/FUSE; newly formatted 32GiB disk, production-size VM, one Node readiness message, normal sync/shutdown, no native Codex/account/model. Polling adds up to 100ms."
+    },
+    {
+      "name": "server-combined",
+      "image": "ghcr.io/leo91000/leo-agent-manager@sha256:b1a368856922b7cbe686329f35b1d7b3e3a2a8d58257f54ff13bf468cc431612",
+      "cpu": 7,
+      "memoryMiB": 36352,
+      "bootArgs": "loglevel=5 i8042.nokbd i8042.noaux",
+      "samples": [
+        {
+          "index": 0,
+          "readyMs": 5254.716166999999,
+          "bootMs": 2394,
+          "completedMs": 26898.932648,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "2169",
+              "total_ms": "2169"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "5",
+              "total_ms": "5"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "168",
+              "total_ms": "173"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "59",
+              "total_ms": "233"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "2161",
+              "total_ms": "2394"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "2395",
+              "total_ms": "4564"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "3",
+              "total_ms": "3"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "66",
+              "total_ms": "70"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "70"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "70"
+            }
+          ],
+          "initAtSeconds": null,
+          "bootLogBytes": 10986
+        },
+        {
+          "index": 1,
+          "readyMs": 5043.410156999998,
+          "bootMs": 2066,
+          "completedMs": 5795.342573000002,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "2340",
+              "total_ms": "2340"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "5",
+              "total_ms": "5"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "186",
+              "total_ms": "192"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "72",
+              "total_ms": "265"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "1801",
+              "total_ms": "2066"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "2066",
+              "total_ms": "4407"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "5",
+              "total_ms": "5"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "58",
+              "total_ms": "63"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "64"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "64"
+            }
+          ],
+          "initAtSeconds": null,
+          "bootLogBytes": 10537
+        },
+        {
+          "index": 2,
+          "readyMs": 4838.493069999997,
+          "bootMs": 2142,
+          "completedMs": 5585.286279,
+          "timings": [
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "started"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "prepare_disk",
+              "event": "phase_completed",
+              "phase_ms": "2133",
+              "total_ms": "2133"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "prepare",
+              "event": "phase_completed",
+              "phase_ms": "7",
+              "total_ms": "7"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "open_journal",
+              "event": "phase_completed",
+              "phase_ms": "161",
+              "total_ms": "168"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "mount_and_network",
+              "event": "phase_completed",
+              "phase_ms": "62",
+              "total_ms": "231"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "started"
+            },
+            {
+              "operation": "vm_boot",
+              "phase": "spawn_and_guest_ready",
+              "event": "completed",
+              "phase_ms": "1910",
+              "total_ms": "2142"
+            },
+            {
+              "operation": "conversation_start",
+              "phase": "boot_vm",
+              "event": "completed",
+              "phase_ms": "2142",
+              "total_ms": "4275"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "clock_and_auth",
+              "event": "phase_completed",
+              "phase_ms": "6",
+              "total_ms": "6"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "imports",
+              "event": "phase_completed",
+              "phase_ms": "77",
+              "total_ms": "83"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_connect",
+              "event": "phase_completed",
+              "phase_ms": "0",
+              "total_ms": "83"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "started"
+            },
+            {
+              "operation": "guest_prepare",
+              "phase": "run_request",
+              "event": "completed",
+              "phase_ms": "0",
+              "total_ms": "84"
+            }
+          ],
+          "initAtSeconds": null,
+          "bootLogBytes": 10694
+        }
+      ],
+      "scope": "Real Firecracker/FUSE; newly formatted 32GiB disk, production-size VM, one Node readiness message, normal sync/shutdown, no native Codex/account/model. Polling adds up to 100ms."
+    }
+  ]
+}

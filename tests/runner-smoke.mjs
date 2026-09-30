@@ -10,7 +10,6 @@ import {
   writeFile,
 } from 'node:fs/promises'
 import { createServer } from 'node:net'
-import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
@@ -21,7 +20,8 @@ import { prepareStorageOrigin, storageSmoke } from './runner-storage-smoke.mjs'
 async function main() {
   const image = process.argv[2] || 'leo-firecracker:dev'
   const docker = (...args) => execFileSync('docker', ['--context', 'default', ...args], { encoding: 'utf8', timeout: 180000, stdio: ['pipe', 'pipe', 'pipe'] }).trim()
-  const root = await mkdtemp(path.join(process.env.VM_TEST_ROOT || os.tmpdir(), 'leo-microvm-'))
+  // The extracted guest image must stay on disk: /tmp can be a RAM filesystem.
+  const root = await mkdtemp(path.join(process.env.VM_TEST_ROOT || '/var/tmp', 'leo-microvm-'))
   const name = `leo-vm-test-${randomUUID().slice(0, 8)}`
   const networkName = `${name}-network`
   const networkServer = `${name}-peer`
@@ -99,6 +99,7 @@ const project=root+'/workspace/'+${JSON.stringify(projectId)};
 if(mode==='first')execFileSync('cc',['-Wall','-Wextra','-Werror','-O2',root+'/workspace/nested-kvm.c','-o',root+'/workspace/nested-kvm'],{timeout:30000});
 if(mode==='first'||mode==='resume')assert.match(execFileSync(root+'/workspace/nested-kvm',[],{encoding:'utf8',timeout:15000}),/KVM_RUN, rax=42, HLT/);
 assert.match(execFileSync('uname',['-r'],{encoding:'utf8'}),/^6\\.12\\.109/);
+assert.equal(fs.existsSync('/sys/bus/serio/devices/serio0'),false,'guest has no emulated PS/2 keyboard');
 for(const path of ['/data/private-manager-canary','/data/runner-secret','/var/run/docker.sock'])assert.equal(fs.existsSync(path),false,path);
 assert.equal(process.env.RUNNER_TOKEN,undefined);
 if(mode==='first') {
