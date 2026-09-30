@@ -44,6 +44,8 @@ pub enum GuestRequest {
         replace: bool,
         #[serde(default)]
         encoding: Encoding,
+        #[serde(default, rename = "traceId", skip_serializing_if = "Option::is_none")]
+        trace_id: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     ProjectImport {
@@ -53,10 +55,73 @@ pub enum GuestRequest {
         read_only: bool,
         #[serde(default)]
         encoding: Encoding,
+        #[serde(default, rename = "traceId", skip_serializing_if = "Option::is_none")]
+        trace_id: Option<String>,
     },
     Run {
         plan: Value,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn imports_accept_legacy_requests_and_optional_trace_ids() {
+        for operation in ["import", "project-import"] {
+            let mut message = json!({
+                "op": operation,
+                "target": "/run/example",
+                "encoding": "binary",
+            });
+            let legacy: GuestRequest = serde_json::from_value(message.clone()).unwrap();
+            assert!(
+                serde_json::to_value(legacy)
+                    .unwrap()
+                    .get("traceId")
+                    .is_none()
+            );
+
+            message["traceId"] = json!("44f35af1-a266-44bc-9659-bfb8ffb040a3");
+            let traced: GuestRequest = serde_json::from_value(message).unwrap();
+            assert_eq!(
+                serde_json::to_value(traced).unwrap()["traceId"],
+                "44f35af1-a266-44bc-9659-bfb8ffb040a3"
+            );
+        }
+    }
+
+    #[test]
+    fn traced_imports_remain_readable_by_legacy_guests() {
+        #[derive(Deserialize)]
+        struct LegacyImport {
+            target: String,
+            #[serde(default)]
+            encoding: Encoding,
+        }
+
+        for request in [
+            GuestRequest::Import {
+                target: "/run/example".into(),
+                replace: false,
+                encoding: Encoding::Binary,
+                trace_id: Some("44f35af1-a266-44bc-9659-bfb8ffb040a3".into()),
+            },
+            GuestRequest::ProjectImport {
+                target: "/run/example".into(),
+                read_only: true,
+                encoding: Encoding::Binary,
+                trace_id: Some("44f35af1-a266-44bc-9659-bfb8ffb040a3".into()),
+            },
+        ] {
+            let legacy: LegacyImport =
+                serde_json::from_value(serde_json::to_value(request).unwrap()).unwrap();
+            assert_eq!(legacy.target, "/run/example");
+            assert_eq!(legacy.encoding, Encoding::Binary);
+        }
+    }
 }
 
 /// Answer of the `status` operation.
