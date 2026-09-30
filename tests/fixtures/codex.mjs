@@ -20,6 +20,10 @@ async function main() {
   }
 
   if (args.includes('app-server')) {
+    const launchRecord = path.join(process.env.CODEX_HOME, 'fixture-launch-args.json')
+    if (existsSync(launchRecord))
+      writeFileSync(launchRecord, JSON.stringify(args))
+
     const chat = chatFixture()
     let loginTimer
     const lines = createInterface({ input: process.stdin })

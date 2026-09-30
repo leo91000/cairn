@@ -173,6 +173,29 @@ fn codex_home(config: &Config) -> std::path::PathBuf {
 }
 
 #[tokio::test]
+async fn codex_sessions_keep_managed_mcp_configuration_without_cloning_native_plugins() {
+    let root = TempDir::new().unwrap();
+    let config = config(&root);
+    let home = codex_home(&config);
+    let launch = home.join("fixture-launch-args.json");
+    std::fs::write(&launch, "[]").unwrap();
+    let managed_mcp = "mcp_servers.fixture.url=\"https://example.invalid/mcp\"";
+    let args = ["-c".into(), managed_mcp.into()];
+    let session = Session::codex(&config, &home, &args, Some(root.path()))
+        .await
+        .unwrap();
+    session.close().await;
+
+    let launched: Vec<String> = serde_json::from_slice(&std::fs::read(launch).unwrap()).unwrap();
+    assert!(launched.windows(2).any(|pair| pair == ["-c", managed_mcp]));
+    assert!(
+        launched
+            .windows(2)
+            .any(|pair| pair == ["-c", "features.plugins=false"])
+    );
+}
+
+#[tokio::test]
 async fn failed_initialization_waits_for_the_codex_process_to_exit() {
     let root = TempDir::new().unwrap();
     let config = config(&root);

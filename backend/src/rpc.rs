@@ -174,6 +174,10 @@ impl Session {
                 "cli_auth_credentials_store=\"file\"",
                 "-c",
                 "forced_login_method=\"chatgpt\"",
+                // Leo supplies skills and MCP servers itself. Codex's unused native
+                // catalog clones ~120 MiB per fresh home and stalls the final disk sync.
+                "-c",
+                "features.plugins=false",
                 "app-server",
                 "--listen",
                 "stdio://",
