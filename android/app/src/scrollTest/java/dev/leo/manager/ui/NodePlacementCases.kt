@@ -247,6 +247,14 @@ abstract class NodePlacementCases {
                 compose.onAllNodesWithText("Agent test").fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithText("Agent test").performClick()
+            // A previous save can close its sheet before releasing the global busy state.
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Enregistrer") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Enregistrer").assertIsEnabled()
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(10000) {
                 writes.any { it.first == "/api/nodes/node/agents" } &&
