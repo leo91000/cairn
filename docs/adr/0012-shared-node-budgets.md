@@ -12,7 +12,10 @@ Une préférence ou une fixation à une node garde son comportement existant.
 
 Les budgets ne sont pas divisés par slot. CPU et RAM sont limités collectivement
 par le cgroup v2 privé du contrôleur, qui comprend les VM et le runtime. Chaque VM
-voit un plafond mémoire égal au budget de sa node et au maximum 32 vCPU. Ces
+voit un plafond mémoire égal au budget de sa node moins 512 Mio pour le contrôleur,
+et au maximum 32 vCPU. La marge couvre le runtime, les caches et le VMM ; elle
+n'est pas divisée ou réservée par slot. Le budget minimal est de 640 Mio, avec
+au moins 128 Mio visibles au guest. Ces
 plafonds ne réservent pas de capacité physique. Le nombre de slots peut dépasser
 le nombre de CPU. Une baisse du budget RAM sous la consommation courante et la
 réserve du contrôleur est refusée ; une baisse du nombre de slots laisse finir les
@@ -27,7 +30,9 @@ Cette coopération est un mécanisme de récupération, pas une garantie de mém
 disponible : le cgroup conserve le plafond physique. Les admissions s’arrêtent
 lorsque la mémoire ou le disque manquent de marge. Des pics simultanés peuvent
 encore épuiser le budget ; le nombre de slots doit être adapté au travail réel.
-La mesure de pression exclut le cache de fichiers inactif que Linux peut récupérer,
+La mesure de pression porte sur tout le conteneur : déplacer le contrôleur dans
+son cgroup délégué ne déplace pas les charges mémoire déjà créées. Elle exclut
+le cache de fichiers inactif que Linux peut récupérer,
 afin que l’import de l’image ne bloque pas les admissions. Lors d’une baisse du
 budget RAM, le contrôleur demande d’abord la récupération des pages de fichiers,
 puis vérifie la consommation totale avant de changer le plafond.

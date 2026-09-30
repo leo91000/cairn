@@ -182,7 +182,16 @@ impl Pool {
         let Some(budget) = self.budget().await else {
             return Ok((serde_json::Value::Null, None));
         };
-        let memory = budget::memory_usage(self.cgroup.get().unwrap())? / 1_048_576;
+        // Moving the controller into its delegated leaf does not move existing
+        // memory charges. Include those charges and health-check processes in
+        // the container envelope instead of measuring only the leaf.
+        let envelope = self
+            .cgroup
+            .get()
+            .unwrap()
+            .parent()
+            .ok_or_else(|| Error::unavailable("Controller memory envelope is unavailable."))?;
+        let memory = budget::memory_usage(envelope)? / 1_048_576;
         let disk = budget::disk_bytes(&self.state)?;
         let (total, free) = crate::storage::policy::space(&self.state)?;
         let policy = match std::fs::read(self.state.join("storage-policy.json")) {
@@ -277,7 +286,7 @@ impl Reservation {
                 ));
             }
             if let Some(budget) = self.pool.budget().await {
-                plan.set_vm_limits(budget.limits.cpu.min(32), budget.limits.memory_mi_b);
+                plan.set_vm_limits(budget.limits.cpu.min(32), budget.vm_memory_mib());
             }
             let disk_mib = plan.as_value()["resources"]["diskMiB"]
                 .as_u64()
@@ -404,7 +413,7 @@ mod tests {
         assert_eq!(applied.slots, 12);
         let mut smaller = applied.clone();
         smaller.limits.cpu = 1;
-        smaller.limits.memory_mi_b = 256;
+        smaller.limits.memory_mi_b = 640;
         pool.configure(smaller.clone()).await.unwrap();
         drop(pool);
         let restarted = Pool::new(
@@ -422,6 +431,34 @@ mod tests {
             applied.limits.memory_mi_b
         );
         restarted.configure(applied).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn memory_pressure_includes_charges_outside_the_delegated_leaf() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        let envelope = root.path().join("envelope");
+        let cgroup = envelope.join("leo-shared");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(&cgroup).unwrap();
+        std::fs::write(
+            envelope.join("memory.current"),
+            (1024 * 1_048_576u64).to_string(),
+        )
+        .unwrap();
+        std::fs::write(envelope.join("memory.stat"), "inactive_file 536870912\n").unwrap();
+        std::fs::write(
+            cgroup.join("memory.current"),
+            (128 * 1_048_576u64).to_string(),
+        )
+        .unwrap();
+        std::fs::write(cgroup.join("memory.max"), "max").unwrap();
+        std::fs::write(cgroup.join("cpu.max"), "max 100000").unwrap();
+        let pool = Pool::new(state, root.path().into(), CancellationToken::new(), 4)
+            .await
+            .unwrap();
+        pool.initialize(cgroup).await.unwrap();
+        assert_eq!(pool.usage().await.unwrap().0["memoryMiB"], 512);
     }
 
     #[tokio::test]

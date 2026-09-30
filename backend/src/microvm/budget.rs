@@ -14,6 +14,8 @@ use std::{
 };
 
 pub const FILE: &str = "node-budget.json";
+const CONTROLLER_MEMORY_MIB: u64 = 512;
+const MIN_GUEST_MEMORY_MIB: u64 = 128;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -23,11 +25,17 @@ pub struct Budget {
 }
 
 impl Budget {
+    pub fn vm_memory_mib(&self) -> u64 {
+        self.limits
+            .memory_mi_b
+            .saturating_sub(CONTROLLER_MEMORY_MIB)
+    }
+
     pub fn validate(&self) -> Result<()> {
         self.limits.validate()?;
-        if self.limits.memory_mi_b <= 128 {
+        if self.vm_memory_mib() < MIN_GUEST_MEMORY_MIB {
             return Err(Error::bad(
-                "Shared RAM must exceed the 128 MiB controller reserve.",
+                "Shared RAM must allow 512 MiB for the controller and at least 128 MiB for a guest.",
             ));
         }
         if !(1..=4096).contains(&self.slots) {
@@ -48,7 +56,7 @@ impl Budget {
         {
             let current = memory_current(cgroup)?;
             let needed = current
-                .saturating_add(128 * 1_048_576)
+                .saturating_add(CONTROLLER_MEMORY_MIB * 1_048_576)
                 .saturating_sub(memory);
             if needed > 0 {
                 // Image imports can fill the page cache. Reclaim file pages before
@@ -58,7 +66,7 @@ impl Budget {
                     format!("{needed} swappiness=0"),
                 );
             }
-            if memory_current(cgroup)?.saturating_add(128 * 1_048_576) > memory {
+            if memory_current(cgroup)?.saturating_add(CONTROLLER_MEMORY_MIB * 1_048_576) > memory {
                 return Err(Error::conflict(
                     "Shared RAM budget is below current usage plus the controller reserve.",
                 ));
@@ -309,6 +317,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn guest_memory_leaves_controller_headroom_without_dividing_by_slots() {
+        let mut budget = Budget {
+            slots: 1,
+            limits: Resources {
+                cpu: 3,
+                memory_mi_b: 7168,
+                disk_mi_b: 32768,
+            },
+        };
+        assert_eq!(budget.vm_memory_mib(), 6656);
+        budget.slots = 16;
+        assert_eq!(budget.vm_memory_mib(), 6656);
+        budget.limits.memory_mi_b = 639;
+        assert!(budget.validate().is_err());
+        budget.limits.memory_mi_b = 640;
+        budget.validate().unwrap();
+        assert_eq!(budget.vm_memory_mib(), 128);
+    }
+
+    #[test]
     fn reconfiguration_never_kills_existing_work_and_cpu_is_shared() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -331,7 +359,7 @@ mod tests {
             std::fs::read_to_string(root.path().join("cpu.max")).unwrap(),
             "800000 100000"
         );
-        budget.limits.memory_mi_b = 512;
+        budget.limits.memory_mi_b = 768;
         assert_eq!(budget.apply(root.path()).unwrap_err().status, 409);
         assert_eq!(
             std::fs::read_to_string(root.path().join("memory.max")).unwrap(),
