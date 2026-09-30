@@ -46,7 +46,10 @@ pub(crate) fn release() -> Result<Release> {
         || !repository
             .bytes()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"/:._-".contains(&c))
-        || !super::snapshots::valid_hash(digest)
+        || digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         return Err(Error::unavailable("Invalid master node image digest."));
     }
