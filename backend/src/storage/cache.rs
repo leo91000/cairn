@@ -1,18 +1,66 @@
 //! Eviction visits only immutable clean cache files, never journals or raw disks.
 //! Unlike the master's backup cache, this retains a working set up to the budget
-//! and holds admission through a fill/write. Backup eviction instead protects
+//! and holds admission through a fill. Writes reserve headroom before releasing
+//! admission for durable I/O. Backup eviction instead protects
 //! master-only recovery points and retires all duplicate S3 payloads on local nodes.
 use super::policy::{Policy, space};
 use std::{
     collections::{BTreeSet, HashMap},
     io,
     path::{Path, PathBuf},
-    sync::{Mutex, MutexGuard, OnceLock},
+    sync::{
+        Mutex, MutexGuard, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime},
 };
 
 static EVICTION: Mutex<()> = Mutex::new(());
+static PENDING_WRITES: PendingWrites = PendingWrites(AtomicU64::new(0));
 const RECONCILE_AFTER: Duration = Duration::from_secs(60);
+
+struct PendingWrites(AtomicU64);
+
+pub(crate) struct WriteReservation<'a> {
+    pending: &'a PendingWrites,
+    bytes: u64,
+}
+
+impl PendingWrites {
+    fn reserve(&self, bytes: u64) -> io::Result<WriteReservation<'_>> {
+        self.0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                pending.checked_add(bytes)
+            })
+            .map_err(|_| io::Error::other("Write headroom reservation overflow"))?;
+        Ok(WriteReservation {
+            pending: self,
+            bytes,
+        })
+    }
+}
+
+impl Drop for WriteReservation<'_> {
+    fn drop(&mut self) {
+        // Callers retain the reservation until the durable write has finished,
+        // including a partial/failed write. statvfs then accounts for its blocks.
+        self.pending.0.fetch_sub(self.bytes, Ordering::Release);
+    }
+}
+
+/// Sample before filesystem/quota space, while serialized with new admissions.
+/// A concurrent release then leaves a conservative reservation in that snapshot.
+pub(crate) fn pending_write_bytes() -> u64 {
+    PENDING_WRITES.0.load(Ordering::Acquire)
+}
+
+/// The caller has checked space and must hold admission while reserving it.
+pub(crate) fn reserve_write(
+    _admission: &MutexGuard<'_, ()>,
+    bytes: u64,
+) -> io::Result<WriteReservation<'static>> {
+    PENDING_WRITES.reserve(bytes)
+}
 
 struct Index {
     bytes: u64,
@@ -257,6 +305,83 @@ pub fn maintain(state: &Path, policy: &Policy) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_fills_cannot_spend_pending_write_headroom() {
+        // Isolate the controller-global reservation from parallel unit tests.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "storage::cache::tests::pending_write_headroom_child",
+                "--ignored",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated controller-global headroom child"]
+    fn pending_write_headroom_child() {
+        let root = tempfile::tempdir().unwrap();
+        let policy = Policy {
+            cache_mi_b: 4,
+            reserve_mi_b: 64,
+            reserve_percent: 1,
+            ..Policy::default()
+        };
+        let admission = admission().unwrap();
+        let reservation = reserve_write(&admission, u64::MAX / 2).unwrap();
+        drop(admission);
+        assert_eq!(space(root.path()).unwrap().1, 0);
+        assert!(reserve(root.path(), &policy, 4096).unwrap().is_none());
+        drop(reservation);
+        let (total, free) = space(root.path()).unwrap();
+        assert!(free > policy.reserve(total) + 4096);
+        assert!(reserve(root.path(), &policy, 4096).unwrap().is_some());
+    }
+
+    #[test]
+    fn pending_write_reservations_cover_overlapping_io_and_release_on_failure() {
+        let pending = PendingWrites(AtomicU64::new(0));
+        let entered = std::sync::Barrier::new(5);
+        let release = std::sync::Barrier::new(5);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    let _reservation = pending.reserve(1024 * 1024).unwrap();
+                    entered.wait();
+                    release.wait();
+                });
+            }
+            entered.wait();
+            assert_eq!(pending.0.load(Ordering::Acquire), 4 * 1024 * 1024);
+            release.wait();
+        });
+        assert_eq!(pending.0.load(Ordering::Acquire), 0);
+
+        let aborted = std::panic::catch_unwind(|| {
+            let _reservation = pending.reserve(4096).unwrap();
+            panic!("injected writer failure");
+        });
+        assert!(aborted.is_err());
+        assert_eq!(pending.0.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn overflowing_write_reservation_does_not_change_prior_ownership() {
+        let pending = PendingWrites(AtomicU64::new(0));
+        let reservation = pending.reserve(u64::MAX - 1).unwrap();
+        assert!(pending.reserve(2).is_err());
+        assert_eq!(pending.0.load(Ordering::Acquire), u64::MAX - 1);
+        drop(reservation);
+        assert_eq!(pending.0.load(Ordering::Acquire), 0);
+    }
 
     #[test]
     #[ignore = "explicit large-cache admission benchmark"]

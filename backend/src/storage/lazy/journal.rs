@@ -138,6 +138,75 @@ struct Segment {
     length: u64,
 }
 
+/// A stable prefix captured under the journal lock. Appends may continue while
+/// these files are synced; only this prefix is acknowledged by the barrier.
+pub(super) struct CommitBatch {
+    through: i64,
+    pub frames: u64,
+    files: Vec<Arc<File>>,
+}
+
+impl CommitBatch {
+    pub fn sync(&self) -> io::Result<()> {
+        for file in &self.files {
+            file.sync_data()?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod commit_tests {
+    use super::*;
+
+    struct Empty;
+
+    impl BlockSource for Empty {
+        fn fetch(&self, _: &str) -> io::Result<Vec<u8>> {
+            Err(failure("Unexpected block fetch"))
+        }
+    }
+
+    #[test]
+    fn captured_prefix_keeps_later_appends_pending_across_segment_rotation() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = serde_json::json!({
+            "version": 1,
+            "size": 4096,
+            "blockSize": BLOCK,
+            "blocks": [{"offset": 0, "size": 4096, "hash": null}]
+        });
+        let disk = LazyDisk::create(root.path(), &manifest, Arc::new(Empty)).unwrap();
+        let mut journal = disk.journal.lock().unwrap();
+        let first = journal.append(root.path(), &disk.db, 0, b"first").unwrap();
+        let batch = journal.commit_batch(first).unwrap().unwrap();
+        assert_eq!(batch.frames, 1);
+        let second = journal.append(root.path(), &disk.db, 8, b"second").unwrap();
+        journal.active = None;
+        let third = journal.append(root.path(), &disk.db, 16, b"third").unwrap();
+        batch.sync().unwrap();
+        journal.committed(&batch).unwrap();
+        assert_eq!(journal.pending.len(), 2);
+        assert!(journal.sync().is_err());
+        assert!(journal.commit_batch(first).unwrap().is_none());
+        let batch = journal.commit_batch(second).unwrap().unwrap();
+        assert_eq!(batch.files.len(), 2);
+        assert_eq!(batch.frames, 2);
+        batch.sync().unwrap();
+        journal.committed(&batch).unwrap();
+        assert!(journal.commit_batch(third).unwrap().is_none());
+        journal.sync().unwrap();
+        drop(journal);
+        drop(disk);
+        let disk = LazyDisk::open(root.path(), Arc::new(Empty)).unwrap();
+        let mut bytes = [0; 21];
+        disk.read_at(0, &mut bytes).unwrap();
+        assert_eq!(&bytes[..5], b"first");
+        assert_eq!(&bytes[8..14], b"second");
+        assert_eq!(&bytes[16..], b"third");
+    }
+}
+
 pub(super) struct Journal {
     records: BTreeMap<i64, Record>,
     blocks: BTreeMap<u64, BTreeMap<i64, Record>>,
@@ -148,6 +217,8 @@ pub(super) struct Journal {
     pub generation: i64,
     pub next: i64,
     failed: bool,
+    durable_through: i64,
+    pending: BTreeMap<String, (Arc<File>, i64)>,
     legacy_through: i64,
     dirty_bytes: u64,
     dirty_since: Option<i64>,
@@ -191,6 +262,8 @@ impl Journal {
             generation,
             next,
             failed: false,
+            durable_through: next - 1,
+            pending: BTreeMap::new(),
             legacy_through,
             dirty_bytes: 0,
             dirty_since: None,
@@ -336,8 +409,11 @@ impl Journal {
             }
             if position != length {
                 file.set_len(position)?;
-                file.sync_all()?;
             }
+            // Recovery can discover complete, unacknowledged frames surviving
+            // a process crash in the page cache. Make them durable before any
+            // subsequent seal or acknowledgement relies on the recovered prefix.
+            file.sync_all()?;
             journal.segments.push(Segment {
                 name: name.clone(),
                 generation: *generation,
@@ -366,6 +442,7 @@ impl Journal {
         }
         journal.reclaim_legacy(directory, cutoff)?;
         File::open(directory)?.sync_all()?;
+        journal.durable_through = journal.next - 1;
         Ok(journal)
     }
 
@@ -482,7 +559,7 @@ impl Journal {
         db: &Mutex<Connection>,
         offset: u64,
         data: &[u8],
-    ) -> io::Result<()> {
+    ) -> io::Result<i64> {
         if self.failed {
             return Err(failure("Journal needs recovery after failed append"));
         }
@@ -543,8 +620,7 @@ impl Journal {
         let position = segment.length;
         let write = (|| {
             segment.file.write_all_at(&header, position)?;
-            segment.file.write_all_at(data, position + HEADER as u64)?;
-            segment.file.sync_data()
+            segment.file.write_all_at(data, position + HEADER as u64)
         })();
         if let Err(error) = write {
             self.failed = true;
@@ -552,6 +628,8 @@ impl Journal {
         }
         segment.length += HEADER as u64 + data.len() as u64;
         self.journal_bytes += HEADER as u64 + data.len() as u64;
+        self.pending
+            .insert(segment.name.clone(), (segment.file.clone(), self.next));
         let record = Record {
             sequence: self.next,
             generation: self.generation,
@@ -565,7 +643,34 @@ impl Journal {
             },
         };
         self.insert(record);
+        let sequence = self.next;
         self.next = next;
+        Ok(sequence)
+    }
+
+    pub fn commit_batch(&self, sequence: i64) -> io::Result<Option<CommitBatch>> {
+        self.check_health()?;
+        if sequence <= self.durable_through {
+            return Ok(None);
+        }
+        if sequence >= self.next || self.pending.is_empty() {
+            return Err(failure("Invalid journal commit sequence"));
+        }
+        Ok(Some(CommitBatch {
+            through: self.next - 1,
+            frames: (self.next - 1 - self.durable_through) as u64,
+            files: self
+                .pending
+                .values()
+                .map(|(file, _)| file.clone())
+                .collect(),
+        }))
+    }
+
+    pub fn committed(&mut self, batch: &CommitBatch) -> io::Result<()> {
+        self.check_health()?;
+        self.durable_through = batch.through;
+        self.pending.retain(|_, (_, last)| *last > batch.through);
         Ok(())
     }
 
@@ -575,6 +680,14 @@ impl Journal {
     }
 
     pub fn sync(&self) -> io::Result<()> {
+        self.check_health()?;
+        if !self.pending.is_empty() {
+            return Err(failure("Journal still has uncommitted writes"));
+        }
+        Ok(())
+    }
+
+    fn check_health(&self) -> io::Result<()> {
         if self.failed {
             return Err(failure("Journal needs recovery after failed append"));
         }

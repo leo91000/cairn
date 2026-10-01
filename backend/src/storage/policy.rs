@@ -88,17 +88,22 @@ impl Policy {
 
 pub fn space(path: &Path) -> std::io::Result<(u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
+    // Sample pending writes before physical/quota usage. A write that finishes
+    // during the query stays conservatively charged in this result. Both cache
+    // fills and new writes use this same headroom calculation under admission.
+    let pending = super::cache::pending_write_bytes();
     let name = std::ffi::CString::new(path.as_os_str().as_bytes())?;
     let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     if unsafe { libc::statvfs(name.as_ptr(), stat.as_mut_ptr()) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
     let stat = unsafe { stat.assume_init() };
-    crate::microvm::budget::disk_space(
+    let (total, free) = crate::microvm::budget::disk_space(
         path,
         stat.f_blocks.saturating_mul(stat.f_frsize),
         stat.f_bavail.saturating_mul(stat.f_frsize),
-    )
+    )?;
+    Ok((total, free.saturating_sub(pending)))
 }
 
 #[cfg(test)]

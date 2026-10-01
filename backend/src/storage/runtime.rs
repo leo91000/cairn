@@ -443,8 +443,10 @@ impl Disk for Volume {
     }
 
     fn write_at(&self, offset: u64, bytes: &[u8]) -> io::Result<()> {
-        // Serialized admission across the node closes the free-space race between
-        // concurrent writers. Space for SQLite WAL/pages is reserved conservatively.
+        let sample = self.disk.start_write_admission();
+        // Serialize space checks and reservations across the node, then release
+        // admission before journal I/O. Pending writes remain conservatively
+        // charged to every writer/cache-fill check until their I/O finishes.
         loop {
             if self.stop.is_cancelled() {
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "Disk stopped"));
@@ -464,10 +466,15 @@ impl Disk for Volume {
                     .parent()
                     .and_then(Path::parent)
                     .ok_or_else(|| io::Error::other("Invalid disk path"))?;
+                let _headroom =
+                    super::cache::reserve_write(&guard, bytes.len() as u64 * 4 + 1024 * 1024)?;
                 crate::microvm::budget::charge_disk(state, bytes.len() as u64 * 4 + 4096)?;
+                drop(guard);
                 let result = self.disk.write_at(offset, bytes);
                 if result.is_err() {
                     self.fault.store(true, Ordering::SeqCst);
+                } else {
+                    sample.finish(bytes.len());
                 }
                 return result;
             }

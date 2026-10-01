@@ -15,6 +15,9 @@ pub(crate) struct Counter {
     over_10ms: AtomicU64,
     over_100ms: AtomicU64,
     over_1s: AtomicU64,
+    in_flight: AtomicU64,
+    max_in_flight: AtomicU64,
+    concurrent_starts: AtomicU64,
 }
 
 pub(crate) struct Sample<'a> {
@@ -26,6 +29,10 @@ pub(crate) struct Sample<'a> {
 
 impl Counter {
     pub(crate) fn start(&self) -> Sample<'_> {
+        let in_flight = self.in_flight.fetch_add(1, Relaxed) + 1;
+        self.max_in_flight.fetch_max(in_flight, Relaxed);
+        self.concurrent_starts
+            .fetch_add(u64::from(in_flight > 1), Relaxed);
         Sample {
             counter: self,
             started: Instant::now(),
@@ -43,7 +50,10 @@ impl Counter {
             "errors": self.errors.load(Relaxed),
             "over10Ms": self.over_10ms.load(Relaxed),
             "over100Ms": self.over_100ms.load(Relaxed),
-            "over1s": self.over_1s.load(Relaxed)
+            "over1s": self.over_1s.load(Relaxed),
+            "inFlight": self.in_flight.load(Relaxed),
+            "maxInFlight": self.max_in_flight.load(Relaxed),
+            "concurrentStarts": self.concurrent_starts.load(Relaxed)
         })
     }
 }
@@ -73,13 +83,18 @@ impl Drop for Sample<'_> {
         counter
             .over_1s
             .fetch_add(u64::from(micros >= 1_000_000), Relaxed);
+        counter.in_flight.fetch_sub(1, Relaxed);
     }
 }
 
 #[derive(Default)]
 pub(super) struct Metrics {
+    pub write_admission: Counter,
     pub reads: Counter,
     pub writes: Counter,
+    pub journal_commits: Counter,
+    pub committed_frames: AtomicU64,
+    pub max_commit_frames: AtomicU64,
     pub syncs: Counter,
     pub remote: Counter,
     pub verification: Counter,
@@ -92,8 +107,12 @@ pub(super) struct Metrics {
 impl Metrics {
     pub fn snapshot(&self) -> Value {
         json!({
+            "writeAdmission": self.write_admission.snapshot(),
             "read": self.reads.snapshot(),
             "write": self.writes.snapshot(),
+            "journalCommit": self.journal_commits.snapshot(),
+            "committedFrames": self.committed_frames.load(Relaxed),
+            "maxCommitFrames": self.max_commit_frames.load(Relaxed),
             "sync": self.syncs.snapshot(),
             "remoteFetch": self.remote.snapshot(),
             "blockVerification": self.verification.snapshot(),
@@ -117,6 +136,25 @@ mod tests {
         let value = counter.snapshot();
         assert_eq!(value["count"], 2);
         assert_eq!(value["bytes"], 4096);
+        assert_eq!(value["errors"], 1);
+    }
+
+    #[test]
+    fn concurrency_counts_overlapping_lifetimes_and_drains_failed_samples() {
+        let counter = Counter::default();
+        let first = counter.start();
+        let second = counter.start();
+        assert_eq!(counter.snapshot()["inFlight"], 2);
+        second.finish(4096);
+        assert_eq!(counter.snapshot()["inFlight"], 1);
+        let third = counter.start();
+        drop(first);
+        third.finish(4096);
+        let value = counter.snapshot();
+        assert_eq!(value["inFlight"], 0);
+        assert_eq!(value["maxInFlight"], 2);
+        assert_eq!(value["concurrentStarts"], 2);
+        assert_eq!(value["count"], 3);
         assert_eq!(value["errors"], 1);
     }
 }

@@ -5,6 +5,7 @@ use rusqlite::OptionalExtension;
 impl LazyDisk {
     /// The caller freezes the guest filesystem and drains guest I/O before sealing.
     pub fn seal(&self) -> io::Result<i64> {
+        let _write = self.write_gate.write().map_err(failure)?;
         let mut journal = self.journal.lock().map_err(failure)?;
         journal.sync()?;
         let mut db = self.db.lock().map_err(failure)?;
