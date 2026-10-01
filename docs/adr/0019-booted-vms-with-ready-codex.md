@@ -472,6 +472,16 @@ Les contrôles d'outage, pression, réouverture, restauration et récupération 
 passent. L'émulateur Intel API 34 AOSP démarre puis reprend dans deux VM réelles.
 Ces validations ne sont pas présentées comme des mesures WAN de sauvegarde.
 
+Après suppression de la rotation périodique (`dec12b8`), une VM anonyme garde
+le même PID et reste prête sur 67 échantillons pendant 70,77 s. La charge avec
+pool actif dure ensuite 303,99 s : 47 publications, 25 017 écritures durables,
+p99 26,70 ms, maximum 235,56 ms et zéro redémarrage intempestif. Les contrôles
+de crash, restauration, outage et pression passent. Le probe de ballon est
+isolé dans un seul slot physique afin que le compteur cgroup partagé n'inclue
+pas une nouvelle VM anonyme : 521 441 280 octets récupérés, avec les assertions
+inchangées. Les résultats bruts sont des assets de la release regroupée ; la
+dernière image de release reste à qualifier avant le tag.
+
 ### Surcoût disque pendant l'exécution
 
 Le vrai dépôt Leo Agent Manager (846 fichiers suivis) est exécuté dans quatre
