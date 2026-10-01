@@ -91,6 +91,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import net from 'node:net';
 import { execFileSync } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
 const root=${JSON.stringify(runRoot)};
 const mode=process.argv[2];
 if(mode!=='first'){const disk=fs.statfsSync(root+'/workspace');assert.ok(disk.blocks*disk.bsize>32*1024**3,'grown workspace exceeds the old jailer file limit');}
@@ -100,6 +101,22 @@ if(mode==='first')execFileSync('cc',['-Wall','-Wextra','-Werror','-O2',root+'/wo
 if(mode==='first'||mode==='resume')assert.match(execFileSync(root+'/workspace/nested-kvm',[],{encoding:'utf8',timeout:15000}),/KVM_RUN, rax=42, HLT/);
 assert.match(execFileSync('uname',['-r'],{encoding:'utf8'}),/^6\\.12\\.109/);
 assert.equal(fs.existsSync('/sys/bus/serio/devices/serio0'),false,'guest has no emulated PS/2 keyboard');
+if(mode==='first'){
+  const templates='/opt/leo-codex-state';
+  const manifest=JSON.parse(fs.readFileSync(templates+'/manifest.json','utf8'));
+  assert.equal(manifest.version,1);
+  assert.ok(manifest.files.some(name=>/^state_\\d+\\.sqlite$/.test(name)));
+  for(const name of manifest.files){
+    const db=new DatabaseSync(templates+'/'+name,{readOnly:true});
+    assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check,'ok');
+    for(const {name:table} of db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all()){
+      if(table==='_sqlx_migrations')continue;
+      assert.match(table,/^\\w+$/);
+      assert.equal(db.prepare('SELECT count(*) AS count FROM '+table).get().count,0,'template has no runtime rows');
+    }
+    db.close();
+  }
+}
 for(const path of ['/data/private-manager-canary','/data/runner-secret','/var/run/docker.sock'])assert.equal(fs.existsSync(path),false,path);
 assert.equal(process.env.RUNNER_TOKEN,undefined);
 if(mode==='first') {

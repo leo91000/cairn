@@ -415,6 +415,23 @@ async fn receive_frames(
 
 /// Marks the disk initialized, saves the plan and applies its filesystem policy.
 async fn prepare_run(plan: &Plan) -> Result<()> {
+    if plan.as_value()["chat"].is_object()
+        && plan.chat_provider() == crate::provider::Provider::Codex
+    {
+        let timing = Operation::new("codex_state_seed", plan.run_id(), "install");
+        let count = tokio::task::spawn_blocking(|| {
+            super::codex_state::install(
+                Path::new("/home/node/.codex"),
+                Path::new("/opt/leo-codex-state"),
+                AGENT_ID,
+                AGENT_ID,
+            )
+        })
+        .await
+        .map_err(|_| Error::unavailable("Codex schema preparation failed."))??;
+        tracing::info!(target: "leo_performance", operation = "codex_state_seed", id = plan.run_id(), databases = count);
+        timing.finish();
+    }
     tokio::fs::create_dir_all("/var/lib/leo").await?;
     atomic_write(Path::new(INITIALIZED), b"1").await?;
     atomic_write(Path::new(PLAN_FILE), &serde_json::to_vec(plan.as_value())?).await?;
@@ -510,14 +527,49 @@ async fn stream_agent(
     while let Some(event) = events.recv().await {
         wire::write(write, &event).await?;
     }
+    let mut timing = Operation::new("guest_finalize", plan.run_id(), "wait_agent");
     let code = child.wait().await?.code().unwrap_or(1);
+    timing.next("read_result");
     let result = read_result(plan).await?;
-    Command::new("sync").status().await?;
+    timing.next("codex_state_metadata");
+    let usage =
+        tokio::task::spawn_blocking(|| super::codex_state::usage(Path::new("/home/node/.codex")))
+            .await
+            .unwrap_or_default();
+    tracing::info!(
+        target: "leo_performance",
+        operation = "codex_state_usage",
+        id = plan.run_id(),
+        state_bytes = usage.state,
+        logs_bytes = usage.logs,
+        history_bytes = usage.history,
+        other_bytes = usage.other,
+        complete = usage.complete,
+    );
+    timing.next("sync_disk");
+    sync_disk("/usr/bin/sync").await?;
+    timing.next("send_exit");
     let exit = Event::Exit {
         code: Some(code.into()),
         result,
     };
-    wire::write(write, &exit).await
+    wire::write(write, &exit).await?;
+    timing.finish();
+    Ok(())
+}
+
+/// Flush the filesystem holding every persistent overlay. Unlike global sync(),
+/// syncfs() reports writeback errors and does not flush unrelated guest mounts.
+async fn sync_disk(program: &str) -> Result<()> {
+    if !Command::new(program)
+        .args(["--file-system", DATA_MOUNT])
+        .status()
+        .await?
+        .success()
+    {
+        return Err(Error::unavailable("Guest disk synchronization failed."));
+    }
+    Ok(())
 }
 
 /// The chat result file written by the agent, if this run is a chat.
@@ -540,6 +592,12 @@ async fn read_result(plan: &Plan) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_disk_flush_is_propagated() {
+        assert!(sync_disk("false").await.is_err());
+        assert!(sync_disk("true").await.is_ok());
+    }
 
     #[tokio::test]
     async fn measured_import_streams_preserve_bytes_and_reject_missing_end_markers() {

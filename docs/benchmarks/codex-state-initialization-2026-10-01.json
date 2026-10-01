@@ -1,0 +1,172 @@
+{
+  "image": "ghcr.io/leo91000/leo-agent-manager@sha256:f042bff317f23663141e8244630358b7622ef15c3ba9747cb02f4ccbbf97fc54",
+  "scope": "Real disposable Firecracker/FUSE, new 32GiB disk, Codex 0.159.3, native turn through local synthetic Responses server. No account or model network. Seed generation runs on tmpfs at runtime in this prototype and is included in totalMs; production change moves it into the image build. Each run performs explicit global sync before the unchanged guest final sync. Not production measurements. Initial four-sample comparison used the guest bridge default cwd /; it does not reproduce managed production instructions/MCP or their larger writes.",
+  "samples": [
+    {
+      "mode": "seeded",
+      "exitCode": 0,
+      "totalMs": 3301.839051,
+      "measures": {
+        "initialized": {
+          "elapsedMs": 384.9068040000001
+        },
+        "opened": {
+          "elapsedMs": 405.69914200000005
+        },
+        "completed": {
+          "elapsedMs": 689.0262260000001
+        },
+        "synced": {
+          "elapsedMs": 203.56025999999997,
+          "totalMs": 928.8523739999999
+        }
+      },
+      "write": {
+        "bytes": 3624960,
+        "count": 719,
+        "errors": 0,
+        "maxMicros": 2673,
+        "over100Ms": 0,
+        "over10Ms": 0,
+        "over1s": 0,
+        "totalMicros": 1065576
+      },
+      "sync": {
+        "bytes": 0,
+        "count": 63,
+        "errors": 0,
+        "maxMicros": 1638,
+        "over100Ms": 0,
+        "over10Ms": 0,
+        "over1s": 0,
+        "totalMicros": 4157
+      }
+    },
+    {
+      "mode": "baseline",
+      "exitCode": 0,
+      "totalMs": 4141.728109,
+      "measures": {
+        "initialized": {
+          "elapsedMs": 824.761249
+        },
+        "opened": {
+          "elapsedMs": 845.916145
+        },
+        "completed": {
+          "elapsedMs": 1226.9107519999998
+        },
+        "synced": {
+          "elapsedMs": 287.8406530000002,
+          "totalMs": 2467.1001069999998
+        }
+      },
+      "write": {
+        "bytes": 6434816,
+        "count": 1252,
+        "errors": 0,
+        "maxMicros": 10480,
+        "over100Ms": 0,
+        "over10Ms": 1,
+        "over1s": 0,
+        "totalMicros": 1918081
+      },
+      "sync": {
+        "bytes": 0,
+        "count": 118,
+        "errors": 0,
+        "maxMicros": 1437,
+        "over100Ms": 0,
+        "over10Ms": 0,
+        "over1s": 0,
+        "totalMicros": 7604
+      }
+    },
+    {
+      "mode": "seeded",
+      "exitCode": 0,
+      "totalMs": 3228.1343860000015,
+      "measures": {
+        "initialized": {
+          "elapsedMs": 369.74375599999996
+        },
+        "opened": {
+          "elapsedMs": 385.9664369999999
+        },
+        "completed": {
+          "elapsedMs": 704.778038
+        },
+        "synced": {
+          "elapsedMs": 171.54231499999992,
+          "totalMs": 963.8693400000001
+        }
+      },
+      "write": {
+        "bytes": 3661824,
+        "count": 714,
+        "errors": 0,
+        "maxMicros": 21404,
+        "over100Ms": 0,
+        "over10Ms": 1,
+        "over1s": 0,
+        "totalMicros": 1108810
+      },
+      "sync": {
+        "bytes": 0,
+        "count": 67,
+        "errors": 0,
+        "maxMicros": 1316,
+        "over100Ms": 0,
+        "over10Ms": 0,
+        "over1s": 0,
+        "totalMicros": 2719
+      }
+    },
+    {
+      "mode": "baseline",
+      "exitCode": 0,
+      "totalMs": 4115.305222000001,
+      "measures": {
+        "initialized": {
+          "elapsedMs": 770.663063
+        },
+        "opened": {
+          "elapsedMs": 791.033967
+        },
+        "completed": {
+          "elapsedMs": 1184.40734
+        },
+        "synced": {
+          "elapsedMs": 1017.1933450000001,
+          "totalMs": 2369.7088639999997
+        }
+      },
+      "write": {
+        "bytes": 6352896,
+        "count": 1226,
+        "errors": 0,
+        "maxMicros": 7991,
+        "over100Ms": 0,
+        "over10Ms": 0,
+        "over1s": 0,
+        "totalMicros": 1894756
+      },
+      "sync": {
+        "bytes": 0,
+        "count": 116,
+        "errors": 0,
+        "maxMicros": 1579,
+        "over100Ms": 0,
+        "over10Ms": 0,
+        "over1s": 0,
+        "totalMicros": 13577
+      }
+    }
+  ],
+  "readonlyTemplateAndReopen": {
+    "templateBuilderNetworking": "disabled",
+    "readonlyDockerReadback": "five databases, journal_mode=delete, integrity_check=ok",
+    "nativeReopen": "A separately booted VM resumed the synthetic thread and returned its previous FIXTURE_NATIVE_OK reply. Real Codex/local synthetic Responses; no account.",
+    "fixtureCompleted": true
+  }
+}

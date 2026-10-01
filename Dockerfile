@@ -58,6 +58,8 @@ RUN arch="${TARGETARCH:-amd64}" \
 # Claude's pinned postinstall places the native executable; pnpm otherwise skips it.
 RUN pnpm add --global --allow-build @anthropic-ai/claude-code "@openai/codex@${CODEX_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
     && claude --version
+COPY deploy/codex-state/prepare.mjs /opt/leo-codex-state-builder.mjs
+RUN --network=none node /opt/leo-codex-state-builder.mjs /opt/leo-codex-state
 COPY deploy/toolkit /opt/leo-toolkit
 RUN chmod +x /opt/leo-toolkit/android.mjs && ln -s /opt/leo-toolkit/android.mjs /usr/local/bin/leo-android
 RUN --mount=type=secret,id=github_token,env=GITHUB_TOKEN /usr/local/bin/node /opt/leo-toolkit/manage.mjs install

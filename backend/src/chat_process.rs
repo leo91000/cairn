@@ -763,6 +763,6 @@ pub async fn run(
         questions: HashMap::new(),
     };
     let result = chat.execute(&plan).await;
-    chat.session.close().await;
+    crate::performance::wait("codex_shutdown", chat.session.close()).await;
     result
 }
