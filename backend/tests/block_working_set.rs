@@ -100,9 +100,12 @@ fn repeated_publications_keep_hot_bytes_and_later_writes_without_admitting_cold_
         assert_eq!(&bytes[3072..], &[value; 1024]);
     }
     assert_eq!(disk.performance()["remoteFetch"]["count"], 0);
+    // Optional published disk bytes may survive; evict them to isolate the RAM
+    // admission guarantee exercised by this test.
+    std::fs::remove_dir_all(root.path().join("cache")).unwrap();
     assert!(
         disk.read_at(BLOCK, &mut bytes).is_err(),
-        "The never-read cold block must remain unretained"
+        "The never-read cold block must remain absent from the RAM cache"
     );
 }
 
@@ -131,6 +134,7 @@ fn publication_after_a_smaller_cache_policy_retains_the_most_recent_extent() {
     disk.capture(generation).unwrap();
     disk.commit_published(generation, "smaller-budget").unwrap();
     assert_eq!(disk.performance()["blockCache"]["bytes"], BLOCK);
+    std::fs::remove_dir_all(root.path().join("cache")).unwrap();
     let mut bytes = [0; 4096];
     disk.read_at(0, &mut bytes).unwrap();
     assert_eq!(bytes, [1; 4096]);

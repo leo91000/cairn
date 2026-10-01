@@ -377,57 +377,66 @@ impl LazyDisk {
         fetch.finish(bytes.len());
         // Cache persistence is optional: it never determines whether an acknowledged
         // write survives. Refusing a cache fill must not turn a valid read into EIO.
-        let _ = (|| -> io::Result<()> {
-            use std::io::Write;
-            let _cache = self.cache.lock().map_err(failure)?;
-            let node_reservation = if let Some(state) = self.node_state() {
-                let policy = std::fs::read(state.join("storage-policy.json"))
-                    .ok()
-                    .and_then(|bytes| serde_json::from_slice::<super::policy::Policy>(&bytes).ok())
-                    .unwrap_or_default();
-                let Some(reservation) = super::cache::reserve(state, &policy, bytes.len() as u64)?
-                else {
-                    return Ok(());
-                };
-                Some(reservation)
-            } else {
-                None
-            };
-            std::fs::create_dir_all(&directory)?;
-            // Standalone disks retain a small fallback cache; controller volumes
-            // share the node budget and can use its available working set.
-            if node_reservation.is_none() {
-                let mut entries = std::fs::read_dir(&directory)?
-                    .filter_map(Result::ok)
-                    .filter_map(|entry| {
-                        entry.metadata().ok().map(|m| {
-                            (
-                                entry.path(),
-                                m.len(),
-                                m.modified().unwrap_or(std::time::UNIX_EPOCH),
-                            )
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                entries.sort_by_key(|entry| entry.2);
-                let mut used = entries.iter().map(|entry| entry.1).sum::<u64>();
-                for (path, size, _) in entries {
-                    if used.saturating_add(bytes.len() as u64) <= 32 * 1024 * 1024 {
-                        break;
-                    }
-                    std::fs::remove_file(path)?;
-                    used = used.saturating_sub(size);
-                }
-            }
-            let mut file = tempfile::NamedTempFile::new_in(&directory)?;
-            file.write_all(&bytes)?;
-            file.persist_noclobber(&target).map_err(failure)?;
-            if let Some(reservation) = &node_reservation {
-                reservation.filled(&target, bytes.len() as u64)?;
-            }
-            Ok(())
-        })();
+        let _ = self.cache_block(hash, &bytes);
         self.remember_block(hash, bytes, foreground)
+    }
+
+    /// Optional immutable bytes, bounded by the same node quota for downloads
+    /// and locally reconstructed publications. Reopened entries are verified.
+    fn cache_block(&self, hash: &str, bytes: &[u8]) -> io::Result<()> {
+        use std::io::Write;
+        let directory = self.directory.join("cache");
+        let target = directory.join(hash);
+        let _cache = self.cache.lock().map_err(failure)?;
+        if target.exists() {
+            return Ok(());
+        }
+        let node_reservation = if let Some(state) = self.node_state() {
+            let policy = std::fs::read(state.join("storage-policy.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<super::policy::Policy>(&bytes).ok())
+                .unwrap_or_default();
+            let Some(reservation) = super::cache::reserve(state, &policy, bytes.len() as u64)?
+            else {
+                return Ok(());
+            };
+            Some(reservation)
+        } else {
+            None
+        };
+        std::fs::create_dir_all(&directory)?;
+        // Standalone disks retain a small fallback cache; controller volumes
+        // share the node budget and can use its available working set.
+        if node_reservation.is_none() {
+            let mut entries = std::fs::read_dir(&directory)?
+                .filter_map(Result::ok)
+                .filter_map(|entry| {
+                    entry.metadata().ok().map(|m| {
+                        (
+                            entry.path(),
+                            m.len(),
+                            m.modified().unwrap_or(std::time::UNIX_EPOCH),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            entries.sort_by_key(|entry| entry.2);
+            let mut used = entries.iter().map(|entry| entry.1).sum::<u64>();
+            for (path, size, _) in entries {
+                if used.saturating_add(bytes.len() as u64) <= 32 * 1024 * 1024 {
+                    break;
+                }
+                std::fs::remove_file(path)?;
+                used = used.saturating_sub(size);
+            }
+        }
+        let mut file = tempfile::NamedTempFile::new_in(&directory)?;
+        file.write_all(bytes)?;
+        file.persist_noclobber(&target).map_err(failure)?;
+        if let Some(reservation) = &node_reservation {
+            reservation.filled(&target, bytes.len() as u64)?;
+        }
+        Ok(())
     }
 }
 

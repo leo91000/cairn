@@ -16,6 +16,89 @@ struct Source {
 }
 
 #[test]
+fn published_writes_resume_from_bounded_disk_cache_after_controller_restart() {
+    struct Missing;
+    impl BlockSource for Missing {
+        fn fetch(&self, _: &str) -> io::Result<Vec<u8>> {
+            Err(io::Error::other("Remote storage is unavailable"))
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("disks/conversation/lazy");
+    let policy = super::super::policy::Policy {
+        reserve_mi_b: 64,
+        ..Default::default()
+    };
+    std::fs::write(
+        root.path().join("storage-policy.json"),
+        serde_json::to_vec(&policy).unwrap(),
+    )
+    .unwrap();
+    let source = Arc::new(Missing);
+    let disk = LazyDisk::create(
+        &directory,
+        &single_block(BLOCK, BLOCK, &Value::Null),
+        source.clone(),
+    )
+    .unwrap();
+    // Newly created Codex databases were written, but never read during this turn.
+    disk.write_at(17, b"new conversation state").unwrap();
+    let generation = disk.seal().unwrap();
+    let manifest = disk.capture(generation).unwrap();
+    let hash = manifest["blocks"][0]["hash"].as_str().unwrap();
+    assert_eq!(disk.performance()["blockCache"]["bytes"], 0);
+    disk.commit_published(generation, "published").unwrap();
+    drop(disk);
+    let disk = LazyDisk::open(&directory, source).unwrap();
+    let mut bytes = [0; 22];
+    disk.read_at(17, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"new conversation state");
+    assert!(directory.join("cache").join(hash).exists());
+    assert_eq!(disk.performance()["remoteFetch"]["count"], 0);
+    assert_eq!(disk.performance()["diskHits"], 1);
+}
+
+#[test]
+fn publication_cache_failure_or_zero_budget_never_prevents_publication() {
+    for zero_budget in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("environments/owned/lazy");
+        let policy = super::super::policy::Policy {
+            cache_mi_b: if zero_budget { 0 } else { 4 },
+            reserve_mi_b: 64,
+            ..Default::default()
+        };
+        std::fs::write(
+            root.path().join("storage-policy.json"),
+            serde_json::to_vec(&policy).unwrap(),
+        )
+        .unwrap();
+        let source = Arc::new(Source {
+            reads: AtomicUsize::new(0),
+        });
+        let disk = LazyDisk::create(
+            &directory,
+            &single_block(BLOCK, BLOCK, &Value::Null),
+            source.clone(),
+        )
+        .unwrap();
+        if !zero_budget {
+            std::fs::write(directory.join("cache"), b"cache unavailable").unwrap();
+        }
+        disk.write_at(0, &vec![7; BLOCK as usize]).unwrap();
+        let generation = disk.seal().unwrap();
+        disk.capture(generation).unwrap();
+        disk.commit_published(generation, "published").unwrap();
+        drop(disk);
+        let disk = LazyDisk::open(&directory, source.clone()).unwrap();
+        let mut bytes = [0; 8];
+        disk.read_at(0, &mut bytes).unwrap();
+        assert_eq!(bytes, [7; 8]);
+        assert_eq!(source.reads.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
 fn old_sha256_segment_and_new_blake3_frames_can_share_a_journal() {
     let root = tempfile::tempdir().unwrap();
     let source = Arc::new(Source {

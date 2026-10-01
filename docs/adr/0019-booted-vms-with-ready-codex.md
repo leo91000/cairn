@@ -224,7 +224,9 @@ une commande réellement exécutée par Codex. Même image et cache d'image,
 Le gain médian observé est de 40 %. La série conserve son essai lent à 4,525 s :
 l'attribution et les imports y prennent 127 ms, le reste se situe dans le
 parcours natif avant le modèle. Ce contrôle local n'inclut ni le manager,
-ni les MCP métier, ni une authentification réelle, ni S3/WAN. Il ne remplace pas
+ni les MCP métier, ni une authentification réelle, ni S3. Des appels de catalogue
+OpenAI rejetés restent possibles avec l'auth synthétique ; ce banc n'isole donc
+pas complètement le WAN. Il ne remplace pas
 la référence de production de 8,75–10,05 s et ne permet pas d'annoncer un nouveau
 temps en production. Les tests natifs vérifient aussi les skills ajoutés après
 préchauffage, les leases de compte par tour et le contexte entre tours.
@@ -311,10 +313,68 @@ La reprise reste sur le même nœud, grâce à l'affinité du checkpoint déjà 
 Elle lit néanmoins 37,75 Mo depuis l'origine, en neuf requêtes de blocs. La
 capture conserve en mémoire des blocs récemment lus ; cette mémoire n'est pas
 un cache inter-processus durable. Le journal publié est récupéré puis supprimé.
+Le contrôleur conserve déjà le cache RAM entre deux VM, mais les fichiers écrits
+et jamais lus lors du premier tour ne font pas partie de ce working set.
 La prochaine piste est donc la rétention bornée de la VM du même propriétaire,
 ou un cache disque borné des versions publiées récemment utilisées, plutôt que
 rajouter une affinité qui existe déjà. Un cache reste évictable et ne remplace
 jamais une publication distante vérifiée.
+
+### Comparatif authentifié du candidat en production
+
+Image `83c6ff6a1cce`, source `64dea73`, même runner et compte, sans projet,
+modèle `gpt-6.1-sol` à raisonnement faible. Un couple neuf/reprise par variante :
+ces échantillons diagnostiquent les phases, ils ne constituent pas des percentiles.
+L'envoi UI est horodaté depuis le navigateur à l'appel de l'API ; aucun délai de
+clic ou de paint DOM n'est mesuré. Les horloges invitées sont synchronisées.
+
+| Phase | Neuf sans pool | Neuf avec pool | Reprise sans pool | Reprise avec pool |
+| --- | ---: | ---: | ---: | ---: |
+| Préparation disque + boot, côté runner | 4,239 s | 0,027 s | 2,699 s | 3,889 s |
+| Préparation invitée | 653 ms | 355 ms | 414 ms | 550 ms |
+| Toolkit invité | 565 ms | 610 ms | 495 ms | 761 ms |
+| Initialisation Codex | 913 ms | déjà prête | 6 297 ms | 2 354 ms |
+| Acquisition tokens broker | 10 ms | 1 ms | 3 ms | 2 ms |
+| Login natif | 60 ms | 52 ms | 53 ms | 52 ms |
+| Création/reprise thread | 464 ms | 452 ms | 632 ms | 2 229 ms |
+| API UI → notification tour commencé | 7,863 s | 3,059 s | 13,474 s | 14,786 s |
+| API UI → premier envoi WebSocket | 9,053 s | 3,790 s | 13,705 s | 15,801 s |
+| API UI → second envoi WebSocket | 10,350 s | 4,934 s | 14,941 s | 16,856 s |
+| API UI → réponse attendue | 15,397 s | 7,582 s | 17,901 s | 21,460 s |
+
+Le premier envoi est le préchauffage `generate=false`, le second l'inférence
+selon le [chemin natif épinglé](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/core/src/client.rs).
+Cette classification est déduite de ces tours réussis sans outils et des deux
+événements natifs ; l'exporter ne fournit pas de champ warmup. Les timestamps
+proviennent du timer d'envoi natif, pas de l'arrivée des lots OTLP. La génération
+part donc environ 5,42 s plus tôt dans cette paire neuve. Aucun gain du pool sur
+les reprises n'est établi. Les durées de réponse incluent le fournisseur.
+
+Le manager prépare workspace et runner en 103 + 56 ms sur le neuf sans pool.
+Les handlers MCP workspace observés prennent 0–18 ms, le catalogue natif modèles
+333 ms. Ces phases peuvent se recouvrir ; on ne les additionne pas aux RPC.
+Il n'y a pas de preuve de six secondes imputables au manager ou au broker.
+La migration de déploiement effaçait le réglage du pool : ce défaut est corrigé
+et testé pour les environnements Compose sous forme de mapping et de liste.
+Le premier échantillon supposé froid a été reclassé avec pool et exclu de la
+colonne sans pool ; le réglage effectif a ensuite été vérifié dans le runner.
+
+Le poste restant prioritaire est la reprise : 40 Mio/10 requêtes S3 et 6,80 s
+de fetch cumulés sans pool ; 32 Mio/8 requêtes et 4,59 s avec pool. Le cache RAM
+reste à 256 Mio, sans éviction, mais manque ces versions nouvellement publiées.
+Le candidat conserve désormais aussi les blocs reconstruits dans le cache disque
+immutable existant, soumis au quota et à la réserve du nœud. Il ne promeut pas
+les scans dans le cache RAM. Un cache plein ou indisponible n'empêche pas une
+sauvegarde ; la reprise vérifie les hashes et peut toujours retélécharger.
+La validation de ce changement en production reste à faire avant release.
+
+Pour les reprises, conserver ensuite une VM exclusivement pour son propriétaire
+pendant deux minutes, avec éviction LRU, priorité aux runs actifs et aux limites
+de mémoire, semble le prochain levier. Le slot reste occupé jusqu'au teardown.
+La sauvegarde reste active ; logout et renouvellement des accès sont obligatoires
+à chaque tour. Un changement de runtime, compte, droits ou configuration invalide
+la VM. Après éviction, conserver l'affinité checkpoint déjà présente et ce cache
+disque borné. Cette rétention de VM n'est pas implémentée dans la PR actuelle.
 
 ### Surcoût disque pendant l'exécution
 

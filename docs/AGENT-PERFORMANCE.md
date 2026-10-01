@@ -86,9 +86,15 @@ event's timestamp (`observedTimeUnixNano` when `timeUnixNano` is zero), and
 This is the native request timer, not a packet capture or collector arrival.
 Abrupt native termination can discard its final unexported batch; shutdown never
 waits for telemetry. A missing transport record is not evidence of no request.
-For the first model request, select `endpoint=responses` and the corresponding
-thread; do not substitute `turn_started` or the first exported batch. A real
-native fixture checks that this interval brackets the local model HTTP receipt.
+For HTTP model requests, select `endpoint=responses` and the corresponding
+thread. Codex 0.159.3 WebSocket send events have no endpoint and also include
+its `generate=false` warmup: the first `websocket_request` is not necessarily
+an inference request. A successful one-turn, no-tool production probe emitted
+two sends (warmup then generation); their classification uses the pinned native
+control flow and is an inference, not an explicit phase field in the exporter.
+Do not apply that ordering to arbitrary retries or tool loops. Do not substitute
+`turn_started` or the first exported batch. A real native HTTP fixture checks
+that the interval brackets the local model receipt.
 
 Open-item/question tracking is bounded to 128 entries each and 256 bytes per ID.
 `skipped_items` makes saturation visible. New turns clear unfinished previous
