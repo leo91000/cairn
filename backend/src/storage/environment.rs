@@ -86,9 +86,10 @@ pub struct Lease {
     _physical: Guard,
 }
 
+#[derive(Clone)]
 pub struct OwnerLease {
     pub directory: PathBuf,
-    _logical: Guard,
+    _logical: std::sync::Arc<Guard>,
 }
 
 /// Bootstrap and VMM boot acquire their own physical lock. Keep this lease
@@ -104,7 +105,7 @@ pub async fn ownership(state: &Path, run: &str, busy: &str) -> Result<OwnerLease
     let physical = directory(state, run)?;
     Ok(OwnerLease {
         directory: physical,
-        _logical: logical_lock,
+        _logical: std::sync::Arc::new(logical_lock),
     })
 }
 
@@ -172,7 +173,7 @@ pub async fn assign(state: &Path, environment: &str, run: &str) -> Result<OwnerL
     persist(&physical.join(OWNER), run).await?;
     Ok(OwnerLease {
         directory: physical,
-        _logical: lock,
+        _logical: std::sync::Arc::new(lock),
     })
 }
 
@@ -296,9 +297,15 @@ mod tests {
         );
         assert!(lock(state.path(), &run, "busy").await.is_err());
         assert!(file_lock::exclusive(&physical.join("lock"), "busy").is_err());
+        let pending_write = logical_lock.clone();
         drop(logical_lock);
         assert!(lock(state.path(), &run, "busy").await.is_err());
         drop(physical_lock);
+        assert!(
+            lock(state.path(), &run, "busy").await.is_err(),
+            "pending authorization retains the owner after VMM retirement"
+        );
+        drop(pending_write);
         let lease = lock(state.path(), &run, "busy").await.unwrap();
         assert_eq!(lease.directory, physical);
         drop(lease);

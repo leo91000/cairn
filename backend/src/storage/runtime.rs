@@ -300,8 +300,11 @@ impl Volume {
         }
         let policy: Policy = serde_json::from_value(context["policy"].clone())?;
         policy.validate()?;
-        let (volume, context) = (self.clone(), context.clone());
+        let (volume, owner, context) = (self.clone(), owner.clone(), context.clone());
         blocking(move || {
+            // A dropped async caller must not unlock the conversation while
+            // its blocking authorization fsync can still change this journal.
+            let _owner = owner;
             volume.source.assign(&context, || {
                 volume.disk.set_context(&context)?;
                 volume.disk.sync()?;
