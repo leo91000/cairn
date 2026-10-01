@@ -269,6 +269,39 @@ async fn stopping_resident_initialization_reaps_unresponsive_native_process() {
     assert!(!socket.exists());
 }
 
+#[tokio::test]
+async fn failed_readiness_notification_reaps_initialized_native_process() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    std::fs::create_dir_all(&config.home).unwrap();
+    std::fs::write(home.join("fixture-lifecycle.jsonl"), "").unwrap();
+    let socket = root.path().join("resident/codex.sock");
+    let result = chat_process::resident::serve_with_ready(
+        &config,
+        &home,
+        &socket,
+        CancellationToken::new(),
+        || {
+            Err(leo_agent_manager::error::Error::unavailable(
+                "Owner pipe closed.",
+            ))
+        },
+    )
+    .await;
+    assert_eq!(result.unwrap_err().message, "Owner pipe closed.");
+    let log = lifecycle(&home);
+    assert_eq!(
+        log.iter()
+            .filter(|entry| entry["method"] == "initialize")
+            .count(),
+        1
+    );
+    let pid = log[0]["pid"].as_i64().unwrap() as i32;
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+    assert!(!socket.exists());
+}
+
 /// The conversation the Codex fixture persisted in `home`.
 fn conversation(home: &Path) -> Value {
     serde_json::from_slice(&std::fs::read(home.join("fixture-conversation.json")).unwrap()).unwrap()

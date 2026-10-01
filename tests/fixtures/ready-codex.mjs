@@ -20,8 +20,10 @@ import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
 
 async function main() {
-  const [leo, codex] = process.argv.slice(2)
-  assert.ok(leo && codex, 'Provide the Rust adapter and real native Codex executable')
+  const [adapter, native] = process.argv.slice(2)
+  assert.ok(adapter && native, 'Provide the Rust adapter and real native Codex executable')
+  const leo = path.resolve(adapter)
+  const codex = path.resolve(native)
   const root = await mkdtemp(path.join(os.tmpdir(), 'leo-ready-codex-'))
   const home = path.join(root, 'home')
   const nativeHome = path.join(home, '.codex')
@@ -122,7 +124,10 @@ async function main() {
     child.stdout.on('data', data => stdout += data)
     child.stderr.on('data', data => stderr += data)
     const done = new Promise((resolve, reject) => {
-      child.once('error', reject)
+      child.once('error', (error) => {
+        live.delete(child)
+        reject(error)
+      })
       child.once('exit', (code) => {
         live.delete(child)
         resolve(code)
@@ -197,7 +202,18 @@ async function main() {
         reasoning: 'low',
         sandbox: 'yolo',
         writableRoots: [workspace],
-        codexConfig: { mcp_servers: mcp },
+        codexConfig: {
+          model_provider: 'fixture',
+          model_providers: {
+            fixture: {
+              name: 'Fixture',
+              base_url: endpoint,
+              wire_api: 'responses',
+              requires_openai_auth: false,
+            },
+          },
+          mcp_servers: mcp,
+        },
         args: resident || !bearer ? [] : ['-c', `mcp_servers.fixture={url="${endpoint}/mcp",http_headers={Authorization="${bearer}"}}`],
         ...(resume ? { sessionId: thread } : {}),
       }
@@ -243,14 +259,21 @@ async function main() {
     }
 
     await turn('cold', 'Bearer alpha', false, false)
+    // The real guest warms before importing a conversation. Thread overrides
+    // must therefore work without a provider or account in startup config.
+    await rm(path.join(nativeHome, 'config.toml'))
+    await writeFile(path.join(nativeHome, 'config.toml'), 'cli_auth_credentials_store = "file"\n')
     const started = performance.now()
     service = launch(['codex-service', socket], environment)
     service.child.stdin.end()
-    while (!await ready()) {
+    while (!service.stdout().includes('\n')) {
       assert.ok(live.has(service.child), service.stderr().slice(-3000))
       assert.ok(performance.now() - started < 30000, 'Native initialization deadline')
       await setTimeout(10)
     }
+
+    assert.equal(service.stdout(), '{"ready":true}\n', 'Native readiness has an explicit bounded frame')
+    assert.equal(await ready(), true, 'Only initialized native accepts socket leases')
 
     const initializeMs = performance.now() - started
     const children = (await readFile(`/proc/${service.child.pid}/task/${service.child.pid}/children`, 'utf8')).trim().split(/\s+/).filter(Boolean)
@@ -265,7 +288,7 @@ async function main() {
     await assert.rejects(access(`/proc/${nativePid}`), { code: 'ENOENT' })
     process.stdout.write(`${JSON.stringify({
       kind: 'real-rust-ready-codex-adapter',
-      scope: 'Local real native, synthetic model/MCP, no real account, no VM/manager/S3. Ready admission excludes prewarm.',
+      scope: 'Local real native, synthetic model/MCP, no real account, no VM/manager/S3. Resident starts without provider/account config and loads per-thread overrides. Ready admission excludes prewarm.',
       initializeMs,
       samples,
       mcpLeasesRenewed: true,

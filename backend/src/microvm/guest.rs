@@ -1,4 +1,6 @@
 //! Guest-only bridge. All filesystem operations here run inside the microVM.
+mod codex;
+
 use super::{
     plan::{CHAT_INBOX, Plan},
     protocol::{ArchiveFrame, Encoding, Event, GuestRequest, GuestStatus, Reply},
@@ -47,13 +49,15 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     std::os::unix::fs::chown(AUTH_SOCKET, Some(AGENT_ID), Some(AGENT_ID))?;
     tokio::spawn(relay_auth(auth, stop.clone()));
     let running = Arc::new(Mutex::new(()));
-    super::listener::serve(
+    let codex = Arc::new(codex::Codex::default());
+    let result = super::listener::serve(
         || listener.accept(),
         |(stream, _)| {
             let running = running.clone();
             let stopping = stop.clone();
+            let codex = codex.clone();
             async move {
-                if let Err(error) = handle(stream, running, stopping).await {
+                if let Err(error) = handle(stream, running, codex, stopping).await {
                     tracing::warn!(message = %error.message, "Guest operation failed");
                 }
             }
@@ -61,8 +65,9 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         32,
         stop.clone(),
     )
-    .await?;
-    Ok(())
+    .await;
+    codex.close().await;
+    result.map_err(Error::from)
 }
 
 /// Forwards agent authentication requests to the host relay.
@@ -89,6 +94,7 @@ async fn relay_auth(auth: UnixListener, stop: CancellationToken) {
 async fn handle(
     stream: VsockStream,
     running: Arc<Mutex<()>>,
+    codex: Arc<codex::Codex>,
     stop: CancellationToken,
 ) -> Result<()> {
     let (read, mut write) = tokio::io::split(stream);
@@ -111,8 +117,23 @@ async fn handle(
                 binary_imports: true,
                 filesystem_snapshots: true,
                 initialized: Path::new(INITIALIZED).exists(),
+                codex_service: true,
+                codex_ready: codex.ready(),
             };
             wire::write(&mut write, &status).await
+        }
+        GuestRequest::WarmCodex => {
+            let _guard = running
+                .try_lock()
+                .map_err(|_| Error::conflict("Guest already running."))?;
+            if codex.socket()?.is_none() {
+                prepare_anonymous_codex().await?;
+                if let Err(error) = codex.warm(stop).await {
+                    codex.close().await;
+                    return Err(error);
+                }
+            }
+            wire::write(&mut write, &Reply::ok(true)).await
         }
         GuestRequest::Import {
             target,
@@ -120,6 +141,9 @@ async fn handle(
             encoding,
             trace_id,
         } => {
+            if codex.socket()?.is_some() {
+                protect_codex_import(&target, replace)?;
+            }
             let import = ImportRequest {
                 target: &target,
                 replace,
@@ -135,6 +159,9 @@ async fn handle(
             encoding,
             trace_id,
         } => {
+            if codex.socket()?.is_some() {
+                protect_codex_import(&target, false)?;
+            }
             let import = ImportRequest {
                 target: &target,
                 replace: false,
@@ -150,11 +177,15 @@ async fn handle(
                 .map_err(|_| Error::conflict("Guest already running."))?;
             let plan = Plan::new(plan);
             prepare_run(&plan).await?;
-            let (child, events) = spawn_agent(&plan)?;
-            tokio::select! {
-                result = stream_agent(&mut write, child, events, &plan) => result,
+            let (child, events, output) = spawn_agent(&plan, &codex)?;
+            let result = tokio::select! {
+                result = stream_agent(&mut write, child, events, output, &plan) => result,
                 () = stop.cancelled() => Ok(()),
+            };
+            if result.is_err() || stop.is_cancelled() {
+                codex.close().await;
             }
+            result
         }
         GuestRequest::Shutdown => {
             wire::write(&mut write, &Reply::ok(true)).await?;
@@ -162,6 +193,20 @@ async fn handle(
             Ok(())
         }
     }
+}
+
+fn protect_codex_import(target: &str, replace: bool) -> Result<()> {
+    let target = Path::new(target);
+    for protected in ["/home/node/.codex", "/run/leo-entrypoint"] {
+        let protected = Path::new(protected);
+        let keeps_home = target == Path::new(super::plan::HOME) && !replace;
+        if target.starts_with(protected) || (protected.starts_with(target) && !keeps_home) {
+            return Err(Error::conflict(
+                "Import would replace active Codex state or code.",
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn fsfreeze(flag: &str) -> std::io::Result<std::process::ExitStatus> {
@@ -419,16 +464,7 @@ async fn prepare_run(plan: &Plan) -> Result<()> {
         && plan.chat_provider() == crate::provider::Provider::Codex
     {
         let timing = Operation::new("codex_state_seed", plan.run_id(), "install");
-        let count = tokio::task::spawn_blocking(|| {
-            super::codex_state::install(
-                Path::new("/home/node/.codex"),
-                Path::new("/opt/leo-codex-state"),
-                AGENT_ID,
-                AGENT_ID,
-            )
-        })
-        .await
-        .map_err(|_| Error::unavailable("Codex schema preparation failed."))??;
+        let count = seed_codex().await?;
         tracing::info!(target: "leo_performance", operation = "codex_state_seed", id = plan.run_id(), databases = count);
         timing.finish();
     }
@@ -458,8 +494,67 @@ async fn prepare_run(plan: &Plan) -> Result<()> {
     super::projects::restore().await
 }
 
+async fn seed_codex() -> Result<usize> {
+    tokio::task::spawn_blocking(|| {
+        super::codex_state::install(
+            Path::new("/home/node/.codex"),
+            Path::new("/opt/leo-codex-state"),
+            AGENT_ID,
+            AGENT_ID,
+        )
+    })
+    .await
+    .map_err(|_| Error::unavailable("Codex schema preparation failed."))?
+    .map_err(Error::from)
+}
+
+/// Warmup never reads a previous conversation or an imported configuration.
+async fn prepare_anonymous_codex() -> Result<()> {
+    if Path::new(INITIALIZED).exists() {
+        return Err(Error::conflict(
+            "Only a fresh VM can initialize anonymous Codex.",
+        ));
+    }
+    let home = Path::new("/home/node/.codex");
+    match tokio::fs::symlink_metadata(home).await {
+        Ok(metadata) if metadata.is_dir() => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            tokio::fs::create_dir(home).await?;
+        }
+        _ => {
+            return Err(Error::conflict(
+                "Codex home must be an anonymous directory.",
+            ));
+        }
+    }
+    if tokio::fs::read_dir(home)
+        .await?
+        .next_entry()
+        .await?
+        .is_some()
+    {
+        return Err(Error::conflict("Codex home already contains state."));
+    }
+    tokio::fs::set_permissions(home, std::os::unix::fs::PermissionsExt::from_mode(0o700)).await?;
+    std::os::unix::fs::chown(home, Some(AGENT_ID), Some(AGENT_ID))?;
+    // This is the same account-free credential-store policy used by managed
+    // homes. External tokens still arrive only through an active attempt relay.
+    atomic_write(
+        &home.join("config.toml"),
+        b"cli_auth_credentials_store = \"file\"\n",
+    )
+    .await?;
+    std::os::unix::fs::chown(home.join("config.toml"), Some(AGENT_ID), Some(AGENT_ID))?;
+    atomic_write(&home.join("leo-managed-auth"), b"1").await?;
+    seed_codex().await?;
+    Ok(())
+}
+
 /// Starts the agent process and streams its output as run events.
-fn spawn_agent(plan: &Plan) -> Result<(Child, mpsc::Receiver<Event>)> {
+fn spawn_agent(
+    plan: &Plan,
+    codex: &codex::Codex,
+) -> Result<(Child, mpsc::Receiver<Event>, Option<codex::OutputLease>)> {
     let invocation = plan
         .command()
         .unwrap_or_else(|| vec!["/usr/local/bin/leo", "runner-entry"]);
@@ -476,6 +571,28 @@ fn spawn_agent(plan: &Plan) -> Result<(Child, mpsc::Receiver<Event>)> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    let socket = codex.socket()?;
+    if let Some(socket) = socket {
+        if !plan.as_value()["chat"].is_object()
+            || plan.chat_provider() != crate::provider::Provider::Codex
+            || plan.command() != Some(vec![super::plan::ENTRYPOINT, "runner-entry"])
+        {
+            return Err(Error::conflict(
+                "Prepared Codex VM requires a managed Codex chat.",
+            ));
+        }
+        command.env("LEO_CODEX_SERVICE", socket);
+    }
+    unprivileged(&mut command);
+    let (tx, events) = mpsc::channel(32);
+    let output = socket.map(|_| codex.attach(tx.clone())).transpose()?;
+    let mut child = command.spawn()?;
+    forward_output(child.stdout.take().unwrap(), false, tx.clone());
+    forward_output(child.stderr.take().unwrap(), true, tx);
+    Ok((child, events, output))
+}
+
+fn unprivileged(command: &mut Command) {
     // Clear inherited supplemental groups and give each execution its own process group.
     unsafe {
         command.pre_exec(|| {
@@ -489,11 +606,13 @@ fn spawn_agent(plan: &Plan) -> Result<(Child, mpsc::Receiver<Event>)> {
             Ok(())
         });
     }
-    let mut child = command.spawn()?;
-    let (tx, events) = mpsc::channel(32);
-    forward_output(child.stdout.take().unwrap(), false, tx.clone());
-    forward_output(child.stderr.take().unwrap(), true, tx);
-    Ok((child, events))
+}
+
+fn forward_event(stderr: bool, bytes: &[u8]) -> Event {
+    Event::Output {
+        stderr,
+        data: STANDARD.encode(bytes),
+    }
 }
 
 fn forward_output(
@@ -507,10 +626,7 @@ fn forward_output(
             if count == 0 {
                 break;
             }
-            let event = Event::Output {
-                stderr,
-                data: STANDARD.encode(&buffer[..count]),
-            };
+            let event = forward_event(stderr, &buffer[..count]);
             if events.send(event).await.is_err() {
                 break;
             }
@@ -520,16 +636,16 @@ fn forward_output(
 
 async fn stream_agent(
     write: &mut (impl AsyncWrite + Unpin),
-    mut child: Child,
-    mut events: mpsc::Receiver<Event>,
+    child: Child,
+    events: mpsc::Receiver<Event>,
+    output: Option<codex::OutputLease>,
     plan: &Plan,
 ) -> Result<()> {
-    while let Some(event) = events.recv().await {
-        wire::write(write, &event).await?;
-    }
-    let mut timing = Operation::new("guest_finalize", plan.run_id(), "wait_agent");
-    let code = child.wait().await?.code().unwrap_or(1);
-    timing.next("read_result");
+    let code = wait_agent(write, child, events, output)
+        .await?
+        .code()
+        .unwrap_or(1);
+    let mut timing = Operation::new("guest_finalize", plan.run_id(), "read_result");
     let result = read_result(plan).await?;
     timing.next("codex_state_metadata");
     let usage =
@@ -556,6 +672,30 @@ async fn stream_agent(
     wire::write(write, &exit).await?;
     timing.finish();
     Ok(())
+}
+
+async fn wait_agent(
+    write: &mut (impl AsyncWrite + Unpin),
+    mut child: Child,
+    mut events: mpsc::Receiver<Event>,
+    output: Option<codex::OutputLease>,
+) -> Result<std::process::ExitStatus> {
+    let mut output = output;
+    let mut status = None;
+    let mut drained = false;
+    while status.is_none() || !drained {
+        tokio::select! {
+            result = child.wait(), if status.is_none() => {
+                status = Some(result?);
+                drop(output.take());
+            },
+            event = events.recv(), if !drained => match event {
+                Some(event) => wire::write(write, &event).await?,
+                None => drained = true,
+            },
+        }
+    }
+    Ok(status.unwrap())
 }
 
 /// Flush the filesystem holding every persistent overlay. Unlike global sync(),
@@ -592,6 +732,30 @@ async fn read_result(plan: &Plan) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resident_imports_preserve_open_database_and_executable_paths() {
+        for target in [
+            "/",
+            "/home",
+            "/home/node/.codex",
+            "/home/node/.codex/state_5.sqlite",
+            "/run",
+            "/run/leo-entrypoint",
+            "/run/leo-entrypoint/leo",
+        ] {
+            assert!(protect_codex_import(target, false).is_err(), "{target}");
+        }
+        assert!(protect_codex_import("/home/node", true).is_err());
+        for target in [
+            "/home/node",
+            "/workspaces",
+            "/run/leo-chat",
+            "/home/node/project",
+        ] {
+            assert!(protect_codex_import(target, false).is_ok(), "{target}");
+        }
+    }
 
     #[tokio::test]
     async fn failed_disk_flush_is_propagated() {

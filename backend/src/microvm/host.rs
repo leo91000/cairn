@@ -202,7 +202,8 @@ pub(super) async fn import(socket: &Path, source: &Path, target: &str) -> Result
         "other"
     };
     let mut timing = import_timing(socket, "vm_import", import_kind);
-    let binary = status(socket).await?.binary_imports;
+    let status = status(socket).await?;
+    let binary = status.binary_imports;
     timing.next("connect");
     let mut stream = connect(socket).await?;
     timing.next("prepare_request");
@@ -213,13 +214,13 @@ pub(super) async fn import(socket: &Path, source: &Path, target: &str) -> Result
         .is_none();
     let request = GuestRequest::Import {
         target: target.to_owned(),
-        replace: empty,
+        replace: empty && !(target == HOME && status.codex_ready),
         encoding: Encoding::of(binary),
         trace_id: Some(timing.id().to_owned()),
     };
     timing.next("send_request");
     wire::write(stream.get_mut(), &request).await?;
-    transfer(stream, source, target, binary, timing).await
+    transfer(stream, source, target, status, timing).await
 }
 
 /// The manager chooses all paths; guest replies never select a host import.
@@ -230,7 +231,8 @@ pub async fn import_project(
     read_only: bool,
 ) -> Result<Value> {
     let mut timing = import_timing(socket, "vm_project_import", "project");
-    let binary = status(socket).await?.binary_imports;
+    let status = status(socket).await?;
+    let binary = status.binary_imports;
     timing.next("connect");
     let mut stream = connect(socket).await?;
     let request = GuestRequest::ProjectImport {
@@ -253,7 +255,7 @@ pub async fn import_project(
     if !response.is_ready() {
         return Err(Error::bad("Guest refused project import."));
     }
-    transfer(stream, source, target, binary, timing).await?;
+    transfer(stream, source, target, status, timing).await?;
     Ok(json!({ "ok": true, "reused": false }))
 }
 
@@ -262,7 +264,7 @@ async fn transfer(
     mut stream: BufReader<UnixStream>,
     source: &Path,
     target: &str,
-    binary: bool,
+    status: GuestStatus,
     mut timing: Operation,
 ) -> Result<()> {
     timing.next("spawn_tar");
@@ -270,6 +272,9 @@ async fn transfer(
     tar.args(["--exclude=leo-auth.sock", "--exclude=*.sock"]);
     if target == HOME {
         tar.arg("--exclude=./.codex/auth.json");
+        if status.codex_ready {
+            tar.arg("--exclude=./.codex");
+        }
     }
     tar.arg("-C");
     tar.arg(source).args(["-cf", "-", "."]);
@@ -290,7 +295,7 @@ async fn transfer(
             break;
         }
         let write_started = Instant::now();
-        if binary {
+        if status.binary_imports {
             wire::write_chunk(stream.get_mut(), &buffer[..count]).await?;
         } else {
             let frame = ArchiveFrame::Chunk {
@@ -304,7 +309,7 @@ async fn transfer(
     }
     metrics.record(timing.id(), "host");
     timing.next("send_end");
-    if binary {
+    if status.binary_imports {
         wire::write_chunk(stream.get_mut(), &[]).await?;
     } else {
         wire::write(stream.get_mut(), &ArchiveFrame::End).await?;

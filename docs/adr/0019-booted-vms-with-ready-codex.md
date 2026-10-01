@@ -165,6 +165,35 @@ distantes anonymes, la persistance de l'autorisation, les écritures avant et
 après attribution sur le même journal, la réouverture et l'annulation d'une
 lecture distante. Cela prépare le bootstrap du pool, encore non activé.
 
+### Cycle de vie du service dans l'invité
+
+Le protocole invité expose maintenant un préchauffage explicite et sa capacité,
+absente sur les anciennes images. Seule une VM sans conversation ni état Codex
+importé peut initialiser le service. Elle installe les schémas SQLite et la
+politique commune de stockage des credentials, sans compte, puis lance le vrai
+adaptateur sous UID 1000 avec un environnement fixe. La disponibilité repose
+sur un message borné envoyé après l'initialisation native, jamais sur la seule
+présence d'un socket. Le contrôleur règle l'horloge avant ce préchauffage.
+
+Les imports préservent les bases ouvertes et le binaire exécuté par le service.
+Les logs de l'adaptateur résident rejoignent uniquement le tour actif ; leur
+détachement annule aussi une émission bloquée et permet au tour de finir alors
+que Codex reste vivant. Une perte du service invalide la VM préparée : aucun
+second processus ne démarre silencieusement sur ses bases ouvertes. L'arrêt de
+l'invité ferme le service et attend ses processus ; un adaptateur qui ne répond
+plus entraîne l'arrêt de son groupe complet.
+
+Le test natif sans fournisseur dans la configuration initiale vérifie les
+overrides de modèle et de MCP par tour, leur renouvellement et leur suppression,
+la conservation du contexte et la fermeture du processus natif. Trois essais
+Firecracker réels avec le journal vhost, 7 vCPU et 35 840 MiB ont également
+conservé Codex disponible après attribution durable du disque et supprimé le
+socket du VMM après arrêt. Ces essais fonctionnels étaient concurrents aux
+tests backend : leurs durées ne constituent pas un comparatif de performances.
+Ils n'exercent pas encore l'admission du pool, une conversation authentifiée ou
+la publication S3. Les traces brutes restent hors du dépôt ; la qualification
+intégrée et ses assets accompagneront la release avec gain mesuré.
+
 ## Preuves et politique de livraison
 
 Les [mesures vhost](https://github.com/leo91000/leo-agent-manager/releases/download/v0.50.6/ready-vm-vhost-2026-10-01.json),

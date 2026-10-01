@@ -24,6 +24,7 @@ impl Encoding {
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum GuestRequest {
     Status,
+    WarmCodex,
     Shutdown,
     Freeze,
     Thaw,
@@ -132,6 +133,10 @@ pub struct GuestStatus {
     pub binary_imports: bool,
     pub filesystem_snapshots: bool,
     pub initialized: bool,
+    /// Guest supports anonymous native initialization; absent on older images.
+    pub codex_service: bool,
+    /// The guest's service completed initialization and remains alive.
+    pub codex_ready: bool,
 }
 
 /// Acknowledgement of an operation. Absent fields are never written.

@@ -42,6 +42,18 @@ pub async fn serve(
     socket: &Path,
     stop: CancellationToken,
 ) -> Result<()> {
+    serve_with_ready(config, home, socket, stop, || Ok(())).await
+}
+
+/// Notify the process owner only after native initialization. A failed notification
+/// follows the same close-and-reap path as a failed lease or service shutdown.
+pub async fn serve_with_ready(
+    config: &Config,
+    home: &Path,
+    socket: &Path,
+    stop: CancellationToken,
+    notify: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     let parent = socket
         .parent()
         .ok_or_else(|| Error::bad("Invalid Codex socket."))?;
@@ -53,7 +65,10 @@ pub async fn serve(
         let mut session =
             Session::codex_until(config, home, &[], Some(&config.home), &stop).await?;
         tracing::info!(target: "leo_performance", operation = "codex_resident", event = "ready", native_init_ms = started.elapsed().as_millis() as u64);
-        let result = serve_session(listener, &mut session, home, stop).await;
+        let result = match notify() {
+            Ok(()) => serve_session(listener, &mut session, home, stop).await,
+            Err(error) => Err(error),
+        };
         session.close().await;
         result
     }

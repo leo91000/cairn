@@ -124,11 +124,17 @@ async fn entry(args: Vec<String>) -> Result<i32> {
             let home =
                 std::env::var("CODEX_HOME").map_err(|_| Error::bad("Missing Codex home."))?;
             let socket = arg(&args, 1, "Missing Codex service socket.")?;
-            leo_agent_manager::chat_process::resident::serve(
+            leo_agent_manager::chat_process::resident::serve_with_ready(
                 &config,
                 Path::new(&home),
                 Path::new(socket),
                 stop,
+                || {
+                    let mut stdout = std::io::stdout().lock();
+                    std::io::Write::write_all(&mut stdout, b"{\"ready\":true}\n")?;
+                    std::io::Write::flush(&mut stdout)?;
+                    Ok(())
+                },
             )
             .await?;
         }
