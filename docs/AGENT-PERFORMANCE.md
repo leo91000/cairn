@@ -2,7 +2,7 @@
 
 Agent timings use the existing `leo_performance` tracing target, enabled by the
 default binary filter. With a custom filter, include `leo_performance=info` in
-`RUST_LOG`. No new endpoint, database schema or restart policy is introduced.
+`RUST_LOG`. These records do not change database schema or restart policy.
 
 ## Correlation
 
@@ -28,7 +28,12 @@ host measurements also work with retained older images.
 | `agent_prepare` | Marking running, access validation, workspace setup, session lookup |
 | `workspace_prepare` | Execution restoration, account home, environment, MCP configuration |
 | `runner_prepare` | Placement, materialization, plan writing, remote preparation, placement commit |
+| `runner_entry` | Guest toolchain preparation before the chat adapter starts |
+| `account_broker` | Time to acquire managed tokens, before native account login |
+| `mcp_startup` | Manager HTTP handling of authenticated initialize/tools-list requests, including authorization and dispatch; fixed endpoint category, optional gateway connection UUID |
 | `codex_rpc` / `mcp_rpc` | Request start and completion, method, local request ID, elapsed time, outbound queue time, deadline and success; no parameters or result |
+| `codex_transport` | Native HTTP/WebSocket request interval and status, plus selected thread startup phases; fixed endpoint category and sanitized thread UUID only |
+| `account_admission` | Manager-side account initialization, eligible-account lookup, required quota refresh, serialized selection and preparation; distinct from guest broker token acquisition |
 | `agent_activity` | Turn start/end, first item, first nonempty assistant message, item start/end and periodic activity summary |
 | `agent_output` | Worker pipe-to-consumer queue delays of at least 100 ms |
 | `agent_wait` | Awaits lasting at least 100 ms: stdout writing/flushing, credential-redaction refresh and output persistence |
@@ -59,6 +64,54 @@ Claude has no such notification in the existing adapter, so its
 `turn_start_source=thread_initialized` measures from the observed thread
 initialization instead. These boundaries must not be treated as identical model
 request timestamps. Receipt replay without initialization does not invent a turn.
+
+Native transport timings use Codex's local OTLP HTTP/JSON exporter, with user
+prompt logging disabled. A loopback collector accepts at most 2 MiB per batch
+and discards the raw document after extracting a fixed allowlist. It ignores
+token streams, prompts, tool data, arbitrary attributes and native error text.
+No raw telemetry is persisted or sent to an external telemetry service. Export
+failure does not fail an agent session.
+
+The collector lives for the VM lifetime, so asynchronous export after an attempt
+releases its output lease still reaches the private guest console. Outside a VM,
+the native session owns its collector. `codex_transport` records from a guest
+must be read from that console and correlated by VM, thread and event time;
+they do not inherit the current attempt's span. A startup request without a
+thread has `thread_id=unknown`.
+Manager MCP HTTP requests without a run-scoped gateway connection are correlated
+by endpoint category and the sample's time interval, not by invented run IDs.
+
+Codex batches export asynchronously. `completed_at_ms` comes from the native
+event's timestamp (`observedTimeUnixNano` when `timeUnixNano` is zero), and
+`request_started_at_ms` subtracts its reported duration at millisecond resolution.
+This is the native request timer, not a packet capture or collector arrival.
+`websocket_connect` measures the native connection attempt separately. The
+loopback trace exporter also retains `model_client.websocket_connection`
+and `model_client.stream_responses_websocket`, with the latter classified from
+the native boolean `websocket.warmup`. These setup spans end after constructing
+the stream; they do not include waiting for the warmup response. The interval
+between warmup and generation sends can also contain catalog refreshes and local
+work, so it must not be described as network RTT.
+`responses_websocket.stream_request` becomes `websocket_response_stream` and
+lasts until the native response worker finishes, including peer-response waiting.
+It has no warmup flag; correlate its interval with the explicit setup spans and
+the sends in the same owned VM/thread. It is not a pure network timer.
+The fixed native `startup_prewarm_*` phases also separate turn-context creation,
+tool capture (including MCP readiness), prompt construction, full warmup waiting,
+and the first turn's wait for background prewarm. These overlap and must not be
+summed as sequential work. Other spans and their arbitrary
+attributes are discarded without persistence.
+Abrupt native termination can discard its final unexported batch; shutdown never
+waits for telemetry. A missing transport record is not evidence of no request.
+For HTTP model requests, select `endpoint=responses` and the corresponding
+thread. Codex 0.159.3 WebSocket send events have no endpoint and also include
+its `generate=false` warmup: the first `websocket_request` is not necessarily
+an inference request. A successful one-turn, no-tool production probe emitted
+two sends (warmup then generation); their classification uses the pinned native
+control flow and is an inference, not an explicit phase field in the exporter.
+Do not apply that ordering to arbitrary retries or tool loops. Do not substitute
+`turn_started` or the first exported batch. A real native HTTP fixture checks
+that the interval brackets the local model receipt.
 
 Open-item/question tracking is bounded to 128 entries each and 256 bytes per ID.
 `skipped_items` makes saturation visible. New turns clear unfinished previous

@@ -22,7 +22,7 @@ pub async fn capture(
     attempt: &str,
 ) -> Result<Value> {
     let mut timing = crate::performance::Operation::new("disk_snapshot", run, "open_journal");
-    let directory = state.join("disks").join(run);
+    let directory = super::environment::directory(state, run)?;
     let volume = super::runtime::load(&directory).await?;
     let _stopped_reads = socket.is_none().then(|| volume.stop.clone().drop_guard());
     timing.next("control_lock");
@@ -151,7 +151,7 @@ pub async fn capture(
     Ok(json!({
         "id": id,
         "manifest": manifest,
-        "grantId": volume.source.grant_id()
+        "grantId": volume.source.grant_id()?
     }))
 }
 

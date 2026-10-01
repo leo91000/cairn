@@ -306,6 +306,7 @@ pub fn chat_plan(
         "sandbox": policy(agent)["sandbox"],
         "writableRoots": roots,
         "args": mcp["args"],
+        "codexConfig": { "mcp_servers": mcp["codexConfig"] },
     });
     if let Some(session) = session {
         plan["sessionId"] = session.into();

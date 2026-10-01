@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Buffer } from 'node:buffer'
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -29,9 +30,20 @@ async function main() {
     const lines = createInterface({ input: process.stdin })
     for await (const line of lines) {
       const request = JSON.parse(line)
+      const lifecycle = path.join(process.env.CODEX_HOME, 'fixture-lifecycle.jsonl')
+      if (existsSync(lifecycle))
+        appendFileSync(lifecycle, `${JSON.stringify({ pid: process.pid, method: request.method })}\n`)
       if (request.id === undefined)
         continue
       const initializationFailure = path.join(process.env.CODEX_HOME, 'fixture-initialize-error')
+      const initializationWait = path.join(process.env.CODEX_HOME, 'fixture-initialize-wait')
+      if (request.method === 'initialize' && existsSync(initializationWait)) {
+        process.on('SIGTERM', () => {})
+        setInterval(() => {}, 1000)
+        writeFileSync(initializationWait, `${process.pid}`)
+        continue
+      }
+
       if (request.method === 'initialize' && existsSync(initializationFailure)) {
         process.on('SIGTERM', () => {})
         setInterval(() => {}, 1000)

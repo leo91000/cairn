@@ -20,6 +20,8 @@ pub mod vhost;
 
 pub mod remote;
 
+pub mod source;
+
 pub mod policy;
 
 pub mod runtime;
@@ -29,3 +31,5 @@ pub mod checkpoint;
 pub mod cache;
 
 pub mod bootstrap;
+
+pub mod environment;

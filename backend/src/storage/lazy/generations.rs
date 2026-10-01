@@ -78,6 +78,10 @@ impl LazyDisk {
             }
             let hash = block_digest(&bytes);
             manifest["blocks"][index as usize]["hash"] = hash.clone().into();
+            // The next native startup may read databases created only by writes
+            // in this turn. Keep their published bytes locally without admitting
+            // a background scan into the shared foreground RAM cache.
+            let _ = self.cache_block(&hash, &bytes);
             if foreground.contains_key(&index) {
                 // These exact bytes produced the immutable identity. Retain its
                 // new version before publication retires the local journal.

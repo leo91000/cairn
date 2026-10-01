@@ -469,12 +469,30 @@ impl Accounts {
         provider: Provider,
         model: &str,
     ) -> Result<Option<Lease>> {
+        let mut timing =
+            crate::performance::Operation::new("account_admission", run_id, "initialize");
         self.initialize(s).await?;
         let driver = provider.driver();
         if !driver.managed(s).await? {
+            timing.finish();
             return Ok(None);
         }
-        self.poll(s, true).await?;
+        timing.next("availability");
+        let available = {
+            let leases = self.leases.lock().await;
+            if leases.contains_key(run_id) {
+                return Err(Error::conflict("This run already holds an account."));
+            }
+            !self.eligible(s, provider, model, &leases).await?.is_empty()
+        };
+        // Background polling continues normally. Refresh synchronously only
+        // when no account satisfies the existing usage validity and slot rules.
+        // Selection below rechecks these rules under its serialization lock.
+        if !available {
+            timing.next("refresh_usage");
+            self.poll(s, true).await?;
+        }
+        timing.next("selection");
         let _selection = self.selection.lock().await;
         let leases = self.leases.lock().await;
         if leases.contains_key(run_id) {
@@ -492,6 +510,7 @@ impl Accounts {
             model: model.into(),
             home: driver.home(s, run_id),
         };
+        timing.next("prepare_home");
         let _guard = self.lock(&lease.account_id).await;
         driver.prepare(s, &lease.account_id, &lease.home).await?;
         self.leases
@@ -500,6 +519,7 @@ impl Accounts {
             .insert(lease.run_id.clone(), lease.clone());
         account.last_used_at = Some(now());
         save(s, &account).await?;
+        timing.finish();
         Ok(Some(lease))
     }
 

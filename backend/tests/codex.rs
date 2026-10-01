@@ -1038,6 +1038,92 @@ async fn parallel_runs_share_one_refresh_and_cannot_overwrite_or_reuse_released_
 }
 
 #[tokio::test]
+async fn resident_logs_in_and_releases_managed_account_for_each_native_turn() {
+    let root = TempDir::new().unwrap();
+    let service = Service::new(config(&root)).await.unwrap();
+    service.accounts.initialize(&service).await.unwrap();
+    refreshed_account(
+        &service,
+        "Resident",
+        json!({
+            "access_token": "synthetic", "refresh_token": "refresh", "account_id": "resident",
+        }),
+    )
+    .await;
+    let lease = acquire(&service, FIRST_RUN, "").await;
+    let _broker = broker::serve(&service, &lease).await.unwrap();
+    let record = lease.home.join("fixture-lifecycle.jsonl");
+    std::fs::write(&record, "").unwrap();
+    let socket = root.path().join("resident/codex.sock");
+    let endpoint = socket.clone();
+    let stop = CancellationToken::new();
+    let stopping = stop.clone();
+    let config = service.config.clone();
+    let home = lease.home.clone();
+    std::fs::create_dir_all(&config.home).unwrap();
+    let native = tokio::spawn(async move {
+        chat_process::resident::serve(&config, &home, &endpoint, stopping).await
+    });
+    eventually(
+        Duration::from_secs(5),
+        Duration::from_millis(10),
+        async || {
+            chat_process::resident::ready(&socket)
+                .await
+                .ok()
+                .filter(|ready| *ready)
+        },
+    )
+    .await;
+    assert!(
+        !std::fs::read_to_string(&record)
+            .unwrap()
+            .contains("account/login/start"),
+        "Anonymous initialization never acquires an account"
+    );
+    for index in 0..2 {
+        let plan = json!({
+            "args": [], "codexConfig": { "mcp_servers": {} },
+            "cwd": root.path(), "sandbox": "yolo", "reasoning": "low",
+            "output": root.path().join("reply.md"), "inputDirectory": root.path(),
+            "writableRoots": [],
+            "execution": { "messageId": format!("message-{index}"), "text": "fixture:auth-refresh", "attachments": [], },
+        });
+        let (events, mut received) = tokio::sync::mpsc::channel::<Value>(64);
+        let output = tokio::spawn(async move {
+            while let Some(event) = received.recv().await {
+                assert!(!event.to_string().contains("synthetic"));
+            }
+        });
+        chat_process::resident::run(&socket, plan, events, CancellationToken::new())
+            .await
+            .unwrap();
+        output.await.unwrap();
+        assert!(!lease.home.join("auth.json").exists());
+    }
+    stop.cancel();
+    native.await.unwrap().unwrap();
+    service.accounts.release(&lease).await.unwrap();
+    let log: Vec<Value> = std::fs::read_to_string(&record)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    for (method, expected) in [
+        ("initialize", 1),
+        ("account/login/start", 2),
+        ("account/logout", 2),
+        ("thread/unsubscribe", 2),
+    ] {
+        assert_eq!(
+            log.iter().filter(|entry| entry["method"] == method).count(),
+            expected,
+            "{method}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn parallel_capacity_prefers_usage_and_lowering_limits_does_not_stop_runs() {
     let root = TempDir::new().unwrap();
     let service = Service::new(config(&root)).await.unwrap();

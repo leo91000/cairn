@@ -156,7 +156,8 @@ mod tests {
         let state = broker.state.clone();
         let run = crate::config::id();
         let snapshot = crate::config::id();
-        let directory = state.join("disks").join(&run);
+        let environment = crate::config::id();
+        let directory = state.join("environments").join(&environment);
         let block = crate::nodes::snapshots::BLOCK;
         let base = json!({
             "version": 1,
@@ -184,6 +185,11 @@ mod tests {
         // A later unpublished write must not replace data from the captured generation.
         disk.write_at(0, &[3; 4096]).unwrap();
         drop(disk);
+        let physical = crate::file_lock::exclusive(&directory.join("lock"), "busy").unwrap();
+        let owner = crate::storage::environment::assign(&state, &environment, &run)
+            .await
+            .unwrap();
+        drop((owner, physical));
         let captured = state.join("snapshots").join(&snapshot);
         private_dir(&captured).await.unwrap();
         std::fs::write(captured.join("run"), run).unwrap();
@@ -364,6 +370,56 @@ mod tests {
             .unwrap()
             .status()
             .as_u16()
+    }
+
+    #[tokio::test]
+    async fn deleting_an_attributed_disk_preserves_ownership_and_other_environments() {
+        let root = tempfile::tempdir().unwrap();
+        let broker = fixture_broker(root.path()).await;
+        let state = broker.state.clone();
+        let run = crate::config::id();
+        let environment = crate::config::id();
+        let directory = state.join("environments").join(&environment);
+        private_dir(&directory).await.unwrap();
+        std::fs::write(directory.join("private-work"), b"user data").unwrap();
+        let physical = crate::file_lock::exclusive(&directory.join("lock"), "busy").unwrap();
+        let owner = crate::storage::environment::assign(&state, &environment, &run)
+            .await
+            .unwrap();
+        let logical = state.join("disks").join(&run);
+        let inode = std::fs::metadata(directory.join("lock")).unwrap().ino();
+        let ownership_inode = std::fs::metadata(logical.join("ownership.lock"))
+            .unwrap()
+            .ino();
+        let other = state.join("environments").join(crate::config::id());
+        private_dir(&other).await.unwrap();
+        std::fs::write(other.join("private-work"), b"keep").unwrap();
+        let app = router(broker);
+        let transfer = crate::config::id();
+        assert_eq!(request(&app, &run, "delete", &transfer, SECRET).await, 409);
+        drop((owner, physical));
+        assert_eq!(request(&app, &run, "delete", &transfer, SECRET).await, 200);
+        assert!(!directory.join("private-work").exists());
+        assert_eq!(
+            crate::storage::environment::directory(&state, &run).unwrap(),
+            directory
+        );
+        assert_eq!(
+            std::fs::metadata(directory.join("lock")).unwrap().ino(),
+            inode
+        );
+        assert_eq!(
+            std::fs::metadata(logical.join("ownership.lock"))
+                .unwrap()
+                .ino(),
+            ownership_inode
+        );
+        assert_eq!(std::fs::read(other.join("private-work")).unwrap(), b"keep");
+        assert!(
+            crate::storage::environment::assign(&state, &environment, &crate::config::id())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

@@ -51,6 +51,257 @@ async fn run_quietly(config: &Config, home: &Path, plan: Value) {
     output.await.unwrap();
 }
 
+struct Resident {
+    socket: PathBuf,
+    stop: CancellationToken,
+    task: tokio::task::JoinHandle<leo_agent_manager::error::Result<()>>,
+}
+
+impl Resident {
+    async fn start(config: Config, home: PathBuf, root: &TempDir) -> Self {
+        std::fs::create_dir_all(&config.home).unwrap();
+        std::fs::write(home.join("fixture-lifecycle.jsonl"), "").unwrap();
+        let socket = root.path().join("resident/codex.sock");
+        let stop = CancellationToken::new();
+        let endpoint = socket.clone();
+        let stopping = stop.clone();
+        let task = tokio::spawn(async move {
+            chat_process::resident::serve(&config, &home, &endpoint, stopping).await
+        });
+        common::eventually(
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+            async || {
+                chat_process::resident::ready(&socket)
+                    .await
+                    .ok()
+                    .filter(|ready| *ready)
+            },
+        )
+        .await;
+        Self { socket, stop, task }
+    }
+
+    async fn run(&self, plan: Value) {
+        let (events, mut received) = mpsc::channel::<Value>(32);
+        let task = tokio::spawn(async move {
+            let mut completed = false;
+            while let Some(event) = received.recv().await {
+                completed |= event["type"] == "turn.completed";
+            }
+            assert!(completed);
+        });
+        chat_process::resident::run(&self.socket, plan, events, CancellationToken::new())
+            .await
+            .unwrap();
+        task.await.unwrap();
+    }
+
+    async fn stop(self) {
+        self.stop.cancel();
+        self.task.await.unwrap().unwrap();
+    }
+}
+
+fn lifecycle(home: &Path) -> Vec<Value> {
+    std::fs::read_to_string(home.join("fixture-lifecycle.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn resident_reuses_native_process_and_reloads_each_attempts_permissions() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let service = Resident::start(config(&root), home.clone(), &root).await;
+    for (index, token) in ["first-lease", "second-lease"].into_iter().enumerate() {
+        let mut plan = plan(&root, &format!("message {index}"));
+        plan["execution"]["messageId"] = format!("message-{index}").into();
+        plan["codexConfig"] = json!({ "mcp_servers": {
+            "fixture": { "url": "http://fixture", "http_headers": { "Authorization": token } }
+        }});
+        if index > 0 {
+            plan["sessionId"] = "fixture-chat".into();
+            plan["sandbox"] = "workspace-write".into();
+        }
+        service.run(plan).await;
+        let saved = conversation(&home);
+        assert_eq!(saved["turns"].as_array().unwrap().len(), index + 1);
+        assert_eq!(
+            saved["fixtureConfig"]["mcp_servers"]["fixture"]["http_headers"]["Authorization"],
+            token
+        );
+    }
+    service.stop().await;
+    let log = lifecycle(&home);
+    assert_eq!(
+        log.iter()
+            .filter(|entry| entry["method"] == "initialize")
+            .count(),
+        1
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|entry| entry["method"] == "thread/unsubscribe")
+            .count(),
+        2
+    );
+    assert!(log.iter().all(|entry| entry["pid"] == log[0]["pid"]));
+    let pid = log[0]["pid"].as_i64().unwrap() as i32;
+    assert_eq!(
+        unsafe { libc::kill(pid, 0) },
+        -1,
+        "Service shutdown must reap its native process"
+    );
+}
+
+#[tokio::test]
+async fn lost_resident_client_retires_native_instead_of_keeping_unknown_turn() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let service = Resident::start(config(&root), home.clone(), &root).await;
+    let mut plan = plan(&root, "fixture:chat-hang");
+    plan["codexConfig"] = json!({ "mcp_servers": {} });
+    let (events, mut received) = mpsc::channel(32);
+    let endpoint = service.socket.clone();
+    let client = tokio::spawn(async move {
+        chat_process::resident::run(&endpoint, plan, events, CancellationToken::new()).await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = received.recv().await {
+            if event["type"] == "turn.started" {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    client.abort();
+    let _ = client.await;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), service.task)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    let log = lifecycle(&home);
+    let pid = log[0]["pid"].as_i64().unwrap() as i32;
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+    assert!(!service.socket.exists());
+}
+
+#[tokio::test]
+async fn resident_rejects_a_concurrent_attempt_without_queuing_it() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let service = Resident::start(config(&root), home.clone(), &root).await;
+    let mut plan = plan(&root, "fixture:chat-hang");
+    plan["codexConfig"] = json!({ "mcp_servers": {} });
+    let (events, mut received) = mpsc::channel(32);
+    let endpoint = service.socket.clone();
+    let first_plan = plan.clone();
+    let client = tokio::spawn(async move {
+        chat_process::resident::run(&endpoint, first_plan, events, CancellationToken::new()).await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = received.recv().await {
+            if event["type"] == "turn.started" {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let (events, _) = mpsc::channel(32);
+    let error = tokio::time::timeout(
+        Duration::from_secs(1),
+        chat_process::resident::run(&service.socket, plan, events, CancellationToken::new()),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(error.status, 409);
+    client.abort();
+    let _ = client.await;
+    assert!(service.task.await.unwrap().is_err());
+    let log = lifecycle(&home);
+    assert_eq!(
+        log.iter()
+            .filter(|entry| entry["method"] == "turn/start")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn stopping_resident_initialization_reaps_unresponsive_native_process() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    std::fs::create_dir_all(&config.home).unwrap();
+    let control = home.join("fixture-initialize-wait");
+    std::fs::write(&control, "").unwrap();
+    let socket = root.path().join("resident/codex.sock");
+    let endpoint = socket.clone();
+    let stop = CancellationToken::new();
+    let stopping = stop.clone();
+    let service = tokio::spawn(async move {
+        chat_process::resident::serve(&config, &home, &endpoint, stopping).await
+    });
+    let pid: i32 = common::eventually(
+        Duration::from_secs(5),
+        Duration::from_millis(10),
+        async || std::fs::read_to_string(&control).ok()?.parse().ok(),
+    )
+    .await;
+    stop.cancel();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), service)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+    assert!(!socket.exists());
+}
+
+#[tokio::test]
+async fn failed_readiness_notification_reaps_initialized_native_process() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    std::fs::create_dir_all(&config.home).unwrap();
+    std::fs::write(home.join("fixture-lifecycle.jsonl"), "").unwrap();
+    let socket = root.path().join("resident/codex.sock");
+    let result = chat_process::resident::serve_with_ready(
+        &config,
+        &home,
+        &socket,
+        CancellationToken::new(),
+        || {
+            Err(leo_agent_manager::error::Error::unavailable(
+                "Owner pipe closed.",
+            ))
+        },
+    )
+    .await;
+    assert_eq!(result.unwrap_err().message, "Owner pipe closed.");
+    let log = lifecycle(&home);
+    assert_eq!(
+        log.iter()
+            .filter(|entry| entry["method"] == "initialize")
+            .count(),
+        1
+    );
+    let pid = log[0]["pid"].as_i64().unwrap() as i32;
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+    assert!(!socket.exists());
+}
+
 /// The conversation the Codex fixture persisted in `home`.
 fn conversation(home: &Path) -> Value {
     serde_json::from_slice(&std::fs::read(home.join("fixture-conversation.json")).unwrap()).unwrap()

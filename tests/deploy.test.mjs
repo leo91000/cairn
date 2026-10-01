@@ -140,6 +140,18 @@ describe('coolify deployment over HTTP', () => {
     expect(result.services.runner.devices).toContain('/dev/fuse:/dev/fuse')
   })
 
+  it.each(['mapping', 'list'])('preserves the operator pool setting across deployment (%s)', async (shape) => {
+    const document = parse(compose)
+    const environment = { ...document.services.runner.environment, LEO_READY_VM_POOL: 'false' }
+    document.services.runner.environment = shape === 'list'
+      ? Object.entries(environment).map(([key, value]) => `${key}=${value}`)
+      : environment
+    compose = stringify(document)
+    await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
+    expect(parse(compose).services.runner.environment.LEO_READY_VM_POOL).toBe('false')
+    expect(firecrackerRunnerCompose(compose)).toBe(compose)
+  })
+
   it('adds FUSE to an existing VM runner before deploying the S3-backed image', async () => {
     const document = parse(compose)
     document.services.runner.devices = document.services.runner.devices.filter(device => !device.startsWith('/dev/fuse:'))

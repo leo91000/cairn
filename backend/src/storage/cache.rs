@@ -77,8 +77,11 @@ impl Index {
             oldest: BTreeSet::new(),
             scanned_at: Instant::now(),
         };
-        let disks = state.join("disks");
-        if disks.exists() {
+        for root in super::environment::ROOTS {
+            let disks = state.join(root);
+            if !disks.exists() {
+                continue;
+            }
             for entry in std::fs::read_dir(disks)? {
                 let entry = entry?;
                 if !entry.file_type()?.is_dir() {
@@ -410,8 +413,8 @@ mod tests {
     #[test]
     fn budget_is_shared_across_conversations_and_never_evicts_journals() {
         let root = tempfile::tempdir().unwrap();
-        for name in ["first", "second"] {
-            let disk = root.path().join("disks").join(name).join("lazy");
+        for (namespace, name) in [("disks", "first"), ("environments", "second")] {
+            let disk = root.path().join(namespace).join(name).join("lazy");
             std::fs::create_dir_all(disk.join("cache")).unwrap();
             std::fs::write(disk.join("cache").join("a".repeat(64)), b"clean").unwrap();
             std::fs::write(disk.join("journal.sqlite"), b"unsaved work").unwrap();
@@ -423,8 +426,8 @@ mod tests {
             ..Default::default()
         };
         assert!(make_room(root.path(), &policy, 0).unwrap());
-        for name in ["first", "second"] {
-            let disk = root.path().join("disks").join(name).join("lazy");
+        for (namespace, name) in [("disks", "first"), ("environments", "second")] {
+            let disk = root.path().join(namespace).join(name).join("lazy");
             assert_eq!(std::fs::read_dir(disk.join("cache")).unwrap().count(), 0);
             assert_eq!(
                 std::fs::read(disk.join("journal.sqlite")).unwrap(),

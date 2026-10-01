@@ -155,6 +155,14 @@ export function firecrackerRunnerCompose(compose) {
   // eslint-disable-next-line no-template-curly-in-string -- Preserve the Compose environment expression.
   const concurrency = configuredConcurrency ?? '${CONCURRENCY:-4}'
   const alreadyUsesVms = runner.get('devices')?.toJSON()?.some(device => typeof device === 'string' && device.split(':')[0] === '/dev/kvm')
+  const runnerEnvironment = runner.get('environment')?.toJSON()
+  const poolSetting = Array.isArray(runnerEnvironment)
+    ? runnerEnvironment.find(value => typeof value === 'string' && value.startsWith('LEO_READY_VM_POOL='))?.slice('LEO_READY_VM_POOL='.length)
+    : runnerEnvironment?.LEO_READY_VM_POOL
+  const migratedEnvironment = { DATA_DIR: '/data', CONCURRENCY: concurrency }
+  if (poolSetting !== undefined)
+    migratedEnvironment.LEO_READY_VM_POOL = poolSetting
+
   const values = {
     user: '0:0',
     entrypoint: ['/usr/local/bin/leo', 'runner-broker'],
@@ -166,7 +174,7 @@ export function firecrackerRunnerCompose(compose) {
     devices: ['/dev/kvm:/dev/kvm', '/dev/fuse:/dev/fuse', '/dev/net/tun:/dev/net/tun'],
     sysctls: { 'net.ipv4.ip_forward': '1', 'net.ipv6.conf.all.disable_ipv6': '1' },
     tmpfs: ['/run', '/tmp'],
-    environment: { DATA_DIR: '/data', CONCURRENCY: concurrency },
+    environment: migratedEnvironment,
     volumes: [data.replace(/:(ro|rw)$/, ''), state.replace(/:(ro|rw)$/, '')],
     // Set defaults when migrating to VMs; preserve subsequent operator sizing.
     mem_limit: alreadyUsesVms ? runner.get('mem_limit') ?? '20g' : '20g',

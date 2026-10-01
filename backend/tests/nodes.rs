@@ -3261,25 +3261,33 @@ async fn growing_a_disk_preserves_publication_identity_and_releases_its_previous
     assert_eq!(volume.disk.size(), 256 * 1024 * 1024);
     assert!(!directory.join("data.ext4").exists());
     assert!(!directory.join("resize-source").exists());
-    assert_eq!(volume.source.grant_id(), auth::digest(&token));
+    assert_eq!(volume.source.grant_id().unwrap(), auth::digest(&token));
     let next = volume.seal().await.unwrap();
     assert!(
         next > generation,
         "publication generations must remain monotone"
     );
     let replacement = published_point(&run, LOCAL_NODE_ID, next);
-    disk_grants::extend(&owner.service, &volume.source.grant_id(), &replacement)
-        .await
-        .unwrap();
+    disk_grants::extend(
+        &owner.service,
+        &volume.source.grant_id().unwrap(),
+        &replacement,
+    )
+    .await
+    .unwrap();
     assert!(
         disk_grants::pinned(&owner.service, &run)
             .await
             .unwrap()
             .contains(previous["id"].as_str().unwrap())
     );
-    disk_grants::acknowledged(&owner.service, &volume.source.grant_id(), &replacement)
-        .await
-        .unwrap();
+    disk_grants::acknowledged(
+        &owner.service,
+        &volume.source.grant_id().unwrap(),
+        &replacement,
+    )
+    .await
+    .unwrap();
     let pinned = disk_grants::pinned(&owner.service, &run).await.unwrap();
     assert_eq!(pinned.len(), 1);
     assert!(pinned.contains(replacement["id"].as_str().unwrap()));

@@ -13,6 +13,44 @@ pub async fn prepare(
     context: &Value,
     stop: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
+    prepare_source(directory, size, context, stop, false).await
+}
+
+/// Build an anonymous, entirely local disk without minting or borrowing any
+/// conversation's S3 authority. Only prepared environments may use this path.
+pub async fn prepare_unassigned(
+    directory: &Path,
+    size: u64,
+    policy: &super::policy::Policy,
+    stop: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    if directory
+        .parent()
+        .and_then(Path::file_name)
+        .is_none_or(|name| name != "environments")
+        || super::runtime::exists(directory)
+    {
+        return Err(Error::conflict(
+            "Anonymous preparation requires a new environment disk.",
+        ));
+    }
+    crate::validation::uuid(
+        directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(""),
+    )?;
+    let context = serde_json::json!({ "unassigned": true, "policy": policy });
+    prepare_source(directory, size, &context, stop, true).await
+}
+
+async fn prepare_source(
+    directory: &Path,
+    size: u64,
+    context: &Value,
+    stop: &tokio_util::sync::CancellationToken,
+    prepared: bool,
+) -> Result<()> {
     crate::skills::private_dir(directory).await?;
     let _lock = crate::file_lock::exclusive(&directory.join("lock"), "VM disk is active.")?;
     let marker = directory.join("bootstrap.pending");
@@ -81,7 +119,11 @@ pub async fn prepare(
     for block in empty["blocks"].as_array_mut().unwrap() {
         block["hash"] = Value::Null;
     }
-    let disk = super::runtime::create_at_generation(&root, &empty, &context, generation).await?;
+    let disk = if prepared {
+        super::runtime::create_prepared(&root, &empty, &context).await?
+    } else {
+        super::runtime::create_at_generation(&root, &empty, &context, generation).await?
+    };
     let writer = disk.clone();
     tokio::task::spawn_blocking(move || copy_blocks(&raw, &manifest, &writer, &policy))
         .await
@@ -156,6 +198,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn anonymous_ext4_disk_bootstraps_without_remote_authority_and_is_adopted_in_place() {
+        let state = tempfile::tempdir().unwrap();
+        let environment = crate::config::id();
+        let directory = state.path().join("environments").join(&environment);
+        let policy = super::super::policy::Policy {
+            reserve_mi_b: 64,
+            reserve_percent: 1,
+            ..Default::default()
+        };
+        let stop = CancellationToken::new();
+        prepare_unassigned(&directory, 128 * 1024 * 1024, &policy, &stop)
+            .await
+            .unwrap();
+        let volume = super::super::runtime::load(&directory).await.unwrap();
+        let mut signature = [0; 2];
+        volume.read_at(1080, &mut signature).unwrap();
+        assert_eq!(signature, [0x53, 0xef]);
+        assert!(!directory.join("data.ext4").exists());
+        assert!(volume.source.grant_id().is_err());
+        assert!(!volume.disk.has_remote_base().unwrap());
+        let context = super::super::LazyDisk::context(&directory.join("lazy")).unwrap();
+        assert!(context.get("master").is_none() && context.get("grant").is_none());
+        let physical = crate::file_lock::exclusive(&directory.join("lock"), "busy").unwrap();
+        let run = crate::config::id();
+        let owner = super::super::environment::assign(state.path(), &environment, &run)
+            .await
+            .unwrap();
+        let authorization = json!({
+            "master": "http://127.0.0.1:1/",
+            "grant": "real-owner-fixture",
+            "policy": policy,
+        });
+        volume.authorize(&owner, &authorization).await.unwrap();
+        volume.read_at(1080, &mut signature).unwrap();
+        assert_eq!(signature, [0x53, 0xef]);
+        assert_eq!(
+            volume.source.grant_id().unwrap(),
+            crate::auth::digest("real-owner-fixture")
+        );
+        assert_eq!(
+            super::super::environment::directory(state.path(), &run).unwrap(),
+            directory
+        );
+        drop((owner, physical));
+    }
+
+    #[tokio::test]
     async fn interrupted_resize_restarts_from_the_original_journal() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("disks/conversation");
@@ -180,7 +269,7 @@ mod tests {
             .unwrap();
         volume.disk.sync().unwrap();
         let before = volume.seal().await.unwrap();
-        let original_grant = volume.source.grant_id();
+        let original_grant = volume.source.grant_id().unwrap();
         drop(volume);
         crate::skills::atomic_write(&directory.join("bootstrap.pending"), b"resizing")
             .await
@@ -198,7 +287,7 @@ mod tests {
             .await
             .unwrap();
         let volume = super::super::runtime::load(&directory).await.unwrap();
-        assert_eq!(volume.source.grant_id(), original_grant);
+        assert_eq!(volume.source.grant_id().unwrap(), original_grant);
         assert!(volume.seal().await.unwrap() > before);
         let mut saved = [0; 13];
         volume.disk.read_at(33 * 1024 * 1024, &mut saved).unwrap();

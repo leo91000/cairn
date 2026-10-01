@@ -65,6 +65,7 @@ pub struct Vm {
     mounted: Option<crate::storage::vhost::MountedDisk>,
     volume: Option<Arc<crate::storage::runtime::Volume>>,
     uid: u32,
+    warmed: bool,
 }
 
 fn console(
@@ -296,6 +297,7 @@ impl Vm {
             mounted: None,
             volume: Some(volume),
             uid: 40000 + slot as u32,
+            warmed: false,
         };
         let result = tokio::select! {
             result = vm.launch(state, (&image, &current_kernel), &id, &resources, slot, &mut timing) => result,
@@ -512,14 +514,21 @@ impl Vm {
         let relay_stop = CancellationToken::new();
         let relay = auth_relay(listener, manager, relay_stop.clone());
         let socket = &self.socket;
+        let warmed = self.warmed;
         let operation = async {
             timing.next("imports");
-            if host::status(socket).await?.initialized {
+            let status = host::status(socket).await?;
+            if warmed && !status.codex_ready {
+                return Err(Error::unavailable(
+                    "Prepared Codex service is no longer ready.",
+                ));
+            }
+            if status.initialized {
                 refresh_imports(socket, plan).await?;
             } else {
                 import_workspace(socket, plan).await?;
             }
-            if plan.command().is_none() {
+            if plan.command().is_none() && !status.codex_ready {
                 timing.next("current_entrypoint");
                 let target = Path::new(ENTRYPOINT).parent().unwrap().to_str().unwrap();
                 host::import(socket, &state.join("entrypoint"), target).await?;
@@ -536,6 +545,56 @@ impl Vm {
         let _ = relay.await;
         let _ = tokio::fs::remove_file(relay_path).await;
         result
+    }
+
+    /// Warm only an anonymous local disk. A live native process must never be
+    /// initialized over a previous conversation or a borrowed storage grant.
+    /// Older guest images return false and remain eligible for the cold path.
+    pub async fn warm_codex(&mut self, state: &Path, stop: &CancellationToken) -> Result<bool> {
+        if self
+            .volume
+            .as_ref()
+            .unwrap()
+            .source
+            .authorization()?
+            .is_some()
+        {
+            return Err(Error::conflict("Only an anonymous VM can prewarm Codex."));
+        }
+        let status = host::status(&self.socket).await?;
+        if !status.codex_service {
+            return Ok(false);
+        }
+        if status.initialized {
+            return Err(Error::conflict("VM already contains a conversation."));
+        }
+        let mut timing = Operation::new("vm_codex_warm", self.id(), "clock");
+        self.synchronize_clock().await?;
+        timing.next("current_entrypoint");
+        let target = Path::new(ENTRYPOINT).parent().unwrap().to_str().unwrap();
+        host::import(&self.socket, &state.join("entrypoint"), target).await?;
+        // Any uncertain outcome retires this VM; execute cannot silently start
+        // a second native process over databases opened by the first one.
+        self.warmed = true;
+        timing.next("native_initialize");
+        let result = tokio::select! {
+            () = stop.cancelled() => Err(Error::unavailable("VM Codex warmup cancelled.")),
+            result = tokio::time::timeout(Duration::from_secs(65), call::<Reply>(&self.socket, &GuestRequest::WarmCodex)) => {
+                result.map_err(|_| Error::gateway_timeout("VM Codex warmup timed out."))?
+            },
+        }?;
+        if !result.succeeded() || !host::status(&self.socket).await?.codex_ready {
+            return Err(Error::unavailable("VM Codex warmup was not acknowledged."));
+        }
+        timing.finish();
+        Ok(true)
+    }
+
+    /// A speculative guest can be discarded on an uncertain probe, before any
+    /// account, conversation or remote grant has been assigned to it.
+    pub async fn codex_ready(&self) -> bool {
+        matches!(tokio::time::timeout(Duration::from_secs(1), host::status(&self.socket)).await,
+            Ok(Ok(status)) if status.codex_ready && !status.initialized)
     }
 }
 

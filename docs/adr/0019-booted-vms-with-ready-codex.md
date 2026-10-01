@@ -2,8 +2,8 @@
 
 Date : 2026-10-01.
 
-Statut : prototypes mesurés ; pool retenu comme prochain candidat à intégrer.
-Cette décision n'active pas encore de pool en production.
+Statut : pool et cache implémentés ; comparatifs authentifiés effectués en production.
+La qualification finale inclut le maintien de la VM anonyme et les timings WebSocket.
 
 ## Question et méthode
 
@@ -88,7 +88,165 @@ la saturation et l'éviction du pool ; vérifier les sauvegardes répétées, la
 après crash, l'isolement entre propriétaires et l'absence de redémarrage intempestif.
 Les essais présents valident le levier de démarrage, pas ce cycle de vie complet.
 
+## Première brique d'intégration : processus Codex résident
+
+Le candidat ajoute un service invité privé qui possède un Codex initialisé et
+exécute un seul tour à la fois via le même adaptateur Rust que le chemin froid.
+L'initialisation ne demande pas de compte. Chaque tour se connecte au broker du
+compte, puis libère cette authentification avant de confirmer sa fin. Une perte
+du client, un état inconnu ou une erreur retire le processus ; une initialisation
+interrompue attend également sa terminaison. Le contrôleur n'active pas encore
+ce service et ne conserve pas encore les VM : cette section décrit le candidat.
+
+La configuration MCP est fournie à chaque thread, avec le token courant du
+gateway. L'environnement du processus conservé ne porte pas un token de tour.
+Le service désabonne son thread après succès. Le [code de Codex 0.159.3](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/app-server/src/request_processors/thread_processor.rs)
+peut ignorer des overrides sur un thread chargé et abonné ; un thread idle sans
+abonné est reconstruit lorsque la reprise apporte des overrides. Il faut donc
+tester cette reprise avec le vrai binaire, en changeant les accès.
+
+Le test reproductible `tests/fixtures/ready-codex.mjs LEO CODEX` utilise des
+homes temporaires, le vrai binaire 0.159.3 extrait de l'image v0.50.6, un modèle
+HTTP simulé et un MCP local. Il vérifie le même PID natif sur trois tours, le
+contexte, le changement du token et des outils MCP, puis leur suppression.
+L'arrêt du service doit récupérer le processus natif. Le modèle annoncé est
+`gpt-5.4`, dont les capacités d'outils sont connues du catalogue local embarqué ;
+aucun véritable modèle n'est interrogé.
+
+Sur l'hôte i9-14900K / noyau 7.2.6, hors VM et sans autre compilation, trois
+séries donnent les médianes suivantes avant la requête modèle : démarrage froid
+de l'adaptateur 151 ms, première attribution prête 57 ms, reprise 34 ms.
+Le binaire Rust est un build `dev` ; le cache de fichiers n'est pas évincé.
+« Froid » signifie ici un nouveau processus, pas un disque froid.
+Le préchauffage préalable prend 88 ms. Ces mesures isolent l'adaptateur ; elles
+ne se comparent pas directement aux 8,75–10,05 s du chemin de production complet.
+Les cinq tests ciblés supplémentaires couvrent aussi le rejet d'un tour
+concurrent, la perte du client, l'arrêt pendant l'initialisation et le cycle
+login/refresh/logout avec un broker synthétique. L'intégration du pool, ses
+limites, l'éviction et les sauvegardes de VM conservées restent à valider avant
+activation ou release.
+
+## Attribution du disque préchauffé
+
+Le candidat conserve les disques préchauffés dans `environments/<UUID>`.
+L'attribution réserve d'abord un pointeur dans `disks/<conversation>`, puis
+écrit le propriétaire permanent dans l'environnement. Une attribution
+interrompue empêche ainsi de réclamer un second disque pour la même conversation.
+Les fichiers et leurs répertoires sont
+synchronisés avant confirmation ; aucun journal ouvert n'est déplacé. Le chemin
+classique `disks/<conversation>` reste compatible pour les disques existants.
+
+Un verrou d'appartenance protège l'attribution et la résolution pendant le
+bootstrap, l'exécution et le teardown. Les mutations prennent également le
+verrou physique. Au redémarrage, après clôture des anciens VMM, le contrôleur
+termine une attribution interrompue et élimine uniquement les environnements
+sans propriétaire. Un conflit avec un autre propriétaire ou un disque existant
+arrête cette récupération sans supprimer les données. Une suppression conserve
+les inodes de verrou et les records d'appartenance : le disque ne retourne jamais
+dans le pool anonyme.
+
+Les sauvegardes, restaurations, reçus, quotas et caches résolvent ce même disque.
+Les tests couvrent les deux ordres de clôture des verrous, le crash entre les
+deux écritures, les conflits, les alias, la suppression et les sauvegardes sur
+un journal déjà ouvert. Cette étape prépare le cycle de vie du pool ; elle
+n'active pas encore le préchauffage et ne représente pas un gain de démarrage.
+
+Le disque anonyme est créé avec une base entièrement locale et sans grant S3.
+Sa source refuse les lectures distantes et la publication avant attribution.
+Après attribution durable, l'autorisation de la conversation est enregistrée
+dans le journal et synchronisée avant d'être attachée à la source ouverte.
+Les imports utilisateur ne peuvent commencer avant cette étape. La récupération
+d'une attribution interrompue avant l'autorisation suit également cette règle.
+Une source déjà autorisée conserve son grant : les reçus de publication et les
+pins de sa base montée restent liés à cette identité.
+
+Les tests vérifient la création réelle d'un ext4 local, le refus des bases
+distantes anonymes, la persistance de l'autorisation, les écritures avant et
+après attribution sur le même journal, la réouverture et l'annulation d'une
+lecture distante. Cela prépare le bootstrap du pool, encore non activé.
+
+### Cycle de vie du service dans l'invité
+
+Le protocole invité expose maintenant un préchauffage explicite et sa capacité,
+absente sur les anciennes images. Seule une VM sans conversation ni état Codex
+importé peut initialiser le service. Elle installe les schémas SQLite et la
+politique commune de stockage des credentials, sans compte, puis lance le vrai
+adaptateur sous UID 1000 avec un environnement fixe. La disponibilité repose
+sur un message borné envoyé après l'initialisation native, jamais sur la seule
+présence d'un socket. Le contrôleur règle l'horloge avant ce préchauffage.
+
+Les imports préservent les bases ouvertes et le binaire exécuté par le service.
+Les logs de l'adaptateur résident rejoignent uniquement le tour actif ; leur
+détachement annule aussi une émission bloquée et permet au tour de finir alors
+que Codex reste vivant. Une perte du service invalide la VM préparée : aucun
+second processus ne démarre silencieusement sur ses bases ouvertes. L'arrêt de
+l'invité ferme le service et attend ses processus ; un adaptateur qui ne répond
+plus entraîne l'arrêt de son groupe complet.
+
+Le test natif sans fournisseur dans la configuration initiale vérifie les
+overrides de modèle et de MCP par tour, leur renouvellement et leur suppression,
+la conservation du contexte et la fermeture du processus natif. Trois essais
+Firecracker réels avec le journal vhost, 7 vCPU et 35 840 MiB ont également
+conservé Codex disponible après attribution durable du disque et supprimé le
+socket du VMM après arrêt. Ces essais fonctionnels étaient concurrents aux
+tests backend : leurs durées ne constituent pas un comparatif de performances.
+Ils n'exercent pas encore l'admission du pool, une conversation authentifiée ou
+la publication S3. Les traces brutes restent hors du dépôt ; la qualification
+intégrée et ses assets accompagneront la release avec gain mesuré.
+
 ## Preuves et politique de livraison
+
+### Admission et premier comparatif intégré local
+
+Le contrôleur prépare au plus une VM anonyme dans ses slots et budgets existants.
+Elle est retirée après un changement de budget ou une pression de ressources.
+La rotation initiale à 60 s a été supprimée : elle créait un trou de disponibilité
+pendant le démarrage de la remplaçante sans répondre à une contrainte de sécurité.
+La VM est sans compte, utilisateur ou projet ; sa disponibilité native est vérifiée
+à l'attribution et tout changement de runtime arrête son contrôleur. Son nombre,
+sa mémoire et ses slots restent bornés. Une reprise utilise un autre slot libre
+et conserve cette VM prête ; elle l'évince seulement si la capacité ou la pression
+l'exige. Le contrôle de compatibilité et d'appartenance reste obligatoire avant usage.
+Le préchauffage requiert 2 Gio de marge. Une demande active annule la préparation
+et attend la fin réelle du VMM et du backend avant de reprendre son slot ; les
+sondes de santé n'attendent pas cette admission. L'arrêt du contrôleur vide aussi
+le pool. Une attribution partiellement persistée conserve toujours son disque.
+
+Seuls les nouveaux chats Codex avec le home géré standard et un disque neuf
+peuvent adopter ce service. Les reprises, les homes personnalisés et les autres
+exécutions gardent leur chemin à froid. Une VM anonyme n'est jamais réattribuée
+après usage. Un journal encore inspecté reste conservé lors de son retrait.
+`LEO_READY_VM_POOL=false` permet un contrôle à froid avec la même image.
+
+Un premier essai du chemin HTTP du runner, sur le vrai Firecracker/vhost et le
+vrai Codex 0.159.3, utilise des tokens de compte synthétiques, un modèle local et
+une commande réellement exécutée par Codex. Même image et cache d'image,
+7 CPU / 35 840 Mio par invité ; trois conversations neuves par variante :
+
+| Demande runner → premier appel modèle | Sans préchauffage | VM avec Codex prêt |
+| --- | ---: | ---: |
+| Médiane | 2,793 s | 1,673 s |
+| Minimum–maximum | 2,718–2,874 s | 1,565–4,525 s |
+
+Le gain médian observé est de 40 %. La série conserve son essai lent à 4,525 s :
+l'attribution et les imports y prennent 127 ms, le reste se situe dans le
+parcours natif avant le modèle. Ce contrôle local n'inclut ni le manager,
+ni les MCP métier, ni une authentification réelle, ni S3. Des appels de catalogue
+OpenAI rejetés restent possibles avec l'auth synthétique ; ce banc n'isole donc
+pas complètement le WAN. Il ne remplace pas
+la référence de production de 8,75–10,05 s et ne permet pas d'annoncer un nouveau
+temps en production. Les tests natifs vérifient aussi les skills ajoutés après
+préchauffage, les leases de compte par tour et le contexte entre tours.
+
+Les trois disques attribués ont ensuite été publiés vers l'origine immutable
+locale : 35–36 blocs distincts par disque, tous relus et vérifiés par leur hash.
+Un nouveau VMM à froid a repris chaque thread avec le même identifiant et son
+contexte. Cela vérifie le chemin de publication et de reprise après attribution,
+sans revendiquer un test du chiffrement S3 ou de la latence WAN.
+
+Les échantillons et le harnais restent hors du dépôt, en attendant les assets
+de la release qualifiée avec gain intégré. Aucune release supplémentaire n'est
+créée pour cette étape seule.
 
 Les [mesures vhost](https://github.com/leo91000/leo-agent-manager/releases/download/v0.50.6/ready-vm-vhost-2026-10-01.json),
 les [mesures snapshot](https://github.com/leo91000/leo-agent-manager/releases/download/v0.50.6/ready-vm-snapshot-2026-10-01.json)
@@ -102,6 +260,244 @@ Les huit anciens JSON de `docs/benchmarks` sont également déplacés dans les
 assets de v0.50.6, octets inchangés et SHA-256 vérifiés. Leur contenu conserve
 ses dates et périmètres historiques. Les liens documentaires pointent vers les
 assets ; aucun historique Git n'est réécrit.
+
+## Validation de charge et priorité avant release
+
+Le test intégré du candidat dure 308,66 s, avec 47 publications et 24 290
+écritures durables : p99 final 27,88 ms, maximum 817,29 ms, aucune erreur de
+lecture/écriture ni redémarrage intempestif. Les vérifications de réouverture,
+restauration différée, publication sous pression et reprise passent également.
+Ce banc local ne remplace pas la qualification S3 et crash de l'image de release.
+
+Un test dans le vrai Codex invité vérifie Cargo et les chemins Android depuis
+un shell sans profil. Il échoue avant correction et passe après partage de
+l'environnement des toolchains entre le lancement froid et le résident. Trois
+disques attribués sont publiés puis reprennent le même thread après reboot.
+
+Avant release, comparer les nouvelles conversations et reprises sur le parcours
+de production complet, avec et sans pool. Le `turn_started` natif est une borne
+de démarrage de tour, pas la preuve du premier appel réseau au modèle. L'écart
+avec un modèle et un compte simulés ne doit pas être attribué au manager par
+soustraction : mesurer chaque frontière, notamment préparation invitée, broker,
+MCP et appel modèle. Mesurer aussi fsync, petites écritures, git status et
+installation de dépendances sur un vrai dépôt contre un disque ext4 direct.
+
+Pour les reprises, envisager une conservation bornée de la VM et du Codex de la
+même conversation, sous le même propriétaire exclusif. Renouveler le compte et
+les droits à chaque tour ; évincer avant admission en cas de pression ou de
+configuration incompatible. Après éviction, préférer un nœud autorisé possédant
+déjà le journal et les blocs, sans bloquer une migration ou perdre la reprise
+depuis l'état publié. Cette stratégie n'est pas encore implémentée.
+
+### Première décomposition de production sans pool
+
+Deux tours réussis sur v0.50.6, le 1 octobre, donnent les bornes suivantes.
+Un seul échantillon par scénario : ce sont des traces diagnostiques, pas des
+percentiles ou un comparatif pool qualifié.
+
+| Phase | Nouvelle conversation | Reprise |
+| --- | ---: | ---: |
+| Envoi UI → démarrage du disque côté runner | ~356 ms | ~444 ms |
+| Préparation du disque | 1 843 ms | 20 ms |
+| Boot VM | 2 400 ms | 2 233 ms |
+| Préparation invitée et imports | 713 ms | 354 ms |
+| Run invité → début initialize Codex, poste encore à instrumenter | ~720 ms | ~735 ms |
+| initialize Codex | 947 ms | 1 557 ms |
+| login natif | 54 ms | 66 ms |
+| Création/reprise du thread | 443 ms | 298 ms |
+| Envoi UI → turn_started | 7 659 ms | 5 868 ms |
+
+Ces intervalles ne sont pas tous contigus ni additionnables : certains logs
+arrivent par lot, et les timestamps inter-processus dépendent des horloges.
+Le premier appel réseau au modèle n'était pas instrumenté dans cette image.
+L'attribution de ~6 s hors VM par différence avec le banc local n'est donc pas
+démontrée. Le disque et le boot représentent déjà 4,24 s à froid dans cette trace.
+Les nouvelles mesures séparent le toolkit invité, l'attente de tokens du broker
+et le transport natif. Comparer la même image en production, pool désactivé puis
+activé, avant de choisir le prochain poste à optimiser ou de releaser.
+
+La reprise reste sur le même nœud, grâce à l'affinité du checkpoint déjà présente.
+Elle lit néanmoins 37,75 Mo depuis l'origine, en neuf requêtes de blocs. La
+capture conserve en mémoire des blocs récemment lus ; cette mémoire n'est pas
+un cache inter-processus durable. Le journal publié est récupéré puis supprimé.
+Le contrôleur conserve déjà le cache RAM entre deux VM, mais les fichiers écrits
+et jamais lus lors du premier tour ne font pas partie de ce working set.
+La prochaine piste est donc la rétention bornée de la VM du même propriétaire,
+ou un cache disque borné des versions publiées récemment utilisées, plutôt que
+rajouter une affinité qui existe déjà. Un cache reste évictable et ne remplace
+jamais une publication distante vérifiée.
+
+### Comparatif authentifié du candidat en production
+
+Image `83c6ff6a1cce`, source `64dea73`, même runner, sans projet,
+modèle `gpt-6.1-sol` à raisonnement faible. Un couple neuf/reprise par variante :
+ces échantillons diagnostiquent les phases, ils ne constituent pas des percentiles.
+L'envoi UI est horodaté depuis le navigateur à l'appel de l'API ; aucun délai de
+clic ou de paint DOM n'est mesuré. Les horloges invitées sont synchronisées.
+
+| Phase | Neuf sans pool | Neuf avec pool | Reprise sans pool | Reprise avec pool |
+| --- | ---: | ---: | ---: | ---: |
+| API UI → début préparation manager | 336 ms | 408 ms | 2 404 ms | 4 411 ms |
+| Préparation disque + boot, côté runner | 4,239 s | 0,027 s | 2,699 s | 3,889 s |
+| Préparation invitée | 653 ms | 355 ms | 414 ms | 550 ms |
+| Toolkit invité | 565 ms | 610 ms | 495 ms | 761 ms |
+| Initialisation Codex | 913 ms | déjà prête | 6 297 ms | 2 354 ms |
+| Acquisition tokens broker | 10 ms | 1 ms | 3 ms | 2 ms |
+| Login natif | 60 ms | 52 ms | 53 ms | 52 ms |
+| Création/reprise thread | 464 ms | 452 ms | 632 ms | 2 229 ms |
+| API UI → notification tour commencé | 7,863 s | 3,059 s | 13,474 s | 14,786 s |
+| API UI → premier envoi WebSocket | 9,053 s | 3,790 s | 13,705 s | 15,801 s |
+| API UI → second envoi WebSocket | 10,350 s | 4,934 s | 14,941 s | 16,856 s |
+| API UI → réponse attendue | 15,397 s | 7,582 s | 17,901 s | 21,460 s |
+
+Le premier envoi est le préchauffage `generate=false`, le second l'inférence
+selon le [chemin natif épinglé](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/core/src/client.rs).
+Cette classification est déduite de ces tours réussis sans outils et des deux
+événements natifs ; l'exporter ne fournit pas de champ warmup. Les timestamps
+proviennent du timer d'envoi natif, pas de l'arrivée des lots OTLP. La génération
+part donc environ 5,42 s plus tôt dans cette paire neuve. Aucun gain du pool sur
+les reprises n'est établi. Les durées de réponse incluent le fournisseur.
+Les trois premiers essais utilisent le même compte ; la reprise avec pool a été
+sélectionnée sur un autre compte par le manager. Ce changement est un facteur de
+variation, pas un effet établi du pool.
+
+Le manager prépare workspace et runner en 103 + 56 ms sur le neuf sans pool.
+Les handlers MCP workspace observés prennent 0–18 ms, le catalogue natif modèles
+333 ms. Ces phases peuvent se recouvrir ; on ne les additionne pas aux RPC.
+Il n'y a pas de preuve de six secondes imputables au manager ou au broker.
+La migration de déploiement effaçait le réglage du pool : ce défaut est corrigé
+et testé pour les environnements Compose sous forme de mapping et de liste.
+Le premier échantillon supposé froid a été reclassé avec pool et exclu de la
+colonne sans pool ; le réglage effectif a ensuite été vérifié dans le runner.
+
+Le poste restant prioritaire est la reprise : 40 Mio/10 requêtes S3 et 6,80 s
+de fetch cumulés sans pool ; 32 Mio/8 requêtes et 4,59 s avec pool. Le cache RAM
+reste à 256 Mio, sans éviction, mais manque ces versions nouvellement publiées.
+Le candidat conserve désormais aussi les blocs reconstruits dans le cache disque
+immutable existant, soumis au quota et à la réserve du nœud. Il ne promeut pas
+les scans dans le cache RAM. Un cache plein ou indisponible n'empêche pas une
+sauvegarde ; la reprise vérifie les hashes et peut toujours retélécharger.
+La validation de ce changement en production reste à faire avant release.
+
+Pour les reprises, conserver ensuite une VM exclusivement pour son propriétaire
+pendant deux minutes, avec éviction LRU, priorité aux runs actifs et aux limites
+de mémoire, semble le prochain levier. Le slot reste occupé jusqu'au teardown.
+La sauvegarde reste active ; logout et renouvellement des accès sont obligatoires
+à chaque tour. Un changement de runtime, compte, droits ou configuration invalide
+la VM. Après éviction, conserver l'affinité checkpoint déjà présente et ce cache
+disque borné. Cette rétention de VM n'est pas implémentée dans la PR actuelle.
+
+Une attente supplémentaire précède la préparation du manager : 4,411 s dans la
+reprise avec pool. Durant la même fenêtre, les logs natifs du manager montrent
+trois lectures compte/quotas, deux en parallèle puis une troisième, entre
+16:24:24,219Z et 16:24:28,333Z. Ces logs ne sont pas attribués au run ; leur
+coïncidence et le chemin `Accounts::acquire → poll` identifient une piste précise.
+L'acquisition attendait systématiquement le rafraîchissement de tous les comptes
+arrivés à échéance, même avec un candidat disponible aux quotas encore valides.
+Le candidat vérifie maintenant les critères existants avant ce poll synchrone,
+puis refait la sélection sous verrou. Sans candidat, le rafraîchissement reste
+obligatoire ; aucune fenêtre de validité ni limite de slots n'est augmentée.
+Le polling de fond reste toutes les quinze secondes. Les phases
+`account_admission` mesurent cette frontière séparément du broker invité.
+Le test échoue avant correction avec un binaire natif indisponible et des quotas
+valides de 65 s ; il passe après, et refuse toujours des quotas expirés de 100 s.
+Les mesures suivantes exercent cette correction sur l'image qualifiée.
+
+### Cache et admission : deuxième série en production
+
+Source `ba72f13`, image `8c6fa18f8ccc`, même runner, modèle et protocole UI.
+Le réglage du pool est lu dans le conteneur après chaque remplacement. Trois
+conversations neuves et deux reprises avec pool activé, puis un couple sans pool :
+
+| Essai | Pool attribué | UI → tour commencé | UI → second envoi WS | Lectures S3 |
+| --- | --- | ---: | ---: | ---: |
+| Neuf, pool activé, 1 | oui | 4,850 s | 7,043 s | 0 |
+| Reprise, pool activé, 1 | non | 5,914 s | 10,069 s | 0 |
+| Neuf, pool activé, 2 | non, renouvellement | 8,982 s | 10,968 s | 0 |
+| Reprise, pool activé, 2 | non | 5,558 s | 7,518 s | 0 |
+| Neuf, pool activé, 3 | oui | 4,833 s | 7,327 s | 0 |
+| Neuf, pool désactivé | non | 7,773 s | 15,064 s | 0 |
+| Reprise, pool désactivé | non | 4,353 s | 6,073 s | 0 |
+
+Tous les tours donnent la réponse attendue. Le second couple avec pool utilise
+un autre compte ; les autres essais utilisent le même compte. Conserver le raté
+du pool dans la série : la VM précédente était prête à 17:26:21,423Z, elle expirait
+à 17:27:21,423Z, et le message est envoyé à 17:27:26,960Z pendant sa relève.
+Le correctif supprime cette expiration périodique ; son test prolongé reste à finir.
+
+Les trois reprises retrouvent 9, 11 et 5 blocs sur le cache disque, respectivement,
+avec zéro téléchargement S3. Leur initialisation Codex prend 760, 750 et 657 ms,
+contre 2,354–6,297 s dans la première série. La lecture distante cumulative de
+4,59–6,80 s disparaît ; le cache disque est la cause vérifiée de ces hits locaux.
+Les échantillons ne prouvent pas un percentile ni un gain constant de bout en bout.
+L'admission de compte prend 19–43 ms dans cinq essais, 309 ms au premier démarrage
+et 1 449 ms dans un autre : son verrou de préparation peut encore attendre un
+rafraîchissement de ce compte. Aucun de ces sept essais ne fait de refresh global
+synchrone ; cette variation reste distincte du broker invité.
+
+Pour la reprise à 5,914 s, les phases séquentielles connues sont : 527 ms jusqu'au
+manager, 60 ms de préparation manager, 64 ms de préparation runner, 42 ms de
+transition vers le nœud, 560 ms de préparation disque, 2 330 ms de boot, 472 ms
+de préparation invitée, 266 ms de toolkit, 760 ms d'initialisation native, 3 ms
+de broker, 83 ms de login, 435 ms de reprise thread, 16 ms de lecture de l'historique
+et 39 ms de `turn/start`. Le résidu est de 257 ms pour les transitions et la
+notification observée. Les handlers MCP workspace observés prennent 0–2 ms,
+mais ils sont inclus dans les opérations natives ; ce n'est pas la mesure de
+tout le démarrage du client MCP. Le pool inutilisé y était aussi retiré avant
+le boot ; le nouveau chemin évite ce teardown lorsque la capacité le permet.
+
+Après la notification, 229 ms séparent le premier envoi WS, puis 3 926 ms
+séparent les deux envois. Le chemin natif attend la réponse de préchauffage avant
+la génération ; ce delta peut aussi inclure le catalogue modèles et le travail
+local. Il ne mesure pas le RTT et ne doit pas être attribué entièrement au réseau.
+La nouvelle instrumentation conserve le timer de handshake et les spans natifs
+`websocket.warmup=true/false`. Les spans de setup mesurent la construction du
+stream, pas l'attente complète de sa réponse. Un modèle simulé avec handshake de
+150 ms retrouve 154–155 ms ; il distingue les phases explicites et conserve les
+tokens MCP, le contexte et le même processus sur trois tours. L'attribution
+détaillée en production attend cette dernière image. Le span natif
+`responses_websocket.stream_request` dure jusqu'à la fin du worker de réponse :
+il retrouve 301 ms de préchauffage et 1 502 ms de génération avec des délais
+imposés de 300 et 1 500 ms. Les phases natives `startup_prewarm_*` donnent aussi
+la capture des outils, la construction du prompt, l'attente complète du warmup
+et l'attente du tour sur ce travail de fond. Elles se chevauchent ; elles ne
+s'additionnent pas. Cette validation fonctionnelle conserve le contexte, les
+droits MCP renouvelés et le même processus ; ce n'est pas un gain en production.
+L'écart d'horloge hôte/nœud
+mesuré sur une connexion persistante est d'environ 2 ms, avec 16–17 ms de RTT.
+
+Sur l'image `ba72f13`, la charge dure 303,38 s : 47 publications, 25 221 écritures
+durables, p99 23,27 ms, maximum 128,04 ms et zéro redémarrage intempestif.
+Les contrôles d'outage, pression, réouverture, restauration et récupération mémoire
+passent. L'émulateur Intel API 34 AOSP démarre puis reprend dans deux VM réelles.
+Ces validations ne sont pas présentées comme des mesures WAN de sauvegarde.
+
+### Surcoût disque pendant l'exécution
+
+Le vrai dépôt Leo Agent Manager (846 fichiers suivis) est exécuté dans quatre
+VM avec la même image : journal, direct, direct, journal ; trois rounds par VM.
+Le disque direct ext4 est servi par virtio en Writeback avec flush invité. Le
+journal vhost garde ses acquittements durables. Boot, imports, préparation du
+dépôt et cache npm sont hors des intervalles mesurés. Le cache npm et le lock
+sont identiques : 650 entrées, dépendances de développement incluses, installation
+offline sans scripts de cycle de vie. Pas de compte, modèle, S3 ou réseau mesuré.
+
+| Opération | Journal | Disque direct |
+| --- | ---: | ---: |
+| fsync d'écritures de 4 Kio, médiane des p50 par round | 11,09 ms | 7,25 ms |
+| fdatasync, même agrégation | 3,53 ms | 3,59 ms |
+| Création, fsync fichier, rename, fsync répertoire | 18,46 ms | 14,34 ms |
+| git status après npm, même agrégation | 2,23 ms | 2,28 ms |
+| npm ci, médiane des six rounds | 2,55 s | 2,58 s |
+
+Le surcoût fsync est de 3,84 ms (~53 %), et celui des petits fichiers durables
+de 4,11 ms (~29 %). Les p99 fsync par round sont de 15,97–37,02 ms pour le
+journal et 8,44–14,49 ms en direct. Le maximum journal atteint 813,59 ms, contre
+39,49 ms en direct ; le premier npm journal prend 7,11 s. Ces essais lents restent
+dans les résultats. Ils demandent une attribution séparée de la contention hôte
+et des barrières de durabilité ; aucune absence de surcoût général n'est déduite
+des médianes proches de git/npm. Les tests de charge et de crash restent une
+qualification distincte. Les dumps et harnais volumineux restent hors dépôt.
 
 Pour ce chantier de performance, regrouper les changements : une nouvelle
 release exige un gain mesuré sur le chemin intégré, avec une image qualifiée.

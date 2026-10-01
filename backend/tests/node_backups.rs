@@ -2,7 +2,7 @@ use leo_agent_manager::{
     auth,
     config::id,
     nodes::{checkpoint, restore, snapshots},
-    storage::{Disk, LazyDisk, policy::Policy, remote::RemoteSource, runtime},
+    storage::{Disk, LazyDisk, environment, policy::Policy, remote::RemoteSource, runtime},
 };
 use serde_json::{Value, json};
 use std::{
@@ -410,14 +410,32 @@ async fn check_capture(
 async fn exercise_vm_control(case: ControlScenario) {
     let root = TempDir::new().unwrap();
     let (run, attempt, vm) = (id(), id(), id());
-    let disk = root.path().join("disks").join(&run);
+    let environment_id = id();
+    let disk = if matches!(case, ControlScenario::DemandCapture) {
+        root.path().join("environments").join(&environment_id)
+    } else {
+        root.path().join("disks").join(&run)
+    };
     std::fs::create_dir_all(&disk).unwrap();
+    let _physical = leo_agent_manager::file_lock::exclusive(&disk.join("lock"), "busy").unwrap();
     std::fs::write(
         root.path().join(format!("{attempt}.vm.json")),
         json!({ "vmId": vm }).to_string(),
     )
     .unwrap();
     create_lazy_disk(&disk, case.emergency());
+    let live = runtime::load(&disk).await.unwrap();
+    let _owner = if matches!(case, ControlScenario::DemandCapture) {
+        Some(
+            environment::assign(root.path(), &environment_id, &run)
+                .await
+                .unwrap(),
+        )
+    } else {
+        None
+    };
+    let resolved = environment::directory(root.path(), &run).unwrap();
+    assert!(Arc::ptr_eq(&live, &runtime::load(&resolved).await.unwrap()));
     std::fs::write(
         disk.join("runtime.json"),
         json!({"runtimeId":"fixture"}).to_string(),
@@ -517,5 +535,8 @@ async fn restore_does_not_replace_a_journal_still_in_use() {
     let restored = runtime::load(&directory).await.unwrap();
     restored.read_at(0, &mut bytes).unwrap();
     assert_eq!(bytes, [0; 3]);
-    assert_eq!(restored.source.grant_id(), auth::digest("new-grant"));
+    assert_eq!(
+        restored.source.grant_id().unwrap(),
+        auth::digest("new-grant")
+    );
 }

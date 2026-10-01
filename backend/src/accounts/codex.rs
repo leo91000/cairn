@@ -948,7 +948,10 @@ impl Client {
     }
 
     pub async fn login(&mut self, session: &mut Session) -> Result<()> {
+        let started = std::time::Instant::now();
         let mut tokens = self.tokens(false).await?;
+        tracing::info!(target: "leo_performance", operation = "account_broker", event = "tokens_ready",
+            elapsed_ms = started.elapsed().as_millis() as u64);
         tokens["type"] = "chatgptAuthTokens".into();
         let result = session.request("account/login/start", tokens).await?;
         if result["type"] != "chatgptAuthTokens" {

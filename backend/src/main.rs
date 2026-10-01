@@ -119,6 +119,25 @@ async fn entry(args: Vec<String>) -> Result<i32> {
             return leo_agent_manager::runner::client(runner, stop).await;
         }
         "chat" => return chat_command(args.get(1), stop).await,
+        "codex-service" => {
+            let config = Config::load()?;
+            let home =
+                std::env::var("CODEX_HOME").map_err(|_| Error::bad("Missing Codex home."))?;
+            let socket = arg(&args, 1, "Missing Codex service socket.")?;
+            leo_agent_manager::chat_process::resident::serve_with_ready(
+                &config,
+                Path::new(&home),
+                Path::new(socket),
+                stop,
+                || {
+                    let mut stdout = std::io::stdout().lock();
+                    std::io::Write::write_all(&mut stdout, b"{\"ready\":true}\n")?;
+                    std::io::Write::flush(&mut stdout)?;
+                    Ok(())
+                },
+            )
+            .await?;
+        }
         "runner-entry" => return runner_entry(stop).await,
         "serve" => serve(stop).await?,
         _ => {
@@ -167,11 +186,16 @@ async fn chat_command(binary: Option<&String>, stop: CancellationToken) -> Resul
 
 async fn runner_entry(stop: CancellationToken) -> Result<i32> {
     let plan: Value = serde_json::from_slice(&tokio::fs::read("/run/leo-plan.json").await?)?;
+    let prepared = std::time::Instant::now();
+    let run_id = leo_agent_manager::performance::identity(text(&plan, "runId"));
+    let attempt_id = leo_agent_manager::performance::identity(text(&plan, "id"));
     let mut env = leo_agent_manager::toolkit::environment(
         Path::new("/home/node"),
         std::env::vars().collect(),
     )
     .await?;
+    tracing::info!(target: "leo_performance", operation = "runner_entry", run_id, attempt_id,
+        phase = "toolkit", elapsed_ms = prepared.elapsed().as_millis() as u64);
     if let Some(token) = plan["mcpEnv"]["LEO_MCP_RUN_TOKEN"].as_str() {
         env.insert("LEO_MCP_RUN_TOKEN".into(), token.into());
     }
@@ -327,11 +351,18 @@ async fn chat(config: &Config, plan: Value, stop: CancellationToken) -> Result<i
     );
     let result = async {
         if plan["provider"] == "claude" {
-            leo_agent_manager::claude_process::run(config, plan, tx.clone(), stop).await
-        } else {
-            leo_agent_manager::chat_process::run(config, Path::new(&home), plan, tx.clone(), stop)
-                .await
+            return leo_agent_manager::claude_process::run(config, plan, tx.clone(), stop).await;
         }
+        if let Ok(socket) = std::env::var("LEO_CODEX_SERVICE") {
+            return leo_agent_manager::chat_process::resident::run(
+                Path::new(&socket),
+                plan,
+                tx.clone(),
+                stop,
+            )
+            .await;
+        }
+        leo_agent_manager::chat_process::run(config, Path::new(&home), plan, tx.clone(), stop).await
     }
     .instrument(span)
     .await;

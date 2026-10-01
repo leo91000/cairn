@@ -21,16 +21,17 @@ pub async fn capture(
     _baseline: Option<&str>,
 ) -> Result<Value> {
     crate::validation::uuid(run)?;
-    let disk = state.join("disks").join(run);
+    let disk = crate::storage::environment::directory(state, run)?;
     let _capture = crate::file_lock::exclusive(
         &disk.join("snapshot.lock"),
         "A snapshot is already in progress.",
     )?;
     // Without a running VM to pause, the disk must not be in use at all.
-    let _stopped = socket
-        .is_none()
-        .then(|| crate::file_lock::exclusive(&disk.join("lock"), "VM disk is still active."))
-        .transpose()?;
+    let _stopped = if socket.is_none() {
+        Some(crate::storage::environment::lock(state, run, "VM disk is still active.").await?)
+    } else {
+        None
+    };
     if !crate::storage::runtime::exists(&disk) {
         return Err(Error::conflict("Conversation has no S3-backed journal."));
     }
