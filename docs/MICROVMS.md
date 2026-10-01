@@ -28,7 +28,10 @@ ownership and storage authorization. Existing disks, threads, custom Codex homes
 other providers and command plans use the ordinary cold path. Preparation yields
 to live admission; its physical slot is released only after teardown. Spare RAM
 is included in node usage, preparation requires 2 GiB of headroom, and a spare
-expires after 60 seconds or a budget change. `/health` reports `ready` and
+is evicted under resource pressure or a budget change. Anonymous readiness has
+no periodic expiration: retiring a healthy spare would create a cold-start gap
+while its replacement boots. The controller checks native readiness at claim
+and retires all spares on shutdown or runtime replacement. `/health` reports `ready` and
 `preparing` within occupied slots. See [the measured comparison](adr/0019-booted-vms-with-ready-codex.md).
 
 Reservations release their slot after teardown, including abandoned HTTP requests.

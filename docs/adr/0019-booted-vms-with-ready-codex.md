@@ -2,8 +2,8 @@
 
 Date : 2026-10-01.
 
-Statut : prototypes mesurés ; admission du pool implémentée et qualification en cours.
-Cette décision n'active pas encore de pool en production.
+Statut : pool et cache implémentés ; comparatifs authentifiés effectués en production.
+La qualification finale inclut le maintien de la VM anonyme et les timings WebSocket.
 
 ## Question et méthode
 
@@ -199,7 +199,14 @@ intégrée et ses assets accompagneront la release avec gain mesuré.
 ### Admission et premier comparatif intégré local
 
 Le contrôleur prépare au plus une VM anonyme dans ses slots et budgets existants.
-Elle expire après 60 s, un changement de budget ou une pression de ressources.
+Elle est retirée après un changement de budget ou une pression de ressources.
+La rotation initiale à 60 s a été supprimée : elle créait un trou de disponibilité
+pendant le démarrage de la remplaçante sans répondre à une contrainte de sécurité.
+La VM est sans compte, utilisateur ou projet ; sa disponibilité native est vérifiée
+à l'attribution et tout changement de runtime arrête son contrôleur. Son nombre,
+sa mémoire et ses slots restent bornés. Une reprise utilise un autre slot libre
+et conserve cette VM prête ; elle l'évince seulement si la capacité ou la pression
+l'exige. Le contrôle de compatibilité et d'appartenance reste obligatoire avant usage.
 Le préchauffage requiert 2 Gio de marge. Une demande active annule la préparation
 et attend la fin réelle du VMM et du backend avant de reprendre son slot ; les
 sondes de santé n'attendent pas cette admission. L'arrêt du contrôleur vide aussi
@@ -322,7 +329,7 @@ jamais une publication distante vérifiée.
 
 ### Comparatif authentifié du candidat en production
 
-Image `83c6ff6a1cce`, source `64dea73`, même runner et compte, sans projet,
+Image `83c6ff6a1cce`, source `64dea73`, même runner, sans projet,
 modèle `gpt-6.1-sol` à raisonnement faible. Un couple neuf/reprise par variante :
 ces échantillons diagnostiquent les phases, ils ne constituent pas des percentiles.
 L'envoi UI est horodaté depuis le navigateur à l'appel de l'API ; aucun délai de
@@ -330,7 +337,7 @@ clic ou de paint DOM n'est mesuré. Les horloges invitées sont synchronisées.
 
 | Phase | Neuf sans pool | Neuf avec pool | Reprise sans pool | Reprise avec pool |
 | --- | ---: | ---: | ---: | ---: |
-| API UI → début préparation manager | 336 ms | 429 ms | 1 467 ms | 4 411 ms |
+| API UI → début préparation manager | 336 ms | 408 ms | 2 404 ms | 4 411 ms |
 | Préparation disque + boot, côté runner | 4,239 s | 0,027 s | 2,699 s | 3,889 s |
 | Préparation invitée | 653 ms | 355 ms | 414 ms | 550 ms |
 | Toolkit invité | 565 ms | 610 ms | 495 ms | 761 ms |
@@ -350,6 +357,9 @@ Cette classification est déduite de ces tours réussis sans outils et des deux
 proviennent du timer d'envoi natif, pas de l'arrivée des lots OTLP. La génération
 part donc environ 5,42 s plus tôt dans cette paire neuve. Aucun gain du pool sur
 les reprises n'est établi. Les durées de réponse incluent le fournisseur.
+Les trois premiers essais utilisent le même compte ; la reprise avec pool a été
+sélectionnée sur un autre compte par le manager. Ce changement est un facteur de
+variation, pas un effet établi du pool.
 
 Le manager prépare workspace et runner en 103 + 56 ms sur le neuf sans pool.
 Les handlers MCP workspace observés prennent 0–18 ms, le catalogue natif modèles
@@ -391,7 +401,68 @@ Le polling de fond reste toutes les quinze secondes. Les phases
 `account_admission` mesurent cette frontière séparément du broker invité.
 Le test échoue avant correction avec un binaire natif indisponible et des quotas
 valides de 65 s ; il passe après, et refuse toujours des quotas expirés de 100 s.
-Le gain en production de cette correction reste à mesurer sur l'image qualifiée.
+Les mesures suivantes exercent cette correction sur l'image qualifiée.
+
+### Cache et admission : deuxième série en production
+
+Source `ba72f13`, image `8c6fa18f8ccc`, même runner, modèle et protocole UI.
+Le réglage du pool est lu dans le conteneur après chaque remplacement. Trois
+conversations neuves et deux reprises avec pool activé, puis un couple sans pool :
+
+| Essai | Pool attribué | UI → tour commencé | UI → second envoi WS | Lectures S3 |
+| --- | --- | ---: | ---: | ---: |
+| Neuf, pool activé, 1 | oui | 4,850 s | 7,043 s | 0 |
+| Reprise, pool activé, 1 | non | 5,914 s | 10,069 s | 0 |
+| Neuf, pool activé, 2 | non, renouvellement | 8,982 s | 10,968 s | 0 |
+| Reprise, pool activé, 2 | non | 5,558 s | 7,518 s | 0 |
+| Neuf, pool activé, 3 | oui | 4,833 s | 7,327 s | 0 |
+| Neuf, pool désactivé | non | 7,773 s | 15,064 s | 0 |
+| Reprise, pool désactivé | non | 4,353 s | 6,073 s | 0 |
+
+Tous les tours donnent la réponse attendue. Le second couple avec pool utilise
+un autre compte ; les autres essais utilisent le même compte. Conserver le raté
+du pool dans la série : la VM précédente était prête à 17:26:21,423Z, elle expirait
+à 17:27:21,423Z, et le message est envoyé à 17:27:26,960Z pendant sa relève.
+Le correctif supprime cette expiration périodique ; son test prolongé reste à finir.
+
+Les trois reprises retrouvent 9, 11 et 5 blocs sur le cache disque, respectivement,
+avec zéro téléchargement S3. Leur initialisation Codex prend 760, 750 et 657 ms,
+contre 2,354–6,297 s dans la première série. La lecture distante cumulative de
+4,59–6,80 s disparaît ; le cache disque est la cause vérifiée de ces hits locaux.
+Les échantillons ne prouvent pas un percentile ni un gain constant de bout en bout.
+L'admission de compte prend 19–43 ms dans cinq essais, 309 ms au premier démarrage
+et 1 449 ms dans un autre : son verrou de préparation peut encore attendre un
+rafraîchissement de ce compte. Aucun de ces sept essais ne fait de refresh global
+synchrone ; cette variation reste distincte du broker invité.
+
+Pour la reprise à 5,914 s, les phases séquentielles connues sont : 527 ms jusqu'au
+manager, 60 ms de préparation manager, 64 ms de préparation runner, 42 ms de
+transition vers le nœud, 560 ms de préparation disque, 2 330 ms de boot, 472 ms
+de préparation invitée, 266 ms de toolkit, 760 ms d'initialisation native, 3 ms
+de broker, 83 ms de login, 435 ms de reprise thread, 16 ms de lecture de l'historique
+et 39 ms de `turn/start`. Le résidu est de 257 ms pour les transitions et la
+notification observée. Les handlers MCP workspace observés prennent 0–2 ms,
+mais ils sont inclus dans les opérations natives ; ce n'est pas la mesure de
+tout le démarrage du client MCP. Le pool inutilisé y était aussi retiré avant
+le boot ; le nouveau chemin évite ce teardown lorsque la capacité le permet.
+
+Après la notification, 229 ms séparent le premier envoi WS, puis 3 926 ms
+séparent les deux envois. Le chemin natif attend la réponse de préchauffage avant
+la génération ; ce delta peut aussi inclure le catalogue modèles et le travail
+local. Il ne mesure pas le RTT et ne doit pas être attribué entièrement au réseau.
+La nouvelle instrumentation conserve le timer de handshake et les spans natifs
+`websocket.warmup=true/false`. Les spans de setup mesurent la construction du
+stream, pas l'attente complète de sa réponse. Un modèle simulé avec handshake de
+150 ms retrouve 154–155 ms ; il distingue les phases explicites et conserve les
+tokens MCP, le contexte et le même processus sur trois tours. L'attribution
+détaillée en production attend cette dernière image. L'écart d'horloge hôte/nœud
+mesuré sur une connexion persistante est d'environ 2 ms, avec 16–17 ms de RTT.
+
+Sur l'image `ba72f13`, la charge dure 303,38 s : 47 publications, 25 221 écritures
+durables, p99 23,27 ms, maximum 128,04 ms et zéro redémarrage intempestif.
+Les contrôles d'outage, pression, réouverture, restauration et récupération mémoire
+passent. L'émulateur Intel API 34 AOSP démarre puis reprend dans deux VM réelles.
+Ces validations ne sont pas présentées comme des mesures WAN de sauvegarde.
 
 ### Surcoût disque pendant l'exécution
 

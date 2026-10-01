@@ -38,8 +38,12 @@ struct Preparing {
 }
 
 impl Slots {
+    fn available(&self, capacity: usize) -> bool {
+        self.occupied.iter().filter(|used| **used).count() < capacity
+    }
+
     fn reserve(&mut self, capacity: usize) -> Option<usize> {
-        if self.occupied.iter().filter(|used| **used).count() >= capacity {
+        if !self.available(capacity) {
             return None;
         }
         let index = match self.occupied.iter().position(|v| !v) {
@@ -278,7 +282,7 @@ impl Pool {
         }
     }
 
-    pub async fn reserve(self: &Arc<Self>, _run_id: &str) -> Result<Reservation> {
+    pub async fn reserve(self: &Arc<Self>, plan: &Plan) -> Result<Reservation> {
         let _admission = self.admission.lock().await;
         if self.stop.is_cancelled() {
             return Err(Error::unavailable("VM controller is stopping."));
@@ -286,12 +290,30 @@ impl Pool {
         // A live request preempts background preparation, but never reuses its
         // physical slot until its VMM and backend have both stopped.
         self.cancel_preparing().await;
-        let prepared = self.slots.lock().await.ready.take();
-        if let Some(mut reservation) = prepared {
-            if self.usage().await?.1.is_none() {
-                return Ok(reservation);
+        let has_ready = self.slots.lock().await.ready.is_some();
+        let disk_mib = plan.as_value()["resources"]["diskMiB"]
+            .as_u64()
+            .unwrap_or(DEFAULT_DISK_MIB);
+        let can_claim = has_ready
+            && disk_mib == DEFAULT_DISK_MIB
+            && ready::eligible(plan).await?
+            && ready::fresh_disk(&self.state, plan.run_id()).await?;
+        if can_claim {
+            let prepared = self.slots.lock().await.ready.take();
+            if let Some(mut reservation) = prepared {
+                if self.usage().await?.1.is_none() {
+                    return Ok(reservation);
+                }
+                reservation.finish().await;
             }
-            reservation.finish().await;
+        }
+        // Resumes and custom plans cannot use anonymous native state. Keep the
+        // healthy spare when another slot is available, rather than making
+        // these runs wait for its teardown and another background warmup.
+        let capacity = self.capacity.load(Ordering::SeqCst);
+        let spare_slot_needed = !self.slots.lock().await.available(capacity);
+        if self.usage().await?.1.is_some() || spare_slot_needed {
+            self.retire_idle().await;
         }
         if self.usage().await?.1.is_some() {
             return Err(Error::unavailable(
@@ -355,7 +377,7 @@ impl Pool {
         };
         let (usage, pressure) = self.usage().await?;
         let memory = usage["memoryMiB"].as_u64().unwrap_or(u64::MAX);
-        let expired = self
+        let incompatible = self
             .slots
             .lock()
             .await
@@ -368,7 +390,7 @@ impl Pool {
                     .unwrap()
                     .compatible(&budget, DEFAULT_DISK_MIB)
             });
-        if expired || pressure.is_some() || memory > budget.limits.memory_mi_b * 75 / 100 {
+        if incompatible || pressure.is_some() || memory > budget.limits.memory_mi_b * 75 / 100 {
             self.retire_idle().await;
             return Ok(());
         }
@@ -460,10 +482,7 @@ impl Reservation {
         {
             let mut slots = pool.slots.lock().await;
             if matches!(operation, Ok(true)) && !stop.is_cancelled() && !pool.stop.is_cancelled() {
-                self.prepared = Some(ready::Prepared {
-                    budget,
-                    created: Instant::now(),
-                });
+                self.prepared = Some(ready::Prepared { budget });
                 let completion = self.completion.take().unwrap();
                 slots.preparing = None;
                 slots.ready = Some(self);
@@ -668,6 +687,10 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    fn cold_plan(run: &str) -> Plan {
+        Plan::new(serde_json::json!({ "runId": run }))
+    }
+
     #[tokio::test]
     async fn anonymous_retirement_preserves_an_open_replacement() {
         let directory = tempfile::tempdir().unwrap().keep();
@@ -692,7 +715,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut preparing = pool.reserve("anonymous").await.unwrap();
+        let mut preparing = pool.reserve(&cold_plan("anonymous")).await.unwrap();
         let stop = CancellationToken::new();
         let (completion, done) = watch::channel(false);
         preparing.completion = Some(completion);
@@ -710,7 +733,7 @@ mod tests {
             drop(preparing);
         });
         let controller = pool.clone();
-        let admission = tokio::spawn(async move { controller.reserve("live").await });
+        let admission = tokio::spawn(async move { controller.reserve(&cold_plan("live")).await });
         tokio::time::timeout(Duration::from_secs(1), stop.cancelled())
             .await
             .unwrap();
@@ -749,6 +772,48 @@ mod tests {
         slots.occupied[1] = false;
         assert_eq!(slots.reserve(2), Some(1));
         assert_eq!(slots.reserve(2), None);
+    }
+
+    #[tokio::test]
+    async fn cold_work_keeps_a_ready_spare_unless_it_needs_the_slot() {
+        let root = tempfile::tempdir().unwrap();
+        let pool = Pool::new(
+            root.path().into(),
+            root.path().into(),
+            CancellationToken::new(),
+            2,
+        )
+        .await
+        .unwrap();
+        let mut spare = pool.reserve(&cold_plan("anonymous")).await.unwrap();
+        spare.prepared = Some(ready::Prepared {
+            budget: Budget {
+                slots: 2,
+                limits: crate::nodes::Resources {
+                    cpu: 3,
+                    memory_mi_b: 6144,
+                    disk_mi_b: 32768,
+                },
+            },
+        });
+        pool.slots.lock().await.ready = Some(spare);
+
+        let resume = Plan::new(
+            serde_json::json!({ "runId": "resumed", "chat": { "provider": "codex", "sessionId": "existing-thread" } }),
+        );
+        let resumed = pool.reserve(&resume).await.unwrap();
+        assert_eq!(resumed.slot, 2);
+        assert_eq!(pool.health().await.ready, 1);
+        assert_eq!(pool.health().await.occupied, 2);
+
+        // Active work wins when the anonymous slot is the only capacity left.
+        let other = pool.reserve(&cold_plan("other")).await.unwrap();
+        assert_eq!(other.slot, 1);
+        assert_eq!(pool.health().await.ready, 0);
+        assert_eq!(pool.health().await.occupied, 2);
+        drop((resumed, other));
+        pool.drain().await;
+        assert_eq!(pool.health().await.occupied, 0);
     }
 
     #[tokio::test]
@@ -859,7 +924,7 @@ mod tests {
         .await
         .unwrap();
         let stop = CancellationToken::new();
-        let reservation = pool.reserve("run").await.unwrap();
+        let reservation = pool.reserve(&cold_plan("run")).await.unwrap();
 
         // Rejecting an invalid plan reaches the same completion/cleanup path as
         // a guest returning its exit status, without requiring KVM in this test.
@@ -887,10 +952,10 @@ mod tests {
         let mut reservations = Vec::new();
         assert_eq!(pool.health().await.capacity, 12);
         for _ in 0..12 {
-            reservations.push(pool.reserve("run").await.unwrap());
+            reservations.push(pool.reserve(&cold_plan("run")).await.unwrap());
         }
         assert_eq!(pool.health().await.occupied, 12);
-        assert!(pool.reserve("run").await.is_err());
+        assert!(pool.reserve(&cold_plan("run")).await.is_err());
         drop(reservations.pop());
         tokio::time::timeout(Duration::from_secs(1), async {
             while pool.health().await.occupied == 12 {
@@ -899,10 +964,10 @@ mod tests {
         })
         .await
         .unwrap();
-        reservations.push(pool.reserve("run").await.unwrap());
+        reservations.push(pool.reserve(&cold_plan("run")).await.unwrap());
         assert_eq!(pool.health().await.occupied, 12);
         stop.cancel();
-        assert!(pool.reserve("run").await.is_err());
+        assert!(pool.reserve(&cold_plan("run")).await.is_err());
         drop(reservations);
         pool.drain().await;
         assert_eq!(pool.health().await.occupied, 0);
@@ -922,7 +987,7 @@ mod tests {
         assert!(pool.slots.lock().await.occupied.is_empty());
         let mut reservations = Vec::new();
         for slot in 1..=300 {
-            let reservation = pool.reserve("run").await.unwrap();
+            let reservation = pool.reserve(&cold_plan("run")).await.unwrap();
             assert_eq!(reservation.slot, slot);
             reservations.push(reservation);
         }

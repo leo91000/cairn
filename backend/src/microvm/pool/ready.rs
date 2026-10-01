@@ -1,25 +1,17 @@
 //! Eligibility and lifetime of an account-free, single-use prepared VM.
 use super::{Budget, Plan};
 use crate::{error::Result, microvm::plan::HOME, provider::Provider};
-use std::{
-    os::unix::fs::FileTypeExt,
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::{os::unix::fs::FileTypeExt, path::Path};
 
-pub(super) const TTL: Duration = Duration::from_secs(60);
 pub(super) const WARM_HEADROOM_MIB: u64 = 2048;
 
 pub(super) struct Prepared {
     pub budget: Budget,
-    pub created: Instant,
 }
 
 impl Prepared {
     pub fn compatible(&self, budget: &Budget, disk_mib: u64) -> bool {
-        self.budget == *budget
-            && disk_mib == super::DEFAULT_DISK_MIB
-            && self.created.elapsed() < TTL
+        self.budget == *budget && disk_mib == super::DEFAULT_DISK_MIB
     }
 }
 
@@ -98,7 +90,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn prepared_hardware_and_expiration_must_match_the_claim() {
+    fn prepared_hardware_must_match_the_claim() {
         let budget = Budget {
             slots: 2,
             limits: crate::nodes::Resources {
@@ -107,17 +99,14 @@ mod tests {
                 disk_mi_b: 65536,
             },
         };
-        let mut prepared = Prepared {
+        let prepared = Prepared {
             budget: budget.clone(),
-            created: Instant::now(),
         };
         assert!(prepared.compatible(&budget, super::super::DEFAULT_DISK_MIB));
         let mut changed = budget.clone();
         changed.limits.cpu = 2;
         assert!(!prepared.compatible(&changed, super::super::DEFAULT_DISK_MIB));
         assert!(!prepared.compatible(&budget, 512));
-        prepared.created = Instant::now() - TTL;
-        assert!(!prepared.compatible(&budget, super::super::DEFAULT_DISK_MIB));
     }
 
     #[tokio::test]

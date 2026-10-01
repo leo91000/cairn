@@ -17,6 +17,7 @@ impl Collector {
         let endpoint = format!("http://{}/v1/logs", listener.local_addr()?);
         let application = Router::new()
             .route("/v1/logs", post(receive))
+            .route("/v1/traces", post(receive))
             .layer(DefaultBodyLimit::max(2 * 1024 * 1024));
         let task = tokio::spawn(
             async move {
@@ -53,7 +54,7 @@ fn local_endpoint(endpoint: &str) -> bool {
         && url.fragment().is_none()
 }
 
-pub(crate) fn arguments(endpoint: &str) -> [String; 4] {
+pub(crate) fn arguments(endpoint: &str) -> [String; 6] {
     [
         "-c".into(),
         "otel.log_user_prompt=false".into(),
@@ -61,6 +62,11 @@ pub(crate) fn arguments(endpoint: &str) -> [String; 4] {
         format!(
             "otel.exporter={{otlp-http={{endpoint=\"{}\",protocol=\"json\"}}}}",
             endpoint
+        ),
+        "-c".into(),
+        format!(
+            "otel.trace_exporter={{otlp-http={{endpoint=\"{}\",protocol=\"json\"}}}}",
+            endpoint.replace("/v1/logs", "/v1/traces")
         ),
     ]
 }
@@ -82,6 +88,17 @@ async fn receive(bytes: Bytes) -> std::result::Result<Json<Value>, StatusCode> {
             for record in array(scope, "logRecords") {
                 records += 1;
                 if let Some(timing) = Timing::parse(record) {
+                    timings += 1;
+                    timing.record();
+                }
+            }
+        }
+    }
+    for resource in array(&document, "resourceSpans") {
+        for scope in array(resource, "scopeSpans") {
+            for span in array(scope, "spans") {
+                records += 1;
+                if let Some(timing) = Timing::parse_span(span) {
                     timings += 1;
                     timing.record();
                 }
@@ -137,6 +154,7 @@ impl<'a> Timing<'a> {
         let event = match text(record, "event.name")? {
             "codex.api_request" => "http_request",
             "codex.websocket_request" | "codex.websocket.request" => "websocket_request",
+            "codex.websocket_connect" => "websocket_connect",
             "codex.startup_phase" => match text(record, "startup.phase")? {
                 "thread_start_create_thread" => "thread_create",
                 "thread_start_total" => "thread_start",
@@ -162,6 +180,33 @@ impl<'a> Timing<'a> {
             completed_at_ms,
             duration_ms,
             status,
+        })
+    }
+
+    fn parse_span(span: &'a Value) -> Option<Self> {
+        let event = match span["name"].as_str()? {
+            "model_client.stream_responses_websocket" => {
+                match attribute(span, "websocket.warmup")?["boolValue"].as_bool()? {
+                    true => "websocket_warmup_setup",
+                    false => "websocket_inference_setup",
+                }
+            }
+            "model_client.websocket_connection" => "websocket_connection",
+            _ => return None,
+        };
+        let started_at_ms = milliseconds(&span["startTimeUnixNano"])?;
+        let completed_at_ms = milliseconds(&span["endTimeUnixNano"])?;
+        let duration_ms = completed_at_ms.checked_sub(started_at_ms)?;
+        if duration_ms > 3_600_000 {
+            return None;
+        }
+        Some(Self {
+            event,
+            endpoint: "responses",
+            thread: crate::performance::identity(text(span, "conversation.id").unwrap_or("")),
+            completed_at_ms,
+            duration_ms: duration_ms as f64,
+            status: None,
         })
     }
 
@@ -278,5 +323,33 @@ mod tests {
             });
             assert!(Timing::parse(&record).is_none());
         }
+    }
+
+    #[test]
+    fn websocket_spans_distinguish_warmup_without_exporting_attributes() {
+        let mut span = json!({
+            "name": "model_client.stream_responses_websocket",
+            "startTimeUnixNano": "1790865467000000000",
+            "endTimeUnixNano": "1790865467300000000",
+            "attributes": [
+                {"key":"websocket.warmup","value":{"boolValue":true}},
+                {"key":"prompt","value":{"stringValue":"private prompt"}},
+                {"key":"api.path","value":{"stringValue":"https://private.invalid/?token=private"}}
+            ]
+        });
+        let timing = Timing::parse_span(&span).unwrap();
+        assert_eq!(timing.event, "websocket_warmup_setup");
+        assert_eq!(timing.duration_ms, 300.0);
+        assert_eq!(timing.endpoint, "responses");
+        assert_eq!(timing.thread, "unknown");
+        span["attributes"][0]["value"]["boolValue"] = false.into();
+        assert_eq!(
+            Timing::parse_span(&span).unwrap().event,
+            "websocket_inference_setup"
+        );
+        span["endTimeUnixNano"] = "1790865466000000000".into();
+        assert!(Timing::parse_span(&span).is_none());
+        span["name"] = "private_tool_call".into();
+        assert!(Timing::parse_span(&span).is_none());
     }
 }

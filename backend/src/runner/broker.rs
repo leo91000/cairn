@@ -209,7 +209,7 @@ impl Broker {
                 "This workspace already has an active attempt.",
             ));
         }
-        let reservation = self.pool.reserve(plan.run_id()).await?;
+        let reservation = self.pool.reserve(&plan).await?;
         // Reservation can wait for preparation teardown. Keep health, stop and imports responsive.
         let mut active = self.active.lock().await;
         if active.contains_key(id) {
