@@ -1,5 +1,5 @@
 //! Demand-paged immutable base with a durable local write journal.
-use super::Disk;
+use super::{Disk, DiskWrite};
 use rusqlite::{Connection, params};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -35,6 +35,10 @@ pub struct LazyDisk {
     size: u64,
     db: Mutex<Connection>,
     journal: Mutex<journal::Journal>,
+    commit: Mutex<()>,
+    write_gate: RwLock<()>,
+    #[cfg(test)]
+    commit_failure: std::sync::atomic::AtomicBool,
     accounting: Mutex<Value>,
     dirty_since: AtomicI64,
     base: Mutex<Arc<Value>>,
@@ -103,6 +107,10 @@ fn validate(manifest: &Value) -> io::Result<u64> {
 }
 
 impl LazyDisk {
+    pub(crate) fn start_write_admission(&self) -> super::metrics::Sample<'_> {
+        self.metrics.write_admission.start()
+    }
+
     fn identity(directory: &Path) -> &str {
         directory
             .parent()
@@ -192,6 +200,10 @@ impl LazyDisk {
             size,
             db: Mutex::new(db),
             journal: Mutex::new(journal),
+            commit: Mutex::new(()),
+            write_gate: RwLock::new(()),
+            #[cfg(test)]
+            commit_failure: std::sync::atomic::AtomicBool::new(false),
             accounting: Mutex::new(accounting),
             dirty_since: AtomicI64::new(dirty_since),
             base: Mutex::new(Arc::new(manifest)),
@@ -518,6 +530,88 @@ mod journal;
 mod memory;
 mod state;
 
+impl LazyDisk {
+    fn append_writes(&self, writes: &[DiskWrite<'_>]) -> io::Result<()> {
+        if writes.len() > 128 {
+            return Err(failure("Too many disk writes in one batch"));
+        }
+        let mut total = 0usize;
+        for write in writes {
+            self.check(write.offset, write.bytes.len())?;
+            total = total
+                .checked_add(write.bytes.len())
+                .filter(|total| *total <= MAX_IO)
+                .ok_or_else(|| failure("Disk write batch exceeds its byte limit"))?;
+        }
+        if total == 0 {
+            return Ok(());
+        }
+        let _write = self.write_gate.read().map_err(failure)?;
+        let _publication = self.publication.read().map_err(failure)?;
+        let mut journal = self.journal.lock().map_err(failure)?;
+        let mut last = None;
+        for write in writes {
+            if write.bytes.is_empty() {
+                continue;
+            }
+            match journal.append(&self.directory, &self.db, write.offset, write.bytes) {
+                Ok(sequence) => last = Some(sequence),
+                Err(error) => {
+                    journal.fail();
+                    return Err(error);
+                }
+            }
+        }
+        if let Err(error) = self.update_accounting(&journal) {
+            journal.fail();
+            return Err(error);
+        }
+        drop(journal);
+        self.commit_write(last.expect("nonempty batch has a sequence"))
+    }
+
+    fn commit_write(&self, sequence: i64) -> io::Result<()> {
+        // One caller syncs a captured prefix while other callers stage frames.
+        // The next owner includes all frames that accumulated during that sync.
+        // No timer, worker thread or separate queue is needed.
+        let _commit = self.commit.lock().map_err(failure)?;
+        let batch = self
+            .journal
+            .lock()
+            .map_err(failure)?
+            .commit_batch(sequence)?;
+        let Some(batch) = batch else {
+            return Ok(());
+        };
+        let sample = self.metrics.journal_commits.start();
+        #[cfg(test)]
+        journal::crash_point(&self.directory, "before_group_sync");
+        #[cfg(test)]
+        let sync = if self.commit_failure.load(Ordering::Relaxed) {
+            Err(failure("Injected journal sync failure"))
+        } else {
+            batch.sync()
+        };
+        #[cfg(not(test))]
+        let sync = batch.sync();
+        if let Err(error) = sync {
+            self.journal.lock().map_err(failure)?.fail();
+            return Err(error);
+        }
+        #[cfg(test)]
+        journal::crash_point(&self.directory, "after_group_sync");
+        self.journal.lock().map_err(failure)?.committed(&batch)?;
+        self.metrics
+            .committed_frames
+            .fetch_add(batch.frames, Ordering::Relaxed);
+        self.metrics
+            .max_commit_frames
+            .fetch_max(batch.frames, Ordering::Relaxed);
+        sample.finish(0);
+        Ok(())
+    }
+}
+
 impl Disk for LazyDisk {
     fn size(&self) -> u64 {
         self.size
@@ -538,25 +632,30 @@ impl Disk for LazyDisk {
 
     fn write_at(&self, offset: u64, bytes: &[u8]) -> io::Result<()> {
         let sample = self.metrics.writes.start();
-        self.check(offset, bytes.len())?;
-        if bytes.is_empty() {
-            sample.finish(0);
-            return Ok(());
-        }
-        let mut journal = self.journal.lock().map_err(failure)?;
-        if let Err(error) = journal.append(&self.directory, &self.db, offset, bytes) {
-            journal.fail();
-            return Err(error);
-        }
-        self.update_accounting(&journal)?;
+        self.append_writes(&[DiskWrite { offset, bytes }])?;
         sample.finish(bytes.len());
+        Ok(())
+    }
+
+    fn write_batch(&self, writes: &[DiskWrite<'_>]) -> io::Result<()> {
+        if writes.len() == 1 {
+            return self.write_at(writes[0].offset, writes[0].bytes);
+        }
+        if writes.len() > 128 {
+            return Err(failure("Too many disk writes in one batch"));
+        }
+        let samples: Vec<_> = writes.iter().map(|_| self.metrics.writes.start()).collect();
+        self.append_writes(writes)?;
+        for (sample, write) in samples.into_iter().zip(writes) {
+            sample.finish(write.bytes.len());
+        }
         Ok(())
     }
 
     fn sync(&self) -> io::Result<()> {
         let sample = self.metrics.syncs.start();
-        // Every acknowledged append is already synced. Serialize with an append
-        // and propagate a prior sync failure instead of checkpointing payloads.
+        // Drain writes through their durable acknowledgements before the fence.
+        let _write = self.write_gate.write().map_err(failure)?;
         let journal = self.journal.lock().map_err(failure)?;
         journal.sync()?;
         File::open(&self.directory)?.sync_all()?;

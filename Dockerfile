@@ -29,6 +29,28 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     touch backend/src/main.rs backend/src/lib.rs && \
     cargo build --locked --release --bin leo && cp target/release/leo /usr/local/bin/leo
 
+# The direct block backend shares guest RAM with Firecracker. Upstream 1.17.0
+# does not reclaim MAP_SHARED memfd pages on balloon/free-page reporting.
+# Keep the patch narrow, pinned and tested; retain the upstream seccomp policy.
+FROM rust:1.97.0-bookworm AS firecracker
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    musl-tools clang libclang-dev libseccomp-dev cmake && rm -rf /var/lib/apt/lists/* \
+    && ln -s /usr/include/linux /usr/include/x86_64-linux-musl/linux \
+    && ln -s /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic \
+    && ln -s /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
+WORKDIR /firecracker
+RUN curl -fsSL https://codeload.github.com/firecracker-microvm/firecracker/tar.gz/95f868c8e345b1cc8faccd1a3c910b4989dc3f58 -o /tmp/firecracker-source.tar.gz \
+    && echo '27280787407229c412901dfcf74cd378f1336010e71050aba43ace51cd4a0f4f  /tmp/firecracker-source.tar.gz' | sha256sum -c - \
+    && tar -xzf /tmp/firecracker-source.tar.gz --strip-components=1 \
+    && rm /tmp/firecracker-source.tar.gz
+COPY deploy/microvm/firecracker-shared-memory.patch /tmp/firecracker.patch
+RUN git apply /tmp/firecracker.patch
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=firecracker-git,target=/usr/local/cargo/git \
+    cargo test --locked -p vmm --lib test_discard_range \
+    && cargo build --locked --release --bin firecracker --target x86_64-unknown-linux-musl \
+    && cp build/cargo_target/x86_64-unknown-linux-musl/release/firecracker /usr/local/bin/firecracker
+
 FROM base AS runtime
 ARG PLAYWRIGHT_VERSION=1.63.0
 # OS libraries are shared by project-pinned browser versions in the persistent home.
@@ -123,9 +145,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends iptables e2fspr
     && curl -fsSL https://github.com/firecracker-microvm/firecracker/releases/download/v1.17.0/firecracker-v1.17.0-x86_64.tgz -o /tmp/firecracker.tgz \
     && echo '06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558  /tmp/firecracker.tgz' | sha256sum -c - \
     && tar -xzf /tmp/firecracker.tgz -C /tmp \
-    && cp /tmp/release-v1.17.0-x86_64/firecracker-v1.17.0-x86_64 /usr/local/bin/firecracker \
     && cp /tmp/release-v1.17.0-x86_64/jailer-v1.17.0-x86_64 /usr/local/bin/jailer \
     && rm -rf /tmp/firecracker.tgz /tmp/release-v1.17.0-x86_64
+COPY --from=firecracker /usr/local/bin/firecracker /usr/local/bin/firecracker
 COPY --from=guest-kernel /kernel/vmlinux /opt/leo-vm/vmlinux
 COPY --from=guest-kernel /kernel/.config /opt/leo-vm/kernel.config
 COPY --from=guest-kernel /kernel/COPYING /opt/leo-vm/KERNEL-COPYING

@@ -9,6 +9,8 @@ use std::{
     },
 };
 
+mod group_commit;
+
 struct Source {
     reads: AtomicUsize,
 }

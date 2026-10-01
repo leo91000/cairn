@@ -62,7 +62,7 @@ pub struct Vm {
     child: Option<tokio::process::Child>,
     consoles: Vec<JoinHandle<()>>,
     network: Network,
-    mounted: Option<crate::storage::fuse::MountedDisk>,
+    mounted: Option<crate::storage::vhost::MountedDisk>,
     volume: Option<Arc<crate::storage::runtime::Volume>>,
     uid: u32,
 }
@@ -160,9 +160,8 @@ fn firecracker_config(network: &Network, resources: &Resources, slot: usize) -> 
             },
             {
                 "drive_id": "data",
-                "path_on_host": "disk/data.ext4",
+                "socket": "disk.sock",
                 "is_root_device": false,
-                "is_read_only": false,
                 "cache_type": "Writeback"
             }
         ],
@@ -325,11 +324,9 @@ impl Vm {
         timing.next("mount_and_network");
         let jail = &self.jail;
         private_dir(jail).await?;
-        let target = jail.join("disk");
-        private_dir(&target).await?;
-        self.mounted = Some(crate::storage::fuse::mount_disk(
+        self.mounted = Some(crate::storage::vhost::mount_disk(
             self.volume.as_ref().unwrap().clone(),
-            &target,
+            &jail.join("disk.sock"),
             self.uid,
         )?);
         tokio::fs::hard_link(image.join("root.ext4"), jail.join("root.ext4")).await?;
@@ -341,9 +338,15 @@ impl Vm {
         atomic_write(&jail.join("config.json"), &serde_json::to_vec(&config)?).await?;
         std::os::unix::fs::chown(jail.join("config.json"), Some(self.uid), Some(self.uid))?;
         let disk_bytes = self.volume.as_ref().unwrap().disk.size();
+        // A vhost frontend also creates a shared guest-memory file. Shared
+        // node limits may allocate more RAM than the conversation's disk size.
+        let file_bytes = disk_bytes.max(resources.memory_mi_b * 1024 * 1024);
+        tracing::info!(target: "leo_performance", operation = "vm_configuration", id,
+            cpu = resources.cpu, memory_mib = resources.memory_mi_b, disk_bytes,
+            file_limit_bytes = file_bytes, vhost = true);
         let child = self
             .child
-            .insert(jailer(id, self.uid, state, disk_bytes).spawn()?);
+            .insert(jailer(id, self.uid, state, file_bytes).spawn()?);
         self.consoles.push(console(
             child.stdout.take().unwrap(),
             state.join(format!("{id}.boot.log")),
@@ -362,6 +365,13 @@ impl Vm {
     async fn wait_for_guest(&mut self) -> Result<GuestStatus> {
         let mut deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         loop {
+            if self
+                .mounted
+                .as_ref()
+                .is_some_and(crate::storage::vhost::MountedDisk::failed)
+            {
+                return Err(Error::unavailable("VM block backend stopped."));
+            }
             if self.child.as_mut().unwrap().try_wait()?.is_some() {
                 return Err(Error::unavailable(
                     "Firecracker exited before the guest was ready. Check the VM boot log.",
@@ -450,7 +460,7 @@ impl Vm {
         if let Some(mounted) = self.mounted.take()
             && let Ok(Err(error)) = tokio::task::spawn_blocking(move || mounted.close()).await
         {
-            tracing::warn!(%error, "Could not unmount VM disk");
+            tracing::warn!(%error, "Could not close VM block backend");
         }
 
         timing.next("network_cleanup");
@@ -519,6 +529,7 @@ impl Vm {
         let result = tokio::select! {
             result = operation => result,
             () = stop.cancelled() => Ok(STOPPED),
+            result = watch_vhost(self.mounted.as_ref()) => result,
         };
         relay_stop.cancel();
         relay.abort();
@@ -526,6 +537,18 @@ impl Vm {
         let _ = tokio::fs::remove_file(relay_path).await;
         result
     }
+}
+
+async fn watch_vhost(backend: Option<&crate::storage::vhost::MountedDisk>) -> Result<i32> {
+    let Some(backend) = backend else {
+        return std::future::pending().await;
+    };
+    while !backend.failed() {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Err(Error::unavailable(
+        "VM block backend stopped. Its workspace disk has been preserved.",
+    ))
 }
 
 /// First boot of a disk: copy every import into the guest.
