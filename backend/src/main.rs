@@ -186,11 +186,16 @@ async fn chat_command(binary: Option<&String>, stop: CancellationToken) -> Resul
 
 async fn runner_entry(stop: CancellationToken) -> Result<i32> {
     let plan: Value = serde_json::from_slice(&tokio::fs::read("/run/leo-plan.json").await?)?;
+    let prepared = std::time::Instant::now();
+    let run_id = leo_agent_manager::performance::identity(text(&plan, "runId"));
+    let attempt_id = leo_agent_manager::performance::identity(text(&plan, "id"));
     let mut env = leo_agent_manager::toolkit::environment(
         Path::new("/home/node"),
         std::env::vars().collect(),
     )
     .await?;
+    tracing::info!(target: "leo_performance", operation = "runner_entry", run_id, attempt_id,
+        phase = "toolkit", elapsed_ms = prepared.elapsed().as_millis() as u64);
     if let Some(token) = plan["mcpEnv"]["LEO_MCP_RUN_TOKEN"].as_str() {
         env.insert("LEO_MCP_RUN_TOKEN".into(), token.into());
     }

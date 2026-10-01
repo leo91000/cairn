@@ -81,7 +81,7 @@ impl Codex {
 
     /// The caller serializes warmup with running attempts. No caller account,
     /// storage authority, or MCP environment is inherited by this process.
-    pub async fn warm(&self, stop: CancellationToken) -> Result<()> {
+    pub async fn warm(&self, stop: CancellationToken, timing_endpoint: Option<&str>) -> Result<()> {
         let directory = std::path::Path::new(SOCKET).parent().unwrap();
         crate::skills::private_dir(directory).await?;
         std::os::unix::fs::chown(directory, Some(AGENT_ID), Some(AGENT_ID))?;
@@ -104,6 +104,9 @@ impl Codex {
             .env_clear()
             .envs(environment)
             .current_dir("/home/node");
+        if let Some(endpoint) = timing_endpoint {
+            command.env("LEO_CODEX_TIMING_ENDPOINT", endpoint);
+        }
         unprivileged(&mut command);
         self.start(command, stop, START_TIMEOUT).await
     }

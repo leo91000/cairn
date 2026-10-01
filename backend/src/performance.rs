@@ -2,6 +2,7 @@
 use std::time::{Duration, Instant};
 
 mod activity;
+pub(crate) mod native;
 
 pub use activity::{Activity, heartbeat};
 

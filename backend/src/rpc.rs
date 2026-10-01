@@ -53,6 +53,7 @@ pub struct Session {
     pub incoming: mpsc::Receiver<Incoming>,
     stop: CancellationToken,
     finished: Option<oneshot::Receiver<()>>,
+    telemetry: Option<crate::performance::native::Collector>,
 }
 
 impl Drop for Session {
@@ -178,6 +179,19 @@ impl Session {
         stop: &CancellationToken,
     ) -> Result<Self> {
         let mut args = args.to_vec();
+        let guest_endpoint = crate::performance::native::guest_endpoint();
+        let telemetry = if guest_endpoint.is_none() {
+            crate::performance::native::Collector::start().await.ok()
+        } else {
+            None
+        };
+        if let Some(endpoint) = guest_endpoint.as_deref().or_else(|| {
+            telemetry
+                .as_ref()
+                .map(crate::performance::native::Collector::endpoint)
+        }) {
+            args.extend(crate::performance::native::arguments(endpoint));
+        }
         args.extend(
             [
                 "-c",
@@ -202,6 +216,7 @@ impl Session {
         );
         command.stdin(Stdio::piped());
         let mut session = Self::spawn(command).await?;
+        session.telemetry = telemetry;
         let initialized = tokio::select! {
             result = session.initialize_codex() => result,
             () = stop.cancelled() => Err(Error::unavailable("Codex initialization stopped.")),
@@ -312,6 +327,7 @@ impl Session {
             incoming: receiver,
             stop,
             finished: Some(finished),
+            telemetry: None,
         })
     }
 

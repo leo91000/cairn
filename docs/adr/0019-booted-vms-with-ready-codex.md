@@ -280,6 +280,69 @@ configuration incompatible. Après éviction, préférer un nœud autorisé poss
 déjà le journal et les blocs, sans bloquer une migration ou perdre la reprise
 depuis l'état publié. Cette stratégie n'est pas encore implémentée.
 
+### Première décomposition de production sans pool
+
+Deux tours réussis sur v0.50.6, le 1 octobre, donnent les bornes suivantes.
+Un seul échantillon par scénario : ce sont des traces diagnostiques, pas des
+percentiles ou un comparatif pool qualifié.
+
+| Phase | Nouvelle conversation | Reprise |
+| --- | ---: | ---: |
+| Envoi UI → démarrage du disque côté runner | ~356 ms | ~444 ms |
+| Préparation du disque | 1 843 ms | 20 ms |
+| Boot VM | 2 400 ms | 2 233 ms |
+| Préparation invitée et imports | 713 ms | 354 ms |
+| Run invité → début initialize Codex, poste encore à instrumenter | ~720 ms | ~735 ms |
+| initialize Codex | 947 ms | 1 557 ms |
+| login natif | 54 ms | 66 ms |
+| Création/reprise du thread | 443 ms | 298 ms |
+| Envoi UI → turn_started | 7 659 ms | 5 868 ms |
+
+Ces intervalles ne sont pas tous contigus ni additionnables : certains logs
+arrivent par lot, et les timestamps inter-processus dépendent des horloges.
+Le premier appel réseau au modèle n'était pas instrumenté dans cette image.
+L'attribution de ~6 s hors VM par différence avec le banc local n'est donc pas
+démontrée. Le disque et le boot représentent déjà 4,24 s à froid dans cette trace.
+Les nouvelles mesures séparent le toolkit invité, l'attente de tokens du broker
+et le transport natif. Comparer la même image en production, pool désactivé puis
+activé, avant de choisir le prochain poste à optimiser ou de releaser.
+
+La reprise reste sur le même nœud, grâce à l'affinité du checkpoint déjà présente.
+Elle lit néanmoins 37,75 Mo depuis l'origine, en neuf requêtes de blocs. La
+capture conserve en mémoire des blocs récemment lus ; cette mémoire n'est pas
+un cache inter-processus durable. Le journal publié est récupéré puis supprimé.
+La prochaine piste est donc la rétention bornée de la VM du même propriétaire,
+ou un cache disque borné des versions publiées récemment utilisées, plutôt que
+rajouter une affinité qui existe déjà. Un cache reste évictable et ne remplace
+jamais une publication distante vérifiée.
+
+### Surcoût disque pendant l'exécution
+
+Le vrai dépôt Leo Agent Manager (846 fichiers suivis) est exécuté dans quatre
+VM avec la même image : journal, direct, direct, journal ; trois rounds par VM.
+Le disque direct ext4 est servi par virtio en Writeback avec flush invité. Le
+journal vhost garde ses acquittements durables. Boot, imports, préparation du
+dépôt et cache npm sont hors des intervalles mesurés. Le cache npm et le lock
+sont identiques : 650 entrées, dépendances de développement incluses, installation
+offline sans scripts de cycle de vie. Pas de compte, modèle, S3 ou réseau mesuré.
+
+| Opération | Journal | Disque direct |
+| --- | ---: | ---: |
+| fsync d'écritures de 4 Kio, médiane des p50 par round | 11,09 ms | 7,25 ms |
+| fdatasync, même agrégation | 3,53 ms | 3,59 ms |
+| Création, fsync fichier, rename, fsync répertoire | 18,46 ms | 14,34 ms |
+| git status après npm, même agrégation | 2,23 ms | 2,28 ms |
+| npm ci, médiane des six rounds | 2,55 s | 2,58 s |
+
+Le surcoût fsync est de 3,84 ms (~53 %), et celui des petits fichiers durables
+de 4,11 ms (~29 %). Les p99 fsync par round sont de 15,97–37,02 ms pour le
+journal et 8,44–14,49 ms en direct. Le maximum journal atteint 813,59 ms, contre
+39,49 ms en direct ; le premier npm journal prend 7,11 s. Ces essais lents restent
+dans les résultats. Ils demandent une attribution séparée de la contention hôte
+et des barrières de durabilité ; aucune absence de surcoût général n'est déduite
+des médianes proches de git/npm. Les tests de charge et de crash restent une
+qualification distincte. Les dumps et harnais volumineux restent hors dépôt.
+
 Pour ce chantier de performance, regrouper les changements : une nouvelle
 release exige un gain mesuré sur le chemin intégré, avec une image qualifiée.
 Un prototype, une instrumentation ou un nettoyage documentaire seul ne déclenche

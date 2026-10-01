@@ -76,6 +76,7 @@ async function main() {
     modelRequests.push({
       label: current.label,
       at: performance.now(),
+      atUnixMs: Date.now(),
       tools: JSON.stringify(input.tools),
       input: JSON.stringify(input.input),
       keys: Object.keys(input),
@@ -183,7 +184,7 @@ async function main() {
       CODEX_HOME: nativeHome,
       CODEX_BIN: codex,
       NO_COLOR: '1',
-      RUST_LOG: 'warn,leo_performance=info',
+      RUST_LOG: 'warn,leo_performance=debug',
     }
     const samples = []
     let thread
@@ -311,9 +312,35 @@ async function main() {
     await turn('ready-resume', 'Bearer beta', true, true)
     await turn('ready-remove-mcp', null, true, true)
     assert.ok(credentialsIssued >= 3, 'Every resident attempt acquires its own account access')
+    const exported = (request) => {
+      const transport = service.stderr().split('\n').filter(line => line.includes('operation="codex_transport"') && line.includes('endpoint="responses"'))
+      return transport.some((line) => {
+        const started = Number(line.match(/request_started_at_ms=(\d+)/)?.[1])
+        const completed = Number(line.match(/completed_at_ms=(\d+)/)?.[1])
+        return started <= request.atUnixMs + 100 && completed >= request.atUnixMs - 100
+      })
+    }
+
+    const requests = modelRequests.filter(request => request.label !== 'cold')
+    // The native SDK batches asynchronously. Test its export while it is alive;
+    // SIGTERM can drop its final batch and must not delay production shutdown.
+    const exportDeadline = performance.now() + 5000
+    const lastRequest = requests.at(-1)
+    assert.ok(lastRequest)
+    while (!exported(lastRequest) && performance.now() < exportDeadline)
+      await setTimeout(10)
+    assert.ok(exported(lastRequest), 'Live native exports its last model request asynchronously')
+    const transport = service.stderr().split('\n').filter(line => line.includes('operation="codex_transport"') && line.includes('endpoint="responses"'))
+    for (const line of transport) {
+      const started = Number(line.match(/request_started_at_ms=(\d+)/)?.[1])
+      const completed = Number(line.match(/completed_at_ms=(\d+)/)?.[1])
+      assert.ok(requests.some(request => started <= request.atUnixMs + 100 && completed >= request.atUnixMs - 100), 'Every reported native interval brackets a real model request, independently of export batching')
+    }
+
     service.child.kill('SIGTERM')
     assert.equal(await service.done, 0, service.stderr().slice(-3000))
     assert.ok(!service.stderr().includes('Bearer alpha') && !service.stderr().includes('Bearer beta'), 'Instrumentation never records gateway credentials')
+
     await assert.rejects(access(`/proc/${nativePid}`), { code: 'ENOENT' })
     process.stdout.write(`${JSON.stringify({
       kind: 'real-rust-ready-codex-adapter',
@@ -324,6 +351,7 @@ async function main() {
       removedMcpAbsent: true,
       sameNativeProcess: true,
       nativeReapedOnShutdown: true,
+      nativeRequestTimingsObserved: true,
       syntheticAccountLeases: credentialsIssued,
     }, null, 2)}\n`)
   }

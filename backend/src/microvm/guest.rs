@@ -50,14 +50,21 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     tokio::spawn(relay_auth(auth, stop.clone()));
     let running = Arc::new(Mutex::new(()));
     let codex = Arc::new(codex::Codex::default());
+    // Native exports can arrive after an attempt detaches its output lease.
+    // The VM owns this collector so those timings still reach its private console.
+    let telemetry = crate::performance::native::Collector::start().await.ok();
     let result = super::listener::serve(
         || listener.accept(),
         |(stream, _)| {
             let running = running.clone();
             let stopping = stop.clone();
             let codex = codex.clone();
+            let timing_endpoint = telemetry
+                .as_ref()
+                .map(|collector| collector.endpoint().to_owned());
             async move {
-                if let Err(error) = handle(stream, running, codex, stopping).await {
+                if let Err(error) = handle(stream, running, codex, stopping, timing_endpoint).await
+                {
                     tracing::warn!(message = %error.message, "Guest operation failed");
                 }
             }
@@ -96,6 +103,7 @@ async fn handle(
     running: Arc<Mutex<()>>,
     codex: Arc<codex::Codex>,
     stop: CancellationToken,
+    timing_endpoint: Option<String>,
 ) -> Result<()> {
     let (read, mut write) = tokio::io::split(stream);
     let mut read = BufReader::new(read);
@@ -128,7 +136,7 @@ async fn handle(
                 .map_err(|_| Error::conflict("Guest already running."))?;
             if codex.socket()?.is_none() {
                 prepare_anonymous_codex().await?;
-                if let Err(error) = codex.warm(stop).await {
+                if let Err(error) = codex.warm(stop, timing_endpoint.as_deref()).await {
                     codex.close().await;
                     return Err(error);
                 }
@@ -177,7 +185,7 @@ async fn handle(
                 .map_err(|_| Error::conflict("Guest already running."))?;
             let plan = Plan::new(plan);
             prepare_run(&plan).await?;
-            let (child, events, output) = spawn_agent(&plan, &codex)?;
+            let (child, events, output) = spawn_agent(&plan, &codex, timing_endpoint.as_deref())?;
             let result = tokio::select! {
                 result = stream_agent(&mut write, child, events, output, &plan) => result,
                 () = stop.cancelled() => Ok(()),
@@ -554,6 +562,7 @@ async fn prepare_anonymous_codex() -> Result<()> {
 fn spawn_agent(
     plan: &Plan,
     codex: &codex::Codex,
+    timing_endpoint: Option<&str>,
 ) -> Result<(Child, mpsc::Receiver<Event>, Option<codex::OutputLease>)> {
     let invocation = plan
         .command()
@@ -571,6 +580,9 @@ fn spawn_agent(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if let Some(endpoint) = timing_endpoint {
+        command.env("LEO_CODEX_TIMING_ENDPOINT", endpoint);
+    }
     let socket = codex.socket()?;
     if let Some(socket) = socket {
         if !plan.as_value()["chat"].is_object()
