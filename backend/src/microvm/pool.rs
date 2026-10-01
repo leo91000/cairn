@@ -500,7 +500,8 @@ impl Pool {
         };
         loop {
             let (usage, pressure) = self.usage().await?;
-            let idle = {
+            let memory_mi_b = usage["memoryMiB"].as_u64().unwrap_or(u64::MAX);
+            let (idle, reason, retained_bytes, retained_count) = {
                 let mut slots = self.slots.lock().await;
                 let bytes = slots
                     .retained
@@ -510,9 +511,8 @@ impl Pool {
                     .retained
                     .front()
                     .is_some_and(|idle| Instant::now() >= idle.expires);
-                let under_pressure = pressure.is_some()
-                    || usage["memoryMiB"].as_u64().unwrap_or(u64::MAX)
-                        > budget.limits.memory_mi_b * 75 / 100;
+                let memory_pressure = memory_mi_b > budget.limits.memory_mi_b * 75 / 100;
+                let under_pressure = pressure.is_some() || memory_pressure;
                 if !expired
                     && !under_pressure
                     && bytes.is_some_and(|bytes| {
@@ -521,10 +521,22 @@ impl Pool {
                 {
                     return Ok(());
                 }
-                slots.retained.pop_front()
+                let reason = if expired {
+                    "expired"
+                } else if pressure.is_some() {
+                    "node_pressure"
+                } else if memory_pressure {
+                    "node_memory"
+                } else if bytes.is_none() {
+                    "memory_unavailable"
+                } else {
+                    "retained_budget"
+                };
+                let count = slots.retained.len();
+                (slots.retained.pop_front(), reason, bytes, count)
             };
             let Some(mut idle) = idle else { return Ok(()) };
-            tracing::info!(target: "leo_performance", operation = "vm_retention", event = "evicted", run_id = crate::performance::identity(&idle.run));
+            tracing::info!(target: "leo_performance", operation = "vm_retention", event = "evicted", run_id = crate::performance::identity(&idle.run), reason, pressure = pressure.unwrap_or("none"), node_memory_mi_b = memory_mi_b, budget_memory_mi_b = budget.limits.memory_mi_b, retained_bytes, retained_count);
             idle.reservation.finish().await;
         }
     }
