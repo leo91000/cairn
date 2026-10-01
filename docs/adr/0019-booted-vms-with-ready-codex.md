@@ -126,6 +126,31 @@ login/refresh/logout avec un broker synthétique. L'intégration du pool, ses
 limites, l'éviction et les sauvegardes de VM conservées restent à valider avant
 activation ou release.
 
+## Attribution du disque préchauffé
+
+Le candidat conserve les disques préchauffés dans `environments/<UUID>`.
+L'attribution réserve d'abord un pointeur dans `disks/<conversation>`, puis
+écrit le propriétaire permanent dans l'environnement. Une attribution
+interrompue empêche ainsi de réclamer un second disque pour la même conversation.
+Les fichiers et leurs répertoires sont
+synchronisés avant confirmation ; aucun journal ouvert n'est déplacé. Le chemin
+classique `disks/<conversation>` reste compatible pour les disques existants.
+
+Un verrou d'appartenance protège l'attribution et la résolution pendant le
+bootstrap, l'exécution et le teardown. Les mutations prennent également le
+verrou physique. Au redémarrage, après clôture des anciens VMM, le contrôleur
+termine une attribution interrompue et élimine uniquement les environnements
+sans propriétaire. Un conflit avec un autre propriétaire ou un disque existant
+arrête cette récupération sans supprimer les données. Une suppression conserve
+les inodes de verrou et les records d'appartenance : le disque ne retourne jamais
+dans le pool anonyme.
+
+Les sauvegardes, restaurations, reçus, quotas et caches résolvent ce même disque.
+Les tests couvrent les deux ordres de clôture des verrous, le crash entre les
+deux écritures, les conflits, les alias, la suppression et les sauvegardes sur
+un journal déjà ouvert. Cette étape prépare le cycle de vie du pool ; elle
+n'active pas encore le préchauffage et ne représente pas un gain de démarrage.
+
 ## Preuves et politique de livraison
 
 Les [mesures vhost](https://github.com/leo91000/leo-agent-manager/releases/download/v0.50.6/ready-vm-vhost-2026-10-01.json),

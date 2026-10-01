@@ -5,7 +5,6 @@ use crate::{
     error::{Error, Result},
     execution::Backend,
     microvm::host,
-    skills::private_dir,
     validation::{text, uuid},
 };
 use axum::{
@@ -235,7 +234,7 @@ async fn disk_storage(
 ) -> Result<Response> {
     uuid(run)?;
     require_post(&request)?;
-    let directory = broker.state.join("disks").join(run);
+    let directory = crate::storage::environment::directory(&broker.state, run)?;
     if !crate::storage::runtime::exists(&directory) {
         return Err(Error::conflict("Conversation has no S3-backed journal."));
     }
@@ -290,12 +289,12 @@ async fn disk_action(
     if active.values().any(|a| a.plan.run_id() == run) {
         return Err(Error::conflict("The workspace still has an active agent."));
     }
-    let directory = broker.state.join("disks").join(run);
-    private_dir(&directory).await?;
-    let _lock =
-        crate::file_lock::exclusive(&directory.join("lock"), "The workspace is still in use.")?;
+    let lease =
+        crate::storage::environment::lock(&broker.state, run, "The workspace is still in use.")
+            .await?;
+    let directory = &lease.directory;
     if action == "prune" {
-        let retired_grants = prune_stale_disks(&directory).await?;
+        let retired_grants = prune_stale_disks(directory).await?;
         return json_response(json!({ "pruned": true, "retiredGrants": retired_grants }));
     }
     match tokio::fs::remove_file(directory.join("data.ext4")).await {
@@ -307,7 +306,7 @@ async fn disk_action(
     // Preserve the lock inode: an overlapping boot must contend on it.
     let mut leftovers = tokio::fs::read_dir(&directory).await?;
     while let Some(entry) = leftovers.next_entry().await? {
-        if entry.file_name() == "lock" {
+        if crate::storage::environment::retained(&entry.file_name()) {
             continue;
         }
         remove_entry(&entry.path(), entry.file_type().await?.is_dir()).await?;

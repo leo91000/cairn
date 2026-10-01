@@ -60,6 +60,7 @@ pub struct Reservation {
     released: bool,
     slot: usize,
     vm: Option<Vm>,
+    owner: Option<crate::storage::environment::OwnerLease>,
 }
 
 pub struct Pool {
@@ -90,7 +91,7 @@ impl Pool {
         if prepared.exists() {
             tokio::fs::remove_dir_all(&prepared).await?;
         }
-        private_dir(&state.join("disks")).await?;
+        crate::storage::environment::recover(&state).await?;
         // Retain the guest OS and toolchains, but never pin the chat adapter to
         // an obsolete image. Copy once per controller, then import into tmpfs.
         let entrypoint = state.join("entrypoint");
@@ -256,6 +257,7 @@ impl Pool {
             released: false,
             slot,
             vm: None,
+            owner: None,
         })
     }
 
@@ -272,12 +274,20 @@ impl Reservation {
         socket: Arc<OnceCell<PathBuf>>,
         stop: CancellationToken,
     ) -> Result<i32> {
-        let disk = self.pool.state.join("disks").join(plan.run_id());
         if stop.is_cancelled() {
             self.finish().await;
             return Ok(143);
         }
         let operation = async {
+            self.owner = Some(
+                crate::storage::environment::ownership(
+                    &self.pool.state,
+                    plan.run_id(),
+                    "Conversation disk is in use.",
+                )
+                .await?,
+            );
+            let disk = self.owner.as_ref().unwrap().directory.clone();
             let mut timing = crate::performance::Operation::new(
                 "conversation_start",
                 plan.run_id(),
@@ -327,6 +337,7 @@ impl Reservation {
         if let Some(mut vm) = self.vm.take() {
             vm.shutdown().await;
         }
+        self.owner.take();
         self.pool.slots.lock().await.occupied[self.slot - 1] = false;
         self.released = true;
     }
@@ -339,11 +350,13 @@ impl Drop for Reservation {
         }
         let pool = self.pool.clone();
         let mut vm = self.vm.take();
+        let owner = self.owner.take();
         let slot = self.slot;
         self.pool.cleanup.spawn(async move {
             if let Some(vm) = &mut vm {
                 vm.shutdown().await;
             }
+            drop(owner);
             pool.slots.lock().await.occupied[slot - 1] = false;
         });
     }

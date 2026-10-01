@@ -202,7 +202,10 @@ pub fn disk_bytes(state: &Path) -> io::Result<u64> {
     {
         return Ok(value.bytes);
     }
-    let bytes = allocated(&state.join("disks"))?;
+    let mut bytes = 0_u64;
+    for root in crate::storage::environment::ROOTS {
+        bytes = bytes.saturating_add(allocated(&state.join(root))?);
+    }
     usage.insert(
         state.to_owned(),
         DiskUsage {
@@ -400,8 +403,8 @@ mod tests {
             },
         };
         std::fs::write(root.path().join(FILE), serde_json::to_vec(&budget).unwrap()).unwrap();
-        for run in ["first", "second"] {
-            let disk = root.path().join("disks").join(run);
+        for (namespace, run) in [("disks", "first"), ("environments", "second")] {
+            let disk = root.path().join(namespace).join(run);
             std::fs::create_dir_all(&disk).unwrap();
             std::fs::write(disk.join("journal"), vec![1; 1_048_576]).unwrap();
             std::os::unix::fs::symlink(external.path(), disk.join("external")).unwrap();

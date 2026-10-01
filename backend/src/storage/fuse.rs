@@ -241,7 +241,11 @@ pub fn cleanup_stale(state: &Path) -> io::Result<()> {
             .replace("\\012", "\n")
             .replace("\\134", "\\");
         let path = Path::new(&path);
-        if !path.starts_with(state.join("jails")) && !path.starts_with(state.join("disks")) {
+        if !path.starts_with(state.join("jails"))
+            && !super::environment::ROOTS
+                .iter()
+                .any(|root| path.starts_with(state.join(root)))
+        {
             continue;
         }
         let encoded = std::ffi::CString::new(path.as_os_str().as_bytes())?;

@@ -130,9 +130,8 @@ pub async fn controller(state: &Path, run: &str, value: Value) -> Result<Value> 
             "Required VM runtime is not installed on this node.",
         ));
     }
-    let directory = state.join("disks").join(run);
-    crate::skills::private_dir(&directory).await?;
-    let _lock = crate::file_lock::exclusive(&directory.join("lock"), "VM disk is active.")?;
+    let lease = crate::storage::environment::lock(state, run, "VM disk is active.").await?;
+    let directory = &lease.directory;
     if directory.join("data.ext4").exists() {
         return Err(Error::conflict(
             "Destination still has a legacy local disk.",
@@ -143,13 +142,13 @@ pub async fn controller(state: &Path, run: &str, value: Value) -> Result<Value> 
         && serde_json::from_slice::<Value>(&tokio::fs::read(&recovery).await?)?["backupId"]
             == value["backupId"];
     if restored
-        && crate::storage::runtime::exists(&directory)
+        && crate::storage::runtime::exists(directory)
         && !directory.join("restore.pending").exists()
     {
         return Ok(ready());
     }
     let origin = super::connector::master(text(&value, "master"))?;
-    let _replacement = crate::storage::runtime::replacement(&directory).await?;
+    let _replacement = crate::storage::runtime::replacement(directory).await?;
     crate::skills::atomic_write(&directory.join("restore.pending"), b"restoring").await?;
     if directory.join("lazy").exists() {
         tokio::fs::rename(

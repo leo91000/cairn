@@ -232,7 +232,12 @@ fn node_cache_evicts_the_oldest_clean_block_after_a_verified_read() {
         let bytes = vec![value; 4 * 1024 * 1024];
         let hash = hex::encode(Sha256::digest(&bytes));
         blocks.insert(hash.clone(), bytes);
-        let directory = root.path().join("disks").join(name).join("lazy");
+        let namespace = if name == "second" {
+            "environments"
+        } else {
+            "disks"
+        };
+        let directory = root.path().join(namespace).join(name).join("lazy");
         let manifest = single_block(4194304, 4194304, &hash.as_str().into());
         disks.push((directory, manifest, hash, value));
     }

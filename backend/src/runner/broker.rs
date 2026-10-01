@@ -338,6 +338,7 @@ impl Execution {
             self.broker.clone(),
             self.id.clone(),
             self.plan.clone(),
+            self.socket.clone(),
             self.control.clone(),
             self.stop.clone(),
             lease_expired.clone(),
@@ -390,21 +391,24 @@ async fn enforce_limits(
     broker: Broker,
     attempt: String,
     plan: Plan,
+    socket: Arc<OnceCell<PathBuf>>,
     control: Arc<Mutex<()>>,
     expiry: CancellationToken,
     lease_expired: Arc<AtomicBool>,
 ) {
     let deadline = plan.deadline();
     let leased = plan.node_lease_required();
-    let disk_directory = broker.state.join("disks").join(plan.run_id());
     loop {
+        let disk_directory = crate::storage::environment::directory(&broker.state, plan.run_id());
         let lost_lease = leased && !broker.lease_valid(&attempt).await;
         if deadline.is_some_and(|d| now() >= d) || lost_lease {
             lease_expired.store(lost_lease, Ordering::SeqCst);
             // Cancellation releases an in-flight guest thaw before waiting
             // for its control lock. The timer never waits unboundedly.
             expiry.cancel();
-            if let Some(volume) = crate::storage::runtime::live(&disk_directory) {
+            if let Ok(directory) = &disk_directory
+                && let Some(volume) = crate::storage::runtime::live(directory)
+            {
                 volume.stop.cancel();
             }
             if leased {
@@ -415,7 +419,18 @@ async fn enforce_limits(
             }
             return;
         }
-        if let Some(volume) = crate::storage::runtime::live(&disk_directory)
+        let directory = match disk_directory {
+            Ok(directory) => Some(directory),
+            // Attribution publishes two durable records before exposing the
+            // guest socket. Its temporary incomplete state is not a VM fault.
+            Err(_) if socket.get().is_none() => None,
+            Err(error) => {
+                tracing::error!(%attempt, message = %error.message, "Could not resolve conversation disk ownership");
+                expiry.cancel();
+                return;
+            }
+        };
+        if let Some(volume) = directory.as_deref().and_then(crate::storage::runtime::live)
             && let Ok(_guard) = control.try_lock()
         {
             if expiry.is_cancelled() {
@@ -436,6 +451,82 @@ async fn enforce_limits(
 async fn plan_run_id(path: &Path) -> Result<String> {
     let plan: Value = serde_json::from_slice(&tokio::fs::read(path).await?)?;
     Ok(text(&plan, "runId").to_owned())
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    use serde_json::json;
+
+    async fn pending_claim(root: &Path) -> (Broker, String) {
+        let state = root.join("state");
+        let data = root.join("data");
+        crate::skills::private_dir(&state).await.unwrap();
+        let pool = Pool::new(state.clone(), root.into(), CancellationToken::new(), 1)
+            .await
+            .unwrap();
+        let run = crate::config::id();
+        let environment = crate::config::id();
+        let logical = state.join("disks").join(&run);
+        crate::skills::private_dir(&logical).await.unwrap();
+        crate::skills::private_dir(&state.join("environments").join(&environment))
+            .await
+            .unwrap();
+        std::fs::write(logical.join("environment"), environment).unwrap();
+        (
+            Broker::new(data, state, pool, CancellationToken::new()),
+            run,
+        )
+    }
+
+    #[tokio::test]
+    async fn incomplete_attribution_is_tolerated_only_before_exposing_guest_socket() {
+        let root = tempfile::tempdir().unwrap();
+        let (broker, run) = pending_claim(root.path()).await;
+        let socket = Arc::new(OnceCell::new());
+        let stop = CancellationToken::new();
+        let monitor = tokio::spawn(enforce_limits(
+            broker,
+            crate::config::id(),
+            Plan::new(json!({ "runId": run })),
+            socket.clone(),
+            Arc::default(),
+            stop.clone(),
+            Arc::default(),
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !stop.is_cancelled(),
+            "an in-progress claim is not a VM fault"
+        );
+        socket.set(root.path().join("guest.sock")).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), stop.cancelled())
+            .await
+            .unwrap();
+        monitor.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn incomplete_attribution_cannot_delay_the_attempt_deadline() {
+        let root = tempfile::tempdir().unwrap();
+        let (broker, run) = pending_claim(root.path()).await;
+        let stop = CancellationToken::new();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            enforce_limits(
+                broker,
+                crate::config::id(),
+                Plan::new(json!({ "runId": run, "expires": now() })),
+                Arc::default(),
+                Arc::default(),
+                stop.clone(),
+                Arc::default(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(stop.is_cancelled());
+    }
 }
 
 /// Fences and deletes every attempt artifact of `run`: plans, logs and VM records.

@@ -518,7 +518,10 @@ fn node_state(directory: &Path) -> Option<&Path> {
         directory
             .parent()
             .and_then(Path::parent)
-            .filter(|disks| disks.file_name().is_some_and(|name| name == "disks"))
+            .filter(|root| {
+                root.file_name()
+                    .is_some_and(|name| name == "disks" || name == "environments")
+            })
             .and_then(Path::parent)
     } else {
         None

@@ -169,7 +169,7 @@ pub async fn served(directory: &Path, hash: &str) -> Result<Vec<u8>> {
 // or timer can retain an idle journal after the response has ended.
 struct JournalReader {
     _cancel: Option<tokio_util::sync::DropGuard>,
-    _stopped: Option<crate::file_lock::Guard>,
+    _stopped: Option<crate::storage::environment::Lease>,
     volume: std::sync::Arc<crate::storage::runtime::Volume>,
     generation: i64,
 }
@@ -192,8 +192,9 @@ impl Reader {
                 .parent()
                 .and_then(Path::parent)
                 .ok_or_else(|| Error::bad("Invalid snapshot directory."))?;
-            let disk = state.join("disks").join(run);
-            let stopped = match crate::file_lock::exclusive(&disk.join("lock"), "Disk active.") {
+            let disk = crate::storage::environment::directory(state, &run)?;
+            let stopped = match crate::storage::environment::lock(state, &run, "Disk active.").await
+            {
                 Ok(lock) => Some(lock),
                 Err(error) if error.status == 409 => None,
                 Err(error) => return Err(error),
