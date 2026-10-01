@@ -211,6 +211,7 @@ fn headers_match(input: &Input, method: &str, version: &str) -> bool {
 }
 
 pub async fn handle(State(app): State<App>, request: Request) -> Result<Response> {
+    let started = std::time::Instant::now();
     let s = &app.service;
     let bearer = bearer(&request);
     let endpoint = Endpoint::of(request.uri().path());
@@ -256,7 +257,18 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
     if id.is_null() {
         return Ok(StatusCode::ACCEPTED.into_response());
     }
-    let frame = match dispatch(s, &endpoint, &bearer, method, &body["params"], modern).await {
+    let dispatched = dispatch(s, &endpoint, &bearer, method, &body["params"], modern).await;
+    if matches!(method, "initialize" | "tools/list") {
+        let (endpoint, connection_id) = match &endpoint {
+            Endpoint::Management => ("management", "unknown"),
+            Endpoint::Workspace => ("workspace", "unknown"),
+            Endpoint::Gateway(id) => ("gateway", crate::performance::identity(id)),
+        };
+        tracing::info!(target: "leo_performance", operation = "mcp_startup", event = "completed",
+            endpoint, connection_id, method, elapsed_ms = started.elapsed().as_millis() as u64,
+            success = dispatched.is_ok());
+    }
+    let frame = match dispatched {
         Ok(result) => Frame::strict(Message::Result {
             id,
             result: finish_result(result, method, modern),

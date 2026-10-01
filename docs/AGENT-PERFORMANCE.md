@@ -30,6 +30,7 @@ host measurements also work with retained older images.
 | `runner_prepare` | Placement, materialization, plan writing, remote preparation, placement commit |
 | `runner_entry` | Guest toolchain preparation before the chat adapter starts |
 | `account_broker` | Time to acquire managed tokens, before native account login |
+| `mcp_startup` | Manager HTTP handling of authenticated initialize/tools-list requests, including authorization and dispatch; fixed endpoint category, optional gateway connection UUID |
 | `codex_rpc` / `mcp_rpc` | Request start and completion, method, local request ID, elapsed time, outbound queue time, deadline and success; no parameters or result |
 | `codex_transport` | Native HTTP/WebSocket request interval and status, plus selected thread startup phases; fixed endpoint category and sanitized thread UUID only |
 | `agent_activity` | Turn start/end, first item, first nonempty assistant message, item start/end and periodic activity summary |
@@ -76,6 +77,8 @@ the native session owns its collector. `codex_transport` records from a guest
 must be read from that console and correlated by VM, thread and event time;
 they do not inherit the current attempt's span. A startup request without a
 thread has `thread_id=unknown`.
+Manager MCP HTTP requests without a run-scoped gateway connection are correlated
+by endpoint category and the sample's time interval, not by invented run IDs.
 
 Codex batches export asynchronously. `completed_at_ms` comes from the native
 event's timestamp (`observedTimeUnixNano` when `timeUnixNano` is zero), and
