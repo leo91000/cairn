@@ -84,3 +84,51 @@ after every pause and agrees with admission within 32 MiB. Aggregate cgroup
 `shmem` proved unsuitable for per-VM accounting because its updates can lag;
 neither the implementation nor this final comparison treats that aggregate as
 the physical cost of an individual guest.
+
+## Memory accounting release gate
+
+The earlier inode/cgroup discrepancy is delayed cgroup accounting. In a
+stationary follow-up, the guest remains CPU-paused and its backing allocation
+stays exactly 848,474,112 bytes. The cgroup discrepancy falls from 60.136719 MiB
+to 12 KiB within 350 ms, without a new turn or guest allocation. The earlier
+34.343750 MiB discrepancy on turn 94 is therefore not evidence of a leak.
+
+A 600-turn, 24-minute audit cross-checks unique backing inodes and the VMM's
+private memory against independent `smaps` page-table measurements. The full-byte
+admission calculation is conservatively 12 KiB higher on every sample. The
+rounded MiB health display and sequential sampling differ by at most 1.09 MiB;
+the admission bound uses recomputed bytes, not that display or aggregate cgroup
+`shmem`. Injecting 2.81 GiB of real additional backing allocation causes eviction,
+complete reaping and durable context recovery on the next turn.
+
+That successful trial uses one physical VMM, 120 paused captures and 12 verified
+publications. Its pool is disabled, so native Codex restarts each turn. Separate
+900-turn resident-native audits cover Codex 0.159.3 and 0.160.0, retain one native
+PID, renew access on every lease, and reap the process at the end. These are
+local synthetic endpoint qualifications, not production latency measurements.
+
+The 600-turn trial also reveals real, correctly charged growth from 757.36 to
+1,020.08 MiB. It is separate from the counter discrepancy. A subsequent 300-turn
+guest diagnostic keeps one VMM: persistent Leo anonymous RSS stabilizes around
+16–18 MiB after warmup, while guest-only cache reclamation plus three active
+seconds reduces retained cost to 697.77 MiB, below the initial 747.91 MiB. A fresh
+VM with the same intervention retains 662.82 MiB. Its 34.95 MiB difference from
+the warm VM is counted; these snapshots cannot classify each remaining byte.
+
+A 100-turn probe demonstrates additional free-page recovery with the persistent
+process alive and anonymous RSS unchanged. Finer reporting plus additional
+active time reduces allocated backing from 870.66 to 703.32 MiB after cache
+reclamation, and normal balloon/pause leaves total cost at 591.68 MiB. Duration
+and reporting order change together, so this does not isolate a production
+tuning benefit; no production reporting setting changes. These workloads show
+substantial recovery and no continuously growing persistent guest-process heap.
+Safety still relies on the measured physical bound and eviction, rather than a
+claim that finite tests prove indefinite leak freedom.
+
+An isolated disk-pressure replay on the main image with Codex 0.160.0 raises
+only the fixture's free-space reserve. Health reports `disk` pressure, the paused
+VMM is reaped and its slot freed, and the next turn recovers its unique context.
+This proves that pressure path, not the historical cause of the earlier failed
+long trial whose eviction log lacks a reason. Eviction logs now include the
+decision reason, pressure type, node RAM and retained allocation for future
+diagnoses; the admission thresholds and teardown behavior stay the same.
