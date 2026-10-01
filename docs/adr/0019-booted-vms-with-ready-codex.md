@@ -330,6 +330,7 @@ clic ou de paint DOM n'est mesuré. Les horloges invitées sont synchronisées.
 
 | Phase | Neuf sans pool | Neuf avec pool | Reprise sans pool | Reprise avec pool |
 | --- | ---: | ---: | ---: | ---: |
+| API UI → début préparation manager | 336 ms | 429 ms | 1 467 ms | 4 411 ms |
 | Préparation disque + boot, côté runner | 4,239 s | 0,027 s | 2,699 s | 3,889 s |
 | Préparation invitée | 653 ms | 355 ms | 414 ms | 550 ms |
 | Toolkit invité | 565 ms | 610 ms | 495 ms | 761 ms |
@@ -375,6 +376,22 @@ La sauvegarde reste active ; logout et renouvellement des accès sont obligatoir
 à chaque tour. Un changement de runtime, compte, droits ou configuration invalide
 la VM. Après éviction, conserver l'affinité checkpoint déjà présente et ce cache
 disque borné. Cette rétention de VM n'est pas implémentée dans la PR actuelle.
+
+Une attente supplémentaire précède la préparation du manager : 4,411 s dans la
+reprise avec pool. Durant la même fenêtre, les logs natifs du manager montrent
+trois lectures compte/quotas, deux en parallèle puis une troisième, entre
+16:24:24,219Z et 16:24:28,333Z. Ces logs ne sont pas attribués au run ; leur
+coïncidence et le chemin `Accounts::acquire → poll` identifient une piste précise.
+L'acquisition attendait systématiquement le rafraîchissement de tous les comptes
+arrivés à échéance, même avec un candidat disponible aux quotas encore valides.
+Le candidat vérifie maintenant les critères existants avant ce poll synchrone,
+puis refait la sélection sous verrou. Sans candidat, le rafraîchissement reste
+obligatoire ; aucune fenêtre de validité ni limite de slots n'est augmentée.
+Le polling de fond reste toutes les quinze secondes. Les phases
+`account_admission` mesurent cette frontière séparément du broker invité.
+Le test échoue avant correction avec un binaire natif indisponible et des quotas
+valides de 65 s ; il passe après, et refuse toujours des quotas expirés de 100 s.
+Le gain en production de cette correction reste à mesurer sur l'image qualifiée.
 
 ### Surcoût disque pendant l'exécution
 

@@ -16,6 +16,43 @@ use tempfile::TempDir;
 const CODEX_ACCOUNT: &str = "11111111-1111-4111-8111-111111111111";
 const CLAUDE_SESSION: &str = "70f5e7a1-8d65-4f5f-a545-af6ee8c0e1ab";
 
+#[tokio::test]
+async fn valid_available_usage_does_not_wait_for_due_account_refresh() {
+    let root = TempDir::new().unwrap();
+    let s = Service::new(config(&root)).await.unwrap();
+    s.accounts.initialize(&s).await.unwrap();
+    let mut account = s
+        .accounts
+        .create(&s, Provider::Codex, "Ready")
+        .await
+        .unwrap();
+    account["state"] = "ready".into();
+    account["usage"] = json!({
+        "allowed": true, "checkedAt": now() - 65_000,
+        "windows": [{ "id": "w", "usedPercent": 20, "models": [] }],
+        "resets": null
+    });
+    s.store.put(KIND, account.clone()).await.unwrap();
+    // The native binary is deliberately unavailable. Usage is still within the
+    // existing 90-second validity window, so no synchronous poll is required.
+    let lease = s
+        .accounts
+        .acquire(&s, "fresh-run", Provider::Codex, "gpt-6.1-sol")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(lease.account_id, text(&account, "id"));
+    s.accounts.release(&lease).await.unwrap();
+    account["usage"]["checkedAt"] = (now() - 100_000).into();
+    s.store.put(KIND, account).await.unwrap();
+    assert!(
+        s.accounts
+            .acquire(&s, "stale-run", Provider::Codex, "gpt-6.1-sol")
+            .await
+            .is_err()
+    );
+}
+
 fn config(root: &TempDir) -> Config {
     Config {
         setup_token: "test".into(),

@@ -33,6 +33,7 @@ host measurements also work with retained older images.
 | `mcp_startup` | Manager HTTP handling of authenticated initialize/tools-list requests, including authorization and dispatch; fixed endpoint category, optional gateway connection UUID |
 | `codex_rpc` / `mcp_rpc` | Request start and completion, method, local request ID, elapsed time, outbound queue time, deadline and success; no parameters or result |
 | `codex_transport` | Native HTTP/WebSocket request interval and status, plus selected thread startup phases; fixed endpoint category and sanitized thread UUID only |
+| `account_admission` | Manager-side account initialization, eligible-account lookup, required quota refresh, serialized selection and preparation; distinct from guest broker token acquisition |
 | `agent_activity` | Turn start/end, first item, first nonempty assistant message, item start/end and periodic activity summary |
 | `agent_output` | Worker pipe-to-consumer queue delays of at least 100 ms |
 | `agent_wait` | Awaits lasting at least 100 ms: stdout writing/flushing, credential-redaction refresh and output persistence |
