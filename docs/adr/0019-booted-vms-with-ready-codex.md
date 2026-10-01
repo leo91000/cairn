@@ -116,6 +116,8 @@ aucun véritable modèle n'est interrogé.
 Sur l'hôte i9-14900K / noyau 7.2.6, hors VM et sans autre compilation, trois
 séries donnent les médianes suivantes avant la requête modèle : démarrage froid
 de l'adaptateur 151 ms, première attribution prête 57 ms, reprise 34 ms.
+Le binaire Rust est un build `dev` ; le cache de fichiers n'est pas évincé.
+« Froid » signifie ici un nouveau processus, pas un disque froid.
 Le préchauffage préalable prend 88 ms. Ces mesures isolent l'adaptateur ; elles
 ne se comparent pas directement aux 8,75–10,05 s du chemin de production complet.
 Les cinq tests ciblés supplémentaires couvrent aussi le rejet d'un tour
