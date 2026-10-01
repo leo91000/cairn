@@ -39,7 +39,7 @@ catalog files are not removed from existing conversations.
 The same native VM reproduction with the override finalizes in 0.52–1.36 s and
 writes 5.3–5.4 MB. The explicit guest `sync` remains active and takes 0.14–0.99 s.
 These are prototype measurements, not production deployment evidence. The raw
-comparisons are in `docs/benchmarks/codex-plugin-shutdown-2026-09-30.json`.
+comparisons are in [codex-plugin-shutdown-2026-09-30.json](https://github.com/leo91000/leo-agent-manager/releases/download/v0.50.6/codex-plugin-shutdown-2026-09-30.json).
 
 The session regression verifies the centralized launch policy while retaining
 caller-supplied MCP configuration. Existing conversation, resume, managed-auth,

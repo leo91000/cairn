@@ -13,3 +13,5 @@ playwright-report/
 /target
 
 __pycache__/
+# Raw benchmark samples belong to release assets; keep summaries in ADRs.
+/docs/benchmarks/

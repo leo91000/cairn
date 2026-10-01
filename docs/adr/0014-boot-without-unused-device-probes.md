@@ -58,5 +58,5 @@ and kills the VMM. The unchanged published image reproduced that failure too.
 Using disk-backed fixture storage preserves the memory limit and avoids
 confusing test-filesystem exhaustion with a VM boot regression.
 
-Raw comparisons: `docs/benchmarks/guest-boot-2026-10-01.json`.
+Raw comparisons: [guest-boot-2026-10-01.json](https://github.com/leo91000/leo-agent-manager/releases/download/v0.50.6/guest-boot-2026-10-01.json).
 Parameter definitions: [upstream Linux documentation](https://www.kernel.org/doc/html/v6.12/admin-guide/kernel-parameters.html).

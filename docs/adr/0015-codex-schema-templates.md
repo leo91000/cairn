@@ -13,7 +13,7 @@ remaining finalization delay still needs separate attribution.
 
 The comparison runs the real Codex 0.159.3 binary in disposable Firecracker VMs
 with new 32 GiB disks. It needs no account or remote model. Its raw metadata is in
-[the comparison](../benchmarks/codex-state-initialization-2026-10-01.json).
+[the comparison](https://github.com/leo91000/leo-agent-manager/releases/download/v0.50.6/codex-state-initialization-2026-10-01.json).
 The prototype builds templates on tmpfs during each seeded run; that work is
 included in its total time. These are local measurements, not deployment proof.
 
