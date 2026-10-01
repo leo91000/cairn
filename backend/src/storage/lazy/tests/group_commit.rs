@@ -4,6 +4,63 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[test]
+fn one_caller_batches_ordered_writes_behind_one_durable_barrier() {
+    let root = tempfile::tempdir().unwrap();
+    let disk = disk(root.path());
+    let writes = [
+        DiskWrite {
+            offset: 4,
+            bytes: b"aaaaaaaa",
+        },
+        DiskWrite {
+            offset: 8,
+            bytes: b"bbbbbbbb",
+        },
+        DiskWrite {
+            offset: 10,
+            bytes: b"cc",
+        },
+    ];
+    disk.write_batch(&writes).unwrap();
+    assert_eq!(disk.performance()["journalCommit"]["count"], 1);
+    assert_eq!(disk.performance()["committedFrames"], 3);
+    assert_eq!(disk.performance()["write"]["count"], 3);
+    drop(disk);
+    let reopened = LazyDisk::open(
+        root.path(),
+        Arc::new(Source {
+            reads: AtomicUsize::new(0),
+        }),
+    )
+    .unwrap();
+    let mut bytes = [0; 20];
+    reopened.read_at(0, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"\0\0\0\0aaaabbccbbbb\0\0\0\0");
+}
+
+#[test]
+fn invalid_later_write_rejects_the_batch_before_any_append() {
+    let root = tempfile::tempdir().unwrap();
+    let disk = disk(root.path());
+    assert!(
+        disk.write_batch(&[
+            DiskWrite {
+                offset: 0,
+                bytes: b"must not appear"
+            },
+            DiskWrite {
+                offset: BLOCK,
+                bytes: b"outside"
+            },
+        ])
+        .is_err()
+    );
+    assert_eq!(disk.journal.lock().unwrap().next, 1);
+    assert_eq!(disk.performance()["journalCommit"]["count"], 0);
+    disk.write_at(0, b"valid after rejected batch").unwrap();
+}
+
 fn disk(root: &Path) -> Arc<LazyDisk> {
     Arc::new(
         LazyDisk::create(

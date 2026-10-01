@@ -235,7 +235,7 @@ export async function storageSmoke({
       metrics,
       resources,
       unintendedRestarts: 0,
-      source: 'real Firecracker/FUSE journal, loopback immutable origin; not S3/WAN',
+      source: 'real Firecracker/vhost-user journal, loopback immutable origin; not S3/WAN',
     }
     if (process.env.LEO_STORAGE_SOAK_EVIDENCE)
       await writeFile(process.env.LEO_STORAGE_SOAK_EVIDENCE, JSON.stringify(evidence, null, 2))

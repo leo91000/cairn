@@ -1,5 +1,5 @@
 //! Demand-paged immutable base with a durable local write journal.
-use super::Disk;
+use super::{Disk, DiskWrite};
 use rusqlite::{Connection, params};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -531,6 +531,45 @@ mod memory;
 mod state;
 
 impl LazyDisk {
+    fn append_writes(&self, writes: &[DiskWrite<'_>]) -> io::Result<()> {
+        if writes.len() > 128 {
+            return Err(failure("Too many disk writes in one batch"));
+        }
+        let mut total = 0usize;
+        for write in writes {
+            self.check(write.offset, write.bytes.len())?;
+            total = total
+                .checked_add(write.bytes.len())
+                .filter(|total| *total <= MAX_IO)
+                .ok_or_else(|| failure("Disk write batch exceeds its byte limit"))?;
+        }
+        if total == 0 {
+            return Ok(());
+        }
+        let _write = self.write_gate.read().map_err(failure)?;
+        let _publication = self.publication.read().map_err(failure)?;
+        let mut journal = self.journal.lock().map_err(failure)?;
+        let mut last = None;
+        for write in writes {
+            if write.bytes.is_empty() {
+                continue;
+            }
+            match journal.append(&self.directory, &self.db, write.offset, write.bytes) {
+                Ok(sequence) => last = Some(sequence),
+                Err(error) => {
+                    journal.fail();
+                    return Err(error);
+                }
+            }
+        }
+        if let Err(error) = self.update_accounting(&journal) {
+            journal.fail();
+            return Err(error);
+        }
+        drop(journal);
+        self.commit_write(last.expect("nonempty batch has a sequence"))
+    }
+
     fn commit_write(&self, sequence: i64) -> io::Result<()> {
         // One caller syncs a captured prefix while other callers stage frames.
         // The next owner includes all frames that accumulated during that sync.
@@ -593,28 +632,23 @@ impl Disk for LazyDisk {
 
     fn write_at(&self, offset: u64, bytes: &[u8]) -> io::Result<()> {
         let sample = self.metrics.writes.start();
-        self.check(offset, bytes.len())?;
-        if bytes.is_empty() {
-            sample.finish(0);
-            return Ok(());
-        }
-        let _write = self.write_gate.read().map_err(failure)?;
-        let _publication = self.publication.read().map_err(failure)?;
-        let mut journal = self.journal.lock().map_err(failure)?;
-        let sequence = match journal.append(&self.directory, &self.db, offset, bytes) {
-            Ok(sequence) => sequence,
-            Err(error) => {
-                journal.fail();
-                return Err(error);
-            }
-        };
-        if let Err(error) = self.update_accounting(&journal) {
-            journal.fail();
-            return Err(error);
-        }
-        drop(journal);
-        self.commit_write(sequence)?;
+        self.append_writes(&[DiskWrite { offset, bytes }])?;
         sample.finish(bytes.len());
+        Ok(())
+    }
+
+    fn write_batch(&self, writes: &[DiskWrite<'_>]) -> io::Result<()> {
+        if writes.len() == 1 {
+            return self.write_at(writes[0].offset, writes[0].bytes);
+        }
+        if writes.len() > 128 {
+            return Err(failure("Too many disk writes in one batch"));
+        }
+        let samples: Vec<_> = writes.iter().map(|_| self.metrics.writes.start()).collect();
+        self.append_writes(writes)?;
+        for (sample, write) in samples.into_iter().zip(writes) {
+            sample.finish(write.bytes.len());
+        }
         Ok(())
     }
 

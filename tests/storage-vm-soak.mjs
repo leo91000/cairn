@@ -11,6 +11,7 @@ import {
 import path from 'node:path'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
+import { memorySmoke } from './runner-memory-smoke.mjs'
 import { storageSmoke } from './runner-storage-smoke.mjs'
 
 async function main() {
@@ -78,6 +79,13 @@ async function main() {
       api,
       until,
       reconnect,
+    })
+    await memorySmoke({
+      root,
+      docker,
+      name,
+      api,
+      until,
     })
   }
   catch (error) {

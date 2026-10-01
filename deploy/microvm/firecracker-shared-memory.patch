@@ -1,0 +1,128 @@
+diff --git a/src/vmm/src/vstate/memory.rs b/src/vmm/src/vstate/memory.rs
+index 888e8c5..4a3ccfe 100644
+--- a/src/vmm/src/vstate/memory.rs
++++ b/src/vmm/src/vstate/memory.rs
+@@ -811,12 +811,38 @@ impl GuestRegionMmapExt {
+                 }
+                 Ok(())
+             }
+-            // Match either the case of an anonymous mapping, or the case
+-            // of a shared file mapping.
+-            // TODO: madvise(MADV_DONTNEED) doesn't actually work with memfd
+-            // (or in general MAP_SHARED of a fd). In those cases we should use
+-            // fallocate64(FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE).
+-            // We keep falling to the madvise branch to keep the previous behaviour.
++            (Some(file_offset), flags) if flags & libc::MAP_SHARED != 0 => {
++                // Shared mappings retain their backing pages after MADV_DONTNEED. Punch the
++                // freed guest range out of its backing file so all shared views see zeroes.
++                // Validate the entire range before touching the file, including region offsets
++                // in a memfd that backs several discontiguous guest memory regions.
++                self.get_slice(caddr, len)?;
++                let offset = file_offset
++                    .start()
++                    .checked_add(caddr.raw_value())
++                    .and_then(|offset| libc::off_t::try_from(offset).ok())
++                    .ok_or(GuestMemoryError::GuestAddressOverflow)?;
++                let length = libc::off_t::try_from(len)
++                    .map_err(|_| GuestMemoryError::GuestAddressOverflow)?;
++                offset
++                    .checked_add(length)
++                    .ok_or(GuestMemoryError::GuestAddressOverflow)?;
++                // SAFETY: The live backing file owns this checked range. KEEP_SIZE leaves the
++                // file size and neighbouring regions unchanged; only guest-discarded pages
++                // are removed. The existing seccomp filter permits this exact flag combination.
++                let ret = unsafe {
++                    libc::fallocate(
++                        file_offset.file().as_raw_fd(),
++                        libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
++                        offset,
++                        length,
++                    )
++                };
++                if ret < 0 {
++                    return Err(GuestMemoryError::IOError(io::Error::last_os_error()));
++                }
++                Ok(())
++            }
+             _ => {
+                 // Madvise the region in order to mark it as not used.
+                 let host_addr = self.get_host_address(caddr)?;
+@@ -1845,6 +1871,78 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn test_discard_range_shared_memfd_reclaims_only_selected_pages() {
++        let page_size = host_page_size();
++        let regions = [
++            (GuestAddress(0), 3 * page_size),
++            (GuestAddress(0x100000), 3 * page_size),
++        ];
++        let mem = into_region_ext(memfd_backed(&regions, false, HugePageConfig::None).unwrap());
++        let second = mem.iter().nth(1).unwrap();
++        let backing = second.file_offset().unwrap().file();
++        assert_eq!(
++            second.file_offset().unwrap().start(),
++            (3 * page_size) as u64
++        );
++        let mirror = into_region_ext(
++            create(
++                regions.into_iter(),
++                libc::MAP_SHARED,
++                Some(backing.try_clone().unwrap()),
++                false,
++                0,
++            )
++            .unwrap(),
++        );
++
++        for (address, len) in regions {
++            mem.write(&vec![37u8; len], address).unwrap();
++        }
++        let allocated = backing.metadata().unwrap();
++        assert!(allocated.blocks() >= (6 * page_size / 512) as u64);
++
++        // This low-level method must not punch outside this region into its neighbours.
++        for (offset, len) in [
++            (page_size + 1, page_size),
++            (page_size, page_size + 1),
++            (2 * page_size, 2 * page_size),
++        ] {
++            assert!(
++                second
++                    .discard_range(MemoryRegionAddress(offset as u64), len)
++                    .is_err()
++            );
++        }
++        assert_eq!(backing.metadata().unwrap().blocks(), allocated.blocks());
++
++        second
++            .discard_range(MemoryRegionAddress(page_size as u64), page_size)
++            .unwrap();
++        let reclaimed = backing.metadata().unwrap();
++        assert_eq!(reclaimed.len(), allocated.len());
++        assert_eq!(
++            reclaimed.blocks(),
++            allocated.blocks() - (page_size / 512) as u64
++        );
++
++        for mapping in [&mem, &mirror] {
++            for (region_address, _) in regions {
++                for page in 0..3 {
++                    let address = region_address.unchecked_add((page * page_size) as u64);
++                    let mut actual = vec![0u8; page_size];
++                    mapping.read(&mut actual, address).unwrap();
++                    let expected = if region_address == regions[1].0 && page == 1 {
++                        0
++                    } else {
++                        37
++                    };
++                    assert_eq!(actual, vec![expected; page_size]);
++                }
++            }
++        }
++    }
++
+     #[test]
+     fn test_discard_range_on_file() {
+         let page_size: usize = 0x1000;

@@ -6,6 +6,13 @@ use std::{
     path::Path,
 };
 
+/// One write whose bytes remain immutable until its durable acknowledgement.
+#[derive(Clone, Copy)]
+pub struct DiskWrite<'a> {
+    pub offset: u64,
+    pub bytes: &'a [u8],
+}
+
 /// Operations are exact and bounded by the disk size. Writes are durable before
 /// acknowledgment; sync propagates a guest flush to persistent local storage.
 /// Callers coordinate filesystem consistency before exporting a running disk.
@@ -15,6 +22,15 @@ pub trait Disk: Send + Sync {
     fn read_at(&self, offset: u64, bytes: &mut [u8]) -> io::Result<()>;
 
     fn write_at(&self, offset: u64, bytes: &[u8]) -> io::Result<()>;
+
+    /// Preserve request order and acknowledge only when every write is durable.
+    /// Failure may leave an unacknowledged prefix; this is not a transaction.
+    fn write_batch(&self, writes: &[DiskWrite<'_>]) -> io::Result<()> {
+        for write in writes {
+            self.write_at(write.offset, write.bytes)?;
+        }
+        Ok(())
+    }
 
     fn sync(&self) -> io::Result<()>;
 }

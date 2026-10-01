@@ -5,7 +5,7 @@ pub use local::prepare;
 
 mod device;
 
-pub use device::{Disk, LocalDisk, export};
+pub use device::{Disk, DiskWrite, LocalDisk, export};
 
 pub mod digest;
 mod lazy;
@@ -15,6 +15,8 @@ pub(crate) use lazy::NodeBlockCache;
 pub use lazy::{BlockSource, LazyDisk};
 
 pub mod fuse;
+
+pub mod vhost;
 
 pub mod remote;
 

@@ -2,7 +2,8 @@
 
 Date : 2026-10-01.
 
-Statut : prototype en validation, non déployé. Aucun gain de latence revendiqué.
+Statut : candidat implémenté, non déployé. Le regroupement est effectif avec le
+transport direct décrit dans [ADR 0018](0018-direct-block-queues-and-shared-ram.md).
 
 ## Problème
 

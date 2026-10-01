@@ -1,5 +1,5 @@
 //! Controller-owned mounted disks. One live journal per conversation directory.
-use super::{Disk, LazyDisk, policy::Policy, remote::RemoteSource};
+use super::{Disk, DiskWrite, LazyDisk, policy::Policy, remote::RemoteSource};
 use crate::error::{Error, Result};
 use serde_json::Value;
 use std::{
@@ -443,6 +443,38 @@ impl Disk for Volume {
     }
 
     fn write_at(&self, offset: u64, bytes: &[u8]) -> io::Result<()> {
+        self.admit_write(bytes.len(), 1, || self.disk.write_at(offset, bytes))
+    }
+
+    fn write_batch(&self, writes: &[DiskWrite<'_>]) -> io::Result<()> {
+        if writes.len() > 128 {
+            return Err(io::Error::other("Too many disk writes in one batch"));
+        }
+        let bytes = writes.iter().try_fold(0usize, |total, write| {
+            total
+                .checked_add(write.bytes.len())
+                .filter(|total| *total <= 8 * 1024 * 1024)
+                .ok_or_else(|| io::Error::other("Disk write batch exceeds its byte limit"))
+        })?;
+        self.admit_write(bytes, writes.len(), || self.disk.write_batch(writes))
+    }
+
+    fn sync(&self) -> io::Result<()> {
+        let result = self.disk.sync();
+        if result.is_err() {
+            self.fault.store(true, Ordering::SeqCst);
+        }
+        result
+    }
+}
+
+impl Volume {
+    fn admit_write(
+        &self,
+        bytes: usize,
+        frames: usize,
+        write: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<()> {
         let sample = self.disk.start_write_admission();
         // Serialize space checks and reservations across the node, then release
         // admission before journal I/O. Pending writes remain conservatively
@@ -457,7 +489,7 @@ impl Disk for Volume {
                 > self
                     .policy()?
                     .reserve(total)
-                    .saturating_add(bytes.len() as u64 * 4 + 1024 * 1024)
+                    .saturating_add(bytes as u64 * 4 + 1024 * 1024)
             {
                 self.pressure.store(false, Ordering::SeqCst);
                 self.space_pressure.store(false, Ordering::Release);
@@ -467,14 +499,17 @@ impl Disk for Volume {
                     .and_then(Path::parent)
                     .ok_or_else(|| io::Error::other("Invalid disk path"))?;
                 let _headroom =
-                    super::cache::reserve_write(&guard, bytes.len() as u64 * 4 + 1024 * 1024)?;
-                crate::microvm::budget::charge_disk(state, bytes.len() as u64 * 4 + 4096)?;
+                    super::cache::reserve_write(&guard, bytes as u64 * 4 + 1024 * 1024)?;
+                crate::microvm::budget::charge_disk(
+                    state,
+                    bytes as u64 * 4 + frames as u64 * 4096,
+                )?;
                 drop(guard);
-                let result = self.disk.write_at(offset, bytes);
+                let result = write();
                 if result.is_err() {
                     self.fault.store(true, Ordering::SeqCst);
                 } else {
-                    sample.finish(bytes.len());
+                    sample.finish(bytes);
                 }
                 return result;
             }
@@ -482,14 +517,6 @@ impl Disk for Volume {
             drop(guard);
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-    }
-
-    fn sync(&self) -> io::Result<()> {
-        let result = self.disk.sync();
-        if result.is_err() {
-            self.fault.store(true, Ordering::SeqCst);
-        }
-        result
     }
 }
 
