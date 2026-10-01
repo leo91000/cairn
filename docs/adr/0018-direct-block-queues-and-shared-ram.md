@@ -2,7 +2,7 @@
 
 Date : 2026-10-01.
 
-Statut : candidat implémenté, qualification de l'image finale en cours.
+Statut : livré et mesuré en production dans v0.50.6.
 
 ## Problème et décision
 
@@ -72,5 +72,20 @@ pas la qualification de l'image finale.
 Avec le correctif mémoire, le même test sur une vraie VM restitue 513,5 Mio
 pendant que la VM reste active : la charge memfd passe de 818,5 à 305,0 Mio.
 Ces mesures utilisent des fixtures jetables et excluent le modèle externe et
-S3. La qualification sous sauvegardes répétées, les tests Android et la mesure
-des conversations réelles restent obligatoires avant livraison complète.
+S3.
+
+## Qualification et production
+
+L'image finale passe 303,4 s de charge, 47 sauvegardes et 23 359 écritures :
+p99 disque 26,1 ms, maximum 178,9 ms, aucune erreur disque ni reprise intempestive.
+Le contexte est repris dans une autre VM ; le test mémoire restitue 512,3 Mio.
+Les tests Android Intel passent au premier démarrage et à la reprise.
+Les preuves sont dans le [manifeste de qualification de v0.50.6](https://github.com/leo91000/leo-agent-manager/releases/download/v0.50.6/final-qualification-manifest.json).
+
+Sur les conversations réelles sans projet, la finalisation mesurée après le
+tour passe de 13,78 s sur le témoin v0.50.5 à 1,48–1,53 s sur les deux nouvelles
+conversations v0.50.6. Le démarrage avant modèle reste à 8,75–10,05 s ; la reprise
+d'une ancienne conversation prend 14,62 s. Ces petits échantillons sont
+observationnels, avec une charge différente entre les séries : ils ne prouvent
+pas un démarrage en quelques secondes. Les [mesures de production](https://github.com/leo91000/leo-agent-manager/releases/download/v0.50.6/v0506-production-summary.json)
+identifient exactement le commit, l'image et les phases.
