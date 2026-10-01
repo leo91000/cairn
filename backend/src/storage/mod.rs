@@ -20,6 +20,8 @@ pub mod vhost;
 
 pub mod remote;
 
+pub mod source;
+
 pub mod policy;
 
 pub mod runtime;

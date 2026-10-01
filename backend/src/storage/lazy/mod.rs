@@ -107,6 +107,15 @@ fn validate(manifest: &Value) -> io::Result<u64> {
 }
 
 impl LazyDisk {
+    pub(crate) fn has_remote_base(&self) -> io::Result<bool> {
+        let base = self.base.lock().map_err(failure)?;
+        Ok(base["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|block| !block["hash"].is_null()))
+    }
+
     pub(crate) fn start_write_admission(&self) -> super::metrics::Sample<'_> {
         self.metrics.write_admission.start()
     }

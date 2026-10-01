@@ -1,5 +1,5 @@
 //! Controller-owned mounted disks. One live journal per conversation directory.
-use super::{Disk, DiskWrite, LazyDisk, policy::Policy, remote::RemoteSource};
+use super::{Disk, DiskWrite, LazyDisk, policy::Policy, source::Source};
 use crate::error::{Error, Result};
 use serde_json::Value;
 use std::{
@@ -53,10 +53,10 @@ pub(crate) fn configure(state: &Path, policy: &Policy) -> Result<()> {
 
 pub struct Volume {
     pub disk: Arc<LazyDisk>,
-    pub source: Arc<RemoteSource>,
+    pub source: Arc<Source>,
     pub stop: CancellationToken,
     directory: PathBuf,
-    policy: Policy,
+    policy: RwLock<Policy>,
     control_policy: RwLock<Policy>,
     active_since: AtomicI64,
     active_attempt: Mutex<String>,
@@ -100,12 +100,33 @@ pub fn open(directory: &Path) -> Result<Arc<Volume>> {
     let root = directory.join("lazy");
     let context = LazyDisk::context(&root)?;
     let stop = CancellationToken::new();
-    let source = Arc::new(RemoteSource::new(
-        &context,
-        tokio::runtime::Handle::current(),
-        stop.clone(),
-    )?);
+    let unassigned = context["unassigned"] == true;
+    if unassigned && (context.get("master").is_some() || context.get("grant").is_some()) {
+        return Err(Error::conflict(
+            "Unassigned disk must not carry remote authority.",
+        ));
+    }
+    if unassigned
+        && directory
+            .parent()
+            .and_then(Path::file_name)
+            .is_none_or(|name| name != "environments")
+    {
+        return Err(Error::conflict(
+            "Unassigned disks must belong to the prepared environment namespace.",
+        ));
+    }
+    let source = Arc::new(if unassigned {
+        Source::prepared(tokio::runtime::Handle::current(), stop.clone())
+    } else {
+        Source::new(&context, tokio::runtime::Handle::current(), stop.clone())?
+    });
     let disk = Arc::new(LazyDisk::open(&root, source.clone())?);
+    if unassigned && disk.has_remote_base()? {
+        return Err(Error::conflict(
+            "Unassigned disk must not contain a remote base.",
+        ));
+    }
     let policy: Policy = serde_json::from_value(context["policy"].clone()).unwrap_or_default();
     policy.validate()?;
     disk.memory_budget(policy.memory_cache_mi_b as usize * 1024 * 1024)?;
@@ -115,7 +136,7 @@ pub fn open(directory: &Path) -> Result<Arc<Volume>> {
         stop,
         directory: directory.to_owned(),
         control_policy: RwLock::new(policy.clone()),
-        policy,
+        policy: RwLock::new(policy),
         active_since: AtomicI64::new(0),
         active_attempt: Mutex::new(String::new()),
         pressure: AtomicBool::new(false),
@@ -195,13 +216,44 @@ pub(crate) async fn create_at_generation(
     context: &Value,
     generation: i64,
 ) -> Result<Arc<LazyDisk>> {
+    create_source(directory, manifest, context, generation, false).await
+}
+
+pub(crate) async fn create_prepared(
+    directory: &Path,
+    manifest: &Value,
+    context: &Value,
+) -> Result<Arc<LazyDisk>> {
+    if context["unassigned"] != true
+        || context.get("master").is_some()
+        || context.get("grant").is_some()
+        || manifest["blocks"]
+            .as_array()
+            .is_none_or(|blocks| blocks.iter().any(|block| !block["hash"].is_null()))
+    {
+        return Err(Error::bad("Prepared disks require a local-only base."));
+    }
+    create_source(directory, manifest, context, 1, true).await
+}
+
+async fn create_source(
+    directory: &Path,
+    manifest: &Value,
+    context: &Value,
+    generation: i64,
+    prepared: bool,
+) -> Result<Arc<LazyDisk>> {
     let (directory, manifest, context) = (directory.to_owned(), manifest.clone(), context.clone());
     blocking(move || {
-        let source = Arc::new(RemoteSource::new(
-            &context,
-            tokio::runtime::Handle::current(),
-            CancellationToken::new(),
-        )?);
+        let source = Arc::new(if prepared {
+            Source::prepared(tokio::runtime::Handle::current(), CancellationToken::new())
+        } else {
+            Source::new(
+                &context,
+                tokio::runtime::Handle::current(),
+                CancellationToken::new(),
+            )?
+        });
         let disk = Arc::new(LazyDisk::create_at_generation(
             &directory, &manifest, source, generation,
         )?);
@@ -227,6 +279,41 @@ pub(crate) async fn rebuild_identity(directory: &Path) -> Result<(Value, i64)> {
 }
 
 impl Volume {
+    /// Called only after the environment's owner was durably assigned. The
+    /// journal and VMM stay open; an existing grant is never replaced.
+    pub async fn authorize(
+        self: &Arc<Self>,
+        owner: &super::environment::OwnerLease,
+        context: &Value,
+    ) -> Result<()> {
+        if owner.directory != self.directory
+            || self
+                .directory
+                .parent()
+                .and_then(Path::file_name)
+                .is_none_or(|name| name != "environments")
+            || context["unassigned"] == true
+        {
+            return Err(Error::conflict(
+                "Disk authorization requires its prepared environment owner.",
+            ));
+        }
+        let policy: Policy = serde_json::from_value(context["policy"].clone())?;
+        policy.validate()?;
+        let (volume, context) = (self.clone(), context.clone());
+        blocking(move || {
+            volume.source.assign(&context, || {
+                volume.disk.set_context(&context)?;
+                volume.disk.sync()?;
+                Ok(())
+            })?;
+            *volume.policy.write().map_err(Error::internal)? = policy.clone();
+            *volume.control_policy.write().map_err(Error::internal)? = policy;
+            Ok(())
+        })
+        .await
+    }
+
     pub fn paused(&self) -> bool {
         self.paused.load(Ordering::SeqCst)
     }
@@ -360,7 +447,11 @@ impl Volume {
                 policy.validate().map_err(|e| io::Error::other(e.message))?;
                 Ok(policy)
             }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(self.policy.clone()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(self
+                .policy
+                .read()
+                .map_err(|error| io::Error::other(error.to_string()))?
+                .clone()),
             Err(e) => Err(e),
         }
     }
@@ -407,7 +498,7 @@ impl Volume {
             )
         };
         status["mode"] = "on-demand".into();
-        status["grantId"] = self.source.grant_id().into();
+        status["grantId"] = self.source.authorization()?.into();
         status["waitingFor"] = reason.into();
         status["freeBytes"] = free.into();
         status["reserveBytes"] = policy.reserve(total).into();
@@ -578,7 +669,106 @@ pub async fn materialize(directory: &Path, stop: &CancellationToken) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::{BlockSource, environment, remote::RemoteSource};
     use serde_json::json;
+
+    fn prepared_manifest() -> Value {
+        json!({
+            "version": 1, "size": 4096, "blockSize": 4_194_304,
+            "blocks": [{ "offset": 0, "size": 4096, "hash": null }],
+        })
+    }
+
+    fn prepared_context() -> Value {
+        json!({ "unassigned": true, "policy": { "reserveMiB": 64, "reservePercent": 1 } })
+    }
+
+    #[tokio::test]
+    async fn adopted_disk_binds_authority_without_reopening_journal_and_survives_restart() {
+        let state = tempfile::tempdir().unwrap();
+        let id = crate::config::id();
+        let directory = state.path().join("environments").join(&id);
+        let context = prepared_context();
+        let disk = create_prepared(&directory.join("lazy"), &prepared_manifest(), &context)
+            .await
+            .unwrap();
+        disk.write_at(0, b"BOOT").unwrap();
+        drop(disk);
+        let volume = load(&directory).await.unwrap();
+        let live = volume.disk.clone();
+        assert!(volume.inspect().await.unwrap()["grantId"].is_null());
+        assert!(volume.source.grant_id().is_err());
+        assert_eq!(
+            volume.source.fetch(&"a".repeat(64)).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        let wrong = environment::ownership(state.path(), &crate::config::id(), "busy")
+            .await
+            .unwrap();
+        let authorized = json!({
+            "master": "http://127.0.0.1:1/",
+            "grant": "owner-grant",
+            "policy": context["policy"],
+        });
+        assert!(volume.authorize(&wrong, &authorized).await.is_err());
+        assert!(volume.source.grant_id().is_err());
+        drop(wrong);
+        let physical = crate::file_lock::exclusive(&directory.join("lock"), "busy").unwrap();
+        let run = crate::config::id();
+        let owner = environment::assign(state.path(), &id, &run).await.unwrap();
+        volume.authorize(&owner, &authorized).await.unwrap();
+        assert!(Arc::ptr_eq(&live, &volume.disk));
+        assert_eq!(
+            volume.source.grant_id().unwrap(),
+            crate::auth::digest("owner-grant")
+        );
+        assert!(volume.authorize(&owner, &authorized).await.is_err());
+        volume.write_at(4, b"USER").unwrap();
+        let mut bytes = [0; 8];
+        volume.read_at(0, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"BOOTUSER");
+        drop((live, volume, physical, owner));
+        let physical = environment::directory(state.path(), &run).unwrap();
+        let reopened = load(&physical).await.unwrap();
+        assert_eq!(
+            reopened.source.grant_id().unwrap(),
+            crate::auth::digest("owner-grant")
+        );
+        reopened.read_at(0, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"BOOTUSER");
+    }
+
+    #[tokio::test]
+    async fn unassigned_journal_cannot_hide_a_remote_base_or_replace_a_legacy_disk() {
+        let state = tempfile::tempdir().unwrap();
+        let context = prepared_context();
+        let mut remote = prepared_manifest();
+        remote["blocks"][0]["hash"] = "a".repeat(64).into();
+        let physical = state.path().join("environments").join(crate::config::id());
+        assert!(
+            create_prepared(&physical.join("lazy"), &remote, &context)
+                .await
+                .is_err()
+        );
+        let authorized = json!({
+            "master": "http://127.0.0.1:1/",
+            "grant": "fixture",
+            "policy": context["policy"],
+        });
+        let disk = create(&physical.join("lazy"), &remote, &authorized)
+            .await
+            .unwrap();
+        disk.set_context(&context).unwrap();
+        drop(disk);
+        assert!(load(&physical).await.is_err());
+        let legacy = state.path().join("disks").join(crate::config::id());
+        drop(
+            create_prepared(&legacy.join("lazy"), &prepared_manifest(), &context)
+                .await
+                .unwrap(),
+        );
+        assert!(load(&legacy).await.is_err());
+    }
 
     #[tokio::test]
     async fn resumed_backlog_gets_one_active_window_without_hiding_its_age() {

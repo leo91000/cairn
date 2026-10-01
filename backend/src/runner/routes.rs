@@ -247,7 +247,7 @@ async fn disk_storage(
     let generation = receipt
         .generation
         .ok_or_else(|| Error::bad("Missing generation."))?;
-    if receipt.grant_id != Some(volume.source.grant_id()) {
+    if receipt.grant_id != Some(volume.source.grant_id()?) {
         return Err(Error::conflict("Publication belongs to a replaced disk."));
     }
     let backup_id = receipt.backup_id;

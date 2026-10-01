@@ -306,6 +306,14 @@ impl Reservation {
                 .unwrap_or(DEFAULT_DISK_MIB);
             let size = disk_mib * 1024 * 1024;
             crate::storage::bootstrap::prepare(&disk, size, plan.storage(), &stop).await?;
+            let volume = crate::storage::runtime::load(&disk).await?;
+            if volume.source.authorization()?.is_none() {
+                // A controller crash may leave ownership durable before its
+                // authorization was attached. Bind before any user import.
+                volume
+                    .authorize(self.owner.as_ref().unwrap(), plan.storage())
+                    .await?;
+            }
             timing.next("boot_vm");
             self.vm = Some(
                 Vm::boot(

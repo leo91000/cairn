@@ -151,7 +151,7 @@ pub async fn capture(
     Ok(json!({
         "id": id,
         "manifest": manifest,
-        "grantId": volume.source.grant_id()
+        "grantId": volume.source.grant_id()?
     }))
 }
 

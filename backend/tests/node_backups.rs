@@ -535,5 +535,8 @@ async fn restore_does_not_replace_a_journal_still_in_use() {
     let restored = runtime::load(&directory).await.unwrap();
     restored.read_at(0, &mut bytes).unwrap();
     assert_eq!(bytes, [0; 3]);
-    assert_eq!(restored.source.grant_id(), auth::digest("new-grant"));
+    assert_eq!(
+        restored.source.grant_id().unwrap(),
+        auth::digest("new-grant")
+    );
 }

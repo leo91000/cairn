@@ -151,6 +151,20 @@ deux écritures, les conflits, les alias, la suppression et les sauvegardes sur
 un journal déjà ouvert. Cette étape prépare le cycle de vie du pool ; elle
 n'active pas encore le préchauffage et ne représente pas un gain de démarrage.
 
+Le disque anonyme est créé avec une base entièrement locale et sans grant S3.
+Sa source refuse les lectures distantes et la publication avant attribution.
+Après attribution durable, l'autorisation de la conversation est enregistrée
+dans le journal et synchronisée avant d'être attachée à la source ouverte.
+Les imports utilisateur ne peuvent commencer avant cette étape. La récupération
+d'une attribution interrompue avant l'autorisation suit également cette règle.
+Une source déjà autorisée conserve son grant : les reçus de publication et les
+pins de sa base montée restent liés à cette identité.
+
+Les tests vérifient la création réelle d'un ext4 local, le refus des bases
+distantes anonymes, la persistance de l'autorisation, les écritures avant et
+après attribution sur le même journal, la réouverture et l'annulation d'une
+lecture distante. Cela prépare le bootstrap du pool, encore non activé.
+
 ## Preuves et politique de livraison
 
 Les [mesures vhost](https://github.com/leo91000/leo-agent-manager/releases/download/v0.50.6/ready-vm-vhost-2026-10-01.json),
