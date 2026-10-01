@@ -119,6 +119,19 @@ async fn entry(args: Vec<String>) -> Result<i32> {
             return leo_agent_manager::runner::client(runner, stop).await;
         }
         "chat" => return chat_command(args.get(1), stop).await,
+        "codex-service" => {
+            let config = Config::load()?;
+            let home =
+                std::env::var("CODEX_HOME").map_err(|_| Error::bad("Missing Codex home."))?;
+            let socket = arg(&args, 1, "Missing Codex service socket.")?;
+            leo_agent_manager::chat_process::resident::serve(
+                &config,
+                Path::new(&home),
+                Path::new(socket),
+                stop,
+            )
+            .await?;
+        }
         "runner-entry" => return runner_entry(stop).await,
         "serve" => serve(stop).await?,
         _ => {
@@ -327,11 +340,18 @@ async fn chat(config: &Config, plan: Value, stop: CancellationToken) -> Result<i
     );
     let result = async {
         if plan["provider"] == "claude" {
-            leo_agent_manager::claude_process::run(config, plan, tx.clone(), stop).await
-        } else {
-            leo_agent_manager::chat_process::run(config, Path::new(&home), plan, tx.clone(), stop)
-                .await
+            return leo_agent_manager::claude_process::run(config, plan, tx.clone(), stop).await;
         }
+        if let Ok(socket) = std::env::var("LEO_CODEX_SERVICE") {
+            return leo_agent_manager::chat_process::resident::run(
+                Path::new(&socket),
+                plan,
+                tx.clone(),
+                stop,
+            )
+            .await;
+        }
+        leo_agent_manager::chat_process::run(config, Path::new(&home), plan, tx.clone(), stop).await
     }
     .instrument(span)
     .await;

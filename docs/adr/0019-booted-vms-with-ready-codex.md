@@ -88,6 +88,42 @@ la saturation et l'éviction du pool ; vérifier les sauvegardes répétées, la
 après crash, l'isolement entre propriétaires et l'absence de redémarrage intempestif.
 Les essais présents valident le levier de démarrage, pas ce cycle de vie complet.
 
+## Première brique d'intégration : processus Codex résident
+
+Le candidat ajoute un service invité privé qui possède un Codex initialisé et
+exécute un seul tour à la fois via le même adaptateur Rust que le chemin froid.
+L'initialisation ne demande pas de compte. Chaque tour se connecte au broker du
+compte, puis libère cette authentification avant de confirmer sa fin. Une perte
+du client, un état inconnu ou une erreur retire le processus ; une initialisation
+interrompue attend également sa terminaison. Le contrôleur n'active pas encore
+ce service et ne conserve pas encore les VM : cette section décrit le candidat.
+
+La configuration MCP est fournie à chaque thread, avec le token courant du
+gateway. L'environnement du processus conservé ne porte pas un token de tour.
+Le service désabonne son thread après succès. Le [code de Codex 0.159.3](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/app-server/src/request_processors/thread_processor.rs)
+peut ignorer des overrides sur un thread chargé et abonné ; un thread idle sans
+abonné est reconstruit lorsque la reprise apporte des overrides. Il faut donc
+tester cette reprise avec le vrai binaire, en changeant les accès.
+
+Le test reproductible `tests/fixtures/ready-codex.mjs LEO CODEX` utilise des
+homes temporaires, le vrai binaire 0.159.3 extrait de l'image v0.50.6, un modèle
+HTTP simulé et un MCP local. Il vérifie le même PID natif sur trois tours, le
+contexte, le changement du token et des outils MCP, puis leur suppression.
+L'arrêt du service doit récupérer le processus natif. Le modèle annoncé est
+`gpt-5.4`, dont les capacités d'outils sont connues du catalogue local embarqué ;
+aucun véritable modèle n'est interrogé.
+
+Sur l'hôte i9-14900K / noyau 7.2.6, hors VM et sans autre compilation, trois
+séries donnent les médianes suivantes avant la requête modèle : démarrage froid
+de l'adaptateur 151 ms, première attribution prête 57 ms, reprise 34 ms.
+Le préchauffage préalable prend 88 ms. Ces mesures isolent l'adaptateur ; elles
+ne se comparent pas directement aux 8,75–10,05 s du chemin de production complet.
+Les cinq tests ciblés supplémentaires couvrent aussi le rejet d'un tour
+concurrent, la perte du client, l'arrêt pendant l'initialisation et le cycle
+login/refresh/logout avec un broker synthétique. L'intégration du pool, ses
+limites, l'éviction et les sauvegardes de VM conservées restent à valider avant
+activation ou release.
+
 ## Preuves et politique de livraison
 
 Les [mesures vhost](https://github.com/leo91000/leo-agent-manager/releases/download/v0.50.6/ready-vm-vhost-2026-10-01.json),

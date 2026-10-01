@@ -17,6 +17,8 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+pub mod resident;
+
 const STOPPED: &str = "Conversation stopped.";
 const MAX_MESSAGE: usize = 5_000_000;
 const MAX_INBOX: usize = 2_000_000;
@@ -83,6 +85,8 @@ struct ThreadParams<'a> {
 
 #[derive(Serialize)]
 struct ThreadConfig<'a> {
+    #[serde(flatten)]
+    overrides: &'a Map<String, Value>,
     #[serde(rename = "features.default_mode_request_user_input")]
     request_user_input: bool,
     sandbox_workspace_write: WorkspaceWrite<'a>,
@@ -143,8 +147,8 @@ struct Question {
     message_id: Option<String>,
 }
 
-struct Chat {
-    session: Session,
+struct Chat<'a> {
+    session: &'a mut Session,
     events: mpsc::Sender<Value>,
     cancel: CancellationToken,
     thread: String,
@@ -157,7 +161,31 @@ struct Chat {
     questions: HashMap<String, Question>,
 }
 
-impl Chat {
+impl Chat<'_> {
+    async fn release(&mut self) -> Result<()> {
+        // Codex 0.159.3 reloads an idle, unsubscribed thread when resume supplies
+        // overrides. A subscribed thread can silently ignore new MCP permissions.
+        let response = self
+            .session
+            .request(
+                "thread/unsubscribe",
+                json!({
+                    "threadId": self.thread,
+                }),
+            )
+            .await?;
+        if !matches!(text(&response, "status"), "unsubscribed" | "notLoaded") {
+            return Err(Error::unavailable(
+                "Codex did not release its conversation.",
+            ));
+        }
+        if self.session.auth.is_some() {
+            self.session.request("account/logout", json!({})).await?;
+            self.session.auth = None;
+        }
+        Ok(())
+    }
+
     async fn emit(&self, value: Value) -> Result<()> {
         self.events
             .send(value)
@@ -364,7 +392,7 @@ impl Chat {
         if !effort.is_empty() {
             return effort.to_owned();
         }
-        let Ok(models) = crate::models::discover(&mut self.session).await else {
+        let Ok(models) = crate::models::discover(self.session).await else {
             return String::new();
         };
         let chosen = models
@@ -386,12 +414,14 @@ impl Chat {
         } else {
             text(plan, "sandbox")
         };
+        let empty = Map::new();
         let params = ThreadParams {
             cwd: &plan["cwd"],
             approval_policy: "never",
             sandbox,
             developer_instructions: &plan["instructions"],
             config: ThreadConfig {
+                overrides: plan["codexConfig"].as_object().unwrap_or(&empty),
                 request_user_input: true,
                 sandbox_workspace_write: WorkspaceWrite {
                     network_access: true,
@@ -722,7 +752,7 @@ fn keep_item(turn: &mut Value, item: &Value) -> Result<()> {
 pub async fn run(
     config: &Config,
     home: &Path,
-    plan: Value,
+    mut plan: Value,
     events: mpsc::Sender<Value>,
     cancel: CancellationToken,
 ) -> Result<()> {
@@ -733,19 +763,36 @@ pub async fn run(
         .filter_map(Value::as_str)
         .map(str::to_owned)
         .collect::<Vec<_>>();
+    // Keep the existing CLI configuration path unchanged for cold adapters.
+    if let Some(plan) = plan.as_object_mut() {
+        plan.remove("codexConfig");
+    }
     let mut session =
         Session::codex(config, home, &args, Some(Path::new(text(&plan, "cwd")))).await?;
+    let result = run_session(&mut session, home, plan, events, cancel, false).await;
+    crate::performance::wait("codex_shutdown", session.close()).await;
+    result
+}
+
+/// A resident owns the native process; one attempt borrows it until every
+/// thread access and account lease has been released. Errors retire the process.
+async fn run_session(
+    session: &mut Session,
+    home: &Path,
+    plan: Value,
+    events: mpsc::Sender<Value>,
+    cancel: CancellationToken,
+    reusable: bool,
+) -> Result<()> {
     let mut auth = crate::accounts::codex::Client::new(home);
     if home.join("leo-managed-auth").exists() && auth.is_none() {
-        session.close().await;
         return Err(Error::unavailable(
             "Account authentication service is unavailable.",
         ));
     }
     if let Some(auth) = &mut auth
-        && let Err(error) = auth.login(&mut session).await
+        && let Err(error) = auth.login(session).await
     {
-        session.close().await;
         return Err(error);
     }
     session.auth = auth;
@@ -762,7 +809,9 @@ pub async fn run(
         texts: HashMap::new(),
         questions: HashMap::new(),
     };
-    let result = chat.execute(&plan).await;
-    crate::performance::wait("codex_shutdown", chat.session.close()).await;
+    let mut result = chat.execute(&plan).await;
+    if result.is_ok() && reusable {
+        result = chat.release().await;
+    }
     result
 }

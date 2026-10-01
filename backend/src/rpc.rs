@@ -167,6 +167,16 @@ impl Session {
         args: &[String],
         cwd: Option<&Path>,
     ) -> Result<Self> {
+        Self::codex_until(config, home, args, cwd, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn codex_until(
+        config: &Config,
+        home: &Path,
+        args: &[String],
+        cwd: Option<&Path>,
+        stop: &CancellationToken,
+    ) -> Result<Self> {
         let mut args = args.to_vec();
         args.extend(
             [
@@ -192,7 +202,11 @@ impl Session {
         );
         command.stdin(Stdio::piped());
         let mut session = Self::spawn(command).await?;
-        if let Err(error) = session.initialize_codex().await {
+        let initialized = tokio::select! {
+            result = session.initialize_codex() => result,
+            () = stop.cancelled() => Err(Error::unavailable("Codex initialization stopped.")),
+        };
+        if let Err(error) = initialized {
             // The caller cannot close a session that failed to initialize. Reap its
             // process here before relinquishing ownership (and its account lease).
             session.close().await;

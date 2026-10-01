@@ -207,6 +207,7 @@ struct ClaudeMcps {
 #[serde(rename_all = "camelCase")]
 struct RunConfiguration {
     args: Vec<String>,
+    codex_config: BTreeMap<String, Value>,
     env: BTreeMap<&'static str, String>,
     redactions: Vec<String>,
     claude_mcps: ClaudeMcps,
@@ -223,6 +224,7 @@ impl RunConfiguration {
     fn new(token: String) -> Self {
         Self {
             args: Vec::new(),
+            codex_config: BTreeMap::new(),
             env: BTreeMap::new(),
             redactions: vec![token.clone()],
             claude_mcps: ClaudeMcps::default(),
@@ -236,9 +238,22 @@ impl RunConfiguration {
     }
 
     fn add_codex(&mut self, name: &str, config: &CodexServer<'_>) -> Result<()> {
-        let config = toml(&serde_json::to_value(config)?);
+        let mut value = serde_json::to_value(config)?;
+        let config = toml(&value);
         self.args.push("-c".to_owned());
         self.args.push(format!("mcp_servers.{name}={config}"));
+
+        // A resident's environment is deliberately independent of an attempt.
+        // Supply the current gateway lease with the thread configuration instead.
+        if let Some(server) = value.as_object_mut()
+            && server.remove("bearer_token_env_var").is_some()
+        {
+            server.insert(
+                "http_headers".into(),
+                serde_json::json!(self.bearer_headers()),
+            );
+        }
+        self.codex_config.insert(name.into(), value);
         Ok(())
     }
 

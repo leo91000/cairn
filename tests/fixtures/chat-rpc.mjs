@@ -54,6 +54,14 @@ export function chatFixture() {
       return true
     }
 
+    if (method === 'thread/unsubscribe') {
+      if (active)
+        throw new Error('Cannot release an active thread')
+      emit({ id: request.id, result: { status: 'unsubscribed' } })
+      thread = undefined
+      return true
+    }
+
     if (!['thread/start', 'thread/resume', 'turn/start', 'turn/steer', 'thread/turns/list', 'thread/items/list'].includes(method))
       return false
     if (method === 'thread/start') {
@@ -64,6 +72,7 @@ export function chatFixture() {
         historyMode: 'paginated',
         turns: [],
         parentThreadId: null,
+        fixtureConfig: params.config,
       }
       save()
       emit({ id: request.id, result: { thread } })
@@ -73,6 +82,7 @@ export function chatFixture() {
       if (!existsSync(file))
         throw new Error('No conversation')
       thread = JSON.parse(readFileSync(file, 'utf8'))
+      thread.fixtureConfig = params.config
       counter = thread.turns.length
       emit({ id: request.id, result: { thread: { ...thread, turns: [] } } })
     }
