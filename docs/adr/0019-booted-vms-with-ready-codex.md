@@ -2,7 +2,7 @@
 
 Date : 2026-10-01.
 
-Statut : prototypes mesurés ; pool retenu comme prochain candidat à intégrer.
+Statut : prototypes mesurés ; admission du pool implémentée et qualification en cours.
 Cette décision n'active pas encore de pool en production.
 
 ## Question et méthode
@@ -195,6 +195,49 @@ la publication S3. Les traces brutes restent hors du dépôt ; la qualification
 intégrée et ses assets accompagneront la release avec gain mesuré.
 
 ## Preuves et politique de livraison
+
+### Admission et premier comparatif intégré local
+
+Le contrôleur prépare au plus une VM anonyme dans ses slots et budgets existants.
+Elle expire après 60 s, un changement de budget ou une pression de ressources.
+Le préchauffage requiert 2 Gio de marge. Une demande active annule la préparation
+et attend la fin réelle du VMM et du backend avant de reprendre son slot ; les
+sondes de santé n'attendent pas cette admission. L'arrêt du contrôleur vide aussi
+le pool. Une attribution partiellement persistée conserve toujours son disque.
+
+Seuls les nouveaux chats Codex avec le home géré standard et un disque neuf
+peuvent adopter ce service. Les reprises, les homes personnalisés et les autres
+exécutions gardent leur chemin à froid. Une VM anonyme n'est jamais réattribuée
+après usage. Un journal encore inspecté reste conservé lors de son retrait.
+`LEO_READY_VM_POOL=false` permet un contrôle à froid avec la même image.
+
+Un premier essai du chemin HTTP du runner, sur le vrai Firecracker/vhost et le
+vrai Codex 0.159.3, utilise des tokens de compte synthétiques, un modèle local et
+une commande réellement exécutée par Codex. Même image et cache d'image,
+7 CPU / 35 840 Mio par invité ; trois conversations neuves par variante :
+
+| Demande runner → premier appel modèle | Sans préchauffage | VM avec Codex prêt |
+| --- | ---: | ---: |
+| Médiane | 2,793 s | 1,673 s |
+| Minimum–maximum | 2,718–2,874 s | 1,565–4,525 s |
+
+Le gain médian observé est de 40 %. La série conserve son essai lent à 4,525 s :
+l'attribution et les imports y prennent 127 ms, le reste se situe dans le
+parcours natif avant le modèle. Ce contrôle local n'inclut ni le manager,
+ni les MCP métier, ni une authentification réelle, ni S3/WAN. Il ne remplace pas
+la référence de production de 8,75–10,05 s et ne permet pas d'annoncer un nouveau
+temps en production. Les tests natifs vérifient aussi les skills ajoutés après
+préchauffage, les leases de compte par tour et le contexte entre tours.
+
+Les trois disques attribués ont ensuite été publiés vers l'origine immutable
+locale : 35–36 blocs distincts par disque, tous relus et vérifiés par leur hash.
+Un nouveau VMM à froid a repris chaque thread avec le même identifiant et son
+contexte. Cela vérifie le chemin de publication et de reprise après attribution,
+sans revendiquer un test du chiffrement S3 ou de la latence WAN.
+
+Les échantillons et le harnais restent hors du dépôt, en attendant les assets
+de la release qualifiée avec gain intégré. Aucune release supplémentaire n'est
+créée pour cette étape seule.
 
 Les [mesures vhost](https://github.com/leo91000/leo-agent-manager/releases/download/v0.50.6/ready-vm-vhost-2026-10-01.json),
 les [mesures snapshot](https://github.com/leo91000/leo-agent-manager/releases/download/v0.50.6/ready-vm-snapshot-2026-10-01.json)

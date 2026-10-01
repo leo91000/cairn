@@ -1,4 +1,6 @@
-//! Bounded execution slots; each reservation boots its own S3-backed VM.
+//! Bounded execution slots, with one account-free VM prepared for a fresh chat.
+mod ready;
+
 use super::{
     budget::{self, Budget},
     host::Vm,
@@ -15,13 +17,24 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    time::{Duration, Instant},
 };
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::{Mutex, OnceCell, watch};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 #[derive(Default)]
 struct Slots {
     occupied: Vec<bool>,
+    ready: Option<Reservation>,
+    preparing: Option<Preparing>,
+    retry_after: Option<Instant>,
+    warm_disabled: bool,
+}
+
+struct Preparing {
+    slot: usize,
+    stop: CancellationToken,
+    done: watch::Receiver<bool>,
 }
 
 impl Slots {
@@ -47,7 +60,7 @@ impl Slots {
 pub struct Health {
     pub capacity: usize,
     pub occupied: usize,
-    /// Always 0 and false: VMs are booted per reservation, never pre-warmed.
+    /// Included in occupied; this slot can be claimed by a compatible chat.
     pub ready: usize,
     pub preparing: bool,
 }
@@ -61,6 +74,9 @@ pub struct Reservation {
     slot: usize,
     vm: Option<Vm>,
     owner: Option<crate::storage::environment::OwnerLease>,
+    anonymous: Option<PathBuf>,
+    prepared: Option<ready::Prepared>,
+    completion: Option<watch::Sender<bool>>,
 }
 
 pub struct Pool {
@@ -70,7 +86,9 @@ pub struct Pool {
     hardware: OnceCell<serde_json::Value>,
     state: PathBuf,
     image: PathBuf,
+    warm_enabled: bool,
     slots: Mutex<Slots>,
+    admission: Mutex<()>,
     stop: CancellationToken,
     cleanup: TaskTracker,
     _block_cache: crate::storage::NodeBlockCache,
@@ -86,6 +104,13 @@ impl Pool {
         if capacity == 0 {
             return Err(Error::bad("VM concurrency must be a positive integer."));
         }
+        // A cold control uses exactly the same image, budget and admission path.
+        // This also lets operators disable speculative CPU/RAM on small nodes.
+        let warm_enabled = match std::env::var("LEO_READY_VM_POOL").as_deref() {
+            Ok("false") => false,
+            Ok("true") | Err(std::env::VarError::NotPresent) => true,
+            _ => return Err(Error::bad("LEO_READY_VM_POOL must be true or false.")),
+        };
         // The controller lock and PID namespace fence all previous owners before this cleanup.
         let prepared = state.join("prepared");
         if prepared.exists() {
@@ -105,14 +130,16 @@ impl Pool {
             hardware: OnceCell::new(),
             state,
             image,
+            warm_enabled,
             slots: Mutex::new(Slots::default()),
+            admission: Mutex::new(()),
             stop,
             cleanup: TaskTracker::new(),
             _block_cache: block_cache,
         }))
     }
 
-    pub async fn initialize(&self, cgroup: PathBuf) -> Result<()> {
+    pub async fn initialize(self: &Arc<Self>, cgroup: PathBuf) -> Result<()> {
         // Detect the container's current envelope on every restart. A previous
         // shared leaf limit must not become the hardware ceiling after a resize.
         let detected = crate::nodes::connector::capabilities(&self.state)?;
@@ -150,11 +177,9 @@ impl Pool {
         self.budget.lock().await.clone()
     }
 
-    pub async fn configure(&self, next: Budget) -> Result<()> {
+    pub async fn configure(self: &Arc<Self>, next: Budget) -> Result<()> {
         next.validate()?;
-        // Serialize budget changes with admission, always taking slots before budget.
-        let _slots = self.slots.lock().await;
-        let mut current = self.budget.lock().await;
+        let _admission = self.admission.lock().await;
         let hardware = self
             .hardware
             .get()
@@ -164,6 +189,14 @@ impl Pool {
         {
             return Err(Error::bad("Shared budgets exceed controller capacity."));
         }
+        if self.budget().await.as_ref() == Some(&next) {
+            return Ok(());
+        }
+        // Release speculative RAM before applying a smaller cgroup envelope.
+        // Health and stop never take the admission lock or await VM teardown.
+        self.retire_idle().await;
+        let _slots = self.slots.lock().await;
+        let mut current = self.budget.lock().await;
         let cgroup = self.cgroup.get().unwrap();
         next.apply(cgroup)?;
         let write = crate::skills::atomic_write(
@@ -216,8 +249,14 @@ impl Pool {
     pub async fn monitor(self: Arc<Self>) {
         loop {
             tokio::select! {
-                () = self.stop.cancelled() => return,
+                () = self.stop.cancelled() => {
+                    self.retire_idle().await;
+                    return;
+                },
                 () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+            }
+            if let Err(error) = self.maintain_ready().await {
+                tracing::warn!(message = %error.message, "Could not maintain prepared VM");
             }
             if let Ok((usage, _)) = self.usage().await
                 && let Some(budget) = self.budget().await
@@ -234,22 +273,35 @@ impl Pool {
         Health {
             capacity: self.capacity.load(Ordering::SeqCst),
             occupied: slots.occupied.iter().filter(|v| **v).count(),
-            ready: 0,
-            preparing: false,
+            ready: usize::from(slots.ready.is_some()),
+            preparing: slots.preparing.is_some(),
         }
     }
 
     pub async fn reserve(self: &Arc<Self>, _run_id: &str) -> Result<Reservation> {
-        let mut slots = self.slots.lock().await;
+        let _admission = self.admission.lock().await;
         if self.stop.is_cancelled() {
             return Err(Error::unavailable("VM controller is stopping."));
+        }
+        // A live request preempts background preparation, but never reuses its
+        // physical slot until its VMM and backend have both stopped.
+        self.cancel_preparing().await;
+        let prepared = self.slots.lock().await.ready.take();
+        if let Some(mut reservation) = prepared {
+            if self.usage().await?.1.is_none() {
+                return Ok(reservation);
+            }
+            reservation.finish().await;
         }
         if self.usage().await?.1.is_some() {
             return Err(Error::unavailable(
                 "Shared node resources are under pressure.",
             ));
         }
-        let slot = slots
+        let slot = self
+            .slots
+            .lock()
+            .await
             .reserve(self.capacity.load(Ordering::SeqCst))
             .ok_or_else(|| Error::unavailable("All VM slots are occupied."))?;
         Ok(Reservation {
@@ -258,16 +310,180 @@ impl Pool {
             slot,
             vm: None,
             owner: None,
+            anonymous: None,
+            prepared: None,
+            completion: None,
         })
     }
 
-    pub async fn drain(&self) {
+    pub async fn drain(self: &Arc<Self>) {
+        self.stop.cancel();
+        self.retire_idle().await;
         self.cleanup.close();
         self.cleanup.wait().await;
+    }
+
+    async fn cancel_preparing(&self) {
+        let mut done = {
+            let slots = self.slots.lock().await;
+            let Some(preparing) = &slots.preparing else {
+                return;
+            };
+            preparing.stop.cancel();
+            preparing.done.clone()
+        };
+        // Completion is sent by the reservation's final cleanup, including its
+        // Drop path. Closing a worker task alone never frees a physical slot.
+        let _ = done.wait_for(|finished| *finished).await;
+    }
+
+    async fn retire_idle(&self) {
+        self.cancel_preparing().await;
+        let ready = self.slots.lock().await.ready.take();
+        if let Some(mut reservation) = ready {
+            reservation.finish().await;
+        }
+    }
+
+    async fn maintain_ready(self: &Arc<Self>) -> Result<()> {
+        let _admission = self.admission.lock().await;
+        if self.stop.is_cancelled() || !self.warm_enabled {
+            return Ok(());
+        }
+        let Some(budget) = self.budget().await else {
+            return Ok(());
+        };
+        let (usage, pressure) = self.usage().await?;
+        let memory = usage["memoryMiB"].as_u64().unwrap_or(u64::MAX);
+        let expired = self
+            .slots
+            .lock()
+            .await
+            .ready
+            .as_ref()
+            .is_some_and(|reservation| {
+                !reservation
+                    .prepared
+                    .as_ref()
+                    .unwrap()
+                    .compatible(&budget, DEFAULT_DISK_MIB)
+            });
+        if expired || pressure.is_some() || memory > budget.limits.memory_mi_b * 75 / 100 {
+            self.retire_idle().await;
+            return Ok(());
+        }
+        if memory.saturating_add(ready::WARM_HEADROOM_MIB) > budget.limits.memory_mi_b {
+            return Ok(());
+        }
+        let policy = match tokio::fs::read(self.state.join("storage-policy.json")).await {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                crate::storage::policy::Policy::default()
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut slots = self.slots.lock().await;
+        if self.stop.is_cancelled()
+            || slots.ready.is_some()
+            || slots.preparing.is_some()
+            || slots.warm_disabled
+            || slots.retry_after.is_some_and(|at| Instant::now() < at)
+        {
+            return Ok(());
+        }
+        let Some(slot) = slots.reserve(self.capacity.load(Ordering::SeqCst)) else {
+            return Ok(());
+        };
+        let stop = self.stop.child_token();
+        let (completion, done) = watch::channel(false);
+        slots.preparing = Some(Preparing {
+            slot,
+            stop: stop.clone(),
+            done,
+        });
+        let reservation = Reservation {
+            pool: self.clone(),
+            released: false,
+            slot,
+            vm: None,
+            owner: None,
+            anonymous: Some(self.state.join("environments").join(crate::config::id())),
+            prepared: None,
+            completion: Some(completion),
+        };
+        self.cleanup
+            .spawn(reservation.prepare(budget, policy, stop));
+        Ok(())
     }
 }
 
 impl Reservation {
+    async fn prepare(
+        mut self,
+        budget: Budget,
+        policy: crate::storage::policy::Policy,
+        stop: CancellationToken,
+    ) {
+        let directory = self.anonymous.as_ref().unwrap().clone();
+        let resources = serde_json::json!({
+            "cpu": budget.limits.cpu.min(32),
+            "memoryMiB": budget.vm_memory_mib(),
+            "diskMiB": DEFAULT_DISK_MIB,
+        });
+        let operation = async {
+            crate::storage::bootstrap::prepare_unassigned(
+                &directory,
+                DEFAULT_DISK_MIB * 1_048_576,
+                &policy,
+                &stop,
+            )
+            .await?;
+            self.vm = Some(
+                Vm::boot(
+                    &self.pool.state,
+                    &self.pool.image,
+                    directory,
+                    self.slot,
+                    &stop,
+                    Some(&resources),
+                )
+                .await?,
+            );
+            self.vm
+                .as_mut()
+                .unwrap()
+                .warm_codex(&self.pool.state, &stop)
+                .await
+        }
+        .await;
+        let pool = self.pool.clone();
+        {
+            let mut slots = pool.slots.lock().await;
+            if matches!(operation, Ok(true)) && !stop.is_cancelled() && !pool.stop.is_cancelled() {
+                self.prepared = Some(ready::Prepared {
+                    budget,
+                    created: Instant::now(),
+                });
+                let completion = self.completion.take().unwrap();
+                slots.preparing = None;
+                slots.ready = Some(self);
+                let _ = completion.send(true);
+                tracing::info!(target: "leo_performance", operation = "vm_pool", event = "ready");
+                return;
+            }
+            if matches!(operation, Ok(false)) {
+                slots.warm_disabled = true;
+            }
+            slots.retry_after = Some(Instant::now() + Duration::from_secs(10));
+        }
+        if let Err(error) = operation
+            && !stop.is_cancelled()
+        {
+            tracing::warn!(message = %error.message, "Anonymous VM preparation failed");
+        }
+        self.finish().await;
+    }
+
     pub async fn execute(
         mut self,
         mut plan: Plan,
@@ -279,15 +495,6 @@ impl Reservation {
             return Ok(143);
         }
         let operation = async {
-            self.owner = Some(
-                crate::storage::environment::ownership(
-                    &self.pool.state,
-                    plan.run_id(),
-                    "Conversation disk is in use.",
-                )
-                .await?,
-            );
-            let disk = self.owner.as_ref().unwrap().directory.clone();
             let mut timing = crate::performance::Operation::new(
                 "conversation_start",
                 plan.run_id(),
@@ -298,14 +505,53 @@ impl Reservation {
                     "S3-backed storage is required for VM execution.",
                 ));
             }
-            if let Some(budget) = self.pool.budget().await {
+            let budget = self.pool.budget().await;
+            if let Some(budget) = &budget {
                 plan.set_vm_limits(budget.limits.cpu.min(32), budget.vm_memory_mib());
             }
             let disk_mib = plan.as_value()["resources"]["diskMiB"]
                 .as_u64()
                 .unwrap_or(DEFAULT_DISK_MIB);
             let size = disk_mib * 1024 * 1024;
-            crate::storage::bootstrap::prepare(&disk, size, plan.storage(), &stop).await?;
+            let compatible = self.prepared.as_ref().is_some_and(|prepared| {
+                budget
+                    .as_ref()
+                    .is_some_and(|budget| prepared.compatible(budget, disk_mib))
+            }) && ready::eligible(&plan).await?
+                && ready::fresh_disk(&self.pool.state, plan.run_id()).await?
+                && self.vm.as_ref().unwrap().codex_ready().await;
+            if self.prepared.is_some() && !compatible {
+                self.retire_anonymous().await;
+                self.prepared = None;
+            }
+            if compatible {
+                let directory = self.anonymous.take().unwrap();
+                let environment = directory.file_name().unwrap().to_str().unwrap();
+                // Assignment can partly persist before returning an error.
+                // From this point onward, never delete this physical directory.
+                self.owner = Some(
+                    crate::storage::environment::assign(
+                        &self.pool.state,
+                        environment,
+                        plan.run_id(),
+                    )
+                    .await?,
+                );
+                timing.next("authorize_prepared_disk");
+            } else {
+                self.owner = Some(
+                    crate::storage::environment::ownership(
+                        &self.pool.state,
+                        plan.run_id(),
+                        "Conversation disk is in use.",
+                    )
+                    .await?,
+                );
+            }
+            let disk = self.owner.as_ref().unwrap().directory.clone();
+            if !compatible {
+                crate::storage::bootstrap::prepare(&disk, size, plan.storage(), &stop).await?;
+            }
             let volume = crate::storage::runtime::load(&disk).await?;
             if volume.source.authorization()?.is_none() {
                 // A controller crash may leave ownership durable before its
@@ -314,18 +560,21 @@ impl Reservation {
                     .authorize(self.owner.as_ref().unwrap(), plan.storage())
                     .await?;
             }
-            timing.next("boot_vm");
-            self.vm = Some(
-                Vm::boot(
-                    &self.pool.state,
-                    &self.pool.image,
-                    disk,
-                    self.slot,
-                    &stop,
-                    plan.resources(),
-                )
-                .await?,
-            );
+            if !compatible {
+                timing.next("boot_vm");
+                self.vm = Some(
+                    Vm::boot(
+                        &self.pool.state,
+                        &self.pool.image,
+                        disk,
+                        self.slot,
+                        &stop,
+                        plan.resources(),
+                    )
+                    .await?,
+                );
+            }
+            tracing::info!(target: "leo_performance", operation = "vm_pool", event = "claim", run_id = crate::performance::identity(plan.run_id()), ready = compatible);
             let vm = self.vm.as_mut().unwrap();
             // Only this reservation initializes the attempt socket.
             let _ = socket.set(vm.socket.clone());
@@ -342,12 +591,17 @@ impl Reservation {
     }
 
     async fn finish(&mut self) {
+        self.retire_anonymous().await;
+        self.owner.take();
+        release_slot(&self.pool, self.slot, self.completion.take()).await;
+        self.released = true;
+    }
+
+    async fn retire_anonymous(&mut self) {
         if let Some(mut vm) = self.vm.take() {
             vm.shutdown().await;
         }
-        self.owner.take();
-        self.pool.slots.lock().await.occupied[self.slot - 1] = false;
-        self.released = true;
+        discard_anonymous(self.anonymous.take()).await;
     }
 }
 
@@ -360,13 +614,52 @@ impl Drop for Reservation {
         let mut vm = self.vm.take();
         let owner = self.owner.take();
         let slot = self.slot;
+        let anonymous = self.anonymous.take();
+        let completion = self.completion.take();
         self.pool.cleanup.spawn(async move {
             if let Some(vm) = &mut vm {
                 vm.shutdown().await;
             }
             drop(owner);
-            pool.slots.lock().await.occupied[slot - 1] = false;
+            discard_anonymous(anonymous).await;
+            release_slot(&pool, slot, completion).await;
         });
+    }
+}
+
+async fn discard_anonymous(directory: Option<PathBuf>) {
+    let Some(directory) = directory else {
+        return;
+    };
+    // Shutdown reaps the VMM and backend first. Fence any remaining inspector
+    // before deleting its journal, and remove this ephemeral registry entry.
+    let _replacement = match crate::storage::runtime::replacement(&directory).await {
+        Ok(guard) => guard,
+        Err(error) => {
+            tracing::warn!(message = %error.message, "Anonymous disk is still in use; retaining it");
+            return;
+        }
+    };
+    if let Err(error) = tokio::fs::remove_dir_all(directory).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(%error, "Could not remove retired anonymous disk");
+    }
+}
+
+async fn release_slot(pool: &Pool, slot: usize, completion: Option<watch::Sender<bool>>) {
+    let mut slots = pool.slots.lock().await;
+    slots.occupied[slot - 1] = false;
+    if completion.is_some()
+        && slots
+            .preparing
+            .as_ref()
+            .is_some_and(|preparing| preparing.slot == slot)
+    {
+        slots.preparing = None;
+    }
+    if let Some(completion) = completion {
+        let _ = completion.send(true);
     }
 }
 
@@ -374,6 +667,75 @@ impl Drop for Reservation {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn anonymous_retirement_preserves_an_open_replacement() {
+        let directory = tempfile::tempdir().unwrap().keep();
+        let guard = crate::storage::runtime::replacement(&directory)
+            .await
+            .unwrap();
+        discard_anonymous(Some(directory.clone())).await;
+        assert!(directory.exists());
+        drop(guard);
+        discard_anonymous(Some(directory.clone())).await;
+        assert!(!directory.exists());
+    }
+
+    #[tokio::test]
+    async fn live_admission_waits_for_preparation_drop_cleanup_without_blocking_health() {
+        let root = tempfile::tempdir().unwrap();
+        let pool = Pool::new(
+            root.path().into(),
+            root.path().into(),
+            CancellationToken::new(),
+            1,
+        )
+        .await
+        .unwrap();
+        let mut preparing = pool.reserve("anonymous").await.unwrap();
+        let stop = CancellationToken::new();
+        let (completion, done) = watch::channel(false);
+        preparing.completion = Some(completion);
+        pool.slots.lock().await.preparing = Some(Preparing {
+            slot: preparing.slot,
+            stop: stop.clone(),
+            done,
+        });
+        let teardown = Arc::new(tokio::sync::Notify::new());
+        let after_cancel = teardown.clone();
+        let cancelled = stop.clone();
+        let worker = tokio::spawn(async move {
+            cancelled.cancelled().await;
+            after_cancel.notified().await;
+            drop(preparing);
+        });
+        let controller = pool.clone();
+        let admission = tokio::spawn(async move { controller.reserve("live").await });
+        tokio::time::timeout(Duration::from_secs(1), stop.cancelled())
+            .await
+            .unwrap();
+        let health = tokio::time::timeout(Duration::from_millis(100), pool.health())
+            .await
+            .unwrap();
+        assert_eq!(health.occupied, 1);
+        assert!(health.preparing);
+        assert!(
+            !admission.is_finished(),
+            "Physical slot remains owned until teardown completes"
+        );
+        teardown.notify_one();
+        worker.await.unwrap();
+        let reservation = tokio::time::timeout(Duration::from_secs(1), admission)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(reservation.slot, 1);
+        assert!(!pool.health().await.preparing);
+        drop(reservation);
+        pool.drain().await;
+        assert_eq!(pool.health().await.occupied, 0);
+    }
 
     #[test]
     fn reducing_slots_keeps_occupied_work_and_blocks_reusing_a_free_index() {

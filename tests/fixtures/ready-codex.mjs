@@ -13,7 +13,7 @@ import {
   writeFile,
 } from 'node:fs/promises'
 import { createServer } from 'node:http'
-import { createConnection } from 'node:net'
+import { createServer as createBroker, createConnection } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -35,6 +35,8 @@ async function main() {
   let current
   let service
   let nativePid
+  let broker
+  let credentialsIssued = 0
   const runId = randomUUID()
 
   const server = createServer(async (request, response) => {
@@ -231,6 +233,8 @@ async function main() {
       assert.match(await readFile(plan.output, 'utf8'), /READY_ADAPTER_OK/)
       const model = modelRequests.find(value => value.label === label && value.tools)
       assert.ok(model, `No tool-bearing model request: ${JSON.stringify({ requests: modelRequests.filter(value => value.label === label).map(value => ({ keys: value.keys, hasPrompt: value.input.includes(label) })), mcp: mcpRequests.filter(value => value.label === label) })}`)
+      if (resident)
+        assert.ok(model.input.includes('pool_ready_skill'), 'Native discovers skills installed after anonymous warmup')
       if (bearer) {
         const selected = bearer === 'Bearer alpha' ? 'alpha_tool' : 'beta_tool'
         assert.ok(model.tools.includes(selected), `${label}: current MCP tools loaded`)
@@ -279,22 +283,48 @@ async function main() {
     const children = (await readFile(`/proc/${service.child.pid}/task/${service.child.pid}/children`, 'utf8')).trim().split(/\s+/).filter(Boolean)
     assert.equal(children.length, 1)
     nativePid = children[0]
+    const skill = path.join(home, '.agents/skills/pool-ready')
+    await mkdir(skill, { recursive: true })
+    await writeFile(path.join(skill, 'SKILL.md'), '---\nname: pool_ready_skill\ndescription: A synthetic skill installed after anonymous warmup.\n---\nReply with the requested marker.\n')
+    // Authentication is attached only after anonymous initialization. Exercise
+    // the real native external-token login/logout without any real account.
+    const claims = Buffer.from(JSON.stringify({
+      'sub': 'synthetic-pool-account',
+      'exp': Math.floor(Date.now() / 1000) + 3600,
+      'https://api.openai.com/auth': { chatgpt_account_id: 'synthetic-pool-account', chatgpt_plan_type: 'plus' },
+    })).toString('base64url')
+    const accessToken = `eyJhbGciOiJub25lIn0.${claims}.synthetic`
+    broker = createBroker((client) => {
+      let input = ''
+      client.on('data', (bytes) => {
+        input += bytes
+        if (!input.includes('\n'))
+          return
+        JSON.parse(input.trim())
+        credentialsIssued++
+        client.end(`${JSON.stringify({ accessToken, chatgptAccountId: 'synthetic-pool-account', chatgptPlanType: 'plus' })}\n`)
+      })
+    })
+    await new Promise(resolve => broker.listen(path.join(nativeHome, 'leo-auth.sock'), resolve))
+    await writeFile(path.join(nativeHome, 'leo-managed-auth'), '1')
     await turn('ready-first', 'Bearer alpha', true, false)
     await turn('ready-resume', 'Bearer beta', true, true)
     await turn('ready-remove-mcp', null, true, true)
+    assert.ok(credentialsIssued >= 3, 'Every resident attempt acquires its own account access')
     service.child.kill('SIGTERM')
     assert.equal(await service.done, 0, service.stderr().slice(-3000))
     assert.ok(!service.stderr().includes('Bearer alpha') && !service.stderr().includes('Bearer beta'), 'Instrumentation never records gateway credentials')
     await assert.rejects(access(`/proc/${nativePid}`), { code: 'ENOENT' })
     process.stdout.write(`${JSON.stringify({
       kind: 'real-rust-ready-codex-adapter',
-      scope: 'Local real native, synthetic model/MCP, no real account, no VM/manager/S3. Resident starts without provider/account config and loads per-thread overrides. Ready admission excludes prewarm.',
+      scope: 'Local real native, synthetic account/model/MCP, no real account, no VM/manager/S3. Resident starts without provider/account config and loads per-thread overrides and skills. Each attempt attaches managed external tokens. Ready admission excludes prewarm.',
       initializeMs,
       samples,
       mcpLeasesRenewed: true,
       removedMcpAbsent: true,
       sameNativeProcess: true,
       nativeReapedOnShutdown: true,
+      syntheticAccountLeases: credentialsIssued,
     }, null, 2)}\n`)
   }
   finally {
@@ -303,6 +333,7 @@ async function main() {
     await Promise.all([...live].map(child => new Promise(resolve => child.once('exit', resolve))))
     server.closeAllConnections()
     server.close()
+    broker?.close()
     await rm(root, { recursive: true, force: true })
   }
 }

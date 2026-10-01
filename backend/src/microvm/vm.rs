@@ -589,6 +589,13 @@ impl Vm {
         timing.finish();
         Ok(true)
     }
+
+    /// A speculative guest can be discarded on an uncertain probe, before any
+    /// account, conversation or remote grant has been assigned to it.
+    pub async fn codex_ready(&self) -> bool {
+        matches!(tokio::time::timeout(Duration::from_secs(1), host::status(&self.socket)).await,
+            Ok(Ok(status)) if status.codex_ready && !status.initialized)
+    }
 }
 
 async fn watch_vhost(backend: Option<&crate::storage::vhost::MountedDisk>) -> Result<i32> {

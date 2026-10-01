@@ -18,8 +18,18 @@ protocol messages and rejects truncated frames. Output reads retain partial fram
 while live inbox updates are delivered.
 
 `microvm/pool.rs` owns execution slots (initially `CONCURRENCY`, default four).
-Each reservation boots its own VM; there is no background spare. The manager can
-update the slot count and shared budgets through authenticated `/node-budget`.
+It can prepare one anonymous VM with native Codex initialized, within those same
+slots and shared budgets. The manager can update both through authenticated
+`/node-budget`. `LEO_READY_VM_POOL=false` disables speculative preparation;
+the default is `true`. Guests without the readiness capability keep booting cold.
+
+A compatible new managed Codex chat claims that VM once, after durable disk
+ownership and storage authorization. Existing disks, threads, custom Codex homes,
+other providers and command plans use the ordinary cold path. Preparation yields
+to live admission; its physical slot is released only after teardown. Spare RAM
+is included in node usage, preparation requires 2 GiB of headroom, and a spare
+expires after 60 seconds or a budget change. `/health` reports `ready` and
+`preparing` within occupied slots. See [the measured comparison](adr/0019-booted-vms-with-ready-codex.md).
 
 Reservations release their slot after teardown, including abandoned HTTP requests.
 If all slots are occupied or shared memory/disk headroom is low, new work waits.
