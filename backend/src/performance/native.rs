@@ -158,6 +158,12 @@ impl<'a> Timing<'a> {
             "codex.startup_phase" => match text(record, "startup.phase")? {
                 "thread_start_create_thread" => "thread_create",
                 "thread_start_total" => "thread_start",
+                "startup_prewarm_create_turn_context" => "startup_prewarm_create_turn_context",
+                "startup_prewarm_build_tools" => "startup_prewarm_build_tools",
+                "startup_prewarm_build_prompt" => "startup_prewarm_build_prompt",
+                "startup_prewarm_websocket_warmup" => "startup_prewarm_websocket_warmup",
+                "startup_prewarm_resolve" => "startup_prewarm_resolve",
+                "startup_prewarm_total" => "startup_prewarm_total",
                 _ => return None,
             },
             _ => return None,
@@ -192,6 +198,9 @@ impl<'a> Timing<'a> {
                 }
             }
             "model_client.websocket_connection" => "websocket_connection",
+            // The native worker retains this span until the response stream
+            // completes. Unlike setup, it includes waiting for the peer.
+            "responses_websocket.stream_request" => "websocket_response_stream",
             _ => return None,
         };
         let started_at_ms = milliseconds(&span["startTimeUnixNano"])?;
@@ -326,6 +335,23 @@ mod tests {
     }
 
     #[test]
+    fn native_startup_phases_are_bounded_and_explicitly_allowed() {
+        let mut record = json!({
+            "timeUnixNano": "1790865467300000000",
+            "attributes": [
+                {"key":"event.name","value":{"stringValue":"codex.startup_phase"}},
+                {"key":"startup.phase","value":{"stringValue":"startup_prewarm_websocket_warmup"}},
+                {"key":"duration_ms","value":{"stringValue":"300"}}
+            ]
+        });
+        let timing = Timing::parse(&record).unwrap();
+        assert_eq!(timing.event, "startup_prewarm_websocket_warmup");
+        assert_eq!(timing.duration_ms, 300.0);
+        record["attributes"][1]["value"]["stringValue"] = "private_phase".into();
+        assert!(Timing::parse(&record).is_none());
+    }
+
+    #[test]
     fn websocket_spans_distinguish_warmup_without_exporting_attributes() {
         let mut span = json!({
             "name": "model_client.stream_responses_websocket",
@@ -347,6 +373,12 @@ mod tests {
             Timing::parse_span(&span).unwrap().event,
             "websocket_inference_setup"
         );
+        span["name"] = "responses_websocket.stream_request".into();
+        span["attributes"] = json!([]);
+        let stream = Timing::parse_span(&span).unwrap();
+        assert_eq!(stream.event, "websocket_response_stream");
+        assert_eq!(stream.duration_ms, 300.0);
+        assert_eq!(stream.endpoint, "responses");
         span["endTimeUnixNano"] = "1790865466000000000".into();
         assert!(Timing::parse_span(&span).is_none());
         span["name"] = "private_tool_call".into();

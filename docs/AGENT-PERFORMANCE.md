@@ -86,12 +86,20 @@ event's timestamp (`observedTimeUnixNano` when `timeUnixNano` is zero), and
 `request_started_at_ms` subtracts its reported duration at millisecond resolution.
 This is the native request timer, not a packet capture or collector arrival.
 `websocket_connect` measures the native connection attempt separately. The
-loopback trace exporter also retains only `model_client.websocket_connection`
+loopback trace exporter also retains `model_client.websocket_connection`
 and `model_client.stream_responses_websocket`, with the latter classified from
 the native boolean `websocket.warmup`. These setup spans end after constructing
 the stream; they do not include waiting for the warmup response. The interval
 between warmup and generation sends can also contain catalog refreshes and local
-work, so it must not be described as network RTT. Other spans and their arbitrary
+work, so it must not be described as network RTT.
+`responses_websocket.stream_request` becomes `websocket_response_stream` and
+lasts until the native response worker finishes, including peer-response waiting.
+It has no warmup flag; correlate its interval with the explicit setup spans and
+the sends in the same owned VM/thread. It is not a pure network timer.
+The fixed native `startup_prewarm_*` phases also separate turn-context creation,
+tool capture (including MCP readiness), prompt construction, full warmup waiting,
+and the first turn's wait for background prewarm. These overlap and must not be
+summed as sequential work. Other spans and their arbitrary
 attributes are discarded without persistence.
 Abrupt native termination can discard its final unexported batch; shutdown never
 waits for telemetry. A missing transport record is not evidence of no request.

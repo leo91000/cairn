@@ -455,7 +455,15 @@ La nouvelle instrumentation conserve le timer de handshake et les spans natifs
 stream, pas l'attente complète de sa réponse. Un modèle simulé avec handshake de
 150 ms retrouve 154–155 ms ; il distingue les phases explicites et conserve les
 tokens MCP, le contexte et le même processus sur trois tours. L'attribution
-détaillée en production attend cette dernière image. L'écart d'horloge hôte/nœud
+détaillée en production attend cette dernière image. Le span natif
+`responses_websocket.stream_request` dure jusqu'à la fin du worker de réponse :
+il retrouve 301 ms de préchauffage et 1 502 ms de génération avec des délais
+imposés de 300 et 1 500 ms. Les phases natives `startup_prewarm_*` donnent aussi
+la capture des outils, la construction du prompt, l'attente complète du warmup
+et l'attente du tour sur ce travail de fond. Elles se chevauchent ; elles ne
+s'additionnent pas. Cette validation fonctionnelle conserve le contexte, les
+droits MCP renouvelés et le même processus ; ce n'est pas un gain en production.
+L'écart d'horloge hôte/nœud
 mesuré sur une connexion persistante est d'environ 2 ms, avec 16–17 ms de RTT.
 
 Sur l'image `ba72f13`, la charge dure 303,38 s : 47 publications, 25 221 écritures
