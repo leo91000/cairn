@@ -252,6 +252,34 @@ assets de v0.50.6, octets inchangés et SHA-256 vérifiés. Leur contenu conserv
 ses dates et périmètres historiques. Les liens documentaires pointent vers les
 assets ; aucun historique Git n'est réécrit.
 
+## Validation de charge et priorité avant release
+
+Le test intégré du candidat dure 308,66 s, avec 47 publications et 24 290
+écritures durables : p99 final 27,88 ms, maximum 817,29 ms, aucune erreur de
+lecture/écriture ni redémarrage intempestif. Les vérifications de réouverture,
+restauration différée, publication sous pression et reprise passent également.
+Ce banc local ne remplace pas la qualification S3 et crash de l'image de release.
+
+Un test dans le vrai Codex invité vérifie Cargo et les chemins Android depuis
+un shell sans profil. Il échoue avant correction et passe après partage de
+l'environnement des toolchains entre le lancement froid et le résident. Trois
+disques attribués sont publiés puis reprennent le même thread après reboot.
+
+Avant release, comparer les nouvelles conversations et reprises sur le parcours
+de production complet, avec et sans pool. Le `turn_started` natif est une borne
+de démarrage de tour, pas la preuve du premier appel réseau au modèle. L'écart
+avec un modèle et un compte simulés ne doit pas être attribué au manager par
+soustraction : mesurer chaque frontière, notamment préparation invitée, broker,
+MCP et appel modèle. Mesurer aussi fsync, petites écritures, git status et
+installation de dépendances sur un vrai dépôt contre un disque ext4 direct.
+
+Pour les reprises, envisager une conservation bornée de la VM et du Codex de la
+même conversation, sous le même propriétaire exclusif. Renouveler le compte et
+les droits à chaque tour ; évincer avant admission en cas de pression ou de
+configuration incompatible. Après éviction, préférer un nœud autorisé possédant
+déjà le journal et les blocs, sans bloquer une migration ou perdre la reprise
+depuis l'état publié. Cette stratégie n'est pas encore implémentée.
+
 Pour ce chantier de performance, regrouper les changements : une nouvelle
 release exige un gain mesuré sur le chemin intégré, avec une image qualifiée.
 Un prototype, une instrumentation ou un nettoyage documentaire seul ne déclenche

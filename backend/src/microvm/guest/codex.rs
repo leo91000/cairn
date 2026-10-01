@@ -85,16 +85,24 @@ impl Codex {
         let directory = std::path::Path::new(SOCKET).parent().unwrap();
         crate::skills::private_dir(directory).await?;
         std::os::unix::fs::chown(directory, Some(AGENT_ID), Some(AGENT_ID))?;
+        let environment = crate::toolkit::toolchain_environment(
+            std::path::Path::new("/home/node"),
+            crate::process::Environment::from([
+                ("CODEX_HOME".into(), "/home/node/.codex".into()),
+                ("LEO_AUTH_SOCKET".into(), AUTH_SOCKET.into()),
+                ("LEO_TOOLKIT_DIR".into(), "/opt/leo-toolkit".into()),
+                ("PNPM_HOME".into(), "/pnpm".into()),
+                (
+                    "PATH".into(),
+                    "/usr/local/bin:/pnpm/bin:/pnpm:/usr/bin:/bin:/usr/sbin:/sbin".into(),
+                ),
+            ]),
+        );
         let mut command = Command::new(ENTRYPOINT);
         command
             .args(["codex-service", SOCKET])
             .env_clear()
-            .env("HOME", "/home/node")
-            .env("CODEX_HOME", "/home/node/.codex")
-            .env("LEO_AUTH_SOCKET", AUTH_SOCKET)
-            .env("LEO_TOOLKIT_DIR", "/opt/leo-toolkit")
-            .env("PNPM_HOME", "/pnpm")
-            .env("PATH", "/usr/local/bin:/home/node/.local/share/mise/shims:/usr/local/share/mise/shims:/pnpm/bin:/pnpm:/usr/bin:/bin:/usr/sbin:/sbin")
+            .envs(environment)
             .current_dir("/home/node");
         unprivileged(&mut command);
         self.start(command, stop, START_TIMEOUT).await

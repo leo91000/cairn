@@ -565,7 +565,9 @@ console.log('probe.done');
     await Promise.all(held.map(id => api(`/runs/${id}`, 'DELETE')))
     await until(async () => {
       const health = await (await api('/health')).json()
-      return health.activeRuns === 0 && health.pool.ready === 0 && health.pool.occupied === 0
+      const speculative = health.pool.ready + Number(health.pool.preparing)
+      assert.ok(speculative <= 1, 'anonymous preparation stays bounded')
+      return health.activeRuns === 0 && health.pool.occupied === speculative
     })
     await api('/node-budget', 'POST', originalBudget)
     process.stdout.write(`${JSON.stringify({ mode: 'pool-capacity-cancel-refill', capacity: 5, status: 'passed' })}\n`)

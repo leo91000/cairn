@@ -2,10 +2,7 @@ use crate::{
     error::{Error, Result},
     process::{Environment, bounded_output, command},
 };
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{path::Path, time::Duration};
 
 const MISE_INSTALLS: &str = "/usr/local/share/mise/installs";
 
@@ -100,7 +97,7 @@ async fn link_rust(directory: &Path, rustup: &Path, cargo: &Path) -> Result<()> 
     prune(&rustup.join("toolchains"), directory).await
 }
 
-async fn link_mise(home: &Path, directory: &Path) -> Result<PathBuf> {
+async fn link_mise(home: &Path, directory: &Path) -> Result<()> {
     let installs = home.join(".local/share/mise/installs");
     for tool in ["node", "pnpm", "python", "go", "rust", "java"] {
         let source = Path::new(MISE_INSTALLS).join(tool);
@@ -124,7 +121,7 @@ async fn link_mise(home: &Path, directory: &Path) -> Result<PathBuf> {
     for name in names(Path::new("/usr/local/share/mise/shims")).await? {
         link(Path::new("/usr/local/bin/mise"), &shims.join(name)).await?;
     }
-    Ok(shims)
+    Ok(())
 }
 
 async fn link_toolchains(directory: &Path, rustup: &Path, cargo: &Path) -> Result<()> {
@@ -161,17 +158,12 @@ fn insert_path(env: &mut Environment, key: &str, path: &Path) {
     env.insert(key.into(), path.to_string_lossy().into_owned());
 }
 
-/// Links the image's shared toolchains into `home` and returns an environment using them.
-pub async fn environment(home: &Path, mut env: Environment) -> Result<Environment> {
-    let Some(directory) = env.get("LEO_TOOLKIT_DIR").cloned() else {
-        return Ok(env);
-    };
-    let directory = Path::new(&directory);
+/// Paths are independent of accounts and filesystem preparation. A resident
+/// native process needs these before it starts, including for non-login shells.
+pub(crate) fn toolchain_environment(home: &Path, mut env: Environment) -> Environment {
     let rustup = home.join(".rustup");
     let cargo = home.join(".cargo");
-    link_rust(directory, &rustup, &cargo).await?;
-    let shims = link_mise(home, directory).await?;
-    link_toolchains(directory, &rustup, &cargo).await?;
+    let shims = home.join(".local/share/mise/shims");
     insert_path(
         &mut env,
         "ANDROID_HOME",
@@ -193,6 +185,19 @@ pub async fn environment(home: &Path, mut env: Environment) -> Result<Environmen
         home.display(),
     );
     env.insert("PATH".into(), path);
+    env
+}
+
+/// Links the image's shared toolchains into `home` and returns an environment using them.
+pub async fn environment(home: &Path, env: Environment) -> Result<Environment> {
+    let Some(directory) = env.get("LEO_TOOLKIT_DIR").cloned() else {
+        return Ok(env);
+    };
+    let directory = Path::new(&directory);
+    link_rust(directory, &home.join(".rustup"), &home.join(".cargo")).await?;
+    link_mise(home, directory).await?;
+    link_toolchains(directory, &home.join(".rustup"), &home.join(".cargo")).await?;
+    let env = toolchain_environment(home, env);
     for args in [vec!["reshim".into()], vec!["env".into(), "--json".into()]] {
         let output = bounded_output(
             command("/usr/local/bin/mise", &args, &env, Some(Path::new("/tmp"))),
