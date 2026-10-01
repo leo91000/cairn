@@ -12,7 +12,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
 import { memorySmoke } from './runner-memory-smoke.mjs'
-import { storageSmoke } from './runner-storage-smoke.mjs'
+import { prepareStorageOrigin, storageSmoke } from './runner-storage-smoke.mjs'
 
 async function main() {
   const image = process.argv[2]
@@ -72,6 +72,12 @@ async function main() {
     }
 
     await reconnect()
+    const storageFixture = await prepareStorageOrigin({
+      root,
+      docker,
+      name,
+      api,
+    })
     await storageSmoke({
       root,
       docker,
@@ -79,6 +85,7 @@ async function main() {
       api,
       until,
       reconnect,
+      storageFixture,
     })
     await memorySmoke({
       root,
@@ -86,6 +93,7 @@ async function main() {
       name,
       api,
       until,
+      storageFixture,
     })
   }
   catch (error) {

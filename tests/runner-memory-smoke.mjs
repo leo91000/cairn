@@ -15,8 +15,9 @@ export async function memorySmoke({
   name,
   api,
   until,
+  storageFixture,
 }) {
-  const { storage } = await prepareStorageOrigin({
+  const { storage } = storageFixture || await prepareStorageOrigin({
     root,
     docker,
     name,
