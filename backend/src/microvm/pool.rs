@@ -1,5 +1,6 @@
 //! Bounded execution slots, with one account-free VM prepared for a fresh chat.
 mod ready;
+mod retained;
 
 use super::{
     budget::{self, Budget},
@@ -12,6 +13,7 @@ use crate::{
 };
 use serde::Serialize;
 use std::{
+    collections::VecDeque,
     path::PathBuf,
     sync::{
         Arc,
@@ -26,6 +28,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 struct Slots {
     occupied: Vec<bool>,
     ready: Option<Reservation>,
+    retained: VecDeque<retained::Retained>,
     preparing: Option<Preparing>,
     retry_after: Option<Instant>,
     warm_disabled: bool,
@@ -67,6 +70,8 @@ pub struct Health {
     /// Included in occupied; this slot can be claimed by a compatible chat.
     pub ready: usize,
     pub preparing: bool,
+    pub retained: usize,
+    pub retained_memory_mi_b: Option<u64>,
 }
 
 /// Disk size used when a plan carries no placement resources.
@@ -81,6 +86,10 @@ pub struct Reservation {
     anonymous: Option<PathBuf>,
     prepared: Option<ready::Prepared>,
     completion: Option<watch::Sender<bool>>,
+    resumed: bool,
+    retained_budget: Option<Budget>,
+    idle_control: Arc<Mutex<()>>,
+    idle_stop: CancellationToken,
 }
 
 pub struct Pool {
@@ -91,6 +100,7 @@ pub struct Pool {
     state: PathBuf,
     image: PathBuf,
     warm_enabled: bool,
+    retention: Duration,
     slots: Mutex<Slots>,
     admission: Mutex<()>,
     stop: CancellationToken,
@@ -135,6 +145,7 @@ impl Pool {
             state,
             image,
             warm_enabled,
+            retention: retained::lifetime()?,
             slots: Mutex::new(Slots::default()),
             admission: Mutex::new(()),
             stop,
@@ -259,6 +270,9 @@ impl Pool {
                 },
                 () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
             }
+            if let Err(error) = self.maintain_retained().await {
+                tracing::warn!(message = %error.message, "Could not maintain idle conversation VMs");
+            }
             if let Err(error) = self.maintain_ready().await {
                 tracing::warn!(message = %error.message, "Could not maintain prepared VM");
             }
@@ -279,6 +293,12 @@ impl Pool {
             occupied: slots.occupied.iter().filter(|v| **v).count(),
             ready: usize::from(slots.ready.is_some()),
             preparing: slots.preparing.is_some(),
+            retained: slots.retained.len(),
+            retained_memory_mi_b: slots
+                .retained
+                .iter()
+                .try_fold(0u64, |total, idle| total.checked_add(idle.bytes()?))
+                .map(|bytes| bytes / 1_048_576),
         }
     }
 
@@ -290,6 +310,29 @@ impl Pool {
         // A live request preempts background preparation, but never reuses its
         // physical slot until its VMM and backend have both stopped.
         self.cancel_preparing().await;
+        self.make_room(false).await?;
+        let retained = {
+            let mut slots = self.slots.lock().await;
+            let index = slots
+                .retained
+                .iter()
+                .position(|idle| idle.run == plan.run_id());
+            index.and_then(|index| slots.retained.remove(index))
+        };
+        if let Some(mut idle) = retained {
+            if self
+                .budget()
+                .await
+                .as_ref()
+                .is_some_and(|budget| idle.compatible(plan, budget, Instant::now()))
+                && self.usage().await?.1.is_none()
+            {
+                idle.reservation.resumed = true;
+                idle.reservation.retained_budget = Some(idle.budget);
+                return Ok(idle.reservation);
+            }
+            idle.reservation.finish().await;
+        }
         let has_ready = self.slots.lock().await.ready.is_some();
         let disk_mib = plan.as_value()["resources"]["diskMiB"]
             .as_u64()
@@ -310,11 +353,7 @@ impl Pool {
         // Resumes and custom plans cannot use anonymous native state. Keep the
         // healthy spare when another slot is available, rather than making
         // these runs wait for its teardown and another background warmup.
-        let capacity = self.capacity.load(Ordering::SeqCst);
-        let spare_slot_needed = !self.slots.lock().await.available(capacity);
-        if self.usage().await?.1.is_some() || spare_slot_needed {
-            self.retire_idle().await;
-        }
+        self.make_room(true).await?;
         if self.usage().await?.1.is_some() {
             return Err(Error::unavailable(
                 "Shared node resources are under pressure.",
@@ -335,6 +374,10 @@ impl Pool {
             anonymous: None,
             prepared: None,
             completion: None,
+            resumed: false,
+            retained_budget: None,
+            idle_control: Arc::default(),
+            idle_stop: CancellationToken::new(),
         })
     }
 
@@ -361,9 +404,128 @@ impl Pool {
 
     async fn retire_idle(&self) {
         self.cancel_preparing().await;
+        loop {
+            let idle = self.slots.lock().await.retained.pop_front();
+            let Some(mut idle) = idle else { break };
+            idle.reservation.finish().await;
+        }
         let ready = self.slots.lock().await.ready.take();
         if let Some(mut reservation) = ready {
             reservation.finish().await;
+        }
+    }
+
+    /// Active work preempts the oldest conversations first, then the anonymous
+    /// spare. Keep other healthy retained guests when one eviction is enough.
+    async fn make_room(&self, needs_slot: bool) -> Result<()> {
+        loop {
+            let pressure = self.usage().await?.1.is_some();
+            let mut slots = self.slots.lock().await;
+            if !pressure && (!needs_slot || slots.available(self.capacity.load(Ordering::SeqCst))) {
+                return Ok(());
+            }
+            let idle = slots
+                .retained
+                .pop_front()
+                .map(|idle| idle.reservation)
+                .or_else(|| slots.ready.take());
+            drop(slots);
+            let Some(mut reservation) = idle else {
+                return Ok(());
+            };
+            reservation.finish().await;
+        }
+    }
+
+    /// Deletion, movement and pruning must reap the physical VM before taking its disk lock.
+    pub async fn evict_conversation(&self, run: &str) {
+        let _admission = self.admission.lock().await;
+        let idle = {
+            let mut slots = self.slots.lock().await;
+            let index = slots.retained.iter().position(|idle| idle.run == run);
+            index.and_then(|index| slots.retained.remove(index))
+        };
+        if let Some(mut idle) = idle {
+            idle.reservation.finish().await;
+        }
+    }
+
+    pub async fn capture_retained(&self, run: &str) -> Result<Option<serde_json::Value>> {
+        let _admission = self.admission.lock().await;
+        let retained = self
+            .slots
+            .lock()
+            .await
+            .retained
+            .iter()
+            .find(|idle| idle.run == run)
+            .and_then(|idle| {
+                Some((
+                    idle.reservation.owner.clone()?,
+                    idle.reservation.idle_control.clone(),
+                    idle.reservation.idle_stop.child_token(),
+                ))
+            });
+        let Some((owner, control, stop)) = retained else {
+            return Ok(None);
+        };
+        let _capture = control
+            .try_lock_owned()
+            .map_err(|_| Error::conflict("A retained disk capture is already in progress."))?;
+        drop(_admission);
+        let snapshot =
+            crate::nodes::checkpoint::capture_paused(&self.state, run, &owner, stop).await?;
+        Ok(Some(snapshot))
+    }
+
+    async fn retention_budget(&self, expected: Option<&Budget>) -> Option<Budget> {
+        let budget = self.budget().await?;
+        if self.stop.is_cancelled() || expected != Some(&budget) {
+            return None;
+        }
+        let (usage, pressure) = self.usage().await.ok()?;
+        if pressure.is_some()
+            || usage["memoryMiB"].as_u64().unwrap_or(u64::MAX)
+                > budget.limits.memory_mi_b * 75 / 100
+        {
+            return None;
+        }
+        Some(budget)
+    }
+
+    async fn maintain_retained(&self) -> Result<()> {
+        let _admission = self.admission.lock().await;
+        let Some(budget) = self.budget().await else {
+            return Ok(());
+        };
+        loop {
+            let (usage, pressure) = self.usage().await?;
+            let idle = {
+                let mut slots = self.slots.lock().await;
+                let bytes = slots
+                    .retained
+                    .iter()
+                    .try_fold(0u64, |total, idle| total.checked_add(idle.bytes()?));
+                let expired = slots
+                    .retained
+                    .front()
+                    .is_some_and(|idle| Instant::now() >= idle.expires);
+                let under_pressure = pressure.is_some()
+                    || usage["memoryMiB"].as_u64().unwrap_or(u64::MAX)
+                        > budget.limits.memory_mi_b * 75 / 100;
+                if !expired
+                    && !under_pressure
+                    && bytes.is_some_and(|bytes| {
+                        retained::within_budget(slots.retained.len(), bytes, &budget)
+                    })
+                {
+                    return Ok(());
+                }
+                slots.retained.pop_front()
+            };
+            let Some(mut idle) = idle else { return Ok(()) };
+            tracing::info!(target: "leo_performance", operation = "vm_retention", event = "evicted", run_id = crate::performance::identity(&idle.run));
+            idle.reservation.finish().await;
         }
     }
 
@@ -432,6 +594,10 @@ impl Pool {
             anonymous: Some(self.state.join("environments").join(crate::config::id())),
             prepared: None,
             completion: Some(completion),
+            resumed: false,
+            retained_budget: None,
+            idle_control: Arc::default(),
+            idle_stop: CancellationToken::new(),
         };
         self.cleanup
             .spawn(reservation.prepare(budget, policy, stop));
@@ -507,12 +673,14 @@ impl Reservation {
         mut self,
         mut plan: Plan,
         socket: Arc<OnceCell<PathBuf>>,
+        control: Arc<Mutex<()>>,
         stop: CancellationToken,
     ) -> Result<i32> {
         if stop.is_cancelled() {
             self.finish().await;
             return Ok(143);
         }
+        let execution_budget = self.pool.budget().await;
         let operation = async {
             let mut timing = crate::performance::Operation::new(
                 "conversation_start",
@@ -524,7 +692,7 @@ impl Reservation {
                     "S3-backed storage is required for VM execution.",
                 ));
             }
-            let budget = self.pool.budget().await;
+            let budget = execution_budget.clone();
             if let Some(budget) = &budget {
                 plan.set_vm_limits(budget.limits.cpu.min(32), budget.vm_memory_mib());
             }
@@ -532,6 +700,26 @@ impl Reservation {
                 .as_u64()
                 .unwrap_or(DEFAULT_DISK_MIB);
             let size = disk_mib * 1024 * 1024;
+            if self.resumed && self.retained_budget != budget {
+                self.idle_stop.cancel();
+                let control = self.idle_control.clone();
+                let _capture = control.lock().await;
+                self.retire_anonymous().await;
+                self.owner.take();
+                self.resumed = false;
+                self.retained_budget = None;
+            }
+            // A retained VM already owns this exact conversation's physical disk.
+            // Admission has compared its immutable mounts, privilege policy and budget.
+            if self.resumed {
+                tracing::info!(target: "leo_performance", operation = "vm_retention", event = "claimed", run_id = crate::performance::identity(plan.run_id()));
+                let vm = self.vm.as_mut().unwrap();
+                let _capture = self.idle_control.lock().await;
+                vm.resume_idle().await?;
+                let _ = socket.set(vm.socket.clone());
+                timing.finish();
+                return vm.execute(&plan, &self.pool.state, stop.clone()).await;
+            }
             let compatible = self.prepared.as_ref().is_some_and(|prepared| {
                 budget
                     .as_ref()
@@ -602,6 +790,84 @@ impl Reservation {
         };
         // Do not drop boot or cleanup futures on cancellation: their resource ownership must drain.
         let result = operation.await;
+        // Retention is optional. A capture can wait for attempt cancellation
+        // to settle an uncertain pause/thaw, so finalization must not wait for
+        // its control lock indefinitely before signalling that cancellation.
+        let _control = if matches!(result, Ok(0)) && !stop.is_cancelled() {
+            tokio::select! {
+                () = stop.cancelled() => None,
+                result = tokio::time::timeout(Duration::from_millis(250), control.lock()) => result.ok(),
+            }
+        } else {
+            None
+        };
+        // Success includes guest sync and closure of the per-attempt auth relay.
+        // Only an acknowledged CPU pause may survive release of the attempt lease.
+        let retain = if matches!(result, Ok(0))
+            && _control.is_some()
+            && !stop.is_cancelled()
+            && !self.pool.stop.is_cancelled()
+            && retained::eligible(&plan)
+            && !self.pool.retention.is_zero()
+            && self
+                .pool
+                .retention_budget(execution_budget.as_ref())
+                .await
+                .is_some()
+        {
+            match self.vm.as_mut().unwrap().suspend_idle().await {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(target: "leo_performance", operation = "vm_retention", event = "reclamation_failed", message = %error.message);
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        if retain {
+            let pool = self.pool.clone();
+            let _admission = pool.admission.lock().await;
+            if let Some(budget) = pool.retention_budget(execution_budget.as_ref()).await
+                && let Some(bytes) = self.vm.as_ref().and_then(Vm::resident_bytes)
+                && retained::within_budget(1, bytes, &budget)
+                && !pool.stop.is_cancelled()
+                && !stop.is_cancelled()
+            {
+                loop {
+                    let old = {
+                        let mut slots = pool.slots.lock().await;
+                        let total = slots
+                            .retained
+                            .iter()
+                            .try_fold(bytes, |total, idle| total.checked_add(idle.bytes()?));
+                        if total.is_some_and(|total| {
+                            retained::within_budget(slots.retained.len() + 1, total, &budget)
+                        }) {
+                            None
+                        } else {
+                            slots.retained.pop_front()
+                        }
+                    };
+                    let Some(mut old) = old else { break };
+                    old.reservation.finish().await;
+                }
+                // Anonymous eligibility ends permanently on assignment.
+                self.prepared = None;
+                self.resumed = false;
+                self.idle_stop = CancellationToken::new();
+                let idle = retained::Retained {
+                    run: plan.run_id().to_owned(),
+                    budget,
+                    key: retained::key(&plan),
+                    expires: Instant::now() + pool.retention,
+                    reservation: self,
+                };
+                pool.slots.lock().await.retained.push_back(idle);
+                stop.cancel();
+                return result;
+            }
+        }
         // Captures share this attempt's lifetime. Release pending thaw retries
         // before shutdown removes the guest socket, including normal completion.
         stop.cancel();
@@ -610,6 +876,9 @@ impl Reservation {
     }
 
     async fn finish(&mut self) {
+        self.idle_stop.cancel();
+        let control = self.idle_control.clone();
+        let _capture = control.lock().await;
         self.retire_anonymous().await;
         self.owner.take();
         release_slot(&self.pool, self.slot, self.completion.take()).await;
@@ -635,7 +904,10 @@ impl Drop for Reservation {
         let slot = self.slot;
         let anonymous = self.anonymous.take();
         let completion = self.completion.take();
+        self.idle_stop.cancel();
+        let control = self.idle_control.clone();
         self.pool.cleanup.spawn(async move {
+            let _capture = control.lock().await;
             if let Some(vm) = &mut vm {
                 vm.shutdown().await;
             }
@@ -689,6 +961,66 @@ mod tests {
 
     fn cold_plan(run: &str) -> Plan {
         Plan::new(serde_json::json!({ "runId": run }))
+    }
+
+    #[tokio::test]
+    async fn active_admission_evicts_oldest_retained_before_the_ready_pool() {
+        let root = tempfile::tempdir().unwrap();
+        let pool = Pool::new(
+            root.path().into(),
+            root.path().into(),
+            CancellationToken::new(),
+            3,
+        )
+        .await
+        .unwrap();
+        let oldest = pool.reserve(&cold_plan("oldest")).await.unwrap();
+        let newest = pool.reserve(&cold_plan("newest")).await.unwrap();
+        let ready = pool.reserve(&cold_plan("anonymous")).await.unwrap();
+        let budget = Budget {
+            slots: 3,
+            limits: crate::nodes::Resources {
+                cpu: 3,
+                memory_mi_b: 8192,
+                disk_mi_b: 32768,
+            },
+        };
+        let mut slots = pool.slots.lock().await;
+        for (run, reservation) in [("oldest", oldest), ("newest", newest)] {
+            slots.retained.push_back(retained::Retained {
+                run: run.into(),
+                budget: budget.clone(),
+                key: serde_json::Value::Null,
+                expires: Instant::now() + Duration::from_secs(180),
+                reservation,
+            });
+        }
+        slots.ready = Some(ready);
+        drop(slots);
+        let active = pool.reserve(&cold_plan("new-active")).await.unwrap();
+        assert_eq!(active.slot, 1, "Oldest retained slot is reclaimed first");
+        let slots = pool.slots.lock().await;
+        assert_eq!(slots.retained.len(), 1);
+        assert_eq!(slots.retained.front().unwrap().run, "newest");
+        assert!(
+            slots.ready.is_some(),
+            "Anonymous spare survives when one eviction suffices"
+        );
+        drop(slots);
+        let second = pool.reserve(&cold_plan("second-active")).await.unwrap();
+        assert_eq!(second.slot, 2);
+        assert!(pool.slots.lock().await.ready.is_some());
+        let third = pool.reserve(&cold_plan("third-active")).await.unwrap();
+        assert_eq!(third.slot, 3);
+        assert!(pool.slots.lock().await.ready.is_none());
+        assert!(pool.reserve(&cold_plan("fourth-active")).await.is_err());
+        assert_eq!(
+            pool.health().await.occupied,
+            3,
+            "Active guests are never evicted"
+        );
+        drop((active, second, third));
+        pool.drain().await;
     }
 
     #[tokio::test]
@@ -931,9 +1263,15 @@ mod tests {
         let plan = Plan::new(serde_json::json!({
             "runId": "run"
         }));
-        let result = reservation
-            .execute(plan, Arc::default(), stop.clone())
-            .await;
+        let control = Arc::new(Mutex::new(()));
+        let held_capture = control.lock().await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            reservation.execute(plan, Arc::default(), control.clone(), stop.clone()),
+        )
+        .await
+        .unwrap();
+        drop(held_capture);
         assert!(result.is_err());
         assert!(
             stop.is_cancelled(),

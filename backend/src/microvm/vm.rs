@@ -66,6 +66,8 @@ pub struct Vm {
     volume: Option<Arc<crate::storage::runtime::Volume>>,
     uid: u32,
     warmed: bool,
+    idle: bool,
+    memory_mib: u64,
 }
 
 fn console(
@@ -298,6 +300,8 @@ impl Vm {
             volume: Some(volume),
             uid: 40000 + slot as u32,
             warmed: false,
+            idle: false,
+            memory_mib: resources.memory_mi_b,
         };
         let result = tokio::select! {
             result = vm.launch(state, (&image, &current_kernel), &id, &resources, slot, &mut timing) => result,
@@ -416,7 +420,7 @@ impl Vm {
             .as_ref()
             .is_some_and(|volume| volume.source.waiting() || volume.paused());
         let mut acknowledged = false;
-        if !blocked {
+        if !blocked && !self.idle {
             // Healthy guests get a bounded graceful stop.
             let request = call::<Reply>(&self.socket, &GuestRequest::Shutdown);
             if let Ok(Ok(reply)) = tokio::time::timeout(Duration::from_secs(10), request).await {
@@ -482,6 +486,126 @@ impl Vm {
             .and_then(Path::file_name)
             .and_then(|name| name.to_str())
             .unwrap_or("unknown")
+    }
+
+    pub(super) fn accepts_retained(&self, plan: &Plan) -> bool {
+        // A resident receives per-thread configuration, but cannot apply new
+        // process-level CLI options. Cold adapters start afresh on every turn.
+        !self.warmed
+            || plan.as_value()["chat"]["args"]
+                .as_array()
+                .is_none_or(Vec::is_empty)
+    }
+
+    /// No CPU or guest background process may run without an attempt lease.
+    pub(super) async fn suspend_idle(&mut self) -> Result<()> {
+        let active_bytes = self
+            .resident_bytes()
+            .ok_or_else(|| Error::unavailable("VM resident memory is unavailable."))?;
+        let started = std::time::Instant::now();
+        let client = self.balloon_client()?;
+        let stats: Value = client
+            .get("http://localhost/balloon/statistics")
+            .send()
+            .await
+            .map_err(Error::internal)?
+            .error_for_status()
+            .map_err(Error::internal)?
+            .json()
+            .await
+            .map_err(Error::internal)?;
+        let actual = stats["actual_mib"].as_u64().unwrap_or(0);
+        let available = stats["available_memory"].as_u64().unwrap_or(0) / 1_048_576;
+        // Keep working memory and headroom for the native service. Inflating the
+        // balloon reclaims free pages and clean caches while CPUs can cooperate;
+        // free-page reporting returns those pages from the shared guest memfd.
+        let target = actual
+            .saturating_add(available.saturating_sub(768))
+            .min(self.memory_mib.saturating_sub(1024));
+        if target > actual {
+            client
+                .patch("http://localhost/balloon")
+                .json(&json!({ "amount_mib": target }))
+                .send()
+                .await
+                .map_err(Error::internal)?
+                .error_for_status()
+                .map_err(Error::internal)?;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+            loop {
+                let stats: Value = client
+                    .get("http://localhost/balloon/statistics")
+                    .send()
+                    .await
+                    .map_err(Error::internal)?
+                    .error_for_status()
+                    .map_err(Error::internal)?
+                    .json()
+                    .await
+                    .map_err(Error::internal)?;
+                if stats["actual_mib"].as_u64().unwrap_or(0) >= target.saturating_sub(16) {
+                    break;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(Error::unavailable(
+                        "Idle balloon reclamation was not acknowledged.",
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
+        self.idle = true;
+        host::set_vm_state(&self.jail.join("api.sock"), "Paused").await?;
+        let retained_bytes = self
+            .resident_bytes()
+            .ok_or_else(|| Error::unavailable("Retained VM memory is unavailable."))?;
+        tracing::info!(target: "leo_performance", operation = "vm_retention", event = "memory_reclaimed", vm_id = self.id(), active_bytes, retained_bytes, reclaimed_bytes = active_bytes.saturating_sub(retained_bytes), balloon_mib = target, elapsed_ms = started.elapsed().as_millis() as u64);
+        Ok(())
+    }
+
+    pub(super) async fn resume_idle(&mut self) -> Result<()> {
+        // Restore usable guest address space on demand. This does not reserve
+        // the whole virtual size in RAM; the shared cgroup remains the ceiling.
+        self.balloon_client()?
+            .patch("http://localhost/balloon")
+            .json(&json!({ "amount_mib": 0 }))
+            .send()
+            .await
+            .map_err(Error::internal)?
+            .error_for_status()
+            .map_err(Error::internal)?;
+        host::set_vm_state(&self.jail.join("api.sock"), "Resumed").await?;
+        self.idle = false;
+        Ok(())
+    }
+
+    fn balloon_client(&self) -> Result<reqwest::Client> {
+        reqwest::Client::builder()
+            .unix_socket(self.jail.join("api.sock"))
+            .timeout(Duration::from_millis(500))
+            .build()
+            .map_err(Error::internal)
+    }
+
+    /// Allocated shared guest pages plus the VMM's other resident pages. Plain
+    /// RSS alone can miss shared memfd pages held by KVM or the block backend.
+    pub(super) fn resident_bytes(&self) -> Option<u64> {
+        let pid = self.child.as_ref()?.id()?;
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        let field = |key| {
+            status.lines().find_map(|line| {
+                line.strip_prefix(key)?
+                    .split_whitespace()
+                    .next()?
+                    .parse::<u64>()
+                    .ok()?
+                    .checked_mul(1024)
+            })
+        };
+        let rss = field("VmRSS:")?;
+        let mapped_shared = field("RssShmem:").unwrap_or(0);
+        let allocated = self.mounted.as_ref()?.allocated_memory_bytes().ok()?;
+        Some(rss.saturating_add(allocated.saturating_sub(mapped_shared)))
     }
 
     pub async fn execute(

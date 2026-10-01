@@ -38,12 +38,32 @@ Reservations release their slot after teardown, including abandoned HTTP request
 If all slots are occupied or shared memory/disk headroom is low, new work waits.
 `/health` exposes capacity, occupied slots, applied budgets, usage and pressure.
 
-Used VMs are always destroyed. Existing conversations boot from their retained
-disk, preserving work while ending prior background processes. They preferentially
-use a free slot.
-Retaining used VM memory needs a separate policy for daemons, account changes and
-sticky guest permissions. Prepared disks left by a controller restart are removed;
-assigned disks remain the recovery authority.
+Successful Codex conversations may retain their own CPU-paused VM for
+180 seconds (`LEO_VM_RETENTION_SECONDS=0..300`; zero disables retention). A
+retained VM is never assigned to another conversation. Its balloon reclaims
+available pages before pausing, with free-page reporting returning shared memfd
+pages to the host. Admission counts allocated memfd pages once, plus the VMM's
+other resident memory; virtual guest RAM is not a reservation. The shared cgroup
+remains the hard limit. At most two conversations are retained, with a combined
+cost of at most 2 GiB or one quarter of the node budget, whichever is smaller;
+retention also requires node usage at or below 75% of its RAM budget.
+
+Active admission evicts the oldest retained conversation first, then the
+anonymous spare, before rejecting work. Idle monitoring uses the same order.
+Expiry, pressure, changed budgets or immutable mounts/privileges, controller
+shutdown and disk deletion also retire retained VMs. Teardown reaps the VMM
+before releasing its physical disk or slot. Failed or cancelled turns and
+command plans use the ordinary cold lifecycle. `/health` reports `retained` and
+`retained_memory_mi_b` alongside the anonymous pool and occupied slots.
+
+Each resumed turn gets a new attempt lease, renewed managed-account login and
+thread/MCP configuration. CPU pause and retention share the attempt's safety-control lock;
+no guest process runs while retained. Background guest processes pause with the
+VM and can resume on its next turn. Repeated disk publication holds a per-VM
+capture barrier and leaves CPUs paused; it never closes the mounted source's
+read cancellation token. The persisted disk, journal and acknowledged publication
+remain the recovery authority after eviction or a controller crash. RAM retention
+is only an optimization. See [the retention decision](adr/0020-paused-conversation-retention.md).
 
 Archive imports negotiate `binaryImports` through guest status. Supporting guests
 receive length-prefixed binary chunks of at most 64 KiB and an explicit zero-length

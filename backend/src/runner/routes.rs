@@ -198,6 +198,12 @@ async fn disk_snapshot(broker: &Broker, request: Request, run: &str) -> Result<R
             "Use the active attempt for a running VM snapshot.",
         ));
     }
+    let pool = broker.pool.clone();
+    let retained_run = run.clone();
+    let retained = tokio::spawn(async move { pool.capture_retained(&retained_run).await });
+    if let Some(snapshot) = retained.await.map_err(Error::internal)?? {
+        return Ok(Json(snapshot).into_response());
+    }
     let state = broker.state.clone();
     let stop = broker.stop.child_token();
     let task = tokio::spawn(async move {
@@ -285,6 +291,7 @@ async fn disk_action(
     uuid(run)?;
     let bytes = body(request, 4096, "Invalid workspace request.").await?;
     let _: serde::de::IgnoredAny = serde_json::from_slice(&bytes)?;
+    broker.pool.evict_conversation(run).await;
     let active = broker.active.lock().await;
     if active.values().any(|a| a.plan.run_id() == run) {
         return Err(Error::conflict("The workspace still has an active agent."));
