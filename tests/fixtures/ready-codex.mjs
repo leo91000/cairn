@@ -33,6 +33,7 @@ async function main() {
   let current
   let service
   let nativePid
+  const runId = randomUUID()
 
   const server = createServer(async (request, response) => {
     let body = ''
@@ -184,6 +185,8 @@ async function main() {
       current = { label, started: performance.now() }
       const mcp = bearer ? { fixture: { url: `${endpoint}/mcp`, http_headers: { Authorization: bearer } } } : {}
       const plan = {
+        runId,
+        attemptId: randomUUID(),
         provider: 'codex',
         execution: { messageId: randomUUID(), text: `Remember ${label}, and reply READY_ADAPTER_OK.`, recovery: false },
         instructions: 'Reply with the requested marker.',
@@ -228,6 +231,7 @@ async function main() {
       if (resident) {
         const children = (await readFile(`/proc/${service.child.pid}/task/${service.child.pid}/children`, 'utf8')).trim().split(/\s+/).filter(Boolean)
         assert.deepEqual(children, [nativePid], 'The same native process survives every lease')
+        assert.ok(service.stderr().split('\n').some(line => line.includes('codex_rpc') && line.includes(plan.attemptId)), 'Resident native RPC timing retains its attempt correlation')
       }
 
       samples.push({
@@ -257,6 +261,7 @@ async function main() {
     await turn('ready-remove-mcp', null, true, true)
     service.child.kill('SIGTERM')
     assert.equal(await service.done, 0, service.stderr().slice(-3000))
+    assert.ok(!service.stderr().includes('Bearer alpha') && !service.stderr().includes('Bearer beta'), 'Instrumentation never records gateway credentials')
     await assert.rejects(access(`/proc/${nativePid}`), { code: 'ENOENT' })
     process.stdout.write(`${JSON.stringify({
       kind: 'real-rust-ready-codex-adapter',

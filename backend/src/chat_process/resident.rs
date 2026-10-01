@@ -6,16 +6,22 @@ use crate::{
     error::{Error, Result},
     rpc::Session,
     skills::private_dir,
+    validation::text,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{os::unix::fs::PermissionsExt, path::Path, time::Duration};
+use std::{
+    os::unix::fs::PermissionsExt,
+    path::Path,
+    time::{Duration, Instant},
+};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{UnixListener, UnixStream},
     sync::mpsc,
 };
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 const MAX_PLAN: usize = 8_000_000;
 // Match the host's total output bound; native tool items can exceed control frames.
@@ -43,8 +49,10 @@ pub async fn serve(
     let listener = UnixListener::bind(socket)?;
     tokio::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600)).await?;
     let result = async {
+        let started = Instant::now();
         let mut session =
             Session::codex_until(config, home, &[], Some(&config.home), &stop).await?;
+        tracing::info!(target: "leo_performance", operation = "codex_resident", event = "ready", native_init_ms = started.elapsed().as_millis() as u64);
         let result = serve_session(listener, &mut session, home, stop).await;
         session.close().await;
         result
@@ -183,7 +191,10 @@ async fn execute_lease(
 ) -> Result<()> {
     let (events, mut received) = mpsc::channel(32);
     let cancel = CancellationToken::new();
-    let run = run_session(session, home, plan, events, cancel.clone(), true);
+    let run_id = crate::performance::identity(text(&plan, "runId"));
+    let attempt_id = crate::performance::identity(text(&plan, "attemptId"));
+    let span = tracing::info_span!(target: "leo_performance", "agent_attempt", run_id, attempt_id, resident = true);
+    let run = run_session(session, home, plan, events, cancel.clone(), true).instrument(span);
     tokio::pin!(run);
     let mut disconnected = false;
     let mut failure = None;
