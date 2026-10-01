@@ -108,8 +108,11 @@ mod tests {
             "blockSize": crate::nodes::snapshots::BLOCK,
             "blocks": [{ "offset": 0, "size": 4096, "hash": null }],
         });
-        let source =
-            json!({ "master": "http://127.0.0.1:9/", "grant": "synthetic-retained-owner" });
+        let source = json!({
+            "master": "http://127.0.0.1:9/",
+            "grant": "synthetic-retained-owner",
+            "policy": { "reserveMiB": 64, "reservePercent": 1 },
+        });
         let disk =
             crate::storage::runtime::create(&owner.directory.join("lazy"), &manifest, &source)
                 .await
@@ -127,6 +130,7 @@ mod tests {
         let disk = volume.disk.clone();
         let cancellation = volume.stop.clone();
         for _ in 0..2 {
+            assert!(volume.inspect().await.unwrap()["waitingFor"].is_null());
             let snapshot = capture_paused(root.path(), &run, &owner, CancellationToken::new())
                 .await
                 .unwrap();

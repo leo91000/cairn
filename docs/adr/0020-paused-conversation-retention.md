@@ -31,6 +31,8 @@ most 250 ms for that lock: an unsettled capture skips this optional optimization
 and follows normal cancellation/teardown instead of blocking completion. An idle
 capture holds physical ownership and a per-conversation barrier without blocking
 admission on other conversations. It neither resumes CPUs nor cancels mounted reads.
+Paused captures are explicitly crash-consistent: CPU pause does not flush dirty
+guest pages, and background processes may have written since the turn's sync.
 Every new turn renews its manager/node/account/MCP access; the old disk binding
 stays immutable so outstanding publication receipts remain valid. Changed mount
 or privilege geometry and changed budgets require a cold VM. Revocation,

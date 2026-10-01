@@ -47,6 +47,9 @@ pub(crate) async fn capture_target(
     stop: CancellationToken,
 ) -> Result<Value> {
     let stopped = matches!(target, Target::Stopped);
+    // Paused CPUs fence new writes but do not flush dirty guest pages. A prior
+    // turn sync is insufficient when guest background processes can write later.
+    let crash_consistent = matches!(target, Target::Paused);
     let (socket, attempt) = match target {
         Target::Running { socket, attempt } => (Some(socket), attempt),
         Target::Stopped | Target::Paused => (None, String::new()),
@@ -172,7 +175,12 @@ pub(crate) async fn capture_target(
     manifest["runtime"] =
         serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
     manifest["capturedAt"] = captured_at.into();
-    manifest["consistency"] = if emergency { "crash" } else { "filesystem" }.into();
+    manifest["consistency"] = if emergency || crash_consistent {
+        "crash"
+    } else {
+        "filesystem"
+    }
+    .into();
     manifest["generation"] = generation.into();
     manifest["onDemand"] = true.into();
 

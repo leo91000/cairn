@@ -274,6 +274,7 @@ async function main() {
         for (let index = 0; index < 2; index++) {
           const snapshot = await (await api(`/disks/${runId}/snapshot`, 'POST', {})).json()
           assert.ok(snapshot.manifest.generation > 0)
+          assert.equal(snapshot.manifest.consistency, 'crash', 'CPU pause does not promise filesystem freeze')
           assert.equal(state(vmId), 'Paused', 'Publication never wakes retained CPUs')
           if (process.env.LEO_RETENTION_PUBLISH === 'true' && index === 0 && lease % 10 === 0) {
             for (const block of snapshot.manifest.blocks) {
