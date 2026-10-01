@@ -352,9 +352,16 @@ pub struct MountedDisk {
     thread: Option<std::thread::JoinHandle<io::Result<()>>>,
     shutdown: Arc<RwLock<Option<ShutdownHandle>>>,
     failed: Arc<AtomicBool>,
+    memory: GuestMemoryAtomic<Memory>,
 }
 
 impl MountedDisk {
+    /// Actual allocated shared pages, including pages absent from the VMM's
+    /// RSS. Guest regions can share one memfd; count its inode only once.
+    pub fn allocated_memory_bytes(&self) -> io::Result<u64> {
+        allocated_memory_bytes(&self.memory.memory())
+    }
+
     pub fn failed(&self) -> bool {
         self.failed.load(Ordering::Acquire)
             || self
@@ -408,7 +415,7 @@ pub fn mount_disk(disk: Arc<dyn Disk>, socket: &Path, uid: u32) -> io::Result<Mo
         failed: failed.clone(),
     }));
     let mut daemon =
-        VhostUserDaemon::new("leo-block".to_owned(), backend, memory).map_err(error)?;
+        VhostUserDaemon::new("leo-block".to_owned(), backend, memory.clone()).map_err(error)?;
     let stopped = Arc::new(AtomicBool::new(false));
     let stop = stopped.clone();
     let exit = kill.clone();
@@ -437,7 +444,36 @@ pub fn mount_disk(disk: Arc<dyn Disk>, socket: &Path, uid: u32) -> io::Result<Mo
         thread: Some(thread),
         shutdown,
         failed,
+        memory,
     })
+}
+
+fn allocated_memory_bytes(memory: &Memory) -> io::Result<u64> {
+    use std::{collections::HashSet, os::unix::fs::MetadataExt};
+    use vm_memory::{GuestMemoryBackend, GuestMemoryRegion};
+    let mut files = HashSet::new();
+    let mut bytes = 0u64;
+    for region in memory.iter() {
+        let file = region
+            .file_offset()
+            .ok_or_else(|| error("Guest memory is not file-backed"))?
+            .file();
+        let metadata = file.metadata()?;
+        if files.insert((metadata.dev(), metadata.ino())) {
+            bytes = bytes
+                .checked_add(
+                    metadata
+                        .blocks()
+                        .checked_mul(512)
+                        .ok_or_else(|| error("Guest memory accounting overflow"))?,
+                )
+                .ok_or_else(|| error("Guest memory accounting overflow"))?;
+        }
+    }
+    if files.is_empty() {
+        return Err(error("Guest memory has not been registered"));
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]

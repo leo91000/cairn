@@ -343,7 +343,9 @@ impl Execution {
             self.stop.clone(),
             lease_expired.clone(),
         ));
-        let result = reservation.execute(self.plan, self.socket, self.stop).await;
+        let result = reservation
+            .execute(self.plan, self.socket, self.control, self.stop)
+            .await;
         timer.abort();
         let broker = &self.broker;
         let id = &self.id;
@@ -399,9 +401,15 @@ async fn enforce_limits(
     let deadline = plan.deadline();
     let leased = plan.node_lease_required();
     loop {
+        if expiry.is_cancelled() {
+            return;
+        }
         let disk_directory = crate::storage::environment::directory(&broker.state, plan.run_id());
         let lost_lease = leased && !broker.lease_valid(&attempt).await;
         if deadline.is_some_and(|d| now() >= d) || lost_lease {
+            if expiry.is_cancelled() {
+                return;
+            }
             lease_expired.store(lost_lease, Ordering::SeqCst);
             // Cancellation releases an in-flight guest thaw before waiting
             // for its control lock. The timer never waits unboundedly.

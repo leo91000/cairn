@@ -346,6 +346,10 @@ async fn vm_state(state: &Path, attempt: &str, status: &str) -> Result<()> {
         .join("jails/firecracker")
         .join(vm)
         .join("root/api.sock");
+    set_vm_state(&socket, status).await
+}
+
+pub(super) async fn set_vm_state(socket: &Path, status: &str) -> Result<()> {
     let request = async {
         let transport = |_| Error::timeout("VM state response was lost; retry confirmation.");
         let mut stream = UnixStream::connect(socket).await.map_err(transport)?;

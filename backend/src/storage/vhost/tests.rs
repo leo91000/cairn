@@ -255,3 +255,58 @@ fn queue_worker_panic_is_visible_without_acknowledging_the_write() {
         0xff
     );
 }
+
+#[test]
+fn shared_guest_accounting_counts_allocated_pages_once_and_observes_reclamation() {
+    use std::os::unix::{fs::MetadataExt, io::AsRawFd};
+    use vm_memory::FileOffset;
+    let file = tempfile::tempfile().unwrap();
+    file.set_len(8192).unwrap();
+    let memory = Memory::from_ranges_with_files(&[
+        (
+            GuestAddress(0),
+            4096,
+            Some(FileOffset::new(file.try_clone().unwrap(), 0)),
+        ),
+        (
+            GuestAddress(8192),
+            4096,
+            Some(FileOffset::new(file.try_clone().unwrap(), 4096)),
+        ),
+    ])
+    .unwrap();
+    assert_eq!(
+        allocated_memory_bytes(&memory).unwrap(),
+        0,
+        "Sparse virtual memory is not committed RAM"
+    );
+    memory.write_obj(1u8, GuestAddress(0)).unwrap();
+    memory.write_obj(2u8, GuestAddress(8192)).unwrap();
+    let active = file.metadata().unwrap().blocks() * 512;
+    assert!(active >= 8192);
+    assert_eq!(
+        allocated_memory_bytes(&memory).unwrap(),
+        active,
+        "Two mappings of one memfd must not double its cost"
+    );
+    assert_eq!(
+        unsafe {
+            libc::fallocate(
+                file.as_raw_fd(),
+                libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+                0,
+                8192,
+            )
+        },
+        0
+    );
+    assert_eq!(
+        allocated_memory_bytes(&memory).unwrap(),
+        0,
+        "Free page reporting returns allocated pages to the host"
+    );
+    assert!(
+        allocated_memory_bytes(&Memory::new()).is_err(),
+        "Unknown memory is never treated as free"
+    );
+}

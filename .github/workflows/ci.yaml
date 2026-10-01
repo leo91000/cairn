@@ -251,6 +251,15 @@ jobs:
         run: |
           node tests/container-smoke.mjs "$SMOKE_IMAGE"
           node tests/runner-smoke.mjs "$SMOKE_IMAGE"
+      - name: Verify retained conversation memory, crash recovery and active admission
+        env:
+          SMOKE_IMAGE: ${{ github.event_name == 'pull_request' && 'leo-agent-manager:test' || format('ghcr.io/{0}@{1}', github.repository, steps.build.outputs.digest) }}
+          LEO_RETENTION_MEMORY_GIB: 4
+          LEO_RETENTION_TURNS: 4
+          LEO_RETENTION_CRASH_AFTER: 2
+          LEO_RETENTION_ADMISSION: 'true'
+          LEO_RETENTION_PUBLISH: 'true'
+        run: node tests/runner-retention-smoke.mjs "$SMOKE_IMAGE"
   publish:
     # The Intel nested Android test needs hardware GitHub does not provide; it runs locally
     # before releases when Android or runner changes need it (docs/DEPLOYMENT.md) and does not gate CI.

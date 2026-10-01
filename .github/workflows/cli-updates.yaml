@@ -85,6 +85,7 @@ jobs:
         run: |
           node tests/container-smoke.mjs "$SMOKE_IMAGE"
           node tests/runner-smoke.mjs "$SMOKE_IMAGE"
+          LEO_RETENTION_MEMORY_GIB=4 node tests/runner-retention-smoke.mjs "$SMOKE_IMAGE"
   deploy:
     needs: [check, image]
     runs-on: ubuntu-latest

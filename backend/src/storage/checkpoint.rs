@@ -13,6 +13,14 @@ use std::{
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+/// A retained guest stays CPU-paused throughout capture; it must not be thawed
+/// or have its mounted volume's read cancellation token closed.
+pub(crate) enum Target {
+    Stopped,
+    Running { socket: PathBuf, attempt: String },
+    Paused,
+}
+
 pub async fn capture(
     state: &Path,
     run: &str,
@@ -21,10 +29,32 @@ pub async fn capture(
     stop: CancellationToken,
     attempt: &str,
 ) -> Result<Value> {
+    let target = match socket {
+        Some(socket) => Target::Running {
+            socket,
+            attempt: attempt.to_owned(),
+        },
+        None => Target::Stopped,
+    };
+    capture_target(state, run, target, control, stop).await
+}
+
+pub(crate) async fn capture_target(
+    state: &Path,
+    run: &str,
+    target: Target,
+    control: Arc<Mutex<()>>,
+    stop: CancellationToken,
+) -> Result<Value> {
+    let stopped = matches!(target, Target::Stopped);
+    let (socket, attempt) = match target {
+        Target::Running { socket, attempt } => (Some(socket), attempt),
+        Target::Stopped | Target::Paused => (None, String::new()),
+    };
     let mut timing = crate::performance::Operation::new("disk_snapshot", run, "open_journal");
     let directory = super::environment::directory(state, run)?;
     let volume = super::runtime::load(&directory).await?;
-    let _stopped_reads = socket.is_none().then(|| volume.stop.clone().drop_guard());
+    let _stopped_reads = stopped.then(|| volume.stop.clone().drop_guard());
     timing.next("control_lock");
     let guard = control.lock().await;
     if stop.is_cancelled() {
@@ -46,7 +76,7 @@ pub async fn capture(
         // A healthy VM may still be paused after its previous protection cycle.
         // Resume it before asking the guest to freeze; paused CPUs cannot reply.
         if !emergency && (volume.paused() || volume.transition_pending()) {
-            if let Err(error) = host::settle_attempt(state, attempt, false, &stop).await {
+            if let Err(error) = host::settle_attempt(state, &attempt, false, &stop).await {
                 stop.cancel();
                 return Err(error);
             }
@@ -69,9 +99,9 @@ pub async fn capture(
         // A failed response does not establish that the pause was rejected.
         // Keep the monitor aware of the possible pause until resume succeeds.
         volume.set_paused(true);
-        if let Err(error) = host::settle_attempt(state, attempt, true, &stop).await {
+        if let Err(error) = host::settle_attempt(state, &attempt, true, &stop).await {
             if !emergency && !stop.is_cancelled() {
-                if host::settle_attempt(state, attempt, false, &stop)
+                if host::settle_attempt(state, &attempt, false, &stop)
                     .await
                     .is_ok()
                 {
@@ -99,7 +129,7 @@ pub async fn capture(
     timing.next("seal_and_resume");
     let generation = volume.seal().await;
     if socket.is_some() && !stop.is_cancelled() && !emergency {
-        if let Err(error) = host::settle_attempt(state, attempt, false, &stop).await {
+        if let Err(error) = host::settle_attempt(state, &attempt, false, &stop).await {
             // The controller tears down an attempt whose CPUs cannot be resumed.
             stop.cancel();
             return Err(error);
