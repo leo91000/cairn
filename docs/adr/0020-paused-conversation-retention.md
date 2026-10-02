@@ -16,6 +16,15 @@ guest cache drop is added: the balloon already reclaims available clean pages,
 and the bound is based on physical allocation after reclamation. A missing,
 failed or unacknowledged memory/pause operation retires the VM safely.
 
+Bound each idle inflation increment by the currently resident guest/VMM bytes
+and a 2 GiB work budget, in addition to those guest headroom limits. Inflating
+tens of GiB of unused virtual memory still requires the guest to visit pages;
+that work can exhaust the three-second acknowledgment budget under contention.
+This smaller request may reclaim less cache in one pause. Free-page reporting
+continues independently, and admission measures the resulting physical cost:
+an oversized retained VM is evicted rather than treated as reclaimed. Keep the
+existing acknowledgment deadline and safe teardown on missing acknowledgment.
+
 RSS alone misses allocated memfd pages held by KVM/backend mappings. Count each
 backing inode's allocated blocks once, then add VMM resident memory outside its
 shared mapping. Unknown cost makes retention ineligible. Limit idle guests to
@@ -39,6 +48,31 @@ or privilege geometry and changed budgets require a cold VM. Revocation,
 expiry, eviction and deletion never depend on saved RAM for durable recovery.
 
 ## Validation and measurements
+
+### Large-guest contention regression (2026-10-02)
+
+Real-account production qualification of v0.52.0 completed its fresh turn and
+two resumes, but rejected retention on all three with an unacknowledged idle
+balloon request. These successful conversations do not prove retained performance.
+A controlled local reproduction uses a 35 GiB virtual guest, a 36 GiB container
+ceiling and a 0.25 CPU quota; the immutable v0.52.0 image fails with the same
+acknowledgment error. The same old image passes at three CPUs, so guest size
+alone does not explain the failure.
+
+With only the host-side bounded-inflation change, the same throttled fixture
+passes three turns on one VMM. Reclamation takes 176 / 296 / 321 ms and the
+independently observed retained allocation is 1,186.57–1,192.34 MiB. Account and
+MCP access renew, context survives, paused captures pass and deletion reaps the
+VM. Under the same quota, two cached resumes without retention on the old
+image take 7,163 / 7,462 ms before the synthetic model; retained resumes on the
+candidate take 2,218 / 2,128 ms. These are two samples per setting, local and
+synthetic, not a production percentile or proof that CPU contention is the
+sole cause in production. The guest image and the three-second bound are unchanged.
+
+Raw failure, control and candidate records remain outside Git as release assets:
+`v0520-contended-retention-red.json.failure.log`,
+`retention-physical-balloon-contended-green.json` and
+`retention-physical-balloon-contended-cold.json`.
 
 The comparison uses the same runner image with retention enabled/disabled,
 real Firecracker/vhost and pinned native Codex, a synthetic account, model and
