@@ -388,7 +388,7 @@ async fn run_route(broker: Broker, request: Request, segments: &[&str]) -> Resul
     }
 }
 
-/// Recovery point of an attempt; a running VM is captured consistently through its guest.
+/// Recovery point of an attempt, with guest flushing unless crash consistency is requested.
 async fn attempt_snapshot(broker: &Broker, request: Request, id: &str) -> Result<Response> {
     let id = id.to_owned();
     let consistency = snapshot_consistency(request).await?;
