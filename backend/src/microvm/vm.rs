@@ -508,6 +508,14 @@ impl Vm {
                 .is_none_or(Vec::is_empty)
     }
 
+    /// Only a confirmed process exit permits retiring an unpublished idle VM.
+    /// Uncertain process state keeps its physical ownership and journal pinned.
+    pub(super) fn exited(&mut self) -> bool {
+        self.child
+            .as_mut()
+            .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))))
+    }
+
     /// No CPU or guest background process may run without an attempt lease.
     pub(super) async fn suspend_idle(&mut self) -> Result<()> {
         let active_bytes = self

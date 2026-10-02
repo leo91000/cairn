@@ -532,13 +532,18 @@ impl Pool {
                     .retained
                     .iter()
                     .try_fold(0u64, |total, idle| total.checked_add(idle.bytes()?));
+                let exited = slots
+                    .retained
+                    .iter_mut()
+                    .position(|idle| idle.reservation.vm.as_mut().is_some_and(Vm::exited));
                 let expired = slots
                     .retained
                     .front()
                     .is_some_and(|idle| Instant::now() >= idle.expires);
                 let memory_pressure = memory_mi_b > budget.limits.memory_mi_b * 75 / 100;
                 let under_pressure = pressure.is_some() || memory_pressure;
-                if !expired
+                if exited.is_none()
+                    && !expired
                     && !under_pressure
                     && bytes.is_some_and(|bytes| {
                         retained::within_budget(slots.retained.len(), bytes, &budget)
@@ -546,7 +551,9 @@ impl Pool {
                 {
                     return Ok(());
                 }
-                let reason = if expired {
+                let reason = if exited.is_some() {
+                    "process_exited"
+                } else if expired {
                     "expired"
                 } else if pressure.is_some() {
                     "node_pressure"
@@ -558,10 +565,15 @@ impl Pool {
                     "retained_budget"
                 };
                 let count = slots.retained.len();
-                let index = slots
-                    .retained
-                    .iter()
-                    .position(|idle| !idle.publication_pending());
+                // An already-dead VMM cannot be retained. Drain its backend
+                // and ownership, keeping the durable source journal intact so
+                // this node can recover it without waiting for remote upload.
+                let index = exited.or_else(|| {
+                    slots
+                        .retained
+                        .iter()
+                        .position(|idle| !idle.publication_pending())
+                });
                 (
                     index.and_then(|index| slots.retained.remove(index)),
                     reason,

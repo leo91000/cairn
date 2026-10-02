@@ -37,6 +37,9 @@ ceilings remain enforced: protection does not authorize adding extra retained
 VMs beyond their budget. Administrative shutdown still stops processes while
 preserving the durable journal on the source node. The manager prevents automatic
 or requested movement while a final publication request is unacknowledged.
+A confirmed VMM process exit retires its dead reservation and backend without
+removing the local journal, permitting same-node crash recovery before S3 finishes.
+Uncertain process state remains pinned.
 
 Publication ownership uses the stable disk grant and source node, rather than
 the previous turn's changing attempt identifier. Legacy disk publication keeps
