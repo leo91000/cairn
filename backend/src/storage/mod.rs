@@ -7,6 +7,10 @@ mod device;
 
 pub use device::{Disk, DiskWrite, LocalDisk, export};
 
+mod view;
+
+pub use view::DiskView;
+
 pub mod digest;
 mod lazy;
 pub(crate) mod metrics;
