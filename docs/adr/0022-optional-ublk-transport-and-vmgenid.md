@@ -1,7 +1,7 @@
 # Transport ublk optionnel et VMGenID
 
-Date : 2026-10-02. Statut : transport qualifié localement, activation et mesure
-en production encore requises.
+Date : 2026-10-02. Statut : transport qualifié localement et mesuré en production,
+activé explicitement sur le VPS. Les snapshots restent un chantier distinct.
 
 ## Question et mesures
 
@@ -86,8 +86,41 @@ l'identité réseau et qualifier l'entropie avant le travail de la conversation 
 les threads distincts du banc ne prouvent pas à eux seuls ce point. Voir les
 [recommandations de Firecracker 1.17](https://github.com/firecracker-microvm/firecracker/blob/v1.17.0/docs/snapshotting/random-for-clones.md).
 
-Les résultats et scripts détaillés restent hors Git pour les futurs assets
-de release. Aucune activation ni release n'est justifiée par ce prototype seul.
+Les résultats et scripts détaillés restent hors Git pour les assets de release.
+
+## Qualification en production
+
+La PR #34 est mergée en `894ed3f`. Les mesures utilisent exactement son image
+immutable `sha256:38dd9dcf11bb22e53f7db944d05ab43d38991fafc279257d5f6f97428aa8aa93`,
+sur le même VPS, dépôt et script attachés. L'ordre vhost/ublk/ublk/vhost donne
+six répétitions par transport, avec les sauvegardes S3 périodiques activées.
+Chaque valeur est la médiane des six médianes de répétition ; démarrage, import
+et préparation sont exclus. Le transport est le seul paramètre modifié.
+
+| Opération, ms | vhost-user | ublk + Async | Variation |
+| --- | ---: | ---: | ---: |
+| fsync | 10,31 | 7,47 | −27,6 % |
+| fdatasync | 2,84 | 2,92 | +2,9 % |
+| Petit fichier durable | 19,66 | 17,35 | −11,7 % |
+| git status après installation | 12,19 | 13,57 | +11,3 % |
+| npm ci hors ligne | 17 876 | 17 464 | −2,3 % |
+
+Le gain de fsync est confirmé ; aucun gain npm ni de démarrage n'est établi.
+Les quatre tours réussissent avec leur sauvegarde finale acquittée. Un cinquième
+tour ublk, exclu de la comparaison, fournit les compteurs avant déchargement du
+disque : 24 308 écritures, 3 644 lectures, aucune erreur, maximum de 63 frames par
+groupe durable et zéro octet lu depuis S3. Sa sauvegarde finale est acquittée.
+La préparation de capture dure encore 1,36 à 4,51 s sous charge, tandis que
+seal/resume dure 4 à 7 ms ; un fsync atteint 4,54 s. Cette limite de latence
+reste visible et n'est pas présentée comme résolue par le changement de transport.
+
+Le scénario complet de runner passe avec cette même image et ublk : reprise,
+redimensionnement, annulation, capture pendant les écritures, crash/recovery et
+pause de sécurité lors d'une indisponibilité de stockage. Après son arrêt
+gracieux, aucun reçu ni périphérique du banc ne reste. Sur le noyau du VPS, le
+banc isolé vérifie aussi la réutilisation des numéros, le refus de retirer un
+propriétaire vivant, la récupération des intentions après SIGKILL et l'intégrité
+du journal. Ces tests ne qualifient pas un démarrage par snapshot en production.
 
 ## Périmètre de livraison
 
