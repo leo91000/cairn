@@ -307,25 +307,7 @@ impl Artifacts {
             .map_err(|e| Error::internal(e.error))?;
         std::fs::File::open(&directory)?.sync_all()?;
         let visibility = publication.visibility.unwrap_or("private");
-        let artifact = match commit(s, bearer, attempt, record, visibility).await {
-            Ok(artifact) => artifact,
-            Err(error) => {
-                // A revocation can win after the file's fsync but before the
-                // metadata transaction. Only remove bytes once the database
-                // confirms they were not committed. Cancellation/uncertainty
-                // still leave reconciliation to recover(), not a Drop guard.
-                let key = format!("artifact:{run_id}:{artifact_id}");
-                if matches!(s.store.kv(&key).await, Ok(None)) {
-                    if let Err(cleanup) = tokio::fs::remove_file(directory.join(&artifact_id)).await
-                    {
-                        tracing::warn!(%cleanup, "Could not remove rejected artifact");
-                    } else {
-                        std::fs::File::open(&directory)?.sync_all()?;
-                    }
-                }
-                return Err(error);
-            }
-        };
+        let artifact = commit(s, bearer, attempt, record, visibility).await?;
         let service = s.clone();
         let published = artifact.clone();
         tokio::spawn(async move {
