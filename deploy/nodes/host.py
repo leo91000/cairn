@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -126,15 +127,50 @@ def refresh_supervisor():
     os.execv(sys.executable, [sys.executable, str(current), 'run'])
 
 
+def block_device_arguments(transport):
+    if transport == 'vhost-user':
+        return []
+    if transport != 'ublk':
+        raise ValueError('Unsupported block transport')
+    command(['modprobe', 'ublk_drv'], timeout=10)
+    control = Path('/dev/ublk-control').stat()
+    if not stat.S_ISCHR(control.st_mode):
+        raise RuntimeError('Missing ublk control device')
+
+    section = None
+    majors = {}
+    for line in Path('/proc/devices').read_text().splitlines():
+        if line in ('Character devices:', 'Block devices:'):
+            section = line
+            continue
+        fields = line.split()
+        if len(fields) == 2 and fields[0].isdigit():
+            majors[(section, fields[1])] = int(fields[0])
+    character = majors.get(('Character devices:', 'ublk-char'))
+    block = majors.get(('Block devices:', 'ublk')) or majors.get(('Block devices:', 'blkext'))
+    if character is None or block is None:
+        raise RuntimeError('Missing ublk device classes')
+    if Path('/proc/sys/kernel/io_uring_disabled').read_text().strip() != '0':
+        raise RuntimeError('ublk requires io_uring on this node')
+    # Dynamic ublk minors require their detected classes, never all host devices.
+    return ['--device=/dev/ublk-control',
+            f'--device-cgroup-rule=c {character}:* rwm',
+            f'--device-cgroup-rule=b {block}:* rwm',
+            '-e', 'LEO_BLOCK_TRANSPORT=ublk']
+
+
 def launch(image):
     if not IMAGE.fullmatch(image):
         raise ValueError('Invalid immutable image')
+    config_path = ROOT / 'config.json'
+    config = json.loads(config_path.read_text()) if config_path.exists() else {}
+    devices = block_device_arguments(config.get('blockTransport', 'vhost-user'))
     remove()
     command(['docker', 'run', '-d', '--name', NAME, '--init', '--user', '0:0', '--read-only',
              '--health-cmd', '/usr/local/bin/node -e ' + shlex.quote(HEALTH_CHECK),
              '--restart=unless-stopped', '--label', 'dev.leo.node.owner=' + json.loads((ROOT / 'data/node/identity.json').read_text())['nodeId'], '--cap-drop=ALL', *['--cap-add=' + cap for cap in ('SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE')],
              '--security-opt=apparmor:unconfined', '--security-opt=seccomp:unconfined',
-             '--device=/dev/kvm', '--device=/dev/net/tun', *(['--device=/dev/fuse'] if Path('/dev/fuse').exists() else []), '--sysctl=net.ipv4.ip_forward=1',
+             '--device=/dev/kvm', '--device=/dev/net/tun', *(['--device=/dev/fuse'] if Path('/dev/fuse').exists() else []), *devices, '--sysctl=net.ipv4.ip_forward=1',
              '--sysctl=net.ipv6.conf.all.disable_ipv6=1', '--tmpfs=/run', '--tmpfs=/tmp',
              '-v', f'{ROOT}/data:/data', '-v', f'{ROOT}/state:/runner-state',
              '-e', 'DATA_DIR=/data', '-e', 'RUNNER_STATE_DIR=/runner-state',
