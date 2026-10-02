@@ -106,3 +106,9 @@ ces classes, sans mode privilégié ni accès global aux périphériques. Le maj
 bloc `blkext` peut être partagé avec d’autres pilotes : cette permission reste
 réservée au backend de confiance, jamais exposée aux guests. La configuration
 par défaut ne charge pas ce module et n’ajoute aucune permission ublk.
+
+Pour le runner local géré par Coolify, le choix explicite
+`LEO_BLOCK_TRANSPORT=ublk`, le montage `/dev/ublk-control` et les deux classes
+détectées doivent figurer dans la configuration du service. Le déploiement
+conserve ces paramètres et refuse une configuration ublk incomplète avant de
+modifier ou redémarrer le service. Les valeurs sont propres à chaque hôte.

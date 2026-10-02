@@ -163,6 +163,26 @@ export function firecrackerRunnerCompose(compose) {
   if (poolSetting !== undefined)
     migratedEnvironment.LEO_READY_VM_POOL = poolSetting
 
+  const blockTransport = Array.isArray(runnerEnvironment)
+    ? runnerEnvironment.find(value => typeof value === 'string' && value.startsWith('LEO_BLOCK_TRANSPORT='))?.slice('LEO_BLOCK_TRANSPORT='.length)
+    : runnerEnvironment?.LEO_BLOCK_TRANSPORT
+  if (blockTransport !== undefined && !['vhost-user', 'ublk'].includes(blockTransport))
+    throw new Error('Unsupported runner block transport.')
+  if (blockTransport !== undefined)
+    migratedEnvironment.LEO_BLOCK_TRANSPORT = blockTransport
+
+  const devices = ['/dev/kvm:/dev/kvm', '/dev/fuse:/dev/fuse', '/dev/net/tun:/dev/net/tun']
+  if (blockTransport === 'ublk') {
+    const configuredDevices = runner.get('devices')?.toJSON()
+    const rules = runner.get('device_cgroup_rules')?.toJSON()
+    const control = '/dev/ublk-control:/dev/ublk-control'
+    const validClasses = Array.isArray(rules) && rules.length === 2
+      && ['c', 'b'].every(type => rules.some(rule => typeof rule === 'string' && new RegExp(`^${type} [1-9][0-9]*:\\* rwm$`).test(rule)))
+    if (!Array.isArray(configuredDevices) || !configuredDevices.includes(control) || !validClasses)
+      throw new Error('ublk requires its control device and the two detected host device classes.')
+    devices.push(control)
+  }
+
   const values = {
     user: '0:0',
     entrypoint: ['/usr/local/bin/leo', 'runner-broker'],
@@ -171,7 +191,7 @@ export function firecrackerRunnerCompose(compose) {
     cap_drop: ['ALL'],
     cap_add: ['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'],
     security_opt: ['apparmor:unconfined', 'seccomp:unconfined'],
-    devices: ['/dev/kvm:/dev/kvm', '/dev/fuse:/dev/fuse', '/dev/net/tun:/dev/net/tun'],
+    devices,
     sysctls: { 'net.ipv4.ip_forward': '1', 'net.ipv6.conf.all.disable_ipv6': '1' },
     tmpfs: ['/run', '/tmp'],
     environment: migratedEnvironment,
