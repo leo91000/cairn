@@ -168,8 +168,9 @@ fn trash(db: &Db<'_>, id: &str, confirmed: bool) -> Result<Value> {
     revoke_chat_access(db, &chat, id)?;
     chat["previousLifecycle"] = state(&chat).into();
     chat["lifecycle"] = Lifecycle::Trash.into();
-    chat["trashedAt"] = now().into();
-    chat["purgeAt"] = (now() + TRASH_RETENTION).into();
+    let trashed_at = now();
+    chat["trashedAt"] = trashed_at.into();
+    chat["purgeAt"] = (trashed_at + TRASH_RETENTION).into();
     chat["paused"] = true.into();
     db.set(
         "conversation-cache-revision",
