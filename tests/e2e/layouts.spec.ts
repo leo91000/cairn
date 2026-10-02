@@ -8,6 +8,10 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
   test.setTimeout(180000)
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
+  let virtualAgents: object[] | undefined
+  // Changing WebKit's interception while a background poll is in flight can cancel it.
+  // Install the route before navigation and only switch the fixture it returns.
+  await page.route('**/api/agents', route => virtualAgents ? route.fulfill({ json: virtualAgents }) : route.continue())
   await page.goto('/')
   await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
   await page.getByRole('button', { name: 'Sign in', exact: true }).click()
@@ -266,7 +270,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
   await page.keyboard.press('Enter')
   await expect(dock.getByRole('link', { name: 'Missions', exact: true })).toHaveAttribute('aria-current', 'page')
   await expect(page.locator('.mission-card').first()).toBeVisible()
-  const manyAgents = Array.from({ length: 10000 }, (_, index) => ({
+  virtualAgents = Array.from({ length: 10000 }, (_, index) => ({
     id: `virtual-${index}`,
     name: index === 4999 ? 'Équipe sécurité' : `Agent ${index.toString().padStart(5, '0')}`,
     description: `Maintains project ${index}`,
@@ -279,7 +283,6 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
       sandbox: 'yolo',
     },
   }))
-  await page.route('**/api/agents', route => route.fulfill({ json: manyAgents }))
   await page.goto('/tasks')
   await page.getByRole('button', { name: 'New mission', exact: true }).click()
   const agentSelect = page.getByRole('combobox', { name: 'Agent', exact: true })
@@ -309,7 +312,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
   await expect(page.getByRole('listbox')).not.toBeVisible()
   await expect(page.getByRole('textbox', { name: /^Tags/ })).toBeFocused()
   await page.keyboard.press('Escape')
-  await page.unroute('**/api/agents')
+  virtualAgents = undefined
 
   function history(events: RunEvent[]) {
     workspace.service.store.db.prepare('DELETE FROM events WHERE run_id=?').run(run.id)

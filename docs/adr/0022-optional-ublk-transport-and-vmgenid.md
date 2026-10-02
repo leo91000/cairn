@@ -1,7 +1,12 @@
 # Transport ublk optionnel et VMGenID
 
-Date : 2026-10-02. Statut : gain mesuré en production ; activation ublk retirée
-pendant la correction du blocage de writeback. Les snapshots restent distincts.
+Date : 2026-10-02. Statut : livré et vérifié dans v0.52.4 (`fa4052b`).
+Après correction du writeback, la comparaison finale en production confirme
+−32,5 % sur le fsync médian (9,29 → 6,27 ms). Les mesures ci-dessous décrivent
+les étapes de qualification précédentes ; les résultats finaux et leurs assets
+sont dans les [notes de release](https://github.com/leo91000/leo-agent-manager/releases/tag/v0.52.4).
+Les pauses de sauvegarde sont traitées dans l'[ADR 0023](0023-periodic-journal-capture-without-guest-freeze.md).
+Les snapshots restent distincts.
 
 ## Question et mesures
 

@@ -193,7 +193,7 @@ async fn disk_snapshot(broker: &Broker, request: Request, run: &str) -> Result<R
     uuid(run)?;
     require_post(&request)?;
     let run = run.to_owned();
-    let baseline = snapshot_baseline(request).await?;
+    let consistency = snapshot_consistency(request).await?;
     if broker.run_is_active(&run).await {
         return Err(Error::conflict(
             "Use the active attempt for a running VM snapshot.",
@@ -215,7 +215,7 @@ async fn disk_snapshot(broker: &Broker, request: Request, run: &str) -> Result<R
             Arc::new(Mutex::new(())),
             stop,
             &run,
-            baseline.as_deref(),
+            consistency,
         )
         .await
     });
@@ -388,10 +388,10 @@ async fn run_route(broker: Broker, request: Request, segments: &[&str]) -> Resul
     }
 }
 
-/// Recovery point of an attempt; a running VM is captured consistently through its guest.
+/// Recovery point of an attempt, with guest flushing unless crash consistency is requested.
 async fn attempt_snapshot(broker: &Broker, request: Request, id: &str) -> Result<Response> {
     let id = id.to_owned();
-    let baseline = snapshot_baseline(request).await?;
+    let consistency = snapshot_consistency(request).await?;
     let (run, socket, control, stop) = {
         let active = broker.active.lock().await;
         if let Some(attempt) = active.get(&id) {
@@ -431,16 +431,8 @@ async fn attempt_snapshot(broker: &Broker, request: Request, id: &str) -> Result
     };
     let state = broker.state.clone();
     let task = tokio::spawn(async move {
-        crate::nodes::checkpoint::capture(
-            &state,
-            &run,
-            socket,
-            control,
-            stop,
-            &id,
-            baseline.as_deref(),
-        )
-        .await
+        crate::nodes::checkpoint::capture(&state, &run, socket, control, stop, &id, consistency)
+            .await
     });
     Ok(Json(task.await.map_err(Error::internal)??).into_response())
 }
@@ -593,11 +585,39 @@ fn wait(broker: Broker, id: String) -> Response {
         .into_response()
 }
 
-/// The latest recovery point the master published, which a capture may continue from.
-async fn snapshot_baseline(request: Request) -> Result<Option<String>> {
+/// Older managers omit the mode and keep the coherent filesystem capture path.
+async fn snapshot_consistency(request: Request) -> Result<crate::storage::checkpoint::Consistency> {
     let bytes = body(request, 1024, "Invalid snapshot request.").await?;
-    let baseline = serde_json::from_slice::<Value>(&bytes)
-        .ok()
-        .and_then(|body| body["baseline"].as_str().map(str::to_owned));
-    Ok(baseline)
+    let value = serde_json::from_slice::<Value>(&bytes).unwrap_or_default();
+    match value.get("consistency") {
+        None => Ok(crate::storage::checkpoint::Consistency::default()),
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|_| Error::bad("Invalid snapshot consistency.")),
+    }
+}
+
+#[cfg(test)]
+mod snapshot_request_tests {
+    use super::*;
+    use crate::storage::checkpoint::Consistency;
+
+    #[tokio::test]
+    async fn legacy_requests_keep_guest_flushing_and_unknown_modes_are_rejected() {
+        for legacy in ["", "{}", r#"{"baseline":"previous"}"#] {
+            let request = Request::new(Body::from(legacy));
+            assert!(matches!(
+                snapshot_consistency(request).await.unwrap(),
+                Consistency::Filesystem
+            ));
+        }
+        let request = Request::new(Body::from(r#"{"consistency":"crash"}"#));
+        assert!(matches!(
+            snapshot_consistency(request).await.unwrap(),
+            Consistency::Crash
+        ));
+        for invalid in [r#"{"consistency":"unknown"}"#, r#"{"consistency":null}"#] {
+            let request = Request::new(Body::from(invalid));
+            assert!(snapshot_consistency(request).await.is_err());
+        }
+    }
 }

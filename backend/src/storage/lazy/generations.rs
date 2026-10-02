@@ -3,7 +3,8 @@ use super::*;
 use rusqlite::OptionalExtension;
 
 impl LazyDisk {
-    /// The caller freezes the guest filesystem and drains guest I/O before sealing.
+    /// Seal a durable journal prefix while later writes enter the next generation.
+    /// Guest filesystem flushing, when required, belongs to the capture caller.
     pub fn seal(&self) -> io::Result<i64> {
         self.seal_with_completion(false)
     }

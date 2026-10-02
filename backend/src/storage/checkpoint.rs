@@ -4,6 +4,7 @@ use crate::{
     microvm::host,
     skills::atomic_write,
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -13,11 +14,25 @@ use std::{
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+/// Periodic recovery points need a durable crash-consistent journal prefix.
+/// Explicit captures retain guest filesystem flushing and CPU fencing.
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Consistency {
+    #[default]
+    Filesystem,
+    Crash,
+}
+
 /// A retained guest stays CPU-paused throughout capture; it must not be thawed
 /// or have its mounted volume's read cancellation token closed.
 pub(crate) enum Target {
     Stopped,
-    Running { socket: PathBuf, attempt: String },
+    Running {
+        socket: PathBuf,
+        attempt: String,
+        consistency: Consistency,
+    },
     Paused,
 }
 
@@ -33,6 +48,7 @@ pub async fn capture(
         Some(socket) => Target::Running {
             socket,
             attempt: attempt.to_owned(),
+            consistency: Consistency::Filesystem,
         },
         None => Target::Stopped,
     };
@@ -125,9 +141,23 @@ pub(crate) async fn seal_target(
     let stopped = matches!(target, Target::Stopped);
     // Paused CPUs fence new writes but do not flush dirty guest pages. A prior
     // turn sync is insufficient when guest background processes can write later.
-    let crash_consistent = matches!(target, Target::Paused);
+    let crash_consistent = matches!(
+        target,
+        Target::Paused
+            | Target::Running {
+                consistency: Consistency::Crash,
+                ..
+            }
+    );
     let (socket, attempt) = match target {
-        Target::Running { socket, attempt } => (Some(socket), attempt),
+        Target::Running {
+            socket,
+            attempt,
+            consistency,
+        } => {
+            let socket = (consistency == Consistency::Filesystem).then_some(socket);
+            (socket, attempt)
+        }
         Target::Stopped | Target::Paused => (None, String::new()),
     };
     let mut timing = crate::performance::Operation::new("disk_snapshot", run, "open_journal");
