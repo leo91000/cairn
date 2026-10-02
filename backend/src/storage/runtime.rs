@@ -334,6 +334,11 @@ impl Volume {
         blocking(move || Ok(disk.seal()?)).await
     }
 
+    pub async fn seal_completed(self: &Arc<Self>) -> Result<i64> {
+        let disk = self.disk.clone();
+        blocking(move || Ok(disk.seal_completed()?)).await
+    }
+
     pub async fn inspect(self: &Arc<Self>) -> Result<Value> {
         let volume = self.clone();
         blocking(move || volume.status()).await

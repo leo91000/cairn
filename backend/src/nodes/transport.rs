@@ -347,7 +347,10 @@ fn is_retry(call: &Call, sequence: u64) -> Result<bool> {
 fn head_timeout(path: &str) -> Duration {
     Duration::from_secs(if path.ends_with("/restore") {
         120
-    } else if path.starts_with("/prepare/") || path.ends_with("snapshot") {
+    } else if path.starts_with("/prepare/")
+        || path.ends_with("snapshot")
+        || path.ends_with("snapshot-completed")
+    {
         300
     } else {
         30

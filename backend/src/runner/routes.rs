@@ -70,6 +70,7 @@ pub(super) async fn handler(State(broker): State<Broker>, request: Request) -> R
         ["storage-policy"] => storage_policy(&broker, request).await,
         ["snapshots", snapshot, hash] => snapshot_file(&broker, request, snapshot, hash).await,
         ["disks", run, "snapshot"] => disk_snapshot(&broker, request, run).await,
+        ["disks", run, "snapshot-completed"] => completed_snapshot(&broker, request, run).await,
         ["disks", run, operation @ ("storage-status" | "published")] => {
             disk_storage(&broker, request, run, operation).await
         }
@@ -221,6 +222,20 @@ async fn disk_snapshot(broker: &Broker, request: Request, run: &str) -> Result<R
     Ok(Json(task.await.map_err(Error::internal)??).into_response())
 }
 
+async fn completed_snapshot(broker: &Broker, request: Request, run: &str) -> Result<Response> {
+    uuid(run)?;
+    require_post(&request)?;
+    let (state, run, stop) = (
+        broker.state.clone(),
+        run.to_owned(),
+        broker.stop.child_token(),
+    );
+    let task = tokio::spawn(async move {
+        crate::nodes::checkpoint::capture_completed(&state, &run, stop).await
+    });
+    Ok(Json(task.await.map_err(Error::internal)??).into_response())
+}
+
 /// Receipt of a disk generation the master has durably published.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -291,7 +306,7 @@ async fn disk_action(
     uuid(run)?;
     let bytes = body(request, 4096, "Invalid workspace request.").await?;
     let _: serde::de::IgnoredAny = serde_json::from_slice(&bytes)?;
-    broker.pool.evict_conversation(run).await;
+    broker.pool.evict_conversation(run).await?;
     let active = broker.active.lock().await;
     if active.values().any(|a| a.plan.run_id() == run) {
         return Err(Error::conflict("The workspace still has an active agent."));

@@ -39,7 +39,10 @@ const SHARED_V1: &str = "shared-v1";
 
 /// Conversations the scheduler may publish: running ones, and completed on-demand
 /// disks that still have unpublished writes or an unfinished publication.
-const SYNC_CANDIDATES: &str = "SELECT data FROM runs WHERE status='running' OR (status='succeeded'
+const SYNC_CANDIDATES: &str =
+    "SELECT data FROM runs WHERE status='running'
+        OR json_extract(data,'$.backup.requestedRevision') > COALESCE(json_extract(data,'$.backup.acknowledgedRevision'),0)
+        OR (status IN ('succeeded','queued')
              AND json_extract(data,'$.storage.mode')='on-demand'
              AND (json_extract(data,'$.storage.dirtyBytes')>0
                   OR json_extract(data,'$.backup.status') IN ('pending','saving','error')))";
@@ -261,6 +264,10 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
     crate::validation::uuid(run_id)?;
     let _operation = s.node_backup_operation.lock(run_id).await;
     let _transfer = s.node_backup_operation.transfer().await;
+    // A queued demand may have outlived its originating turn. Capture the live
+    // attempt, not a stale stopped-run endpoint or publication revision.
+    let current_run = s.store.run(run_id).await?;
+    let run = &current_run;
 
     timing.next("collect_before");
     let checkpoint = super::checkpoint(s, run_id).await?;
@@ -274,6 +281,34 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
     let base = super::transport::url(s, run_id).await?;
     let credential = super::runner_secret(s).await?;
     let snapshot = request_snapshot(s, run, &base, attempt, &credential).await?;
+
+    if snapshot["alreadyPublished"] == true {
+        let point = s
+            .get("node-backups", text(&snapshot["published"], "backupId"))
+            .await?;
+        let grant = s
+            .get("node-disk-grants", text(&snapshot, "grantId"))
+            .await?;
+        if point["runId"] != run_id
+            || point["nodeId"] != checkpoint["nodeId"]
+            || grant["runId"] != run_id
+            || grant["nodeId"] != checkpoint["nodeId"]
+        {
+            return Err(Error::conflict(
+                "Completed publication belongs to another disk owner.",
+            ));
+        }
+        super::disk_grants::acknowledged(s, text(&snapshot, "grantId"), &point).await?;
+        super::storage::refresh(s, run).await?;
+        complete_request(
+            s,
+            run_id,
+            run["backup"]["requestedRevision"].as_u64().unwrap_or(0),
+        )
+        .await?;
+        timing.finish();
+        return Ok(public(point));
+    }
 
     timing.next("prepare_upload");
     let snapshot_id = text(&snapshot, "id");
@@ -318,6 +353,30 @@ async fn request_snapshot(
     credential: &str,
 ) -> Result<Value> {
     let run_id = text(run, "id");
+    if requested(run) {
+        let response = s
+            .http
+            .post(format!("{base}/disks/{run_id}/snapshot-completed"))
+            .bearer_auth(credential)
+            .json(&json!({}))
+            .timeout(Duration::from_secs(300))
+            .send()
+            .await
+            .map_err(|_| Error::unavailable("Completed snapshot capture interrupted."))?;
+        if response.status().is_success() {
+            return response.json().await.map_err(Error::internal);
+        }
+        if response.status() == reqwest::StatusCode::CONFLICT {
+            return Err(Error::new(425, "Waiting for completed generation capture."));
+        }
+        if !matches!(response.status().as_u16(), 404 | 412) {
+            return Err(Error::unavailable(
+                "Unable to capture the completed disk generation.",
+            ));
+        }
+        // Older nodes and pre-upgrade completed turns use the existing coherent
+        // capture path. New nodes never pause a following turn for final upload.
+    }
     let stopped = run["status"] != RunStatus::Running || run["moveRequest"]["idle"] == true;
     let capture_path = if stopped {
         format!("{base}/disks/{run_id}/snapshot")
@@ -371,6 +430,7 @@ impl Publication<'_> {
         timing.next("acknowledge_journal");
         if intent.manifest["onDemand"] == true {
             self.acknowledge(&intent.value, &intent.manifest).await?;
+            self.complete().await?;
             // Completed runs leave the active-run monitor. Read back the final
             // journal counters so their UI does not retain an old dirty count.
             let _ = super::storage::refresh(s, self.run).await;
@@ -549,27 +609,58 @@ impl Publication<'_> {
             snapshot_id: &intent.value["snapshotId"],
             captured_at: &intent.manifest["capturedAt"],
             uploaded_bytes: Some(uploaded),
-            status: BackupStatus::Ready,
+            status: if self.snapshot["manifest"]["onDemand"] == true {
+                BackupStatus::Saving
+            } else {
+                BackupStatus::Ready
+            },
             error: None,
         };
         let patch = json!({ "backup": pointer });
         let run = self.run_id.to_owned();
         let attempt = self.attempt.to_owned();
         let node = self.node.clone();
+        let on_demand = self.snapshot["manifest"]["onDemand"] == true;
+        let grant_id = self.snapshot["grantId"].as_str().map(str::to_owned);
         let point = intent.value.clone();
         self.s
             .store
             .transaction(move |db| {
                 let current = super::db_checkpoint(db, &run)?;
-                if current["runnerId"] != attempt || current["nodeId"] != node {
+                let same_disk = if on_demand {
+                    match grant_id {
+                        Some(grant_id) => db
+                            .get("node-disk-grants", &grant_id)?
+                            .is_some_and(|grant| grant["runId"] == run && grant["nodeId"] == node),
+                        None => false,
+                    }
+                } else {
+                    current["runnerId"] == attempt
+                };
+                if !same_disk || current["nodeId"] != node {
                     return Err(Error::conflict("Disk owner changed during publication."));
                 }
                 shared_blocks::verified(db, text(&point, "id"))?;
                 db.put("node-backups", &point)?;
-                db.patch_run(&run, &patch)?;
+                let current_run = db
+                    .run(&run)?
+                    .ok_or_else(|| Error::not_found("Conversation missing."))?;
+                let mut backup = current_run["backup"]
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default();
+                backup.extend(patch["backup"].as_object().unwrap().clone());
+                db.patch_run(&run, &json!({ "backup": backup }))?;
                 Ok(())
             })
             .await
+    }
+
+    async fn complete(&self) -> Result<()> {
+        let revision = self.run["backup"]["requestedRevision"]
+            .as_u64()
+            .unwrap_or(0);
+        complete_request(self.s, self.run_id, revision).await
     }
 
     /// An on-demand disk keeps reading its old base until the node confirms the new one.
@@ -598,6 +689,36 @@ impl Publication<'_> {
         }
         super::disk_grants::acknowledged(self.s, grant, point).await
     }
+}
+
+async fn complete_request(s: &Service, run: &str, revision: u64) -> Result<()> {
+    let run = run.to_owned();
+    s.store
+        .transaction(move |db| {
+            let current = db
+                .run(&run)?
+                .ok_or_else(|| Error::not_found("Conversation missing."))?;
+            let mut backup = current["backup"].as_object().cloned().unwrap_or_default();
+            let requested = backup
+                .get("requestedRevision")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            backup.insert("acknowledgedRevision".into(), revision.into());
+            backup.insert(
+                "status".into(),
+                json!(if requested > revision {
+                    BackupStatus::Pending
+                } else {
+                    BackupStatus::Ready
+                }),
+            );
+            backup.insert("error".into(), Value::Null);
+            db.patch_run(&run, &json!({ "backup": backup }))?;
+            Ok(())
+        })
+        .await?;
+    s.node_publication_notify.notify_one();
+    Ok(())
 }
 
 async fn encrypt_block(s: &Service, scope: String, bytes: Vec<u8>) -> Result<Vec<u8>> {
@@ -1207,6 +1328,37 @@ pub async fn attempt(s: &Service, run: &Value) {
     }
 }
 
+/// Durable, coalesced demand. The scheduler owns uploads, independently of the
+/// completed turn's account and execution leases; a restart rediscovers demand.
+pub async fn request(s: &Service, run: &str) -> Result<()> {
+    let run = run.to_owned();
+    s.store
+        .transaction(move |db| {
+            let current = db
+                .run(&run)?
+                .ok_or_else(|| Error::not_found("Conversation missing."))?;
+            let mut backup = current["backup"].as_object().cloned().unwrap_or_default();
+            let revision = backup
+                .get("requestedRevision")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or_else(|| Error::conflict("Publication revision exhausted."))?;
+            backup.insert("requestedRevision".into(), revision.into());
+            backup.insert("status".into(), json!(BackupStatus::Pending));
+            db.patch_run(&run, &json!({ "backup": backup }))?;
+            Ok(())
+        })
+        .await?;
+    s.node_publication_notify.notify_one();
+    Ok(())
+}
+
+pub(crate) fn requested(run: &Value) -> bool {
+    run["backup"]["requestedRevision"].as_u64().unwrap_or(0)
+        > run["backup"]["acknowledgedRevision"].as_u64().unwrap_or(0)
+}
+
 async fn update_status(s: &Service, run: &str, patch: Value) -> Result<()> {
     let run = run.to_owned();
     s.store
@@ -1266,6 +1418,7 @@ pub async fn maintain(s: Arc<Service>) {
     loop {
         tokio::select! {
             () = scheduler.s.shutdown.cancelled() => break,
+            () = scheduler.s.node_publication_notify.notified() => {},
             () = tokio::time::sleep(Duration::from_secs(5)) => {}
         }
         scheduler.reap();
@@ -1338,7 +1491,10 @@ impl Scheduler {
                 .read(move |db| crate::conversation_lifecycle::require_active_run(db, &run_id))
                 .await
                 .is_ok();
-            if !still_active {
+            // Trashing a conversation stops execution, not its already durable
+            // final publication request. Purge and publication share the disk
+            // operation lock; a missing run is rejected before any upload.
+            if !still_active && !requested(&run) {
                 continue;
             }
 
@@ -1392,12 +1548,14 @@ fn publication_due(run: &Value, since_last_ms: i64, default_interval_ms: i64) ->
     let interval = run["storage"]["backupSeconds"]
         .as_i64()
         .map_or(default_interval_ms, |seconds| seconds * 1000);
+    let requested = run["backup"]["requestedRevision"].as_u64().unwrap_or(0);
+    let acknowledged = run["backup"]["acknowledgedRevision"].as_u64().unwrap_or(0);
     protected(run)
         && (run["sessionId"].is_string() || on_demand)
-        && !run["moveRequest"].is_object()
+        && (!run["moveRequest"].is_object() || requested > acknowledged)
         && !synchronized
         && since_last_ms
-            >= if run["storage"]["backupUrgent"] == true {
+            >= if requested > acknowledged || run["storage"]["backupUrgent"] == true {
                 5000
             } else {
                 interval

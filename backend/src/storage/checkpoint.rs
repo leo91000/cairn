@@ -46,6 +46,82 @@ pub(crate) async fn capture_target(
     control: Arc<Mutex<()>>,
     stop: CancellationToken,
 ) -> Result<Value> {
+    seal_target(state, run, target, control, stop)
+        .await?
+        .finish(state, run)
+        .await
+}
+
+/// The immutable journal prefix is ready before block reconstruction starts.
+/// Physical disk ownership must outlive this value; guest execution need not.
+pub(crate) struct SealedCapture {
+    volume: Arc<super::runtime::Volume>,
+    directory: PathBuf,
+    generation: i64,
+    captured_at: i64,
+    pause_ms: Value,
+    crash_consistent: bool,
+    stop: CancellationToken,
+    timing: crate::performance::Operation,
+    _stopped_reads: Option<tokio_util::sync::DropGuard>,
+}
+
+/// Reconstruct a completed turn without touching guest control or new writes.
+pub(crate) async fn capture_completed(
+    state: &Path,
+    run: &str,
+    stop: CancellationToken,
+) -> Result<Value> {
+    let directory = super::environment::directory(state, run)?;
+    let volume = super::runtime::load(&directory).await?;
+    let disk = volume.disk.clone();
+    let completed = tokio::task::spawn_blocking(move || disk.completed())
+        .await
+        .map_err(Error::internal)??
+        .ok_or_else(|| Error::new(412, "No completed turn generation is available."))?;
+    let generation = completed["generation"]
+        .as_i64()
+        .ok_or_else(|| Error::conflict("Invalid completed generation."))?;
+    let disk = volume.disk.clone();
+    if !tokio::task::spawn_blocking(move || disk.has_sealed(generation))
+        .await
+        .map_err(Error::internal)??
+    {
+        let status = volume.inspect().await?;
+        if status["published"]["generation"]
+            .as_i64()
+            .is_some_and(|published| published >= generation)
+        {
+            return Ok(
+                json!({ "alreadyPublished": true, "published": status["published"], "grantId": volume.source.grant_id()? }),
+            );
+        }
+        return Err(Error::conflict(
+            "Completed journal generation is unavailable.",
+        ));
+    }
+    SealedCapture {
+        volume,
+        directory,
+        generation,
+        captured_at: completed["capturedAt"].as_i64().unwrap_or(0),
+        pause_ms: json!(0),
+        crash_consistent: true,
+        stop,
+        timing: crate::performance::Operation::new("disk_snapshot", run, "completed_generation"),
+        _stopped_reads: None,
+    }
+    .finish(state, run)
+    .await
+}
+
+pub(crate) async fn seal_target(
+    state: &Path,
+    run: &str,
+    target: Target,
+    control: Arc<Mutex<()>>,
+    stop: CancellationToken,
+) -> Result<SealedCapture> {
     let stopped = matches!(target, Target::Stopped);
     // Paused CPUs fence new writes but do not flush dirty guest pages. A prior
     // turn sync is insufficient when guest background processes can write later.
@@ -159,38 +235,64 @@ pub(crate) async fn capture_target(
     } else {
         json!(paused_at.elapsed().as_millis() as u64)
     };
-    let generation = generation?;
-    timing.next("reconstruct_manifest");
-    let indexed_at = std::time::Instant::now();
-    let disk = volume.disk.clone();
-    let mut manifest = tokio::select! {
-        () = stop.cancelled() => return Err(Error::conflict("Disk capture stopped.")),
-        result = tokio::task::spawn_blocking(move || disk.capture(generation)) => {
-            result.map_err(Error::internal)??
-        }
-    };
-    manifest["indexMs"] = (indexed_at.elapsed().as_millis() as u64).into();
-    manifest["pauseMs"] = pause_ms;
-    timing.next("persist_snapshot");
-    manifest["runtime"] =
-        serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
-    manifest["capturedAt"] = captured_at.into();
-    manifest["consistency"] = if emergency || crash_consistent {
-        "crash"
-    } else {
-        "filesystem"
-    }
-    .into();
-    manifest["generation"] = generation.into();
-    manifest["onDemand"] = true.into();
+    Ok(SealedCapture {
+        volume,
+        directory,
+        generation: generation?,
+        captured_at,
+        pause_ms,
+        crash_consistent: emergency || crash_consistent,
+        stop,
+        timing,
+        _stopped_reads,
+    })
+}
 
-    let id = write_snapshot(state, run, &manifest).await?;
-    timing.finish();
-    Ok(json!({
-        "id": id,
-        "manifest": manifest,
-        "grantId": volume.source.grant_id()?
-    }))
+impl SealedCapture {
+    pub(crate) async fn finish(self, state: &Path, run: &str) -> Result<Value> {
+        let Self {
+            volume,
+            directory,
+            generation,
+            captured_at,
+            pause_ms,
+            crash_consistent,
+            stop,
+            mut timing,
+            _stopped_reads,
+        } = self;
+        timing.next("reconstruct_manifest");
+        let indexed_at = std::time::Instant::now();
+        let disk = volume.disk.clone();
+        let mut manifest = tokio::select! {
+            () = stop.cancelled() => return Err(Error::conflict("Disk capture stopped.")),
+            result = tokio::task::spawn_blocking(move || disk.capture(generation)) => {
+                result.map_err(Error::internal)??
+            }
+        };
+        manifest["indexMs"] = (indexed_at.elapsed().as_millis() as u64).into();
+        manifest["pauseMs"] = pause_ms;
+        timing.next("persist_snapshot");
+        manifest["runtime"] =
+            serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
+        manifest["capturedAt"] = captured_at.into();
+        manifest["consistency"] = if crash_consistent {
+            "crash"
+        } else {
+            "filesystem"
+        }
+        .into();
+        manifest["generation"] = generation.into();
+        manifest["onDemand"] = true.into();
+
+        let id = write_snapshot(state, run, &manifest).await?;
+        timing.finish();
+        Ok(json!({
+            "id": id,
+            "manifest": manifest,
+            "grantId": volume.source.grant_id()?
+        }))
+    }
 }
 
 async fn write_snapshot(state: &Path, run: &str, manifest: &Value) -> Result<String> {

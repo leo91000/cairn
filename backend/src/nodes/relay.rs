@@ -227,6 +227,7 @@ fn route(method: &str, path: &str) -> Result<()> {
                     "prune",
                     "restore",
                     "snapshot",
+                    "snapshot-completed",
                     "published",
                     "storage-status",
                 ]
@@ -244,7 +245,7 @@ fn route(method: &str, path: &str) -> Result<()> {
 fn controller_timeout(path: &str) -> Duration {
     Duration::from_secs(if path.ends_with("/restore") {
         120
-    } else if path.ends_with("snapshot") {
+    } else if path.ends_with("snapshot") || path.ends_with("snapshot-completed") {
         300
     } else {
         25
@@ -413,4 +414,18 @@ async fn stream_body(master: &Master<'_>, id: &str, response: reqwest::Response)
         return Err(Error::conflict("Execution stream rejected."));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completed_generation_capture_is_authorized_through_the_outbound_relay() {
+        let path = format!("/disks/{}/snapshot-completed", crate::config::id());
+        assert!(route("POST", &path).is_ok());
+        assert!(route("GET", &path).is_err());
+        assert!(route("POST", "/disks/not-a-conversation/snapshot-completed").is_err());
+        assert_eq!(controller_timeout(&path), Duration::from_secs(300));
+    }
 }

@@ -617,8 +617,14 @@ fn sealed_generation_excludes_later_writes_and_publication_preserves_them() {
     let initial = single_block(4096, 4194304, &serde_json::Value::Null);
     let disk = LazyDisk::create(root.path(), &initial, source.clone()).unwrap();
     disk.write_at(7, b"before").unwrap();
-    let generation = disk.seal().unwrap();
+    let generation = disk.seal_completed().unwrap();
     disk.write_at(7, b"after!").unwrap();
+    let completed = disk.completed().unwrap().unwrap();
+    assert_eq!(completed["generation"], generation);
+    drop(disk);
+    let disk = LazyDisk::open(root.path(), source.clone()).unwrap();
+    assert_eq!(disk.completed().unwrap().unwrap(), completed);
+    assert!(disk.has_sealed(generation).unwrap());
     let manifest = disk.capture(generation).unwrap();
     let hash = manifest["blocks"][0]["hash"].as_str().unwrap();
     let bytes = disk.captured_block(generation, hash).unwrap();
@@ -633,6 +639,8 @@ fn sealed_generation_excludes_later_writes_and_publication_preserves_them() {
     );
     drop(disk);
     let disk = LazyDisk::open(root.path(), source).unwrap();
+    assert_eq!(disk.completed().unwrap().unwrap(), completed);
+    assert!(!disk.has_sealed(generation).unwrap());
     let mut bytes = [0; 6];
     disk.read_at(7, &mut bytes).unwrap();
     assert_eq!(&bytes, b"after!");

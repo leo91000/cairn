@@ -5,6 +5,14 @@ use rusqlite::OptionalExtension;
 impl LazyDisk {
     /// The caller freezes the guest filesystem and drains guest I/O before sealing.
     pub fn seal(&self) -> io::Result<i64> {
+        self.seal_with_completion(false)
+    }
+
+    pub fn seal_completed(&self) -> io::Result<i64> {
+        self.seal_with_completion(true)
+    }
+
+    fn seal_with_completion(&self, completed: bool) -> io::Result<i64> {
         let _write = self.write_gate.write().map_err(failure)?;
         let mut journal = self.journal.lock().map_err(failure)?;
         journal.sync()?;
@@ -23,6 +31,11 @@ impl LazyDisk {
             params![next, journal.next],
         )
         .map_err(failure)?;
+        if completed {
+            let receipt =
+                serde_json::json!({ "generation": generation, "capturedAt": crate::config::now() });
+            tx.execute("INSERT INTO settings(key,value) VALUES ('completed',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [receipt.to_string()]).map_err(failure)?;
+        }
         if let Err(error) = tx.commit() {
             journal.fail();
             return Err(failure(error));
@@ -30,6 +43,36 @@ impl LazyDisk {
         journal.sealed(next);
         self.update_accounting(&journal)?;
         Ok(generation)
+    }
+
+    /// Durable completed-turn boundary, including after controller restart.
+    pub fn completed(&self) -> io::Result<Option<Value>> {
+        let encoded: Option<String> = self
+            .db
+            .lock()
+            .map_err(failure)?
+            .query_row(
+                "SELECT value FROM settings WHERE key='completed'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(failure)?;
+        encoded
+            .map(|value| serde_json::from_str(&value).map_err(failure))
+            .transpose()
+    }
+
+    pub fn has_sealed(&self, generation: i64) -> io::Result<bool> {
+        self.db
+            .lock()
+            .map_err(failure)?
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sealed WHERE generation=?1)",
+                [generation],
+                |row| row.get(0),
+            )
+            .map_err(failure)
     }
 
     pub fn capture(&self, generation: i64) -> io::Result<Value> {
