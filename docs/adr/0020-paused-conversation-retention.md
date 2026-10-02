@@ -49,6 +49,19 @@ expiry, eviction and deletion never depend on saved RAM for durable recovery.
 
 ## Validation and measurements
 
+### Thread-scoped MCP configuration (2026-10-02)
+
+Codex chat plans send managed MCP configuration only through the thread protocol;
+CLI MCP configuration remains available for ordinary CLI execution. Cold and
+resident adapters both apply the current thread configuration, including access
+replacement and server removal. Genuine process-level arguments still reject
+resident reuse. Duplicating managed MCP configuration in both places forced the
+first production pool-born resume to boot another VM. The same 35 GiB local
+native fixture reproduces that replacement with the old plan and keeps the same
+VMM/native PID with the corrected plan; two retained synthetic-model requests
+start in 612 and 598 ms. These prototype measurements exclude manager and WAN
+latency; production comparison and raw traces belong in the release assets.
+
 ### Large-guest contention regression (2026-10-02)
 
 Real-account production qualification of v0.52.0 completed its fresh turn and

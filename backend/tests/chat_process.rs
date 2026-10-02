@@ -111,17 +111,67 @@ fn lifecycle(home: &Path) -> Vec<Value> {
         .collect()
 }
 
+#[test]
+fn manager_chat_plans_keep_mcp_configuration_out_of_process_arguments() {
+    let root = TempDir::new().unwrap();
+    let run = json!({ "snapshot": { "agent": { "provider": "codex" } } });
+    let prepared = json!({ "output": root.path().join("output/result.md") });
+    let mcp = json!({
+        "args": ["-c", "mcp_servers.fixture={url=\"http://fixture\"}"],
+        "codexConfig": { "fixture": { "url": "http://fixture" } },
+    });
+    let plan = leo_agent_manager::run_output::chat_plan(&run, &prepared, root.path(), &mcp, None);
+    assert_eq!(
+        plan["args"],
+        json!([]),
+        "MCP CLI duplication rejects a retained resident"
+    );
+    assert_eq!(plan["codexConfig"]["mcp_servers"], mcp["codexConfig"]);
+
+    let claude = json!({ "snapshot": { "agent": { "provider": "claude" } } });
+    let plan =
+        leo_agent_manager::run_output::chat_plan(&claude, &prepared, root.path(), &mcp, None);
+    assert_eq!(plan["args"], mcp["args"]);
+}
+
+#[tokio::test]
+async fn cold_chats_refresh_and_remove_thread_mcp_configuration() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    for (index, token) in [Some("first-lease"), Some("second-lease"), None]
+        .into_iter()
+        .enumerate()
+    {
+        let mut plan = plan(&root, &format!("message {index}"));
+        plan["execution"]["messageId"] = format!("message-{index}").into();
+        let servers = token.map_or_else(|| json!({}), |token| json!({
+            "fixture": { "url": "http://fixture", "http_headers": { "Authorization": token } }
+        }));
+        plan["codexConfig"] = json!({ "mcp_servers": servers });
+        if index > 0 {
+            plan["sessionId"] = "fixture-chat".into();
+        }
+        run_quietly(&config, &home, plan).await;
+        assert_eq!(conversation(&home)["fixtureConfig"]["mcp_servers"], servers);
+    }
+}
+
 #[tokio::test]
 async fn resident_reuses_native_process_and_reloads_each_attempts_permissions() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);
     let service = Resident::start(config(&root), home.clone(), &root).await;
-    for (index, token) in ["first-lease", "second-lease"].into_iter().enumerate() {
+    for (index, token) in [Some("first-lease"), Some("second-lease"), None]
+        .into_iter()
+        .enumerate()
+    {
         let mut plan = plan(&root, &format!("message {index}"));
         plan["execution"]["messageId"] = format!("message-{index}").into();
-        plan["codexConfig"] = json!({ "mcp_servers": {
+        let servers = token.map_or_else(|| json!({}), |token| json!({
             "fixture": { "url": "http://fixture", "http_headers": { "Authorization": token } }
-        }});
+        }));
+        plan["codexConfig"] = json!({ "mcp_servers": servers });
         if index > 0 {
             plan["sessionId"] = "fixture-chat".into();
             plan["sandbox"] = "workspace-write".into();
@@ -129,10 +179,7 @@ async fn resident_reuses_native_process_and_reloads_each_attempts_permissions() 
         service.run(plan).await;
         let saved = conversation(&home);
         assert_eq!(saved["turns"].as_array().unwrap().len(), index + 1);
-        assert_eq!(
-            saved["fixtureConfig"]["mcp_servers"]["fixture"]["http_headers"]["Authorization"],
-            token
-        );
+        assert_eq!(saved["fixtureConfig"]["mcp_servers"], servers);
     }
     service.stop().await;
     let log = lifecycle(&home);
@@ -146,7 +193,7 @@ async fn resident_reuses_native_process_and_reloads_each_attempts_permissions() 
         log.iter()
             .filter(|entry| entry["method"] == "thread/unsubscribe")
             .count(),
-        2
+        3
     );
     assert!(log.iter().all(|entry| entry["pid"] == log[0]["pid"]));
     let pid = log[0]["pid"].as_i64().unwrap() as i32;
