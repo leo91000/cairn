@@ -49,11 +49,12 @@ createServer(async (request, response) => {
     return
   }
 
-  const paths = ['snapshot-sentinel', '/home/node/.codex/snapshot-system-marker']
+  const caches = ['/home/node/.cache', '/home/node/.local/share', '/home/node/.android']
+  const paths = ['snapshot-sentinel', '/home/node/.codex/snapshot-system-marker', ...caches.map(cache => `${cache}/snapshot-cache-marker`)]
   const operation = verify
     ? `for(const path of paths)assert.equal(fs.readFileSync(path,'utf8'),marker);`
     : `for(const path of paths){fs.writeFileSync(path,marker);const fd=fs.openSync(path,'r');fs.fsyncSync(fd);fs.closeSync(fd);}const directory=fs.openSync('.','r');fs.fsyncSync(directory);fs.closeSync(directory);`
-  const program = `const fs=require('node:fs'),assert=require('node:assert/strict'),cp=require('node:child_process');cp.execFileSync('cc',['-O2','-o','/tmp/snapshot-nested-kvm','nested-kvm.c'],{timeout:20000});console.log(cp.execFileSync('/tmp/snapshot-nested-kvm',{encoding:'utf8',timeout:20000}));const marker=${JSON.stringify(marker)},paths=${JSON.stringify(paths)};${operation}console.log('${success}');`
+  const program = `const fs=require('node:fs'),assert=require('node:assert/strict'),cp=require('node:child_process');cp.execFileSync('cc',['-O2','-o','/tmp/snapshot-nested-kvm','nested-kvm.c'],{timeout:20000});console.log(cp.execFileSync('/tmp/snapshot-nested-kvm',{encoding:'utf8',timeout:20000}));for(const cache of ${JSON.stringify(caches)})assert.equal(fs.statSync(cache).dev,fs.statSync('.').dev);assert.notEqual(fs.statSync('/home/node/.codex').dev,fs.statSync('.').dev);const marker=${JSON.stringify(marker)},paths=${JSON.stringify(paths)};${operation}console.log('${success}');`
   const quoted = `'${program.replaceAll('\'', '\'\\\'\'')}'`
   const message = executed || failed
   const text = failed ? 'SNAPSHOT_TEST_FAILED' : 'SNAPSHOT_NATIVE_OK'

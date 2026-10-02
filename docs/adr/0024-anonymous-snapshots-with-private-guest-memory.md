@@ -14,7 +14,14 @@ indépendantes et les pages inchangées sont partagées par le noyau hôte.
 Un disque de conversation devient deux vues bornées du même journal durable :
 le système/overlay et le workspace. Les deux vues conservent la même frontière
 de génération et le regroupement des écritures/fsync. Par défaut, le système
-occupe un quart du budget disque. Les deux systèmes de fichiers sont agrandis
+occupe un quart du budget disque. Docker/containerd, les installations du toolkit
+(`~/.local/share`), les caches (`~/.cache`) et les données Android (`~/.android`)
+sont bind-montés depuis le workspace ; `~/.codex` reste sur la vue système.
+Une copie existante est installée et synchronisée atomiquement avant suppression
+de l’ancienne copie, puis les copies incomplètes d’un crash sont nettoyées.
+Le premier test Android a révélé qu’un userdata de 12 Gio ne tenait pas dans
+les 8 Gio système du disque par défaut ; augmenter seulement le budget total
+n’aurait pas corrigé ce placement. Les deux systèmes de fichiers sont agrandis
 hors ligne, sans réduire la partition système existante ; une reprise après
 crash repart du journal original plutôt que d'une image partiellement déplacée.
 Les disques existants gardent leur format. Un manifeste à deux vues porte la
@@ -115,8 +122,8 @@ Le même test compile et exécute le petit guest L2 de `nested-kvm.c` avant chaq
 marqueur, dans les clones puis après reprise ; il ne remplace pas la qualification
 Android complète sur les deux architectures.
 
-Le test versionné passe ensuite sur une image sans modèle ajouté au guest,
-toujours dérivée du runtime épinglé de v0.52.5 et avec le nouveau runner/guest.
+Avant l’ajout du contrôle L2, le test natif passe sur une image sans modèle ajouté
+au guest, toujours dérivée du runtime épinglé de v0.52.5 et avec le nouveau runner/guest.
 Quatre conversations par mode publient puis reprennent après SIGKILL ; les deux
 marqueurs et le même thread natif survivent dans les huit cas. RAM totale :
 4,95 Gio sans snapshots contre 3,70 Gio avec snapshots (−25,3 %) ; PSS cumulé :
@@ -125,9 +132,45 @@ pool et 7,92–7,94 s pour les autres arrivées, contre 3,63–3,71 s pour les c
 Le hit du pool n'est donc toujours pas une victoire de latence. La pression I/O
 hôte reste élevée ; ces mesures ne remplacent pas la qualification production.
 
+Après le correctif d’activation KVM différée, le même test compile et lance le
+L2 dans les quatre clones puis leurs quatre reprises après crash. Tous les
+`KVM_RUN` calculent 42. Avec ce travail supplémentaire, le cgroup complet passe
+de 5,36 Gio à 4,28 Gio (−20,1 %) et le PSS cumulé de 3,82 Gio à 1,59 Gio (−58,4 %).
+Ce sont des cohortes distinctes de la mesure sans compilation ci-dessus ; le
+cache du compilateur et du noyau fait partie du coût réel mesuré. Le partage
+reste établi après le lancement de processus utilisateurs, sans promettre une
+réduction de RAM constante pour toutes les charges.
+
 Le contrôle sans rafale donne aussi 1,65–2,91 s avec le pool ordinaire et
 1,39–1,93 s avec snapshots sur trois conversations par mode. L'échantillon est
 trop petit et la charge hôte trop variable pour annoncer un gain de latence isolé.
+
+## Image immutable sur les deux nœuds Intel
+
+La CI de `a1d89e2` est verte. L’image `112f0180…29c05` passe le test natif à
+quatre VM sur i9-14900K et sur le VPS Xeon E5-1410 v2. Chaque nœud utilise la
+même image pour le contrôle sans snapshots, toujours avec ublk et deux vues.
+
+| Quatre VM avec compilation/exécution L2 | PC Intel | VPS Intel |
+| --- | ---: | ---: |
+| Cgroup sans snapshots / avec snapshots | 5,24 / 4,03 Gio | 5,26 / 4,21 Gio |
+| Réduction du cgroup complet | 23,1 % | 19,9 % |
+| PSS sans snapshots / avec snapshots | 3,80 / 1,58 Gio | 3,84 / 1,75 Gio |
+| Reprises après publication et SIGKILL, deux modes | 8 / 8 | 8 / 8 |
+
+Les comptes/modèles et l’origine HTTP sont synthétiques. Ce sont des mesures
+sur le matériel des nœuds, sans activation sur les conversations de production.
+La pression I/O du VPS est élevée ; les arrivées en rafale avant modèle donnent
+8,20–11,69 s avec snapshots contre 13,64–24,93 s sans. Ce banc change aussi la
+configuration du modèle, ne mesure pas UI/S3/WAN et n’est pas comparable au hit
+habituel du pool ou à une reprise retenue. Aucun OOM ; les mappings privés des
+quatre clones partagent un inode. La réduction du budget pendant la capture
+annule la VM source en 269 ms, n’installe aucun template incomplet, puis la
+préparation suivante réussit sur cette image.
+
+Ces chiffres précèdent le correctif de placement des caches Android décrit
+ci-dessus : son nouveau guest reste à qualifier sur l’image finale. AMD et le
+chemin production complet ne sont pas encore qualifiés.
 
 ## Charge sur les deux vues
 
