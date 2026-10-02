@@ -75,3 +75,61 @@ récupération du journal après crash conservent leurs tests existants.
 
 Les mesures brutes et le script du banc restent hors Git, pour les assets de
 release. Aucune release n'est décidée sur ces seuls quatre échantillons.
+
+## Qualification prolongée locale
+
+Comparaison séquentielle sans compilation ni charge externe ajoutée : mêmes
+deux VM, mêmes écritures tamponnées, SQLite en WAL/FULL et 40 captures par mode.
+Une première exécution perturbée par le hook Git est exclue du chiffrage et
+conservée seulement comme validation d'intégrité sous charge supplémentaire.
+
+| Fsync, ms | Gel filesystem | Frontière journal |
+| --- | ---: | ---: |
+| VM capturée, p99 pendant capture + publication | 996,86 | 136,36 |
+| VM capturée, maximum pendant capture + publication | 1 357,80 | 1 149,41 |
+| VM capturée, p99 sur l'ensemble du run | 97,71 | 76,85 |
+| VM voisine, p99 pendant capture + publication | 66,22 | 61,77 |
+| VM voisine, maximum pendant capture + publication | 229,37 | 139,51 |
+
+Le p99 pendant sauvegarde baisse de 86,3 %, son maximum de 15,3 %. Le candidat
+garde zéro pause explicite sur les 40 captures. Des pics proches d'une seconde
+reviennent aussi hors sauvegarde, espacés d'environ 30,7 s : leur présence
+n'est pas présentée comme résolue. Le p99 porte sur 1 073 et 548 fsync pendant
+sauvegarde ; les fenêtres incluent la capture et la publication HTTP locale.
+Les captures sont suivies de cinq secondes d'attente : la durée totale diffère
+donc entre les modes. Ce n'est pas une comparaison de débit à durée fixe.
+
+Les deux exécutions conservent l'identité de chaque VM pendant les 40 captures,
+n'ont aucune erreur disque, OOM ni redémarrage intempestif, puis passent un
+SIGKILL et trois restaurations de points distants. Le candidat retrouve 4 629
+commits SQLite dans le journal local pour 4 622 observés avant le crash ; ses
+points distant initial, intermédiaire et final retrouvent au moins les 287,
+2 431 et 4 525 commits acquittés avant capture. Tous les contrôles d'intégrité,
+de lignes et de marqueur durable passent. L'arrêt final du contrôleur est
+gracieux et ne laisse aucun périphérique ublk du banc.
+
+Le même test court avec vhost-user et sans `CAP_SYS_RESOURCE` passe également
+le crash et les trois restaurations dans les deux modes. Sur ses quatre
+sauvegardes, le p99/max de la VM capturée passe de 957 à 121 ms ; le maximum
+global atteint encore 1 181 ms hors sauvegarde. Ce contrôle qualifie le chemin
+de repli ; il ne remplace pas la comparaison prolongée ni la mesure S3.
+
+## Témoin en production
+
+Le VPS ublk en v0.52.4 exécute 300 secondes d'écritures tamponnées, de fsync
+échantillonnés toutes les 100 ms et de transactions SQLite WAL/FULL. Cinq
+sauvegardes S3 périodiques réelles passent pendant le script. Le gel/suspension
+dure 2 084–2 586 ms ; la frontière seal/resume vaut seulement 2–6 ms, puis
+le manifeste est reconstruit en 827–1 094 ms après le dégel.
+
+Sur 2 500 fsync, le p99 global est 58,04 ms et le maximum 2 829,55 ms. Pendant
+la seule capture, p99/max vaut 2 579,60 ms (38 fsync). Sur l'ensemble capture
+et publication S3, il vaut 68,04/2 579,60 ms (512 fsync). Le temps d'envoi S3
+élargit les fenêtres : ces deux p99 doivent rester distingués pour ne pas
+masquer les pauses. Le maximum global vient d'un autre intervalle, hors
+publication ; il sera comparé aussi. Les 5 502 lignes SQLite sont vérifiées,
+`integrity_check` vaut `ok` et la sauvegarde finale est acquittée.
+
+La comparaison avec le nouveau chemin reste requise avant release, à ressources
+identiques (7 CPU, 35,5 Gio de RAM et disque de 32 Gio), sur cette conversation
+de test uniquement. Les résumés et échantillons restent hors Git.

@@ -61,6 +61,9 @@ jobs:
       - name: Install bindings toolchain for the optional ublk transport
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev
       - uses: actions/cache@v6.1.0
+        env:
+          # A stalled segment must leave time for the uncached quality checks.
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
         with:
           path: |
             ~/.cargo/registry/
