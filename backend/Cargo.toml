@@ -9,6 +9,14 @@ publish = false
 name = "leo"
 path = "src/main.rs"
 
+[[example]]
+name = "ublk_probe"
+required-features = [ "ublk-prototype" ]
+
+[features]
+ublk = [ "dep:libublk" ]
+ublk-prototype = [ "ublk" ]
+
 [dependencies]
 axum = { version = "0.8.9", features = [
   "macros",
@@ -93,6 +101,7 @@ vm-memory = { version = "=0.18.0", features = [
   "backend-bitmap"
 ] }
 vmm-sys-util = "=0.15.0"
+libublk = { git = "https://github.com/ublk-org/libublk-rs", rev = "0d172817b3737079477337b39538ccdc91766e6e", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

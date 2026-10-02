@@ -73,12 +73,26 @@ pub struct Vm {
     child: Option<tokio::process::Child>,
     consoles: Vec<JoinHandle<()>>,
     network: Network,
-    mounted: Option<crate::storage::vhost::MountedDisk>,
+    mounted: Option<crate::storage::transport::MountedDisk>,
     volume: Option<Arc<crate::storage::runtime::Volume>>,
     uid: u32,
     warmed: bool,
     idle: bool,
     memory_mib: u64,
+}
+
+impl Drop for Vm {
+    fn drop(&mut self) {
+        // Mounted transports also own the Volume. Cancelling before dropping
+        // them releases remote reads even when boot/run was cancelled before
+        // shutdown could await the VMM and close the backend normally.
+        if let Some(volume) = &self.volume {
+            volume.stop.cancel();
+        }
+        if let Some(child) = &mut self.child {
+            let _ = child.start_kill();
+        }
+    }
 }
 
 fn console(
@@ -152,7 +166,12 @@ async fn retained_image(state: &Path, image: &Path, disk_dir: &Path) -> Result<P
     Ok(retained)
 }
 
-fn firecracker_config(network: &Network, resources: &Resources, slot: usize) -> Value {
+fn firecracker_config(
+    network: &Network,
+    resources: &Resources,
+    slot: usize,
+    drive: &Value,
+) -> Value {
     // Virtio guests have no PS/2 devices. Keep warnings and errors on the
     // serial console without paying for informational output during boot.
     let boot_args = format!(
@@ -172,12 +191,7 @@ fn firecracker_config(network: &Network, resources: &Resources, slot: usize) -> 
                 "is_root_device": true,
                 "is_read_only": true
             },
-            {
-                "drive_id": "data",
-                "socket": "disk.sock",
-                "is_root_device": false,
-                "cache_type": "Writeback"
-            }
+            drive
         ],
         "machine-config": {
             "vcpu_count": resources.cpu,
@@ -341,17 +355,22 @@ impl Vm {
         timing.next("mount_and_network");
         let jail = &self.jail;
         private_dir(jail).await?;
-        self.mounted = Some(crate::storage::vhost::mount_disk(
-            self.volume.as_ref().unwrap().clone(),
-            &jail.join("disk.sock"),
-            self.uid,
-        )?);
+        self.mounted = Some(
+            crate::storage::transport::mount(
+                self.volume.as_ref().unwrap().clone(),
+                state,
+                jail,
+                self.uid,
+            )
+            .await?,
+        );
         tokio::fs::hard_link(image.join("root.ext4"), jail.join("root.ext4")).await?;
         tokio::fs::copy(kernel, jail.join("vmlinux")).await?;
         self.network.create(self.uid).await?;
 
         timing.next("spawn_and_guest_ready");
-        let config = firecracker_config(&self.network, resources, slot);
+        let mounted = self.mounted.as_ref().unwrap();
+        let config = firecracker_config(&self.network, resources, slot, &mounted.drive());
         atomic_write(&jail.join("config.json"), &serde_json::to_vec(&config)?).await?;
         std::os::unix::fs::chown(jail.join("config.json"), Some(self.uid), Some(self.uid))?;
         let disk_bytes = self.volume.as_ref().unwrap().disk.size();
@@ -360,7 +379,7 @@ impl Vm {
         let file_bytes = disk_bytes.max(resources.memory_mi_b * 1024 * 1024);
         tracing::info!(target: "leo_performance", operation = "vm_configuration", id,
             cpu = resources.cpu, memory_mib = resources.memory_mi_b, disk_bytes,
-            file_limit_bytes = file_bytes, vhost = true);
+            file_limit_bytes = file_bytes, vhost = mounted.vhost());
         let child = self
             .child
             .insert(jailer(id, self.uid, state, file_bytes).spawn()?);
@@ -385,7 +404,7 @@ impl Vm {
             if self
                 .mounted
                 .as_ref()
-                .is_some_and(crate::storage::vhost::MountedDisk::failed)
+                .is_some_and(crate::storage::transport::MountedDisk::failed)
             {
                 return Err(Error::unavailable("VM block backend stopped."));
             }
@@ -680,7 +699,7 @@ impl Vm {
         let result = tokio::select! {
             result = operation => result,
             () = stop.cancelled() => Ok(STOPPED),
-            result = watch_vhost(self.mounted.as_ref()) => result,
+            result = watch_backend(self.mounted.as_ref()) => result,
         };
         relay_stop.cancel();
         relay.abort();
@@ -740,7 +759,7 @@ impl Vm {
     }
 }
 
-async fn watch_vhost(backend: Option<&crate::storage::vhost::MountedDisk>) -> Result<i32> {
+async fn watch_backend(backend: Option<&crate::storage::transport::MountedDisk>) -> Result<i32> {
     let Some(backend) = backend else {
         return std::future::pending().await;
     };

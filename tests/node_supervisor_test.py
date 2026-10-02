@@ -7,11 +7,13 @@ from pathlib import Path
 import queue
 import signal
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -43,6 +45,43 @@ elif args[0]=='stop':
 
 
 class Supervisor(unittest.TestCase):
+    def test_ublk_permissions_use_detected_majors_without_privileged_mode(self):
+        spec = importlib.util.spec_from_file_location('node_supervisor', SOURCE)
+        host = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(host)
+        devices = 'Character devices:\n 507 ublk-char\n\nBlock devices:\n 260 blkext\n'
+        control = SimpleNamespace(st_mode=stat.S_IFCHR, st_rdev=os.makedev(10, 261))
+
+        def read(path):
+            return '0' if path.name == 'io_uring_disabled' else devices
+
+        with patch.object(host, 'command') as command, patch.object(Path, 'stat', return_value=control), patch.object(Path, 'read_text', read):
+            arguments = host.block_device_arguments('ublk')
+        self.assertEqual(command.call_args.args[0], ['modprobe', 'ublk_drv'])
+        self.assertEqual(arguments, ['--device=/dev/ublk-control', '--device-cgroup-rule=c 507:* rwm', '--device-cgroup-rule=b 260:* rwm', '-e', 'LEO_BLOCK_TRANSPORT=ublk'])
+        self.assertEqual(host.block_device_arguments('vhost-user'), [])
+
+        with patch.object(host, 'command'), patch.object(Path, 'stat', return_value=control), patch.object(Path, 'read_text', lambda path: '2' if path.name == 'io_uring_disabled' else devices):
+            with self.assertRaisesRegex(RuntimeError, 'requires io_uring'):
+                host.block_device_arguments('ublk')
+        with patch.object(host, 'command'), patch.object(Path, 'stat', return_value=control), patch.object(Path, 'read_text', return_value=''):
+            with self.assertRaisesRegex(RuntimeError, 'Missing ublk device classes'):
+                host.block_device_arguments('ublk')
+        with self.assertRaisesRegex(ValueError, 'Unsupported block transport'):
+            host.block_device_arguments('unknown')
+
+    def test_ublk_preflight_does_not_remove_a_running_node(self):
+        spec = importlib.util.spec_from_file_location('node_supervisor', SOURCE)
+        host = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(host)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'config.json').write_text(json.dumps({'blockTransport': 'ublk'}))
+            with patch.object(host, 'ROOT', root), patch.object(host, 'remove') as remove, patch.object(host, 'block_device_arguments', side_effect=RuntimeError('Kernel lacks ublk')):
+                with self.assertRaisesRegex(RuntimeError, 'Kernel lacks ublk'):
+                    host.launch(NEW)
+            remove.assert_not_called()
+
     def test_health_checks_accept_idle_on_demand_nodes(self):
         spec = importlib.util.spec_from_file_location('node_supervisor', SOURCE)
         host = importlib.util.module_from_spec(spec)

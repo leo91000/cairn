@@ -152,6 +152,33 @@ describe('coolify deployment over HTTP', () => {
     expect(firecrackerRunnerCompose(compose)).toBe(compose)
   })
 
+  it.each(['mapping', 'list'])('preserves explicitly configured ublk transport and device classes (%s)', async (shape) => {
+    const document = parse(compose)
+    const runner = document.services.runner
+    const environment = { ...runner.environment, LEO_BLOCK_TRANSPORT: 'ublk' }
+    runner.environment = shape === 'list'
+      ? Object.entries(environment).map(([key, value]) => `${key}=${value}`)
+      : environment
+    runner.devices.push('/dev/ublk-control:/dev/ublk-control')
+    runner.device_cgroup_rules = ['c 238:* rwm', 'b 259:* rwm']
+    compose = stringify(document)
+    await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
+    const result = parse(compose).services.runner
+    expect(result.environment.LEO_BLOCK_TRANSPORT).toBe('ublk')
+    expect(result.devices).toContain('/dev/ublk-control:/dev/ublk-control')
+    expect(result.device_cgroup_rules).toEqual(runner.device_cgroup_rules)
+    expect(result.privileged).toBeUndefined()
+    expect(firecrackerRunnerCompose(compose)).toBe(compose)
+  })
+
+  it('rejects incomplete ublk permissions before changing or restarting the service', async () => {
+    const document = parse(compose)
+    document.services.runner.environment.LEO_BLOCK_TRANSPORT = 'ublk'
+    compose = stringify(document)
+    await expect(deploy(config, { intervalMs: 0, timeoutMs: 1000 })).rejects.toThrow('ublk')
+    expect(requests.some(request => request.method === 'PATCH' || request.method === 'POST')).toBe(false)
+  })
+
   it('adds FUSE to an existing VM runner before deploying the S3-backed image', async () => {
     const document = parse(compose)
     document.services.runner.devices = document.services.runner.devices.filter(device => !device.startsWith('/dev/fuse:'))

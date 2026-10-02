@@ -58,6 +58,8 @@ jobs:
         with:
           cache: true
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
+      - name: Install bindings toolchain for the optional ublk transport
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev
       - uses: actions/cache@v6.1.0
         with:
           path: |
@@ -71,9 +73,9 @@ jobs:
       - run: |
           node --import tsx scripts/backend-schemas.mjs
           git diff --exit-code -- backend/schemas/inputs.json
-          cargo clippy --locked --workspace --all-targets -- -D warnings
-          node scripts/test-backend.mjs
-          cargo build --locked --bin leo
+          cargo clippy --locked --workspace --all-targets --features ublk-prototype -- -D warnings
+          node scripts/test-backend.mjs --features ublk-prototype
+          cargo build --locked --bin leo --features ublk
       - name: Validate node supervisor and S3 recovery
         run: |
           python3 tests/guest_projects_test.py

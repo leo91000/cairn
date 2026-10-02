@@ -15,19 +15,23 @@ COPY public ./public
 RUN pnpm build
 
 FROM rust:1.97.1-bookworm AS backend
+RUN apt-get update && apt-get install -y --no-install-recommends clang libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY backend/Cargo.toml ./backend/Cargo.toml
 # A separate dependency layer survives application edits in remote BuildKit
 # caches. Cargo cache mounts alone do not persist on fresh GitHub runners.
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
-    mkdir -p backend/src && printf 'fn main() {}\n' > backend/src/main.rs \
-    && printf '' > backend/src/lib.rs && cargo build --locked --release --bin leo
+    mkdir -p backend/src backend/examples \
+    && printf 'fn main() {}\n' > backend/src/main.rs \
+    && printf 'fn main() {}\n' > backend/examples/ublk_probe.rs \
+    && printf '' > backend/src/lib.rs && cargo build --locked --release --bin leo --features ublk
 COPY backend ./backend
 COPY deploy/nodes ./deploy/nodes
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     touch backend/src/main.rs backend/src/lib.rs && \
-    cargo build --locked --release --bin leo && cp target/release/leo /usr/local/bin/leo
+    cargo build --locked --release --bin leo --features ublk && cp target/release/leo /usr/local/bin/leo
 
 # The direct block backend shares guest RAM with Firecracker. Upstream 1.17.0
 # does not reclaim MAP_SHARED memfd pages on balloon/free-page reporting.
@@ -122,7 +126,7 @@ RUN make x86_64_defconfig && scripts/kconfig/merge_config.sh -m .config /tmp/leo
         --disable SCSI --disable ATA --disable BLK_DEV_MD --disable MMC --disable FIREWIRE \
         --disable MODULES --disable DEBUG_INFO --disable DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT \
     && make olddefconfig \
-    && for option in KVM KVM_INTEL KVM_AMD; do grep -qx "CONFIG_${option}=y" .config || exit 1; done \
+    && for option in KVM KVM_INTEL KVM_AMD VMGENID; do grep -qx "CONFIG_${option}=y" .config || exit 1; done \
     && make -j8 vmlinux && strip --strip-debug vmlinux \
     && mv vmlinux /tmp/leo-vmlinux && make clean && mv /tmp/leo-vmlinux vmlinux
 
