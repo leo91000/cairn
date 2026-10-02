@@ -389,7 +389,7 @@ async fn check_capture(
             Arc::new(tokio::sync::Mutex::new(())),
             stop.clone(),
             attempt,
-            None,
+            leo_agent_manager::storage::checkpoint::Consistency::Filesystem,
         ),
     )
     .await

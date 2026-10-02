@@ -18,9 +18,10 @@ pub async fn capture(
     control: Arc<Mutex<()>>,
     stop: CancellationToken,
     attempt: &str,
-    _baseline: Option<&str>,
+    consistency: crate::storage::checkpoint::Consistency,
 ) -> Result<Value> {
-    // A stopped disk has no physical owner. Running captures use guest control.
+    // A stopped disk has no physical owner. Running captures retain ownership
+    // even when their crash-consistent boundary needs no guest control.
     let _stopped = if socket.is_none() {
         Some(crate::storage::environment::lock(state, run, "VM disk is still active.").await?)
     } else {
@@ -30,6 +31,7 @@ pub async fn capture(
         Some(socket) => crate::storage::checkpoint::Target::Running {
             socket,
             attempt: attempt.to_owned(),
+            consistency,
         },
         None => crate::storage::checkpoint::Target::Stopped,
     };
@@ -124,6 +126,15 @@ mod tests {
 
     #[tokio::test]
     async fn retained_resume_can_write_while_manifest_reconstruction_waits_for_a_block() {
+        check_writes_during_reconstruction(true).await;
+    }
+
+    #[tokio::test]
+    async fn periodic_capture_keeps_guest_running_and_fences_the_captured_prefix() {
+        check_writes_during_reconstruction(false).await;
+    }
+
+    async fn check_writes_during_reconstruction(retained: bool) {
         let root = tempfile::tempdir().unwrap();
         let run = crate::config::id();
         let owner = crate::storage::environment::ownership(root.path(), &run, "busy")
@@ -168,11 +179,27 @@ mod tests {
             .await
             .unwrap();
         let barrier = Arc::new(Mutex::new(()));
-        let guard = barrier.clone().lock_owned().await;
         let capture = {
             let (state, run, owner) = (root.path().to_owned(), run.clone(), owner.clone());
+            let barrier = barrier.clone();
             tokio::spawn(async move {
-                capture_paused(&state, &run, &owner, CancellationToken::new(), guard).await
+                if retained {
+                    let guard = barrier.lock_owned().await;
+                    return capture_paused(&state, &run, &owner, CancellationToken::new(), guard)
+                        .await;
+                }
+                // There is deliberately no guest control socket or VM API.
+                // Periodic capture must not freeze or pause the live guest.
+                capture(
+                    &state,
+                    &run,
+                    Some(state.join("absent-guest.sock")),
+                    barrier,
+                    CancellationToken::new(),
+                    &crate::config::id(),
+                    crate::storage::checkpoint::Consistency::Crash,
+                )
+                .await
             })
         };
         tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
@@ -180,13 +207,25 @@ mod tests {
             .unwrap();
         let resume =
             tokio::time::timeout(std::time::Duration::from_millis(250), barrier.lock()).await;
-        release.cancel();
         assert!(
             resume.is_ok(),
             "The next turn must not wait for remote block reconstruction"
         );
         volume.disk.write_at(0, b"new").unwrap();
+        assert!(
+            !volume.stop.is_cancelled(),
+            "Mounted remote reads remain usable"
+        );
+        assert!(
+            crate::storage::environment::ownership(root.path(), &run, "busy")
+                .await
+                .is_err(),
+            "Capture must not release the live disk's physical ownership"
+        );
+        release.cancel();
         let snapshot = capture.await.unwrap().unwrap();
+        assert_eq!(snapshot["manifest"]["consistency"], "crash");
+        assert_eq!(snapshot["manifest"]["pauseMs"], 0);
         let generation = snapshot["manifest"]["generation"].as_i64().unwrap();
         let hash = snapshot["manifest"]["blocks"][0]["hash"]
             .as_str()

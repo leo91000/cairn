@@ -388,7 +388,7 @@ async fn request_snapshot(
         .post(capture_path)
         .bearer_auth(credential)
         // The node copies only blocks written since this published point if it still tracks it.
-        .json(&json!({ "baseline": run["backup"]["snapshotId"] }))
+        .json(&snapshot_request(run, stopped))
         .timeout(Duration::from_secs(300))
         .send()
         .await
@@ -407,6 +407,14 @@ async fn request_snapshot(
         ));
     }
     response.json().await.map_err(Error::internal)
+}
+
+fn snapshot_request(run: &Value, stopped: bool) -> Value {
+    let periodic = !stopped && !requested(run) && !run["moveRequest"].is_object();
+    json!({
+        "baseline": run["backup"]["snapshotId"],
+        "consistency": if periodic { "crash" } else { "filesystem" }
+    })
 }
 
 impl Publication<'_> {
@@ -1659,4 +1667,26 @@ async fn local_locations(s: &Service, run: &str) -> Result<Vec<Value>> {
         }
     }
     Ok(locations)
+}
+
+#[cfg(test)]
+mod capture_policy_tests {
+    use super::*;
+
+    #[test]
+    fn final_requested_and_moving_captures_keep_filesystem_consistency() {
+        let mut run = json!({ "backup": { "snapshotId": "previous" } });
+        assert_eq!(snapshot_request(&run, false)["consistency"], "crash");
+        assert_eq!(snapshot_request(&run, true)["consistency"], "filesystem");
+
+        run["backup"]["requestedRevision"] = 2.into();
+        run["backup"]["acknowledgedRevision"] = 1.into();
+        assert_eq!(snapshot_request(&run, false)["consistency"], "filesystem");
+
+        run["backup"]["acknowledgedRevision"] = 2.into();
+        assert_eq!(snapshot_request(&run, false)["consistency"], "crash");
+        run["moveRequest"] = json!({ "idle": false });
+        assert_eq!(snapshot_request(&run, false)["consistency"], "filesystem");
+        assert_eq!(snapshot_request(&run, false)["baseline"], "previous");
+    }
 }

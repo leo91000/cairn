@@ -1481,9 +1481,17 @@ async fn completed_run_storage_refresh_clears_stale_dirty_counts() {
 async fn starting_vm_defers_publication_without_a_sync_failure() {
     let captures = Arc::new(tokio::sync::Notify::new());
     let captured = captures.clone();
-    let runner = Router::new().fallback(move || {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let received = requests.clone();
+    let runner = Router::new().fallback(move |request: Request<Body>| {
         let captured = captured.clone();
+        let received = received.clone();
         async move {
+            let body = to_bytes(request.into_body(), 1024).await.unwrap();
+            received
+                .lock()
+                .unwrap()
+                .push(serde_json::from_slice::<Value>(&body).unwrap());
             captured.notify_one();
             (
                 StatusCode::CONFLICT,
@@ -1518,6 +1526,7 @@ async fn starting_vm_defers_publication_without_a_sync_failure() {
     assert_eq!(current["backup"]["status"], "pending");
     assert_eq!(current["backup"]["snapshotId"], previous_snapshot);
     captures.notified().await;
+    assert_eq!(requests.lock().unwrap()[0]["consistency"], "crash");
 
     owner
         .service
@@ -1535,6 +1544,10 @@ async fn starting_vm_defers_publication_without_a_sync_failure() {
     tokio::time::timeout(Duration::from_secs(8), captures.notified())
         .await
         .expect("a deferred final capture must retry after the run has completed");
+    assert_eq!(
+        requests.lock().unwrap().last().unwrap()["consistency"],
+        "filesystem"
+    );
     maintenance.abort();
     assert!(
         owner
@@ -2292,6 +2305,12 @@ fn movement_controller(
                     format!("/disks/{run}/snapshot"),
                     "Idle movement must capture by disk, without destination attempt history"
                 );
+                let body = to_bytes(request.into_body(), 1024).await.unwrap();
+                let value: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    value["consistency"], "filesystem",
+                    "Movement retains coherent capture"
+                );
                 if faults.cancel_during_capture.load(Ordering::SeqCst) {
                     service
                         .store
@@ -2312,7 +2331,7 @@ fn movement_controller(
                     Arc::new(tokio::sync::Mutex::new(())),
                     CancellationToken::new(),
                     &run,
-                    None,
+                    leo_agent_manager::storage::checkpoint::Consistency::Filesystem,
                 )
                 .await
                 .unwrap();
