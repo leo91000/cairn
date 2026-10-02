@@ -152,11 +152,22 @@ le redimensionnement doit connaître les bornes de chaque filesystem. Mesurer le
 coût mémoire complet du nœud, qualifier les leases/admission, le prébuild par
 version/configuration et le premier modèle en production avant activation.
 
-La configuration effective du noyau livré désactive `VIRT_DRIVERS` et n'inclut
-pas VMGenID. L'intégration devra activer et vérifier ce pilote, ainsi que le
-renouvellement de l'identité réseau et de l'entropie avant le premier tour. Les
-threads distincts du banc ne prouvent pas à eux seuls ce dernier point ; voir
-les [recommandations de Firecracker 1.17](https://github.com/firecracker-microvm/firecracker/blob/v1.17.0/docs/snapshotting/random-for-clones.md).
+Le noyau livré désactive `VIRT_DRIVERS` et n'inclut pas VMGenID : un test privé
+échoue sur l'absence du pilote attaché. Le candidat active les deux options en
+built-in ; la construction vérifie `CONFIG_VMGENID=y` après `olddefconfig`.
+Avec ce noyau 6.12.109, quatre restaurations partagent le même inode mémoire,
+gardent Codex prêt et reçoivent chacune exactement une notification de fork
+qui provoque le reseed du noyau, confirmé par dmesg. Les quatre échantillons
+`getrandom` sont distincts. Entre la demande de chargement et l'observation du
+reseed par vsock, les temps valent 18,94 / 19,26 / 20,21 / 12,06 ms ; ils ne
+mesurent ni le seul interrupt ni le démarrage complet en production.
+Le prébuild de ce banc prend 8,62 s et les VM sont supprimées à la fin.
+
+Ce résultat ne qualifie pas les caches RNG de l'espace utilisateur ni une
+barrière d'admission du premier tour. L'intégration doit encore renouveler
+l'identité réseau et qualifier l'entropie avant le travail de la conversation ;
+les threads distincts du banc ne prouvent pas à eux seuls ce point. Voir les
+[recommandations de Firecracker 1.17](https://github.com/firecracker-microvm/firecracker/blob/v1.17.0/docs/snapshotting/random-for-clones.md).
 
 Les résultats et scripts détaillés restent hors Git pour les futurs assets
 de release. Aucune activation ni release n'est justifiée par ce prototype seul.
