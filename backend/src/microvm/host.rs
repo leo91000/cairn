@@ -74,6 +74,7 @@ pub async fn assets(state: &Path) -> Result<PathBuf> {
         return Err(Error::bad("Invalid VM image version."));
     }
     crate::storage::fuse::cleanup_stale(state)?;
+    crate::storage::transport::cleanup_stale(state).await?;
     // The exclusive controller lock is already held and its previous container's
     // PID namespace is gone. Remove stale jail hard links before old image caches.
     if state.join("jails").exists() {

@@ -14,7 +14,8 @@ name = "ublk_probe"
 required-features = [ "ublk-prototype" ]
 
 [features]
-ublk-prototype = [ "dep:libublk" ]
+ublk = [ "dep:libublk" ]
+ublk-prototype = [ "ublk" ]
 
 [dependencies]
 axum = { version = "0.8.9", features = [

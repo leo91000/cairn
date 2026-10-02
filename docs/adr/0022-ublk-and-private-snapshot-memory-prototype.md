@@ -106,6 +106,43 @@ de la génération publiée. Les deux périphériques sont recréés puis suppri
 sans erreur d'I/O. Le conteneur du banc est limité à 8 Gio et deux CPU. Cela
 qualifie le transport sur ce noyau, pas le chemin manager/S3 de production.
 
+## Transport géré et qualification du runner
+
+Le runner peut maintenant sélectionner `LEO_BLOCK_TRANSPORT=ublk` ; vhost-user
+reste le choix par défaut. Le moteur Async utilise le même `Volume`, journal,
+regroupement des écritures durables et frontière de publication. La construction
+Docker et la CI compilent cette option et ses tests ; l'activation sur les nœuds
+et celle des snapshots restent séparées.
+
+Le noyau choisit les numéros de périphériques. Une intention fsyncée précède ADD,
+puis un reçu associe le numéro à un nonce immuable du noyau, au boot, à la VM et
+à l'identité du processus backend. Cela couvre un crash avant l'enregistrement
+du numéro. Un ancien numéro réutilisé ne permet pas de retirer le nouvel
+occupant. Le nettoyage attend la mort du backend et de la VM ; STOP précède
+DEL, avec confirmation. Une fermeture normale utilise les processus déjà
+attendus, sans inspection des jails voisins. Le réveil eventfd est acquitté
+après le dernier slot d'I/O, avant de quitter le runtime de libublk.
+
+La qualification locale utilise le binaire Debian candidat dans l'image guest
+de v0.52.3, avec les capacités limitées du runner et les permissions des
+périphériques ublk ajoutées. Les tours, reprises, captures pendant les nouvelles
+écritures, crash/recovery, redimensionnement, renouvellement de l'entrypoint,
+sandboxes et annulation/remplissage du pool passent. La charge de 304 secondes
+effectue 27 431 écritures durables et 46 publications : p99 final 25,7 ms,
+maximum 239 ms, aucun redémarrage ni erreur de lecture/écriture. Les groupes
+durables restent présents (maximum de 7 frames sur cette charge séquentielle).
+La pause de capture médiane vaut 59 ms, au maximum 96 ms.
+
+Après l'arrêt gracieux du contrôleur, aucun reçu ni périphérique du banc ne
+reste. Les logs ne contiennent plus de refus de fermeture ni de slab libublk
+abandonné. Ces deux défauts ont été observés sur une première exécution,
+corrigés, puis le scénario complet a été répété. Le test des propriétaires
+vérifie aussi le refus de nettoyage avec une VM encore vivante, la récupération
+d'une intention sans numéro et l'intégrité du journal après SIGKILL.
+
+L'origine de cette qualification est HTTP local, pas S3/WAN ; ce n'est pas une
+mesure du premier appel modèle en production, ni une activation des snapshots.
+
 ## Intégration restant à qualifier
 
 Un template anonyme sert aux nouvelles conversations ; une conversation ayant

@@ -367,6 +367,30 @@ fn operation(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
+    if args.get(1).is_some_and(|value| value == "inspect-device") {
+        let control = UblkCtrlBuilder::default().id(args[2].parse()?).build()?;
+        let info = control.dev_info();
+        println!(
+            "{}",
+            json!({
+                "deviceId": info.dev_id,
+                "token": info.ublksrv_flags.to_string(),
+                "state": info.state,
+                "pid": info.ublksrv_pid
+            })
+        );
+        return Ok(());
+    }
+    if args.get(1).is_some_and(|value| value == "cleanup-managed") {
+        let state = Path::new(&args[2]);
+        let _lock = leo_agent_manager::file_lock::exclusive(
+            &state.join("controller.lock"),
+            "Fixture controller is active.",
+        )?;
+        storage::ublk::cleanup_stale(state)?;
+        return Ok(());
+    }
+
     if args.get(1).is_some_and(|value| value == "remove-stopped") {
         // The harness has already confirmed its backend and VMM are dead.
         // STOP alone does not unregister a device whose ADD owner was killed.
@@ -388,7 +412,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let pair = args.get(1).is_some_and(|mode| mode == "ublk-pair");
     if args.len() != if pair { 8 } else { 7 }
-        || !["ublk", "vhost", "ublk-pair"].contains(&args[1].as_str())
+        || !["ublk", "vhost", "ublk-pair", "ublk-managed"].contains(&args[1].as_str())
     {
         return Err(
             "Usage: ublk_probe ublk|vhost BASE JOURNAL READY METRICS ID_OR_SOCKET; ublk-pair BASE JOURNAL READY METRICS FIRST_ID SPLIT_BYTES; stop ID".into(),
@@ -432,6 +456,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::thread::sleep(Duration::from_millis(200));
         }
     });
+
+    if args[1] == "ublk-managed" {
+        let state = Path::new(&args[6]);
+        fs::create_dir_all(state)?;
+        let _lock = leo_agent_manager::file_lock::exclusive(
+            &state.join("controller.lock"),
+            "Fixture controller is active.",
+        )?;
+        storage::ublk::cleanup_stale(state)?;
+        let jail = state
+            .join("jails/firecracker")
+            .join(uuid::Uuid::new_v4().to_string())
+            .join("root");
+        fs::create_dir_all(&jail)?;
+        let mounted = storage::ublk::mount_disk(disk, state, &jail, 40001)?;
+        fs::write(
+            &args[4],
+            jail.join("disk.blk")
+                .to_str()
+                .ok_or("Invalid private fixture jail")?,
+        )?;
+        loop {
+            if Path::new(&format!("{}.managed-stop", args[5])).exists() {
+                mounted.close()?;
+                return Ok(());
+            }
+            if mounted.failed() {
+                return Err("Managed ublk backend stopped".into());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
     if pair {
         let first_id: i32 = args[6].parse()?;
         let second_id = first_id
