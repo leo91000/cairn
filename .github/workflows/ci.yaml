@@ -259,6 +259,7 @@ jobs:
           LEO_RETENTION_CRASH_AFTER: 2
           LEO_RETENTION_ADMISSION: 'true'
           LEO_RETENTION_PUBLISH: 'true'
+          LEO_RETENTION_ASYNC_PUBLISH: 'true'
         run: node tests/runner-retention-smoke.mjs "$SMOKE_IMAGE"
   publish:
     # The Intel nested Android test needs hardware GitHub does not provide; it runs locally

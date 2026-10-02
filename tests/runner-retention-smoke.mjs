@@ -85,14 +85,17 @@ async function main() {
     throw new Error('Retention qualification timed out')
   }
 
-  async function api(endpoint, method = 'GET', body) {
+  async function api(endpoint, method = 'GET', body, expectedStatus) {
     const response = await fetch(url + endpoint, {
       method,
       headers: { 'authorization': 'Bearer fixture-runner-token', 'content-type': 'application/json' },
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(120000),
     })
-    assert.ok(response.ok, `${method} ${endpoint}: ${response.status}`)
+    if (expectedStatus)
+      assert.equal(response.status, expectedStatus, `${method} ${endpoint}`)
+    else
+      assert.ok(response.ok, `${method} ${endpoint}: ${response.status}`)
     return response
   }
 
@@ -160,6 +163,52 @@ async function main() {
       name,
       api,
     })
+    const delayedPublication = process.env.LEO_RETENTION_ASYNC_PUBLISH === 'true'
+    let pendingPublication
+    let delayedAcknowledgements = 0
+    let protectedEvictions = 0
+
+    async function publish(snapshot) {
+      if (snapshot.alreadyPublished)
+        return
+      for (const block of snapshot.manifest.blocks) {
+        if (!block.hash || uploaded.has(block.hash))
+          continue
+        const bytes = Buffer.from(await (await api(`/snapshots/${snapshot.id}/${block.hash}`)).arrayBuffer())
+        assert.equal(blockDigest(bytes, block.hash), block.hash)
+        await writeFile(path.join(origin, block.hash), bytes)
+        uploaded.add(block.hash)
+      }
+
+      const backupId = randomUUID()
+      await api(`/disks/${runId}/published`, 'POST', { generation: snapshot.manifest.generation, grantId: snapshot.grantId, backupId })
+      const status = await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json()
+      assert.equal(status.published.backupId, backupId)
+      publications++
+    }
+
+    async function completedSnapshot() {
+      const response = await fetch(`${url}/disks/${runId}/snapshot-completed`, {
+        method: 'POST',
+        headers: { 'authorization': 'Bearer fixture-runner-token', 'content-type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(120000),
+      })
+      if ([404, 412].includes(response.status))
+        return (await api(`/disks/${runId}/snapshot`, 'POST', {})).json()
+      assert.ok(response.ok, `Completed generation capture: ${response.status}`)
+      return response.json()
+    }
+
+    async function flushPublication(snapshot = pendingPublication) {
+      if (!snapshot)
+        snapshot = await completedSnapshot()
+      await publish(snapshot)
+      if (snapshot.id)
+        await api(`/snapshots/${snapshot.id}/discard`, 'DELETE')
+      pendingPublication = undefined
+    }
+
     let sessionId
     let previousVm
     let evictedVm
@@ -272,30 +321,34 @@ async function main() {
           evictedVm = undefined
         }
 
+        if (pendingPublication) {
+          // The following real native turn has completed writes on this same
+          // VMM while the preceding generation still awaits acknowledgement.
+          await flushPublication()
+          const status = await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json()
+          assert.ok(status.dirtyBytes > 0, 'An older receipt preserves the following turn\'s durable writes')
+          delayedAcknowledgements++
+        }
+
         for (let index = 0; index < 2; index++) {
           const snapshot = await (await api(`/disks/${runId}/snapshot`, 'POST', {})).json()
           assert.ok(snapshot.manifest.generation > 0)
           assert.equal(snapshot.manifest.consistency, 'crash', 'CPU pause does not promise filesystem freeze')
           assert.equal(state(vmId), 'Paused', 'Publication never wakes retained CPUs')
-          if (process.env.LEO_RETENTION_PUBLISH === 'true' && index === 0 && lease % 10 === 0) {
-            for (const block of snapshot.manifest.blocks) {
-              if (!block.hash || uploaded.has(block.hash))
-                continue
-              const bytes = Buffer.from(await (await api(`/snapshots/${snapshot.id}/${block.hash}`)).arrayBuffer())
-              assert.equal(blockDigest(bytes, block.hash), block.hash)
-              await writeFile(path.join(origin, block.hash), bytes)
-              uploaded.add(block.hash)
-            }
-
-            const backupId = randomUUID()
-            await api(`/disks/${runId}/published`, 'POST', { generation: snapshot.manifest.generation, grantId: snapshot.grantId, backupId })
-            const status = await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json()
-            assert.equal(status.published.backupId, backupId)
+          if (!delayedPublication && process.env.LEO_RETENTION_PUBLISH === 'true' && index === 0 && lease % 10 === 0) {
+            await publish(snapshot)
             assert.equal(state(vmId), 'Paused', 'Publication acknowledgement also leaves CPUs paused')
-            publications++
           }
 
           await api(`/snapshots/${snapshot.id}/discard`, 'DELETE')
+        }
+
+        if (delayedPublication) {
+          pendingPublication = await completedSnapshot()
+          assert.ok(pendingPublication.manifest.generation > 0)
+          await api(`/disks/${runId}/delete`, 'POST', {}, 425)
+          assert.equal(state(vmId), 'Paused', 'Unacknowledged journal protects its retained VMM')
+          protectedEvictions++
         }
       }
       else {
@@ -323,6 +376,7 @@ async function main() {
       }
 
       if (retention > 0 && lease === Number(process.env.LEO_RETENTION_EXPIRE_AFTER ?? -1)) {
+        await flushPublication()
         await until(async () => (await (await api('/health')).json()).pool.retained === 0, (retention + 5) * 1000)
         previousVm = undefined
         evictedVm = vmId
@@ -331,6 +385,9 @@ async function main() {
     }
 
     assert.ok(credentials >= samples.length, 'Each turn renews account access')
+    // Admission/expiry/deletion may only evict after the final durable prefix
+    // has been acknowledged, including benchmarks with periodic upload disabled.
+    await flushPublication()
     let activeAdmissionPassed = false
     if (retention > 0 && process.env.LEO_RETENTION_ADMISSION === 'true') {
       const active = []
@@ -389,6 +446,8 @@ async function main() {
       scope: 'Local real Firecracker/native Codex, synthetic account/model/MCP and loopback block origin. Model response deliberately delayed 1.5 s; preModel excludes that delay. No manager, production or WAN.',
       durationMs: Date.now() - benchmarkStarted,
       publications,
+      delayedAcknowledgements,
+      protectedEvictions,
       samples,
       reclamation,
       crashRecoveryPassed,
