@@ -24,6 +24,13 @@ use std::{
     time::Duration,
 };
 
+/// Initialize the runner before its runtime starts. Journal writes, capture and
+/// cache maintenance can all hold locks needed by block I/O; every runtime
+/// thread must inherit writeback progress, not just the ublk queue thread.
+pub fn prepare_io_threads() -> std::io::Result<()> {
+    io::enable_io_flusher()
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Record {
@@ -439,6 +446,9 @@ pub fn mount_disk(
         let mut pending = None;
         let mut registered = false;
         let result = (|| {
+            // Fail before ADD without the required capability. All newly
+            // created I/O threads inherit the validated flusher state.
+            io::enable_io_flusher()?;
             let token = (uuid::Uuid::new_v4().as_u128() as u64).max(1);
             let mut record = Record {
                 version: 1,
