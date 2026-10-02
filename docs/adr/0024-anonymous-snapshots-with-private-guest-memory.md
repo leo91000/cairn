@@ -114,8 +114,31 @@ Le contrôle sans rafale donne aussi 1,65–2,91 s avec le pool ordinaire et
 1,39–1,93 s avec snapshots sur trois conversations par mode. L'échantillon est
 trop petit et la charge hôte trop variable pour annoncer un gain de latence isolé.
 
-Charge avec sauvegardes répétées,
-admission/annulation sous pression, Intel/AMD et mesure en production restent
+## Charge sur les deux vues
+
+Quatre VM par mode écrivent, fsync et relisent en continu des blocs de 4 Kio
+dans le système **et** le workspace. Chaque mode subit cinq minutes de captures
+crash-consistent et publications HTTP locales, puis une publication finale et
+SIGKILL du contrôleur. Les huit reprises retrouvent leur thread, leurs marqueurs
+et des blocs complets dont numéro de séquence, emplacement et contenu sont vérifiés.
+Les 332 captures périodiques gardent `pauseMs=0` ; aucune attente de stockage,
+erreur de lecture/écriture ou substitution de VM n'est observée.
+
+| Fsync de 4 Kio | Boot ordinaire, même journal à deux vues | Snapshots |
+| --- | ---: | ---: |
+| Échantillons collectés | 58 838 | 60 566 |
+| p99 global / maximum | 53,1 / 928,2 ms | 52,8 / 852,2 ms |
+| p99 / maximum pendant capture | 270,0 / 646,1 ms | 153,8 / 471,8 ms |
+| p99 / maximum pendant publication | 150,3 / 928,2 ms | 73,8 / 852,2 ms |
+
+Le p99 global reste similaire. Les fenêtres sont rapprochées par les horloges
+hôte/guest synchronisées, à la résolution de la milliseconde. La pression I/O
+hôte est élevée et varie entre modes : les pics plus faibles ne constituent pas
+une preuve de gain causal sur les écritures. Ce comparatif contrôle le restore
+contre le boot ordinaire, avec le même transport ublk/journal ; ce n'est ni un
+comparatif avec disque direct, ni une mesure S3 de production.
+
+Admission/annulation sous pression, image finale Intel/AMD et mesure en production restent
 nécessaires avant livraison.
 
 ## Activation et compatibilité
