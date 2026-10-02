@@ -1,5 +1,7 @@
 //! Guest-only bridge. All filesystem operations here run inside the microVM.
 mod codex;
+mod filesystems;
+mod restored;
 
 use super::{
     plan::{CHAT_INBOX, Plan},
@@ -38,7 +40,6 @@ static FREEZE_GENERATION: AtomicU64 = AtomicU64::new(0);
 const INITIALIZED: &str = "/var/lib/leo/initialized";
 const AUTH_SOCKET: &str = "/run/leo-auth.sock";
 const PLAN_FILE: &str = "/run/leo-plan.json";
-const DATA_MOUNT: &str = "/oldroot/run/data";
 const MAX_RESULT_BYTES: usize = 1_000_000;
 /// The unprivileged agent user and group.
 const AGENT_ID: u32 = 1000;
@@ -115,6 +116,32 @@ async fn handle(
     match request {
         GuestRequest::Freeze => freeze(&mut write, true).await,
         GuestRequest::Thaw => freeze(&mut write, false).await,
+        GuestRequest::MountWorkspace => {
+            let _running = running
+                .try_lock()
+                .map_err(|_| Error::conflict("Guest already running."))?;
+            let _filesystem = FILESYSTEM_CONTROL.lock().await;
+            filesystems::mount().await?;
+            wire::write(&mut write, &Reply::ok(true)).await
+        }
+        GuestRequest::RestoreClone { identity } => {
+            let _running = running
+                .try_lock()
+                .map_err(|_| Error::conflict("Guest already running."))?;
+            let _filesystem = FILESYSTEM_CONTROL.lock().await;
+            if Path::new(INITIALIZED).exists() || filesystems::mounted() {
+                return Err(Error::conflict(
+                    "Only an anonymous unmounted VM can be cloned.",
+                ));
+            }
+            restored::validate(&identity)?;
+            filesystems::freeze(false).await?;
+            restored::renew(&identity).await?;
+            // VMGenID cannot reset randomness cached by an arbitrary userspace
+            // library. Recreate the native process before granting an account.
+            codex.restart(stop, timing_endpoint.as_deref()).await?;
+            wire::write(&mut write, &Reply::ok(true)).await
+        }
         GuestRequest::ArtifactExport { path, root } => {
             export_artifact(&mut write, Path::new(&path), &root).await
         }
@@ -127,6 +154,8 @@ async fn handle(
                 initialized: Path::new(INITIALIZED).exists(),
                 codex_service: true,
                 codex_ready: codex.ready(),
+                workspace_disks: true,
+                snapshot_clones: true,
             };
             wire::write(&mut write, &status).await
         }
@@ -217,21 +246,11 @@ fn protect_codex_import(target: &str, replace: bool) -> Result<()> {
     Ok(())
 }
 
-async fn fsfreeze(flag: &str) -> std::io::Result<std::process::ExitStatus> {
-    Command::new("fsfreeze")
-        .arg(flag)
-        .arg(DATA_MOUNT)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-}
-
 async fn freeze(write: &mut (impl AsyncWrite + Unpin), freeze: bool) -> Result<()> {
     let _guard = FILESYSTEM_CONTROL.lock().await;
     let generation = FREEZE_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-    let status = fsfreeze(if freeze { "--freeze" } else { "--unfreeze" }).await?;
-    if freeze && status.success() {
+    let frozen = filesystems::freeze(freeze).await?;
+    if freeze && frozen {
         // A lost host control connection must not freeze the guest indefinitely.
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(300)).await;
@@ -239,10 +258,10 @@ async fn freeze(write: &mut (impl AsyncWrite + Unpin), freeze: bool) -> Result<(
             if FREEZE_GENERATION.load(Ordering::SeqCst) != generation {
                 return;
             }
-            let _ = fsfreeze("--unfreeze").await;
+            let _ = filesystems::freeze(false).await;
         });
     }
-    wire::write(write, &Reply::ok(status.success() || !freeze)).await
+    wire::write(write, &Reply::ok(frozen)).await
 }
 
 async fn export_artifact(
@@ -713,15 +732,7 @@ async fn wait_agent(
 /// Flush the filesystem holding every persistent overlay. Unlike global sync(),
 /// syncfs() reports writeback errors and does not flush unrelated guest mounts.
 async fn sync_disk(program: &str) -> Result<()> {
-    if !Command::new(program)
-        .args(["--file-system", DATA_MOUNT])
-        .status()
-        .await?
-        .success()
-    {
-        return Err(Error::unavailable("Guest disk synchronization failed."));
-    }
-    Ok(())
+    filesystems::sync(program).await
 }
 
 /// The chat result file written by the agent, if this run is a chat.

@@ -28,6 +28,10 @@ pub enum GuestRequest {
     Shutdown,
     Freeze,
     Thaw,
+    MountWorkspace,
+    RestoreClone {
+        identity: CloneIdentity,
+    },
     #[serde(rename_all = "camelCase")]
     Clock {
         epoch_ms: i64,
@@ -137,6 +141,20 @@ pub struct GuestStatus {
     pub codex_service: bool,
     /// The guest's service completed initialization and remains alive.
     pub codex_ready: bool,
+    /// Supports mounting the unmounted conversation device after restoration.
+    pub workspace_disks: bool,
+    /// Supports reseeding and renewing an anonymous snapshot before assignment.
+    pub snapshot_clones: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CloneIdentity {
+    pub id: String,
+    pub guest: String,
+    pub gateway: String,
+    pub mac: String,
+    pub entropy: String,
 }
 
 /// Acknowledgement of an operation. Absent fields are never written.

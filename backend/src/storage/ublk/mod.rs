@@ -425,6 +425,19 @@ pub fn mount_disk(
     jail: &Path,
     uid: u32,
 ) -> stdio::Result<MountedDisk> {
+    mount_named_disk(disk, state, jail, uid, "disk.blk")
+}
+
+pub(crate) fn mount_named_disk(
+    disk: Arc<dyn Disk>,
+    state: &Path,
+    jail: &Path,
+    uid: u32,
+    name: &str,
+) -> stdio::Result<MountedDisk> {
+    if !matches!(name, "disk.blk" | "workspace.blk") {
+        return Err(stdio::Error::other("Invalid VM block node name"));
+    }
     if disk.size() == 0 || !disk.size().is_multiple_of(512) {
         return Err(stdio::Error::other("Invalid ublk disk size"));
     }
@@ -543,7 +556,7 @@ pub fn mount_disk(
             _ => return Err(stdio::Error::other("ublk startup did not complete")),
         }
         node(
-            &jail.join("disk.blk"),
+            &jail.join(name),
             &PathBuf::from(format!(
                 "/sys/class/block/ublkb{}",
                 mounted.record.device_id()?

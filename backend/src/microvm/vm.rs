@@ -1,4 +1,6 @@
 //! One booted Firecracker VM and the attempt it executes.
+pub(super) mod snapshots;
+
 use super::{
     host::{self, call, connect, import, valid_runtime_name},
     network::Network,
@@ -35,6 +37,13 @@ use tokio_util::sync::CancellationToken;
 /// Exit code of an attempt stopped by the controller.
 const STOPPED: i32 = 143;
 const MAX_OUTPUT_BYTES: usize = 100_000_000;
+
+#[derive(Clone, Copy)]
+enum Startup<'a> {
+    Cold,
+    Template,
+    Restore(&'a Path),
+}
 
 /// Balloon inflation touches guest pages even when their virtual address space
 /// has never occupied host RAM. Bound idle work by the physical working set,
@@ -170,7 +179,7 @@ fn firecracker_config(
     network: &Network,
     resources: &Resources,
     slot: usize,
-    drive: &Value,
+    drives: &[Value],
 ) -> Value {
     // Virtio guests have no PS/2 devices. Keep warnings and errors on the
     // serial console without paying for informational output during boot.
@@ -182,17 +191,16 @@ fn firecracker_config(
         ),
         network.guest, network.gateway
     );
+    let mut configured_drives = vec![json!({
+        "drive_id": "root",
+        "path_on_host": "root.ext4",
+        "is_root_device": true,
+        "is_read_only": true
+    })];
+    configured_drives.extend_from_slice(drives);
     json!({
         "boot-source": { "kernel_image_path": "vmlinux", "boot_args": boot_args },
-        "drives": [
-            {
-                "drive_id": "root",
-                "path_on_host": "root.ext4",
-                "is_root_device": true,
-                "is_read_only": true
-            },
-            drive
-        ],
+        "drives": configured_drives,
         "machine-config": {
             "vcpu_count": resources.cpu,
             "mem_size_mib": resources.memory_mi_b,
@@ -211,7 +219,7 @@ fn firecracker_config(
     })
 }
 
-fn jailer(id: &str, uid: u32, state: &Path, disk_bytes: u64) -> Command {
+fn jailer(id: &str, uid: u32, state: &Path, disk_bytes: u64, configured: bool) -> Command {
     let uid = uid.to_string();
     // Firecracker writes a regular FUSE file at guest block offsets. A fixed
     // limit below the retained disk size terminates the VMM with SIGXFSZ.
@@ -238,13 +246,14 @@ fn jailer(id: &str, uid: u32, state: &Path, disk_bytes: u64) -> Command {
             "--",
             "--api-sock",
             "api.sock",
-            "--config-file",
-            "config.json",
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if configured {
+        command.args(["--config-file", "config.json"]);
+    }
     command
 }
 
@@ -293,6 +302,18 @@ impl Vm {
         stop: &CancellationToken,
         resources: Option<&Value>,
     ) -> Result<Self> {
+        Self::boot_start(state, image, disk_dir, slot, stop, resources, Startup::Cold).await
+    }
+
+    async fn boot_start(
+        state: &Path,
+        image: &Path,
+        disk_dir: PathBuf,
+        slot: usize,
+        stop: &CancellationToken,
+        resources: Option<&Value>,
+        startup: Startup<'_>,
+    ) -> Result<Self> {
         let run_id = disk_dir.file_name().and_then(|v| v.to_str()).unwrap_or("");
         let mut timing = Operation::new("vm_boot", run_id, "prepare");
         let resources = self::resources(resources)?;
@@ -329,7 +350,7 @@ impl Vm {
             memory_mib: resources.memory_mi_b,
         };
         let result = tokio::select! {
-            result = vm.launch(state, (&image, &current_kernel), &id, &resources, slot, &mut timing) => result,
+            result = vm.launch(state, (&image, &current_kernel, startup), &id, &resources, slot, &mut timing) => result,
             () = stop.cancelled() => Err(Error::unavailable("VM preparation stopped.")),
         };
         if let Err(error) = result {
@@ -346,7 +367,7 @@ impl Vm {
     async fn launch(
         &mut self,
         state: &Path,
-        (image, kernel): (&Path, &Path),
+        (image, kernel, startup): (&Path, &Path, Startup<'_>),
         id: &str,
         resources: &Resources,
         slot: usize,
@@ -370,7 +391,19 @@ impl Vm {
 
         timing.next("spawn_and_guest_ready");
         let mounted = self.mounted.as_ref().unwrap();
-        let config = firecracker_config(&self.network, resources, slot, &mounted.drive());
+        let paired = mounted.paired();
+        if !matches!(startup, Startup::Cold) && !paired {
+            return Err(Error::bad("Snapshots require paired native disks."));
+        }
+        let mut config = firecracker_config(&self.network, resources, slot, &mounted.drives());
+        if matches!(startup, Startup::Template) {
+            // The first diff is a standalone image of a freshly booted VM.
+            // Avoid faulting/writing the entire sparse RAM ceiling on a node.
+            config["machine-config"]["track_dirty_pages"] = true.into();
+        }
+        if let Startup::Restore(template) = startup {
+            snapshots::link(template, jail).await?;
+        }
         atomic_write(&jail.join("config.json"), &serde_json::to_vec(&config)?).await?;
         std::os::unix::fs::chown(jail.join("config.json"), Some(self.uid), Some(self.uid))?;
         let disk_bytes = self.volume.as_ref().unwrap().disk.size();
@@ -380,9 +413,16 @@ impl Vm {
         tracing::info!(target: "leo_performance", operation = "vm_configuration", id,
             cpu = resources.cpu, memory_mib = resources.memory_mi_b, disk_bytes,
             file_limit_bytes = file_bytes, vhost = mounted.vhost());
-        let child = self
-            .child
-            .insert(jailer(id, self.uid, state, file_bytes).spawn()?);
+        let child = self.child.insert(
+            jailer(
+                id,
+                self.uid,
+                state,
+                file_bytes,
+                !matches!(startup, Startup::Restore(_)),
+            )
+            .spawn()?,
+        );
         self.consoles.push(console(
             child.stdout.take().unwrap(),
             state.join(format!("{id}.boot.log")),
@@ -391,9 +431,39 @@ impl Vm {
             child.stderr.take().unwrap(),
             state.join(format!("{id}.vmm.log")),
         ));
+        if matches!(startup, Startup::Restore(_)) {
+            // The restored anonymous guest inherits a frozen OS. A cancelled
+            // renewal must kill it rather than wait for guest-side shutdown.
+            self.idle = true;
+            timing.next("snapshot_load_and_drive_patch");
+            self.load_snapshot().await?;
+        }
         let status = self.wait_for_guest().await?;
         if status.version != 1 {
             return Err(Error::unavailable("Unsupported guest protocol."));
+        }
+        if matches!(startup, Startup::Restore(_)) {
+            if !status.snapshot_clones || status.initialized || !status.codex_ready {
+                return Err(Error::unavailable(
+                    "Snapshot is not an anonymous ready guest.",
+                ));
+            }
+            timing.next("clone_identity_and_native_restart");
+            self.renew_clone().await?;
+            self.warmed = true;
+            self.idle = false;
+        }
+        if paired && !matches!(startup, Startup::Template) {
+            if !status.workspace_disks {
+                return Err(Error::unavailable(
+                    "Guest image does not support paired disks.",
+                ));
+            }
+            let reply =
+                host::guest_request(&self.socket, &json!({ "op": "mount-workspace" })).await?;
+            if reply["ok"] != true {
+                return Err(Error::unavailable("Guest workspace mount failed."));
+            }
         }
         Ok(())
     }
@@ -944,7 +1014,7 @@ mod tests {
             .unwrap()
             .set_len(disk_bytes)
             .unwrap();
-        let command = jailer("test", 1000, directory.path(), disk_bytes);
+        let command = jailer("test", 1000, directory.path(), disk_bytes, true);
         let limit = command
             .as_std()
             .get_args()

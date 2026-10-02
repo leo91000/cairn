@@ -173,6 +173,21 @@ impl Codex {
         service.stop.cancel();
         let _ = (&mut service.task).await;
     }
+
+    /// The caller holds the anonymous guest's running/filesystem guards. A
+    /// failed restart retires the clone; a conversation never uses this path.
+    pub async fn restart(
+        &self,
+        stop: CancellationToken,
+        timing_endpoint: Option<&str>,
+    ) -> Result<()> {
+        if self.output.lock().unwrap().is_some() {
+            return Err(Error::conflict("Codex output is already leased."));
+        }
+        self.close().await;
+        self.started.store(false, Ordering::Release);
+        self.warm(stop, timing_endpoint).await
+    }
 }
 
 async fn supervise(

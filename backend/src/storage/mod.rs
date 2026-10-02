@@ -1,4 +1,5 @@
 //! Conversation disk storage. Callers hold the conversation lock while preparing or exporting.
+pub mod layout;
 mod local;
 
 pub use local::prepare;
@@ -6,6 +7,10 @@ pub use local::prepare;
 mod device;
 
 pub use device::{Disk, DiskWrite, LocalDisk, export};
+
+mod view;
+
+pub use view::DiskView;
 
 pub mod digest;
 mod lazy;

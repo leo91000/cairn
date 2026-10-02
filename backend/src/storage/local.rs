@@ -4,6 +4,19 @@ use crate::{
 };
 use std::path::{Path, PathBuf};
 
+mod paired;
+
+pub(crate) async fn prepare_layout(
+    directory: &Path,
+    desired: u64,
+    layout: super::layout::Layout,
+) -> Result<(PathBuf, super::layout::Layout)> {
+    match layout {
+        super::layout::Layout::Flat => Ok((prepare(directory, desired).await?, layout)),
+        super::layout::Layout::Paired { .. } => paired::prepare(directory, desired, layout).await,
+    }
+}
+
 /// Format or grow the temporary ext4 image used to build an S3-backed journal.
 pub async fn prepare(disk_dir: &Path, desired: u64) -> Result<PathBuf> {
     let disk = disk_dir.join("data.ext4");

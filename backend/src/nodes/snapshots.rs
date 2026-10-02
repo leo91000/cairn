@@ -125,6 +125,8 @@ pub async fn index(path: &Path) -> Result<Value> {
 }
 
 pub fn validate(manifest: &Value) -> Result<()> {
+    let layout = crate::storage::layout::Layout::from_manifest(manifest)
+        .map_err(|error| Error::bad(error.to_string()))?;
     let blocks = manifest["blocks"]
         .as_array()
         .ok_or_else(|| Error::bad("Missing backup blocks."))?;
@@ -132,7 +134,7 @@ pub fn validate(manifest: &Value) -> Result<()> {
         .as_u64()
         .filter(|s| *s > 0 && *s <= 1024 * 1024 * 1024 * 1024)
         .ok_or_else(|| Error::bad("Invalid backup size."))?;
-    if manifest["version"] != MANIFEST_VERSION
+    if manifest["version"] != layout.manifest_version()
         || manifest["blockSize"] != BLOCK
         || blocks.len() as u64 != size.div_ceil(BLOCK)
     {

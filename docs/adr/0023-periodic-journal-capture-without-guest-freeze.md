@@ -1,7 +1,8 @@
 # Sauvegardes périodiques sans gel du guest
 
-Date : 2026-10-02. Statut : prototype mesuré ; qualification prolongée et
-comparaison en production en cours. Le démarrage par snapshot reste séparé.
+Date : 2026-10-02. Statut : livré et vérifié en production dans
+[v0.52.5](https://github.com/leo91000/leo-agent-manager/releases/tag/v0.52.5).
+Le démarrage par snapshot reste séparé.
 
 ## Problème
 
@@ -130,6 +131,30 @@ masquer les pauses. Le maximum global vient d'un autre intervalle, hors
 publication ; il sera comparé aussi. Les 5 502 lignes SQLite sont vérifiées,
 `integrity_check` vaut `ok` et la sauvegarde finale est acquittée.
 
-La comparaison avec le nouveau chemin reste requise avant release, à ressources
-identiques (7 CPU, 35,5 Gio de RAM et disque de 32 Gio), sur cette conversation
-de test uniquement. Les résumés et échantillons restent hors Git.
+## Comparaison en production et livraison
+
+Le même script de 300 secondes est rejoué sur la même conversation, avec les
+mêmes ressources (7 CPU, 35,5 Gio de RAM et disque de 32 Gio), après déploiement
+de l'image exacte v0.52.5. Cinq publications S3 sont à nouveau observées.
+
+| Fsync, ms | v0.52.4 | v0.52.5 |
+| --- | ---: | ---: |
+| p99 / maximum pendant capture | 2 579,60 | 59,48 |
+| p99 pendant capture + publication | 68,04 | 70,45 |
+| maximum pendant capture + publication | 2 579,60 | 96,25 |
+| maximum hors publication | 2 829,55 | 2 528,07 |
+
+Le maximum pendant capture baisse de 97,7 %, celui pendant publication de
+96,3 %. Les pauses explicites sont nulles sur les cinq captures ; la frontière
+durable prend 4–8 ms et la reconstruction 890–1 307 ms pendant que le guest
+continue. Le p99 de capture repose sur seulement 38 puis 50 fsync et coïncide
+donc avec le maximum ; le p99 sur toute la publication ne s'améliore pas.
+Ce résultat ne prouve pas la disparition des pics hors sauvegarde.
+
+Les 5 475 lignes SQLite, leur contenu et `integrity_check=ok` sont vérifiés.
+La VM reste identique pendant le run, les 14 acquittements observés réussissent,
+sans erreur disque ni redémarrage intempestif. L'image exacte passe également
+40 captures locales, un SIGKILL du contrôleur et trois restaurations de points
+publiés. Les deux nœuds de production exécutent l'image publiée ; une nouvelle
+conversation et sa reprise vérifient un marqueur fsync et aboutissent dans l'UI.
+Les preuves et mesures brutes sont des assets de v0.52.5, hors Git.
