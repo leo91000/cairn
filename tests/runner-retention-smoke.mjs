@@ -55,6 +55,7 @@ async function main() {
   const image = process.argv[2]
   assert.ok(image, 'Provide the runner image')
   const retention = Number(process.env.LEO_VM_RETENTION_SECONDS ?? 180)
+  const cpuQuota = process.env.LEO_RETENTION_CPU_QUOTA ?? '3'
   const docker = (...args) => execFileSync('docker', ['--context', 'default', ...args], { encoding: 'utf8', timeout: 180000 }).trim()
   const root = await mkdtemp(path.join(process.env.VM_TEST_ROOT || '/var/tmp', 'leo-retention-'))
   const name = `leo-retention-${randomUUID().slice(0, 8)}`
@@ -142,7 +143,7 @@ async function main() {
     docker('run', '-d', '--name', peer, '-v', `${root}/peer.cjs:/peer.cjs:ro`, '--entrypoint', 'node', image, '/peer.cjs')
     docker('network', 'connect', '--ip', '203.0.113.3', network, peer)
     const capabilities = ['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE']
-    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(value => ['--cap-add', value]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', `${process.env.LEO_RETENTION_MEMORY_GIB ?? 10}g`, '--cpus', '3', '-e', 'CONCURRENCY=3', '-e', `LEO_VM_RETENTION_SECONDS=${retention}`, '-e', 'LEO_READY_VM_POOL=false', '--entrypoint', '/usr/local/bin/leo', image, 'runner-broker')
+    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(value => ['--cap-add', value]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', `${process.env.LEO_RETENTION_MEMORY_GIB ?? 10}g`, '--cpus', cpuQuota, '-e', 'CONCURRENCY=3', '-e', `LEO_VM_RETENTION_SECONDS=${retention}`, '-e', 'LEO_READY_VM_POOL=false', '--entrypoint', '/usr/local/bin/leo', image, 'runner-broker')
     docker('network', 'connect', '--ip', '203.0.113.2', network, name)
     url = `http://${await until(() => {
       try {
@@ -383,6 +384,7 @@ async function main() {
     const evidence = {
       kind: 'real-native-vm-retention',
       image,
+      cpuQuota,
       retentionSeconds: retention,
       scope: 'Local real Firecracker/native Codex, synthetic account/model/MCP and loopback block origin. Model response deliberately delayed 1.5 s; preModel excludes that delay. No manager, production or WAN.',
       durationMs: Date.now() - benchmarkStarted,

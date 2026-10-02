@@ -830,7 +830,7 @@ impl Reservation {
             match self.vm.as_mut().unwrap().suspend_idle().await {
                 Ok(()) => true,
                 Err(error) => {
-                    tracing::warn!(target: "leo_performance", operation = "vm_retention", event = "reclamation_failed", message = %error.message);
+                    tracing::warn!(target: "leo_performance", operation = "vm_retention", event = "reclamation_failed", run_id = crate::performance::identity(plan.run_id()), vm_id = self.vm.as_ref().unwrap().id(), message = %error.message);
                     false
                 }
             }

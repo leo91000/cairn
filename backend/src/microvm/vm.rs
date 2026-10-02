@@ -36,6 +36,17 @@ use tokio_util::sync::CancellationToken;
 const STOPPED: i32 = 143;
 const MAX_OUTPUT_BYTES: usize = 100_000_000;
 
+/// Balloon inflation touches guest pages even when their virtual address space
+/// has never occupied host RAM. Bound idle work by the physical working set,
+/// rather than walking tens of GiB of unused address space under CPU pressure.
+fn idle_balloon_target(memory_mib: u64, actual: u64, available: u64, resident_bytes: u64) -> u64 {
+    let physical_mib = resident_bytes.div_ceil(1_048_576);
+    let reclaim_mib = available.saturating_sub(768).min(physical_mib).min(2048);
+    actual
+        .saturating_add(reclaim_mib)
+        .min(memory_mib.saturating_sub(1024))
+}
+
 /// `{attempt}.vm.json`: which VM executes an attempt, for pause and erasure.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -480,7 +491,7 @@ impl Vm {
         timing.finish();
     }
 
-    fn id(&self) -> &str {
+    pub(super) fn id(&self) -> &str {
         self.jail
             .parent()
             .and_then(Path::file_name)
@@ -516,12 +527,10 @@ impl Vm {
             .map_err(Error::internal)?;
         let actual = stats["actual_mib"].as_u64().unwrap_or(0);
         let available = stats["available_memory"].as_u64().unwrap_or(0) / 1_048_576;
-        // Keep working memory and headroom for the native service. Inflating the
-        // balloon reclaims free pages and clean caches while CPUs can cooperate;
-        // free-page reporting returns those pages from the shared guest memfd.
-        let target = actual
-            .saturating_add(available.saturating_sub(768))
-            .min(self.memory_mib.saturating_sub(1024));
+        // Keep guest working-memory headroom, but reclaim only a bounded physical
+        // working set. Free-page reporting returns unused backing independently
+        // of the remaining virtual size; admission still measures actual bytes.
+        let target = idle_balloon_target(self.memory_mib, actual, available, active_bytes);
         if target > actual {
             client
                 .patch("http://localhost/balloon")
@@ -547,6 +556,7 @@ impl Vm {
                     break;
                 }
                 if tokio::time::Instant::now() >= deadline {
+                    tracing::warn!(target: "leo_performance", operation = "vm_retention", event = "balloon_unacknowledged", vm_id = self.id(), requested_mib = target, actual_mib = stats["actual_mib"].as_u64(), active_bytes, elapsed_ms = started.elapsed().as_millis() as u64);
                     return Err(Error::unavailable(
                         "Idle balloon reclamation was not acknowledged.",
                     ));
@@ -876,6 +886,27 @@ impl Inbox {
 mod tests {
     use super::*;
     use std::os::unix::process::CommandExt;
+
+    #[test]
+    fn idle_balloon_does_not_walk_unallocated_large_guest_memory() {
+        let physical_bytes = 1322995712;
+        assert_eq!(idle_balloon_target(35840, 0, 35000, physical_bytes), 1262);
+        assert_eq!(idle_balloon_target(9728, 0, 9000, physical_bytes), 1262);
+        assert_eq!(
+            idle_balloon_target(35840, 0, 35000, 32 * 1_048_576 * 1024),
+            2048
+        );
+    }
+
+    #[test]
+    fn idle_balloon_preserves_guest_headroom_and_existing_inflation() {
+        let physical_bytes = 2 * 1024 * 1_048_576;
+        assert_eq!(idle_balloon_target(4096, 256, 768, physical_bytes), 256);
+        assert_eq!(idle_balloon_target(4096, 256, 900, physical_bytes), 388);
+        assert_eq!(idle_balloon_target(2048, 256, 2000, physical_bytes), 1024);
+        assert_eq!(idle_balloon_target(4096, 256, 3500, 0), 256);
+        assert_eq!(idle_balloon_target(1024, 0, 1000, physical_bytes), 0);
+    }
 
     #[test]
     fn jailer_allows_writes_to_the_end_of_a_grown_disk() {
