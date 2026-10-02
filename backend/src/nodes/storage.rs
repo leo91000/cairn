@@ -110,14 +110,21 @@ fn record_status(
         && let Some(point) = point
         && captured_at(point) >= captured_at(&current["backup"])
     {
-        patch["backup"] = serde_json::to_value(PublishedPointer {
+        let pointer = serde_json::to_value(PublishedPointer {
             id: &point["id"],
             snapshot_id: &point["snapshotId"],
             captured_at: &point["capturedAt"],
             uploaded_bytes: None,
-            status: BackupStatus::Ready,
+            status: if super::publication::requested(&current) {
+                BackupStatus::Pending
+            } else {
+                BackupStatus::Ready
+            },
             error: None,
         })?;
+        let mut backup = current["backup"].as_object().cloned().unwrap_or_default();
+        backup.extend(pointer.as_object().unwrap().clone());
+        patch["backup"] = backup.into();
     }
     db.patch_run(id, &patch)?;
     record_volume(db, id, node, status)?;

@@ -380,6 +380,10 @@ const WAITING_TITLE: &str = "Conversation waiting for its node";
 
 /// Plans a lossless move of queued work when its retained node has no room.
 pub async fn queue_capacity_move(s: &Service, run: &Value) -> Result<bool> {
+    if super::publication::requested(run) {
+        s.node_publication_notify.notify_one();
+        return Ok(false);
+    }
     if run["status"] != RunStatus::Queued
         || run["pinnedNodeId"].is_string()
         || run["moveRequest"].is_object()
@@ -507,6 +511,12 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
     if !run["cancelRequestedAt"].is_null() {
         release_destination(s, run).await?;
         return Ok(true);
+    }
+    // Keep the authoritative journal on its source until every coalesced final
+    // publication is acknowledged. Same-node work may continue in the meantime.
+    if super::publication::requested(run) {
+        s.node_publication_notify.notify_one();
+        return Ok(!run["moveRequest"].is_object());
     }
     let mut current = run.clone();
     if !current["moveRequest"].is_object() {

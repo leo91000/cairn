@@ -17,6 +17,7 @@ def main():
     parser.add_argument('--benchmark', action='store_true')
     parser.add_argument('--repo', type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument('--repeat', type=int, default=3)
+    parser.add_argument('--case', help='Run one node recovery test against the isolated S3 fixture')
     args = parser.parse_args()
     server = ThreadedMotoServer(ip_address='127.0.0.1', port=0, verbose=False)
     server.start()
@@ -38,6 +39,10 @@ def main():
         env['AWS_EC2_METADATA_DISABLED'] = 'true'
         env['AWS_CONFIG_FILE'] = '/dev/null'
         env['AWS_SHARED_CREDENTIALS_FILE'] = '/dev/null'
+        if args.case:
+            subprocess.run(['pnpm', 'test:backend', '--test', 'nodes', args.case,
+                            '--', '--ignored', '--nocapture'], cwd=args.repo, env=env, check=True)
+            return
         if args.benchmark:
             for _ in range(args.repeat):
                 # Each process gets the same empty fixture bucket. Moto's object
@@ -54,7 +59,7 @@ def main():
                        cwd=Path(__file__).resolve().parents[1], env=env, check=True)
         remaining = client.list_objects_v2(Bucket='leo-node-test')
         assert remaining.get('KeyCount', 0) == 0, 'Conversation purge must remove all remote recovery objects'
-        for case in ['idle_conversations_move_twice', 'queued_capacity_transfer', 'active_captures_name', 'obsolete_object_collection', 'interrupted_first_publication', 'shared_publications']:
+        for case in ['idle_conversations_move_twice', 'queued_capacity_transfer', 'active_captures_name', 'obsolete_object_collection', 'interrupted_first_publication', 'shared_publications', 'coalesced_final_publication']:
             subprocess.run(['pnpm', 'test:backend', '--test', 'nodes', case, '--', '--ignored'],
                            cwd=Path(__file__).resolve().parents[1], env=env, check=True)
 

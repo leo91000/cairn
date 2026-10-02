@@ -3010,6 +3010,296 @@ struct CaptureLog {
     lost_ack: Arc<AtomicBool>,
 }
 
+#[tokio::test]
+#[ignore = "requires loopback S3; run tests/node_s3_test.py"]
+async fn coalesced_final_publication_survives_a_new_attempt_and_preserves_later_writes() {
+    let root = TempDir::new().unwrap();
+    let state = root.path().to_owned();
+    let run = id();
+    let disk_owner = leo_agent_manager::storage::environment::ownership(&state, &run, "busy")
+        .await
+        .unwrap();
+    let manifest = json!({ "version": 1, "size": 4096, "blockSize": snapshots::BLOCK, "blocks": [{ "offset": 0, "size": 4096, "hash": null }] });
+    let source = json!({ "master": "http://localhost:4310/", "grant": "synthetic-publication", "policy": { "reserveMiB": 64, "reservePercent": 1 } });
+    let remote = RemoteSource::new(
+        &source,
+        tokio::runtime::Handle::current(),
+        CancellationToken::new(),
+    )
+    .unwrap();
+    let disk = LazyDisk::create(
+        &disk_owner.directory.join("lazy"),
+        &manifest,
+        Arc::new(remote),
+    )
+    .unwrap();
+    disk.set_context(&source).unwrap();
+    drop(disk);
+    let volume = runtime::load(&disk_owner.directory).await.unwrap();
+    volume.disk.write_at(0, b"first").unwrap();
+    std::fs::write(
+        disk_owner.directory.join("runtime.json"),
+        b"{\"runtimeId\":\"fixture\"}",
+    )
+    .unwrap();
+    volume.seal_completed().await.unwrap();
+    let grant = volume.source.grant_id().unwrap();
+    let captures = Arc::new(AtomicUsize::new(0));
+    let reads = Arc::new(AtomicUsize::new(0));
+    let acknowledgements = Arc::new(AtomicUsize::new(0));
+    let transfer_entered = Arc::new(tokio::sync::Notify::new());
+    let transfer_release = CancellationToken::new();
+    let ack_entered = Arc::new(tokio::sync::Notify::new());
+    let ack_release = CancellationToken::new();
+    let controller = Router::new().fallback({
+        let (
+            state,
+            run,
+            volume,
+            captures,
+            reads,
+            acknowledgements,
+            transfer_entered,
+            transfer_release,
+            ack_entered,
+            ack_release,
+            grant,
+            disk_owner,
+        ) = (
+            state.clone(),
+            run.clone(),
+            volume.clone(),
+            captures.clone(),
+            reads.clone(),
+            acknowledgements.clone(),
+            transfer_entered.clone(),
+            transfer_release.clone(),
+            ack_entered.clone(),
+            ack_release.clone(),
+            grant.clone(),
+            disk_owner.clone(),
+        );
+        move |request: Request<Body>| {
+            let (
+                state,
+                run,
+                volume,
+                captures,
+                reads,
+                acknowledgements,
+                transfer_entered,
+                transfer_release,
+                ack_entered,
+                ack_release,
+                grant,
+                _disk_owner,
+            ) = (
+                state.clone(),
+                run.clone(),
+                volume.clone(),
+                captures.clone(),
+                reads.clone(),
+                acknowledgements.clone(),
+                transfer_entered.clone(),
+                transfer_release.clone(),
+                ack_entered.clone(),
+                ack_release.clone(),
+                grant.clone(),
+                disk_owner.clone(),
+            );
+            async move {
+                let path = request.uri().path().to_owned();
+                if request.method() == "DELETE" {
+                    return Json(json!({})).into_response();
+                }
+                if path.ends_with("/storage-status") {
+                    return Json(volume.inspect().await.unwrap()).into_response();
+                }
+                if path.ends_with("/snapshot-completed") {
+                    captures.fetch_add(1, Ordering::SeqCst);
+                    return Json(
+                        checkpoint::capture_completed(&state, &run, CancellationToken::new())
+                            .await
+                            .unwrap(),
+                    )
+                    .into_response();
+                }
+                if path.ends_with("/snapshot") {
+                    captures.fetch_add(1, Ordering::SeqCst);
+                    let generation = volume.seal().await.unwrap();
+                    let disk = volume.disk.clone();
+                    let mut manifest =
+                        tokio::task::spawn_blocking(move || disk.capture(generation))
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    manifest["generation"] = generation.into();
+                    manifest["onDemand"] = true.into();
+                    manifest["capturedAt"] = now().into();
+                    manifest["runtime"] = json!({ "runtimeId": "fixture" });
+                    let snapshot = id();
+                    let directory = state.join("snapshots").join(&snapshot);
+                    tokio::fs::create_dir_all(&directory).await.unwrap();
+                    tokio::fs::write(directory.join("run"), &run).await.unwrap();
+                    tokio::fs::write(directory.join("manifest.json"), manifest.to_string())
+                        .await
+                        .unwrap();
+                    return Json(json!({ "id": snapshot, "manifest": manifest, "grantId": grant }))
+                        .into_response();
+                }
+                if path.ends_with("/published") {
+                    let body = to_bytes(request.into_body(), 16384).await.unwrap();
+                    let receipt: Value = serde_json::from_slice(&body).unwrap();
+                    if acknowledgements.fetch_add(1, Ordering::SeqCst) == 0 {
+                        ack_entered.notify_one();
+                        ack_release.cancelled().await;
+                    }
+                    let disk = volume.disk.clone();
+                    tokio::task::spawn_blocking(move || {
+                        disk.commit_published(
+                            receipt["generation"].as_i64().unwrap(),
+                            receipt["backupId"].as_str().unwrap(),
+                        )
+                    })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    return Json(json!({ "committed": true })).into_response();
+                }
+                if path.ends_with("/blocks") {
+                    return StatusCode::NOT_FOUND.into_response();
+                }
+                if reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                    transfer_entered.notify_one();
+                    transfer_release.cancelled().await;
+                }
+                let parts: Vec<_> = path.split('/').collect();
+                snapshots::served(&state.join("snapshots").join(parts[2]), parts[3])
+                    .await
+                    .unwrap()
+                    .into_response()
+            }
+        }
+    });
+    let (url, server) = common::serve_locally(controller).await;
+    let owner = Owner::with_runner(common::HOST.into(), url).await;
+    let mut record = isolated_run(&run, LOCAL_NODE_ID);
+    record["status"] = json!(RunStatus::Succeeded);
+    record["storage"] = json!({ "mode": "on-demand", "dirtyBytes": 5 });
+    add_local_run(&owner, &record).await;
+    owner
+        .put(
+            "node-disk-grants",
+            json!({ "id": grant, "runId": run, "nodeId": LOCAL_NODE_ID, "backups": [] }),
+        )
+        .await;
+    publication::request(&owner.service, &run).await.unwrap();
+    let maintenance = tokio::spawn(publication::maintain(owner.service.clone()));
+    tokio::time::timeout(Duration::from_secs(5), transfer_entered.notified())
+        .await
+        .unwrap();
+    owner
+        .set_checkpoint(&run, json!({ "nodeId": LOCAL_NODE_ID, "runnerId": id() }))
+        .await;
+    let mut later = vec![0; 4096];
+    later[..5].copy_from_slice(b"later");
+    volume.disk.write_at(0, &later).unwrap();
+    volume.seal_completed().await.unwrap();
+    publication::request(&owner.service, &run).await.unwrap();
+    publication::request(&owner.service, &run).await.unwrap();
+    assert_eq!(
+        captures.load(Ordering::SeqCst),
+        1,
+        "Later turns coalesce behind the in-flight generation"
+    );
+    transfer_release.cancel();
+    tokio::time::timeout(Duration::from_secs(5), ack_entered.notified())
+        .await
+        .unwrap();
+    let current = owner.run(&run).await;
+    assert_eq!(current["backup"]["requestedRevision"], 3);
+    assert_eq!(
+        current["backup"]["status"], "saving",
+        "S3 publication is not a node acknowledgement"
+    );
+    assert!(current["backup"]["acknowledgedRevision"].is_null());
+    ack_release.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let current = owner.run(&run).await;
+            if current["backup"]["acknowledgedRevision"] == 3
+                && current["backup"]["status"] == "ready"
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    let current = owner.run(&run).await;
+    assert!(
+        result.is_ok(),
+        "Coalesced publication did not drain: backup={} storage={} captures={} acks={}",
+        current["backup"],
+        current["storage"],
+        captures.load(Ordering::SeqCst),
+        acknowledgements.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        captures.load(Ordering::SeqCst),
+        2,
+        "Three final turns require only two publications"
+    );
+    assert_eq!(volume.disk.accounting().unwrap()["dirtyBytes"], 0);
+    let current = owner.run(&run).await;
+    let point = owner
+        .service
+        .get("node-backups", current["backup"]["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    let manifest = publication::manifest(&owner.service, &point).await.unwrap();
+    let bytes = publication::read_block(
+        &owner.service,
+        &point,
+        manifest["blocks"][0]["hash"].as_str().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(&bytes[..5], b"later");
+    owner
+        .service
+        .store
+        .patch_run(&run, json!({ "status": RunStatus::Cancelled }))
+        .await
+        .unwrap();
+    owner
+        .put(
+            "chats",
+            json!({ "id": id(), "runId": run, "lifecycle": "trash", "trashedAt": now() }),
+        )
+        .await;
+    publication::request(&owner.service, &run).await.unwrap();
+    common::eventually(
+        Duration::from_secs(15),
+        Duration::from_millis(10),
+        async || {
+            let current = owner.run(&run).await;
+            (current["backup"]["acknowledgedRevision"] == 4
+                && current["backup"]["status"] == "ready")
+                .then_some(())
+        },
+    )
+    .await;
+    assert_eq!(
+        acknowledgements.load(Ordering::SeqCst),
+        2,
+        "An already published completed generation needs no new S3 publication or receipt"
+    );
+    owner.service.shutdown.cancel();
+    maintenance.await.unwrap();
+    server.abort();
+}
+
 /// A runner controller that records capture requests and never acknowledges publication.
 fn capture_controller(disk: PathBuf, manifest: Value, grant: String, log: CaptureLog) -> Router {
     Router::new().fallback(move |request: Request<Body>| {

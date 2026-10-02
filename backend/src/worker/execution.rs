@@ -243,8 +243,8 @@ async fn release(
     requeue_pending_move(s, checkpoint).await?;
     if fenced && saved.firecracker() {
         let run = s.store.run(run_id).await?;
-        if run["status"] == RunStatus::Succeeded {
-            crate::nodes::publication::attempt(s, &run).await;
+        if run["status"] == RunStatus::Succeeded && crate::nodes::publication::protected(&run) {
+            crate::nodes::publication::request(s, run_id).await?;
         }
     }
     if fenced {
@@ -298,4 +298,66 @@ async fn clear_credentials(s: &Service, run_id: &str) {
         .join("home/.config/gh");
     // Most runs never configured GitHub CLI credentials.
     let _ = tokio::fs::remove_dir_all(github).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn completed_turn_releases_admission_while_publication_is_busy() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::config::Config {
+            data_dir: root.path().join("data"),
+            home: root.path().join("home"),
+            workspace_roots: vec![root.path().into()],
+            public_url: "http://localhost:4310".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            setup_token: "fixture".into(),
+            codex_bin: "codex".into(),
+            claude_bin: "claude".into(),
+            gh_bin: "gh".into(),
+            concurrency: 1,
+            logger: false,
+            worker_enabled: false,
+            runner_url: String::new(),
+        })
+        .await
+        .unwrap();
+        let run = crate::config::id();
+        service.store.transaction({
+            let run = run.clone();
+            move |db| {
+                let record = json!({ "id": run, "status": "succeeded", "isolated": true });
+                db.0.execute("INSERT INTO runs(id,task_id,project_id,status,created_at,data) VALUES(?1,?1,'','succeeded',0,?2)", rusqlite::params![run, record.to_string()])?;
+                Ok(())
+            }
+        }).await.unwrap();
+        let checkpoint = Checkpoint::new(service.store.clone(), run.clone(), RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "firecracker", "isolated": true }, "runnerId": crate::config::id(),
+        })).unwrap());
+        // A real publication holds this operation across capture, every S3 PUT,
+        // manifest verification and the node's acknowledgement.
+        let publication = service.node_backup_operation.lock(&run).await;
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            release(&service, &checkpoint, None, true),
+        )
+        .await
+        .expect("A completed turn must release its scheduler slot before S3 acknowledgement")
+        .unwrap();
+        let current = service.store.run(&run).await.unwrap();
+        assert_eq!(current["backup"]["status"], "pending");
+        assert_eq!(current["backup"]["requestedRevision"], 1);
+        // Repeated completed turns coalesce to one durable demand rather than
+        // enqueueing one upload task for each response.
+        release(&service, &checkpoint, None, true).await.unwrap();
+        assert_eq!(
+            service.store.run(&run).await.unwrap()["backup"]["requestedRevision"],
+            2
+        );
+        drop(publication);
+        service.shutdown.cancel();
+    }
 }

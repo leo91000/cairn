@@ -209,7 +209,7 @@ impl Pool {
         }
         // Release speculative RAM before applying a smaller cgroup envelope.
         // Health and stop never take the admission lock or await VM teardown.
-        self.retire_idle().await;
+        self.retire_idle(false).await;
         let _slots = self.slots.lock().await;
         let mut current = self.budget.lock().await;
         let cgroup = self.cgroup.get().unwrap();
@@ -265,7 +265,7 @@ impl Pool {
         loop {
             tokio::select! {
                 () = self.stop.cancelled() => {
-                    self.retire_idle().await;
+                    self.retire_idle(true).await;
                     return;
                 },
                 () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
@@ -331,6 +331,13 @@ impl Pool {
                 idle.reservation.retained_budget = Some(idle.budget);
                 return Ok(idle.reservation);
             }
+            if idle.publication_pending() {
+                self.slots.lock().await.retained.push_back(idle);
+                return Err(Error::new(
+                    425,
+                    "Waiting for disk publication before replacing this VM.",
+                ));
+            }
             idle.reservation.finish().await;
         }
         let has_ready = self.slots.lock().await.ready.is_some();
@@ -383,7 +390,7 @@ impl Pool {
 
     pub async fn drain(self: &Arc<Self>) {
         self.stop.cancel();
-        self.retire_idle().await;
+        self.retire_idle(true).await;
         self.cleanup.close();
         self.cleanup.wait().await;
     }
@@ -402,10 +409,17 @@ impl Pool {
         let _ = done.wait_for(|finished| *finished).await;
     }
 
-    async fn retire_idle(&self) {
+    async fn retire_idle(&self, shutdown: bool) {
         self.cancel_preparing().await;
         loop {
-            let idle = self.slots.lock().await.retained.pop_front();
+            let idle = {
+                let mut slots = self.slots.lock().await;
+                let index = slots
+                    .retained
+                    .iter()
+                    .position(|idle| shutdown || !idle.publication_pending());
+                index.and_then(|index| slots.retained.remove(index))
+            };
             let Some(mut idle) = idle else { break };
             idle.reservation.finish().await;
         }
@@ -424,9 +438,12 @@ impl Pool {
             if !pressure && (!needs_slot || slots.available(self.capacity.load(Ordering::SeqCst))) {
                 return Ok(());
             }
-            let idle = slots
+            let index = slots
                 .retained
-                .pop_front()
+                .iter()
+                .position(|idle| !idle.publication_pending());
+            let idle = index
+                .and_then(|index| slots.retained.remove(index))
                 .map(|idle| idle.reservation)
                 .or_else(|| slots.ready.take());
             drop(slots);
@@ -438,16 +455,23 @@ impl Pool {
     }
 
     /// Deletion, movement and pruning must reap the physical VM before taking its disk lock.
-    pub async fn evict_conversation(&self, run: &str) {
+    pub async fn evict_conversation(&self, run: &str) -> Result<()> {
         let _admission = self.admission.lock().await;
         let idle = {
             let mut slots = self.slots.lock().await;
             let index = slots.retained.iter().position(|idle| idle.run == run);
+            if index.is_some_and(|index| slots.retained[index].publication_pending()) {
+                return Err(Error::new(
+                    425,
+                    "Waiting for disk publication before eviction.",
+                ));
+            }
             index.and_then(|index| slots.retained.remove(index))
         };
         if let Some(mut idle) = idle {
             idle.reservation.finish().await;
         }
+        Ok(())
     }
 
     pub async fn capture_retained(&self, run: &str) -> Result<Option<serde_json::Value>> {
@@ -469,12 +493,13 @@ impl Pool {
         let Some((owner, control, stop)) = retained else {
             return Ok(None);
         };
-        let _capture = control
+        let capture = control
             .try_lock_owned()
             .map_err(|_| Error::conflict("A retained disk capture is already in progress."))?;
         drop(_admission);
         let snapshot =
-            crate::nodes::checkpoint::capture_paused(&self.state, run, &owner, stop).await?;
+            crate::nodes::checkpoint::capture_paused(&self.state, run, &owner, stop, capture)
+                .await?;
         Ok(Some(snapshot))
     }
 
@@ -507,13 +532,18 @@ impl Pool {
                     .retained
                     .iter()
                     .try_fold(0u64, |total, idle| total.checked_add(idle.bytes()?));
+                let exited = slots
+                    .retained
+                    .iter_mut()
+                    .position(|idle| idle.reservation.vm.as_mut().is_some_and(Vm::exited));
                 let expired = slots
                     .retained
                     .front()
                     .is_some_and(|idle| Instant::now() >= idle.expires);
                 let memory_pressure = memory_mi_b > budget.limits.memory_mi_b * 75 / 100;
                 let under_pressure = pressure.is_some() || memory_pressure;
-                if !expired
+                if exited.is_none()
+                    && !expired
                     && !under_pressure
                     && bytes.is_some_and(|bytes| {
                         retained::within_budget(slots.retained.len(), bytes, &budget)
@@ -521,7 +551,9 @@ impl Pool {
                 {
                     return Ok(());
                 }
-                let reason = if expired {
+                let reason = if exited.is_some() {
+                    "process_exited"
+                } else if expired {
                     "expired"
                 } else if pressure.is_some() {
                     "node_pressure"
@@ -533,7 +565,21 @@ impl Pool {
                     "retained_budget"
                 };
                 let count = slots.retained.len();
-                (slots.retained.pop_front(), reason, bytes, count)
+                // An already-dead VMM cannot be retained. Drain its backend
+                // and ownership, keeping the durable source journal intact so
+                // this node can recover it without waiting for remote upload.
+                let index = exited.or_else(|| {
+                    slots
+                        .retained
+                        .iter()
+                        .position(|idle| !idle.publication_pending())
+                });
+                (
+                    index.and_then(|index| slots.retained.remove(index)),
+                    reason,
+                    bytes,
+                    count,
+                )
             };
             let Some(mut idle) = idle else { return Ok(()) };
             tracing::info!(target: "leo_performance", operation = "vm_retention", event = "evicted", run_id = crate::performance::identity(&idle.run), reason, pressure = pressure.unwrap_or("none"), node_memory_mi_b = memory_mi_b, budget_memory_mi_b = budget.limits.memory_mi_b, retained_bytes, retained_count);
@@ -565,7 +611,7 @@ impl Pool {
                     .compatible(&budget, DEFAULT_DISK_MIB)
             });
         if incompatible || pressure.is_some() || memory > budget.limits.memory_mi_b * 75 / 100 {
-            self.retire_idle().await;
+            self.retire_idle(false).await;
             return Ok(());
         }
         if memory.saturating_add(ready::WARM_HEADROOM_MIB) > budget.limits.memory_mi_b {
@@ -802,6 +848,14 @@ impl Reservation {
         };
         // Do not drop boot or cleanup futures on cancellation: their resource ownership must drain.
         let result = operation.await;
+        if matches!(result, Ok(0)) {
+            let volume =
+                crate::storage::runtime::load(&self.owner.as_ref().unwrap().directory).await?;
+            // Seal the synced response before releasing its execution lease.
+            // The publisher can reconstruct this prefix without pausing a
+            // following turn, including when optional VM retention is skipped.
+            volume.seal_completed().await?;
+        }
         // Retention is optional. A capture can wait for attempt cancellation
         // to settle an uncertain pause/thaw, so finalization must not wait for
         // its control lock indefinitely before signalling that cancellation.
@@ -839,6 +893,8 @@ impl Reservation {
         };
         if retain {
             let pool = self.pool.clone();
+            let directory = &self.owner.as_ref().unwrap().directory;
+            let volume = crate::storage::runtime::load(directory).await?;
             let _admission = pool.admission.lock().await;
             if let Some(budget) = pool.retention_budget(execution_budget.as_ref()).await
                 && let Some(bytes) = self.vm.as_ref().and_then(Vm::resident_bytes)
@@ -858,11 +914,30 @@ impl Reservation {
                         }) {
                             None
                         } else {
-                            slots.retained.pop_front()
+                            let index = slots
+                                .retained
+                                .iter()
+                                .position(|idle| !idle.publication_pending());
+                            index.and_then(|index| slots.retained.remove(index))
                         }
                     };
                     let Some(mut old) = old else { break };
                     old.reservation.finish().await;
+                }
+                let fits = {
+                    let slots = pool.slots.lock().await;
+                    slots
+                        .retained
+                        .iter()
+                        .try_fold(bytes, |total, idle| total.checked_add(idle.bytes()?))
+                        .is_some_and(|total| {
+                            retained::within_budget(slots.retained.len() + 1, total, &budget)
+                        })
+                };
+                if !fits {
+                    stop.cancel();
+                    self.finish().await;
+                    return result;
                 }
                 // Anonymous eligibility ends permanently on assignment.
                 self.prepared = None;
@@ -874,6 +949,7 @@ impl Reservation {
                     key: retained::key(&plan),
                     expires: Instant::now() + pool.retention,
                     reservation: self,
+                    volume: Some(volume),
                 };
                 pool.slots.lock().await.retained.push_back(idle);
                 stop.cancel();
@@ -976,6 +1052,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admission_and_explicit_eviction_preserve_unacknowledged_journals() {
+        use crate::storage::Disk;
+        let root = tempfile::tempdir().unwrap();
+        let pool = Pool::new(
+            root.path().into(),
+            root.path().into(),
+            CancellationToken::new(),
+            3,
+        )
+        .await
+        .unwrap();
+        let run = crate::config::id();
+        let owner = crate::storage::environment::ownership(root.path(), &run, "busy")
+            .await
+            .unwrap();
+        let manifest = serde_json::json!({ "version": 1, "size": 4096, "blockSize": crate::nodes::snapshots::BLOCK, "blocks": [{ "offset": 0, "size": 4096, "hash": null }] });
+        let source = serde_json::json!({ "master": "http://127.0.0.1:9/", "grant": "synthetic-pin", "policy": { "reserveMiB": 64, "reservePercent": 1 } });
+        let disk =
+            crate::storage::runtime::create(&owner.directory.join("lazy"), &manifest, &source)
+                .await
+                .unwrap();
+        disk.write_at(0, b"durable but not published").unwrap();
+        drop(disk);
+        let volume = crate::storage::runtime::load(&owner.directory)
+            .await
+            .unwrap();
+        let pinned = pool.reserve(&cold_plan(&run)).await.unwrap();
+        let disposable = pool.reserve(&cold_plan("disposable")).await.unwrap();
+        let ready = pool.reserve(&cold_plan("anonymous")).await.unwrap();
+        let budget = Budget {
+            slots: 3,
+            limits: crate::nodes::Resources {
+                cpu: 3,
+                memory_mi_b: 8192,
+                disk_mi_b: 32768,
+            },
+        };
+        {
+            let mut slots = pool.slots.lock().await;
+            for (run, reservation, volume) in [
+                (run.clone(), pinned, Some(volume.clone())),
+                ("disposable".into(), disposable, None),
+            ] {
+                slots.retained.push_back(retained::Retained {
+                    run,
+                    reservation,
+                    volume,
+                    budget: budget.clone(),
+                    key: serde_json::Value::Null,
+                    expires: Instant::now() - Duration::from_secs(1),
+                });
+            }
+            slots.ready = Some(ready);
+        }
+        assert_eq!(pool.evict_conversation(&run).await.unwrap_err().status, 425);
+        let first = pool.reserve(&cold_plan("first-active")).await.unwrap();
+        assert_eq!(
+            first.slot, 2,
+            "Even expired retained VMs stay pinned until publication"
+        );
+        let second = pool.reserve(&cold_plan("second-active")).await.unwrap();
+        assert_eq!(
+            second.slot, 3,
+            "Evict the anonymous pool before the unpublished conversation"
+        );
+        assert!(pool.reserve(&cold_plan("third-active")).await.is_err());
+        let generation = volume.seal().await.unwrap();
+        volume.disk.capture(generation).unwrap();
+        volume
+            .disk
+            .commit_published(generation, &crate::config::id())
+            .unwrap();
+        pool.evict_conversation(&run).await.unwrap();
+        assert!(pool.slots.lock().await.retained.is_empty());
+        drop((first, second));
+        pool.drain().await;
+    }
+
+    #[tokio::test]
     async fn active_admission_evicts_oldest_retained_before_the_ready_pool() {
         let root = tempfile::tempdir().unwrap();
         let pool = Pool::new(
@@ -1005,6 +1160,7 @@ mod tests {
                 key: serde_json::Value::Null,
                 expires: Instant::now() + Duration::from_secs(180),
                 reservation,
+                volume: None,
             });
         }
         slots.ready = Some(ready);
