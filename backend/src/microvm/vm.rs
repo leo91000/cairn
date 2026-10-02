@@ -400,6 +400,12 @@ impl Vm {
             // The first diff is a standalone image of a freshly booted VM.
             // Avoid faulting/writing the entire sparse RAM ceiling on a node.
             config["machine-config"]["track_dirty_pages"] = true.into();
+            // Never capture enabled L2 virtualization hardware: its VMX/SVM
+            // state is not part of a Firecracker snapshot. The guest enables
+            // it on the first nested VM creation after restore instead.
+            let boot_args = config["boot-source"]["boot_args"].as_str().unwrap();
+            config["boot-source"]["boot_args"] =
+                format!("{boot_args} kvm.enable_virt_at_load=0").into();
         }
         if let Startup::Restore(template) = startup {
             snapshots::link(template, jail).await?;

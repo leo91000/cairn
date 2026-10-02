@@ -127,6 +127,7 @@ async function main() {
       await writeFile(path.join(source, 'home/.codex/config.toml'), 'cli_auth_credentials_store = "file"\n')
       await writeFile(path.join(source, 'home/.codex/leo-managed-auth'), '1')
       await writeFile(path.join(source, 'chat-input/messages.json'), '[]')
+      await copyFile(new URL('./fixtures/nested-kvm.c', import.meta.url), path.join(source, 'workspace/nested-kvm.c'))
       let credentials = 0
       const claims = Buffer.from(JSON.stringify({ 'sub': marker, 'exp': Math.floor(Date.now() / 1000) + 3600, 'https://api.openai.com/auth': { chatgpt_account_id: marker, chatgpt_plan_type: 'plus' } })).toString('base64url')
       const broker = createServer(client => client.once('data', () => {
@@ -182,6 +183,7 @@ async function main() {
     await Promise.all(plans.map(entry => api(`/runs/${entry.id}`, 'POST')))
     await until(() => {
       const requests = records()
+      assert.ok(!requests.some(request => request.failed), 'Native tool failed; inspect the private guest logs')
       return plans.every(entry => requests.some(request => request.marker === entry.marker && request.executed))
     })
     const memory = JSON.parse(docker('exec', name, 'node', '/data/memory.mjs'))

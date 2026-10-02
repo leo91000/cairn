@@ -53,6 +53,18 @@ Les restaurations sont parallèles ; installation/éviction seulement utilisent
 un verrou exclusif. Un échec de restauration retire le clone et ne lui attribue
 aucune conversation. Les reprises existantes gardent la rétention/boot habituel.
 
+Le template démarre avec `kvm.enable_virt_at_load=0`. Le noyau guest 6.12 active
+normalement VMX/SVM dès son chargement ; cet état matériel de virtualisation
+imbriquée n'est pas restauré avec le template. Le premier prototype fait ainsi
+échouer les quatre créations de vCPU L2 sur Intel (`kvm_spurious_fault` et
+SIGSEGV), alors que le contrôle à froid passe. Avec l'activation différée au
+premier L2, les quatre clones et leurs quatre reprises après crash exécutent
+`KVM_RUN` et calculent 42. Le guest refuse la capacité de template si le réglage
+n'est pas effectif. Les démarrages ordinaires gardent leur configuration.
+Ce réglage est celui du
+[noyau](https://docs.kernel.org/admin-guide/kernel-parameters.html) ; aucun patch
+Firecracker n'est ajouté. Le template reste sans VM Android/nested active.
+
 ## Premier comparatif intégré
 
 Même image privée dérivée de v0.52.5 avec le nouveau runner/guest, Firecracker
@@ -99,6 +111,9 @@ le modèle synthétique hors du guest pour vérifier le réseau renouvelé, cont
 quatre mappings privés vers le même inode et vérifie après SIGKILL des marqueurs
 fsync dans le système et le workspace de chaque conversation. Les seuls accès
 de test sont synthétiques. `SYS_PTRACE` sert à la mesure smaps, pas au produit.
+Le même test compile et exécute le petit guest L2 de `nested-kvm.c` avant chaque
+marqueur, dans les clones puis après reprise ; il ne remplace pas la qualification
+Android complète sur les deux architectures.
 
 Le test versionné passe ensuite sur une image sans modèle ajouté au guest,
 toujours dérivée du runtime épinglé de v0.52.5 et avec le nouveau runner/guest.

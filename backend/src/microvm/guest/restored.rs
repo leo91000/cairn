@@ -14,6 +14,11 @@ struct Entropy {
     bytes: [u8; 32],
 }
 
+pub(super) fn kvm_is_deferred() -> bool {
+    std::fs::read_to_string("/sys/module/kvm/parameters/enable_virt_at_load")
+        .is_ok_and(|value| value.trim() == "N")
+}
+
 pub(super) fn validate(identity: &CloneIdentity) -> Result<[u8; 32]> {
     uuid::Uuid::parse_str(&identity.id).map_err(|_| Error::bad("Invalid clone identity."))?;
     let guest: Ipv4Addr = identity

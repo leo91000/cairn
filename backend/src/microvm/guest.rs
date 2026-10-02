@@ -155,7 +155,7 @@ async fn handle(
                 codex_service: true,
                 codex_ready: codex.ready(),
                 workspace_disks: true,
-                snapshot_clones: true,
+                snapshot_clones: restored::kvm_is_deferred(),
             };
             wire::write(&mut write, &status).await
         }

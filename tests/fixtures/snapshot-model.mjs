@@ -30,16 +30,21 @@ createServer(async (request, response) => {
   const verify = input.includes('VERIFY_SNAPSHOT')
   const success = verify ? 'SNAPSHOT_TOOL_VERIFIED' : 'SNAPSHOT_TOOL_EXECUTED'
   const outputs = body.input.filter(item => item.type === 'function_call_output')
-  const executed = JSON.stringify(outputs.at(-1) || {}).includes(success)
-  const tool = body.tools?.find(item => item.name === 'exec_command')
+  const output = JSON.stringify(outputs.at(-1) || {})
+  const executed = output.includes(success)
+  const exit = output.match(/Process exited with code (\d+)/)?.[1]
+  const failed = exit !== undefined && exit !== '0'
+  const pending = output.match(/Process running with session ID (\d+)/)?.[1]
+  const tool = body.tools?.find(item => item.name === (pending ? 'write_stdin' : 'exec_command'))
   records.push({
     at: Date.now(),
     marker,
     verify,
     executed,
+    failed,
     tools: Boolean(tool),
   })
-  if (!executed && !tool) {
+  if (!executed && !failed && !tool) {
     response.writeHead(400).end('{}')
     return
   }
@@ -48,15 +53,17 @@ createServer(async (request, response) => {
   const operation = verify
     ? `for(const path of paths)assert.equal(fs.readFileSync(path,'utf8'),marker);`
     : `for(const path of paths){fs.writeFileSync(path,marker);const fd=fs.openSync(path,'r');fs.fsyncSync(fd);fs.closeSync(fd);}const directory=fs.openSync('.','r');fs.fsyncSync(directory);fs.closeSync(directory);`
-  const program = `const fs=require('node:fs'),assert=require('node:assert/strict');const marker=${JSON.stringify(marker)},paths=${JSON.stringify(paths)};${operation}console.log('${success}');`
+  const program = `const fs=require('node:fs'),assert=require('node:assert/strict'),cp=require('node:child_process');cp.execFileSync('cc',['-O2','-o','/tmp/snapshot-nested-kvm','nested-kvm.c'],{timeout:20000});console.log(cp.execFileSync('/tmp/snapshot-nested-kvm',{encoding:'utf8',timeout:20000}));const marker=${JSON.stringify(marker)},paths=${JSON.stringify(paths)};${operation}console.log('${success}');`
   const quoted = `'${program.replaceAll('\'', '\'\\\'\'')}'`
-  const item = executed
+  const message = executed || failed
+  const text = failed ? 'SNAPSHOT_TEST_FAILED' : 'SNAPSHOT_NATIVE_OK'
+  const item = message
     ? {
         id: `msg_${randomUUID()}`,
         type: 'message',
         role: 'assistant',
         status: 'completed',
-        content: [{ type: 'output_text', text: 'SNAPSHOT_NATIVE_OK', annotations: [] }],
+        content: [{ type: 'output_text', text, annotations: [] }],
       }
     : {
         id: `fc_${randomUUID()}`,
@@ -64,7 +71,9 @@ createServer(async (request, response) => {
         status: 'completed',
         call_id: `call_${randomUUID()}`,
         name: tool.name,
-        arguments: JSON.stringify({ cmd: `node -e ${quoted}`, login: false, yield_time_ms: 1000 }),
+        arguments: JSON.stringify(pending
+          ? { session_id: Number(pending), chars: '', yield_time_ms: 1000 }
+          : { cmd: `node -e ${quoted}`, login: false, yield_time_ms: 1000 }),
       }
   // Keep four real VMMs active long enough to inspect physical memory.
   if (executed && !verify && input.includes('HOLD_SNAPSHOT'))
@@ -85,14 +94,14 @@ createServer(async (request, response) => {
   response.writeHead(200, { 'content-type': 'text/event-stream' })
   for (const event of [
     { type: 'response.created', response: { ...result, status: 'in_progress', output: [] } },
-    { type: 'response.output_item.added', output_index: 0, item: { ...item, status: 'in_progress', ...(executed ? { content: [] } : { arguments: '' }) } },
-    executed
+    { type: 'response.output_item.added', output_index: 0, item: { ...item, status: 'in_progress', ...(message ? { content: [] } : { arguments: '' }) } },
+    message
       ? {
           type: 'response.output_text.delta',
           item_id: item.id,
           output_index: 0,
           content_index: 0,
-          delta: 'SNAPSHOT_NATIVE_OK',
+          delta: text,
         }
       : {
           type: 'response.function_call_arguments.delta',
