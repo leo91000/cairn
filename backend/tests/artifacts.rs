@@ -334,6 +334,33 @@ async fn interrupted_transfers_and_revoked_in_flight_grants_do_not_publish_parti
 }
 
 #[tokio::test]
+async fn rejected_metadata_commit_removes_the_durable_unpublished_file() {
+    let f = Fixture::new().await;
+    let database = rusqlite::Connection::open(f.s.config.data_dir.join("manager.db")).unwrap();
+    database
+        .execute_batch(
+            "CREATE TRIGGER reject_artifact BEFORE INSERT ON kv
+             WHEN NEW.key LIKE 'artifact:%'
+             BEGIN SELECT RAISE(ABORT, 'rejected artifact commit'); END;",
+        )
+        .unwrap();
+
+    let error = f
+        .publish(&json!({ "path": "/tmp/report.md", "title": "Report", "key": "report" }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, 409);
+    assert!(f.listed().await.is_empty());
+    assert_eq!(
+        std::fs::read_dir(f.s.config.data_dir.join("artifacts"))
+            .unwrap()
+            .count(),
+        0
+    );
+    f.server.abort();
+}
+
+#[tokio::test]
 async fn preview_is_prepared_asynchronously_or_reports_missing_optional_tools_without_losing_original()
  {
     let f = Fixture::new().await;
