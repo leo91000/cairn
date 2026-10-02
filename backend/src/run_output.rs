@@ -292,8 +292,16 @@ pub fn chat_plan(
         directory.join("chat-input")
     };
     let agent = &run["snapshot"]["agent"];
+    let provider = crate::provider::Provider::of_run(run);
+    // MCP access belongs to the current thread lease. Duplicating it in CLI
+    // options prevents an already initialized Codex process from being reused.
+    let args = if provider == crate::provider::Provider::Codex {
+        json!([])
+    } else {
+        mcp["args"].clone()
+    };
     let mut plan = json!({
-        "provider": crate::provider::Provider::of_run(run),
+        "provider": provider,
         "claudeMcps": mcp["claudeMcps"],
         "claudeDeniedTools": mcp["claudeDeniedTools"],
         "execution": run["chatExecution"],
@@ -305,7 +313,7 @@ pub fn chat_plan(
         "reasoning": agent["reasoning"],
         "sandbox": policy(agent)["sandbox"],
         "writableRoots": roots,
-        "args": mcp["args"],
+        "args": args,
         "codexConfig": { "mcp_servers": mcp["codexConfig"] },
     });
     if let Some(session) = session {

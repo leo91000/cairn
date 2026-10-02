@@ -1,7 +1,7 @@
 {
   "name": "leo-agent-manager",
   "type": "module",
-  "version": "0.52.1",
+  "version": "0.52.2",
   "private": true,
   "packageManager": "pnpm@12.3.4",
   "description": "A private control room for your coding agents, scheduled work, and shared skills.",

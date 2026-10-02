@@ -752,7 +752,7 @@ fn keep_item(turn: &mut Value, item: &Value) -> Result<()> {
 pub async fn run(
     config: &Config,
     home: &Path,
-    mut plan: Value,
+    plan: Value,
     events: mpsc::Sender<Value>,
     cancel: CancellationToken,
 ) -> Result<()> {
@@ -763,10 +763,6 @@ pub async fn run(
         .filter_map(Value::as_str)
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    // Keep the existing CLI configuration path unchanged for cold adapters.
-    if let Some(plan) = plan.as_object_mut() {
-        plan.remove("codexConfig");
-    }
     let mut session =
         Session::codex(config, home, &args, Some(Path::new(text(&plan, "cwd")))).await?;
     let result = run_session(&mut session, home, plan, events, cancel, false).await;
