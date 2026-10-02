@@ -1,7 +1,7 @@
 # Transport ublk optionnel et VMGenID
 
-Date : 2026-10-02. Statut : transport qualifié localement et mesuré en production,
-activé explicitement sur le VPS. Les snapshots restent un chantier distinct.
+Date : 2026-10-02. Statut : gain mesuré en production ; activation ublk retirée
+pendant la correction du blocage de writeback. Les snapshots restent distincts.
 
 ## Question et mesures
 
@@ -123,6 +123,38 @@ propriétaire vivant, la récupération des intentions après SIGKILL et l'inté
 du journal. Ces tests ne qualifient pas un démarrage par snapshot en production.
 
 ## Périmètre de livraison
+
+### Progression du writeback hôte
+
+La qualification Android a révélé un worker bloqué dans `balance_dirty_pages`.
+Le ménage disque effectué sur l'hôte entre 14 h 45 et 15 h 05 UTC augmente
+la contention de cette première exécution ; il ne suffit pas à expliquer
+le défaut. Après ce ménage, un banc sans VM, sans remplissage mémoire ni charge
+externe ajoutée reproduit le blocage avec 512 Mio d'écritures tamponnées sur
+un périphérique ublk réel, dans un conteneur limité à 1 280 Mio. Le témoin
+expire après 20 s, sans OOM. Ajouter uniquement `CAP_SYS_RESOURCE` ne le corrige
+pas : libublk marque sa file, mais le worker qui écrit le journal reste ordinaire.
+
+Le backend sert le writeback d'un périphérique tout en écrivant via le page
+cache d'un autre : le throttling peut attendre les requêtes qu'il doit lui-même
+terminer. Le runner ublk active et vérifie `PR_SET_IO_FLUSHER` avant de créer
+son runtime ; ses threads de journal, capture et maintenance héritent de cette
+protection. Le worker du journal la vérifie aussi explicitement. Sans la
+capacité, le démarrage échoue avant la création d'un périphérique. Seuls les
+conteneurs configurés pour ublk reçoivent `CAP_SYS_RESOURCE` ; les plafonds
+mémoire du conteneur et la frontière durable restent en place.
+
+Le test noyau `tests/ublk-writeback-smoke.mjs IMAGE PROBE` couvre la progression
+d'un Gio, le regroupement durable, l'absence d'OOM, un SIGKILL, la relecture
+complète après réouverture du journal et le refus sans capacité. `PROBE` est
+construit avec `--features ublk-prototype --example ublk_probe` pour la libc de
+l'image testée. Les détails et pressions hôte sont conservés hors Git dans
+`/var/tmp/leo-ublk-evidence-*`. L'ancien binaire échoue sur la progression après
+20 s ; le candidat réussit trois répétitions consécutives sans charge ajoutée
+en parallèle : écriture et fsync en 2,61 / 3,51 / 3,41 s, 2 052 frames durables,
+groupes de 16 frames au maximum, aucun OOM et un Gio vérifié après chaque crash.
+Ces temps portent sur le banc, pas sur une conversation. La qualification Android et l'image finale
+restent des étapes requises avant release ; les mesures ci-dessus ne les remplacent pas.
 
 Cette décision livre uniquement le transport optionnel et le pilote VMGenID.
 La séparation système/workspace, les vues de disque, le prébuild et le démarrage

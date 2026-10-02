@@ -58,7 +58,7 @@ class Supervisor(unittest.TestCase):
         with patch.object(host, 'command') as command, patch.object(Path, 'stat', return_value=control), patch.object(Path, 'read_text', read):
             arguments = host.block_device_arguments('ublk')
         self.assertEqual(command.call_args.args[0], ['modprobe', 'ublk_drv'])
-        self.assertEqual(arguments, ['--device=/dev/ublk-control', '--device-cgroup-rule=c 507:* rwm', '--device-cgroup-rule=b 260:* rwm', '-e', 'LEO_BLOCK_TRANSPORT=ublk'])
+        self.assertEqual(arguments, ['--cap-add=SYS_RESOURCE', '--device=/dev/ublk-control', '--device-cgroup-rule=c 507:* rwm', '--device-cgroup-rule=b 260:* rwm', '-e', 'LEO_BLOCK_TRANSPORT=ublk'])
         self.assertEqual(host.block_device_arguments('vhost-user'), [])
 
         with patch.object(host, 'command'), patch.object(Path, 'stat', return_value=control), patch.object(Path, 'read_text', lambda path: '2' if path.name == 'io_uring_disabled' else devices):

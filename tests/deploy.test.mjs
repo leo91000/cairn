@@ -167,7 +167,18 @@ describe('coolify deployment over HTTP', () => {
     expect(result.environment.LEO_BLOCK_TRANSPORT).toBe('ublk')
     expect(result.devices).toContain('/dev/ublk-control:/dev/ublk-control')
     expect(result.device_cgroup_rules).toEqual(runner.device_cgroup_rules)
+    expect(result.cap_add).toContain('SYS_RESOURCE')
     expect(result.privileged).toBeUndefined()
+    expect(firecrackerRunnerCompose(compose)).toBe(compose)
+  })
+
+  it('does not grant the ublk flusher capability to a vhost-user runner', async () => {
+    const document = parse(compose)
+    document.services.runner.cap_add.push('SYS_RESOURCE')
+    document.services.runner.environment.LEO_BLOCK_TRANSPORT = 'vhost-user'
+    compose = stringify(document)
+    await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
+    expect(parse(compose).services.runner.cap_add).not.toContain('SYS_RESOURCE')
     expect(firecrackerRunnerCompose(compose)).toBe(compose)
   })
 

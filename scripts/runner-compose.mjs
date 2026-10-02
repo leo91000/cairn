@@ -189,7 +189,7 @@ export function firecrackerRunnerCompose(compose) {
     stop_grace_period: '30s',
     read_only: true,
     cap_drop: ['ALL'],
-    cap_add: ['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'],
+    cap_add: ['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE', ...(blockTransport === 'ublk' ? ['SYS_RESOURCE'] : [])],
     security_opt: ['apparmor:unconfined', 'seccomp:unconfined'],
     devices,
     sysctls: { 'net.ipv4.ip_forward': '1', 'net.ipv6.conf.all.disable_ipv6': '1' },

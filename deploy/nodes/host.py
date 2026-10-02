@@ -153,7 +153,7 @@ def block_device_arguments(transport):
     if Path('/proc/sys/kernel/io_uring_disabled').read_text().strip() != '0':
         raise RuntimeError('ublk requires io_uring on this node')
     # Dynamic ublk minors require their detected classes, never all host devices.
-    return ['--device=/dev/ublk-control',
+    return ['--cap-add=SYS_RESOURCE', '--device=/dev/ublk-control',
             f'--device-cgroup-rule=c {character}:* rwm',
             f'--device-cgroup-rule=b {block}:* rwm',
             '-e', 'LEO_BLOCK_TRANSPORT=ublk']

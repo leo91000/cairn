@@ -178,6 +178,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() != 7 || !["vhost", "ublk-managed"].contains(&args[1].as_str()) {
         return Err("Usage: ublk_probe vhost|ublk-managed BASE JOURNAL READY METRICS SOCKET_OR_STATE; cleanup-managed STATE; inspect-device ID; export METRICS".into());
     }
+    if args[1] == "ublk-managed" {
+        storage::ublk::prepare_io_threads()?;
+    }
     let disk = disk(Path::new(&args[2]), Path::new(&args[3]))?;
     let metrics = args[5].clone();
     let observer = disk.clone();

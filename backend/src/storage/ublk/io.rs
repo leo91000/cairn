@@ -20,6 +20,27 @@ pub(super) const DEPTH: u16 = 64;
 const IO_BYTES: u32 = 512 * 1024;
 const MAX_BATCH_BYTES: usize = 8 * 1024 * 1024;
 
+/// Journal writes service another block device's writeback. Ordinary dirty-page
+/// throttling can wait for those same requests, creating a circular dependency.
+/// Set this before creating the device so its writer and queue threads inherit
+/// the flag. libublk tries this for its queue alone and ignores permission errors.
+pub(super) fn enable_io_flusher() -> io::Result<()> {
+    // Linux prctl ABI, available since 5.6; absent from libc's Linux constants.
+    const PR_SET_IO_FLUSHER: i32 = 57;
+    const PR_GET_IO_FLUSHER: i32 = 58;
+    if unsafe { libc::prctl(PR_SET_IO_FLUSHER, 1_i64, 0_i64, 0_i64, 0_i64) } != 0 {
+        let error = io::Error::last_os_error();
+        return Err(io::Error::new(
+            error.kind(),
+            format!("ublk I/O threads require CAP_SYS_RESOURCE for IO_FLUSHER: {error}"),
+        ));
+    }
+    if unsafe { libc::prctl(PR_GET_IO_FLUSHER, 0_i64, 0_i64, 0_i64, 0_i64) } != 1 {
+        return Err(io::Error::other("ublk IO_FLUSHER state was not enabled"));
+    }
+    Ok(())
+}
+
 enum Command {
     Read { offset: u64, length: usize },
     Write { offset: u64, bytes: Vec<u8> },
@@ -105,7 +126,13 @@ pub(super) fn serve(
     let wake = Arc::new(EventFd::new(libc::EFD_CLOEXEC | libc::EFD_NONBLOCK)?);
     let writer_wake = wake.clone();
     let (sender, receiver) = mpsc::sync_channel(usize::from(DEPTH));
-    let worker = std::thread::spawn(move || worker(disk.as_ref(), &receiver, &writer_wake));
+    let worker = std::thread::Builder::new()
+        .name("leo-ublk-journal".into())
+        .spawn(move || -> io::Result<()> {
+            enable_io_flusher()?;
+            worker(disk.as_ref(), &receiver, &writer_wake);
+            Ok(())
+        })?;
     let result = control
         .run_target(
             move |dev: &mut UblkDev| {
@@ -265,6 +292,6 @@ pub(super) fn serve(
     drop(control);
     worker
         .join()
-        .map_err(|_| io::Error::other("ublk journal worker panicked"))?;
+        .map_err(|_| io::Error::other("ublk journal worker panicked"))??;
     result.map(|_| ())
 }

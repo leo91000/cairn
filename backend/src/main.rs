@@ -33,6 +33,14 @@ fn main() -> ExitCode {
         eprintln!("Missing supervisor control socket.");
         return ExitCode::FAILURE;
     }
+    #[cfg(feature = "ublk")]
+    if args.first().is_some_and(|a| a == "runner-broker")
+        && std::env::var("LEO_BLOCK_TRANSPORT").is_ok_and(|value| value == "ublk")
+        && let Err(error) = leo_agent_manager::storage::ublk::prepare_io_threads()
+    {
+        eprintln!("{error}");
+        return ExitCode::FAILURE;
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
