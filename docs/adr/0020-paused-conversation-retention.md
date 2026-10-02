@@ -69,10 +69,19 @@ candidate take 2,218 / 2,128 ms. These are two samples per setting, local and
 synthetic, not a production percentile or proof that CPU contention is the
 sole cause in production. The guest image and the three-second bound are unchanged.
 
+A 141.54-second large-guest trial at three CPUs then passes 40 native turns,
+four digest-verified publications, 40 account renewals, MCP replacement/removal,
+paused captures, forced VMM crash/context recovery, active-work eviction and
+complete reaping. One VMM serves the first 39 turns and a new VMM serves the
+deliberate crash recovery. Retained physical allocation is 1,232.86–1,342.25 MiB;
+reclamation takes 54–135 ms. This finite trial validates recovery and admission,
+not indefinite leak freedom; the counter-gap conclusion below remains separate.
+
 Raw failure, control and candidate records remain outside Git as release assets:
 `v0520-contended-retention-red.json.failure.log`,
 `retention-physical-balloon-contended-green.json` and
-`retention-physical-balloon-contended-cold.json`.
+`retention-physical-balloon-contended-cold.json`, plus
+`retention-physical-balloon-large-soak.json`.
 
 The comparison uses the same runner image with retention enabled/disabled,
 real Firecracker/vhost and pinned native Codex, a synthetic account, model and
