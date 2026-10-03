@@ -323,7 +323,7 @@ async fn authenticate_api(app: &App, request: &mut Request) -> Result<()> {
         InstallationIdentity::trusted(InstallationRole::Owner)
     };
 
-    if identity.role != InstallationRole::Owner && owner_operation(path) {
+    if identity.role != InstallationRole::Owner && owner_operation(method, path) {
         return Err(Error::forbidden(
             "Only the installation owner can manage this resource.",
         ));
@@ -333,8 +333,24 @@ async fn authenticate_api(app: &App, request: &mut Request) -> Result<()> {
 }
 
 /// Installation management permissions are declared here, before dispatch.
-fn owner_operation(path: &str) -> bool {
-    path == "/api/nodes" || path.starts_with("/api/nodes/")
+fn owner_operation(method: &str, path: &str) -> bool {
+    let segments = path
+        .trim_start_matches("/api/")
+        .split('/')
+        .collect::<Vec<_>>();
+    let read = matches!(method, "GET" | "HEAD");
+    match segments.as_slice() {
+        // Storage configuration lives under nodes; credentials also include
+        // MCP grants, connection flows and per-agent GitHub tokens below.
+        [
+            "nodes" | "accounts" | "onepassword" | "mcps" | "tokens" | "oauth" | "connections"
+            | "settings" | "audit" | "agent-avatars",
+            ..,
+        ] => true,
+        ["agents"] | ["agents", _, "avatar"] => !read,
+        ["agents", ..] => true,
+        _ => false,
+    }
 }
 
 pub struct Input {

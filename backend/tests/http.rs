@@ -176,6 +176,56 @@ async fn member_identity_can_list_conversations_but_cannot_manage_nodes() {
 }
 
 #[tokio::test]
+async fn member_identity_cannot_manage_installation_resources() {
+    let (_root, app, _service) = app().await;
+    let agent = MAIN_AGENT_ID;
+    let management = [
+        ("GET", "/api/accounts".to_owned()),
+        ("GET", "/api/onepassword".to_owned()),
+        ("GET", "/api/mcps".to_owned()),
+        ("GET", "/api/connections/login".to_owned()),
+        ("GET", "/api/tokens".to_owned()),
+        ("POST", "/api/oauth/consent".to_owned()),
+        ("GET", "/api/settings".to_owned()),
+        ("GET", "/api/audit".to_owned()),
+        ("GET", "/api/nodes/settings".to_owned()),
+        ("HEAD", "/api/nodes".to_owned()),
+        ("GET", "/api/agent-avatars".to_owned()),
+        ("POST", "/api/agents".to_owned()),
+        ("PUT", format!("/api/agents/{agent}")),
+        ("DELETE", format!("/api/agents/{agent}")),
+        ("GET", format!("/api/agents/{agent}/github-token")),
+        ("PUT", format!("/api/agents/{agent}/github-token")),
+        ("POST", format!("/api/agents/{agent}/avatar/generate")),
+        ("PUT", format!("/api/agents/{agent}/avatar")),
+    ];
+
+    for (method, path) in management {
+        let mut request = json_request(method, &path).body(Body::empty()).unwrap();
+        request
+            .extensions_mut()
+            .insert(InstallationIdentity::trusted(InstallationRole::Member));
+
+        assert_eq!(
+            send(&app, request).await.status(),
+            StatusCode::FORBIDDEN,
+            "{method} {path}",
+        );
+    }
+
+    // Choosing an agent for a conversation is available to every member.
+    for method in ["GET", "HEAD"] {
+        let mut request = json_request(method, "/api/agents")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(InstallationIdentity::trusted(InstallationRole::Member));
+        assert_eq!(send(&app, request).await.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
 async fn login_limits_ignore_forged_forwarded_ips() {
     let (_root, app, _service) = app().await;
     for n in 0..11 {
