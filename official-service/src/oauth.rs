@@ -40,6 +40,7 @@ impl OAuthProviders {
 
 pub(super) async fn options(State(service): State<Service>) -> Json<Value> {
     Json(json!({
+        "passkeys": passkeys::available(&service),
         "google": service.oauth.google.is_some(),
         "github": service.oauth.github.is_some(),
     }))
@@ -246,19 +247,20 @@ pub(super) async fn callback(
     let mut transaction = service.pool.begin().await?;
     let (account_id,): (String,) = query_as("INSERT INTO leo_accounts (id, email) VALUES ($1, $2) ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email RETURNING id")
         .bind(uuid::Uuid::new_v4().to_string()).bind(&email).fetch_one(&mut *transaction).await?;
-    if link_account.is_some_and(|id| id != account_id) {
+    if link_account.as_ref().is_some_and(|id| id != &account_id) {
         return Err(rejected());
     }
-    let existing: Option<(String,)> =
-        query_as("SELECT account_id FROM sign_in_methods WHERE kind = $1 AND subject = $2")
-            .bind(&name)
-            .bind(&subject)
-            .fetch_optional(&mut *transaction)
-            .await?;
-    if existing.is_some_and(|(id,)| id != account_id) {
+    let existing: Option<(String, bool)> = query_as(
+        "SELECT account_id, removed FROM sign_in_methods WHERE kind = $1 AND subject = $2",
+    )
+    .bind(&name)
+    .bind(&subject)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    if existing.is_some_and(|(id, removed)| id != account_id || removed && link_account.is_none()) {
         return Err(rejected());
     }
-    query("INSERT INTO sign_in_methods (id, account_id, kind, subject, label) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (kind, subject) DO NOTHING")
+    query("INSERT INTO sign_in_methods (id, account_id, kind, subject, label) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (kind, subject) DO UPDATE SET removed = false")
         .bind(uuid::Uuid::new_v4().to_string()).bind(&account_id).bind(name).bind(subject).bind(&email).execute(&mut *transaction).await?;
     let session_response = create_session(&service, &mut transaction, &account_id, &email).await?;
     transaction.commit().await?;

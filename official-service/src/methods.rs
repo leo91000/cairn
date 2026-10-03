@@ -31,7 +31,7 @@ pub(super) async fn list(
 ) -> Result<Json<Value>, ApiError> {
     let (id, _) = authenticated(&service, &headers, false).await?;
     let rows: Vec<(String, String, String)> = query_as(
-        "SELECT id, kind, label FROM sign_in_methods WHERE account_id = $1 ORDER BY kind, id",
+        "SELECT id, kind, label FROM sign_in_methods WHERE account_id = $1 AND NOT removed ORDER BY kind, id",
     )
     .bind(id)
     .fetch_all(&service.pool)
@@ -66,10 +66,11 @@ pub(super) async fn remove(
         .bind(&account_id)
         .execute(&mut *transaction)
         .await?;
-    let rows: Vec<(String,)> = query_as("SELECT id FROM sign_in_methods WHERE account_id = $1")
-        .bind(&account_id)
-        .fetch_all(&mut *transaction)
-        .await?;
+    let rows: Vec<(String,)> =
+        query_as("SELECT id FROM sign_in_methods WHERE account_id = $1 AND NOT removed")
+            .bind(&account_id)
+            .fetch_all(&mut *transaction)
+            .await?;
     if !rows.iter().any(|(id,)| id == &input.id) {
         return Err(ApiError(StatusCode::NOT_FOUND, "Sign-in method not found"));
     }
@@ -80,7 +81,7 @@ pub(super) async fn remove(
         ));
     }
 
-    query("DELETE FROM sign_in_methods WHERE account_id = $1 AND id = $2")
+    query("UPDATE sign_in_methods SET removed = true, credential = NULL WHERE account_id = $1 AND id = $2")
         .bind(account_id)
         .bind(input.id)
         .execute(&mut *transaction)

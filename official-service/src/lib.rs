@@ -1,5 +1,6 @@
 mod methods;
 mod oauth;
+mod passkeys;
 
 pub use oauth::{OAuthProvider, OAuthProviders};
 
@@ -92,6 +93,13 @@ pub async fn router_with_oauth(
                 include_str!("../migrations/202610030052_sign_in_methods.sql").into(),
                 false,
             ),
+            Migration::new(
+                202610030152,
+                "removed sign in methods".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/202610030152_removed_methods.sql").into(),
+                false,
+            ),
         ]),
         ..Migrator::DEFAULT
     };
@@ -108,6 +116,22 @@ pub async fn router_with_oauth(
         .route("/api/account/verify", post(verify_code))
         .route("/api/account/session", get(session))
         .route("/api/account/logout", post(logout))
+        .route(
+            "/api/account/passkeys/register/start",
+            post(passkeys::register_start),
+        )
+        .route(
+            "/api/account/passkeys/register/finish",
+            post(passkeys::register_finish),
+        )
+        .route(
+            "/api/account/passkeys/login/start",
+            post(passkeys::login_start),
+        )
+        .route(
+            "/api/account/passkeys/login/finish",
+            post(passkeys::login_finish),
+        )
         .route("/api/account/options", get(oauth::options))
         .route("/api/account/oauth/{provider}/start", post(oauth::start))
         .route(
@@ -215,6 +239,7 @@ struct Verification {
 async fn verify_code(
     State(service): State<Service>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(input): Json<Verification>,
 ) -> Result<Response, ApiError> {
     consume_limit(&service.pool, &format!("verification:{}", peer.ip()), 30).await?;
@@ -246,7 +271,22 @@ async fn verify_code(
     let (account_id,): (String,) = query_as("INSERT INTO leo_accounts (id, email) VALUES ($1, $2) ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email RETURNING id")
         .bind(uuid::Uuid::new_v4().to_string()).bind(&email).fetch_one(&mut *transaction).await?;
 
-    query("INSERT INTO sign_in_methods (id, account_id, kind, subject, label) VALUES ($1, $2, 'email', $3, $3) ON CONFLICT (kind, subject) DO NOTHING")
+    let removed: Option<(bool,)> =
+        query_as("SELECT removed FROM sign_in_methods WHERE account_id = $1 AND kind = 'email'")
+            .bind(&account_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+    if removed == Some((true,)) {
+        let linked = methods::authenticated(&service, &headers, true).await?;
+        if linked.0 != account_id {
+            return Err(ApiError(
+                StatusCode::UNAUTHORIZED,
+                "Sign in with another method to re-enable email",
+            ));
+        }
+    }
+
+    query("INSERT INTO sign_in_methods (id, account_id, kind, subject, label) VALUES ($1, $2, 'email', $3, $3) ON CONFLICT (kind, subject) DO UPDATE SET removed = false")
         .bind(uuid::Uuid::new_v4().to_string()).bind(&account_id).bind(&email).execute(&mut *transaction).await?;
 
     let response = create_session(&service, &mut transaction, &account_id, &email).await?;
