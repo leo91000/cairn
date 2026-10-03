@@ -148,12 +148,24 @@ async fn cold_chats_refresh_and_remove_thread_mcp_configuration() {
         let servers = token.map_or_else(|| json!({}), |token| json!({
             "fixture": { "url": "http://fixture", "http_headers": { "Authorization": token } }
         }));
-        plan["codexConfig"] = json!({ "mcp_servers": servers });
+        // Switch back after an HTTP lease while also renewing/removing MCP grants.
+        let http_version = (index == 1).then_some("0.160.0");
+        plan["codexConfig"] =
+            leo_agent_manager::run_output::codex_configuration(&servers, http_version);
         if index > 0 {
             plan["sessionId"] = "fixture-chat".into();
         }
         run_quietly(&config, &home, plan).await;
-        assert_eq!(conversation(&home)["fixtureConfig"]["mcp_servers"], servers);
+        let saved = conversation(&home);
+        assert_eq!(saved["fixtureConfig"]["mcp_servers"], servers);
+        assert_eq!(
+            saved["fixtureConfig"]["model_provider"],
+            if http_version.is_some() {
+                "leo_http"
+            } else {
+                "openai"
+            }
+        );
     }
 }
 
@@ -171,7 +183,9 @@ async fn resident_reuses_native_process_and_reloads_each_attempts_permissions() 
         let servers = token.map_or_else(|| json!({}), |token| json!({
             "fixture": { "url": "http://fixture", "http_headers": { "Authorization": token } }
         }));
-        plan["codexConfig"] = json!({ "mcp_servers": servers });
+        let http_version = (index == 1).then_some("0.160.0");
+        plan["codexConfig"] =
+            leo_agent_manager::run_output::codex_configuration(&servers, http_version);
         if index > 0 {
             plan["sessionId"] = "fixture-chat".into();
             plan["sandbox"] = "workspace-write".into();
@@ -180,6 +194,14 @@ async fn resident_reuses_native_process_and_reloads_each_attempts_permissions() 
         let saved = conversation(&home);
         assert_eq!(saved["turns"].as_array().unwrap().len(), index + 1);
         assert_eq!(saved["fixtureConfig"]["mcp_servers"], servers);
+        assert_eq!(
+            saved["fixtureConfig"]["model_provider"],
+            if http_version.is_some() {
+                "leo_http"
+            } else {
+                "openai"
+            }
+        );
     }
     service.stop().await;
     let log = lifecycle(&home);

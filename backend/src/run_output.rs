@@ -256,6 +256,36 @@ fn project_line(run: &Value, project: &Value) -> String {
     }
 }
 
+/// A thread's complete transport selection. Select the built-in provider explicitly
+/// on rollback so a resumed HTTP thread cannot retain its previous provider.
+pub fn codex_configuration(servers: &Value, http_version: Option<&str>) -> Value {
+    let mut configuration = json!({
+        "mcp_servers": servers,
+        "model_provider": "openai",
+    });
+    let Some(version) = http_version else {
+        return configuration;
+    };
+    configuration["model_provider"] = "leo_http".into();
+    configuration["model_providers"] = json!({
+        "leo_http": {
+            // Codex uses this name to retain ChatGPT backend routing and capabilities.
+            "name": "OpenAI",
+            "wire_api": "responses",
+            "requires_openai_auth": true,
+            "supports_websockets": false,
+            "supports_standalone_web_search": true,
+            "include_internal_metadata": true,
+            "http_headers": { "version": version },
+            "env_http_headers": {
+                "OpenAI-Organization": "OPENAI_ORGANIZATION",
+                "OpenAI-Project": "OPENAI_PROJECT",
+            },
+        },
+    });
+    configuration
+}
+
 pub fn chat_plan(
     run: &Value,
     prepared: &Value,
@@ -300,6 +330,15 @@ pub fn chat_plan(
     } else {
         mcp["args"].clone()
     };
+    let http_requested = std::env::var("LEO_CODEX_TRANSPORT").as_deref() == Ok("http");
+    let http_version = http_requested
+        .then(|| std::env::var("APP_CODEX_VERSION").ok())
+        .flatten()
+        .filter(|version| !version.trim().is_empty());
+    if http_requested && http_version.is_none() && provider == crate::provider::Provider::Codex {
+        tracing::warn!("HTTP Codex transport needs the image's APP_CODEX_VERSION; using WebSocket");
+    }
+    let codex_config = codex_configuration(&mcp["codexConfig"], http_version.as_deref());
     let mut plan = json!({
         "provider": provider,
         "claudeMcps": mcp["claudeMcps"],
@@ -314,7 +353,7 @@ pub fn chat_plan(
         "sandbox": policy(agent)["sandbox"],
         "writableRoots": roots,
         "args": args,
-        "codexConfig": { "mcp_servers": mcp["codexConfig"] },
+        "codexConfig": codex_config,
     });
     if let Some(session) = session {
         plan["sessionId"] = session.into();
