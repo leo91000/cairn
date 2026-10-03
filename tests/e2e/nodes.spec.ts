@@ -102,6 +102,16 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   })
   expect(response.ok()).toBe(true)
   const node = await response.json()
+  const heartbeat = async () => {
+    // Legacy seeds bypass the manager's writer. A node heartbeat supplies a
+    // real commit notification instead of relying on an empty scheduler pass.
+    const reply = await page.request.post(`${workspace.url}/internal/nodes/heartbeat`, {
+      headers: { authorization: `Bearer ${node.token}` },
+      data: {},
+    })
+    expect(reply.ok()).toBe(true)
+  }
+
   const destinationInvitation = await workspace.api('/api/nodes/enrollments', 'POST', { name: 'Destination server' })
   const destinationResponse = await page.request.post(`${workspace.url}/internal/nodes/enroll`, {
     data: {
@@ -155,6 +165,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
     },
     backup: { capturedAt: Date.now() - 120000, status: 'saving' },
   } as any)
+  await heartbeat()
   await expect(header).toContainText('Saving…', { timeout: 15000 })
   await header.click()
   await expect(panel).toContainText('182.5 MiB on this node')
@@ -178,6 +189,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await expect(panel).toHaveCount(0)
   await expect(header).toBeFocused()
   workspace.service.store.updateRun(detail.run.id, { backup: { capturedAt: Date.now() - 120000, status: 'ready', error: 'Upload timed out' } } as any)
+  await heartbeat()
   await expect(header).toContainText('Sync failed', { timeout: 15000 })
   await page.emulateMedia({ colorScheme: 'dark' })
   await header.click()
