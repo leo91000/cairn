@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { state } from './api'
 import ThemeControl from './components/ThemeControl.vue'
 import UiAlert from './components/UiAlert.vue'
@@ -38,6 +38,10 @@ const busy = ref(false)
 const error = ref('')
 const claimCode = ref('')
 const installation = ref<{ id: string, name: string } | null>(null)
+
+watch(session, (value) => {
+  state.csrf = value?.csrf || ''
+})
 
 async function accountRequest(route: string, body?: unknown) {
   const response = await fetch(`/api/account/${route}`, {

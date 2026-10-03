@@ -12,8 +12,8 @@ import { config as loadConfig } from '../legacy/server/config'
 import { Service as SeedService } from '../legacy/server/service'
 import { Store } from '../legacy/server/store'
 
-test('claims an installation, reads conversations and sends through the official relay after restart', async ({ page }) => {
-  test.setTimeout(60000)
+test('claims an installation and sends after relay restarts and official session renewal', async ({ page }) => {
+  test.setTimeout(120000)
   const messages: string[] = []
   const mail = createServer(async (request, response) => {
     let body = ''
@@ -27,7 +27,7 @@ test('claims an installation, reads conversations and sends through the official
   const mailPort = (mail.address() as { port: number }).port
   const root = await mkdtemp(join(tmpdir(), 'leo-official-relay-'))
   await Promise.all([mkdir(join(root, 'data')), mkdir(join(root, 'home'))])
-  const url = 'http://127.0.0.1:4399'
+  const url = 'http://localhost:4399'
   const children: ChildProcess[] = []
   let hostilePeer: WebSocket | undefined
   // As in the native browser fixtures, open the seeding module before the
@@ -127,6 +127,42 @@ test('claims an installation, reads conversations and sends through the official
     await page.getByLabel('Message', { exact: true }).fill('After reconnection')
     await page.getByRole('button', { name: 'Send message', exact: true }).click()
     await expect(page.getByRole('list', { name: 'Pending messages' })).toContainText('After reconnection')
+    // Renew the official session while keeping the same installation selected.
+    // Use the existing account UI and a resident authenticator, as in #52.
+    const cdp = await page.context().newCDPSession(page)
+    await cdp.send('WebAuthn.enable')
+    await cdp.send('WebAuthn.addVirtualAuthenticator', {
+      options: {
+        protocol: 'ctap2',
+        transport: 'internal',
+        hasResidentKey: true,
+        hasUserVerification: true,
+        isUserVerified: true,
+        automaticPresenceSimulation: true,
+      },
+    })
+    await page.getByRole('button', { name: 'Sign-in methods', exact: true }).click()
+    await page.getByRole('button', { name: 'Add passkey', exact: true }).click()
+    await expect(page.getByText('My passkey', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: /Remove Email/ }).click()
+    // The previous login's email delivery quota expires after one minute. Keep
+    // that real limit enabled and retry through the public UI until it expires.
+    await expect(async () => {
+      await page.getByRole('button', { name: 'Enable email sign-in', exact: true }).click()
+      await expect(page.getByLabel('Email code')).toBeVisible()
+    }).toPass({ timeout: 70000 })
+    await expect.poll(() => messages.length).toBe(2)
+    await page.getByLabel('Email code').fill(messages[1]!.match(/\b\d{8}\b/)![0])
+    await page.getByRole('button', { name: 'Confirm email code', exact: true }).click()
+    await expect(page.getByRole('button', { name: /Remove Email/ })).toBeVisible()
+    await page.getByRole('button', { name: 'Back to installations', exact: true }).click()
+    await page.getByRole('button', { name: 'A message through the relay', exact: true }).click()
+    await page.getByLabel('Message', { exact: true }).fill('After session renewal')
+    const sent = page.waitForResponse(response => response.url().endsWith('/messages') && response.request().method() === 'POST')
+    await page.getByRole('button', { name: 'Send message', exact: true }).click()
+    expect((await sent).status()).toBe(200)
+    await expect(page.getByRole('list', { name: 'Pending messages' })).toContainText('After session renewal')
+
     // Seed a finished run using the same fixture module as the native browser
     // journeys. Its detail is then read through the real official HTTP relay.
     const chat = seed.store.list('chats')[0]!
