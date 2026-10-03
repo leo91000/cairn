@@ -1,3 +1,9 @@
+mod methods;
+mod oauth;
+mod passkeys;
+
+pub use oauth::{OAuthProvider, OAuthProviders};
+
 use async_trait::async_trait;
 use axum::{
     Json, Router,
@@ -32,6 +38,7 @@ struct Service {
     pool: PgPool,
     sender: Arc<dyn EmailSender>,
     origin: String,
+    oauth: OAuthProviders,
 }
 
 struct ApiError(StatusCode, &'static str);
@@ -54,6 +61,15 @@ pub async fn router(
     sender: Arc<dyn EmailSender>,
     origin: String,
 ) -> Result<Router, sqlx_core::migrate::MigrateError> {
+    router_with_oauth(pool, sender, origin, OAuthProviders::default()).await
+}
+
+pub async fn router_with_oauth(
+    pool: PgPool,
+    sender: Arc<dyn EmailSender>,
+    origin: String,
+    oauth: OAuthProviders,
+) -> Result<Router, sqlx_core::migrate::MigrateError> {
     let migrations = Migrator {
         migrations: Cow::Owned(vec![
             Migration::new(
@@ -70,6 +86,20 @@ pub async fn router(
                 include_str!("../migrations/0002_account_rate_limits.sql").into(),
                 false,
             ),
+            Migration::new(
+                202610030052,
+                "sign in methods".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/202610030052_sign_in_methods.sql").into(),
+                false,
+            ),
+            Migration::new(
+                202610030152,
+                "removed sign in methods".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/202610030152_removed_methods.sql").into(),
+                false,
+            ),
         ]),
         ..Migrator::DEFAULT
     };
@@ -79,12 +109,37 @@ pub async fn router(
         pool,
         sender,
         origin,
+        oauth,
     };
     Ok(Router::new()
         .route("/api/account/email-code", post(request_code))
         .route("/api/account/verify", post(verify_code))
         .route("/api/account/session", get(session))
         .route("/api/account/logout", post(logout))
+        .route(
+            "/api/account/passkeys/register/start",
+            post(passkeys::register_start),
+        )
+        .route(
+            "/api/account/passkeys/register/finish",
+            post(passkeys::register_finish),
+        )
+        .route(
+            "/api/account/passkeys/login/start",
+            post(passkeys::login_start),
+        )
+        .route(
+            "/api/account/passkeys/login/finish",
+            post(passkeys::login_finish),
+        )
+        .route("/api/account/options", get(oauth::options))
+        .route("/api/account/oauth/{provider}/start", post(oauth::start))
+        .route(
+            "/api/account/oauth/{provider}/callback",
+            get(oauth::callback),
+        )
+        .route("/api/account/methods", get(methods::list))
+        .route("/api/account/methods/remove", post(methods::remove))
         .layer(middleware::from_fn_with_state(
             service.clone(),
             browser_security,
@@ -107,14 +162,8 @@ struct EmailRequest {
     email: String,
 }
 
-async fn request_code(
-    State(service): State<Service>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    Json(input): Json<EmailRequest>,
-) -> Result<Response, ApiError> {
-    consume_limit(&service.pool, &format!("delivery:{}", peer.ip()), 10).await?;
-
-    let email = input.email.trim().to_lowercase();
+fn normalized_email(input: &str) -> Result<String, ApiError> {
+    let email = input.trim().to_lowercase();
     if email.len() > 254
         || email.chars().any(char::is_control)
         || email_address::EmailAddress::parse_with_options(
@@ -131,6 +180,18 @@ async fn request_code(
             "Enter a valid email address",
         ));
     }
+
+    Ok(email)
+}
+
+async fn request_code(
+    State(service): State<Service>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(input): Json<EmailRequest>,
+) -> Result<Response, ApiError> {
+    consume_limit(&service.pool, &format!("delivery:{}", peer.ip()), 10).await?;
+
+    let email = normalized_email(&input.email)?;
 
     consume_limit(&service.pool, &format!("email:{}", digest(&email)), 1).await?;
 
@@ -184,6 +245,7 @@ struct Verification {
 async fn verify_code(
     State(service): State<Service>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(input): Json<Verification>,
 ) -> Result<Response, ApiError> {
     consume_limit(&service.pool, &format!("verification:{}", peer.ip()), 30).await?;
@@ -215,11 +277,39 @@ async fn verify_code(
     let (account_id,): (String,) = query_as("INSERT INTO leo_accounts (id, email) VALUES ($1, $2) ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email RETURNING id")
         .bind(uuid::Uuid::new_v4().to_string()).bind(&email).fetch_one(&mut *transaction).await?;
 
+    let removed: Option<(bool,)> =
+        query_as("SELECT removed FROM sign_in_methods WHERE account_id = $1 AND kind = 'email'")
+            .bind(&account_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+    if removed == Some((true,)) {
+        let linked = methods::authenticated_on(&mut transaction, &headers, true).await?;
+        if linked.0 != account_id {
+            return Err(ApiError(
+                StatusCode::UNAUTHORIZED,
+                "Sign in with another method to re-enable email",
+            ));
+        }
+    }
+
+    query("INSERT INTO sign_in_methods (id, account_id, kind, subject, label) VALUES ($1, $2, 'email', $3, $3) ON CONFLICT (kind, subject) DO UPDATE SET removed = false")
+        .bind(uuid::Uuid::new_v4().to_string()).bind(&account_id).bind(&email).execute(&mut *transaction).await?;
+
+    let response = create_session(&service, &mut transaction, &account_id, &email).await?;
+    transaction.commit().await?;
+    Ok(response)
+}
+
+async fn create_session(
+    service: &Service,
+    connection: &mut sqlx_postgres::PgConnection,
+    account_id: &str,
+    email: &str,
+) -> Result<Response, ApiError> {
     let token = random_token();
     let csrf = random_token();
     query("INSERT INTO web_sessions (digest, account_id, csrf, expires_at) VALUES ($1, $2, $3, now() + interval '7 days')")
-        .bind(digest(&token)).bind(&account_id).bind(&csrf).execute(&mut *transaction).await?;
-    transaction.commit().await?;
+        .bind(digest(&token)).bind(account_id).bind(&csrf).execute(connection).await?;
 
     let secure = if service.origin.starts_with("https://") {
         "; Secure"
@@ -285,6 +375,10 @@ async fn browser_security(
 }
 
 fn session_token(headers: &HeaderMap) -> &str {
+    cookie_token(headers, "leo_session")
+}
+
+fn cookie_token<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
     let cookie = headers
         .get(header::COOKIE)
         .and_then(|value| value.to_str().ok())
@@ -292,7 +386,7 @@ fn session_token(headers: &HeaderMap) -> &str {
     cookie
         .split(';')
         .filter_map(|part| part.trim().split_once('='))
-        .find_map(|(key, value)| (key == "leo_session").then_some(value))
+        .find_map(|(key, value)| (key == name).then_some(value))
         .unwrap_or("")
 }
 

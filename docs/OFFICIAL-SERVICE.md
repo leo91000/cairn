@@ -2,8 +2,9 @@
 
 The `leo-official` binary is distinct from the installation's `leo` binary. It
 owns a separate Postgres database and serves the web application. This first
-slice provides email sign-in and an empty installation screen. It does not
-provide installation access, claiming, sharing, OAuth, or Android sign-in.
+account slice provides email, Google, GitHub and web passkey sign-in, management
+of sign-in methods, and an empty installation screen. Installation access,
+claiming, sharing and Android sign-in are separate tickets.
 
 ## Development
 
@@ -34,6 +35,8 @@ variables through the operator's secret management:
 | `LEO_OFFICIAL_EMAIL_FROM` | Required sender address on a verified email domain |
 | `LEO_OFFICIAL_EMAIL_KEY` | Required email provider bearer key; never logged |
 | `LEO_OFFICIAL_EMAIL_ENDPOINT` | Default `https://api.resend.com/emails`; override only for the loopback development setup |
+| `LEO_OFFICIAL_GOOGLE_CLIENT_ID`, `LEO_OFFICIAL_GOOGLE_CLIENT_SECRET` | Optional pair, enables Google sign-in |
+| `LEO_OFFICIAL_GITHUB_CLIENT_ID`, `LEO_OFFICIAL_GITHUB_CLIENT_SECRET` | Optional pair, enables GitHub sign-in |
 
 The production adapter uses [Resend's send-email contract](https://resend.com/docs/api-reference/emails/send-email)
 (`from`, `to`, `subject`, `text` over HTTP). `EmailSender` is the replaceable
@@ -59,6 +62,71 @@ responses use Cache-Control: no-store. Logout requires the session's CSRF token
 in `X-CSRF-Token` plus the exact origin, deletes the server session and clears
 the cookie. Login also requires the exact origin to prevent login CSRF.
 
+## OAuth and web passkeys
+
+Register a web OAuth client with Google and an OAuth app with GitHub. Register
+these exact callback URLs, using the configured `LEO_OFFICIAL_ORIGIN`:
+
+- `/api/account/oauth/google/callback`
+- `/api/account/oauth/github/callback`
+
+Configure both client credentials for each enabled provider. An incomplete pair
+fails startup; unconfigured providers are hidden on the sign-in screen. The
+Compose development setup reads the four optional credential variables from the
+operator's environment. Credentials and provider tokens are never returned to
+the browser or forwarded to installations. Provider access tokens are discarded
+after fetching identity; no refresh tokens are requested or stored.
+
+Google uses `openid email` and the
+[verified email from UserInfo](https://developers.google.com/identity/openid-connect/openid-connect).
+GitHub requests only `user:email` and uses its
+[verified primary email](https://docs.github.com/en/rest/users/emails), ignoring
+the public profile's email. GitHub sign-in provides no repository access to
+agents. Verified emails are normalized exactly like email-code sign-in and
+can create a new Leo account. For an existing account, a new Google identity is
+automatically attached only when Google is
+[authoritative for the email](https://developers.google.com/identity/sign-in/web/backend-auth):
+`@gmail.com`, or a verified Workspace `hd` matching the email's domain. Other
+Google emails and GitHub require a current Leo session to link. Once linked,
+the identity remains a normal sign-in method. An identity already attached to
+a different account is rejected; linking while signed in must match the current
+account's verified email. Concurrent first sign-ins reuse the same account and
+method without a uniqueness error.
+
+Default endpoints are the official Google and GitHub endpoints. Tests replace
+only their HTTP endpoints. Operators can override
+`LEO_OFFICIAL_{GOOGLE,GITHUB}_{AUTHORIZATION_URL,TOKEN_URL,USERINFO_URL}` and
+`LEO_OFFICIAL_GITHUB_EMAILS_URL`; endpoints require HTTPS, except HTTP loopback
+endpoints when the official origin is also loopback. OAuth uses authorization
+codes, S256 PKCE and a five-minute, single-use state bound to an HttpOnly browser
+cookie. Explicit linking also checks the initiating session and CSRF token. OAuth
+cancellation or rejection returns to the sign-in screen with a generic message.
+OAuth and passkey browser cookies are cleared after completion or rejection.
+
+Passkeys use [webauthn-rs](https://docs.rs/webauthn-rs/latest/webauthn_rs/)
+for signature, origin, relying-party and required user-verification checks. The
+relying-party ID is the exact official origin's hostname; changing it invalidates
+existing passkeys. Use an HTTPS hostname in production and `http://localhost`
+for local passkey development. IP origins still support email/OAuth sign-in but
+do not offer passkeys. The web uses the browser's WebAuthn JSON methods; older
+browsers receive an unavailable message and can use email or OAuth instead.
+Passkey sign-in is discoverable: the browser selects a resident key without an
+email lookup. Start options are identical for known, unknown and omitted emails
+and contain no credential IDs. Registration requires a resident credential.
+Adding a named passkey requires a current session, origin and CSRF token; up to
+20 passkeys can be registered per account. Registration and authentication states
+stay only in Postgres, expire after five minutes and are consumed once, even on
+invalid proofs. Only public credentials are stored. Removing a passkey also
+invalidates challenges already issued for it.
+
+Sign-in methods are managed from the empty installation screen. Concurrent
+removals lock the account and preserve at least one method. Removed email and
+OAuth identities remain recorded so an unauthenticated sign-in cannot silently
+re-enable them. Re-enable email by confirming a code while signed in; re-link
+Google/GitHub while signed in. Removing a method leaves active sessions intact;
+session management belongs to its separate ticket. OAuth/passkey requests have
+persisted rate limits, using the TCP peer rather than forwarded headers.
+
 ## Validation
 
 Use a disposable Postgres database that can create schemas. Each Rust test owns
@@ -73,5 +141,9 @@ LEO_OFFICIAL_TEST_DATABASE_URL=postgres://leo:test-only@localhost/leo_official_t
 
 CI supplies Postgres for both integration and browser tests. Browser tests run
 the real official binary and replace only external email delivery with an HTTP
-mailbox. They cover sign-in, an invalid code, empty installations, reload,
-responsive widths and sign-out. The installation remains untouched by this slice.
+mailbox. They cover email sign-in, invalid codes, empty installations, reload,
+responsive widths, sign-out, OAuth linking/removal and passkey registration,
+sign-in/removal with Chromium's virtual authenticator. API tests use HTTP OAuth
+providers and a software WebAuthn authenticator (a client adapter supplies its
+locally retained credential and user handle for discovery), including unverified emails,
+replay, explicit re-linking and concurrent removal of the final methods. The installation remains untouched by this slice.

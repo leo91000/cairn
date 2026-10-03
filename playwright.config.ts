@@ -12,7 +12,7 @@ export default defineConfig({
   reporter: [['list'], ['html', { open: 'never' }]],
   use: { trace: 'retain-on-failure', screenshot: 'only-on-failure', ...devices['Desktop Chrome'] },
   projects: [
-    { name: 'journeys-official-account', testMatch: 'official-account.spec.ts' },
+    { name: 'journeys-official-account', testMatch: ['official-account.spec.ts', 'official-oauth.spec.ts'] },
     { name: 'journeys-nodes', testMatch: 'nodes.spec.ts' },
     { name: 'layout-webkit-nodes', testMatch: 'nodes.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
     { name: 'journeys-agent-avatars', testMatch: 'agent-avatars.spec.ts' },

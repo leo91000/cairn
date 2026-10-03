@@ -5,7 +5,7 @@ use axum::{
     http::StatusCode,
     routing::{any, get},
 };
-use leo_official_service::{EmailSender, router};
+use leo_official_service::{EmailSender, OAuthProvider, OAuthProviders, router_with_oauth};
 use reqwest::Client;
 use serde_json::json;
 use sqlx_postgres::PgPoolOptions;
@@ -50,6 +50,70 @@ fn required(name: &str) -> Result<String, String> {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| format!("Set {name}"))
+}
+
+fn configured_oauth(name: &str, loopback: bool) -> Result<Option<OAuthProvider>, String> {
+    let prefix = format!("LEO_OFFICIAL_{name}");
+    let client_id = env::var(format!("{prefix}_CLIENT_ID"))
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let client_secret = env::var(format!("{prefix}_CLIENT_SECRET"))
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let (client_id, client_secret) = match (client_id, client_secret) {
+        (None, None) => return Ok(None),
+        (Some(id), Some(secret)) => (id, secret),
+        _ => {
+            return Err(format!(
+                "Set both {prefix}_CLIENT_ID and {prefix}_CLIENT_SECRET"
+            ));
+        }
+    };
+
+    let endpoint = |suffix: &str, default: &str| -> Result<String, String> {
+        let key = format!("{prefix}_{suffix}");
+        let value = env::var(&key).unwrap_or_else(|_| default.into());
+        let url = Url::parse(&value).map_err(|_| format!("Invalid {key}"))?;
+        let local_endpoint = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+        if !(url.scheme() == "https" || loopback && local_endpoint && url.scheme() == "http")
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(format!(
+                "{key} requires HTTPS (HTTP endpoints are only allowed on loopback in development)"
+            ));
+        }
+
+        Ok(value)
+    };
+
+    let (authorization, token, userinfo, emails) = match name {
+        "GOOGLE" => (
+            "https://accounts.google.com/o/oauth2/v2/auth",
+            "https://oauth2.googleapis.com/token",
+            "https://openidconnect.googleapis.com/v1/userinfo",
+            None,
+        ),
+        "GITHUB" => (
+            "https://github.com/login/oauth/authorize",
+            "https://github.com/login/oauth/access_token",
+            "https://api.github.com/user",
+            Some("https://api.github.com/user/emails"),
+        ),
+        _ => return Err("Unknown OAuth provider".into()),
+    };
+
+    Ok(Some(OAuthProvider {
+        client_id,
+        client_secret,
+        authorization_url: endpoint("AUTHORIZATION_URL", authorization)?,
+        token_url: endpoint("TOKEN_URL", token)?,
+        userinfo_url: endpoint("USERINFO_URL", userinfo)?,
+        emails_url: emails
+            .map(|value| endpoint("EMAILS_URL", value))
+            .transpose()?,
+    }))
 }
 
 async fn run() -> Result<(), String> {
@@ -109,7 +173,11 @@ async fn run() -> Result<(), String> {
         .await
         .map_err(|_| "Could not connect to the official Postgres database")?;
 
-    let app = router(pool, Arc::new(sender), origin)
+    let oauth = OAuthProviders {
+        google: configured_oauth("GOOGLE", loopback)?,
+        github: configured_oauth("GITHUB", loopback)?,
+    };
+    let app = router_with_oauth(pool, Arc::new(sender), origin, oauth)
         .await
         .map_err(|_| "Official database migration failed")?
         .route("/health", get(|| async { StatusCode::OK }))
