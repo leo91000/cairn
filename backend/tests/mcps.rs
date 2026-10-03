@@ -1,6 +1,8 @@
 mod common;
 
+use axum::{body::Body, http::StatusCode};
 use leo_agent_manager::{
+    auth::{InstallationIdentity, InstallationRole},
     config::{Config, MAIN_AGENT_ID},
     http::router,
     mcp_client::Client,
@@ -627,25 +629,41 @@ async fn oauth_consent_pkce_callback_replay_and_refresh_use_the_existing_provide
     let stats: Value = serde_json::from_str(&command(b"stats\n").await).unwrap();
     assert_eq!(stats, json!({ "refreshes": 1, "exchanges": 1 }));
     // A native session can complete OAuth despite an unrelated (or absent) browser cookie.
-    let native = s
-        .mcps
-        .connect_native(&s, id, "native-session")
-        .await
+    let app = router(s.clone()).await.unwrap();
+    let mut request = common::request("POST", &format!("/api/mcps/{id}/connect"))
+        .body(Body::from(r#"{"native":true}"#))
         .unwrap();
-    let finish = async |session: &str| {
-        s.mcps
-            .finish_native_callback(&s, id, session)
-            .await
-            .unwrap()
+    request
+        .extensions_mut()
+        .insert(InstallationIdentity::trusted(
+            InstallationRole::Owner,
+            "native-account",
+        ));
+    let response = common::send(&app, request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let native = common::read_json(response).await;
+    let finish = async |account: &str| {
+        let mut request = common::request("POST", &format!("/api/mcps/{id}/callback"))
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(InstallationIdentity::trusted(
+                InstallationRole::Owner,
+                account,
+            ));
+        let response = common::send(&app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        common::read_json(response).await
     };
-    assert_eq!(finish("native-session").await, json!({ "pending": true }));
+    assert_eq!(finish("native-account").await, json!({ "pending": true }));
     let params = consent_callback(&http, &native).await;
     assert!(s.mcps.capture_native_callback(&s, &params).await.unwrap());
     let mut replay = params.clone();
     replay.insert("code".into(), "attacker-replacement".into());
     assert!(s.mcps.capture_native_callback(&s, &replay).await.unwrap());
     assert_eq!(
-        finish("browser-session").await,
+        finish("another-account").await,
         json!({ "pending": false, "result": "expired" })
     );
     let stats: Value = serde_json::from_str(&command(b"stats\n").await).unwrap();
@@ -654,11 +672,11 @@ async fn oauth_consent_pkce_callback_replay_and_refresh_use_the_existing_provide
         "Capturing a callback must not exchange credentials"
     );
     assert_eq!(
-        finish("native-session").await,
+        finish("native-account").await,
         json!({ "pending": false, "result": "connected" })
     );
     assert!(!s.mcps.capture_native_callback(&s, &params).await.unwrap());
-    assert_eq!(finish("native-session").await["result"], "expired");
+    assert_eq!(finish("native-account").await["result"], "expired");
     stdin.write_all(b"stop\n").await.unwrap();
     drop(stdin);
     if tokio::time::timeout(Duration::from_secs(2), provider.wait())

@@ -36,23 +36,31 @@ pub enum InstallationRole {
 pub struct InstallationIdentity {
     pub role: InstallationRole,
     local_session: Option<String>,
+    oauth_binding: String,
 }
 
 impl InstallationIdentity {
     /// Only trusted in-process callers (the future authenticated tunnel) may
-    /// attach this context to a request. Ordinary HTTP clients cannot supply it.
-    pub fn trusted(role: InstallationRole) -> Self {
+    /// attach this context to a request with its verified Leo account identifier.
+    /// Ordinary HTTP clients cannot supply it.
+    pub fn trusted(role: InstallationRole, account_id: &str) -> Self {
         Self {
             role,
             local_session: None,
+            oauth_binding: format!("leo-account:{account_id}"),
         }
     }
 
-    pub(crate) fn local_owner(session: String) -> Self {
+    pub(crate) fn local_owner(session: String, csrf: String) -> Self {
         Self {
             role: InstallationRole::Owner,
             local_session: Some(session),
+            oauth_binding: csrf,
         }
+    }
+
+    pub(crate) fn oauth_binding(&self) -> &str {
+        &self.oauth_binding
     }
 
     /// Local streams stop when their browser session is revoked or expires.

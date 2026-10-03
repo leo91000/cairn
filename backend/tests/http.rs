@@ -170,7 +170,10 @@ async fn member_identity_can_list_conversations_but_cannot_manage_nodes() {
             .unwrap();
         request
             .extensions_mut()
-            .insert(InstallationIdentity::trusted(InstallationRole::Member));
+            .insert(InstallationIdentity::trusted(
+                InstallationRole::Member,
+                "member-account",
+            ));
 
         assert_eq!(send(&app, request).await.status(), expected, "{path}");
     }
@@ -205,7 +208,10 @@ async fn member_identity_cannot_manage_installation_resources() {
         let mut request = json_request(method, &path).body(Body::empty()).unwrap();
         request
             .extensions_mut()
-            .insert(InstallationIdentity::trusted(InstallationRole::Member));
+            .insert(InstallationIdentity::trusted(
+                InstallationRole::Member,
+                "member-account",
+            ));
 
         assert_eq!(
             send(&app, request).await.status(),
@@ -221,7 +227,10 @@ async fn member_identity_cannot_manage_installation_resources() {
             .unwrap();
         request
             .extensions_mut()
-            .insert(InstallationIdentity::trusted(InstallationRole::Member));
+            .insert(InstallationIdentity::trusted(
+                InstallationRole::Member,
+                "member-account",
+            ));
         assert_eq!(send(&app, request).await.status(), StatusCode::OK);
     }
 }
@@ -234,7 +243,10 @@ async fn member_identity_can_create_and_stream_conversations_without_a_local_ses
         .unwrap();
     create
         .extensions_mut()
-        .insert(InstallationIdentity::trusted(InstallationRole::Member));
+        .insert(InstallationIdentity::trusted(
+            InstallationRole::Member,
+            "member-account",
+        ));
     let response = send(&app, create).await;
     assert_eq!(response.status(), StatusCode::OK);
     let chat = read_json(response).await;
@@ -246,7 +258,10 @@ async fn member_identity_can_create_and_stream_conversations_without_a_local_ses
         let mut request = json_request("GET", &path).body(Body::empty()).unwrap();
         request
             .extensions_mut()
-            .insert(InstallationIdentity::trusted(InstallationRole::Member));
+            .insert(InstallationIdentity::trusted(
+                InstallationRole::Member,
+                "member-account",
+            ));
         let response = send(&app, request).await;
         assert_eq!(response.status(), StatusCode::OK, "{path}");
         assert_eq!(response.headers()["content-type"], "text/event-stream");

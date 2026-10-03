@@ -321,7 +321,7 @@ async fn authenticate_api(app: &App, request: &mut Request) -> Result<()> {
                 "Invalid CSRF token. Refresh the page and try again.",
             ));
         }
-        InstallationIdentity::local_owner(credential)
+        InstallationIdentity::local_owner(credential, text(&session, "csrf").to_owned())
     };
 
     if identity.role != InstallationRole::Owner && owner_operation(method, path) {
