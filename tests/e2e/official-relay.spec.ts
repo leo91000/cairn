@@ -1,4 +1,5 @@
 import type { ChildProcess } from 'node:child_process'
+import { Buffer } from 'node:buffer'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
@@ -28,6 +29,7 @@ test('claims an installation, reads conversations and sends through the official
   await Promise.all([mkdir(join(root, 'data')), mkdir(join(root, 'home'))])
   const url = 'http://127.0.0.1:4399'
   const children: ChildProcess[] = []
+  let hostilePeer: WebSocket | undefined
   // As in the native browser fixtures, open the seeding module before the
   // native process applies newer database migrations.
   const seed = new SeedService(new Store(join(root, 'data')), loadConfig({
@@ -134,8 +136,62 @@ test('claims an installation, reads conversations and sends through the official
     seed.store.put('chats', { ...chat, runId: run.id })
     await page.getByRole('button', { name: 'Refresh conversation', exact: true }).click()
     await expect(page.getByRole('region', { name: 'Agent response' })).toContainText('The relayed agent reply remains readable.')
+
+    // A separately claimed peer can send hostile protocol frames. The real
+    // connector is covered above and by the HTTP duplicate-header regression.
+    const session = await (await page.request.get(`${url}/api/account/session`)).json()
+    const claim = await (await page.request.post(`${url}/api/installations/claim-code`, {
+      headers: { 'origin': url, 'x-csrf-token': session.csrf },
+      data: {},
+    })).json()
+    const identity = await (await page.request.post(`${url}/api/relay/claim`, {
+      data: { code: claim.code, name: 'Hostile fixture', protocol: 1 },
+    })).json()
+    // Node's WebSocket supports request headers in its init object; DOM
+    // constructor types only expose the browser's protocol argument.
+    hostilePeer = Reflect.construct(WebSocket, [
+      `${url.replace('http:', 'ws:')}/api/relay/${identity.installationId}/connect`,
+      { headers: { authorization: `Bearer ${identity.token}` } },
+    ]) as WebSocket
+    const peer = hostilePeer
+    const welcomed = new Promise<void>((resolve) => {
+      peer.addEventListener('message', (event) => {
+        const frame = JSON.parse(String(event.data))
+        if (frame.type === 'welcome') {
+          resolve()
+          return
+        }
+
+        if (frame.type === 'request') {
+          peer.send(JSON.stringify({
+            type: 'response',
+            id: frame.id,
+            status: 200,
+            headers: [
+              ['content-type', 'application/json'],
+              ['content-type', 'text/html'],
+              ['content-security-policy', 'default-src * \'unsafe-inline\''],
+            ],
+            body: Buffer.from('<body>Hostile fixture<script>document.body.dataset.executed = "yes"</script>').toString('base64'),
+          }))
+        }
+      })
+    })
+    await once(peer, 'open')
+    peer.send(JSON.stringify({ type: 'hello', versions: [1] }))
+    await welcomed
+
+    const navigation = await page.goto(`${url}/api/installations/${identity.installationId}/api/hostile`)
+    expect(navigation?.status()).toBe(200)
+    // Chromium chooses the final content type; the official policy must still
+    // prevent this document's script from executing on the official origin.
+    expect(await page.evaluate(() => document.contentType)).toBe('text/html')
+    await expect(page.locator('body')).toContainText('Hostile fixture')
+    expect(await page.locator('body').getAttribute('data-executed')).toBeNull()
+    expect(navigation?.headers()['content-security-policy']).toBe('sandbox')
   }
   finally {
+    hostilePeer?.close()
     await Promise.all(children.map(stop))
     await seed.accounts.close()
     seed.store.close()

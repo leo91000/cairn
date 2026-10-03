@@ -292,6 +292,7 @@ async fn serve(stop: CancellationToken) -> Result<()> {
             );
         }
     }
+
     if identity_exists || tokio::fs::try_exists(relay_directory.join("identity.json")).await? {
         let relay_router = router.clone();
         let relay_stop = service.shutdown.clone();

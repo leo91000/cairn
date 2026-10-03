@@ -37,7 +37,9 @@ existing in-memory request extension (#45). HTTP identity headers, browser
 cookies and browser authorization credentials are never forwarded.
 Bodies are base64 strings in the JSON frames, rather than arrays of byte numbers.
 Installation security headers are not trusted: the official service supplies
-`nosniff`, `no-store` and a `sandbox` CSP for every non-JSON relayed response.
+`nosniff`, `no-store` and a `sandbox` CSP for every relayed response, including
+JSON. This prevents ambiguous content types from bypassing the official policy;
+the browser can still fetch and read JSON normally.
 
 The browser calls `/api/installations/{installation}/api/...`. Every request
 checks the official session and owner; mutations also require the official

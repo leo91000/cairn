@@ -51,10 +51,12 @@ mod body {
         if encoded.len() > MAX_BODY.div_ceil(3) * 4 {
             return Err(D::Error::custom("Relay body is too large"));
         }
+
         let bytes = STANDARD.decode(encoded).map_err(D::Error::custom)?;
         if bytes.len() > MAX_BODY {
             return Err(D::Error::custom("Relay body is too large"));
         }
+
         Ok(bytes)
     }
 }

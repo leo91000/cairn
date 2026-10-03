@@ -66,6 +66,7 @@ pub(super) async fn claim_code(
     query("DELETE FROM installation_claim_codes WHERE expires_at <= now()")
         .execute(&service.pool)
         .await?;
+
     let code = random_token();
     query("INSERT INTO installation_claim_codes (digest, account_id, expires_at) VALUES ($1, $2, now() + interval '10 minutes')")
         .bind(digest(&code)).bind(account).execute(&service.pool).await?;
@@ -110,6 +111,7 @@ pub(super) async fn claim(
             "Invalid or expired claim code",
         ));
     };
+
     let installation = uuid::Uuid::new_v4().to_string();
     let token = random_token();
     query("INSERT INTO installations (id, owner_id, name, token_digest) VALUES ($1, $2, $3, $4)")

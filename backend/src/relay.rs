@@ -79,6 +79,7 @@ pub async fn claim(official: &str, directory: &Path, code: &str, name: &str) -> 
         .open(&path)
         .await
         .map_err(|_| Error::conflict("Installation identity exists or is not writable."))?;
+
     let result = async {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -100,6 +101,7 @@ pub async fn claim(official: &str, directory: &Path, code: &str, name: &str) -> 
                 "Installation claim refused; obtain a new claim code.",
             ));
         }
+
         let claimed: Claimed = response
             .json()
             .await
@@ -116,9 +118,11 @@ pub async fn claim(official: &str, directory: &Path, code: &str, name: &str) -> 
         Ok(())
     }
     .await;
+
     if result.is_err() {
         let _ = tokio::fs::remove_file(path).await;
     }
+
     result
 }
 
@@ -185,6 +189,7 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
     .await
     .map_err(|_| Error::unavailable("Relay connection timed out."))?
     .map_err(|_| Error::unavailable("Relay connection refused."))?;
+
     socket
         .send(Message::Text(
             serde_json::to_string(&Frame::Hello {
@@ -194,6 +199,7 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
         ))
         .await
         .map_err(Error::internal)?;
+
     let welcome = tokio::time::timeout(Duration::from_secs(5), socket.next())
         .await
         .map_err(|_| Error::unavailable("Relay negotiation timed out."))?;
@@ -307,12 +313,14 @@ async fn dispatch(router: Router, input: ApiRequest) -> Result<ApiResponse> {
             request.headers_mut().append(name, value);
         }
     }
+
     request
         .extensions_mut()
         .insert(ConnectInfo("127.0.0.1:0".parse::<SocketAddr>().unwrap()));
     request
         .extensions_mut()
         .insert(InstallationIdentity::trusted(role, &input.account_id));
+
     let response = router
         .oneshot(request)
         .await
@@ -341,6 +349,7 @@ async fn dispatch(router: Router, input: ApiRequest) -> Result<ApiResponse> {
             }
         })?
         .to_vec();
+
     Ok(ApiResponse {
         id: input.id,
         status,

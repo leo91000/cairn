@@ -108,6 +108,7 @@ async fn serve_socket(relay: Relay, installation: String, mut socket: WebSocket)
     {
         let _ = previous.stop.send(true);
     }
+
     let mut pending = HashMap::<String, Pending>::new();
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -285,26 +286,12 @@ pub(super) async fn forward(
         }
     }
 
-    // An installation cannot choose the security policy of the official origin.
-    let is_json = output
-        .headers()
-        .get("content-type")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value
-                .split(';')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .eq_ignore_ascii_case("application/json")
-        });
-
-    if !is_json {
-        output.headers_mut().insert(
-            "content-security-policy",
-            HeaderValue::from_static("sandbox"),
-        );
-    }
+    // Apply this even to JSON: peers can send ambiguous content types that
+    // browsers interpret differently. Fetching API data is unaffected by CSP.
+    output.headers_mut().insert(
+        "content-security-policy",
+        HeaderValue::from_static("sandbox"),
+    );
     output.headers_mut().insert(
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),

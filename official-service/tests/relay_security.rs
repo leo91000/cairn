@@ -4,10 +4,39 @@ use axum::{
     Router,
     body::{Body, to_bytes},
     extract::Request,
+    http::{HeaderValue, Response},
     routing::{get, post},
 };
 use common::RelayedInstallation;
 use reqwest::StatusCode;
+
+#[tokio::test]
+async fn contradictory_content_types_cannot_bypass_the_official_sandbox() {
+    let routes = Router::new().route(
+        "/api/fixture/ambiguous",
+        get(|| async {
+            let mut response = Response::new(Body::from(
+                "<script>document.body.dataset.executed = 'yes'</script>",
+            ));
+            response
+                .headers_mut()
+                .append("content-type", HeaderValue::from_static("application/json"));
+            response
+                .headers_mut()
+                .append("content-type", HeaderValue::from_static("text/html"));
+            response
+        }),
+    );
+    let relay = RelayedInstallation::new(routes).await;
+    let response = relay.get("/fixture/ambiguous").send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers().get_all("content-type").iter().count(), 2);
+    assert_eq!(
+        response.headers().get("content-security-policy"),
+        Some(&HeaderValue::from_static("sandbox")),
+    );
+    relay.close().await;
+}
 
 #[tokio::test]
 async fn the_official_origin_imposes_security_even_on_a_hostile_installation_response() {
