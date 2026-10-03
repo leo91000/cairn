@@ -446,7 +446,8 @@ impl Vm {
         }
         let status = self.wait_for_guest().await?;
         if status.version != 1 {
-            return Err(Error::unavailable("Unsupported guest protocol."));
+            // An incompatible image never succeeds on retry.
+            return Err(Error::bad_gateway("Unsupported guest protocol."));
         }
         if matches!(startup, Startup::Restore(_)) {
             if !status.snapshot_clones || status.initialized || !status.codex_ready {
@@ -462,7 +463,7 @@ impl Vm {
         if paired && !matches!(startup, Startup::Template) {
             timing.next("mount_workspace");
             if !status.workspace_disks {
-                return Err(Error::unavailable(
+                return Err(Error::bad_gateway(
                     "Guest image does not support paired disks.",
                 ));
             }
