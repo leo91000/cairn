@@ -713,6 +713,38 @@ impl OAuthMock {
     }
 }
 
+#[track_caller]
+fn assert_oauth_rejected(response: &reqwest::Response) {
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()["location"], "/?sign_in_error=oauth");
+    assert!(
+        response
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .all(|value| !value.to_str().unwrap().starts_with("leo_session="))
+    );
+    assert!(
+        response.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .contains("Max-Age=0")
+    );
+}
+
+#[track_caller]
+fn assert_oauth_signed_in(response: &reqwest::Response) {
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()["location"], "/");
+    assert!(
+        response
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .any(|value| value.to_str().unwrap().starts_with("leo_session="))
+    );
+}
+
 #[tokio::test]
 async fn verified_google_and_github_emails_attach_to_the_same_leo_account() {
     let provider = OAuthMock::new().await;
@@ -769,10 +801,7 @@ async fn verified_google_and_github_emails_attach_to_the_same_leo_account() {
             "{}/api/account/oauth/{name}/callback?state={}&code=verified",
             app.url, params["state"]
         );
-        assert_eq!(
-            client.get(&callback).send().await.unwrap().status(),
-            StatusCode::UNAUTHORIZED
-        );
+        assert_oauth_rejected(&client.get(&callback).send().await.unwrap());
         let response = client
             .get(&callback)
             .header(
@@ -786,7 +815,7 @@ async fn verified_google_and_github_emails_attach_to_the_same_leo_account() {
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_oauth_signed_in(&response);
         let session_cookie = response.headers()["set-cookie"]
             .to_str()
             .unwrap()
@@ -853,15 +882,13 @@ async fn verified_google_and_github_emails_attach_to_the_same_leo_account() {
             "{}/api/account/oauth/{name}/callback?state={}&code=verified",
             app.url, params["state"]
         );
-        assert_eq!(
-            client
+        assert_oauth_rejected(
+            &client
                 .get(removed_callback)
                 .header("cookie", removed_cookie)
                 .send()
                 .await
-                .unwrap()
-                .status(),
-            StatusCode::UNAUTHORIZED
+                .unwrap(),
         );
 
         // Re-linking is an explicit mutation of an authenticated account.
@@ -899,26 +926,22 @@ async fn verified_google_and_github_emails_attach_to_the_same_leo_account() {
             "{}/api/account/oauth/{name}/callback?state={state}&code=verified",
             app.url
         );
-        assert_eq!(
-            client
+        assert_oauth_signed_in(
+            &client
                 .get(&link_callback)
                 .header("cookie", format!("{browser}; {session_cookie}"))
                 .send()
                 .await
-                .unwrap()
-                .status(),
-            StatusCode::SEE_OTHER
+                .unwrap(),
         );
 
-        assert_eq!(
-            client
+        assert_oauth_rejected(
+            &client
                 .get(&callback)
                 .header("cookie", cookie)
                 .send()
                 .await
-                .unwrap()
-                .status(),
-            StatusCode::UNAUTHORIZED
+                .unwrap(),
         );
     }
     for name in ["google", "github"] {
@@ -948,25 +971,21 @@ async fn verified_google_and_github_emails_attach_to_the_same_leo_account() {
             "{}/api/account/oauth/{name}/callback?state={state}&code=unverified",
             app.url
         );
-        assert_eq!(
-            client
+        assert_oauth_rejected(
+            &client
                 .get(&callback)
                 .header("cookie", &browser)
                 .send()
                 .await
-                .unwrap()
-                .status(),
-            StatusCode::UNAUTHORIZED
+                .unwrap(),
         );
-        assert_eq!(
-            client
+        assert_oauth_rejected(
+            &client
                 .get(&callback)
                 .header("cookie", &browser)
                 .send()
                 .await
-                .unwrap()
-                .status(),
-            StatusCode::UNAUTHORIZED
+                .unwrap(),
         );
     }
     provider.server.abort();
@@ -1387,6 +1406,18 @@ async fn passkeys_require_user_verification_origin_session_binding_and_current_c
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{scenario}");
+        assert!(
+            response.headers()["set-cookie"]
+                .to_str()
+                .unwrap()
+                .contains("leo_passkey=;")
+        );
+        assert!(
+            response.headers()["set-cookie"]
+                .to_str()
+                .unwrap()
+                .contains("Max-Age=0")
+        );
         let response = app
             .client
             .post(format!("{}/api/account/passkeys/login/finish", app.url))
@@ -1424,19 +1455,11 @@ async fn existing_accounts_require_authoritative_google_email_or_authenticated_l
 
     for name in ["google", "github"] {
         let rejected = provider.attempt(&app, name, None).await;
-        assert_eq!(
-            rejected.status(),
-            StatusCode::UNAUTHORIZED,
-            "{name} must not attach by email alone"
-        );
+        assert_oauth_rejected(&rejected);
         let linked = provider.attempt(&app, name, Some((&cookie, csrf))).await;
-        assert_eq!(linked.status(), StatusCode::SEE_OTHER);
+        assert_oauth_signed_in(&linked);
         let signed_in = provider.attempt(&app, name, None).await;
-        assert_eq!(
-            signed_in.status(),
-            StatusCode::SEE_OTHER,
-            "previously linked identity is a sign-in method"
-        );
+        assert_oauth_signed_in(&signed_in);
     }
 
     let (challenge, code) = app.code("other@example.test").await;
@@ -1452,17 +1475,14 @@ async fn existing_accounts_require_authoritative_google_email_or_authenticated_l
     provider.state.profiles.lock().unwrap()["google"]["email"] = json!("other@example.test");
     provider.state.profiles.lock().unwrap()["emails"][1]["email"] = json!("other@example.test");
     for name in ["google", "github"] {
-        assert_eq!(
-            provider
+        assert_oauth_rejected(
+            &provider
                 .attempt(
                     &app,
                     name,
-                    Some((&other_cookie, other["csrf"].as_str().unwrap()))
+                    Some((&other_cookie, other["csrf"].as_str().unwrap())),
                 )
-                .await
-                .status(),
-            StatusCode::UNAUTHORIZED,
-            "a provider identity cannot move to another account"
+                .await,
         );
         let fresh = Fixture::with_oauth(provider.providers()).await;
         let (first, second) = tokio::join!(
@@ -1470,11 +1490,7 @@ async fn existing_accounts_require_authoritative_google_email_or_authenticated_l
             provider.attempt(&fresh, name, None)
         );
         for response in [first, second] {
-            assert_eq!(
-                response.status(),
-                StatusCode::SEE_OTHER,
-                "simultaneous first sign-ins remain available"
-            );
+            assert_oauth_signed_in(&response);
         }
         fresh.close().await;
     }
@@ -1487,10 +1503,62 @@ async fn existing_accounts_require_authoritative_google_email_or_authenticated_l
         gmail.verify(&challenge, &code).await.status(),
         StatusCode::OK
     );
-    assert_eq!(
-        provider.attempt(&gmail, "google", None).await.status(),
-        StatusCode::SEE_OTHER
-    );
+    assert_oauth_signed_in(&provider.attempt(&gmail, "google", None).await);
     gmail.close().await;
     provider.server.abort();
+}
+
+#[tokio::test]
+async fn oauth_denials_redirect_to_sign_in_and_clear_the_browser_cookie() {
+    let provider = OAuthMock::new().await;
+    let app = Fixture::with_oauth(provider.providers()).await;
+    let start = app.post("/api/account/oauth/google/start", json!({})).await;
+    let browser = start.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let start: Value = start.json().await.unwrap();
+    let url = url::Url::parse(start["url"].as_str().unwrap()).unwrap();
+    let state = url
+        .query_pairs()
+        .find(|(key, _)| key == "state")
+        .unwrap()
+        .1
+        .to_string();
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let response = client
+        .get(format!(
+            "{}/api/account/oauth/google/callback?state={state}&error=access_denied",
+            app.url
+        ))
+        .header("cookie", &browser)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()["location"], "/?sign_in_error=oauth");
+    assert!(
+        response.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .contains("Max-Age=0")
+    );
+    let response = client
+        .get(format!(
+            "{}/api/account/oauth/google/callback?state={state}&code=verified",
+            app.url
+        ))
+        .header("cookie", &browser)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.headers()["location"], "/?sign_in_error=oauth");
+    provider.server.abort();
+    app.close().await;
 }

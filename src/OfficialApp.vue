@@ -224,7 +224,15 @@ function changeEmail() {
   error.value = ''
 }
 
-onMounted(loadSession)
+onMounted(async () => {
+  await loadSession()
+  const url = new URL(window.location.href)
+  if (url.searchParams.get('sign_in_error') === 'oauth') {
+    error.value = 'Sign-in was cancelled or could not be verified. Try another method.'
+    url.searchParams.delete('sign_in_error')
+    window.history.replaceState(null, '', url)
+  }
+})
 </script>
 
 <template>

@@ -99,7 +99,9 @@ only their HTTP endpoints. Operators can override
 `LEO_OFFICIAL_GITHUB_EMAILS_URL`; endpoints require HTTPS, except HTTP loopback
 endpoints when the official origin is also loopback. OAuth uses authorization
 codes, S256 PKCE and a five-minute, single-use state bound to an HttpOnly browser
-cookie. Explicit linking also checks the initiating session and CSRF token.
+cookie. Explicit linking also checks the initiating session and CSRF token. OAuth
+cancellation or rejection returns to the sign-in screen with a generic message.
+OAuth and passkey browser cookies are cleared after completion or rejection.
 
 Passkeys use [webauthn-rs](https://docs.rs/webauthn-rs/latest/webauthn_rs/)
 for signature, origin, relying-party and required user-verification checks. The

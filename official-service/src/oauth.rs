@@ -51,13 +51,13 @@ struct OAuthState {
     verifier: String,
 }
 
-pub(super) fn browser_cookie(service: &Service, name: &str, token: &str) -> String {
+pub(super) fn browser_cookie(service: &Service, name: &str, token: &str, max_age: u16) -> String {
     let secure = if service.origin.starts_with("https://") {
         "; Secure"
     } else {
         ""
     };
-    format!("{name}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=300{secure}")
+    format!("{name}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}")
 }
 
 pub(super) async fn start(
@@ -112,7 +112,7 @@ pub(super) async fn start(
     Ok((
         [(
             header::SET_COOKIE,
-            browser_cookie(&service, "leo_oauth", &browser),
+            browser_cookie(&service, "leo_oauth", &browser, 300),
         )],
         Json(json!({ "url": url.as_str() })),
     )
@@ -143,18 +143,39 @@ pub(super) async fn callback(
     State(service): State<Service>,
     Path(name): Path<String>,
     headers: HeaderMap,
-    Query(input): Query<Callback>,
+    query: Result<Query<Callback>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    let result = match query {
+        Ok(Query(input)) => complete_callback(&service, &name, &headers, input).await,
+        Err(_) => Err(rejected()),
+    };
+    let mut response =
+        result.unwrap_or_else(|_| Redirect::to("/?sign_in_error=oauth").into_response());
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        browser_cookie(&service, "leo_oauth", "", 0)
+            .parse()
+            .expect("static cookie"),
+    );
+    response
+}
+
+async fn complete_callback(
+    service: &Service,
+    name: &str,
+    headers: &HeaderMap,
+    input: Callback,
 ) -> Result<Response, ApiError> {
-    let provider = service.oauth.provider(&name)?;
+    let provider = service.oauth.provider(name)?;
     let row: Option<(Option<String>, String, String)> = query_as("DELETE FROM sign_in_challenges WHERE id = $1 AND kind = $2 AND browser_digest = $3 AND expires_at > now() RETURNING account_id, session_digest, state")
-        .bind(input.state).bind(format!("oauth:{name}")).bind(digest(cookie_token(&headers, "leo_oauth")))
+        .bind(input.state).bind(format!("oauth:{name}")).bind(digest(cookie_token(headers, "leo_oauth")))
         .fetch_optional(&service.pool).await?;
 
     let (link_account, session_digest, state) = row.ok_or_else(rejected)?;
     if link_account.is_some() {
-        let account = methods::authenticated(&service, &headers, false).await?;
+        let account = methods::authenticated(service, headers, false).await?;
         if link_account.as_deref() != Some(&account.0)
-            || session_digest != digest(session_token(&headers))
+            || session_digest != digest(session_token(headers))
         {
             return Err(rejected());
         }
@@ -273,7 +294,7 @@ pub(super) async fn callback(
     let existing: Option<(String, bool)> = query_as(
         "SELECT account_id, removed FROM sign_in_methods WHERE kind = $1 AND subject = $2",
     )
-    .bind(&name)
+    .bind(name)
     .bind(&subject)
     .fetch_optional(&mut *transaction)
     .await?;
@@ -291,7 +312,7 @@ pub(super) async fn callback(
         return Err(rejected());
     }
 
-    let session_response = create_session(&service, &mut transaction, &account_id, &email).await?;
+    let session_response = create_session(service, &mut transaction, &account_id, &email).await?;
     transaction.commit().await?;
 
     // Provider tokens are deliberately discarded: GitHub identification grants no agent access.

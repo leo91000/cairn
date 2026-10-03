@@ -197,7 +197,7 @@ pub(super) async fn login_start(
     Ok((
         [(
             header::SET_COOKIE,
-            oauth::browser_cookie(&service, "leo_passkey", &browser),
+            oauth::browser_cookie(&service, "leo_passkey", &browser, 300),
         )],
         Json(json!({
             "challenge": challenge,
@@ -217,19 +217,42 @@ pub(super) async fn login_finish(
     State(service): State<Service>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    Json(input): Json<Authentication>,
+    input: Result<Json<Authentication>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let result = match input {
+        Ok(Json(input)) => complete_login(&service, peer, &headers, input).await,
+        Err(_) => Err(ApiError(StatusCode::BAD_REQUEST, "Invalid passkey proof")),
+    };
+    let mut response = match result {
+        Ok(response) => response,
+        Err(error) => error.into_response(),
+    };
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        oauth::browser_cookie(&service, "leo_passkey", "", 0)
+            .parse()
+            .expect("static cookie"),
+    );
+    response
+}
+
+async fn complete_login(
+    service: &Service,
+    peer: SocketAddr,
+    headers: &HeaderMap,
+    input: Authentication,
 ) -> Result<Response, ApiError> {
     consume_limit(&service.pool, &format!("passkey-login:{}", peer.ip()), 30).await?;
 
     let (_, _, state) = take_challenge(
-        &service,
+        service,
         &input.challenge,
         "passkey-login",
-        cookie_token(&headers, "leo_passkey"),
+        cookie_token(headers, "leo_passkey"),
     )
     .await?;
     let state: DiscoverableAuthentication = serde_json::from_str(&state).map_err(|_| rejected())?;
-    let webauthn = webauthn(&service)?;
+    let webauthn = webauthn(service)?;
     let (owner, credential_id) = webauthn
         .identify_discoverable_authentication(&input.credential)
         .map_err(|_| rejected())?;
@@ -263,7 +286,7 @@ pub(super) async fn login_finish(
         .execute(&mut *transaction)
         .await?;
 
-    let response = create_session(&service, &mut transaction, &account_id, &email).await?;
+    let response = create_session(service, &mut transaction, &account_id, &email).await?;
 
     transaction.commit().await?;
 

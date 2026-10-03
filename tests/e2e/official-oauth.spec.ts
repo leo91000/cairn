@@ -5,6 +5,7 @@ import process from 'node:process'
 import { expect, test } from '@playwright/test'
 
 test('Google and GitHub reuse a verified Leo account and manage its sign-in methods', async ({ page }) => {
+  let denyNextAuthorization = false
   const githubId = Date.now()
   const email = `oauth-browser-${Date.now()}@example.test`
   const provider = createServer(async (request, response) => {
@@ -13,7 +14,14 @@ test('Google and GitHub reuse a verified Leo account and manage its sign-in meth
     if (url.pathname === '/authorize') {
       const callback = new URL(url.searchParams.get('redirect_uri')!)
       callback.searchParams.set('state', url.searchParams.get('state')!)
-      callback.searchParams.set('code', 'verified')
+      if (denyNextAuthorization) {
+        callback.searchParams.set('error', 'access_denied')
+        denyNextAuthorization = false
+      }
+      else {
+        callback.searchParams.set('code', 'verified')
+      }
+
       expect(url.searchParams.get('scope')).toBe(url.searchParams.get('client_id') === 'google-test' ? 'openid email' : 'user:email')
       expect(url.searchParams.get('code_challenge_method')).toBe('S256')
       response.writeHead(302, { location: callback.href }).end()
@@ -78,6 +86,10 @@ test('Google and GitHub reuse a verified Leo account and manage its sign-in meth
     }).toBe(true)
     await page.goto(url)
     await expect(page.getByRole('button', { name: 'Continue with Google' })).toBeVisible()
+    denyNextAuthorization = true
+    await page.getByRole('button', { name: 'Continue with Google' }).click()
+    await expect(page.getByRole('alert')).toContainText('Sign-in was cancelled')
+    expect((await page.context().cookies(url)).some(cookie => cookie.name === 'leo_oauth')).toBe(false)
     await page.getByRole('button', { name: 'Continue with Google' }).click()
     await expect(page.getByRole('heading', { name: 'No installations yet' })).toBeVisible()
     await expect(page.getByText(`You’re signed in as ${email}.`)).toBeVisible()
