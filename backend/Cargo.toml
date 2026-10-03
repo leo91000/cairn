@@ -18,6 +18,7 @@ ublk = [ "dep:libublk" ]
 ublk-prototype = [ "ublk" ]
 
 [dependencies]
+leo-relay-protocol = { path = "../relay-protocol" }
 axum = { version = "0.8.9", features = [
   "macros",
   "form"

@@ -4,6 +4,7 @@ mod oauth;
 mod passkeys;
 
 pub use oauth::{OAuthProvider, OAuthProviders};
+mod relay;
 
 use async_trait::async_trait;
 use axum::{
@@ -13,7 +14,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{any, get, post},
 };
 use rand::{Rng, RngCore};
 use serde::Deserialize;
@@ -40,6 +41,7 @@ struct Service {
     sender: Arc<dyn EmailSender>,
     origin: String,
     oauth: OAuthProviders,
+    relay: relay::Relay,
 }
 
 struct ApiError(StatusCode, &'static str);
@@ -119,6 +121,7 @@ pub async fn router_with_oauth(
         sender,
         origin,
         oauth,
+        relay: relay::Relay::default(),
     };
     Ok(Router::new()
         .route("/api/account/email-code", post(request_code))
@@ -154,11 +157,19 @@ pub async fn router_with_oauth(
             post(installations::claim_code),
         )
 
+        .route(
+            "/api/installations/{installation}/api/{*path}",
+            any(relay::forward),
+        )
         .layer(middleware::from_fn_with_state(
             service.clone(),
             browser_security,
         ))
-        .merge(Router::new().route("/api/relay/claim", post(installations::claim)))
+        .merge(
+            Router::new()
+                .route("/api/relay/claim", post(installations::claim))
+                .route("/api/relay/{installation}/connect", get(relay::upgrade)),
+        )
         .with_state(service))
 }
 

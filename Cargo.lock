@@ -2902,6 +2902,7 @@ dependencies = [
  "http-body-util",
  "image",
  "jsonschema",
+ "leo-relay-protocol",
  "libc",
  "libublk",
  "lru",
@@ -2947,6 +2948,8 @@ dependencies = [
  "email_address",
  "futures-util",
  "hex",
+ "leo-agent-manager",
+ "leo-relay-protocol",
  "rand 0.9.5",
  "reqwest",
  "serde",
@@ -2955,7 +2958,9 @@ dependencies = [
  "sqlx-core",
  "sqlx-postgres",
  "subtle",
+ "tempfile",
  "tokio",
+ "tokio-util",
  "tower-http",
  "tracing",
  "tracing-subscriber",
@@ -2964,6 +2969,13 @@ dependencies = [
  "webauthn-authenticator-rs",
  "webauthn-rs",
  "webauthn-rs-proto",
+]
+
+[[package]]
+name = "leo-relay-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

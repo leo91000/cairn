@@ -40,6 +40,7 @@ pub mod project_git;
 pub mod project_workspaces;
 pub mod provider;
 pub mod recovery;
+pub mod relay;
 pub mod rpc;
 mod run_limits;
 pub mod run_output;
