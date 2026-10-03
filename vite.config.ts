@@ -33,5 +33,5 @@ export default defineConfig({
       '/oauth': 'http://127.0.0.1:4310',
     },
   },
-  build: { chunkSizeWarningLimit: 400 },
+  build: { chunkSizeWarningLimit: 400, rolldownOptions: { input: { installation: 'index.html', official: 'official.html' } } },
 })

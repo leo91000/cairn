@@ -8,7 +8,7 @@ WORKDIR /app
 FROM base AS build
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store pnpm install --frozen-lockfile
-COPY tsconfig.json vite.config.ts index.html ./
+COPY tsconfig.json vite.config.ts index.html official.html ./
 COPY src ./src
 COPY shared ./shared
 COPY public ./public

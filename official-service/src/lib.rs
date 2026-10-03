@@ -1,8 +1,10 @@
 use async_trait::async_trait;
 use axum::{
     Json, Router,
-    extract::State,
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    extract::Request,
+    extract::{ConnectInfo, State},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -16,7 +18,7 @@ use sqlx_core::{
     query_as::query_as,
 };
 use sqlx_postgres::PgPool;
-use std::{borrow::Cow, sync::Arc};
+use std::{borrow::Cow, net::SocketAddr, sync::Arc};
 use subtle::ConstantTimeEq;
 
 #[async_trait]
@@ -53,13 +55,22 @@ pub async fn router(
     origin: String,
 ) -> Result<Router, sqlx_core::migrate::MigrateError> {
     let migrations = Migrator {
-        migrations: Cow::Owned(vec![Migration::new(
-            1,
-            "leo accounts".into(),
-            MigrationType::Simple,
-            include_str!("../migrations/0001_leo_accounts.sql").into(),
-            false,
-        )]),
+        migrations: Cow::Owned(vec![
+            Migration::new(
+                1,
+                "leo accounts".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/0001_leo_accounts.sql").into(),
+                false,
+            ),
+            Migration::new(
+                2,
+                "account rate limits".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/0002_account_rate_limits.sql").into(),
+                false,
+            ),
+        ]),
         ..Migrator::DEFAULT
     };
     migrations.run(&pool).await?;
@@ -73,6 +84,11 @@ pub async fn router(
         .route("/api/account/email-code", post(request_code))
         .route("/api/account/verify", post(verify_code))
         .route("/api/account/session", get(session))
+        .route("/api/account/logout", post(logout))
+        .layer(middleware::from_fn_with_state(
+            service.clone(),
+            browser_security,
+        ))
         .with_state(service))
 }
 
@@ -93,14 +109,49 @@ struct EmailRequest {
 
 async fn request_code(
     State(service): State<Service>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(input): Json<EmailRequest>,
 ) -> Result<Response, ApiError> {
+    consume_limit(&service.pool, &format!("delivery:{}", peer.ip()), 10).await?;
     let email = input.email.trim().to_lowercase();
+    if email.len() > 254
+        || email.chars().any(char::is_control)
+        || email_address::EmailAddress::parse_with_options(
+            &email,
+            email_address::Options {
+                allow_display_text: false,
+                ..Default::default()
+            },
+        )
+        .is_err()
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "Enter a valid email address",
+        ));
+    }
+    consume_limit(&service.pool, &format!("email:{}", digest(&email)), 1).await?;
+    query("DELETE FROM email_codes WHERE expires_at <= now()")
+        .execute(&service.pool)
+        .await?;
+    query("DELETE FROM web_sessions WHERE expires_at <= now()")
+        .execute(&service.pool)
+        .await?;
+    query("DELETE FROM account_rate_limits WHERE resets_at < now() - interval '1 day'")
+        .execute(&service.pool)
+        .await?;
+
     let challenge = random_token();
     let code = format!("{:08}", rand::rng().random_range(0..100_000_000_u32));
     let code_digest = digest(&format!("{challenge}:{code}"));
+    let mut transaction = service.pool.begin().await?;
+    query("DELETE FROM email_codes WHERE email = $1")
+        .bind(&email)
+        .execute(&mut *transaction)
+        .await?;
     query("INSERT INTO email_codes (challenge, email, code_digest, expires_at) VALUES ($1, $2, $3, now() + interval '10 minutes')")
-        .bind(&challenge).bind(&email).bind(code_digest).execute(&service.pool).await?;
+        .bind(&challenge).bind(&email).bind(code_digest).execute(&mut *transaction).await?;
+    transaction.commit().await?;
 
     if service.sender.send_code(&email, &code).await.is_err() {
         query("DELETE FROM email_codes WHERE challenge = $1")
@@ -128,17 +179,24 @@ struct Verification {
 
 async fn verify_code(
     State(service): State<Service>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(input): Json<Verification>,
 ) -> Result<Response, ApiError> {
+    consume_limit(&service.pool, &format!("verification:{}", peer.ip()), 30).await?;
     let mut transaction = service.pool.begin().await?;
-    let row: Option<(String, String, bool)> = query_as("SELECT email, code_digest, expires_at > now() FROM email_codes WHERE challenge = $1 FOR UPDATE")
+    let row: Option<(String, String, bool, i32)> = query_as("SELECT email, code_digest, expires_at > now(), attempts FROM email_codes WHERE challenge = $1 FOR UPDATE")
         .bind(&input.challenge).fetch_optional(&mut *transaction).await?;
     let invalid = || ApiError(StatusCode::UNAUTHORIZED, "Invalid or expired code");
-    let Some((email, expected, unexpired)) = row else {
+    let Some((email, expected, unexpired, attempts)) = row else {
         return Err(invalid());
     };
     let supplied = digest(&format!("{}:{}", input.challenge, input.code));
-    if !unexpired || !bool::from(expected.as_bytes().ct_eq(supplied.as_bytes())) {
+    if !unexpired || attempts >= 5 || !bool::from(expected.as_bytes().ct_eq(supplied.as_bytes())) {
+        query("UPDATE email_codes SET attempts = attempts + 1 WHERE challenge = $1")
+            .bind(&input.challenge)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
         return Err(invalid());
     }
 
@@ -177,15 +235,7 @@ async fn session(
     State(service): State<Service>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    let cookie = headers
-        .get(header::COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-    let token = cookie
-        .split(';')
-        .filter_map(|part| part.trim().split_once('='))
-        .find_map(|(key, value)| (key == "leo_session").then_some(value))
-        .unwrap_or("");
+    let token = session_token(&headers);
     let row: Option<(String, String, String)> = query_as("SELECT a.id, a.email, s.csrf FROM web_sessions s JOIN leo_accounts a ON a.id = s.account_id WHERE s.digest = $1 AND s.expires_at > now()")
         .bind(digest(token)).fetch_optional(&service.pool).await?;
     Ok(Json(match row {
@@ -202,4 +252,92 @@ async fn session(
             "installations": [],
         }),
     }))
+}
+
+async fn browser_security(
+    State(service): State<Service>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let allowed_origin = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        == Some(service.origin.as_str());
+    let mut response = if request.method() != Method::GET && !allowed_origin {
+        ApiError(StatusCode::FORBIDDEN, "Invalid origin").into_response()
+    } else {
+        next.run(request).await
+    };
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+fn session_token(headers: &HeaderMap) -> &str {
+    let cookie = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    cookie
+        .split(';')
+        .filter_map(|part| part.trim().split_once('='))
+        .find_map(|(key, value)| (key == "leo_session").then_some(value))
+        .unwrap_or("")
+}
+
+async fn logout(State(service): State<Service>, headers: HeaderMap) -> Result<Response, ApiError> {
+    let token = session_token(&headers);
+    let supplied = headers
+        .get("x-csrf-token")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let mut transaction = service.pool.begin().await?;
+    let row: Option<(String,)> = query_as(
+        "SELECT csrf FROM web_sessions WHERE digest = $1 AND expires_at > now() FOR UPDATE",
+    )
+    .bind(digest(token))
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let Some((csrf,)) = row else {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "Session expired. Please sign in again.",
+        ));
+    };
+    if !bool::from(csrf.as_bytes().ct_eq(supplied.as_bytes())) {
+        return Err(ApiError(StatusCode::FORBIDDEN, "Invalid CSRF token"));
+    }
+
+    query("DELETE FROM web_sessions WHERE digest = $1")
+        .bind(digest(token))
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    let secure = if service.origin.starts_with("https://") {
+        "; Secure"
+    } else {
+        ""
+    };
+    Ok((
+        StatusCode::NO_CONTENT,
+        [(
+            header::SET_COOKIE,
+            format!("leo_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}"),
+        )],
+    )
+        .into_response())
+}
+
+async fn consume_limit(pool: &PgPool, key: &str, maximum: i32) -> Result<(), ApiError> {
+    let (requests,): (i32,) = query_as("INSERT INTO account_rate_limits (key, requests, resets_at) VALUES ($1, 1, now() + interval '1 minute') ON CONFLICT (key) DO UPDATE SET requests = CASE WHEN account_rate_limits.resets_at <= now() THEN 1 ELSE LEAST(account_rate_limits.requests + 1, $2 + 1) END, resets_at = CASE WHEN account_rate_limits.resets_at <= now() THEN now() + interval '1 minute' ELSE account_rate_limits.resets_at END RETURNING requests")
+        .bind(key).bind(maximum).fetch_one(pool).await?;
+    if requests > maximum {
+        return Err(ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many attempts. Please wait a minute.",
+        ));
+    }
+    Ok(())
 }

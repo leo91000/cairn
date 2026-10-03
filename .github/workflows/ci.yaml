@@ -91,6 +91,7 @@ jobs:
           cargo clippy --locked --workspace --all-targets --features ublk-prototype -- -D warnings
           node scripts/test-backend.mjs --features ublk-prototype
           cargo build --locked --bin leo --features ublk
+          cargo build --locked -p leo-official-service --bin leo-official
       - name: Validate node supervisor and S3 recovery
         run: |
           python3 tests/guest_projects_test.py
@@ -101,7 +102,9 @@ jobs:
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: browser-backend
-          path: target/debug/leo
+          path: |
+            target/debug/leo
+            target/debug/leo-official
           retention-days: 1
       - uses: actions/upload-artifact@v7.0.1
         with:
@@ -109,6 +112,18 @@ jobs:
           path: dist/
           retention-days: 1
   browser:
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: leo
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: leo_official_test
+        options: >-
+          --health-cmd "pg_isready -U leo -d leo_official_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      LEO_OFFICIAL_TEST_DATABASE_URL: postgres://leo:test-only@postgres:5432/leo_official_test
     name: browser (${{ matrix.group }})
     needs: [resolve, quality]
     if: needs.resolve.outputs.reuse != 'true'
@@ -161,7 +176,7 @@ jobs:
         with:
           name: browser-backend
           path: target/debug/
-      - run: chmod +x target/debug/leo
+      - run: chmod +x target/debug/leo target/debug/leo-official
       - run: |
           args=(--project="$BROWSER_PROJECTS" --workers="$BROWSER_WORKERS")
           if [[ -n "$BROWSER_SHARD" ]]; then
