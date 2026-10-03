@@ -150,6 +150,15 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_batch_reuses_one_journal_and_releases_the_stopped_disk() {
+        snapshot_reader_lifetime("blocks", 2).await;
+    }
+
+    #[tokio::test]
+    async fn publication_reuses_one_journal_and_releases_the_stopped_disk() {
+        snapshot_reader_lifetime("publication", crate::nodes::snapshots::READ_BATCH + 2).await;
+    }
+
+    async fn snapshot_reader_lifetime(endpoint: &str, count: usize) {
         use crate::storage::Disk;
         let root = tempfile::tempdir().unwrap();
         let broker = fixture_broker(root.path()).await;
@@ -161,12 +170,13 @@ mod tests {
         let block = crate::nodes::snapshots::BLOCK;
         let base = json!({
             "version": 1,
-            "size": block + 1024,
+            "size": block * (count as u64 - 1) + 1024,
             "blockSize": block,
-            "blocks": [
-                { "offset": 0, "size": block, "hash": null },
-                { "offset": block, "size": 1024, "hash": null }
-            ]
+            "blocks": (0..count).map(|index| json!({
+                "offset": block * index as u64,
+                "size": if index + 1 == count { 1024 } else { block },
+                "hash": null
+            })).collect::<Vec<_>>()
         });
         let source = json!({
             "master": "http://127.0.0.1:9/",
@@ -175,8 +185,15 @@ mod tests {
         let disk = crate::storage::runtime::create(&directory.join("lazy"), &base, &source)
             .await
             .unwrap();
-        disk.write_at(0, &vec![7; block as usize]).unwrap();
-        disk.write_at(block, &[9; 1024]).unwrap();
+        for index in 0..count {
+            let size = if index + 1 == count {
+                1024
+            } else {
+                block as usize
+            };
+            disk.write_at(block * index as u64, &vec![7 + index as u8; size])
+                .unwrap();
+        }
         let generation = disk.seal().unwrap();
         let mut manifest = disk.capture(generation).unwrap();
         manifest["onDemand"] = true.into();
@@ -202,7 +219,10 @@ mod tests {
             .collect();
         let request = || {
             let batch = json!({ "hashes": hashes }).to_string();
-            authorized_post(format!("/snapshots/{snapshot}/blocks"), Body::from(batch))
+            authorized_post(
+                format!("/snapshots/{snapshot}/{endpoint}"),
+                Body::from(batch),
+            )
         };
         let app = router(broker);
 
@@ -217,11 +237,21 @@ mod tests {
         let cancellation = opened.stop.clone();
         let identity = Arc::downgrade(&opened);
         drop(opened);
-        assert_eq!(stream.next().await.unwrap().unwrap().as_ref(), &[9; 1024]);
-        assert!(Arc::ptr_eq(
-            &identity.upgrade().unwrap(),
-            &crate::storage::runtime::load(&directory).await.unwrap()
-        ));
+        for index in 1..count {
+            let size = if index + 1 == count {
+                1024
+            } else {
+                block as usize
+            };
+            assert_eq!(
+                stream.next().await.unwrap().unwrap().as_ref(),
+                vec![7 + index as u8; size]
+            );
+            assert!(Arc::ptr_eq(
+                &identity.upgrade().unwrap(),
+                &crate::storage::runtime::load(&directory).await.unwrap()
+            ));
+        }
         assert!(stream.next().await.is_none());
         assert!(cancellation.is_cancelled());
         assert!(identity.upgrade().is_none());
@@ -249,11 +279,32 @@ mod tests {
         // The same response must not cancel a mounted VM's shared volume.
         let _owner = crate::file_lock::exclusive(&directory.join("lock"), "busy").unwrap();
         let mounted = crate::storage::runtime::load(&directory).await.unwrap();
-        let response = app.oneshot(request()).await.unwrap();
+        let response = app.clone().oneshot(request()).await.unwrap();
         let mut stream = response.into_body().into_data_stream();
         stream.next().await.unwrap().unwrap();
         drop(stream);
         assert!(!mounted.stop.is_cancelled());
+        drop(mounted);
+        drop(_owner);
+
+        // Reusing the open journal must still detect corruption that occurs
+        // after its initial scan, before a later block is reconstructed.
+        let response = app.oneshot(request()).await.unwrap();
+        let mut stream = response.into_body().into_data_stream();
+        stream.next().await.unwrap().unwrap();
+        let segment = directory.join("lazy/payload-1-1.segment");
+        let length = std::fs::metadata(&segment).unwrap().len();
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(segment)
+            .unwrap();
+        file.seek(SeekFrom::Start(length - 1)).unwrap();
+        file.write_all(&[0]).unwrap();
+        for _ in 1..count - 1 {
+            stream.next().await.unwrap().unwrap();
+        }
+        assert!(stream.next().await.unwrap().is_err());
+        assert!(crate::storage::runtime::live(&directory).is_none());
     }
 
     #[tokio::test]

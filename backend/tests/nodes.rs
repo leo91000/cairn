@@ -1648,7 +1648,9 @@ fn snapshot_controller(
                 let manifest = manifest.lock().await.clone();
                 return Json(json!({ "id": snapshot, "manifest": manifest })).into_response();
             }
-            if request.uri().path().ends_with("/blocks") {
+            if request.uri().path().ends_with("/blocks")
+                || request.uri().path().ends_with("/publication")
+            {
                 batched.store(true, Ordering::SeqCst);
                 let body = to_bytes(request.into_body(), 4096).await.unwrap();
                 let batch: Value = serde_json::from_slice(&body).unwrap();
@@ -2365,11 +2367,17 @@ fn movement_controller(
                     tokio::fs::remove_dir_all(directory).await.unwrap();
                     return Json(json!({ "ok": true })).into_response();
                 }
-                if request.method() == "POST" && parts[3] == "blocks" {
+                if request.method() == "POST" && matches!(parts[3], "blocks" | "publication") {
                     let body = to_bytes(request.into_body(), 4096).await.unwrap();
                     let value: Value = serde_json::from_slice(&body).unwrap();
                     let hashes = serde_json::from_value(value["hashes"].clone()).unwrap();
-                    let (length, body) = snapshots::served_batch(&directory, hashes).await.unwrap();
+                    let (length, body) = if parts[3] == "publication" {
+                        snapshots::served_publication(&directory, hashes)
+                            .await
+                            .unwrap()
+                    } else {
+                        snapshots::served_batch(&directory, hashes).await.unwrap()
+                    };
                     return ([("content-length", length.to_string())], body).into_response();
                 }
                 return snapshots::served(&directory, parts[3])
@@ -3185,7 +3193,7 @@ async fn coalesced_final_publication_survives_a_new_attempt_and_preserves_later_
                     .unwrap();
                     return Json(json!({ "committed": true })).into_response();
                 }
-                if path.ends_with("/blocks") {
+                if path.ends_with("/blocks") || path.ends_with("/publication") {
                     return StatusCode::NOT_FOUND.into_response();
                 }
                 if reads.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -4125,7 +4133,9 @@ fn shared_publication_controller(
                 let manifest = manifest.lock().await.clone();
                 return Json(json!({ "id": id(), "manifest": manifest })).into_response();
             }
-            if request.uri().path().ends_with("/blocks") {
+            if request.uri().path().ends_with("/blocks")
+                || request.uri().path().ends_with("/publication")
+            {
                 return StatusCode::NOT_FOUND.into_response();
             }
             gates.requests.fetch_add(1, Ordering::SeqCst);

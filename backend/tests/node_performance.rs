@@ -294,12 +294,17 @@ async fn controller_manifest(disk: &std::path::Path) -> Value {
     manifest
 }
 
-/// Streams the blocks a `/blocks` request names, in the requested order.
+/// Streams the blocks a publication or legacy batch names, in the requested order.
 async fn serve_block_batch(
     source: &std::path::Path,
     manifest: Value,
     request: Request,
 ) -> axum::response::Response {
+    let limit = if request.uri().path().ends_with("/publication") {
+        snapshots::MAX_PUBLICATION_BLOCKS
+    } else {
+        snapshots::READ_BATCH
+    };
     let body = axum::body::to_bytes(request.into_body(), 8192)
         .await
         .unwrap();
@@ -310,7 +315,7 @@ async fn serve_block_batch(
         .iter()
         .map(|hash| hash.as_str().unwrap().to_owned())
         .collect::<Vec<_>>();
-    assert!(!hashes.is_empty() && hashes.len() <= snapshots::READ_BATCH);
+    assert!(!hashes.is_empty() && hashes.len() <= limit);
 
     let block_size = |hash: &String| {
         manifest["blocks"]
@@ -363,7 +368,9 @@ async fn master_reuses_unchanged_blocks() {
             if request.uri().path().ends_with("/snapshot") {
                 return Json(json!({ "id": id(), "manifest": manifest })).into_response();
             }
-            if request.uri().path().ends_with("/blocks") {
+            if request.uri().path().ends_with("/blocks")
+                || request.uri().path().ends_with("/publication")
+            {
                 return serve_block_batch(&source, manifest, request).await;
             }
             snapshots::block(
