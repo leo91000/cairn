@@ -650,10 +650,96 @@ async fn verified_google_and_github_emails_attach_to_the_same_leo_account() {
             StatusCode::UNAUTHORIZED
         );
 
+        // Re-linking is an explicit mutation of an authenticated account.
+        let linked = app
+            .client
+            .post(format!("{}/api/account/oauth/{name}/start", app.url))
+            .header("origin", &app.url)
+            .header("cookie", session_cookie)
+            .header("x-csrf-token", session["csrf"].as_str().unwrap())
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(linked.status(), StatusCode::OK);
+        let browser = linked.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let linked: Value = linked.json().await.unwrap();
+        let url = url::Url::parse(linked["url"].as_str().unwrap()).unwrap();
+        let state = url
+            .query_pairs()
+            .find(|(key, _)| key == "state")
+            .unwrap()
+            .1
+            .to_string();
+        let link_callback = format!(
+            "{}/api/account/oauth/{name}/callback?state={state}&code=verified",
+            app.url
+        );
+        assert_eq!(
+            client
+                .get(&link_callback)
+                .header("cookie", format!("{browser}; {session_cookie}"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SEE_OTHER
+        );
+
         assert_eq!(
             client
                 .get(&callback)
                 .header("cookie", cookie)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    for name in ["google", "github"] {
+        let start = app
+            .post(&format!("/api/account/oauth/{name}/start"), json!({}))
+            .await;
+        let browser = start.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let start: Value = start.json().await.unwrap();
+        let url = url::Url::parse(start["url"].as_str().unwrap()).unwrap();
+        let state = url
+            .query_pairs()
+            .find(|(key, _)| key == "state")
+            .unwrap()
+            .1
+            .to_string();
+        let callback = format!(
+            "{}/api/account/oauth/{name}/callback?state={state}&code=unverified",
+            app.url
+        );
+        assert_eq!(
+            client
+                .get(&callback)
+                .header("cookie", &browser)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            client
+                .get(&callback)
+                .header("cookie", &browser)
                 .send()
                 .await
                 .unwrap()
@@ -773,6 +859,45 @@ async fn a_signed_in_account_can_register_a_passkey_and_sign_in_with_it() {
         app.verify(&email_challenge, &email_code).await.status(),
         StatusCode::UNAUTHORIZED
     );
+
+    let response = app
+        .client
+        .post(format!("{}/api/account/verify", app.url))
+        .header("origin", &app.url)
+        .header("cookie", &cookie)
+        .header("x-csrf-token", session["csrf"].as_str().unwrap())
+        .json(&json!({ "challenge": email_challenge, "code": email_code }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let methods: Value = app
+        .client
+        .get(format!("{}/api/account/methods", app.url))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(methods["methods"].as_array().unwrap().len(), 2);
+    let remove = |id: Value| {
+        app.client
+            .post(format!("{}/api/account/methods/remove", app.url))
+            .header("origin", &app.url)
+            .header("cookie", &cookie)
+            .header("x-csrf-token", session["csrf"].as_str().unwrap())
+            .json(&json!({ "id": id }))
+            .send()
+    };
+    let (first, second) = tokio::join!(
+        remove(methods["methods"][0]["id"].clone()),
+        remove(methods["methods"][1]["id"].clone())
+    );
+    let statuses = [first.unwrap().status(), second.unwrap().status()];
+    assert!(statuses.contains(&StatusCode::NO_CONTENT));
+    assert!(statuses.contains(&StatusCode::CONFLICT));
 
     let response = app
         .client

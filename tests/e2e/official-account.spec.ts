@@ -4,7 +4,7 @@ import { createServer } from 'node:http'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
 
-test('email sign-in opens the empty installation screen, persists and signs out', async ({ page }) => {
+test('email sign-in opens the empty installation screen, persists and signs out', async ({ page, context }) => {
   const messages: Array<{ to: string[], text: string }> = []
   const mail = createServer(async (request, response) => {
     let body = ''
@@ -16,7 +16,7 @@ test('email sign-in opens the empty installation screen, persists and signs out'
   mail.listen(0, '127.0.0.1')
   await once(mail, 'listening')
   const mailPort = (mail.address() as { port: number }).port
-  const url = 'http://127.0.0.1:4398'
+  const url = 'http://localhost:4398'
   const child = spawn('target/debug/leo-official', [], {
     env: {
       ...process.env,
@@ -38,6 +38,18 @@ test('email sign-in opens the empty installation screen, persists and signs out'
         throw new Error(`Official service exited: ${log}`)
       return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
     }).toBe(true)
+    const cdp = await context.newCDPSession(page)
+    await cdp.send('WebAuthn.enable')
+    await cdp.send('WebAuthn.addVirtualAuthenticator', {
+      options: {
+        protocol: 'ctap2',
+        transport: 'internal',
+        hasResidentKey: true,
+        hasUserVerification: true,
+        isUserVerified: true,
+        automaticPresenceSimulation: true,
+      },
+    })
     await page.goto(url)
     await page.getByLabel('Email address').fill(`browser-${Date.now()}@example.test`)
     await page.getByRole('button', { name: 'Send code', exact: true }).click()
@@ -51,6 +63,21 @@ test('email sign-in opens the empty installation screen, persists and signs out'
     await expect(page.getByRole('heading', { name: 'No installations yet' })).toBeVisible()
     await page.reload()
     await expect(page.getByRole('heading', { name: 'No installations yet' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Sign-in methods', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Sign-in methods', exact: true }).click()
+    await page.getByLabel('Passkey name').fill('Laptop')
+    await page.getByRole('button', { name: 'Add passkey', exact: true }).click()
+    await expect(page.getByText('Laptop', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Back to installations' }).click()
+    await page.getByRole('button', { name: 'Sign out' }).click()
+    await page.getByLabel('Email address').fill(messages[0]!.to[0]!)
+    await page.getByRole('button', { name: 'Sign in with a passkey' }).click()
+    await expect(page.getByRole('heading', { name: 'No installations yet' })).toBeVisible()
+    await page.getByRole('button', { name: 'Sign-in methods', exact: true }).click()
+    await page.getByRole('button', { name: 'Remove Laptop' }).click()
+    await expect(page.getByText('Laptop', { exact: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /Remove Email/ })).toBeDisabled()
+    await page.getByRole('button', { name: 'Back to installations' }).click()
     for (const width of [1440, 390, 320]) {
       await page.setViewportSize({ width, height: 844 })
       await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible()
