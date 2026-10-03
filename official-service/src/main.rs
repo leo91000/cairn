@@ -22,15 +22,25 @@ struct HttpEmailSender {
 #[async_trait]
 impl EmailSender for HttpEmailSender {
     async fn send_code(&self, email: &str, code: &str) -> Result<(), String> {
-        let response = self.client.post(&self.endpoint).bearer_auth(&self.key).json(&json!({
+        let message = json!({
             "from": self.from,
             "to": [email],
             "subject": "Your Leo sign-in code",
             "text": format!("Your Leo sign-in code is {code}. It expires in 10 minutes. If you did not request it, ignore this email."),
-        })).send().await.map_err(|_| "Email delivery failed".to_owned())?;
+        });
+        let response = self
+            .client
+            .post(&self.endpoint)
+            .bearer_auth(&self.key)
+            .json(&message)
+            .send()
+            .await
+            .map_err(|_| "Email delivery failed".to_owned())?;
+
         if !response.status().is_success() {
             return Err("Email delivery failed".into());
         }
+
         Ok(())
     }
 }
@@ -61,12 +71,14 @@ async fn run() -> Result<(), String> {
         );
     }
     let origin = origin_url.origin().ascii_serialization();
+
     let endpoint = env::var("LEO_OFFICIAL_EMAIL_ENDPOINT")
         .unwrap_or_else(|_| "https://api.resend.com/emails".into());
     let email_url = Url::parse(&endpoint).map_err(|_| "Invalid LEO_OFFICIAL_EMAIL_ENDPOINT")?;
     if email_url.scheme() != "https" && !(loopback && email_url.scheme() == "http") {
         return Err("LEO_OFFICIAL_EMAIL_ENDPOINT requires HTTPS outside development".into());
     }
+
     let sender = HttpEmailSender {
         client: Client::builder()
             .timeout(Duration::from_secs(10))
@@ -77,22 +89,26 @@ async fn run() -> Result<(), String> {
         key: required("LEO_OFFICIAL_EMAIL_KEY")?,
         from: required("LEO_OFFICIAL_EMAIL_FROM")?,
     };
+
     let address: SocketAddr = env::var("LEO_OFFICIAL_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:4311".into())
         .parse()
         .map_err(|_| "Invalid LEO_OFFICIAL_LISTEN")?;
+
     let web = PathBuf::from(env::var("LEO_OFFICIAL_WEB_DIR").unwrap_or_else(|_| "dist".into()));
     if !web.join("official.html").is_file() {
         return Err(
             "Build the web application with pnpm build before starting the official service".into(),
         );
     }
+
     let pool = PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(Duration::from_secs(5))
         .connect(&required("LEO_OFFICIAL_DATABASE_URL")?)
         .await
         .map_err(|_| "Could not connect to the official Postgres database")?;
+
     let app = router(pool, Arc::new(sender), origin)
         .await
         .map_err(|_| "Official database migration failed")?
@@ -101,9 +117,11 @@ async fn run() -> Result<(), String> {
         .route_service("/", ServeFile::new(web.join("official.html")))
         .route_service("/index.html", ServeFile::new(web.join("official.html")))
         .fallback_service(ServeDir::new(&web).fallback(ServeFile::new(web.join("official.html"))));
+
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .map_err(|_| "Could not bind LEO_OFFICIAL_LISTEN")?;
+
     tracing::info!("Official service listening");
     axum::serve(
         listener,

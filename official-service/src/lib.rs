@@ -113,6 +113,7 @@ async fn request_code(
     Json(input): Json<EmailRequest>,
 ) -> Result<Response, ApiError> {
     consume_limit(&service.pool, &format!("delivery:{}", peer.ip()), 10).await?;
+
     let email = input.email.trim().to_lowercase();
     if email.len() > 254
         || email.chars().any(char::is_control)
@@ -130,7 +131,9 @@ async fn request_code(
             "Enter a valid email address",
         ));
     }
+
     consume_limit(&service.pool, &format!("email:{}", digest(&email)), 1).await?;
+
     query("DELETE FROM email_codes WHERE expires_at <= now()")
         .execute(&service.pool)
         .await?;
@@ -144,6 +147,7 @@ async fn request_code(
     let challenge = random_token();
     let code = format!("{:08}", rand::rng().random_range(0..100_000_000_u32));
     let code_digest = digest(&format!("{challenge}:{code}"));
+
     let mut transaction = service.pool.begin().await?;
     query("DELETE FROM email_codes WHERE email = $1")
         .bind(&email)
@@ -183,13 +187,16 @@ async fn verify_code(
     Json(input): Json<Verification>,
 ) -> Result<Response, ApiError> {
     consume_limit(&service.pool, &format!("verification:{}", peer.ip()), 30).await?;
+
     let mut transaction = service.pool.begin().await?;
     let row: Option<(String, String, bool, i32)> = query_as("SELECT email, code_digest, expires_at > now(), attempts FROM email_codes WHERE challenge = $1 FOR UPDATE")
         .bind(&input.challenge).fetch_optional(&mut *transaction).await?;
+
     let invalid = || ApiError(StatusCode::UNAUTHORIZED, "Invalid or expired code");
     let Some((email, expected, unexpired, attempts)) = row else {
         return Err(invalid());
     };
+
     let supplied = digest(&format!("{}:{}", input.challenge, input.code));
     if !unexpired || attempts >= 5 || !bool::from(expected.as_bytes().ct_eq(supplied.as_bytes())) {
         query("UPDATE email_codes SET attempts = attempts + 1 WHERE challenge = $1")
@@ -204,8 +211,10 @@ async fn verify_code(
         .bind(&input.challenge)
         .execute(&mut *transaction)
         .await?;
+
     let (account_id,): (String,) = query_as("INSERT INTO leo_accounts (id, email) VALUES ($1, $2) ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email RETURNING id")
         .bind(uuid::Uuid::new_v4().to_string()).bind(&email).fetch_one(&mut *transaction).await?;
+
     let token = random_token();
     let csrf = random_token();
     query("INSERT INTO web_sessions (digest, account_id, csrf, expires_at) VALUES ($1, $2, $3, now() + interval '7 days')")
@@ -293,6 +302,7 @@ async fn logout(State(service): State<Service>, headers: HeaderMap) -> Result<Re
         .get("x-csrf-token")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
+
     let mut transaction = service.pool.begin().await?;
     let row: Option<(String,)> = query_as(
         "SELECT csrf FROM web_sessions WHERE digest = $1 AND expires_at > now() FOR UPDATE",
@@ -300,12 +310,14 @@ async fn logout(State(service): State<Service>, headers: HeaderMap) -> Result<Re
     .bind(digest(token))
     .fetch_optional(&mut *transaction)
     .await?;
+
     let Some((csrf,)) = row else {
         return Err(ApiError(
             StatusCode::UNAUTHORIZED,
             "Session expired. Please sign in again.",
         ));
     };
+
     if !bool::from(csrf.as_bytes().ct_eq(supplied.as_bytes())) {
         return Err(ApiError(StatusCode::FORBIDDEN, "Invalid CSRF token"));
     }
@@ -315,6 +327,7 @@ async fn logout(State(service): State<Service>, headers: HeaderMap) -> Result<Re
         .execute(&mut *transaction)
         .await?;
     transaction.commit().await?;
+
     let secure = if service.origin.starts_with("https://") {
         "; Secure"
     } else {
@@ -339,5 +352,6 @@ async fn consume_limit(pool: &PgPool, key: &str, maximum: i32) -> Result<(), Api
             "Too many attempts. Please wait a minute.",
         ));
     }
+
     Ok(())
 }
