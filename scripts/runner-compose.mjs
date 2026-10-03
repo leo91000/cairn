@@ -164,6 +164,12 @@ export function firecrackerRunnerCompose(compose) {
   if (poolSetting !== undefined)
     migratedEnvironment.LEO_READY_VM_POOL = poolSetting
 
+  const poolSize = runnerSetting('LEO_READY_VM_POOL_SIZE')
+  if (poolSize !== undefined && !/^[1-4]$/.test(poolSize))
+    throw new Error('Runner pool size must be between 1 and 4.')
+  if (poolSize !== undefined)
+    migratedEnvironment.LEO_READY_VM_POOL_SIZE = poolSize
+
   const blockTransport = runnerSetting('LEO_BLOCK_TRANSPORT')
   if (blockTransport !== undefined && !['vhost-user', 'ublk'].includes(blockTransport))
     throw new Error('Unsupported runner block transport.')

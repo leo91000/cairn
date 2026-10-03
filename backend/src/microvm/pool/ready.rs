@@ -5,6 +5,32 @@ use std::{os::unix::fs::FileTypeExt, path::Path};
 
 pub(super) const WARM_HEADROOM_MIB: u64 = 2048;
 
+pub(super) fn capacity(value: Option<&str>) -> Result<usize> {
+    match value {
+        None => Ok(1),
+        Some(value) => value
+            .parse::<usize>()
+            .ok()
+            .filter(|count| (1..=4).contains(count))
+            .ok_or_else(|| {
+                crate::error::Error::bad("LEO_READY_VM_POOL_SIZE must be between 1 and 4.")
+            }),
+    }
+}
+
+pub(super) fn memory_allowance(budget: &Budget) -> u64 {
+    (budget.limits.memory_mi_b / 4).clamp(WARM_HEADROOM_MIB, 8192) * 1_048_576
+}
+
+pub(super) fn can_prepare(count: usize, bytes: Option<u64>, budget: &Budget) -> bool {
+    // Preserve the original single-spare policy on small nodes. Additional
+    // spares need their own measured allowance and conservative startup margin.
+    count == 0
+        || bytes.is_some_and(|bytes| {
+            bytes.saturating_add(WARM_HEADROOM_MIB * 1_048_576) <= memory_allowance(budget)
+        })
+}
+
 pub(super) struct Prepared {
     pub budget: Budget,
 }
@@ -88,6 +114,33 @@ async fn policy_file(path: &Path, expected: &[u8]) -> Result<bool> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn additional_spares_need_measured_ram_and_startup_headroom() {
+        let mut budget = Budget {
+            slots: 8,
+            limits: crate::nodes::Resources {
+                cpu: 7,
+                memory_mi_b: 36352,
+                disk_mi_b: 65536,
+            },
+        };
+        assert!(can_prepare(3, Some(5 * 1024 * 1_048_576), &budget));
+        assert!(!can_prepare(3, Some(7 * 1024 * 1_048_576), &budget));
+        assert!(!can_prepare(1, None, &budget));
+        budget.limits.memory_mi_b = 4096;
+        assert!(can_prepare(0, Some(0), &budget));
+        assert!(!can_prepare(1, Some(1), &budget));
+    }
+
+    #[test]
+    fn pool_configuration_is_bounded_and_opt_in() {
+        assert_eq!(capacity(None).unwrap(), 1);
+        assert_eq!(capacity(Some("4")).unwrap(), 4);
+        for value in ["0", "5", "-1", "", "1.5", "four"] {
+            assert!(capacity(Some(value)).is_err(), "{value}");
+        }
+    }
 
     #[test]
     fn prepared_hardware_must_match_the_claim() {

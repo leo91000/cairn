@@ -440,7 +440,12 @@ impl Templates {
         if !build_missing && !template.exists() {
             return Ok(None);
         }
-        let mut timing = Operation::new("vm_template", &name, "lookup");
+        let environment = crate::performance::identity(
+            disk.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(""),
+        );
+        let mut timing = Operation::new("vm_template", environment, "lookup");
         if !template.exists() {
             let staging = tempfile::Builder::new()
                 .prefix("partial-")

@@ -52,6 +52,7 @@ class Supervisor(unittest.TestCase):
         self.assertEqual(host.vm_arguments({}), [])
         config = {'blockTransport': 'ublk', 'vmSnapshots': True}
         self.assertEqual(host.vm_arguments(config), ['-e', 'LEO_DISK_LAYOUT=paired-ext4-v1', '-e', 'LEO_VM_SNAPSHOTS=true'])
+        config['readyVmPoolSize'] = 4
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / 'data/node').mkdir(parents=True)
@@ -62,14 +63,15 @@ class Supervisor(unittest.TestCase):
             launch = command.call_args_list[0].args[0]
             self.assertIn('LEO_DISK_LAYOUT=paired-ext4-v1', launch)
             self.assertIn('LEO_VM_SNAPSHOTS=true', launch)
+            self.assertIn('LEO_READY_VM_POOL_SIZE=4', launch)
         config.update({'vmSnapshots': False, 'diskLayout': 'paired-ext4-v1'})
-        self.assertEqual(host.vm_arguments(config), ['-e', 'LEO_DISK_LAYOUT=paired-ext4-v1', '-e', 'LEO_VM_SNAPSHOTS=false'])
+        self.assertEqual(host.vm_arguments(config), ['-e', 'LEO_READY_VM_POOL_SIZE=4', '-e', 'LEO_DISK_LAYOUT=paired-ext4-v1', '-e', 'LEO_VM_SNAPSHOTS=false'])
 
     def test_incompatible_snapshot_configuration_never_removes_the_running_node(self):
         spec = importlib.util.spec_from_file_location('node_supervisor', SOURCE)
         host = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(host)
-        for config in [{'vmSnapshots': True}, {'diskLayout': 'paired-ext4-v1'}, {'vmSnapshots': 'true'}, {'vmSnapshots': 1}, {'diskLayout': 'invalid'}, {'blockTransport': 'ublk', 'vmSnapshots': True, 'diskLayout': 'flat-ext4-v1'}]:
+        for config in [{'readyVmPoolSize': value} for value in [0, 5, True, '4', 1.5]] + [{'vmSnapshots': True}, {'diskLayout': 'paired-ext4-v1'}, {'vmSnapshots': 'true'}, {'vmSnapshots': 1}, {'diskLayout': 'invalid'}, {'blockTransport': 'ublk', 'vmSnapshots': True, 'diskLayout': 'flat-ext4-v1'}]:
             with self.subTest(config=config), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 (root / 'config.json').write_text(json.dumps(config))

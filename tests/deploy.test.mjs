@@ -142,13 +142,14 @@ describe('coolify deployment over HTTP', () => {
 
   it.each(['mapping', 'list'])('preserves the operator pool setting across deployment (%s)', async (shape) => {
     const document = parse(compose)
-    const environment = { ...document.services.runner.environment, LEO_READY_VM_POOL: 'false' }
+    const environment = { ...document.services.runner.environment, LEO_READY_VM_POOL: 'false', LEO_READY_VM_POOL_SIZE: '4' }
     document.services.runner.environment = shape === 'list'
       ? Object.entries(environment).map(([key, value]) => `${key}=${value}`)
       : environment
     compose = stringify(document)
     await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
     expect(parse(compose).services.runner.environment.LEO_READY_VM_POOL).toBe('false')
+    expect(parse(compose).services.runner.environment.LEO_READY_VM_POOL_SIZE).toBe('4')
     expect(firecrackerRunnerCompose(compose)).toBe(compose)
   })
 

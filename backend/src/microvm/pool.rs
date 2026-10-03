@@ -1,4 +1,4 @@
-//! Bounded execution slots, with one account-free VM prepared for a fresh chat.
+//! Bounded execution slots and an evictable pool of account-free prepared VMs.
 mod ready;
 mod retained;
 
@@ -27,7 +27,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 #[derive(Default)]
 struct Slots {
     occupied: Vec<bool>,
-    ready: Option<Reservation>,
+    ready: VecDeque<Reservation>,
     retained: VecDeque<retained::Retained>,
     preparing: Option<Preparing>,
     retry_after: Option<Instant>,
@@ -41,6 +41,12 @@ struct Preparing {
 }
 
 impl Slots {
+    fn ready_bytes(&self) -> Option<u64> {
+        self.ready.iter().try_fold(0u64, |bytes, reservation| {
+            bytes.checked_add(reservation.vm.as_ref()?.resident_bytes()?)
+        })
+    }
+
     fn available(&self, capacity: usize) -> bool {
         self.occupied.iter().filter(|used| **used).count() < capacity
     }
@@ -69,6 +75,7 @@ pub struct Health {
     pub occupied: usize,
     /// Included in occupied; this slot can be claimed by a compatible chat.
     pub ready: usize,
+    pub ready_memory_mi_b: Option<u64>,
     pub preparing: bool,
     pub retained: usize,
     pub retained_memory_mi_b: Option<u64>,
@@ -100,6 +107,7 @@ pub struct Pool {
     state: PathBuf,
     image: PathBuf,
     warm_enabled: bool,
+    warm_capacity: usize,
     retention: Duration,
     slots: Mutex<Slots>,
     admission: Mutex<()>,
@@ -126,6 +134,11 @@ impl Pool {
             Ok("true") | Err(std::env::VarError::NotPresent) => true,
             _ => return Err(Error::bad("LEO_READY_VM_POOL must be true or false.")),
         };
+        let warm_capacity = match std::env::var("LEO_READY_VM_POOL_SIZE") {
+            Ok(value) => ready::capacity(Some(&value))?,
+            Err(std::env::VarError::NotPresent) => ready::capacity(None)?,
+            Err(_) => return Err(Error::bad("Invalid VM pool size configuration.")),
+        };
         // The controller lock and PID namespace fence all previous owners before this cleanup.
         let prepared = state.join("prepared");
         if prepared.exists() {
@@ -147,6 +160,7 @@ impl Pool {
             state,
             image,
             warm_enabled,
+            warm_capacity,
             retention: retained::lifetime()?,
             slots: Mutex::new(Slots::default()),
             admission: Mutex::new(()),
@@ -294,7 +308,8 @@ impl Pool {
         Health {
             capacity: self.capacity.load(Ordering::SeqCst),
             occupied: slots.occupied.iter().filter(|v| **v).count(),
-            ready: usize::from(slots.ready.is_some()),
+            ready: slots.ready.len(),
+            ready_memory_mi_b: slots.ready_bytes().map(|bytes| bytes / 1_048_576),
             preparing: slots.preparing.is_some(),
             retained: slots.retained.len(),
             retained_memory_mi_b: slots
@@ -306,13 +321,17 @@ impl Pool {
     }
 
     pub async fn reserve(self: &Arc<Self>, plan: &Plan) -> Result<Reservation> {
+        let mut timing =
+            crate::performance::Operation::new("vm_admission", plan.run_id(), "admission_lock");
         let _admission = self.admission.lock().await;
         if self.stop.is_cancelled() {
             return Err(Error::unavailable("VM controller is stopping."));
         }
         // A live request preempts background preparation, but never reuses its
         // physical slot until its VMM and backend have both stopped.
+        timing.next("background_preemption");
         self.cancel_preparing().await;
+        timing.next("reclaim_idle");
         self.make_room(false).await?;
         let retained = {
             let mut slots = self.slots.lock().await;
@@ -332,6 +351,7 @@ impl Pool {
             {
                 idle.reservation.resumed = true;
                 idle.reservation.retained_budget = Some(idle.budget);
+                timing.finish();
                 return Ok(idle.reservation);
             }
             if idle.publication_pending() {
@@ -343,7 +363,8 @@ impl Pool {
             }
             idle.reservation.finish().await;
         }
-        let has_ready = self.slots.lock().await.ready.is_some();
+        let has_ready = !self.slots.lock().await.ready.is_empty();
+        timing.next("claim_spare");
         let disk_mib = plan.as_value()["resources"]["diskMiB"]
             .as_u64()
             .unwrap_or(DEFAULT_DISK_MIB);
@@ -352,9 +373,10 @@ impl Pool {
             && ready::eligible(plan).await?
             && ready::fresh_disk(&self.state, plan.run_id()).await?;
         if can_claim {
-            let prepared = self.slots.lock().await.ready.take();
+            let prepared = self.slots.lock().await.ready.pop_front();
             if let Some(mut reservation) = prepared {
                 if self.usage().await?.1.is_none() {
+                    timing.finish();
                     return Ok(reservation);
                 }
                 reservation.finish().await;
@@ -363,6 +385,7 @@ impl Pool {
         // Resumes and custom plans cannot use anonymous native state. Keep the
         // healthy spare when another slot is available, rather than making
         // these runs wait for its teardown and another background warmup.
+        timing.next("reserve_slot");
         self.make_room(true).await?;
         if self.usage().await?.1.is_some() {
             return Err(Error::unavailable(
@@ -375,6 +398,7 @@ impl Pool {
             .await
             .reserve(self.capacity.load(Ordering::SeqCst))
             .ok_or_else(|| Error::unavailable("All VM slots are occupied."))?;
+        timing.finish();
         Ok(Reservation {
             pool: self.clone(),
             released: false,
@@ -426,8 +450,9 @@ impl Pool {
             let Some(mut idle) = idle else { break };
             idle.reservation.finish().await;
         }
-        let ready = self.slots.lock().await.ready.take();
-        if let Some(mut reservation) = ready {
+        loop {
+            let ready = self.slots.lock().await.ready.pop_front();
+            let Some(mut reservation) = ready else { break };
             reservation.finish().await;
         }
     }
@@ -448,7 +473,7 @@ impl Pool {
             let idle = index
                 .and_then(|index| slots.retained.remove(index))
                 .map(|idle| idle.reservation)
-                .or_else(|| slots.ready.take());
+                .or_else(|| slots.ready.pop_front());
             drop(slots);
             let Some(mut reservation) = idle else {
                 return Ok(());
@@ -600,24 +625,41 @@ impl Pool {
         };
         let (usage, pressure) = self.usage().await?;
         let memory = usage["memoryMiB"].as_u64().unwrap_or(u64::MAX);
-        let incompatible = self
-            .slots
-            .lock()
-            .await
-            .ready
-            .as_ref()
-            .is_some_and(|reservation| {
-                !reservation
-                    .prepared
-                    .as_ref()
-                    .unwrap()
-                    .compatible(&budget, DEFAULT_DISK_MIB)
-            });
+        let incompatible = self.slots.lock().await.ready.iter().any(|reservation| {
+            !reservation
+                .prepared
+                .as_ref()
+                .unwrap()
+                .compatible(&budget, DEFAULT_DISK_MIB)
+        });
         if incompatible || pressure.is_some() || memory > budget.limits.memory_mi_b * 75 / 100 {
             self.retire_idle(false).await;
             return Ok(());
         }
         if memory.saturating_add(ready::WARM_HEADROOM_MIB) > budget.limits.memory_mi_b {
+            return Ok(());
+        }
+        // Recheck actual RAM after preparation too: admission never relies on
+        // the estimate, and an enlarged pool can shrink without touching work.
+        loop {
+            let retire = {
+                let mut slots = self.slots.lock().await;
+                let bytes = slots.ready_bytes();
+                if slots.ready.len() <= 1
+                    || bytes.is_some_and(|bytes| bytes <= ready::memory_allowance(&budget))
+                {
+                    None
+                } else {
+                    slots.ready.pop_front()
+                }
+            };
+            let Some(mut reservation) = retire else { break };
+            reservation.finish().await;
+        }
+        let slots = self.slots.lock().await;
+        let can_prepare = ready::can_prepare(slots.ready.len(), slots.ready_bytes(), &budget);
+        drop(slots);
+        if !can_prepare {
             return Ok(());
         }
         let policy = match tokio::fs::read(self.state.join("storage-policy.json")).await {
@@ -629,7 +671,7 @@ impl Pool {
         };
         let mut slots = self.slots.lock().await;
         if self.stop.is_cancelled()
-            || slots.ready.is_some()
+            || slots.ready.len() >= self.warm_capacity
             || slots.preparing.is_some()
             || slots.warm_disabled
             || slots.retry_after.is_some_and(|at| Instant::now() < at)
@@ -721,7 +763,7 @@ impl Reservation {
                 self.prepared = Some(ready::Prepared { budget });
                 let completion = self.completion.take().unwrap();
                 slots.preparing = None;
-                slots.ready = Some(self);
+                slots.ready.push_back(self);
                 let _ = completion.send(true);
                 tracing::info!(target: "leo_performance", operation = "vm_pool", event = "ready");
                 return;
@@ -1149,7 +1191,7 @@ mod tests {
                     expires: Instant::now() - Duration::from_secs(1),
                 });
             }
-            slots.ready = Some(ready);
+            slots.ready.push_back(ready);
         }
         assert_eq!(pool.evict_conversation(&run).await.unwrap_err().status, 425);
         let first = pool.reserve(&cold_plan("first-active")).await.unwrap();
@@ -1182,15 +1224,16 @@ mod tests {
             root.path().into(),
             root.path().into(),
             CancellationToken::new(),
-            3,
+            4,
         )
         .await
         .unwrap();
         let oldest = pool.reserve(&cold_plan("oldest")).await.unwrap();
         let newest = pool.reserve(&cold_plan("newest")).await.unwrap();
         let ready = pool.reserve(&cold_plan("anonymous")).await.unwrap();
+        let second_ready = pool.reserve(&cold_plan("second-anonymous")).await.unwrap();
         let budget = Budget {
-            slots: 3,
+            slots: 4,
             limits: crate::nodes::Resources {
                 cpu: 3,
                 memory_mi_b: 8192,
@@ -1208,7 +1251,8 @@ mod tests {
                 volume: None,
             });
         }
-        slots.ready = Some(ready);
+        slots.ready.push_back(ready);
+        slots.ready.push_back(second_ready);
         drop(slots);
         let active = pool.reserve(&cold_plan("new-active")).await.unwrap();
         assert_eq!(active.slot, 1, "Oldest retained slot is reclaimed first");
@@ -1216,23 +1260,26 @@ mod tests {
         assert_eq!(slots.retained.len(), 1);
         assert_eq!(slots.retained.front().unwrap().run, "newest");
         assert!(
-            slots.ready.is_some(),
+            !slots.ready.is_empty(),
             "Anonymous spare survives when one eviction suffices"
         );
         drop(slots);
         let second = pool.reserve(&cold_plan("second-active")).await.unwrap();
         assert_eq!(second.slot, 2);
-        assert!(pool.slots.lock().await.ready.is_some());
+        assert!(!pool.slots.lock().await.ready.is_empty());
         let third = pool.reserve(&cold_plan("third-active")).await.unwrap();
         assert_eq!(third.slot, 3);
-        assert!(pool.slots.lock().await.ready.is_none());
-        assert!(pool.reserve(&cold_plan("fourth-active")).await.is_err());
+        assert_eq!(pool.slots.lock().await.ready.len(), 1);
+        let fourth = pool.reserve(&cold_plan("fourth-active")).await.unwrap();
+        assert_eq!(fourth.slot, 4, "Anonymous spares are evicted oldest first");
+        assert!(pool.slots.lock().await.ready.is_empty());
+        assert!(pool.reserve(&cold_plan("fifth-active")).await.is_err());
         assert_eq!(
             pool.health().await.occupied,
-            3,
+            4,
             "Active guests are never evicted"
         );
-        drop((active, second, third));
+        drop((active, second, third, fourth));
         pool.drain().await;
     }
 
@@ -1341,7 +1388,7 @@ mod tests {
                 },
             },
         });
-        pool.slots.lock().await.ready = Some(spare);
+        pool.slots.lock().await.ready.push_back(spare);
 
         let resume = Plan::new(
             serde_json::json!({ "runId": "resumed", "chat": { "provider": "codex", "sessionId": "existing-thread" } }),

@@ -12,7 +12,14 @@ const vmms = fs.readdirSync('/proc').filter(pid => /^\d+$/.test(pid)).flatMap((p
       return field ? [[field[1], Number(field[2])]] : []
     }))
     const mappings = fs.readFileSync(`/proc/${pid}/maps`, 'utf8').split('\n').filter(line => line.includes('snapshot.mem'))
-    return [{ pid, memory, mappings }]
+    const args = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0')
+    const vmId = args[args.indexOf('--id') + 1]
+    return [{
+      pid,
+      vmId,
+      memory,
+      mappings,
+    }]
   }
   catch { return [] }
 })

@@ -23,6 +23,12 @@ async function main() {
   const image = process.argv[2]
   assert.ok(image, 'Provide the runner image')
   const snapshots = process.env.LEO_VM_SNAPSHOTS !== 'false'
+  const poolSize = Number(process.env.LEO_READY_VM_POOL_SIZE ?? 1)
+  const memoryGiB = Number(process.env.LEO_SNAPSHOT_TEST_MEMORY_GIB ?? 16)
+  const cpuQuota = Number(process.env.LEO_SNAPSHOT_TEST_CPU ?? 4)
+  const slots = Number(process.env.LEO_SNAPSHOT_TEST_SLOTS ?? 4)
+  assert.ok(Number.isInteger(poolSize) && poolSize >= 1 && poolSize <= 4)
+  assert.ok([memoryGiB, cpuQuota, slots].every(value => Number.isInteger(value) && value > 0))
   const docker = (...args) => execFileSync('docker', ['--context', 'default', ...args], { encoding: 'utf8', timeout: 180000 }).trim()
   const imageId = docker('image', 'inspect', '--format', '{{.Id}}', image)
   const root = await mkdtemp(path.join(process.env.VM_TEST_ROOT || '/var/tmp', 'leo-snapshots-'))
@@ -105,7 +111,7 @@ async function main() {
     docker('network', 'connect', '--ip', '203.0.113.3', network, peer)
     // SYS_PTRACE is observer-only: it permits smaps inspection of other UIDs.
     const capabilities = ['SYS_RESOURCE', 'SYS_PTRACE', 'SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE']
-    docker('run', '-d', '--name', name, '--user', '0:0', '--no-healthcheck', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(value => ['--cap-add', value]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/ublk-control', '--device-cgroup-rule', `c ${charMajor}:* rwm`, '--device-cgroup-rule', `b ${blockMajor}:* rwm`, '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '16g', '--cpus', '4', '-e', 'CONCURRENCY=4', '-e', `APP_RUNTIME_ID=snapshots-test-${imageId.slice(7)}`, '-e', 'LEO_READY_VM_POOL=true', '-e', 'LEO_BLOCK_TRANSPORT=ublk', '-e', 'LEO_DISK_LAYOUT=paired-ext4-v1', '-e', `LEO_VM_SNAPSHOTS=${snapshots}`, '-e', 'RUST_LOG=warn,leo_performance=info', '--entrypoint', '/usr/local/bin/leo', imageId, 'runner-broker')
+    docker('run', '-d', '--name', name, '--user', '0:0', '--no-healthcheck', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(value => ['--cap-add', value]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/ublk-control', '--device-cgroup-rule', `c ${charMajor}:* rwm`, '--device-cgroup-rule', `b ${blockMajor}:* rwm`, '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', `${memoryGiB}g`, '--cpus', `${cpuQuota}`, '-e', `CONCURRENCY=${slots}`, '-e', `APP_RUNTIME_ID=snapshots-test-${imageId.slice(7)}`, '-e', 'LEO_READY_VM_POOL=true', '-e', `LEO_READY_VM_POOL_SIZE=${poolSize}`, '-e', 'LEO_BLOCK_TRANSPORT=ublk', '-e', 'LEO_DISK_LAYOUT=paired-ext4-v1', '-e', `LEO_VM_SNAPSHOTS=${snapshots}`, '-e', 'RUST_LOG=warn,leo_performance=info', '--entrypoint', '/usr/local/bin/leo', imageId, 'runner-broker')
     docker('network', 'connect', '--ip', '203.0.113.2', network, name)
     await reconnect()
     const fixture = await prepareStorageOrigin({
@@ -114,7 +120,7 @@ async function main() {
       name,
       api,
     })
-    await until(async () => (await (await api('/health')).json()).pool.ready === 1, 300000)
+    await until(async () => (await (await api('/health')).json()).pool.ready === poolSize, 300000)
 
     for (let index = 0; index < 4; index++) {
       const runId = randomUUID()
@@ -169,7 +175,7 @@ async function main() {
           expires: Date.now() + 120000,
           sandbox: 'yolo',
           cwd: chat.cwd,
-          resources: { cpu: 4, memoryMiB: 15872, diskMiB: 32768 },
+          resources: { cpu: cpuQuota, memoryMiB: memoryGiB * 1024 - 512, diskMiB: 32768 },
           storage: fixture.storage,
           chat,
           imports: [{ source: `${runRoot}/workspace`, target: chat.cwd }, { source: `${runRoot}/home`, target: '/home/node' }, { source: `${runRoot}/output`, target: `${runRoot}/output` }, { source: `${runRoot}/chat-input`, target: '/run/leo-chat', readOnly: true }],
@@ -179,6 +185,8 @@ async function main() {
 
     for (const entry of plans)
       await writeFile(path.join(root, 'data/runner-plans', `${entry.id}.json`), JSON.stringify(entry.plan))
+    const poolBefore = (await (await api('/health')).json()).pool
+    const poolMemoryBefore = JSON.parse(docker('exec', name, 'node', '/data/memory.mjs'))
     const started = Date.now()
     await Promise.all(plans.map(entry => api(`/runs/${entry.id}`, 'POST')))
     await until(() => {
@@ -188,13 +196,20 @@ async function main() {
     })
     const memory = JSON.parse(docker('exec', name, 'node', '/data/memory.mjs'))
     await writeFile(path.join(root, 'memory.json'), JSON.stringify(memory, null, 2))
-    assert.equal(memory.vmms.length, 4, 'Four VMMs are active during measurement')
+    const activeIds = new Set(plans.map(entry => JSON.parse(docker('exec', name, 'cat', `/runner-state/${entry.id}.vm.json`)).vmId))
+    const activeVmms = memory.vmms.filter(vm => activeIds.has(vm.vmId))
+    assert.equal(activeVmms.length, 4, 'Four owned conversations are active during measurement')
+    if (poolSize === 4) {
+      const preparedIds = new Set(poolMemoryBefore.vmms.map(vm => vm.vmId))
+      assert.ok([...activeIds].every(id => preparedIds.has(id)), 'All four arrivals claim their already initialized VM')
+    }
+
     assert.match(memory.events, /^oom_kill 0$/m)
-    const inodes = memory.vmms.map(vm => vm.mappings[0]?.trim().split(/\s+/)[4])
+    const inodes = activeVmms.map(vm => vm.mappings[0]?.trim().split(/\s+/)[4])
     if (snapshots) {
       assert.ok(inodes.every(Boolean), 'All clones map snapshot memory')
       assert.equal(new Set(inodes).size, 1, 'All clones share one immutable memory inode')
-      assert.ok(memory.vmms.every(vm => vm.mappings.every(mapping => / rw-p /.test(mapping))), 'Guest memory uses private mappings')
+      assert.ok(activeVmms.every(vm => vm.mappings.every(mapping => / rw-p /.test(mapping))), 'Guest memory uses private mappings')
     }
     else {
       assert.ok(inodes.every(inode => !inode), 'Control guests use the ordinary boot path')
@@ -259,6 +274,10 @@ async function main() {
     process.stdout.write(`${JSON.stringify({
       imageId,
       snapshots,
+      poolSize,
+      poolBefore,
+      poolMemoryBefore,
+      activeVmms,
       root,
       preModelMs,
       memory,
