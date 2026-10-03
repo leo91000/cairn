@@ -1,3 +1,4 @@
+mod installations;
 mod methods;
 mod oauth;
 mod passkeys;
@@ -87,6 +88,13 @@ pub async fn router_with_oauth(
                 false,
             ),
             Migration::new(
+                3,
+                "installation claims".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/0003_installations.sql").into(),
+                false,
+            ),
+            Migration::new(
                 202610030052,
                 "sign in methods".into(),
                 MigrationType::Simple,
@@ -98,6 +106,7 @@ pub async fn router_with_oauth(
                 "removed sign in methods".into(),
                 MigrationType::Simple,
                 include_str!("../migrations/202610030152_removed_methods.sql").into(),
+
                 false,
             ),
         ]),
@@ -140,10 +149,16 @@ pub async fn router_with_oauth(
         )
         .route("/api/account/methods", get(methods::list))
         .route("/api/account/methods/remove", post(methods::remove))
+        .route(
+            "/api/installations/claim-code",
+            post(installations::claim_code),
+        )
+
         .layer(middleware::from_fn_with_state(
             service.clone(),
             browser_security,
         ))
+        .merge(Router::new().route("/api/relay/claim", post(installations::claim)))
         .with_state(service))
 }
 
@@ -342,7 +357,7 @@ async fn session(
             "authenticated": true,
             "account": { "id": id, "email": email },
             "csrf": csrf,
-            "installations": [],
+            "installations": installations::list(&service.pool, &id).await?,
         }),
         None => json!({
             "authenticated": false,

@@ -102,6 +102,8 @@ vm-memory = { version = "=0.18.0", features = [
 ] }
 vmm-sys-util = "=0.15.0"
 libublk = { git = "https://github.com/ublk-org/libublk-rs", rev = "0d172817b3737079477337b39538ccdc91766e6e", optional = true }
+tokio-tungstenite = { version = "0.29", features = [ "rustls-tls-webpki-roots" ] }
+tower = { version = "0.5", features = [ "util" ] }
 
 [dev-dependencies]
 tempfile = "3"
