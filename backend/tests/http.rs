@@ -7,6 +7,7 @@ use axum::{
     response::Response,
 };
 use common::{Credentials, Session, read_bytes, read_json, read_text, request, send};
+use http_body_util::BodyExt;
 use leo_agent_manager::{
     attachments::MAX_FILE,
     auth::{InstallationIdentity, InstallationRole, hex_digest},
@@ -15,7 +16,7 @@ use leo_agent_manager::{
     service::Service,
 };
 use serde_json::{Value, json};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
@@ -222,6 +223,42 @@ async fn member_identity_cannot_manage_installation_resources() {
             .extensions_mut()
             .insert(InstallationIdentity::trusted(InstallationRole::Member));
         assert_eq!(send(&app, request).await.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn member_identity_can_create_and_stream_conversations_without_a_local_session() {
+    let (_root, app, _service) = app().await;
+    let mut create = json_request("POST", "/api/chats")
+        .body(Body::from("{}"))
+        .unwrap();
+    create
+        .extensions_mut()
+        .insert(InstallationIdentity::trusted(InstallationRole::Member));
+    let response = send(&app, create).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let chat = read_json(response).await;
+
+    for path in [
+        "/api/chats/stream".to_owned(),
+        format!("/api/chats/{}/stream", chat["id"].as_str().unwrap()),
+    ] {
+        let mut request = json_request("GET", &path).body(Body::empty()).unwrap();
+        request
+            .extensions_mut()
+            .insert(InstallationIdentity::trusted(InstallationRole::Member));
+        let response = send(&app, request).await;
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+
+        let mut body = response.into_body();
+        let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
+            .await
+            .expect("the member should receive the initial batch")
+            .expect("the member stream should remain open")
+            .unwrap();
+        let batch = String::from_utf8(frame.into_data().unwrap().to_vec()).unwrap();
+        assert!(batch.contains("event: batch"), "{path}: {batch}");
     }
 }
 

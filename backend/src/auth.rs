@@ -32,16 +32,37 @@ pub enum InstallationRole {
 
 /// Trusted request context, never an HTTP header or stored authorship. Local
 /// sessions identify the owner; the authenticated relay will supply a role.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct InstallationIdentity {
     pub role: InstallationRole,
+    local_session: Option<String>,
 }
 
 impl InstallationIdentity {
     /// Only trusted in-process callers (the future authenticated tunnel) may
     /// attach this context to a request. Ordinary HTTP clients cannot supply it.
     pub fn trusted(role: InstallationRole) -> Self {
-        Self { role }
+        Self {
+            role,
+            local_session: None,
+        }
+    }
+
+    pub(crate) fn local_owner(session: String) -> Self {
+        Self {
+            role: InstallationRole::Owner,
+            local_session: Some(session),
+        }
+    }
+
+    /// Local streams stop when their browser session is revoked or expires.
+    /// Trusted tunnel requests have no local session; their transport owns
+    /// revocation and the lifetime of the relay stream.
+    pub(crate) async fn is_active(&self, auth: &Auth) -> Result<bool> {
+        match &self.local_session {
+            Some(session) => Ok(auth.read(session).await?.is_some()),
+            None => Ok(true),
+        }
     }
 }
 

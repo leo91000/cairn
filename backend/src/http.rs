@@ -307,10 +307,11 @@ async fn authenticate_api(app: &App, request: &mut Request) -> Result<()> {
         identity.clone()
     } else {
         let headers = request.headers();
+        let credential = cookie(headers);
         let session = app
             .service
             .auth
-            .read(&cookie(headers))
+            .read(&credential)
             .await?
             .ok_or_else(|| Error::unauthorized("Please sign in."))?;
         if !["GET", "HEAD", "OPTIONS"].contains(&method)
@@ -320,7 +321,7 @@ async fn authenticate_api(app: &App, request: &mut Request) -> Result<()> {
                 "Invalid CSRF token. Refresh the page and try again.",
             ));
         }
-        InstallationIdentity::trusted(InstallationRole::Owner)
+        InstallationIdentity::local_owner(credential)
     };
 
     if identity.role != InstallationRole::Owner && owner_operation(method, path) {
@@ -359,6 +360,7 @@ pub struct Input {
     pub query: HashMap<String, String>,
     pub headers: HeaderMap,
     pub body: Value,
+    pub identity: Option<InstallationIdentity>,
 }
 
 impl Input {
@@ -394,6 +396,7 @@ impl Input {
             query,
             headers: parts.headers,
             body,
+            identity: parts.extensions.get::<InstallationIdentity>().cloned(),
         })
     }
 
