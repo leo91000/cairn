@@ -1,5 +1,5 @@
 use crate::{
-    auth::safe_equal,
+    auth::{InstallationIdentity, InstallationRole, safe_equal},
     config::now,
     error::{Error, Result},
     execution::secret,
@@ -119,13 +119,16 @@ async fn security(State(app): State<App>, mut request: Request, next: Next) -> R
         .get::<ConnectInfo<SocketAddr>>()
         .map_or(IpAddr::from([127, 0, 0, 1]), |peer| peer.0.ip());
     let head = request.method() == "HEAD";
-    let outcome = check_security(
-        &app,
-        request.headers(),
-        request.method().as_str(),
-        &path,
-        peer,
-    )
+    let outcome = async {
+        check_security(
+            &app,
+            request.headers(),
+            request.method().as_str(),
+            &path,
+            peer,
+        )?;
+        authenticate_api(&app, &mut request).await
+    }
     .await;
     let mut response = match outcome {
         Ok(()) => {
@@ -253,7 +256,7 @@ fn development_origin(origin: &str) -> bool {
         && ["http://localhost:5178", "http://127.0.0.1:5178"].contains(&origin)
 }
 
-async fn check_security(
+fn check_security(
     app: &App,
     headers: &HeaderMap,
     method: &str,
@@ -285,10 +288,25 @@ async fn check_security(
         return Err(Error::forbidden("Unexpected origin."));
     }
     rate_limit(app, peer, path)?;
-    if !public_artifact
-        && path.starts_with("/api/")
-        && !["/api/session", "/api/setup", "/api/login"].contains(&path)
+    Ok(())
+}
+
+/// The authentication seam for every protected API route, including raw bodies
+/// and SSE. Only trusted in-process context can replace local session auth.
+async fn authenticate_api(app: &App, request: &mut Request) -> Result<()> {
+    let path = request.uri().path();
+    let method = request.method().as_str();
+    if !path.starts_with("/api/")
+        || ["/api/session", "/api/setup", "/api/login"].contains(&path)
+        || crate::artifacts::sharing::public_read(path, method)
     {
+        return Ok(());
+    }
+
+    let identity = if let Some(identity) = request.extensions().get::<InstallationIdentity>() {
+        identity.clone()
+    } else {
+        let headers = request.headers();
         let session = app
             .service
             .auth
@@ -302,8 +320,21 @@ async fn check_security(
                 "Invalid CSRF token. Refresh the page and try again.",
             ));
         }
+        InstallationIdentity::trusted(InstallationRole::Owner)
+    };
+
+    if identity.role != InstallationRole::Owner && owner_operation(path) {
+        return Err(Error::forbidden(
+            "Only the installation owner can manage this resource.",
+        ));
     }
+    request.extensions_mut().insert(identity);
     Ok(())
+}
+
+/// Installation management permissions are declared here, before dispatch.
+fn owner_operation(path: &str) -> bool {
+    path == "/api/nodes" || path.starts_with("/api/nodes/")
 }
 
 pub struct Input {

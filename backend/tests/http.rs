@@ -9,7 +9,7 @@ use axum::{
 use common::{Credentials, Session, read_bytes, read_json, read_text, request, send};
 use leo_agent_manager::{
     attachments::MAX_FILE,
-    auth::hex_digest,
+    auth::{InstallationIdentity, InstallationRole, hex_digest},
     config::{Config, MAIN_AGENT_ID, id, now},
     http::router,
     service::Service,
@@ -152,6 +152,27 @@ async fn http_authentication_csrf_host_origin_and_cookie_contracts() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn member_identity_can_list_conversations_but_cannot_manage_nodes() {
+    let (_root, app, _service) = app().await;
+    let session = set_up_owner(&app).await;
+
+    for (path, expected) in [
+        ("/api/chats", StatusCode::OK),
+        ("/api/nodes", StatusCode::FORBIDDEN),
+    ] {
+        let mut request = session
+            .authorize(json_request("GET", path))
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(InstallationIdentity::trusted(InstallationRole::Member));
+
+        assert_eq!(send(&app, request).await.status(), expected, "{path}");
+    }
 }
 
 #[tokio::test]

@@ -24,6 +24,27 @@ const SCOPES: [&str; 3] = ["read", "run", "manage"];
 const INVALID_CODE: &str = "Invalid or expired authorization code, verifier, or resource.";
 const INVALID_REFRESH: &str = "Invalid refresh token.";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InstallationRole {
+    Owner,
+    Member,
+}
+
+/// Trusted request context, never an HTTP header or stored authorship. Local
+/// sessions identify the owner; the authenticated relay will supply a role.
+#[derive(Clone, Debug)]
+pub struct InstallationIdentity {
+    pub role: InstallationRole,
+}
+
+impl InstallationIdentity {
+    /// Only trusted in-process callers (the future authenticated tunnel) may
+    /// attach this context to a request. Ordinary HTTP clients cannot supply it.
+    pub fn trusted(role: InstallationRole) -> Self {
+        Self { role }
+    }
+}
+
 pub fn token() -> String {
     let mut bytes = [0; 32];
     rand::rng().fill_bytes(&mut bytes);
