@@ -45,6 +45,17 @@ jobs:
           GH_VERSION: ${{ steps.tools.outputs.gh }}
         run: node scripts/resolve-release.mjs
   quality:
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: leo
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: leo_official_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U leo -d leo_official_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     needs: resolve
     if: needs.resolve.outputs.reuse != 'true'
     runs-on: ubuntu-latest
@@ -52,6 +63,7 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_INCREMENTAL: '0'
+      LEO_OFFICIAL_TEST_DATABASE_URL: postgres://leo:test-only@localhost:5432/leo_official_test
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: ./.github/actions/setup-pnpm

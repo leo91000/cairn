@@ -20,13 +20,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends clang libclang-
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY backend/Cargo.toml ./backend/Cargo.toml
+COPY official-service/Cargo.toml ./official-service/Cargo.toml
 # A separate dependency layer survives application edits in remote BuildKit
 # caches. Cargo cache mounts alone do not persist on fresh GitHub runners.
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
-    mkdir -p backend/src backend/examples \
+    mkdir -p backend/src backend/examples official-service/src \
     && printf 'fn main() {}\n' > backend/src/main.rs \
     && printf 'fn main() {}\n' > backend/examples/ublk_probe.rs \
-    && printf '' > backend/src/lib.rs && cargo build --locked --release --bin leo --features ublk
+    && printf '' > backend/src/lib.rs \
+    && printf 'fn main() {}\n' > official-service/src/main.rs \
+    && printf '' > official-service/src/lib.rs && cargo build --locked --release --bin leo --features ublk
 COPY backend ./backend
 COPY deploy/nodes ./deploy/nodes
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \

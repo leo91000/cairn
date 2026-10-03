@@ -1,0 +1,41 @@
+[package]
+name = "leo-official-service"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[[bin]]
+name = "leo-official"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8.9"
+tokio = { version = "1", features = [ "full" ] }
+tower-http = { version = "0.6", features = [
+  "fs",
+  "set-header"
+] }
+serde = { version = "1", features = [ "derive" ] }
+serde_json = "1"
+sqlx-core = { version = "=0.8.6", features = [
+  "_rt-tokio",
+  "_tls-rustls-ring-webpki",
+  "migrate"
+] }
+sqlx-postgres = { version = "=0.8.6", features = [ "migrate" ] }
+async-trait = "0.1.92"
+reqwest = { version = "0.13", default-features = false, features = [
+  "json",
+  "rustls"
+] }
+rand = "0.9"
+sha2 = "0.10"
+hex = "0.4"
+subtle = "2"
+uuid = { version = "1", features = [ "v4" ] }
+url = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = [ "env-filter" ] }
+
+[dev-dependencies]
