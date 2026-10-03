@@ -911,3 +911,213 @@ async fn a_signed_in_account_can_register_a_passkey_and_sign_in_with_it() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     app.close().await;
 }
+
+#[tokio::test]
+async fn passkeys_require_user_verification_origin_session_binding_and_current_credentials() {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use webauthn_authenticator_rs::{WebauthnAuthenticator, softpasskey::SoftPasskey};
+    let app = Fixture::new().await;
+    let (challenge, code) = app.code("proofs@example.test").await;
+    let response = app.verify(&challenge, &code).await;
+    let cookie = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let session: Value = response.json().await.unwrap();
+    let signed = |route: &str, body: Value| {
+        app.client
+            .post(format!("{}{route}", app.url))
+            .header("origin", &app.url)
+            .header("cookie", &cookie)
+            .header("x-csrf-token", session["csrf"].as_str().unwrap())
+            .json(&body)
+            .send()
+    };
+    assert_eq!(
+        app.post("/api/account/passkeys/register/start", json!({}))
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let response = app
+        .client
+        .post(format!("{}/api/account/passkeys/register/start", app.url))
+        .header("origin", &app.url)
+        .header("cookie", &cookie)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let origin = url::Url::parse(&app.url).unwrap();
+    let mut authenticator = WebauthnAuthenticator::new(SoftPasskey::new(true));
+    // Registration without user verification is not sufficient to add a passkey.
+    let start: Value = signed("/api/account/passkeys/register/start", json!({}))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut unverified = WebauthnAuthenticator::new(SoftPasskey::new(false));
+    let mut unverified_options = start["options"].clone();
+    unverified_options["publicKey"]["authenticatorSelection"]["userVerification"] =
+        json!("discouraged");
+    let credential = unverified
+        .do_registration(
+            origin.clone(),
+            serde_json::from_value(unverified_options).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(signed("/api/account/passkeys/register/finish", json!({ "challenge": start["challenge"], "credential": credential, "label": "Unverified" })).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    let start: Value = signed("/api/account/passkeys/register/start", json!({}))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let credential = authenticator
+        .do_registration(
+            origin.clone(),
+            serde_json::from_value(start["options"].clone()).unwrap(),
+        )
+        .unwrap();
+    let registration =
+        json!({ "challenge": start["challenge"], "credential": credential, "label": "Verified" });
+    let (other_challenge, other_code) = app.code("other@example.test").await;
+    let response = app.verify(&other_challenge, &other_code).await;
+    let other_cookie = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let other: Value = response.json().await.unwrap();
+    let response = app
+        .client
+        .post(format!("{}/api/account/passkeys/register/finish", app.url))
+        .header("origin", &app.url)
+        .header("cookie", other_cookie)
+        .header("x-csrf-token", other["csrf"].as_str().unwrap())
+        .json(&registration)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        signed(
+            "/api/account/passkeys/register/finish",
+            registration.clone()
+        )
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        signed("/api/account/passkeys/register/finish", registration)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    for scenario in ["origin", "expiry", "removed"] {
+        let start = app
+            .post(
+                "/api/account/passkeys/login/start",
+                json!({ "email": "proofs@example.test" }),
+            )
+            .await;
+        let browser = start.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let start: Value = start.json().await.unwrap();
+        let assertion = authenticator
+            .do_authentication(
+                origin.clone(),
+                serde_json::from_value(start["options"].clone()).unwrap(),
+            )
+            .unwrap();
+        let mut proof = serde_json::to_value(assertion).unwrap();
+        match scenario {
+            "origin" => {
+                let bytes = URL_SAFE_NO_PAD
+                    .decode(proof["response"]["clientDataJSON"].as_str().unwrap())
+                    .unwrap();
+                let mut data: Value = serde_json::from_slice(&bytes).unwrap();
+                data["origin"] = json!("https://attacker.test");
+                proof["response"]["clientDataJSON"] =
+                    json!(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&data).unwrap()));
+            }
+            "expiry" => {
+                query("UPDATE sign_in_challenges SET expires_at = now() - interval '1 second'")
+                    .execute(&app.pool)
+                    .await
+                    .unwrap();
+            }
+            "removed" => {
+                let methods: Value = app
+                    .client
+                    .get(format!("{}/api/account/methods", app.url))
+                    .header("cookie", &cookie)
+                    .send()
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                let passkey = methods["methods"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|method| method["kind"] == "passkey")
+                    .unwrap();
+                assert_eq!(
+                    signed(
+                        "/api/account/methods/remove",
+                        json!({ "id": passkey["id"] })
+                    )
+                    .await
+                    .unwrap()
+                    .status(),
+                    StatusCode::NO_CONTENT
+                );
+            }
+            _ => unreachable!(),
+        }
+        let payload = json!({ "challenge": start["challenge"], "credential": proof });
+        let response = app
+            .client
+            .post(format!("{}/api/account/passkeys/login/finish", app.url))
+            .header("origin", &app.url)
+            .header("cookie", &browser)
+            .json(&payload)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{scenario}");
+        let response = app
+            .client
+            .post(format!("{}/api/account/passkeys/login/finish", app.url))
+            .header("origin", &app.url)
+            .header("cookie", &browser)
+            .json(&payload)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "{scenario} replay"
+        );
+    }
+    app.close().await;
+}
