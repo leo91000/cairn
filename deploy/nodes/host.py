@@ -160,6 +160,9 @@ def block_device_arguments(transport):
 
 
 def vm_arguments(config):
+    pool_size = config.get('readyVmPoolSize')
+    if pool_size is not None and (type(pool_size) is not int or not 1 <= pool_size <= 4):
+        raise ValueError('readyVmPoolSize must be an integer between 1 and 4')
     snapshots = config.get('vmSnapshots', False)
     if not isinstance(snapshots, bool):
         raise ValueError('vmSnapshots must be a boolean')
@@ -171,6 +174,8 @@ def vm_arguments(config):
     if snapshots and layout != 'paired-ext4-v1':
         raise ValueError('Snapshots require paired disks')
     arguments = []
+    if pool_size is not None:
+        arguments += ['-e', 'LEO_READY_VM_POOL_SIZE=' + str(pool_size)]
     if layout is not None:
         arguments += ['-e', 'LEO_DISK_LAYOUT=' + layout]
     if 'vmSnapshots' in config:

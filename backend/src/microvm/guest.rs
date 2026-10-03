@@ -135,11 +135,16 @@ async fn handle(
                 ));
             }
             restored::validate(&identity)?;
+            let mut timing =
+                crate::performance::Operation::new("guest_clone", &identity.id, "unfreeze");
             filesystems::freeze(false).await?;
+            timing.next("entropy_and_network");
             restored::renew(&identity).await?;
             // VMGenID cannot reset randomness cached by an arbitrary userspace
             // library. Recreate the native process before granting an account.
+            timing.next("native_restart");
             codex.restart(stop, timing_endpoint.as_deref()).await?;
+            timing.finish();
             wire::write(&mut write, &Reply::ok(true)).await
         }
         GuestRequest::ArtifactExport { path, root } => {

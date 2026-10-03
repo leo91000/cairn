@@ -118,12 +118,21 @@ impl Worker {
         // the node slot. Running VMs use node slots without a global ceiling.
         let preparation = if execution::uses_vm(&run, &s.config) {
             let Ok(guard) = self.preparation.clone().try_lock_owned() else {
+                tracing::info!(
+                    target: "leo_performance",
+                    operation = "manager_admission",
+                    id = crate::performance::identity(&run_id),
+                    phase = "preparation_lock",
+                    event = "deferred"
+                );
                 return Ok(());
             };
             Some(guard)
         } else {
             None
         };
+        let mut timing =
+            crate::performance::Operation::new("manager_admission", &run_id, "capacity_check");
         // Waiting here keeps the account free and retries on every tick.
         if execution::uses_vm(&run, &s.config) {
             let current = s.store.run(&run_id).await?;
@@ -139,6 +148,7 @@ impl Worker {
             }
         }
         let provider = Provider::of_run(&run);
+        timing.next("account_acquire");
         let model = text(&run["snapshot"]["agent"], "model");
         let account = match s.accounts.acquire(s, &run_id, provider, model).await {
             Ok(account) => account,
@@ -151,6 +161,7 @@ impl Worker {
             return Ok(());
         }
         projects.extend(locked_projects(s, &run));
+        timing.next("launch");
         let cancel = CancellationToken::new();
         self.active
             .lock()
@@ -172,6 +183,7 @@ impl Worker {
             worker.active.lock().await.remove(&run_id);
             worker.notify();
         });
+        timing.finish();
         Ok(())
     }
 }

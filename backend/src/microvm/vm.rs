@@ -460,6 +460,7 @@ impl Vm {
             self.idle = false;
         }
         if paired && !matches!(startup, Startup::Template) {
+            timing.next("mount_workspace");
             if !status.workspace_disks {
                 return Err(Error::unavailable(
                     "Guest image does not support paired disks.",

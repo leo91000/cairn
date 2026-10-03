@@ -18,10 +18,18 @@ protocol messages and rejects truncated frames. Output reads retain partial fram
 while live inbox updates are delivered.
 
 `microvm/pool.rs` owns execution slots (initially `CONCURRENCY`, default four).
-It can prepare one anonymous VM with native Codex initialized, within those same
+It can prepare anonymous VMs with native Codex initialized, within those same
 slots and shared budgets. The manager can update both through authenticated
 `/node-budget`. `LEO_READY_VM_POOL=false` disables speculative preparation;
 the default is `true`. Guests without the readiness capability keep booting cold.
+`LEO_READY_VM_POOL_SIZE=1..4` controls the target size (default one). The node
+supervisor preserves the equivalent `readyVmPoolSize` in its `config.json`.
+Additional spares need measured resident RAM plus 2 GiB of startup headroom
+within one quarter of the node's RAM budget, bounded between 2 and 8 GiB.
+Actual RAM is checked again after preparation; an oversized pool shrinks oldest
+first. The original single-spare policy and shared hard limits still apply on
+small nodes. This is a target, not a reservation of four guaranteed spares:
+active work, retained conversations, slot limits and RAM pressure take priority.
 
 A compatible new managed Codex chat claims that VM once, after durable disk
 ownership and storage authorization. Existing disks, threads, custom Codex homes,
