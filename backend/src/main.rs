@@ -275,6 +275,39 @@ async fn serve(stop: CancellationToken) -> Result<()> {
         tokio::net::TcpListener::bind((service.config.host.as_str(), service.config.port)).await?;
     let router = leo_agent_manager::http::router(service.clone()).await?;
     let mut background = Vec::new();
+    let relay_directory = service.config.data_dir.join("installation-relay");
+    let identity_exists = tokio::fs::try_exists(relay_directory.join("identity.json")).await?;
+    if !identity_exists && let Ok(code) = std::env::var("LEO_INSTALLATION_CLAIM_CODE") {
+        let claimed = async {
+            let origin = std::env::var("LEO_OFFICIAL_ORIGIN")
+                .map_err(|_| Error::bad("Set LEO_OFFICIAL_ORIGIN to claim this installation."))?;
+            let name =
+                std::env::var("LEO_INSTALLATION_NAME").unwrap_or_else(|_| "My installation".into());
+            leo_agent_manager::relay::claim(&origin, &relay_directory, &code, &name).await
+        }
+        .await;
+        if claimed.is_err() {
+            tracing::warn!(
+                "Installation claim failed; continuing without a relay. Check the official origin and obtain a new claim code before restarting"
+            );
+        }
+    }
+
+    if identity_exists || tokio::fs::try_exists(relay_directory.join("identity.json")).await? {
+        let relay_router = router.clone();
+        let relay_stop = service.shutdown.clone();
+        background.push(tokio::spawn(async move {
+            if leo_agent_manager::relay::connect(relay_directory, relay_router, relay_stop)
+                .await
+                .is_err()
+            {
+                tracing::error!(
+                    "Installation relay could not start; check the private installation identity"
+                );
+            }
+        }));
+    }
+
     if service.config.worker_enabled {
         service.worker.start(service.clone()).await?;
         background.push(spawn_periodic(

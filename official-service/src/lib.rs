@@ -1,6 +1,8 @@
+mod installations;
 mod methods;
 mod oauth;
 mod passkeys;
+mod relay;
 
 pub use oauth::{OAuthProvider, OAuthProviders};
 
@@ -12,7 +14,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{any, get, post},
 };
 use rand::{Rng, RngCore};
 use serde::Deserialize;
@@ -39,6 +41,7 @@ struct Service {
     sender: Arc<dyn EmailSender>,
     origin: String,
     oauth: OAuthProviders,
+    relay: relay::Relay,
 }
 
 struct ApiError(StatusCode, &'static str);
@@ -87,6 +90,13 @@ pub async fn router_with_oauth(
                 false,
             ),
             Migration::new(
+                3,
+                "installation claims".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/0003_installations.sql").into(),
+                false,
+            ),
+            Migration::new(
                 202610030052,
                 "sign in methods".into(),
                 MigrationType::Simple,
@@ -110,6 +120,7 @@ pub async fn router_with_oauth(
         sender,
         origin,
         oauth,
+        relay: relay::Relay::default(),
     };
     Ok(Router::new()
         .route("/api/account/email-code", post(request_code))
@@ -140,10 +151,23 @@ pub async fn router_with_oauth(
         )
         .route("/api/account/methods", get(methods::list))
         .route("/api/account/methods/remove", post(methods::remove))
+        .route(
+            "/api/installations/claim-code",
+            post(installations::claim_code),
+        )
+        .route(
+            "/api/installations/{installation}/api/{*path}",
+            any(relay::forward),
+        )
         .layer(middleware::from_fn_with_state(
             service.clone(),
             browser_security,
         ))
+        .merge(
+            Router::new()
+                .route("/api/relay/claim", post(installations::claim))
+                .route("/api/relay/{installation}/connect", get(relay::upgrade)),
+        )
         .with_state(service))
 }
 
@@ -309,7 +333,7 @@ async fn create_session(
     let token = random_token();
     let csrf = random_token();
     query("INSERT INTO web_sessions (digest, account_id, csrf, expires_at) VALUES ($1, $2, $3, now() + interval '7 days')")
-        .bind(digest(&token)).bind(account_id).bind(&csrf).execute(connection).await?;
+        .bind(digest(&token)).bind(account_id).bind(&csrf).execute(&mut *connection).await?;
 
     let secure = if service.origin.starts_with("https://") {
         "; Secure"
@@ -324,7 +348,7 @@ async fn create_session(
             "authenticated": true,
             "account": { "id": account_id, "email": email },
             "csrf": csrf,
-            "installations": [],
+            "installations": installations::list(&mut *connection, account_id).await?,
         })),
     )
         .into_response())
@@ -342,7 +366,7 @@ async fn session(
             "authenticated": true,
             "account": { "id": id, "email": email },
             "csrf": csrf,
-            "installations": [],
+            "installations": installations::list(&service.pool, &id).await?,
         }),
         None => json!({
             "authenticated": false,

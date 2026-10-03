@@ -1,14 +1,16 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
+import { state } from './api'
 import ThemeControl from './components/ThemeControl.vue'
 import UiAlert from './components/UiAlert.vue'
 import UiButton from './components/UiButton.vue'
+import OfficialConversations from './OfficialConversations.vue'
 
 interface AccountSession {
   authenticated: boolean
   account: { id: string, email: string } | null
   csrf: string | null
-  installations: unknown[]
+  installations: Array<{ id: string, name: string, role: 'owner' }>
 }
 
 interface SignInMethod {
@@ -34,6 +36,12 @@ const code = ref('')
 const challenge = ref('')
 const busy = ref(false)
 const error = ref('')
+const claimCode = ref('')
+const installation = ref<{ id: string, name: string } | null>(null)
+
+watch(session, (value) => {
+  state.csrf = value?.csrf || ''
+})
 
 async function accountRequest(route: string, body?: unknown) {
   const response = await fetch(`/api/account/${route}`, {
@@ -102,6 +110,11 @@ async function signOut() {
     await accountRequest('logout', {})
     session.value = null
     showMethods.value = false
+    installation.value = null
+    claimCode.value = ''
+    state.installationId = ''
+    state.csrf = ''
+    state.authenticated = false
     email.value = ''
     code.value = ''
     challenge.value = ''
@@ -182,6 +195,28 @@ async function passkey(register: boolean) {
   }
 }
 
+async function addInstallation() {
+  busy.value = true
+  error.value = ''
+  claimCode.value = ''
+  try {
+    const response = await fetch('/api/installations/claim-code', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': session.value?.csrf || '' },
+    })
+    const value = await response.json()
+    if (!response.ok)
+      throw new Error(value.error || 'Unable to add an installation.')
+    claimCode.value = value.code
+  }
+  catch (cause) {
+    error.value = cause instanceof Error ? cause.message : 'Unable to add an installation.'
+  }
+  finally {
+    busy.value = false
+  }
+}
+
 async function oauth(provider: 'google' | 'github') {
   busy.value = true
   error.value = ''
@@ -216,6 +251,14 @@ async function enableEmail() {
   finally {
     busy.value = false
   }
+}
+
+function openInstallation(value: { id: string, name: string }) {
+  state.installationId = value.id
+  state.csrf = session.value?.csrf || ''
+  state.authenticated = true
+  installation.value = value
+  claimCode.value = ''
 }
 
 function changeEmail() {
@@ -316,14 +359,34 @@ onMounted(async () => {
       </template>
       <template v-else-if="session?.authenticated">
         <h1 class="font-heading text-2xl mb-4">
-          No installations yet
+          {{ installation?.name || (session.installations.length ? 'Your installations' : 'No installations yet') }}
         </h1>
         <p class="text-muted mb-4">
           You’re signed in as {{ session.account?.email }}.
         </p>
-        <p class="text-muted mb-8">
-          Your Leo account is ready. Your installations will appear here when you add one.
-        </p>
+        <OfficialConversations v-if="installation" :key="installation.id" />
+        <template v-else>
+          <p v-if="!session.installations.length" class="text-muted mb-8">
+            Your Leo account is ready. Your installations will appear here when you add one.
+          </p>
+          <div class="grid gap-3 mb-6">
+            <UiButton v-for="item in session.installations" :key="item.id" @click="openInstallation(item)">
+              {{ item.name }}
+            </UiButton>
+            <UiButton :disabled="busy" @click="addInstallation">
+              Add an installation
+            </UiButton>
+            <UiButton :disabled="busy" @click="loadSession">
+              Refresh installations
+            </UiButton>
+          </div>
+          <div v-if="claimCode" class="grid gap-3 mb-6">
+            <label>Installation claim code<input :value="claimCode" readonly autocomplete="off"></label>
+            <p class="text-muted">
+              This code expires in 10 minutes.
+            </p>
+          </div>
+        </template>
         <UiAlert v-if="error">
           {{ error }}
         </UiAlert>

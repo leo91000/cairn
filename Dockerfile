@@ -21,19 +21,22 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY backend/Cargo.toml ./backend/Cargo.toml
 COPY official-service/Cargo.toml ./official-service/Cargo.toml
+COPY relay-protocol/Cargo.toml ./relay-protocol/Cargo.toml
 # A separate dependency layer survives application edits in remote BuildKit
 # caches. Cargo cache mounts alone do not persist on fresh GitHub runners.
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
-    mkdir -p backend/src backend/examples official-service/src \
+    mkdir -p backend/src backend/examples official-service/src relay-protocol/src \
     && printf 'fn main() {}\n' > backend/src/main.rs \
     && printf 'fn main() {}\n' > backend/examples/ublk_probe.rs \
     && printf '' > backend/src/lib.rs \
     && printf 'fn main() {}\n' > official-service/src/main.rs \
+    && printf '' > relay-protocol/src/lib.rs \
     && printf '' > official-service/src/lib.rs && cargo build --locked --release --bin leo --features ublk
 COPY backend ./backend
+COPY relay-protocol ./relay-protocol
 COPY deploy/nodes ./deploy/nodes
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
-    touch backend/src/main.rs backend/src/lib.rs && \
+    touch backend/src/main.rs backend/src/lib.rs relay-protocol/src/lib.rs && \
     cargo build --locked --release --bin leo --features ublk && cp target/release/leo /usr/local/bin/leo
 
 # The direct block backend shares guest RAM with Firecracker. Upstream 1.17.0

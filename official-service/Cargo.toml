@@ -10,7 +10,8 @@ name = "leo-official"
 path = "src/main.rs"
 
 [dependencies]
-axum = "0.8.9"
+leo-relay-protocol = { path = "../relay-protocol" }
+axum = { version = "0.8.9", features = [ "ws" ] }
 tokio = { version = "1", features = [ "full" ] }
 tower-http = { version = "0.6", features = [
   "fs",
@@ -45,6 +46,10 @@ webauthn-rs = { version = "0.5.4", features = [
 ] }
 webauthn-rs-proto = "0.5.4"
 base64 = "0.22"
+futures-util = "0.3"
 
 [dev-dependencies]
 webauthn-authenticator-rs = { version = "0.5.4", features = [ "softpasskey" ] }
+leo-agent-manager = { path = "../backend" }
+tempfile = "3"
+tokio-util = { version = "0.7", features = [ "rt" ] }

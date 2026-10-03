@@ -15,6 +15,7 @@ export const state = reactive({
   redirecting: false,
   setupRequired: false,
   csrf: '',
+  installationId: '',
   agents: [] as Agent[],
   projects: [] as Project[],
   tasks: [] as Task[],
@@ -60,7 +61,10 @@ export async function api<T = any>(
   url: string,
   options: RequestInit = {},
 ): Promise<T> {
-  const response = await fetch(`/api${url}`, {
+  const prefix = state.installationId
+    ? `/api/installations/${encodeURIComponent(state.installationId)}/api`
+    : '/api'
+  const response = await fetch(`${prefix}${url}`, {
     ...options,
     headers: {
       ...(options.body === undefined
