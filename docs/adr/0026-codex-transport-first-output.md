@@ -1,71 +1,63 @@
-# Transport Codex mesuré jusqu'au premier texte
+# Codex : conserver WebSocket après comparaison HTTP
 
-Date : 2026-10-03. Statut : HTTP qualifié sur des tours natifs isolés ;
-comparaison du parcours complet encore requise avant activation générale.
+Date : 2026-10-03. Décision : garder le transport WebSocket natif et son
+préchauffage. Abandonner l'option HTTP de la PR #41, sans merge ni activation
+en production. Un gain sur le premier texte ne suffit pas à choisir un transport.
 
-## Mesure et décision provisoire
+## Mesures réalisées
 
-L'envoi de la requête n'est pas le critère de gain : le préchauffage WebSocket
-envoie le prompt et les outils avec `generate=false`, ce qui peut préparer un
-cache serveur. Le premier fragment de texte reçu est capturé en continu avec
-une horloge monotone, sans attendre la fin du processus ni les lots OTLP.
+Même compte ChatGPT existant, Codex 0.160.0, `gpt-6.1-sol/low`, guest préparé
+en production. Premier texte reçu en continu sur stdout, horloge monotone :
+ni l'envoi de la requête ni la réception d'un lot OTLP ne servent de substitut.
+Les modes sont alternés pour limiter le biais d'ordre.
 
-Codex 0.160.0 ouvre déjà le WebSocket en parallèle de la découverte des outils.
-Les traces confirment un chevauchement de 232 à 1 003 ms. Le préchauffage du
-prompt suit cette préparation. Le travail restant côté Leo comprend aussi
-l'admission et la préparation de l'environnement avant l'ouverture du thread.
-
-Premier comparatif sur un même guest préparé en production, compte ChatGPT et
-modèle `gpt-6.1-sol/low`. Les modes sont alternés pour limiter le biais d'ordre.
-
-| Comparatif | Essais par mode | WebSocket + préchauffage | HTTP sans préchauffage |
+| Tours courts | Essais par mode | WebSocket | HTTP |
 | --- | ---: | ---: | ---: |
 | Nouveau processus, sans MCP | 4 | 5,72 s | 4,53 s |
 | Service résident, vrai MCP, nouveau thread | 4 | 5,16 s | 4,10 s |
 | Même service et thread repris, vrai MCP | 4 | 3,89 s | 2,75 s |
 
-Ce sont des médianes du premier texte natif reçu. L'admission, la préparation
-du guest et le rendu DOM sont exclus. Deux séries résidentes inversent l'ordre
-des modes, chacune dans son propre guest préparé. Ces séries restent petites :
-aucun p99 ni délai de trois secondes pour quatre arrivées n'est démontré. Sur
-les reprises, le maximum HTTP atteint 5,84 s, contre 4,39 s pour WebSocket ; le
-gain de médiane ne prouve pas un gain de latence maximale. HTTP change aussi
-le transport : ce n'est pas un test qui isole uniquement le préchauffage.
+Médianes du premier texte natif ; admission, préparation du guest et rendu DOM
+exclus. Le maximum HTTP d'une reprise atteint 5,84 s, contre 4,39 s en
+WebSocket. Ces petites séries ne démontrent ni un p99 ni trois secondes pour
+quatre arrivées. Codex parallélise déjà la connexion WebSocket et la préparation
+des outils ; les traces confirment un chevauchement de 232 à 1 003 ms.
 
-Quatre autres tours HTTP, deux créations et deux reprises, exécutent chacun un
-vrai outil et vérifient l'écriture/relecture d'un marqueur dans leur workspace.
-Ils terminent avec le marqueur attendu et le même thread sur chaque reprise.
-Les services privés sont arrêtés et les conversations de test supprimées après
-acquittement de leur sauvegarde. Les données brutes restent hors de Git et
-seront des assets de release si la qualification complète confirme un gain.
+Une tâche longue parcourt 15 scripts suivis du dépôt Leo, modifie le traitement
+des dates de `ci-timings.mjs`, ajoute et exécute des régressions Node, puis
+vérifie le diff. Chaque tour exécute 20 appels d'outils séquentiels. Les tests
+et une vérification indépendante du résultat passent dans les deux modes.
 
-## Activation et retour arrière
+| Tours longs, un essai par mode dans chaque série | WebSocket | HTTP |
+| --- | ---: | ---: |
+| Durée totale, sans sonde | 107,87 s | 116,13 s |
+| Premier texte, sans sonde | 4,72 s | 3,35 s |
+| Durée totale, avec compteurs de payload | 125,73 s | 128,68 s |
+| Requête → premier delta après outil, médiane de 20 requêtes | 2,65 s | 2,90 s |
+| Payload envoyé après outil, médiane | 684 octets | 34 744 octets |
+| Payloads envoyés sur le tour, préchauffage inclus | 45 493 octets | 760 969 octets |
 
-`LEO_CODEX_TRANSPORT=http` sur le manager sélectionne un profil par thread.
-Le défaut reste WebSocket. L'image doit fournir `APP_CODEX_VERSION` pour
-conserver l'en-tête de version du vrai client natif ; sans cette information,
-le manager journalise un avertissement et garde WebSocket.
+La sonde éphémère conserve les frames WebSocket/permessage-deflate et les
+payloads HTTP/zstd, avec une session TLS/HTTP2 persistante vers le serveur.
+Elle ne conserve que tailles, timestamps et compteurs numériques, sans corps
+ni en-têtes. Les tailles excluent TLS et en-têtes. Les deux transports bénéficient
+du cache serveur : environ 95 % des tokens d'entrée après outil sont reconnus
+comme déjà en cache. WebSocket réutilise `previous_response_id` et envoie les
+nouveaux items ; HTTP renvoie le contexte complet malgré sa compression.
 
-Le profil HTTP utilise le nom `OpenAI`, l'authentification ChatGPT existante,
-le backend natif par défaut, les métadonnées et les capacités de recherche.
-Il ne définit ni URL de base alternative ni clé API. Les accès et le MCP
-restent renouvelés à chaque tour ; aucune option ne duplique les arguments
-CLI du processus résident.
+Ce sont deux tours longs réussis par mode, pas une preuve statistique de
+régression : la génération des modifications/tests varie, et les séries avec
+et sans sonde ne sont pas interchangeables. Les essais de mise au point de la
+sonde sont exclus, notamment une file de six streams HTTP/1.1 non libérés ;
+ce blocage appartenait au banc, pas à Codex. La comparaison est arrêtée avant
+d'autres répétitions. Les données brutes restent hors de Git.
 
-Huit tours sur le vrai Codex qualifient les deux séquences HTTP → WebSocket →
-HTTP et WebSocket → HTTP → WebSocket. Chaque séquence conserve exactement son
-thread et les traces vérifient le transport effectivement utilisé. Deux essais
-précédents avaient un tour normal terminé mais un marqueur différent de la
-forme brute attendue ; leur réponse n'ayant pas été conservée, leur cause exacte
-reste inconnue. Le répétiteur distingue désormais panne native, absence de
-texte et différence de marqueur ; les huit derniers tours ont répondu avec
-le marqueur brut attendu, sans normalisation nécessaire.
+## Conséquence
 
-Retirer l'option, ou sélectionner `websocket`, transmet explicitement le
-provider intégré `openai`, y compris pour une reprise d'un thread HTTP. Les
-tests de conversation à froid et résidente vérifient la propagation du choix
-avec renouvellement puis suppression des grants MCP.
-
-Avant de choisir un défaut ou une release : comparer quatre arrivées
-simultanées et des reprises depuis l'envoi UI jusqu'au premier texte reçu,
-sur l'image exacte contenant ce changement.
+HTTP avance le premier texte d'environ une seconde sur les petites séries,
+mais aucun gain sur le tour long n'est démontré et son volume transmis augmente
+fortement. Cela ne justifie ni une sonde de protocole maintenue ni deux transports.
+Le protocole public de Codex 0.160.0 ne propose pas HTTP pour la première requête
+puis WebSocket dans le même tour ; sa bascule de secours est WebSocket → HTTP.
+Les prochaines optimisations visent la publication des gros journaux arrêtés
+et les pics de fsync hors sauvegarde, dans deux PR distinctes.
