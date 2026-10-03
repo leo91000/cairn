@@ -543,115 +543,209 @@ async fn the_last_sign_in_method_cannot_be_removed() {
     app.close().await;
 }
 
+#[derive(Clone)]
+struct OAuthMockState {
+    authorizations: Arc<Mutex<std::collections::HashMap<String, (String, String)>>>,
+    profiles: Arc<Mutex<Value>>,
+}
+
 struct OAuthMock {
     url: String,
     server: JoinHandle<()>,
+    state: OAuthMockState,
 }
 
 impl OAuthMock {
     async fn new() -> Self {
         use axum::{
             Json, Router,
+            extract::State,
             routing::{get, post},
         };
-        let app =
-            Router::new()
-                .route(
-                    "/token",
-                    post(
-                        |axum::Form(body): axum::Form<
-                            std::collections::HashMap<String, String>,
-                        >| async move {
-                            assert_eq!(body.get("grant_type").unwrap(), "authorization_code");
-                            assert_eq!(body.get("client_secret").unwrap(), "test-only");
-                            assert!(body.get("code_verifier").unwrap().len() >= 43);
+        let state = OAuthMockState {
+            authorizations: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            profiles: Arc::new(Mutex::new(json!({
+                "google": {
+                    "sub": "google-alice",
+                    "email": " Alice@Example.test ",
+                    "email_verified": true,
+                    "hd": "example.test",
+                },
+                "github": {
+                    "id": 52,
+                    "email": "untrusted@example.test",
+                },
+                "emails": [
+                    {
+                        "email": "untrusted@example.test",
+                        "primary": false,
+                        "verified": false,
+                    },
+                    {
+                        "email": "alice@example.test",
+                        "primary": true,
+                        "verified": true,
+                    },
+                ],
+            }))),
+        };
+        let app = Router::new()
+            .route("/token", post(|State(state): State<OAuthMockState>, axum::Form(body): axum::Form<std::collections::HashMap<String, String>>| async move {
+                use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+                use sha2::{Digest, Sha256};
+                assert_eq!(body["grant_type"], "authorization_code");
+                assert_eq!(body["client_secret"], "test-only");
+                let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(body["code_verifier"].as_bytes()));
+                let (client_id, redirect) = state.authorizations.lock().unwrap()[&challenge].clone();
+                assert_eq!(body["client_id"], client_id);
+                assert_eq!(body["redirect_uri"], redirect);
 
-                            Json(json!({
-                                "access_token": body["code"],
-                                "token_type": "Bearer",
-                            }))
-                        },
-                    ),
-                )
-                .route(
-                    "/google/userinfo",
-                    get(|headers: axum::http::HeaderMap| async move {
-                        Json(json!({
-                            "sub": "google-alice",
-                            "email": " Alice@Example.test ",
-                            "email_verified": headers["authorization"] == "Bearer verified",
-                        }))
-                    }),
-                )
-                .route(
-                    "/github/user",
-                    get(|| async {
-                        Json(json!({
-                            "id": 52,
-                            "email": "untrusted@example.test",
-                        }))
-                    }),
-                )
-                .route(
-                    "/github/emails",
-                    get(|headers: axum::http::HeaderMap| async move {
-                        Json(json!([
-                            {
-                                "email": "untrusted@example.test",
-                                "primary": false,
-                                "verified": false,
-                            },
-                            {
-                                "email": "alice@example.test",
-                                "primary": true,
-                                "verified": headers["authorization"] == "Bearer verified",
-                            },
-                        ]))
-                    }),
-                );
+                Json(json!({
+                    "access_token": body["code"],
+                    "token_type": "Bearer",
+                }))
+            }))
+            .route("/google/userinfo", get(|State(state): State<OAuthMockState>, headers: axum::http::HeaderMap| async move {
+                let mut profile = state.profiles.lock().unwrap()["google"].clone();
+                profile["email_verified"] = json!(profile["email_verified"] == true && headers["authorization"] == "Bearer verified");
+                Json(profile)
+            }))
+            .route("/github/user", get(|State(state): State<OAuthMockState>| async move {
+                Json(state.profiles.lock().unwrap()["github"].clone())
+            }))
+            .route("/github/emails", get(|State(state): State<OAuthMockState>, headers: axum::http::HeaderMap| async move {
+                let mut emails = state.profiles.lock().unwrap()["emails"].clone();
+                emails[1]["verified"] = json!(emails[1]["verified"] == true && headers["authorization"] == "Bearer verified");
+                Json(emails)
+            }))
+            .with_state(state.clone());
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        Self { url, server }
+        Self { url, server, state }
+    }
+
+    fn providers(&self) -> leo_official_service::OAuthProviders {
+        leo_official_service::OAuthProviders {
+            google: Some(leo_official_service::OAuthProvider {
+                client_id: "google-test".into(),
+                client_secret: "test-only".into(),
+                authorization_url: format!("{}/authorize", self.url),
+                token_url: format!("{}/token", self.url),
+                userinfo_url: format!("{}/google/userinfo", self.url),
+                emails_url: None,
+            }),
+            github: Some(leo_official_service::OAuthProvider {
+                client_id: "github-test".into(),
+                client_secret: "test-only".into(),
+                authorization_url: format!("{}/authorize", self.url),
+                token_url: format!("{}/token", self.url),
+                userinfo_url: format!("{}/github/user", self.url),
+                emails_url: Some(format!("{}/github/emails", self.url)),
+            }),
+        }
+    }
+
+    fn expect_authorization(&self, url: &url::Url, redirect: String) {
+        let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(params["redirect_uri"], redirect);
+        self.state.authorizations.lock().unwrap().insert(
+            params["code_challenge"].clone(),
+            (params["client_id"].clone(), redirect),
+        );
+    }
+
+    async fn attempt(
+        &self,
+        app: &Fixture,
+        name: &str,
+        session: Option<(&str, &str)>,
+    ) -> reqwest::Response {
+        let mut request = app
+            .client
+            .post(format!("{}/api/account/oauth/{name}/start", app.url))
+            .header("origin", &app.url)
+            .json(&json!({}));
+        if let Some((cookie, csrf)) = session {
+            request = request
+                .header("cookie", cookie)
+                .header("x-csrf-token", csrf);
+        }
+        let start = request.send().await.unwrap();
+        assert_eq!(start.status(), StatusCode::OK);
+        let browser = start.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let start: Value = start.json().await.unwrap();
+        let authorize = url::Url::parse(start["url"].as_str().unwrap()).unwrap();
+        self.expect_authorization(
+            &authorize,
+            format!("{}/api/account/oauth/{name}/callback", app.url),
+        );
+        let state = authorize
+            .query_pairs()
+            .find(|(key, _)| key == "state")
+            .unwrap()
+            .1
+            .to_string();
+        let cookie = session.map_or(browser.clone(), |(cookie, _)| {
+            format!("{browser}; {cookie}")
+        });
+        Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap()
+            .get(format!(
+                "{}/api/account/oauth/{name}/callback?state={state}&code=verified",
+                app.url
+            ))
+            .header("cookie", cookie)
+            .send()
+            .await
+            .unwrap()
     }
 }
 
 #[tokio::test]
 async fn verified_google_and_github_emails_attach_to_the_same_leo_account() {
     let provider = OAuthMock::new().await;
-    let app = Fixture::with_oauth(leo_official_service::OAuthProviders {
-        google: Some(leo_official_service::OAuthProvider {
-            client_id: "google-test".into(),
-            client_secret: "test-only".into(),
-            authorization_url: format!("{}/authorize", provider.url),
-            token_url: format!("{}/token", provider.url),
-            userinfo_url: format!("{}/google/userinfo", provider.url),
-            emails_url: None,
-        }),
-        github: Some(leo_official_service::OAuthProvider {
-            client_id: "github-test".into(),
-            client_secret: "test-only".into(),
-            authorization_url: format!("{}/authorize", provider.url),
-            token_url: format!("{}/token", provider.url),
-            userinfo_url: format!("{}/github/user", provider.url),
-            emails_url: Some(format!("{}/github/emails", provider.url)),
-        }),
-    })
-    .await;
+    let app = Fixture::with_oauth(provider.providers()).await;
     let (challenge, code) = app.code("alice@example.test").await;
     let response = app.verify(&challenge, &code).await;
+    let initial_cookie = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
     let account: Value = response.json().await.unwrap();
     let client = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap();
     for (name, scope) in [("google", "openid email"), ("github", "user:email")] {
-        let response = app
-            .post(&format!("/api/account/oauth/{name}/start"), json!({}))
-            .await;
+        let response = if name == "github" {
+            app.client
+                .post(format!("{}/api/account/oauth/{name}/start", app.url))
+                .header("origin", &app.url)
+                .header("cookie", &initial_cookie)
+                .header("x-csrf-token", account["csrf"].as_str().unwrap())
+                .json(&json!({}))
+                .send()
+                .await
+                .unwrap()
+        } else {
+            app.post(&format!("/api/account/oauth/{name}/start"), json!({}))
+                .await
+        };
         assert_eq!(response.status(), StatusCode::OK);
         let cookie = response.headers()["set-cookie"]
             .to_str()
@@ -662,6 +756,10 @@ async fn verified_google_and_github_emails_attach_to_the_same_leo_account() {
             .to_owned();
         let start: Value = response.json().await.unwrap();
         let authorize = url::Url::parse(start["url"].as_str().unwrap()).unwrap();
+        provider.expect_authorization(
+            &authorize,
+            format!("{}/api/account/oauth/{name}/callback", app.url),
+        );
         let params: std::collections::HashMap<_, _> =
             authorize.query_pairs().into_owned().collect();
         assert_eq!(params["scope"], scope);
@@ -677,7 +775,14 @@ async fn verified_google_and_github_emails_attach_to_the_same_leo_account() {
         );
         let response = client
             .get(&callback)
-            .header("cookie", &cookie)
+            .header(
+                "cookie",
+                if name == "github" {
+                    format!("{cookie}; {initial_cookie}")
+                } else {
+                    cookie.clone()
+                },
+            )
             .send()
             .await
             .unwrap();
@@ -738,6 +843,10 @@ async fn verified_google_and_github_emails_attach_to_the_same_leo_account() {
             .to_owned();
         let start: Value = start.json().await.unwrap();
         let authorize = url::Url::parse(start["url"].as_str().unwrap()).unwrap();
+        provider.expect_authorization(
+            &authorize,
+            format!("{}/api/account/oauth/{name}/callback", app.url),
+        );
         let params: std::collections::HashMap<_, _> =
             authorize.query_pairs().into_owned().collect();
         let removed_callback = format!(
@@ -776,6 +885,10 @@ async fn verified_google_and_github_emails_attach_to_the_same_leo_account() {
             .to_owned();
         let linked: Value = linked.json().await.unwrap();
         let url = url::Url::parse(linked["url"].as_str().unwrap()).unwrap();
+        provider.expect_authorization(
+            &url,
+            format!("{}/api/account/oauth/{name}/callback", app.url),
+        );
         let state = url
             .query_pairs()
             .find(|(key, _)| key == "state")
@@ -821,6 +934,10 @@ async fn verified_google_and_github_emails_attach_to_the_same_leo_account() {
             .to_owned();
         let start: Value = start.json().await.unwrap();
         let url = url::Url::parse(start["url"].as_str().unwrap()).unwrap();
+        provider.expect_authorization(
+            &url,
+            format!("{}/api/account/oauth/{name}/callback", app.url),
+        );
         let state = url
             .query_pairs()
             .find(|(key, _)| key == "state")
@@ -1286,4 +1403,94 @@ async fn passkeys_require_user_verification_origin_session_binding_and_current_c
         );
     }
     app.close().await;
+}
+
+#[tokio::test]
+async fn existing_accounts_require_authoritative_google_email_or_authenticated_linking() {
+    let provider = OAuthMock::new().await;
+    provider.state.profiles.lock().unwrap()["google"]["hd"] = Value::Null;
+    let app = Fixture::with_oauth(provider.providers()).await;
+    let (challenge, code) = app.code("alice@example.test").await;
+    let response = app.verify(&challenge, &code).await;
+    let cookie = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let session: Value = response.json().await.unwrap();
+    let csrf = session["csrf"].as_str().unwrap();
+
+    for name in ["google", "github"] {
+        let rejected = provider.attempt(&app, name, None).await;
+        assert_eq!(
+            rejected.status(),
+            StatusCode::UNAUTHORIZED,
+            "{name} must not attach by email alone"
+        );
+        let linked = provider.attempt(&app, name, Some((&cookie, csrf))).await;
+        assert_eq!(linked.status(), StatusCode::SEE_OTHER);
+        let signed_in = provider.attempt(&app, name, None).await;
+        assert_eq!(
+            signed_in.status(),
+            StatusCode::SEE_OTHER,
+            "previously linked identity is a sign-in method"
+        );
+    }
+
+    let (challenge, code) = app.code("other@example.test").await;
+    let response = app.verify(&challenge, &code).await;
+    let other_cookie = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let other: Value = response.json().await.unwrap();
+    provider.state.profiles.lock().unwrap()["google"]["email"] = json!("other@example.test");
+    provider.state.profiles.lock().unwrap()["emails"][1]["email"] = json!("other@example.test");
+    for name in ["google", "github"] {
+        assert_eq!(
+            provider
+                .attempt(
+                    &app,
+                    name,
+                    Some((&other_cookie, other["csrf"].as_str().unwrap()))
+                )
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED,
+            "a provider identity cannot move to another account"
+        );
+        let fresh = Fixture::with_oauth(provider.providers()).await;
+        let (first, second) = tokio::join!(
+            provider.attempt(&fresh, name, None),
+            provider.attempt(&fresh, name, None)
+        );
+        for response in [first, second] {
+            assert_eq!(
+                response.status(),
+                StatusCode::SEE_OTHER,
+                "simultaneous first sign-ins remain available"
+            );
+        }
+        fresh.close().await;
+    }
+    app.close().await;
+
+    provider.state.profiles.lock().unwrap()["google"]["email"] = json!("alice@gmail.com");
+    let gmail = Fixture::with_oauth(provider.providers()).await;
+    let (challenge, code) = gmail.code("alice@gmail.com").await;
+    assert_eq!(
+        gmail.verify(&challenge, &code).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        provider.attempt(&gmail, "google", None).await.status(),
+        StatusCode::SEE_OTHER
+    );
+    gmail.close().await;
+    provider.server.abort();
 }

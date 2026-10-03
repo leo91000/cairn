@@ -162,14 +162,8 @@ struct EmailRequest {
     email: String,
 }
 
-async fn request_code(
-    State(service): State<Service>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    Json(input): Json<EmailRequest>,
-) -> Result<Response, ApiError> {
-    consume_limit(&service.pool, &format!("delivery:{}", peer.ip()), 10).await?;
-
-    let email = input.email.trim().to_lowercase();
+fn normalized_email(input: &str) -> Result<String, ApiError> {
+    let email = input.trim().to_lowercase();
     if email.len() > 254
         || email.chars().any(char::is_control)
         || email_address::EmailAddress::parse_with_options(
@@ -186,6 +180,18 @@ async fn request_code(
             "Enter a valid email address",
         ));
     }
+
+    Ok(email)
+}
+
+async fn request_code(
+    State(service): State<Service>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(input): Json<EmailRequest>,
+) -> Result<Response, ApiError> {
+    consume_limit(&service.pool, &format!("delivery:{}", peer.ip()), 10).await?;
+
+    let email = normalized_email(&input.email)?;
 
     consume_limit(&service.pool, &format!("email:{}", digest(&email)), 1).await?;
 

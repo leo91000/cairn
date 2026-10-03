@@ -83,9 +83,15 @@ GitHub requests only `user:email` and uses its
 [verified primary email](https://docs.github.com/en/rest/users/emails), ignoring
 the public profile's email. GitHub sign-in provides no repository access to
 agents. Verified emails are normalized exactly like email-code sign-in and
-attach to the existing Leo account. A provider identity already attached to a
-different account is rejected; linking while signed in must match the current
-account's verified email.
+can create a new Leo account. For an existing account, a new Google identity is
+automatically attached only when Google is
+[authoritative for the email](https://developers.google.com/identity/sign-in/web/backend-auth):
+`@gmail.com`, or a verified Workspace `hd` matching the email's domain. Other
+Google emails and GitHub require a current Leo session to link. Once linked,
+the identity remains a normal sign-in method. An identity already attached to
+a different account is rejected; linking while signed in must match the current
+account's verified email. Concurrent first sign-ins reuse the same account and
+method without a uniqueness error.
 
 Default endpoints are the official Google and GitHub endpoints. Tests replace
 only their HTTP endpoints. Operators can override

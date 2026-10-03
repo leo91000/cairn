@@ -241,23 +241,31 @@ pub(super) async fn callback(
         (subject, email)
     };
 
-    let email = email.trim().to_lowercase();
-    if email.len() > 254
-        || email_address::EmailAddress::parse_with_options(
-            &email,
-            email_address::Options {
-                allow_display_text: false,
-                ..Default::default()
-            },
-        )
-        .is_err()
-    {
-        return Err(rejected());
-    }
+    let email = normalized_email(&email).map_err(|_| rejected())?;
+    let domain = email
+        .rsplit_once('@')
+        .map(|(_, domain)| domain)
+        .ok_or_else(rejected)?;
+    let authoritative = name == "google"
+        && (domain == "gmail.com"
+            || identity["hd"]
+                .as_str()
+                .is_some_and(|hosted| hosted.to_lowercase() == domain));
 
     let mut transaction = service.pool.begin().await?;
-    let (account_id,): (String,) = query_as("INSERT INTO leo_accounts (id, email) VALUES ($1, $2) ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email RETURNING id")
-        .bind(uuid::Uuid::new_v4().to_string()).bind(&email).fetch_one(&mut *transaction).await?;
+    let created: Option<(String,)> = query_as("INSERT INTO leo_accounts (id, email) VALUES ($1, $2) ON CONFLICT (email) DO NOTHING RETURNING id")
+        .bind(uuid::Uuid::new_v4().to_string()).bind(&email).fetch_optional(&mut *transaction).await?;
+    let new_account = created.is_some();
+    let account_id = if let Some((id,)) = created {
+        id
+    } else {
+        let (id,): (String,) = query_as("SELECT id FROM leo_accounts WHERE email = $1 FOR UPDATE")
+            .bind(&email)
+            .fetch_one(&mut *transaction)
+            .await?;
+        id
+    };
+
     if link_account.as_ref().is_some_and(|id| id != &account_id) {
         return Err(rejected());
     }
@@ -269,12 +277,19 @@ pub(super) async fn callback(
     .bind(&subject)
     .fetch_optional(&mut *transaction)
     .await?;
+    if !new_account && existing.is_none() && link_account.is_none() && !authoritative {
+        return Err(rejected());
+    }
     if existing.is_some_and(|(id, removed)| id != account_id || removed && link_account.is_none()) {
         return Err(rejected());
     }
 
-    query("INSERT INTO sign_in_methods (id, account_id, kind, subject, label) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (kind, subject) DO UPDATE SET removed = false")
-        .bind(uuid::Uuid::new_v4().to_string()).bind(&account_id).bind(name).bind(subject).bind(&email).execute(&mut *transaction).await?;
+    let linked = query("INSERT INTO sign_in_methods (id, account_id, kind, subject, label) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (kind, subject) DO UPDATE SET removed = false WHERE sign_in_methods.account_id = EXCLUDED.account_id AND (NOT sign_in_methods.removed OR $6)")
+        .bind(uuid::Uuid::new_v4().to_string()).bind(&account_id).bind(name).bind(subject).bind(&email)
+        .bind(link_account.is_some()).execute(&mut *transaction).await?;
+    if linked.rows_affected() != 1 {
+        return Err(rejected());
+    }
 
     let session_response = create_session(&service, &mut transaction, &account_id, &email).await?;
     transaction.commit().await?;
