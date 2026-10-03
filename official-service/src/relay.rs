@@ -18,15 +18,22 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
+
+struct Pending {
+    reply: oneshot::Sender<ApiResponse>,
+    // Browser cancellation does not release a slot for work still running remotely.
+    _permit: OwnedSemaphorePermit,
+}
 
 struct Command {
     request: ApiRequest,
-    reply: oneshot::Sender<ApiResponse>,
+    pending: Pending,
 }
 
 struct Tunnel {
     commands: mpsc::Sender<Command>,
+    slots: Arc<Semaphore>,
     // Replacing a connection closes the old generation and its pending replies.
     stop: watch::Sender<bool>,
 }
@@ -87,7 +94,11 @@ async fn serve_socket(relay: Relay, installation: String, mut socket: WebSocket)
 
     let (commands, mut receiver) = mpsc::channel::<Command>(MAX_IN_FLIGHT);
     let (stop, mut stopped) = watch::channel(false);
-    let tunnel = Arc::new(Tunnel { commands, stop });
+    let tunnel = Arc::new(Tunnel {
+        commands,
+        slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
+        stop,
+    });
     if let Some(previous) = relay
         .0
         .lock()
@@ -96,7 +107,7 @@ async fn serve_socket(relay: Relay, installation: String, mut socket: WebSocket)
     {
         let _ = previous.stop.send(true);
     }
-    let mut pending = HashMap::<String, oneshot::Sender<ApiResponse>>::new();
+    let mut pending = HashMap::<String, Pending>::new();
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut received = tokio::time::Instant::now();
@@ -104,7 +115,6 @@ async fn serve_socket(relay: Relay, installation: String, mut socket: WebSocket)
         tokio::select! {
             _ = stopped.changed() => break,
             _ = heartbeat.tick() => {
-                pending.retain(|_, reply| !reply.is_closed());
                 if received.elapsed() > Duration::from_secs(45) {
                     break;
                 }
@@ -116,15 +126,13 @@ async fn serve_socket(relay: Relay, installation: String, mut socket: WebSocket)
                 let Some(command) = command else {
                     break;
                 };
-                pending.retain(|_, reply| !reply.is_closed());
-                if command.reply.is_closed() || pending.len() >= MAX_IN_FLIGHT {
+                if command.pending.reply.is_closed() {
                     continue;
                 }
 
-
                 let id = command.request.id.clone();
                 let message = serde_json::to_string(&Frame::Request(command.request)).unwrap();
-                pending.insert(id, command.reply);
+                pending.insert(id, command.pending);
                 if socket.send(Message::Text(message.into())).await.is_err() {
                     break;
                 }
@@ -140,9 +148,8 @@ async fn serve_socket(relay: Relay, installation: String, mut socket: WebSocket)
                             break;
                         }
 
-
-                        if let Some(reply) = pending.remove(&response.id) {
-                            let _ = reply.send(response);
+                        if let Some(completed) = pending.remove(&response.id) {
+                            let _ = completed.reply.send(response);
                         }
                     }
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
@@ -198,6 +205,25 @@ pub(super) async fn forward(
             "Streaming relay is not available yet",
         ));
     }
+
+    // Reserve capacity before reading the body, including requests not yet sent.
+    let tunnel = service
+        .relay
+        .0
+        .lock()
+        .unwrap()
+        .get(&installation)
+        .cloned()
+        .ok_or(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Installation unavailable",
+        ))?;
+    let permit = tunnel
+        .slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "Installation busy"))?;
+
     let headers = request
         .headers()
         .iter()
@@ -221,23 +247,15 @@ pub(super) async fn forward(
             .map_err(|_| ApiError(StatusCode::PAYLOAD_TOO_LARGE, "API request is too large"))?
             .to_vec(),
     };
-    let tunnel = service
-        .relay
-        .0
-        .lock()
-        .unwrap()
-        .get(&installation)
-        .cloned()
-        .ok_or(ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Installation unavailable",
-        ))?;
     let (reply, response) = oneshot::channel();
     tunnel
         .commands
         .try_send(Command {
             request: api_request,
-            reply,
+            pending: Pending {
+                reply,
+                _permit: permit,
+            },
         })
         .map_err(|_| {
             ApiError(
