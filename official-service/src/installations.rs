@@ -161,3 +161,24 @@ pub(super) async fn claim(
         Json(json!({ "installationId": installation, "token": token })),
     ))
 }
+
+/// Detach revokes access without removing either installation data or its record.
+pub(super) async fn detach(
+    State(service): State<Service>,
+    Path(installation): Path<String>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let owner = account(&service, &headers, &Method::POST).await?;
+    let detached =
+        query("UPDATE installations SET owner_id = NULL WHERE id = $1 AND owner_id = $2")
+            .bind(&installation)
+            .bind(owner)
+            .execute(&service.pool)
+            .await?;
+    if detached.rows_affected() == 0 {
+        return Err(ApiError(StatusCode::NOT_FOUND, "Installation not found"));
+    }
+
+    service.relay.disconnect(&installation);
+    Ok(StatusCode::NO_CONTENT)
+}

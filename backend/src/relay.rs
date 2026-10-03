@@ -147,7 +147,11 @@ pub async fn connect(directory: PathBuf, router: Router, stop: CancellationToken
         tokio::select! {
             () = stop.cancelled() => return Ok(()),
             result = connected(&identity, &official, router.clone()) => {
-                if result.is_err() {
+                if let Err(error) = result {
+                    if error.status == 401 {
+                        tracing::warn!("Installation identity revoked; run leo claim, then restart the manager");
+                        return Ok(());
+                    }
                     tracing::warn!("Installation relay disconnected; retrying");
                 }
             }
@@ -192,7 +196,13 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
     )
     .await
     .map_err(|_| Error::unavailable("Relay connection timed out."))?
-    .map_err(|_| Error::unavailable("Relay connection refused."))?;
+    .map_err(|error| {
+        if matches!(&error, tokio_tungstenite::tungstenite::Error::Http(response) if response.status().as_u16() == 401) {
+            Error::unauthorized("Installation identity revoked.")
+        } else {
+            Error::unavailable("Relay connection refused.")
+        }
+    })?;
 
     socket
         .send(Message::Text(

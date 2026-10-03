@@ -122,6 +122,13 @@ pub async fn router_with_relay(
                 include_str!("../migrations/202610030152_removed_methods.sql").into(),
                 false,
             ),
+            Migration::new(
+                202610030250,
+                "reclaim installations".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/202610030250_reclaim.sql").into(),
+                false,
+            ),
         ]),
         ..Migrator::DEFAULT
     };
@@ -171,6 +178,10 @@ pub async fn router_with_relay(
         .route(
             "/api/installations/{installation}",
             axum::routing::patch(installations::rename),
+        )
+        .route(
+            "/api/installations/{installation}/detach",
+            post(installations::detach),
         )
         .route(
             "/api/installations/{installation}/api/{*path}",
