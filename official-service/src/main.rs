@@ -69,6 +69,7 @@ fn configured_oauth(name: &str, loopback: bool) -> Result<Option<OAuthProvider>,
             ));
         }
     };
+
     let endpoint = |suffix: &str, default: &str| -> Result<String, String> {
         let key = format!("{prefix}_{suffix}");
         let value = env::var(&key).unwrap_or_else(|_| default.into());
@@ -83,8 +84,10 @@ fn configured_oauth(name: &str, loopback: bool) -> Result<Option<OAuthProvider>,
                 "{key} requires HTTPS (HTTP endpoints are only allowed on loopback in development)"
             ));
         }
+
         Ok(value)
     };
+
     let (authorization, token, userinfo, emails) = match name {
         "GOOGLE" => (
             "https://accounts.google.com/o/oauth2/v2/auth",
@@ -100,6 +103,7 @@ fn configured_oauth(name: &str, loopback: bool) -> Result<Option<OAuthProvider>,
         ),
         _ => return Err("Unknown OAuth provider".into()),
     };
+
     Ok(Some(OAuthProvider {
         client_id,
         client_secret,

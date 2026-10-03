@@ -5,8 +5,17 @@ pub(super) async fn authenticated(
     headers: &HeaderMap,
     mutation: bool,
 ) -> Result<(String, String), ApiError> {
+    let mut connection = service.pool.acquire().await?;
+    authenticated_on(&mut connection, headers, mutation).await
+}
+
+pub(super) async fn authenticated_on(
+    connection: &mut sqlx_postgres::PgConnection,
+    headers: &HeaderMap,
+    mutation: bool,
+) -> Result<(String, String), ApiError> {
     let row: Option<(String, String, String)> = query_as("SELECT a.id, a.email, s.csrf FROM web_sessions s JOIN leo_accounts a ON a.id = s.account_id WHERE s.digest = $1 AND s.expires_at > now()")
-        .bind(digest(session_token(headers))).fetch_optional(&service.pool).await?;
+        .bind(digest(session_token(headers))).fetch_optional(connection).await?;
     let Some((id, email, csrf)) = row else {
         return Err(ApiError(
             StatusCode::UNAUTHORIZED,
@@ -30,12 +39,14 @@ pub(super) async fn list(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let (id, _) = authenticated(&service, &headers, false).await?;
+
     let rows: Vec<(String, String, String)> = query_as(
         "SELECT id, kind, label FROM sign_in_methods WHERE account_id = $1 AND NOT removed ORDER BY kind, id",
     )
     .bind(id)
     .fetch_all(&service.pool)
     .await?;
+
     let methods: Vec<Value> = rows
         .into_iter()
         .map(|(id, kind, label)| {
@@ -46,6 +57,7 @@ pub(super) async fn list(
             })
         })
         .collect();
+
     Ok(Json(json!({ "methods": methods })))
 }
 
@@ -60,12 +72,14 @@ pub(super) async fn remove(
     Json(input): Json<Removal>,
 ) -> Result<StatusCode, ApiError> {
     let (account_id, _) = authenticated(&service, &headers, true).await?;
+
     let mut transaction = service.pool.begin().await?;
     // Serialize all changes to this account's methods, including concurrent removals.
     query("SELECT id FROM leo_accounts WHERE id = $1 FOR UPDATE")
         .bind(&account_id)
         .execute(&mut *transaction)
         .await?;
+
     let rows: Vec<(String,)> =
         query_as("SELECT id FROM sign_in_methods WHERE account_id = $1 AND NOT removed")
             .bind(&account_id)
@@ -86,6 +100,8 @@ pub(super) async fn remove(
         .bind(input.id)
         .execute(&mut *transaction)
         .await?;
+
     transaction.commit().await?;
+
     Ok(StatusCode::NO_CONTENT)
 }

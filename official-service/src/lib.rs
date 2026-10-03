@@ -277,7 +277,7 @@ async fn verify_code(
             .fetch_optional(&mut *transaction)
             .await?;
     if removed == Some((true,)) {
-        let linked = methods::authenticated(&service, &headers, true).await?;
+        let linked = methods::authenticated_on(&mut transaction, &headers, true).await?;
         if linked.0 != account_id {
             return Err(ApiError(
                 StatusCode::UNAUTHORIZED,

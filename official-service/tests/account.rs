@@ -38,6 +38,10 @@ impl Fixture {
     }
 
     async fn with_oauth(oauth: leo_official_service::OAuthProviders) -> Self {
+        Self::with_pool_size(oauth, 5).await
+    }
+
+    async fn with_pool_size(oauth: leo_official_service::OAuthProviders, connections: u32) -> Self {
         let database = std::env::var("LEO_OFFICIAL_TEST_DATABASE_URL")
             .expect("Set LEO_OFFICIAL_TEST_DATABASE_URL to a disposable Postgres database");
         let admin = PgPool::connect(&database).await.unwrap();
@@ -49,11 +53,12 @@ impl Fixture {
         let options = PgConnectOptions::from_str(&database)
             .unwrap()
             .options([("search_path", schema.as_str())]);
-        let pool = PgPoolOptions::new()
-            .max_connections(5)
-            .connect_with(options)
-            .await
-            .unwrap();
+        let mut pool_options = PgPoolOptions::new().max_connections(connections);
+        if connections == 1 {
+            pool_options = pool_options.acquire_timeout(std::time::Duration::from_secs(2));
+        }
+
+        let pool = pool_options.connect_with(options).await.unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://localhost:{}", listener.local_addr().unwrap().port());
         let mail = Arc::new(Mailbox::default());
@@ -484,27 +489,62 @@ impl OAuthMock {
             Json, Router,
             routing::{get, post},
         };
-        let app = Router::new()
-            .route("/token", post(|axum::Form(body): axum::Form<std::collections::HashMap<String, String>>| async move {
-                assert_eq!(body.get("grant_type").unwrap(), "authorization_code");
-                assert_eq!(body.get("client_secret").unwrap(), "test-only");
-                assert!(body.get("code_verifier").unwrap().len() >= 43);
-                Json(json!({ "access_token": body["code"], "token_type": "Bearer" }))
-            }))
-            .route("/google/userinfo", get(|headers: axum::http::HeaderMap| async move {
-                Json(json!({
-                    "sub": "google-alice",
-                    "email": " Alice@Example.test ",
-                    "email_verified": headers["authorization"] == "Bearer verified",
-                }))
-            }))
-            .route("/github/user", get(|| async { Json(json!({ "id": 52, "email": "untrusted@example.test" })) }))
-            .route("/github/emails", get(|headers: axum::http::HeaderMap| async move {
-                Json(json!([
-                    { "email": "untrusted@example.test", "primary": false, "verified": false },
-                    { "email": "alice@example.test", "primary": true, "verified": headers["authorization"] == "Bearer verified" },
-                ]))
-            }));
+        let app =
+            Router::new()
+                .route(
+                    "/token",
+                    post(
+                        |axum::Form(body): axum::Form<
+                            std::collections::HashMap<String, String>,
+                        >| async move {
+                            assert_eq!(body.get("grant_type").unwrap(), "authorization_code");
+                            assert_eq!(body.get("client_secret").unwrap(), "test-only");
+                            assert!(body.get("code_verifier").unwrap().len() >= 43);
+
+                            Json(json!({
+                                "access_token": body["code"],
+                                "token_type": "Bearer",
+                            }))
+                        },
+                    ),
+                )
+                .route(
+                    "/google/userinfo",
+                    get(|headers: axum::http::HeaderMap| async move {
+                        Json(json!({
+                            "sub": "google-alice",
+                            "email": " Alice@Example.test ",
+                            "email_verified": headers["authorization"] == "Bearer verified",
+                        }))
+                    }),
+                )
+                .route(
+                    "/github/user",
+                    get(|| async {
+                        Json(json!({
+                            "id": 52,
+                            "email": "untrusted@example.test",
+                        }))
+                    }),
+                )
+                .route(
+                    "/github/emails",
+                    get(|headers: axum::http::HeaderMap| async move {
+                        Json(json!([
+                            {
+                                "email": "untrusted@example.test",
+                                "primary": false,
+                                "verified": false,
+                            },
+                            {
+                                "email": "alice@example.test",
+                                "primary": true,
+                                "verified": headers["authorization"] == "Bearer verified",
+                            },
+                        ]))
+                    }),
+                );
+
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -752,164 +792,181 @@ async fn verified_google_and_github_emails_attach_to_the_same_leo_account() {
 }
 
 #[tokio::test]
-async fn a_signed_in_account_can_register_a_passkey_and_sign_in_with_it() {
+async fn passkeys_and_email_reactivation_preserve_methods_with_small_database_pools() {
     use webauthn_authenticator_rs::{WebauthnAuthenticator, softpasskey::SoftPasskey};
-    let app = Fixture::new().await;
-    let (challenge, code) = app.code("passkey@example.test").await;
-    let response = app.verify(&challenge, &code).await;
-    let cookie = response.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_owned();
-    let session: Value = response.json().await.unwrap();
-    let response = app
-        .client
-        .post(format!("{}/api/account/passkeys/register/start", app.url))
-        .header("origin", &app.url)
-        .header("cookie", &cookie)
-        .header("x-csrf-token", session["csrf"].as_str().unwrap())
-        .json(&json!({}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let registration: Value = response.json().await.unwrap();
-    let mut authenticator = WebauthnAuthenticator::new(SoftPasskey::new(true));
-    let credential = authenticator
-        .do_registration(
-            url::Url::parse(&app.url).unwrap(),
-            serde_json::from_value(registration["options"].clone()).unwrap(),
-        )
-        .unwrap();
-    let response = app.client.post(format!("{}/api/account/passkeys/register/finish", app.url))
-        .header("origin", &app.url).header("cookie", &cookie)
-        .header("x-csrf-token", session["csrf"].as_str().unwrap())
-        .json(&json!({ "challenge": registration["challenge"], "credential": credential, "label": "Laptop" })).send().await.unwrap();
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let start = app
-        .post(
-            "/api/account/passkeys/login/start",
-            json!({ "email": "passkey@example.test" }),
-        )
-        .await;
-    assert_eq!(start.status(), StatusCode::OK);
-    let browser = start.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_owned();
-    let login: Value = start.json().await.unwrap();
-    let assertion = authenticator
-        .do_authentication(
-            url::Url::parse(&app.url).unwrap(),
-            serde_json::from_value(login["options"].clone()).unwrap(),
-        )
-        .unwrap();
-    let payload = json!({ "challenge": login["challenge"], "credential": assertion });
-    let response = app
-        .client
-        .post(format!("{}/api/account/passkeys/login/finish", app.url))
-        .header("origin", &app.url)
-        .header("cookie", &browser)
-        .json(&payload)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let signed_in: Value = response.json().await.unwrap();
-    assert_eq!(signed_in["account"], session["account"]);
-    let methods: Value = app
-        .client
-        .get(format!("{}/api/account/methods", app.url))
-        .header("cookie", &cookie)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let email_method = methods["methods"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|method| method["kind"] == "email")
-        .unwrap();
-    let response = app
-        .client
-        .post(format!("{}/api/account/methods/remove", app.url))
-        .header("origin", &app.url)
-        .header("cookie", &cookie)
-        .header("x-csrf-token", session["csrf"].as_str().unwrap())
-        .json(&json!({ "id": email_method["id"] }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second'")
-        .execute(&app.pool)
-        .await
-        .unwrap();
-    let (email_challenge, email_code) = app.code("passkey@example.test").await;
-    assert_eq!(
-        app.verify(&email_challenge, &email_code).await.status(),
-        StatusCode::UNAUTHORIZED
-    );
-
-    let response = app
-        .client
-        .post(format!("{}/api/account/verify", app.url))
-        .header("origin", &app.url)
-        .header("cookie", &cookie)
-        .header("x-csrf-token", session["csrf"].as_str().unwrap())
-        .json(&json!({ "challenge": email_challenge, "code": email_code }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let methods: Value = app
-        .client
-        .get(format!("{}/api/account/methods", app.url))
-        .header("cookie", &cookie)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(methods["methods"].as_array().unwrap().len(), 2);
-    let remove = |id: Value| {
-        app.client
+    for connections in [1, 5] {
+        let app =
+            Fixture::with_pool_size(leo_official_service::OAuthProviders::default(), connections)
+                .await;
+        let (challenge, code) = app.code("passkey@example.test").await;
+        let response = app.verify(&challenge, &code).await;
+        let cookie = response.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let session: Value = response.json().await.unwrap();
+        let response = app
+            .client
+            .post(format!("{}/api/account/passkeys/register/start", app.url))
+            .header("origin", &app.url)
+            .header("cookie", &cookie)
+            .header("x-csrf-token", session["csrf"].as_str().unwrap())
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let registration: Value = response.json().await.unwrap();
+        let mut authenticator = WebauthnAuthenticator::new(SoftPasskey::new(true));
+        let credential = authenticator
+            .do_registration(
+                url::Url::parse(&app.url).unwrap(),
+                serde_json::from_value(registration["options"].clone()).unwrap(),
+            )
+            .unwrap();
+        let response = app
+            .client
+            .post(format!("{}/api/account/passkeys/register/finish", app.url))
+            .header("origin", &app.url)
+            .header("cookie", &cookie)
+            .header("x-csrf-token", session["csrf"].as_str().unwrap())
+            .json(&json!({
+                "challenge": registration["challenge"],
+                "credential": credential,
+                "label": "Laptop",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let start = app
+            .post(
+                "/api/account/passkeys/login/start",
+                json!({ "email": "passkey@example.test" }),
+            )
+            .await;
+        assert_eq!(start.status(), StatusCode::OK);
+        let browser = start.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let login: Value = start.json().await.unwrap();
+        let assertion = authenticator
+            .do_authentication(
+                url::Url::parse(&app.url).unwrap(),
+                serde_json::from_value(login["options"].clone()).unwrap(),
+            )
+            .unwrap();
+        let payload = json!({
+            "challenge": login["challenge"],
+            "credential": assertion,
+        });
+        let response = app
+            .client
+            .post(format!("{}/api/account/passkeys/login/finish", app.url))
+            .header("origin", &app.url)
+            .header("cookie", &browser)
+            .json(&payload)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let signed_in: Value = response.json().await.unwrap();
+        assert_eq!(signed_in["account"], session["account"]);
+        let methods: Value = app
+            .client
+            .get(format!("{}/api/account/methods", app.url))
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let email_method = methods["methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|method| method["kind"] == "email")
+            .unwrap();
+        let response = app
+            .client
             .post(format!("{}/api/account/methods/remove", app.url))
             .header("origin", &app.url)
             .header("cookie", &cookie)
             .header("x-csrf-token", session["csrf"].as_str().unwrap())
-            .json(&json!({ "id": id }))
+            .json(&json!({ "id": email_method["id"] }))
             .send()
-    };
-    let (first, second) = tokio::join!(
-        remove(methods["methods"][0]["id"].clone()),
-        remove(methods["methods"][1]["id"].clone())
-    );
-    let statuses = [first.unwrap().status(), second.unwrap().status()];
-    assert!(statuses.contains(&StatusCode::NO_CONTENT));
-    assert!(statuses.contains(&StatusCode::CONFLICT));
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second'")
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        let (email_challenge, email_code) = app.code("passkey@example.test").await;
+        assert_eq!(
+            app.verify(&email_challenge, &email_code).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
 
-    let response = app
-        .client
-        .post(format!("{}/api/account/passkeys/login/finish", app.url))
-        .header("origin", &app.url)
-        .header("cookie", &browser)
-        .json(&payload)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    app.close().await;
+        let response = app
+            .client
+            .post(format!("{}/api/account/verify", app.url))
+            .header("origin", &app.url)
+            .header("cookie", &cookie)
+            .header("x-csrf-token", session["csrf"].as_str().unwrap())
+            .json(&json!({ "challenge": email_challenge, "code": email_code }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let methods: Value = app
+            .client
+            .get(format!("{}/api/account/methods", app.url))
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(methods["methods"].as_array().unwrap().len(), 2);
+        let remove = |id: Value| {
+            app.client
+                .post(format!("{}/api/account/methods/remove", app.url))
+                .header("origin", &app.url)
+                .header("cookie", &cookie)
+                .header("x-csrf-token", session["csrf"].as_str().unwrap())
+                .json(&json!({ "id": id }))
+                .send()
+        };
+        let (first, second) = tokio::join!(
+            remove(methods["methods"][0]["id"].clone()),
+            remove(methods["methods"][1]["id"].clone())
+        );
+        let statuses = [first.unwrap().status(), second.unwrap().status()];
+        assert!(statuses.contains(&StatusCode::NO_CONTENT));
+        assert!(statuses.contains(&StatusCode::CONFLICT));
+
+        let response = app
+            .client
+            .post(format!("{}/api/account/passkeys/login/finish", app.url))
+            .header("origin", &app.url)
+            .header("cookie", &browser)
+            .json(&payload)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        app.close().await;
+    }
 }
 
 #[tokio::test]
@@ -971,7 +1028,18 @@ async fn passkeys_require_user_verification_origin_session_binding_and_current_c
             serde_json::from_value(unverified_options).unwrap(),
         )
         .unwrap();
-    assert_eq!(signed("/api/account/passkeys/register/finish", json!({ "challenge": start["challenge"], "credential": credential, "label": "Unverified" })).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    let response = signed(
+        "/api/account/passkeys/register/finish",
+        json!({
+            "challenge": start["challenge"],
+            "credential": credential,
+            "label": "Unverified",
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
     let start: Value = signed("/api/account/passkeys/register/start", json!({}))
         .await
         .unwrap()
@@ -984,8 +1052,12 @@ async fn passkeys_require_user_verification_origin_session_binding_and_current_c
             serde_json::from_value(start["options"].clone()).unwrap(),
         )
         .unwrap();
-    let registration =
-        json!({ "challenge": start["challenge"], "credential": credential, "label": "Verified" });
+    let registration = json!({
+        "challenge": start["challenge"],
+        "credential": credential,
+        "label": "Verified",
+    });
+
     let (other_challenge, other_code) = app.code("other@example.test").await;
     let response = app.verify(&other_challenge, &other_code).await;
     let other_cookie = response.headers()["set-cookie"]
@@ -1093,7 +1165,10 @@ async fn passkeys_require_user_verification_origin_session_binding_and_current_c
             }
             _ => unreachable!(),
         }
-        let payload = json!({ "challenge": start["challenge"], "credential": proof });
+        let payload = json!({
+            "challenge": start["challenge"],
+            "credential": proof,
+        });
         let response = app
             .client
             .post(format!("{}/api/account/passkeys/login/finish", app.url))

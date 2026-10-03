@@ -68,12 +68,14 @@ pub(super) async fn start(
 ) -> Result<Response, ApiError> {
     let provider = service.oauth.provider(&name)?;
     consume_limit(&service.pool, &format!("oauth:{}", peer.ip()), 30).await?;
+
     // A logged-in flow is explicit linking and must be protected like any mutation.
     let account_id = if session_token(&headers).is_empty() {
         None
     } else {
         Some(methods::authenticated(&service, &headers, true).await?.0)
     };
+
     let state = random_token();
     let browser = random_token();
     let verifier = random_token();
@@ -97,6 +99,7 @@ pub(super) async fn start(
             "code_challenge",
             &URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
         );
+
     query("DELETE FROM sign_in_challenges WHERE expires_at <= now()")
         .execute(&service.pool)
         .await?;
@@ -105,6 +108,7 @@ pub(super) async fn start(
         .bind(digest(session_token(&headers)))
         .bind(serde_json::to_string(&OAuthState { verifier }).map_err(|_| unavailable())?)
         .execute(&service.pool).await?;
+
     Ok((
         [(
             header::SET_COOKIE,
@@ -145,6 +149,7 @@ pub(super) async fn callback(
     let row: Option<(Option<String>, String, String)> = query_as("DELETE FROM sign_in_challenges WHERE id = $1 AND kind = $2 AND browser_digest = $3 AND expires_at > now() RETURNING account_id, session_digest, state")
         .bind(input.state).bind(format!("oauth:{name}")).bind(digest(cookie_token(&headers, "leo_oauth")))
         .fetch_optional(&service.pool).await?;
+
     let (link_account, session_digest, state) = row.ok_or_else(rejected)?;
     if link_account.is_some() {
         let account = methods::authenticated(&service, &headers, false).await?;
@@ -154,6 +159,7 @@ pub(super) async fn callback(
             return Err(rejected());
         }
     }
+
     let state: OAuthState = serde_json::from_str(&state).map_err(|_| rejected())?;
     let code = input.code.ok_or_else(rejected)?;
     let client = reqwest::Client::builder()
@@ -162,6 +168,7 @@ pub(super) async fn callback(
         .user_agent("Leo account sign-in")
         .build()
         .map_err(|_| unavailable())?;
+
     let token: Value = client
         .post(&provider.token_url)
         .header(header::ACCEPT, "application/json")
@@ -184,6 +191,7 @@ pub(super) async fn callback(
         .json()
         .await
         .map_err(|_| unavailable())?;
+
     let access_token = token["access_token"]
         .as_str()
         .filter(|v| !v.is_empty())
@@ -199,6 +207,7 @@ pub(super) async fn callback(
         .json()
         .await
         .map_err(|_| unavailable())?;
+
     let (subject, email) = if name == "github" {
         let subject = identity["id"].as_u64().ok_or_else(rejected)?.to_string();
         let emails: Vec<Value> = client
@@ -231,6 +240,7 @@ pub(super) async fn callback(
         let email = identity["email"].as_str().ok_or_else(rejected)?.to_owned();
         (subject, email)
     };
+
     let email = email.trim().to_lowercase();
     if email.len() > 254
         || email_address::EmailAddress::parse_with_options(
@@ -244,12 +254,14 @@ pub(super) async fn callback(
     {
         return Err(rejected());
     }
+
     let mut transaction = service.pool.begin().await?;
     let (account_id,): (String,) = query_as("INSERT INTO leo_accounts (id, email) VALUES ($1, $2) ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email RETURNING id")
         .bind(uuid::Uuid::new_v4().to_string()).bind(&email).fetch_one(&mut *transaction).await?;
     if link_account.as_ref().is_some_and(|id| id != &account_id) {
         return Err(rejected());
     }
+
     let existing: Option<(String, bool)> = query_as(
         "SELECT account_id, removed FROM sign_in_methods WHERE kind = $1 AND subject = $2",
     )
@@ -260,15 +272,19 @@ pub(super) async fn callback(
     if existing.is_some_and(|(id, removed)| id != account_id || removed && link_account.is_none()) {
         return Err(rejected());
     }
+
     query("INSERT INTO sign_in_methods (id, account_id, kind, subject, label) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (kind, subject) DO UPDATE SET removed = false")
         .bind(uuid::Uuid::new_v4().to_string()).bind(&account_id).bind(name).bind(subject).bind(&email).execute(&mut *transaction).await?;
+
     let session_response = create_session(&service, &mut transaction, &account_id, &email).await?;
     transaction.commit().await?;
+
     // Provider tokens are deliberately discarded: GitHub identification grants no agent access.
     let mut response = Redirect::to("/").into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
         session_response.headers()[header::SET_COOKIE].clone(),
     );
+
     Ok(response)
 }
