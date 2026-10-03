@@ -16,6 +16,8 @@ use std::{
 pub const FILE: &str = "node-budget.json";
 const CONTROLLER_MEMORY_MIB: u64 = 512;
 const MIN_GUEST_MEMORY_MIB: u64 = 128;
+/// Reclaim starts one tenth below the shared RAM limit.
+const RECLAIM_HEADROOM_DIVISOR: u64 = 10;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -80,6 +82,15 @@ impl Budget {
         if let Err(error) = std::fs::write(cgroup.join("memory.max"), memory.to_string()) {
             std::fs::write(cgroup.join("cpu.max"), old_cpu)?;
             return Err(error.into());
+        }
+
+        // Journal page cache shares this cgroup with the guests. At the hard
+        // limit, GFP_NOFS journal allocations cannot reclaim it and the kernel
+        // kills a VM or the controller; above memory.high it reclaims and
+        // throttles instead.
+        let high = memory - memory / RECLAIM_HEADROOM_DIVISOR;
+        if let Err(error) = std::fs::write(cgroup.join("memory.high"), high.to_string()) {
+            tracing::warn!(message = %error, "Could not set the shared memory reclaim threshold");
         }
         Ok(())
     }
@@ -375,6 +386,38 @@ mod tests {
         .unwrap();
         budget.limits.memory_mi_b = 1024;
         budget.apply(root.path()).unwrap();
+    }
+
+    #[test]
+    fn shared_memory_is_reclaimed_before_its_hard_limit_kills_vms() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("memory.current"), "0").unwrap();
+        std::fs::write(root.path().join("cpu.max"), "max 100000").unwrap();
+        std::fs::write(root.path().join("memory.max"), "max").unwrap();
+        let budget = Budget {
+            slots: 8,
+            limits: Resources {
+                cpu: 7,
+                memory_mi_b: 36352,
+                disk_mi_b: 32768,
+            },
+        };
+        budget.apply(root.path()).unwrap();
+        let max = 36352 * 1_048_576u64;
+        let high = std::fs::read_to_string(root.path().join("memory.high"))
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("memory.max")).unwrap(),
+            max.to_string()
+        );
+        assert!(
+            high < max,
+            "page cache must be reclaimed before an OOM kill"
+        );
+        assert!(max - high >= 1024 * 1_048_576);
+        assert!(high >= max - max / 8, "guests keep most of the budget");
     }
 
     #[test]

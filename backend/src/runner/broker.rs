@@ -349,18 +349,10 @@ impl Execution {
         timer.abort();
         let broker = &self.broker;
         let id = &self.id;
-        let code = match result {
-            Ok(code) => code,
-            Err(error) => {
-                log_failure(broker, id, &error.message).await;
-                1
-            }
-        };
-        let code = if lease_expired.load(Ordering::SeqCst) {
-            CONTROLLER_INTERRUPTED
-        } else {
-            code
-        };
+        if let Err(error) = &result {
+            log_failure(broker, id, &error.message).await;
+        }
+        let code = exit_code(result, lease_expired.load(Ordering::SeqCst));
         let exit = atomic_write(&broker.state_file(id, "exit"), code.to_string().as_bytes()).await;
         if let Err(error) = exit {
             tracing::warn!(attempt = %id, message = %error.message, "Could not record VM exit");
@@ -368,6 +360,18 @@ impl Execution {
         let _ = tokio::fs::remove_file(broker.state_file(id, "active")).await;
         broker.active.lock().await.remove(id);
         let _ = self.done.send(true);
+    }
+}
+
+/// A lost lease or an unavailable VM (for example a guest killed by the
+/// shared memory limit) keeps its disk: the manager resumes the attempt
+/// instead of failing the run.
+fn exit_code(result: Result<i32>, lease_expired: bool) -> i32 {
+    match result {
+        _ if lease_expired => CONTROLLER_INTERRUPTED,
+        Err(error) if error.is_unavailable() => CONTROLLER_INTERRUPTED,
+        Err(_) => 1,
+        Ok(code) => code,
     }
 }
 
@@ -626,6 +630,16 @@ mod tests {
         }
         plan.as_object_mut().unwrap().remove("expires");
         assert!(!valid(&plan));
+    }
+
+    #[test]
+    fn an_unavailable_guest_is_reported_as_a_recoverable_interruption() {
+        let disconnected =
+            Error::unavailable("Guest disconnected. Its workspace disk has been preserved.");
+        assert_eq!(exit_code(Err(disconnected), false), CONTROLLER_INTERRUPTED);
+        assert_eq!(exit_code(Err(Error::bad("Invalid plan.")), false), 1);
+        assert_eq!(exit_code(Ok(3), false), 3);
+        assert_eq!(exit_code(Ok(0), true), CONTROLLER_INTERRUPTED);
     }
 
     #[test]
