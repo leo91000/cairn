@@ -102,7 +102,9 @@ existing passkeys. Use an HTTPS hostname in production and `http://localhost`
 for local passkey development. IP origins still support email/OAuth sign-in but
 do not offer passkeys. The web uses the browser's WebAuthn JSON methods; older
 browsers receive an unavailable message and can use email or OAuth instead.
-Passkey sign-in asks for the account email before the browser selects a key.
+Passkey sign-in is discoverable: the browser selects a resident key without an
+email lookup. Start options are identical for known, unknown and omitted emails
+and contain no credential IDs. Registration requires a resident credential.
 Adding a named passkey requires a current session, origin and CSRF token; up to
 20 passkeys can be registered per account. Registration and authentication states
 stay only in Postgres, expire after five minutes and are consumed once, even on
@@ -134,5 +136,6 @@ the real official binary and replace only external email delivery with an HTTP
 mailbox. They cover email sign-in, invalid codes, empty installations, reload,
 responsive widths, sign-out, OAuth linking/removal and passkey registration,
 sign-in/removal with Chromium's virtual authenticator. API tests use HTTP OAuth
-providers and a software WebAuthn authenticator, including unverified emails,
+providers and a software WebAuthn authenticator (a client adapter supplies its
+locally retained credential and user handle for discovery), including unverified emails,
 replay, explicit re-linking and concurrent removal of the final methods. The installation remains untouched by this slice.

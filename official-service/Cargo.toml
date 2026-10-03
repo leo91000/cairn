@@ -39,7 +39,11 @@ uuid = { version = "1", features = [ "v4" ] }
 url = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = [ "env-filter" ] }
-webauthn-rs = { version = "0.5.4", features = [ "danger-allow-state-serialisation" ] }
+webauthn-rs = { version = "0.5.4", features = [
+  "danger-allow-state-serialisation",
+  "conditional-ui"
+] }
+webauthn-rs-proto = "0.5.4"
 base64 = "0.22"
 
 [dev-dependencies]

@@ -151,7 +151,7 @@ async function passkey(register: boolean) {
     if (!window.PublicKeyCredential?.parseCreationOptionsFromJSON || !PublicKeyCredential.parseRequestOptionsFromJSON)
       throw new Error('Passkeys are unavailable in this browser. Use another sign-in method.')
     const route = register ? 'register' : 'login'
-    const start = await accountRequest(`passkeys/${route}/start`, register ? {} : { email: email.value })
+    const start = await accountRequest(`passkeys/${route}/start`, {})
     const credential = register
       ? await navigator.credentials.create({ publicKey: PublicKeyCredential.parseCreationOptionsFromJSON(start.options.publicKey) })
       : await navigator.credentials.get({ publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(start.options.publicKey) })
@@ -365,7 +365,7 @@ onMounted(loadSession)
           <UiButton type="submit" variant="primary" :disabled="busy">
             {{ busy ? 'Please wait…' : challenge ? 'Sign in' : 'Send code' }}
           </UiButton>
-          <UiButton v-if="!challenge && options.passkeys" :disabled="busy || !email" @click="passkey(false)">
+          <UiButton v-if="!challenge && options.passkeys" :disabled="busy" @click="passkey(false)">
             Sign in with a passkey
           </UiButton>
           <UiButton v-if="challenge" :disabled="busy" @click="changeEmail">

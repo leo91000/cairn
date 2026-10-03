@@ -1,5 +1,6 @@
 use super::*;
 use webauthn_rs::prelude::*;
+use webauthn_rs_proto::ResidentKeyRequirement;
 
 fn rejected() -> ApiError {
     ApiError(
@@ -29,7 +30,7 @@ async fn store_challenge<T: serde::Serialize>(
     service: &Service,
     kind: &str,
     browser: &str,
-    account_id: &str,
+    account_id: Option<&str>,
     session: Option<&str>,
     state: &T,
 ) -> Result<String, ApiError> {
@@ -50,8 +51,8 @@ async fn take_challenge(
     id: &str,
     kind: &str,
     browser: &str,
-) -> Result<(String, Option<String>, String), ApiError> {
-    let row: Option<(String, Option<String>, String)> = query_as("DELETE FROM sign_in_challenges WHERE id = $1 AND kind = $2 AND browser_digest = $3 AND expires_at > now() RETURNING account_id, session_digest, state")
+) -> Result<(Option<String>, Option<String>, String), ApiError> {
+    let row: Option<(Option<String>, Option<String>, String)> = query_as("DELETE FROM sign_in_challenges WHERE id = $1 AND kind = $2 AND browser_digest = $3 AND expires_at > now() RETURNING account_id, session_digest, state")
         .bind(id).bind(kind).bind(digest(browser)).fetch_optional(&service.pool).await?;
     row.ok_or_else(rejected)
 }
@@ -85,7 +86,7 @@ pub(super) async fn register_start(
     }
 
     let exclude = passkeys.iter().map(|key| key.cred_id().clone()).collect();
-    let (options, state) = webauthn(&service)?
+    let (mut options, state) = webauthn(&service)?
         .start_passkey_registration(
             uuid::Uuid::parse_str(&account_id).map_err(|_| rejected())?,
             &email,
@@ -94,12 +95,18 @@ pub(super) async fn register_start(
         )
         .map_err(|_| rejected())?;
 
+    // Discoverable sign-in needs the browser to retain a resident credential.
+    if let Some(selection) = options.public_key.authenticator_selection.as_mut() {
+        selection.require_resident_key = true;
+        selection.resident_key = Some(ResidentKeyRequirement::Required);
+    }
+
     let token = session_token(&headers);
     let challenge = store_challenge(
         &service,
         "passkey-registration",
         token,
-        &account_id,
+        Some(&account_id),
         Some(token),
         &state,
     )
@@ -128,7 +135,7 @@ pub(super) async fn register_finish(
     let token = session_token(&headers);
     let (owner, session, state) =
         take_challenge(&service, &input.challenge, "passkey-registration", token).await?;
-    if owner != account_id || session.as_deref() != Some(digest(token).as_str()) {
+    if owner.as_deref() != Some(&account_id) || session.as_deref() != Some(digest(token).as_str()) {
         return Err(rejected());
     }
 
@@ -175,35 +182,17 @@ pub(super) async fn register_finish(
 pub(super) async fn login_start(
     State(service): State<Service>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    Json(input): Json<EmailRequest>,
 ) -> Result<Response, ApiError> {
     consume_limit(&service.pool, &format!("passkey-login:{}", peer.ip()), 30).await?;
 
-    let row: Option<(String,)> = query_as("SELECT id FROM leo_accounts WHERE email = $1")
-        .bind(input.email.trim().to_lowercase())
-        .fetch_optional(&service.pool)
-        .await?;
-    let (account_id,) = row.ok_or_else(rejected)?;
-
-    let passkeys = account_passkeys(&service, &account_id).await?;
-    if passkeys.is_empty() {
-        return Err(rejected());
-    }
-
+    // Every browser gets the same options, without looking up an email or exposing IDs.
     let (options, state) = webauthn(&service)?
-        .start_passkey_authentication(&passkeys)
+        .start_discoverable_authentication()
         .map_err(|_| rejected())?;
 
     let browser = random_token();
-    let challenge = store_challenge(
-        &service,
-        "passkey-login",
-        &browser,
-        &account_id,
-        None,
-        &state,
-    )
-    .await?;
+    let challenge =
+        store_challenge(&service, "passkey-login", &browser, None, None, &state).await?;
 
     Ok((
         [(
@@ -232,31 +221,42 @@ pub(super) async fn login_finish(
 ) -> Result<Response, ApiError> {
     consume_limit(&service.pool, &format!("passkey-login:{}", peer.ip()), 30).await?;
 
-    let (account_id, _, state) = take_challenge(
+    let (_, _, state) = take_challenge(
         &service,
         &input.challenge,
         "passkey-login",
         cookie_token(&headers, "leo_passkey"),
     )
     .await?;
-
-    let state: PasskeyAuthentication = serde_json::from_str(&state).map_err(|_| rejected())?;
-    let result = webauthn(&service)?
-        .finish_passkey_authentication(&input.credential, &state)
+    let state: DiscoverableAuthentication = serde_json::from_str(&state).map_err(|_| rejected())?;
+    let webauthn = webauthn(&service)?;
+    let (owner, credential_id) = webauthn
+        .identify_discoverable_authentication(&input.credential)
         .map_err(|_| rejected())?;
+    let account_id = owner.to_string();
 
     let mut transaction = service.pool.begin().await?;
-    let (email,): (String,) = query_as("SELECT email FROM leo_accounts WHERE id = $1 FOR UPDATE")
-        .bind(&account_id)
-        .fetch_one(&mut *transaction)
-        .await?;
+    let row: Option<(String,)> =
+        query_as("SELECT email FROM leo_accounts WHERE id = $1 FOR UPDATE")
+            .bind(&account_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+    let (email,) = row.ok_or_else(rejected)?;
 
-    // Check the current method: removal while the challenge was pending revokes it too.
+    // Validate against the current credential and counter, including revocation while pending.
     let row: Option<(String, String)> = query_as("SELECT id, credential FROM sign_in_methods WHERE account_id = $1 AND kind = 'passkey' AND NOT removed AND subject = $2 FOR UPDATE")
-        .bind(&account_id).bind(hex::encode(result.cred_id().as_ref())).fetch_optional(&mut *transaction).await?;
+        .bind(&account_id).bind(hex::encode(credential_id)).fetch_optional(&mut *transaction).await?;
     let (id, credential) = row.ok_or_else(rejected)?;
     let mut passkey: Passkey = serde_json::from_str(&credential).map_err(|_| rejected())?;
+    let result = webauthn
+        .finish_discoverable_authentication(
+            &input.credential,
+            state,
+            &[DiscoverableKey::from(&passkey)],
+        )
+        .map_err(|_| rejected())?;
     passkey.update_credential(&result);
+
     query("UPDATE sign_in_methods SET credential = $1 WHERE id = $2")
         .bind(serde_json::to_string(&passkey).map_err(|_| rejected())?)
         .bind(id)

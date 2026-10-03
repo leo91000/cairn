@@ -70,7 +70,7 @@ test('email sign-in opens the empty installation screen, persists and signs out'
     await expect(page.getByText('Laptop', { exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Back to installations' }).click()
     await page.getByRole('button', { name: 'Sign out' }).click()
-    await page.getByLabel('Email address').fill(messages[0]!.to[0]!)
+    await expect(page.getByRole('button', { name: 'Sign in with a passkey' })).toBeEnabled()
     await page.getByRole('button', { name: 'Sign in with a passkey' }).click()
     await expect(page.getByRole('heading', { name: 'No installations yet' })).toBeVisible()
     await page.getByRole('button', { name: 'Sign-in methods', exact: true }).click()

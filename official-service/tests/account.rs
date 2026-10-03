@@ -22,6 +22,71 @@ impl EmailSender for Mailbox {
     }
 }
 
+// SoftPasskey signs real WebAuthn proofs but lacks resident-key storage. This client
+// adapter retains the credential/user handle and supplies them locally when the
+// server sends an empty discovery list, as a resident authenticator would do.
+struct SoftwarePasskey {
+    inner: webauthn_authenticator_rs::WebauthnAuthenticator<
+        webauthn_authenticator_rs::softpasskey::SoftPasskey,
+    >,
+    credential_id: Vec<u8>,
+    user_handle: Vec<u8>,
+}
+
+impl SoftwarePasskey {
+    fn new(verified: bool) -> Self {
+        Self {
+            inner: webauthn_authenticator_rs::WebauthnAuthenticator::new(
+                webauthn_authenticator_rs::softpasskey::SoftPasskey::new(verified),
+            ),
+            credential_id: Vec::new(),
+            user_handle: Vec::new(),
+        }
+    }
+
+    fn do_registration(
+        &mut self,
+        origin: url::Url,
+        mut options: webauthn_rs::prelude::CreationChallengeResponse,
+    ) -> Result<webauthn_rs::prelude::RegisterPublicKeyCredential, String> {
+        let selection = options.public_key.authenticator_selection.as_mut().unwrap();
+        assert!(selection.require_resident_key);
+        self.user_handle = options.public_key.user.id.as_ref().to_vec();
+        selection.require_resident_key = false;
+        selection.resident_key = Some(webauthn_rs_proto::ResidentKeyRequirement::Discouraged);
+
+        let credential = self
+            .inner
+            .do_registration(origin, options)
+            .map_err(|error| format!("{error:?}"))?;
+        self.credential_id = credential.raw_id.as_ref().to_vec();
+        Ok(credential)
+    }
+
+    fn do_authentication(
+        &mut self,
+        origin: url::Url,
+        mut options: webauthn_rs::prelude::RequestChallengeResponse,
+    ) -> Result<webauthn_rs::prelude::PublicKeyCredential, String> {
+        assert!(options.public_key.allow_credentials.is_empty());
+        options
+            .public_key
+            .allow_credentials
+            .push(webauthn_rs_proto::AllowCredentials {
+                type_: "public-key".into(),
+                id: self.credential_id.clone().into(),
+                transports: None,
+            });
+
+        let mut credential = self
+            .inner
+            .do_authentication(origin, options)
+            .map_err(|error| format!("{error:?}"))?;
+        credential.response.user_handle = Some(self.user_handle.clone().into());
+        Ok(credential)
+    }
+}
+
 struct Fixture {
     url: String,
     client: Client,
@@ -793,7 +858,6 @@ async fn verified_google_and_github_emails_attach_to_the_same_leo_account() {
 
 #[tokio::test]
 async fn passkeys_and_email_reactivation_preserve_methods_with_small_database_pools() {
-    use webauthn_authenticator_rs::{WebauthnAuthenticator, softpasskey::SoftPasskey};
     for connections in [1, 5] {
         let app =
             Fixture::with_pool_size(leo_official_service::OAuthProviders::default(), connections)
@@ -820,7 +884,7 @@ async fn passkeys_and_email_reactivation_preserve_methods_with_small_database_po
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let registration: Value = response.json().await.unwrap();
-        let mut authenticator = WebauthnAuthenticator::new(SoftPasskey::new(true));
+        let mut authenticator = SoftwarePasskey::new(true);
         let credential = authenticator
             .do_registration(
                 url::Url::parse(&app.url).unwrap(),
@@ -842,6 +906,34 @@ async fn passkeys_and_email_reactivation_preserve_methods_with_small_database_po
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
+
+        let known = app
+            .post(
+                "/api/account/passkeys/login/start",
+                json!({ "email": "passkey@example.test" }),
+            )
+            .await;
+        let unknown = app
+            .post(
+                "/api/account/passkeys/login/start",
+                json!({ "email": "unknown@example.test" }),
+            )
+            .await;
+        assert_eq!(known.status(), StatusCode::OK);
+        assert_eq!(unknown.status(), StatusCode::OK);
+        let mut known: Value = known.json().await.unwrap();
+        let mut unknown: Value = unknown.json().await.unwrap();
+        assert_eq!(known["options"]["publicKey"]["allowCredentials"], json!([]));
+        assert_eq!(
+            unknown["options"]["publicKey"]["allowCredentials"],
+            json!([])
+        );
+        for response in [&mut known, &mut unknown] {
+            response["challenge"] = json!("random challenge");
+            response["options"]["publicKey"]["challenge"] = json!("random challenge");
+        }
+        assert_eq!(known, unknown);
+
         let start = app
             .post(
                 "/api/account/passkeys/login/start",
@@ -972,7 +1064,6 @@ async fn passkeys_and_email_reactivation_preserve_methods_with_small_database_po
 #[tokio::test]
 async fn passkeys_require_user_verification_origin_session_binding_and_current_credentials() {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-    use webauthn_authenticator_rs::{WebauthnAuthenticator, softpasskey::SoftPasskey};
     let app = Fixture::new().await;
     let (challenge, code) = app.code("proofs@example.test").await;
     let response = app.verify(&challenge, &code).await;
@@ -1010,7 +1101,7 @@ async fn passkeys_require_user_verification_origin_session_binding_and_current_c
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let origin = url::Url::parse(&app.url).unwrap();
-    let mut authenticator = WebauthnAuthenticator::new(SoftPasskey::new(true));
+    let mut authenticator = SoftwarePasskey::new(true);
     // Registration without user verification is not sufficient to add a passkey.
     let start: Value = signed("/api/account/passkeys/register/start", json!({}))
         .await
@@ -1018,7 +1109,7 @@ async fn passkeys_require_user_verification_origin_session_binding_and_current_c
         .json()
         .await
         .unwrap();
-    let mut unverified = WebauthnAuthenticator::new(SoftPasskey::new(false));
+    let mut unverified = SoftwarePasskey::new(false);
     let mut unverified_options = start["options"].clone();
     unverified_options["publicKey"]["authenticatorSelection"]["userVerification"] =
         json!("discouraged");
