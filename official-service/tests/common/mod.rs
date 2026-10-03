@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use async_trait::async_trait;
-use leo_official_service::{EmailSender, router};
+use leo_official_service::EmailSender;
 use reqwest::Client;
 use serde_json::{Value, json};
 use sqlx_core::query::query;
@@ -43,7 +43,10 @@ impl Fixture {
         Self::with_pool_size(oauth, 5).await
     }
 
-    pub async fn with_pool_size(oauth: leo_official_service::OAuthProviders, connections: u32) -> Self {
+    pub async fn with_pool_size(
+        oauth: leo_official_service::OAuthProviders,
+        connections: u32,
+    ) -> Self {
         let database = std::env::var("LEO_OFFICIAL_TEST_DATABASE_URL")
             .expect("Set LEO_OFFICIAL_TEST_DATABASE_URL to a disposable Postgres database");
         let admin = PgPool::connect(&database).await.unwrap();

@@ -2,9 +2,9 @@ mod installations;
 mod methods;
 mod oauth;
 mod passkeys;
+mod relay;
 
 pub use oauth::{OAuthProvider, OAuthProviders};
-mod relay;
 
 use async_trait::async_trait;
 use axum::{
@@ -108,7 +108,6 @@ pub async fn router_with_oauth(
                 "removed sign in methods".into(),
                 MigrationType::Simple,
                 include_str!("../migrations/202610030152_removed_methods.sql").into(),
-
                 false,
             ),
         ]),
@@ -156,7 +155,6 @@ pub async fn router_with_oauth(
             "/api/installations/claim-code",
             post(installations::claim_code),
         )
-
         .route(
             "/api/installations/{installation}/api/{*path}",
             any(relay::forward),
@@ -335,7 +333,7 @@ async fn create_session(
     let token = random_token();
     let csrf = random_token();
     query("INSERT INTO web_sessions (digest, account_id, csrf, expires_at) VALUES ($1, $2, $3, now() + interval '7 days')")
-        .bind(digest(&token)).bind(account_id).bind(&csrf).execute(connection).await?;
+        .bind(digest(&token)).bind(account_id).bind(&csrf).execute(&mut *connection).await?;
 
     let secure = if service.origin.starts_with("https://") {
         "; Secure"
@@ -350,7 +348,7 @@ async fn create_session(
             "authenticated": true,
             "account": { "id": account_id, "email": email },
             "csrf": csrf,
-            "installations": installations::list(&service.pool, &account_id).await?,
+            "installations": installations::list(&mut *connection, account_id).await?,
         })),
     )
         .into_response())

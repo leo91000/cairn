@@ -1,4 +1,4 @@
-use super::{ApiError, Service, consume_limit, digest, random_token, session_token};
+use super::{ApiError, Service, consume_limit, digest, methods, random_token};
 use axum::{
     Json,
     extract::{ConnectInfo, State},
@@ -7,43 +7,28 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx_core::{query::query, query_as::query_as};
-use sqlx_postgres::PgPool;
+use sqlx_postgres::PgExecutor;
 use std::net::SocketAddr;
-use subtle::ConstantTimeEq;
 
 pub(super) async fn account(
     service: &Service,
     headers: &HeaderMap,
     method: &Method,
 ) -> Result<String, ApiError> {
-    let row: Option<(String, String)> = query_as(
-        "SELECT account_id, csrf FROM web_sessions WHERE digest = $1 AND expires_at > now()",
-    )
-    .bind(digest(session_token(headers)))
-    .fetch_optional(&service.pool)
-    .await?;
-    let Some((id, csrf)) = row else {
-        return Err(ApiError(StatusCode::UNAUTHORIZED, "Please sign in."));
-    };
-
-    if !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
-        let supplied = headers
-            .get("x-csrf-token")
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("");
-        if !bool::from(csrf.as_bytes().ct_eq(supplied.as_bytes())) {
-            return Err(ApiError(StatusCode::FORBIDDEN, "Invalid CSRF token"));
-        }
-    }
+    let mutation = !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS);
+    let (id, _) = methods::authenticated(service, headers, mutation).await?;
 
     Ok(id)
 }
 
-pub(super) async fn list(pool: &PgPool, account: &str) -> Result<Vec<Value>, ApiError> {
+pub(super) async fn list<'e>(
+    executor: impl PgExecutor<'e>,
+    account: &str,
+) -> Result<Vec<Value>, ApiError> {
     let rows: Vec<(String, String)> =
         query_as("SELECT id, name FROM installations WHERE owner_id = $1 ORDER BY created_at, id")
             .bind(account)
-            .fetch_all(pool)
+            .fetch_all(executor)
             .await?;
     Ok(rows
         .into_iter()

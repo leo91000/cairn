@@ -2,9 +2,12 @@ mod common;
 
 use common::Fixture;
 use leo_official_service::router;
-use reqwest::StatusCode;
+use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
 use sqlx_core::query::query;
+use std::sync::{Arc, Mutex};
+use tokio::task::JoinHandle;
+
 // SoftPasskey signs real WebAuthn proofs but lacks resident-key storage. This client
 // adapter retains the credential/user handle and supplies them locally when the
 // server sends an empty discovery list, as a resident authenticator would do.
@@ -69,8 +72,6 @@ impl SoftwarePasskey {
         Ok(credential)
     }
 }
-
-
 
 #[tokio::test]
 async fn email_code_creates_a_verified_leo_account_and_a_persistent_session() {
