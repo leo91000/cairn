@@ -143,9 +143,13 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
     ) -> Result<T> {
         let changes = self.0.changes.clone();
         self.call(&self.0.writer, move |db| {
+            let before = db.0.total_changes();
             let result = f(db);
             // Notify on the database actor, after commit, even if the caller was cancelled.
-            changes.send_modify(|revision| *revision = revision.wrapping_add(1));
+            // Empty scheduler transactions must not wake every live UI subscriber.
+            if db.0.total_changes() != before {
+                changes.send_modify(|revision| *revision = revision.wrapping_add(1));
+            }
             result
         })
         .await
