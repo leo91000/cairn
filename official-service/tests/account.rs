@@ -149,7 +149,16 @@ async fn foreign_and_missing_origins_cannot_start_or_complete_sign_in() {
             if let Some(origin) = origin {
                 request = request.header("origin", origin);
             }
-            let response = request.json(&json!({ "email": "alice@example.test", "challenge": "missing", "code": "12345678" })).send().await.unwrap();
+            let response = request
+                .json(&json!({
+                    "email": "alice@example.test",
+                    "challenge": "missing",
+                    "code": "12345678",
+                }))
+                .send()
+                .await
+                .unwrap();
+
             assert_eq!(response.status(), StatusCode::FORBIDDEN);
         }
     }
