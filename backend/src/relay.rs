@@ -16,6 +16,7 @@ use leo_relay_protocol::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     net::SocketAddr,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -208,12 +209,26 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
     }
 
     let mut requests = JoinSet::new();
+    let mut request_ids = HashMap::new();
     loop {
         tokio::select! {
-            result = requests.join_next(), if !requests.is_empty() => {
+            result = requests.join_next_with_id(), if !requests.is_empty() => {
                 let completed = result
                     .ok_or_else(|| Error::unavailable("Relay request stopped."))?;
-                let response = completed.map_err(Error::internal)??;
+                let (task_id, result) = match completed {
+                    Ok((task_id, result)) => (task_id, result),
+                    Err(error) => (
+                        error.id(),
+                        Err(Error::bad_gateway("Installation handler failed.")),
+                    ),
+                };
+                let request_id = request_ids
+                    .remove(&task_id)
+                    .ok_or_else(|| Error::bad_gateway("Unknown relay request."))?;
+                let response = match result {
+                    Ok(response) => response,
+                    Err(error) => request_failure(request_id, error.status, &error.message),
+                };
 
                 let frame = serde_json::to_string(&Frame::Response(response))?;
                 socket
@@ -229,10 +244,18 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
                             return Err(Error::bad("Unexpected relay frame."));
                         };
                         if requests.len() >= MAX_IN_FLIGHT {
-                            return Err(Error::unavailable("Too many relay requests."));
+                            let response = request_failure(request.id, 503, "Installation busy.");
+                            let frame = serde_json::to_string(&Frame::Response(response))?;
+                            socket
+                                .send(Message::Text(frame.into()))
+                                .await
+                                .map_err(Error::internal)?;
+                            continue;
                         }
 
-                        requests.spawn(dispatch(router.clone(), request));
+                        let request_id = request.id.clone();
+                        let task = requests.spawn(dispatch(router.clone(), request));
+                        request_ids.insert(task.id(), request_id);
                     }
                     Some(Ok(Message::Ping(bytes))) => {
                         socket.send(Message::Pong(bytes)).await.map_err(Error::internal)?;
@@ -242,6 +265,15 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
                 }
             }
         }
+    }
+}
+
+fn request_failure(id: String, status: u16, message: &str) -> ApiResponse {
+    ApiResponse {
+        id,
+        status,
+        headers: vec![("content-type".into(), "application/json".into())],
+        body: serde_json::to_vec(&serde_json::json!({ "error": message })).unwrap(),
     }
 }
 
@@ -258,7 +290,7 @@ async fn dispatch(router: Router, input: ApiRequest) -> Result<ApiResponse> {
         .uri(&input.path)
         .header("host", "localhost")
         .body(Body::from(input.body))
-        .map_err(Error::internal)?;
+        .map_err(|_| Error::bad_gateway("Invalid installation request."))?;
     for (name, value) in input.headers {
         if leo_relay_protocol::request_header(&name)
             && let (Ok(name), Ok(value)) =
@@ -273,7 +305,10 @@ async fn dispatch(router: Router, input: ApiRequest) -> Result<ApiResponse> {
     request
         .extensions_mut()
         .insert(InstallationIdentity::trusted(role, &input.account_id));
-    let response = router.oneshot(request).await.map_err(Error::internal)?;
+    let response = router
+        .oneshot(request)
+        .await
+        .map_err(|_| Error::bad_gateway("Installation handler failed."))?;
     let status = response.status().as_u16();
     let headers = response
         .headers()
@@ -288,7 +323,15 @@ async fn dispatch(router: Router, input: ApiRequest) -> Result<ApiResponse> {
         .collect();
     let body = to_bytes(response.into_body(), MAX_BODY)
         .await
-        .map_err(Error::internal)?
+        .map_err(|error| {
+            let oversized = std::error::Error::source(&error)
+                .is_some_and(<dyn std::error::Error>::is::<http_body_util::LengthLimitError>);
+            if oversized {
+                Error::too_large("Installation response is too large.")
+            } else {
+                Error::bad_gateway("Installation response failed.")
+            }
+        })?
         .to_vec();
     Ok(ApiResponse {
         id: input.id,

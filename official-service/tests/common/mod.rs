@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use leo_official_service::{EmailSender, router};
 use reqwest::Client;
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx_core::query::query;
 use sqlx_postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use std::{
@@ -105,5 +105,155 @@ impl Fixture {
             .await
             .unwrap();
         self.admin.close().await;
+    }
+}
+
+pub async fn login(app: &Fixture, email: &str) -> (String, Value) {
+    let challenge: Value = app
+        .post("/api/account/email-code", json!({ "email": email }))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let code = app.mail.0.lock().unwrap().last().unwrap().1.clone();
+    let response = app
+        .post(
+            "/api/account/verify",
+            json!({ "challenge": challenge["challenge"], "code": code }),
+        )
+        .await;
+    let cookie = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    (cookie, response.json().await.unwrap())
+}
+
+/// A real installation router behind its outbound connector and official HTTP API.
+/// Extra HTTP handlers let tests supply slow or broken responses at the transport seam.
+pub struct RelayedInstallation {
+    pub app: Fixture,
+    pub installation: Arc<leo_agent_manager::service::Service>,
+    pub cookie: String,
+    pub session: Value,
+    pub base: String,
+    pub stop: tokio_util::sync::CancellationToken,
+    pub connector: JoinHandle<leo_agent_manager::error::Result<()>>,
+    pub root: tempfile::TempDir,
+}
+
+impl RelayedInstallation {
+    pub async fn new(extra_routes: axum::Router) -> Self {
+        use leo_agent_manager::{config::Config, service::Service};
+        use serde_json::json;
+        use std::time::Duration;
+        use tokio_util::sync::CancellationToken;
+
+        let app = Fixture::new().await;
+        let (cookie, session) = login(&app, "relay-owner@example.test").await;
+        let claim: Value = app
+            .client
+            .post(format!("{}/api/installations/claim-code", app.url))
+            .header("origin", &app.url)
+            .header("cookie", &cookie)
+            .header("x-csrf-token", session["csrf"].as_str().unwrap())
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let config: Config = serde_json::from_value(json!({
+            "dataDir": root.path().join("data"),
+            "home": root.path().join("home"),
+            "workspaceRoots": [root.path()],
+            "publicUrl": "http://localhost:4310",
+            "host": "127.0.0.1",
+            "port": 0,
+            "setupToken": "fixture",
+            "codexBin": "codex",
+            "claudeBin": "claude",
+            "ghBin": "gh",
+            "concurrency": 1,
+            "logger": false,
+            "workerEnabled": false,
+            "runnerUrl": "",
+        }))
+        .unwrap();
+        let installation = Service::new(config).await.unwrap();
+        let router = leo_agent_manager::http::router(installation.clone())
+            .await
+            .unwrap()
+            .merge(extra_routes);
+        let identity_dir = root.path().join("relay");
+        leo_agent_manager::relay::claim(
+            &app.url,
+            &identity_dir,
+            claim["code"].as_str().unwrap(),
+            "Real installation",
+        )
+        .await
+        .unwrap();
+        let session: Value = app
+            .client
+            .get(format!("{}/api/account/session", app.url))
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let id = session["installations"][0]["id"].as_str().unwrap();
+        let stop = CancellationToken::new();
+        let connector = tokio::spawn(leo_agent_manager::relay::connect(
+            identity_dir,
+            router,
+            stop.clone(),
+        ));
+        let base = format!("{}/api/installations/{id}/api", app.url);
+        let fixture = Self {
+            app,
+            installation,
+            cookie,
+            session,
+            base,
+            stop,
+            connector,
+            root,
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let response = fixture.get("/chats").send().await.unwrap();
+                if response.status() == reqwest::StatusCode::OK {
+                    assert_eq!(response.json::<Value>().await.unwrap(), json!([]));
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("installation must become accessible through the relay");
+        fixture
+    }
+
+    pub fn get(&self, route: &str) -> reqwest::RequestBuilder {
+        self.app
+            .client
+            .get(format!("{}{route}", self.base))
+            .header("cookie", &self.cookie)
+    }
+
+    pub async fn close(self) {
+        self.stop.cancel();
+        self.connector.await.unwrap().unwrap();
+        self.installation.shutdown.cancel();
+        self.installation.avatars.close().await;
+        self.app.close().await;
     }
 }

@@ -1,32 +1,8 @@
 mod common;
 
-use common::Fixture;
+use common::{Fixture, RelayedInstallation, login};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
-
-async fn login(app: &Fixture, email: &str) -> (String, Value) {
-    let challenge: Value = app
-        .post("/api/account/email-code", json!({ "email": email }))
-        .await
-        .json()
-        .await
-        .unwrap();
-    let code = app.mail.0.lock().unwrap().last().unwrap().1.clone();
-    let response = app
-        .post(
-            "/api/account/verify",
-            json!({ "challenge": challenge["challenge"], "code": code }),
-        )
-        .await;
-    let cookie = response.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_owned();
-    (cookie, response.json().await.unwrap())
-}
 
 #[tokio::test]
 async fn owner_claims_an_installation_with_a_single_use_code() {
@@ -90,92 +66,11 @@ async fn owner_claims_an_installation_with_a_single_use_code() {
 
 #[tokio::test]
 async fn owner_uses_the_real_installation_api_over_an_outbound_relay() {
-    use leo_agent_manager::{config::Config, service::Service};
-    use std::time::Duration;
-    use tokio_util::sync::CancellationToken;
-
-    let app = Fixture::new().await;
-    let (cookie, session) = login(&app, "relay-owner@example.test").await;
-    let claim: Value = app
-        .client
-        .post(format!("{}/api/installations/claim-code", app.url))
-        .header("origin", &app.url)
-        .header("cookie", &cookie)
-        .header("x-csrf-token", session["csrf"].as_str().unwrap())
-        .json(&json!({}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let root = tempfile::tempdir().unwrap();
-    let config: Config = serde_json::from_value(json!({
-        "dataDir": root.path().join("data"),
-        "home": root.path().join("home"),
-        "workspaceRoots": [root.path()],
-        "publicUrl": "http://localhost:4310",
-        "host": "127.0.0.1",
-        "port": 0,
-        "setupToken": "fixture",
-        "codexBin": "codex",
-        "claudeBin": "claude",
-        "ghBin": "gh",
-        "concurrency": 1,
-        "logger": false,
-        "workerEnabled": false,
-        "runnerUrl": "",
-    }))
-    .unwrap();
-    let installation = Service::new(config).await.unwrap();
-    let router = leo_agent_manager::http::router(installation.clone())
-        .await
-        .unwrap();
-    let identity_dir = root.path().join("relay");
-    leo_agent_manager::relay::claim(
-        &app.url,
-        &identity_dir,
-        claim["code"].as_str().unwrap(),
-        "Real installation",
-    )
-    .await
-    .unwrap();
-    let session: Value = app
-        .client
-        .get(format!("{}/api/account/session", app.url))
-        .header("cookie", &cookie)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let id = session["installations"][0]["id"].as_str().unwrap();
-    let stop = CancellationToken::new();
-    let connector = tokio::spawn(leo_agent_manager::relay::connect(
-        identity_dir,
-        router,
-        stop.clone(),
-    ));
-    let base = format!("{}/api/installations/{id}/api", app.url);
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let response = app
-                .client
-                .get(format!("{base}/chats"))
-                .header("cookie", &cookie)
-                .send()
-                .await
-                .unwrap();
-            if response.status() == StatusCode::OK {
-                assert_eq!(response.json::<Value>().await.unwrap(), json!([]));
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("installation must become accessible through the relay");
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let app = &relay.app;
+    let cookie = relay.cookie.clone();
+    let session = relay.session.clone();
+    let base = &relay.base;
     // Owner-only routes prove the connector uses the trusted owner context,
     // regardless of identity-looking headers supplied by a browser.
     assert_eq!(
@@ -297,7 +192,7 @@ async fn owner_uses_the_real_installation_api_over_an_outbound_relay() {
             .starts_with("attachment;")
     );
 
-    let (other_cookie, _) = login(&app, "other@example.test").await;
+    let (other_cookie, _) = login(app, "other@example.test").await;
     assert_eq!(
         app.client
             .get(format!("{base}/chats"))
@@ -308,9 +203,5 @@ async fn owner_uses_the_real_installation_api_over_an_outbound_relay() {
             .status(),
         StatusCode::NOT_FOUND
     );
-    stop.cancel();
-    connector.await.unwrap().unwrap();
-    installation.shutdown.cancel();
-    installation.avatars.close().await;
-    app.close().await;
+    relay.close().await;
 }
