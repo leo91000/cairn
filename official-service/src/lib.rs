@@ -350,7 +350,7 @@ async fn create_session(
             "authenticated": true,
             "account": { "id": account_id, "email": email },
             "csrf": csrf,
-            "installations": [],
+            "installations": installations::list(&service.pool, &account_id).await?,
         })),
     )
         .into_response())

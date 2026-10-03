@@ -176,6 +176,51 @@ async fn owner_uses_the_real_installation_api_over_an_outbound_relay() {
     })
     .await
     .expect("installation must become accessible through the relay");
+    // Owner-only routes prove the connector uses the trusted owner context,
+    // regardless of identity-looking headers supplied by a browser.
+    assert_eq!(
+        app.client
+            .get(format!("{base}/accounts"))
+            .header("cookie", &cookie)
+            .header("x-leo-role", "member")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.client
+            .get(format!("{base}/chats"))
+            .header("x-leo-role", "owner")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        app.client
+            .post(format!("{base}/chats"))
+            .header("cookie", &cookie)
+            .header("origin", &app.url)
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        app.client
+            .get(format!("{base}/session"))
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
     let request = |path: String, body: Value| {
         app.client
             .post(path)
