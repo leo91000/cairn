@@ -12,7 +12,8 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use leo_relay_protocol::{
-    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, PROTOCOL_VERSION, Role,
+    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, PROTOCOL_VERSION,
+    REQUEST_TIMEOUT, Role,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -254,7 +255,14 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
                         }
 
                         let request_id = request.id.clone();
-                        let task = requests.spawn(dispatch(router.clone(), request));
+                        let router = router.clone();
+                        let task = requests.spawn(async move {
+                            tokio::time::timeout(REQUEST_TIMEOUT, dispatch(router, request))
+                                .await
+                                .unwrap_or_else(|_| {
+                                    Err(Error::gateway_timeout("Installation request timed out."))
+                                })
+                        });
                         request_ids.insert(task.id(), request_id);
                     }
                     Some(Ok(Message::Ping(bytes))) => {

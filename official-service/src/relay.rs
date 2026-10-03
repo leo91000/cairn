@@ -10,7 +10,8 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use leo_relay_protocol::{
-    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, PROTOCOL_VERSION, Role,
+    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, PROTOCOL_VERSION,
+    REQUEST_TIMEOUT, Role,
 };
 use sqlx_core::query_as::query_as;
 use std::{
@@ -263,7 +264,7 @@ pub(super) async fn forward(
                 "Installation busy or unavailable",
             )
         })?;
-    let response = tokio::time::timeout(Duration::from_secs(30), response)
+    let response = tokio::time::timeout(REQUEST_TIMEOUT, response)
         .await
         .map_err(|_| {
             ApiError(
@@ -283,5 +284,34 @@ pub(super) async fn forward(
             output.headers_mut().append(name, value);
         }
     }
+
+    // An installation cannot choose the security policy of the official origin.
+    let is_json = output
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("application/json")
+        });
+
+    if !is_json {
+        output.headers_mut().insert(
+            "content-security-policy",
+            HeaderValue::from_static("sandbox"),
+        );
+    }
+    output.headers_mut().insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    output
+        .headers_mut()
+        .insert("cache-control", HeaderValue::from_static("no-store"));
+
     Ok(output)
 }

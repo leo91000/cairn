@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const MAX_BODY: usize = 8_000_000;
-// JSON byte arrays expand by up to four bytes per byte, plus envelope metadata.
-pub const MAX_FRAME: usize = MAX_BODY * 4 + 65_536;
+// Base64 expands by four bytes per three body bytes, plus envelope metadata.
+pub const MAX_FRAME: usize = MAX_BODY.div_ceil(3) * 4 + 65_536;
 pub const MAX_IN_FLIGHT: usize = 32;
+pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -23,6 +24,7 @@ pub struct ApiRequest {
     pub method: String,
     pub path: String,
     pub headers: Vec<(String, String)>,
+    #[serde(with = "body")]
     pub body: Vec<u8>,
 }
 
@@ -31,7 +33,30 @@ pub struct ApiResponse {
     pub id: String,
     pub status: u16,
     pub headers: Vec<(String, String)>,
+    #[serde(with = "body")]
     pub body: Vec<u8>,
+}
+
+mod body {
+    use super::MAX_BODY;
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let encoded = String::deserialize(deserializer)?;
+        if encoded.len() > MAX_BODY.div_ceil(3) * 4 {
+            return Err(D::Error::custom("Relay body is too large"));
+        }
+        let bytes = STANDARD.decode(encoded).map_err(D::Error::custom)?;
+        if bytes.len() > MAX_BODY {
+            return Err(D::Error::custom("Relay body is too large"));
+        }
+        Ok(bytes)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -60,10 +85,6 @@ pub fn response_header(name: &str) -> bool {
             | "accept-ranges"
             | "content-range"
             | "retry-after"
-            | "content-security-policy"
-            | "x-content-type-options"
-            | "x-frame-options"
-            | "referrer-policy"
     )
 }
 
