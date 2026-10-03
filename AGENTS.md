@@ -14,3 +14,13 @@
   Use the backend test launcher to isolate tests from live agent credentials.
   For Android, run `./gradlew spotlessCheck testDebugUnitTest lintDebug` from
   `android/`; UI behavior changes also need the relevant browser or device tests.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live in GitHub Issues for `leo91000/leo-agent-manager`. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.

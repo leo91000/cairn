@@ -4,8 +4,36 @@ Leo Agent Manager permet de conduire des conversations avec des agents et de ret
 
 ## Language
 
+**Service officiel** :
+Le service hébergé par Leo qui fournit l’interface web et mobile, les comptes Leo et l’accès à toutes les installations d’un compte. Il ne conserve pas le travail des agents.
+
+**Compte Leo** :
+L’identité d’une personne sur le service officiel, définie par une adresse e-mail vérifiée. Le code par e-mail, Google, GitHub et les passkeys ne sont que des moyens de s’y connecter. C’est la seule manière d’accéder à une installation.
+_Avoid_ : utilisateur GitHub, compte d’agent de code
+
+**Installation** :
+Un ensemble autonome déployé par une personne sur ses machines, avec ses nodes d’exécution. Il conserve les conversations, les projets, les comptes d’agent de code et les secrets ; ces données ne quittent pas l’installation pour être conservées par le service officiel.
+_Avoid_ : node, set de nodes, instance, serveur
+
+**Revendication d’une installation** :
+Le rattachement d’une installation à un compte Leo, qui en devient le propriétaire. Une installation non revendiquée n’est accessible à personne.
+
+**Propriétaire d’une installation** :
+Le compte Leo auquel l’installation est rattachée. Il est le seul à gérer ses nodes, ses comptes d’agent de code, ses secrets et son partage.
+Sans propriétaire, une installation redevient non revendiquée ; la propriété ne se transfère pas.
+
+**Membre d’une installation** :
+Un compte Leo invité par le propriétaire. Il voit toutes les conversations de l’installation et fait travailler ses agents, donc avec les comptes d’agent de code et les secrets du propriétaire, sans pouvoir les gérer.
+_Avoid_ : invité, collaborateur
+
+**Installation courante** :
+L’installation dans laquelle on travaille dans l’interface ; on n’en voit qu’une à la fois et on passe de l’une à l’autre.
+
+**Relais** :
+Le passage par le service officiel de tous les échanges entre l’interface et une installation, ouvert par l’installation elle-même. Le relais transporte le travail des agents sans le conserver.
+
 **Node d’exécution** :
-Machine enregistrée dans Leo pour y effectuer le travail d’un agent, selon ses capacités et les autorisations accordées. Une node peut être disponible de manière intermittente.
+Machine rattachée à une installation pour y effectuer le travail d’un agent, selon ses capacités et les autorisations accordées. Une node peut être disponible de manière intermittente.
 _Avoid_ : agent (qui désigne l’agent chargé du travail, et non la machine)
 
 **Capacité d’une node** :
