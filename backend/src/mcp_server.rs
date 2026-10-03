@@ -736,14 +736,13 @@ async fn proxy(
     result
 }
 
-/// The CSRF token of the signed-in browser session, which binds OAuth sign-ins.
-async fn session_csrf(s: &Service, input: &Input) -> Result<String> {
-    let session = s
-        .auth
-        .read(&crate::http::cookie(&input.headers))
-        .await?
+/// OAuth sign-ins are bound to the identity validated at the API auth seam.
+fn oauth_binding(input: &Input) -> Result<&str> {
+    let identity = input
+        .identity
+        .as_ref()
         .ok_or_else(|| Error::unauthorized("Please sign in."))?;
-    Ok(text(&session, "csrf").to_owned())
+    Ok(identity.oauth_binding())
 }
 
 pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
@@ -771,17 +770,17 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         }
         ("POST", ["mcps", id, "connect"]) => {
             crate::validation::uuid(id)?;
-            let csrf = session_csrf(s, input).await?;
+            let binding = oauth_binding(input)?;
             if input.body["native"] == true {
-                s.mcps.connect_native(s, id, &csrf).await
+                s.mcps.connect_native(s, id, binding).await
             } else {
-                s.mcps.connect(s, id, &csrf).await
+                s.mcps.connect(s, id, binding).await
             }
         }
         ("POST", ["mcps", id, "callback"]) => {
             crate::validation::uuid(id)?;
-            let csrf = session_csrf(s, input).await?;
-            s.mcps.finish_native_callback(s, id, &csrf).await
+            let binding = oauth_binding(input)?;
+            s.mcps.finish_native_callback(s, id, binding).await
         }
         ("POST", ["mcps", id, "disconnect"]) => {
             crate::validation::uuid(id)?;

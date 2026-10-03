@@ -1,8 +1,9 @@
 //! Durable replay and live delivery share one cursor. Notifications are hints;
 //! SQLite is authoritative, so a slow subscriber never buffers or blocks writes.
 use crate::{
+    auth::InstallationIdentity,
     error::{Error, Result},
-    http::{Input, cookie},
+    http::Input,
     service::Service,
     store::Db,
     validation::{text, uuid},
@@ -226,6 +227,9 @@ pub async fn http(s: Arc<Service>, kind: &str, id: &str, input: Input) -> Result
         uuid(id)?;
     }
     let after = cursor(&input)?;
+    let identity = input
+        .identity
+        .ok_or_else(|| Error::unauthorized("Please sign in."))?;
     let scope = Scope::new(kind, id);
     // Subscribe before reading: commits during replay remain observable.
     let changes = s.store.subscribe();
@@ -244,7 +248,6 @@ pub async fn http(s: Arc<Service>, kind: &str, id: &str, input: Input) -> Result
         before: None,
     };
     let first = page(&s, scope.clone(), request).await?;
-    let session = cookie(&input.headers);
     let subscription = Subscription {
         s,
         scope,
@@ -254,7 +257,7 @@ pub async fn http(s: Arc<Service>, kind: &str, id: &str, input: Input) -> Result
         pending: Some(first),
         previous: None,
         history: None,
-        session,
+        identity,
         deltas: crate::live_text::TextDeltas::default(),
     };
     let stream = futures_util::stream::try_unfold(subscription, |mut subscription| async move {
@@ -281,7 +284,7 @@ struct Subscription {
     pending: Option<Page>,
     previous: Option<State>,
     history: Option<String>,
-    session: String,
+    identity: InstallationIdentity,
     deltas: crate::live_text::TextDeltas,
 }
 
@@ -304,7 +307,7 @@ impl Subscription {
             // Mark observed changes before reading auth. Otherwise a logout
             // between the auth check and the page read can be consumed unseen.
             self.changes.borrow_and_update();
-            if self.s.auth.read(&self.session).await?.is_none() {
+            if !self.identity.is_active(&self.s.auth).await? {
                 return Ok(None);
             }
             if let Some(event) = self.poll().await? {
