@@ -258,6 +258,45 @@ async fn owner_uses_the_real_installation_api_over_an_outbound_relay() {
         .await
         .unwrap();
     assert_eq!(detail["messages"][0]["text"], "Relayed message");
+    let attachment_path = format!(
+        "{base}/chats/{chat_id}/attachments/{}?name=hostile.svg",
+        uuid::Uuid::new_v4()
+    );
+    let response = app
+        .client
+        .put(&attachment_path)
+        .header("origin", &app.url)
+        .header("cookie", &cookie)
+        .header("x-csrf-token", session["csrf"].as_str().unwrap())
+        .body("<svg onload='alert(1)'/>")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .client
+        .get(&attachment_path)
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    assert!(
+        response.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .contains("sandbox")
+    );
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert!(
+        response.headers()["content-disposition"]
+            .to_str()
+            .unwrap()
+            .starts_with("attachment;")
+    );
+
     let (other_cookie, _) = login(&app, "other@example.test").await;
     assert_eq!(
         app.client

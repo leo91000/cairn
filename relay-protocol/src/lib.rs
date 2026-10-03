@@ -60,6 +60,10 @@ pub fn response_header(name: &str) -> bool {
             | "accept-ranges"
             | "content-range"
             | "retry-after"
+            | "content-security-policy"
+            | "x-content-type-options"
+            | "x-frame-options"
+            | "referrer-policy"
     )
 }
 

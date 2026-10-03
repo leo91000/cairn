@@ -211,9 +211,15 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
     loop {
         tokio::select! {
             result = requests.join_next(), if !requests.is_empty() => {
-                let response = result.ok_or_else(|| Error::unavailable("Relay request stopped."))?.map_err(Error::internal)??;
+                let completed = result
+                    .ok_or_else(|| Error::unavailable("Relay request stopped."))?;
+                let response = completed.map_err(Error::internal)??;
+
                 let frame = serde_json::to_string(&Frame::Response(response))?;
-                socket.send(Message::Text(frame.into())).await.map_err(Error::internal)?;
+                socket
+                    .send(Message::Text(frame.into()))
+                    .await
+                    .map_err(Error::internal)?;
             }
             message = tokio::time::timeout(Duration::from_secs(45), socket.next()) => {
                 let message = message.map_err(|_| Error::unavailable("Relay heartbeat lost."))?;
@@ -225,7 +231,6 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
                         if requests.len() >= MAX_IN_FLIGHT {
                             return Err(Error::unavailable("Too many relay requests."));
                         }
-
 
                         requests.spawn(dispatch(router.clone(), request));
                     }

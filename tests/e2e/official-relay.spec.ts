@@ -7,6 +7,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
+import { config as loadConfig } from '../legacy/server/config'
+import { Service as SeedService } from '../legacy/server/service'
+import { Store } from '../legacy/server/store'
 
 test('claims an installation, reads conversations and sends through the official relay after restart', async ({ page }) => {
   test.setTimeout(60000)
@@ -25,6 +28,15 @@ test('claims an installation, reads conversations and sends through the official
   await Promise.all([mkdir(join(root, 'data')), mkdir(join(root, 'home'))])
   const url = 'http://127.0.0.1:4399'
   const children: ChildProcess[] = []
+  // As in the native browser fixtures, open the seeding module before the
+  // native process applies newer database migrations.
+  const seed = new SeedService(new Store(join(root, 'data')), loadConfig({
+    dataDir: join(root, 'data'),
+    home: join(root, 'home'),
+    workspaceRoots: [root],
+    workerEnabled: false,
+    logger: false,
+  }))
 
   function start(binary: string, env: NodeJS.ProcessEnv) {
     const child = spawn(binary, [], { env: { ...process.env, ...env }, stdio: ['ignore', 'ignore', 'ignore'] })
@@ -113,9 +125,20 @@ test('claims an installation, reads conversations and sends through the official
     await page.getByLabel('Message', { exact: true }).fill('After reconnection')
     await page.getByRole('button', { name: 'Send message', exact: true }).click()
     await expect(page.getByRole('list', { name: 'Pending messages' })).toContainText('After reconnection')
+    // Seed a finished run using the same fixture module as the native browser
+    // journeys. Its detail is then read through the real official HTTP relay.
+    const chat = seed.store.list('chats')[0]!
+    const task = seed.task({ name: 'Finished conversation', prompt: 'Review the workspace', agentId: chat.agentId })
+    const run = await seed.enqueue(task.id)
+    seed.store.updateRun(run.id, { status: 'succeeded', summary: 'The **relayed agent reply** remains readable.', finishedAt: Date.now() })
+    seed.store.put('chats', { ...chat, runId: run.id })
+    await page.getByRole('button', { name: 'Refresh conversation', exact: true }).click()
+    await expect(page.getByRole('region', { name: 'Agent response' })).toContainText('The relayed agent reply remains readable.')
   }
   finally {
     await Promise.all(children.map(stop))
+    await seed.accounts.close()
+    seed.store.close()
     await new Promise<void>(resolve => mail.close(() => resolve()))
     await rm(root, { recursive: true, force: true })
   }

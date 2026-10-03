@@ -36,7 +36,7 @@ COPY backend ./backend
 COPY relay-protocol ./relay-protocol
 COPY deploy/nodes ./deploy/nodes
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
-    touch backend/src/main.rs backend/src/lib.rs && \
+    touch backend/src/main.rs backend/src/lib.rs relay-protocol/src/lib.rs && \
     cargo build --locked --release --bin leo --features ublk && cp target/release/leo /usr/local/bin/leo
 
 # The direct block backend shares guest RAM with Firecracker. Upstream 1.17.0

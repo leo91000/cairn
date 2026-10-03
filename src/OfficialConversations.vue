@@ -2,6 +2,7 @@
 import type { ChatDetail, ChatView } from '../shared/chats'
 import { onMounted, ref } from 'vue'
 import { api } from './api'
+import Markdown from './components/Markdown.vue'
 import UiAlert from './components/UiAlert.vue'
 import UiButton from './components/UiButton.vue'
 
@@ -85,6 +86,12 @@ onMounted(list)
           {{ item.text }}
         </li>
       </ul>
+      <UiAlert v-if="detail.run?.error">
+        {{ detail.run.error }}
+      </UiAlert>
+      <section v-else-if="detail.run?.summary" aria-label="Agent response" class="min-w-0 break-words">
+        <Markdown :content="detail.run.summary" />
+      </section>
       <form class="grid gap-3" @submit.prevent="send">
         <label>Message<textarea
           v-model="message"
