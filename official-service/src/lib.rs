@@ -1,3 +1,8 @@
+mod methods;
+mod oauth;
+
+pub use oauth::{OAuthProvider, OAuthProviders};
+
 use async_trait::async_trait;
 use axum::{
     Json, Router,
@@ -32,6 +37,7 @@ struct Service {
     pool: PgPool,
     sender: Arc<dyn EmailSender>,
     origin: String,
+    oauth: OAuthProviders,
 }
 
 struct ApiError(StatusCode, &'static str);
@@ -54,6 +60,15 @@ pub async fn router(
     sender: Arc<dyn EmailSender>,
     origin: String,
 ) -> Result<Router, sqlx_core::migrate::MigrateError> {
+    router_with_oauth(pool, sender, origin, OAuthProviders::default()).await
+}
+
+pub async fn router_with_oauth(
+    pool: PgPool,
+    sender: Arc<dyn EmailSender>,
+    origin: String,
+    oauth: OAuthProviders,
+) -> Result<Router, sqlx_core::migrate::MigrateError> {
     let migrations = Migrator {
         migrations: Cow::Owned(vec![
             Migration::new(
@@ -70,6 +85,13 @@ pub async fn router(
                 include_str!("../migrations/0002_account_rate_limits.sql").into(),
                 false,
             ),
+            Migration::new(
+                202610030052,
+                "sign in methods".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/202610030052_sign_in_methods.sql").into(),
+                false,
+            ),
         ]),
         ..Migrator::DEFAULT
     };
@@ -79,12 +101,21 @@ pub async fn router(
         pool,
         sender,
         origin,
+        oauth,
     };
     Ok(Router::new()
         .route("/api/account/email-code", post(request_code))
         .route("/api/account/verify", post(verify_code))
         .route("/api/account/session", get(session))
         .route("/api/account/logout", post(logout))
+        .route("/api/account/options", get(oauth::options))
+        .route("/api/account/oauth/{provider}/start", post(oauth::start))
+        .route(
+            "/api/account/oauth/{provider}/callback",
+            get(oauth::callback),
+        )
+        .route("/api/account/methods", get(methods::list))
+        .route("/api/account/methods/remove", post(methods::remove))
         .layer(middleware::from_fn_with_state(
             service.clone(),
             browser_security,
@@ -215,11 +246,24 @@ async fn verify_code(
     let (account_id,): (String,) = query_as("INSERT INTO leo_accounts (id, email) VALUES ($1, $2) ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email RETURNING id")
         .bind(uuid::Uuid::new_v4().to_string()).bind(&email).fetch_one(&mut *transaction).await?;
 
+    query("INSERT INTO sign_in_methods (id, account_id, kind, subject, label) VALUES ($1, $2, 'email', $3, $3) ON CONFLICT (kind, subject) DO NOTHING")
+        .bind(uuid::Uuid::new_v4().to_string()).bind(&account_id).bind(&email).execute(&mut *transaction).await?;
+
+    let response = create_session(&service, &mut transaction, &account_id, &email).await?;
+    transaction.commit().await?;
+    Ok(response)
+}
+
+async fn create_session(
+    service: &Service,
+    connection: &mut sqlx_postgres::PgConnection,
+    account_id: &str,
+    email: &str,
+) -> Result<Response, ApiError> {
     let token = random_token();
     let csrf = random_token();
     query("INSERT INTO web_sessions (digest, account_id, csrf, expires_at) VALUES ($1, $2, $3, now() + interval '7 days')")
-        .bind(digest(&token)).bind(&account_id).bind(&csrf).execute(&mut *transaction).await?;
-    transaction.commit().await?;
+        .bind(digest(&token)).bind(account_id).bind(&csrf).execute(connection).await?;
 
     let secure = if service.origin.starts_with("https://") {
         "; Secure"
@@ -285,6 +329,10 @@ async fn browser_security(
 }
 
 fn session_token(headers: &HeaderMap) -> &str {
+    cookie_token(headers, "leo_session")
+}
+
+fn cookie_token<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
     let cookie = headers
         .get(header::COOKIE)
         .and_then(|value| value.to_str().ok())
@@ -292,7 +340,7 @@ fn session_token(headers: &HeaderMap) -> &str {
     cookie
         .split(';')
         .filter_map(|part| part.trim().split_once('='))
-        .find_map(|(key, value)| (key == "leo_session").then_some(value))
+        .find_map(|(key, value)| (key == name).then_some(value))
         .unwrap_or("")
 }
 

@@ -34,6 +34,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_oauth(leo_official_service::OAuthProviders::default()).await
+    }
+
+    async fn with_oauth(oauth: leo_official_service::OAuthProviders) -> Self {
         let database = std::env::var("LEO_OFFICIAL_TEST_DATABASE_URL")
             .expect("Set LEO_OFFICIAL_TEST_DATABASE_URL to a disposable Postgres database");
         let admin = PgPool::connect(&database).await.unwrap();
@@ -53,9 +57,10 @@ impl Fixture {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let mail = Arc::new(Mailbox::default());
-        let app = router(pool.clone(), mail.clone(), url.clone())
-            .await
-            .unwrap();
+        let app =
+            leo_official_service::router_with_oauth(pool.clone(), mail.clone(), url.clone(), oauth)
+                .await
+                .unwrap();
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
@@ -427,5 +432,179 @@ async fn expired_codes_and_sessions_cannot_authenticate_and_sign_in_reuses_the_a
     assert_eq!(response.status(), StatusCode::OK);
     let second: Value = response.json().await.unwrap();
     assert_eq!(second["account"], first["account"]);
+    app.close().await;
+}
+
+#[tokio::test]
+async fn the_last_sign_in_method_cannot_be_removed() {
+    let app = Fixture::new().await;
+    let (challenge, code) = app.code("methods@example.test").await;
+    let response = app.verify(&challenge, &code).await;
+    let cookie = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let session: Value = response.json().await.unwrap();
+    let response = app
+        .client
+        .get(format!("{}/api/account/methods", app.url))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let methods: Value = response.json().await.unwrap();
+    assert_eq!(methods["methods"].as_array().unwrap().len(), 1);
+    assert_eq!(methods["methods"][0]["kind"], "email");
+    let response = app
+        .client
+        .post(format!("{}/api/account/methods/remove", app.url))
+        .header("origin", &app.url)
+        .header("cookie", cookie)
+        .header("x-csrf-token", session["csrf"].as_str().unwrap())
+        .json(&json!({ "id": methods["methods"][0]["id"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    app.close().await;
+}
+
+struct OAuthMock {
+    url: String,
+    server: JoinHandle<()>,
+}
+
+impl OAuthMock {
+    async fn new() -> Self {
+        use axum::{
+            Json, Router,
+            routing::{get, post},
+        };
+        let app = Router::new()
+            .route("/token", post(|axum::Form(body): axum::Form<std::collections::HashMap<String, String>>| async move {
+                assert_eq!(body.get("grant_type").unwrap(), "authorization_code");
+                assert_eq!(body.get("client_secret").unwrap(), "test-only");
+                assert!(body.get("code_verifier").unwrap().len() >= 43);
+                Json(json!({ "access_token": body["code"], "token_type": "Bearer" }))
+            }))
+            .route("/google/userinfo", get(|headers: axum::http::HeaderMap| async move {
+                Json(json!({
+                    "sub": "google-alice",
+                    "email": " Alice@Example.test ",
+                    "email_verified": headers["authorization"] == "Bearer verified",
+                }))
+            }))
+            .route("/github/user", get(|| async { Json(json!({ "id": 52, "email": "untrusted@example.test" })) }))
+            .route("/github/emails", get(|headers: axum::http::HeaderMap| async move {
+                Json(json!([
+                    { "email": "untrusted@example.test", "primary": false, "verified": false },
+                    { "email": "alice@example.test", "primary": true, "verified": headers["authorization"] == "Bearer verified" },
+                ]))
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        Self { url, server }
+    }
+}
+
+#[tokio::test]
+async fn verified_google_and_github_emails_attach_to_the_same_leo_account() {
+    let provider = OAuthMock::new().await;
+    let app = Fixture::with_oauth(leo_official_service::OAuthProviders {
+        google: Some(leo_official_service::OAuthProvider {
+            client_id: "google-test".into(),
+            client_secret: "test-only".into(),
+            authorization_url: format!("{}/authorize", provider.url),
+            token_url: format!("{}/token", provider.url),
+            userinfo_url: format!("{}/google/userinfo", provider.url),
+            emails_url: None,
+        }),
+        github: Some(leo_official_service::OAuthProvider {
+            client_id: "github-test".into(),
+            client_secret: "test-only".into(),
+            authorization_url: format!("{}/authorize", provider.url),
+            token_url: format!("{}/token", provider.url),
+            userinfo_url: format!("{}/github/user", provider.url),
+            emails_url: Some(format!("{}/github/emails", provider.url)),
+        }),
+    })
+    .await;
+    let (challenge, code) = app.code("alice@example.test").await;
+    let response = app.verify(&challenge, &code).await;
+    let account: Value = response.json().await.unwrap();
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    for (name, scope) in [("google", "openid email"), ("github", "user:email")] {
+        let response = app
+            .post(&format!("/api/account/oauth/{name}/start"), json!({}))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = response.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let start: Value = response.json().await.unwrap();
+        let authorize = url::Url::parse(start["url"].as_str().unwrap()).unwrap();
+        let params: std::collections::HashMap<_, _> =
+            authorize.query_pairs().into_owned().collect();
+        assert_eq!(params["scope"], scope);
+        assert_eq!(params["code_challenge_method"], "S256");
+        assert!(authorize.as_str().starts_with(&provider.url));
+        let callback = format!(
+            "{}/api/account/oauth/{name}/callback?state={}&code=verified",
+            app.url, params["state"]
+        );
+        assert_eq!(
+            client.get(&callback).send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let response = client
+            .get(&callback)
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let session_cookie = response.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let session: Value = app
+            .client
+            .get(format!("{}/api/account/session", app.url))
+            .header("cookie", session_cookie)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(session["account"], account["account"]);
+        assert_eq!(
+            client
+                .get(&callback)
+                .header("cookie", cookie)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    provider.server.abort();
     app.close().await;
 }

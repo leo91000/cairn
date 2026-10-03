@@ -27,6 +27,7 @@ sqlx-postgres = { version = "=0.8.6", features = [ "migrate" ] }
 async-trait = "0.1.92"
 reqwest = { version = "0.13", default-features = false, features = [
   "json",
+  "form",
   "rustls"
 ] }
 rand = "0.9"
@@ -38,5 +39,8 @@ uuid = { version = "1", features = [ "v4" ] }
 url = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = [ "env-filter" ] }
+webauthn-rs = { version = "0.5.4", features = [ "danger-allow-state-serialisation" ] }
+base64 = "0.22"
 
 [dev-dependencies]
+webauthn-authenticator-rs = { version = "0.5.4", features = [ "softpasskey" ] }
