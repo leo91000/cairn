@@ -1,0 +1,44 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: leo
+      POSTGRES_PASSWORD: development-only
+      POSTGRES_DB: leo_official
+    ports: ['127.0.0.1:5433:5432']
+    volumes: [official-postgres:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U leo -d leo_official]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  mail:
+    image: node:24-alpine
+    command: [node, /app/dev-mail.mjs]
+    volumes: ['./dev-mail.mjs:/app/dev-mail.mjs:ro']
+    ports: ['127.0.0.1:8025:8025']
+  official:
+    image: rust:1.97.1-bookworm
+    working_dir: /app
+    command: [cargo, run, --locked, --bin, leo-official]
+    environment:
+      LEO_OFFICIAL_DATABASE_URL: postgres://leo:development-only@postgres/leo_official
+      LEO_OFFICIAL_ORIGIN: http://localhost:4311
+      LEO_OFFICIAL_LISTEN: 0.0.0.0:4311
+      LEO_OFFICIAL_EMAIL_ENDPOINT: http://mail:8025/emails
+      LEO_OFFICIAL_EMAIL_KEY: development-only
+      LEO_OFFICIAL_EMAIL_FROM: Leo <leo@example.test>
+    volumes:
+      - ../..:/app
+      - official-cargo:/usr/local/cargo
+      - official-target:/app/target
+    ports: ['127.0.0.1:4311:4311']
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mail:
+        condition: service_started
+volumes:
+  official-postgres:
+  official-cargo:
+  official-target:

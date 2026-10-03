@@ -1,5 +1,8 @@
 [workspace]
-members = [ "backend" ]
+members = [
+  "backend",
+  "official-service"
+]
 resolver = "3"
 
 [profile.release]
