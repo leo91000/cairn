@@ -640,6 +640,12 @@ mod tests {
         assert_eq!(exit_code(Err(Error::bad("Invalid plan.")), false), 1);
         assert_eq!(exit_code(Ok(3), false), 3);
         assert_eq!(exit_code(Ok(0), true), CONTROLLER_INTERRUPTED);
+        assert_eq!(
+            exit_code(Err(Error::bad("Invalid plan.")), true),
+            CONTROLLER_INTERRUPTED
+        );
+        let incompatible = Error::bad_gateway("Unsupported guest protocol.");
+        assert_eq!(exit_code(Err(incompatible), false), 1);
     }
 
     #[test]

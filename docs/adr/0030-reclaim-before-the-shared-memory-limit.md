@@ -30,13 +30,19 @@ a ramené l’usage de 38,1 à 31,6 Go sans pression mesurable (PSI `some` à
 Une erreur « indisponible » d’une tentative (guest déconnecté, VM tuée) est
 enregistrée comme `CONTROLLER_INTERRUPTED`, comme une lease perdue. Le
 manager reprend alors l’exécution depuis son disque conservé, dans la limite
-existante de trois reprises du contrôleur. Les erreurs de validation restent
-des échecs définitifs.
+existante de trois reprises du contrôleur, sans plafond sur une node
+distante. Les erreurs de validation et les incompatibilités d’image invitée
+(protocole, disques appariés) ne sont pas « indisponibles » et restent des
+échecs définitifs, pour ne pas boucler sur une node distante.
 
 ## Conséquences
 
 Les pics proches de la limite coûtent de la latence au lieu d’une perte
-d’exécution. Le cache du journal n’est pas vidé explicitement après les
-synchronisations : il est relu par les VM, et la récupération par
-`memory.high` suffit à le contenir. Cette option reste à réévaluer si la
-pression mémoire du cgroup devient durable.
+d’exécution. Sans swap, la mémoire anonyme d’un guest au-delà du seuil n’est
+pas récupérable : ce guest, et le contrôleur du même cgroup, sont ralentis
+tant qu’elle y reste. Le ballon commence déjà à 85 % du budget.
+
+Le cache du journal n’est pas vidé explicitement après les synchronisations :
+il est relu par les VM, et la récupération par `memory.high` suffit à le
+contenir. Cette option reste à réévaluer si la pression mémoire du cgroup
+devient durable.
