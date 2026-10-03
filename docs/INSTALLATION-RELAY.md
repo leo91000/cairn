@@ -12,6 +12,10 @@ for development. The existing manager data and agent-home directories must
 already exist. Start the usual `leo serve` command. No public installation URL
 or inbound connection is needed by the relay; existing local access is retained
 until #50. Remove the claim code from deployment configuration after success.
+If a claim is refused, misconfigured or cannot reach the official service, the
+manager logs the failure and still starts without a relay identity. Obtain a
+new code and restart after fixing connectivity. A lost claim response can mean
+the single-use code was consumed; repeating that code must not cause a crash loop.
 
 The installation stores its identity in
 `DATA_DIR/installation-relay/identity.json` (directory mode 0700, file mode 0600).
@@ -31,6 +35,9 @@ selected headers and binary bodies. Owner identity comes from the official
 session and installation ownership record, then enters the installation's
 existing in-memory request extension (#45). HTTP identity headers, browser
 cookies and browser authorization credentials are never forwarded.
+Bodies are base64 strings in the JSON frames, rather than arrays of byte numbers.
+Installation security headers are not trusted: the official service supplies
+`nosniff`, `no-store` and a `sandbox` CSP for every non-JSON relayed response.
 
 The browser calls `/api/installations/{installation}/api/...`. Every request
 checks the official session and owner; mutations also require the official
@@ -42,7 +49,12 @@ WebSocket ping/pong detects dead peers. Existing agent execution is independent
 of the connector's availability.
 
 Finite request and response bodies are limited to 8 MB, with at most 32 requests
-in flight on a connection and a 30-second official response deadline. Contents
+in flight on a connection and a 30-second response deadline on both ends. A slot
+is reserved before reading an upload and remains occupied until the installation
+responds, even when the browser has abandoned its request. A timeout cancels the
+installation request and releases its slot through the response. Oversized
+responses return 413, handler/body failures return 502, and saturation returns
+503 for that request alone, preserving the tunnel and other requests. Contents
 are held only in bounded memory, never in Postgres. This ticket uses one relay
 process; a deployment must route the installation's API requests and WebSocket
 to that process. Distributed connection routing is not implemented here.

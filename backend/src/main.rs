@@ -278,11 +278,19 @@ async fn serve(stop: CancellationToken) -> Result<()> {
     let relay_directory = service.config.data_dir.join("installation-relay");
     let identity_exists = tokio::fs::try_exists(relay_directory.join("identity.json")).await?;
     if !identity_exists && let Ok(code) = std::env::var("LEO_INSTALLATION_CLAIM_CODE") {
-        let origin = std::env::var("LEO_OFFICIAL_ORIGIN")
-            .map_err(|_| Error::bad("Set LEO_OFFICIAL_ORIGIN to claim this installation."))?;
-        let name =
-            std::env::var("LEO_INSTALLATION_NAME").unwrap_or_else(|_| "My installation".into());
-        leo_agent_manager::relay::claim(&origin, &relay_directory, &code, &name).await?;
+        let claimed = async {
+            let origin = std::env::var("LEO_OFFICIAL_ORIGIN")
+                .map_err(|_| Error::bad("Set LEO_OFFICIAL_ORIGIN to claim this installation."))?;
+            let name =
+                std::env::var("LEO_INSTALLATION_NAME").unwrap_or_else(|_| "My installation".into());
+            leo_agent_manager::relay::claim(&origin, &relay_directory, &code, &name).await
+        }
+        .await;
+        if claimed.is_err() {
+            tracing::warn!(
+                "Installation claim failed; continuing without a relay. Check the official origin and obtain a new claim code before restarting"
+            );
+        }
     }
     if identity_exists || tokio::fs::try_exists(relay_directory.join("identity.json")).await? {
         let relay_router = router.clone();
