@@ -45,6 +45,39 @@ elif args[0]=='stop':
 
 
 class Supervisor(unittest.TestCase):
+    def test_snapshot_options_survive_launch_and_can_be_disabled_without_changing_layout(self):
+        spec = importlib.util.spec_from_file_location('node_supervisor', SOURCE)
+        host = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(host)
+        self.assertEqual(host.vm_arguments({}), [])
+        config = {'blockTransport': 'ublk', 'vmSnapshots': True}
+        self.assertEqual(host.vm_arguments(config), ['-e', 'LEO_DISK_LAYOUT=paired-ext4-v1', '-e', 'LEO_VM_SNAPSHOTS=true'])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'data/node').mkdir(parents=True)
+            (root / 'data/node/identity.json').write_text(json.dumps({'nodeId': 'fixture-node'}))
+            (root / 'config.json').write_text(json.dumps(config))
+            with patch.object(host, 'ROOT', root), patch.object(host, 'remove'), patch.object(host, 'block_device_arguments', return_value=[]), patch.object(host, 'command') as command:
+                host.launch(NEW)
+            launch = command.call_args_list[0].args[0]
+            self.assertIn('LEO_DISK_LAYOUT=paired-ext4-v1', launch)
+            self.assertIn('LEO_VM_SNAPSHOTS=true', launch)
+        config.update({'vmSnapshots': False, 'diskLayout': 'paired-ext4-v1'})
+        self.assertEqual(host.vm_arguments(config), ['-e', 'LEO_DISK_LAYOUT=paired-ext4-v1', '-e', 'LEO_VM_SNAPSHOTS=false'])
+
+    def test_incompatible_snapshot_configuration_never_removes_the_running_node(self):
+        spec = importlib.util.spec_from_file_location('node_supervisor', SOURCE)
+        host = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(host)
+        for config in [{'vmSnapshots': True}, {'diskLayout': 'paired-ext4-v1'}, {'vmSnapshots': 'true'}, {'vmSnapshots': 1}, {'diskLayout': 'invalid'}, {'blockTransport': 'ublk', 'vmSnapshots': True, 'diskLayout': 'flat-ext4-v1'}]:
+            with self.subTest(config=config), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / 'config.json').write_text(json.dumps(config))
+                with patch.object(host, 'ROOT', root), patch.object(host, 'remove') as remove:
+                    with self.assertRaises(ValueError):
+                        host.launch(NEW)
+                remove.assert_not_called()
+
     def test_ublk_permissions_use_detected_majors_without_privileged_mode(self):
         spec = importlib.util.spec_from_file_location('node_supervisor', SOURCE)
         host = importlib.util.module_from_spec(spec)

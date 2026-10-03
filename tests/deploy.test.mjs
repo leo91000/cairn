@@ -182,6 +182,46 @@ describe('coolify deployment over HTTP', () => {
     expect(firecrackerRunnerCompose(compose)).toBe(compose)
   })
 
+  it.each(['mapping', 'list'])('preserves snapshot activation through repeated deployment (%s)', async (shape) => {
+    const document = parse(compose)
+    const runner = document.services.runner
+    const environment = {
+      ...runner.environment,
+      LEO_BLOCK_TRANSPORT: 'ublk',
+      LEO_DISK_LAYOUT: 'paired-ext4-v1',
+      LEO_VM_SNAPSHOTS: 'true',
+    }
+    runner.environment = shape === 'list'
+      ? Object.entries(environment).map(([key, value]) => `${key}=${value}`)
+      : environment
+    runner.devices.push('/dev/ublk-control:/dev/ublk-control')
+    runner.device_cgroup_rules = ['c 238:* rwm', 'b 259:* rwm']
+    compose = stringify(document)
+    await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
+    expect(parse(compose).services.runner.environment).toMatchObject({ LEO_BLOCK_TRANSPORT: 'ublk', LEO_DISK_LAYOUT: 'paired-ext4-v1', LEO_VM_SNAPSHOTS: 'true' })
+    expect(firecrackerRunnerCompose(compose)).toBe(compose)
+    // Disabling new clones must retain the ability to boot existing paired disks.
+    const disabled = parse(compose)
+    disabled.services.runner.environment.LEO_VM_SNAPSHOTS = 'false'
+    compose = stringify(disabled)
+    await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
+    expect(parse(compose).services.runner.environment).toMatchObject({ LEO_DISK_LAYOUT: 'paired-ext4-v1', LEO_VM_SNAPSHOTS: 'false' })
+  })
+
+  it.each([
+    { LEO_VM_SNAPSHOTS: 'true' },
+    { LEO_DISK_LAYOUT: 'paired-ext4-v1' },
+    { LEO_VM_SNAPSHOTS: 'yes' },
+    { LEO_DISK_LAYOUT: 'unknown' },
+    { LEO_VM_SNAPSHOTS: 'true', LEO_BLOCK_TRANSPORT: 'ublk', LEO_DISK_LAYOUT: 'flat-ext4-v1' },
+  ])('rejects incompatible snapshot configuration before mutating the service (%j)', async (settings) => {
+    const document = parse(compose)
+    Object.assign(document.services.runner.environment, settings)
+    compose = stringify(document)
+    await expect(deploy(config, { intervalMs: 0, timeoutMs: 1000 })).rejects.toThrow()
+    expect(requests.some(request => request.method === 'PATCH' || request.method === 'POST')).toBe(false)
+  })
+
   it('rejects incomplete ublk permissions before changing or restarting the service', async () => {
     const document = parse(compose)
     document.services.runner.environment.LEO_BLOCK_TRANSPORT = 'ublk'

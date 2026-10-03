@@ -196,8 +196,9 @@ une preuve de gain causal sur les écritures. Ce comparatif contrôle le restore
 contre le boot ordinaire, avec le même transport ublk/journal ; ce n'est ni un
 comparatif avec disque direct, ni une mesure S3 de production.
 
-Admission/annulation sous pression, image finale Intel/AMD et mesure en production restent
-nécessaires avant livraison.
+Admission/annulation sous pression et mesure en production restent nécessaires
+avant livraison. Les deux nœuds de production sont Intel ; aucune qualification
+matérielle AMD n'est revendiquée.
 
 ## Activation et compatibilité
 
@@ -206,6 +207,23 @@ Opt-in : `LEO_VM_SNAPSHOTS=true`, `LEO_BLOCK_TRANSPORT=ublk` et
 Le pool est activé pour préconstruire la configuration au démarrage du contrôleur.
 Sans option snapshots, le comportement actuel reste le défaut. Les petits
 disques de moins de 256 Mio restent plats ; le chemin préparé utilise 32 Gio.
+
+Le superviseur installé sur l'hôte conserve ces options dans son `config.json` :
+
+```json
+{
+  "blockTransport": "ublk",
+  "diskLayout": "paired-ext4-v1",
+  "vmSnapshots": true
+}
+```
+
+Pour Coolify, renseigner les trois variables ci-dessus dans l'environnement du
+runner ; les valeurs `"true"` et `"false"` doivent être des chaînes YAML. Le
+générateur Compose et le superviseur conservent cette configuration lors des
+mises à jour. Une combinaison incompatible est refusée avant de modifier le
+service ou d'arrêter le nœud. Pour désactiver les nouveaux clones, passer seulement
+`vmSnapshots` / `LEO_VM_SNAPSHOTS` à `false` et conserver le transport et le format.
 
 Avant de créer des disques version 2 en production, le manager et tous les nœuds
 autorisés à les reprendre doivent lire ce format et utiliser ublk. Un nœud

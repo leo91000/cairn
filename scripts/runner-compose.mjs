@@ -156,20 +156,34 @@ export function firecrackerRunnerCompose(compose) {
   const concurrency = configuredConcurrency ?? '${CONCURRENCY:-4}'
   const alreadyUsesVms = runner.get('devices')?.toJSON()?.some(device => typeof device === 'string' && device.split(':')[0] === '/dev/kvm')
   const runnerEnvironment = runner.get('environment')?.toJSON()
-  const poolSetting = Array.isArray(runnerEnvironment)
-    ? runnerEnvironment.find(value => typeof value === 'string' && value.startsWith('LEO_READY_VM_POOL='))?.slice('LEO_READY_VM_POOL='.length)
-    : runnerEnvironment?.LEO_READY_VM_POOL
+  const runnerSetting = key => Array.isArray(runnerEnvironment)
+    ? runnerEnvironment.find(value => typeof value === 'string' && value.startsWith(`${key}=`))?.slice(key.length + 1)
+    : runnerEnvironment?.[key]
+  const poolSetting = runnerSetting('LEO_READY_VM_POOL')
   const migratedEnvironment = { DATA_DIR: '/data', CONCURRENCY: concurrency }
   if (poolSetting !== undefined)
     migratedEnvironment.LEO_READY_VM_POOL = poolSetting
 
-  const blockTransport = Array.isArray(runnerEnvironment)
-    ? runnerEnvironment.find(value => typeof value === 'string' && value.startsWith('LEO_BLOCK_TRANSPORT='))?.slice('LEO_BLOCK_TRANSPORT='.length)
-    : runnerEnvironment?.LEO_BLOCK_TRANSPORT
+  const blockTransport = runnerSetting('LEO_BLOCK_TRANSPORT')
   if (blockTransport !== undefined && !['vhost-user', 'ublk'].includes(blockTransport))
     throw new Error('Unsupported runner block transport.')
   if (blockTransport !== undefined)
     migratedEnvironment.LEO_BLOCK_TRANSPORT = blockTransport
+
+  const diskLayout = runnerSetting('LEO_DISK_LAYOUT')
+  const snapshots = runnerSetting('LEO_VM_SNAPSHOTS')
+  if (diskLayout !== undefined && !['flat-ext4-v1', 'paired-ext4-v1'].includes(diskLayout))
+    throw new Error('Unsupported runner disk layout.')
+  if (snapshots !== undefined && !['true', 'false'].includes(snapshots))
+    throw new Error('Runner snapshots must be true or false.')
+  if ((diskLayout === 'paired-ext4-v1' || snapshots === 'true') && blockTransport !== 'ublk')
+    throw new Error('Paired disks and snapshots require ublk.')
+  if (snapshots === 'true' && diskLayout !== 'paired-ext4-v1')
+    throw new Error('Snapshots require paired disks.')
+  if (diskLayout !== undefined)
+    migratedEnvironment.LEO_DISK_LAYOUT = diskLayout
+  if (snapshots !== undefined)
+    migratedEnvironment.LEO_VM_SNAPSHOTS = snapshots
 
   const devices = ['/dev/kvm:/dev/kvm', '/dev/fuse:/dev/fuse', '/dev/net/tun:/dev/net/tun']
   if (blockTransport === 'ublk') {
