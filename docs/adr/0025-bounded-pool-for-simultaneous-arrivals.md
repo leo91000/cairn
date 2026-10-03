@@ -1,6 +1,7 @@
 # Pool borné pour les arrivées simultanées
 
-Date : 2026-10-03. Statut : prototype mesuré ; qualification production en cours.
+Date : 2026-10-03. Statut : pool qualifié sur deux rafales en production ;
+l'objectif de trois secondes reste à atteindre.
 
 ## Problème et décision
 
@@ -88,5 +89,77 @@ la préemption du remplissage du pool, le renouvellement réseau/entropie et le
 redémarrage natif. La trace du clone porte désormais l'identifiant de son
 environnement, pour éviter une attribution ambiguë au template commun.
 
-Les résultats bruts et scripts de qualification restent hors de Git. Ils seront
-joints à la release seulement après confirmation d'un gain en production.
+## Qualification de l'image et comparaison en production
+
+L'image de la révision `4c336c740451ea677c617ad648dd193c8ba6da70`, publiée
+après tous ses contrôles CI, passe le test natif de quatre VM préparées :
+2,332–2,334 s avant modèle, quatre publications avec vérification des blocs,
+puis quatre reprises du même thread après SIGKILL et renouvellement des accès.
+La CI de PR passe également après une relance du test de stockage : son premier
+essai avait expiré en attendant les métriques du guest, alors que le même test
+passait sur l'image publiée. Aucun timeout produit n'a été modifié.
+
+Le pilote utilise cette image immuable sur les deux nœuds ; seul le VPS passe
+à quatre spares. Les anciens conteneurs sont remplacés, le pool est rempli et
+aucun tour n'est actif avant les envois. Le même agent dédié, compte et modèle
+sont utilisés pour deux rafales de quatre messages simultanés. L'échantillonnage
+CPU commence avant les messages. Les huit VM revendiquées sont exactement les
+VM déjà présentes avant leurs rafales ; aucune restauration ni relance native
+du snapshot n'a lieu dans leur chemin critique.
+
+| Rafale | Pool à une VM, v0.52.6 | Pool à quatre VM, pilote |
+| --- | --- | --- |
+| Première | 10,537 ; 3,649 ; 13,285 ; 12,405 s | 10,590 ; 11,550 ; 8,793 ; 7,464 s |
+| Seconde | 12,776 ; 4,257 ; 11,863 ; 11,267 s | 8,998 ; 7,918 ; 7,875 ; 4,754 s |
+
+Sur ces huit arrivées par configuration, la médiane passe de 11,565 à
+8,356 s (−27,8 %), la moyenne de 10,005 à 8,493 s (−15,1 %), et le maximum
+de 13,285 à 11,550 s. Ce sont deux petites rafales par configuration, pas
+une estimation du p99 ni un A/B simultané à charge extérieure contrôlée.
+Le meilleur hit du pool à une VM reste plus rapide que le meilleur de ces
+rafales à quatre spares : l'amélioration des misses ne garantit pas un gain
+sur chaque arrivée. Une release ne doit pas annoncer l'objectif des trois
+secondes comme atteint.
+
+La seconde rafale du pilote se décompose ainsi, par message :
+
+| Phase | A | B | C | D |
+| --- | ---: | ---: | ---: | ---: |
+| Envoi UI → début du run manager | 4,377 s | 3,011 s | 0,792 s | 0,172 s |
+| Préparation manager → placement engagé | 0,247 s | 0,293 s | 1,048 s | 0,256 s |
+| Placement → requête au nœud | 0,068 s | 0,060 s | 0,258 s | 0,043 s |
+| Attribution de la VM/disque préparés | 0,039 s | 0,049 s | 0,071 s | 0,023 s |
+| Horloge, accès et imports guest | 0,309 s | 0,413 s | 0,426 s | 0,330 s |
+| Requête guest → premier appel modèle | 3,958 s | 4,092 s | 5,280 s | 3,930 s |
+| Total avant modèle | 8,998 s | 7,918 s | 7,875 s | 4,754 s |
+
+Dans la dernière phase, les traces du processus propre à chaque tentative
+mesurent séparément la préparation du toolkit (0,632–1,078 s), l'obtention
+des accès (19–28 ms), le login natif (46–73 ms), `thread/start` (446–703 ms)
+et le préchauffage Codex (1,650–3,413 s). Ces sous-phases se chevauchent
+partiellement ; ne pas les ajouter à la table précédente. Le toolkit refait
+les liens de toolchains et appelle `mise reshim` puis `mise env` à chaque entrée.
+Les seuls logs de console VM ne contiennent pas les RPC du processus de tour :
+la décomposition les lit aussi dans le journal de sa tentative, avec une
+liste stricte de noms d'opérations et de compteurs.
+
+Les deux fenêtres utilisent en moyenne 1,79 puis 2,21 cœurs sur sept,
+sans période bridée par le quota. Le PSI I/O `some` augmente respectivement
+de 10,89 et 7,88 s : cela signale une attente I/O d'au moins une tâche,
+pas un ralentissement de cette durée pour chaque conversation. La première
+rafale suit de près le déploiement ; la seconde attend la fin des publications
+et le remplissage du pool. La causalité du remplissage anonyme concurrent
+n'est pas isolée par ces mesures.
+
+Les huit tours réussissent, avec les huit révisions de sauvegarde acquittées.
+Seules ces conversations synthétiques sont ensuite mises à la corbeille,
+après vérification de leur propriétaire, du message, de l'absence de travail
+en attente et de l'acquittement. La limite suivante est l'admission manager :
+plusieurs essais reportent le lancement pendant le verrou de préparation,
+mais les délais UI → manager incluent aussi la création durable du run et
+les passes du scheduler. Les instrumenter et raccourcir cette fenêtre dans
+une PR séparée est nécessaire avant d'attribuer tout ce temps au verrou.
+Le toolkit et le préchauffage natif sont les autres postes restant à traiter.
+
+Les résultats bruts et scripts de qualification restent hors de Git et seront
+joints aux assets de release. Aucun dump de benchmark n'est ajouté ici.
