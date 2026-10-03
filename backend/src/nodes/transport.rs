@@ -415,7 +415,7 @@ pub async fn proxy(State(app): State<App>, request: Request) -> Result<Response>
         format!("/{path}"),
         request.method().as_str().to_owned(),
     );
-    let limit = if path.ends_with("/restore") {
+    let limit = if path.ends_with("/restore") || path.ends_with("/publication") {
         super::snapshots::MAX_MANIFEST_BYTES
     } else {
         MAX_REQUEST_BYTES

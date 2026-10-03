@@ -173,12 +173,20 @@ async fn snapshot_file(
         tokio::fs::remove_dir_all(directory).await?;
         return json_response(json!({ "ok": true }));
     }
-    if request.method() == "POST" && hash == "blocks" {
-        let bytes = body(request, 4096, "Invalid snapshot block batch.").await?;
+    if request.method() == "POST" && matches!(hash, "blocks" | "publication") {
+        let limit = if hash == "publication" {
+            crate::nodes::snapshots::MAX_MANIFEST_BYTES
+        } else {
+            4096
+        };
+        let bytes = body(request, limit, "Invalid snapshot block batch.").await?;
         let batch: BlockBatch = serde_json::from_slice(&bytes)
             .map_err(|_| Error::bad("Invalid snapshot block batch."))?;
-        let (length, blocks) =
-            crate::nodes::snapshots::served_batch(&directory, batch.hashes).await?;
+        let (length, blocks) = if hash == "publication" {
+            crate::nodes::snapshots::served_publication(&directory, batch.hashes).await?
+        } else {
+            crate::nodes::snapshots::served_batch(&directory, batch.hashes).await?
+        };
         return Ok(([("content-length", length.to_string())], blocks).into_response());
     }
     if request.method() != "GET" {

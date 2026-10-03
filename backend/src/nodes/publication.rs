@@ -530,7 +530,7 @@ impl Publication<'_> {
             .map(|object| (object.hash.clone(), object.size))
             .collect();
         let mut reads = snapshots::Fetch::new(
-            self.s.http.clone(),
+            self.s.disk_http.clone(),
             format!("{}/snapshots/{}", self.base, self.snapshot_id),
             self.credential.to_owned(),
             missing,

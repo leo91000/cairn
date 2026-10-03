@@ -40,6 +40,7 @@ pub struct Service {
     pub vault: Vault,
     pub skills: Skills,
     pub http: reqwest::Client,
+    pub disk_http: reqwest::Client,
     pub hot_s3: Arc<crate::object_storage::HotS3>,
     pub shutdown: CancellationToken,
 }
@@ -87,6 +88,13 @@ impl Service {
                 .build()
                 .map_err(Error::internal)?,
             hot_s3: Arc::new(crate::object_storage::HotS3::new()),
+            // Publications can take minutes while making progress. Their reader
+            // bounds individual I/O waits instead of timing out the whole disk.
+            disk_http: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(std::time::Duration::from_secs(20))
+                .build()
+                .map_err(Error::internal)?,
             config,
             store,
             vault,

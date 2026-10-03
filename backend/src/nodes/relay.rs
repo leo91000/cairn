@@ -203,7 +203,7 @@ fn route(method: &str, path: &str) -> Result<()> {
         ["snapshots", id, hash] => {
             uuid(id)
                 && ((method == "GET" && super::snapshots::valid_hash(hash))
-                    || (method == "POST" && *hash == "blocks")
+                    || (method == "POST" && matches!(*hash, "blocks" | "publication"))
                     || (method == "DELETE" && *hash == "discard"))
         }
         ["runs", id] => uuid(id) && ["POST", "DELETE"].contains(&method),
@@ -303,7 +303,8 @@ async fn forward(
     // Bulk data uses one continuous, backpressured request. Keep control/log
     // frames and old masters on the existing protocol (including /wait's result).
     let streams_snapshot_body = path.starts_with("/snapshots/")
-        && (method == "GET" || (method == "POST" && path.ends_with("/blocks")));
+        && (method == "GET"
+            || (method == "POST" && (path.ends_with("/blocks") || path.ends_with("/publication"))));
     if command["streamBody"] == true && streams_snapshot_body {
         return stream_body(master, id, response).await;
     }
@@ -353,7 +354,7 @@ async fn call_controller(
     let bytes = STANDARD
         .decode(text(command, "body"))
         .map_err(|_| Error::bad("Invalid execution payload."))?;
-    let limit = if path.ends_with("/restore") {
+    let limit = if path.ends_with("/restore") || path.ends_with("/publication") {
         super::snapshots::MAX_MANIFEST_BYTES
     } else {
         MAX_PAYLOAD_BYTES
@@ -387,15 +388,23 @@ async fn call_controller(
 
 /// Uploads the whole response body to the master in one streaming request.
 async fn stream_body(master: &Master<'_>, id: &str, response: reqwest::Response) -> Result<()> {
-    let chunks =
-        futures_util::stream::try_unfold(response.bytes_stream(), |mut stream| async move {
+    let (progress, observed) = tokio::sync::watch::channel(0u64);
+    let chunks = futures_util::stream::try_unfold(
+        (response.bytes_stream(), progress),
+        |(mut stream, progress)| async move {
             match tokio::time::timeout(Duration::from_secs(60), stream.next()).await {
-                Ok(Some(Ok(bytes))) => Ok(Some((bytes, stream))),
+                Ok(Some(Ok(bytes))) => {
+                    if !bytes.is_empty() {
+                        progress.send_modify(|total| *total += bytes.len() as u64);
+                    }
+                    Ok(Some((bytes, (stream, progress))))
+                }
                 Ok(None) => Ok(None),
                 _ => Err(std::io::Error::other("VM response interrupted")),
             }
-        });
-    let uploaded = master
+        },
+    );
+    let upload = master
         .client
         .post(
             master
@@ -405,20 +414,79 @@ async fn stream_body(master: &Master<'_>, id: &str, response: reqwest::Response)
         )
         .bearer_auth(master.token)
         .header("content-type", "application/octet-stream")
-        .timeout(Duration::from_secs(120))
         .body(reqwest::Body::wrap_stream(chunks))
-        .send()
-        .await
-        .map_err(|_| Error::unavailable("Master upload interrupted."))?;
+        .send();
+    let uploaded = progressing_upload(
+        async {
+            upload
+                .await
+                .map_err(|_| Error::unavailable("Master upload interrupted."))
+        },
+        observed,
+    )
+    .await?;
     if !uploaded.status().is_success() {
         return Err(Error::conflict("Execution stream rejected."));
     }
     Ok(())
 }
 
+async fn progressing_upload<T>(
+    upload: impl std::future::Future<Output = Result<T>>,
+    mut observed: tokio::sync::watch::Receiver<u64>,
+) -> Result<T> {
+    tokio::pin!(upload);
+    // A whole-publication response may legitimately exceed two minutes. Bound
+    // stalled uploads and the final acknowledgement while allowing progress.
+    loop {
+        tokio::select! {
+            response = &mut upload => {
+                return response;
+            }
+            progress = tokio::time::timeout(Duration::from_secs(120), observed.changed()) => {
+                match progress {
+                    Ok(Ok(())) => {},
+                    Ok(Err(_)) => {
+                        return tokio::time::timeout(Duration::from_secs(120), &mut upload)
+                            .await
+                            .map_err(|_| Error::unavailable("Master upload interrupted."))?;
+                    }
+                    Err(_) => return Err(Error::unavailable("Master upload stalled.")),
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn publication_upload_allows_progress_beyond_the_old_deadline() {
+        let (progress, observed) = tokio::sync::watch::channel(0);
+        let work = async move {
+            for value in 1..=3 {
+                tokio::time::sleep(Duration::from_secs(59)).await;
+                progress.send(value).unwrap();
+            }
+            Ok(())
+        };
+        assert!(progressing_upload(work, observed).await.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn publication_upload_rejects_a_stall_and_a_missing_final_response() {
+        for closed in [false, true] {
+            let (progress, observed) = tokio::sync::watch::channel(0);
+            let held = (!closed).then_some(progress);
+            let started = tokio::time::Instant::now();
+            let result: Result<()> = progressing_upload(std::future::pending(), observed).await;
+            assert_eq!(result.unwrap_err().status, 503);
+            assert_eq!(started.elapsed(), Duration::from_secs(120));
+            drop(held);
+        }
+    }
 
     #[test]
     fn completed_generation_capture_is_authorized_through_the_outbound_relay() {
@@ -427,5 +495,13 @@ mod tests {
         assert!(route("GET", &path).is_err());
         assert!(route("POST", "/disks/not-a-conversation/snapshot-completed").is_err());
         assert_eq!(controller_timeout(&path), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn publication_reader_is_authorized_through_the_outbound_relay() {
+        let path = format!("/snapshots/{}/publication", crate::config::id());
+        assert!(route("POST", &path).is_ok());
+        assert!(route("GET", &path).is_err());
+        assert!(route("POST", "/snapshots/invalid/publication").is_err());
     }
 }

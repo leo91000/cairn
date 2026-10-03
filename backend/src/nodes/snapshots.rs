@@ -18,6 +18,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
 pub const BLOCK: u64 = 4 * 1024 * 1024;
 pub const READ_BATCH: usize = 8;
+pub const MAX_PUBLICATION_BLOCKS: usize = (1024_u64 * 1024 * 1024 * 1024 / BLOCK) as usize;
+const TRANSFER_IDLE: std::time::Duration = std::time::Duration::from_secs(120);
 const MANIFEST_VERSION: u64 = 1;
 
 /// One fixed-size extent of a disk manifest. Holes and zero blocks have no hash.
@@ -262,18 +264,42 @@ pub async fn served_batch(
     directory: &Path,
     hashes: Vec<String>,
 ) -> Result<(u64, axum::body::Body)> {
-    if hashes.is_empty() || hashes.len() > READ_BATCH || hashes.iter().any(|hash| !valid_hash(hash))
-    {
+    served_blocks(directory, hashes, READ_BATCH).await
+}
+
+/// A publication owns one journal reader, regardless of its number of blocks.
+/// Backpressure keeps payload memory bounded to one block, not the disk size.
+pub async fn served_publication(
+    directory: &Path,
+    hashes: Vec<String>,
+) -> Result<(u64, axum::body::Body)> {
+    served_blocks(directory, hashes, MAX_PUBLICATION_BLOCKS).await
+}
+
+async fn served_blocks(
+    directory: &Path,
+    hashes: Vec<String>,
+    limit: usize,
+) -> Result<(u64, axum::body::Body)> {
+    if hashes.is_empty() || hashes.len() > limit || hashes.iter().any(|hash| !valid_hash(hash)) {
         return Err(Error::bad("Invalid snapshot block batch."));
     }
     let reader = Reader::open(directory).await?;
     validate(&reader.manifest)?;
+    let sizes: std::collections::HashMap<_, _> = reader.manifest["blocks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|block| Some((block["hash"].as_str()?, block["size"].as_u64()?)))
+        .collect();
     let mut length = 0;
     for hash in &hashes {
-        let block = find_block(&reader.manifest, hash)
+        let size = sizes
+            .get(hash.as_str())
             .ok_or_else(|| Error::not_found("Unknown backup block."))?;
-        length += block["size"].as_u64().unwrap_or_default();
+        length += size;
     }
+    drop(sizes);
     let stream = futures_util::stream::try_unfold(
         (reader, hashes.into_iter()),
         |(reader, mut hashes)| async move {
@@ -383,6 +409,7 @@ pub struct Fetch {
     stream: Option<std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>>,
     remaining: usize,
     legacy: bool,
+    publication: bool,
 }
 
 impl Fetch {
@@ -400,6 +427,7 @@ impl Fetch {
             stream: None,
             remaining: 0,
             legacy: false,
+            publication: true,
         }
     }
 
@@ -411,22 +439,39 @@ impl Fetch {
             .filter(|(expected, size)| expected == hash && *size <= BLOCK)
             .map(|(_, size)| *size)
             .ok_or_else(|| Error::bad("Unexpected snapshot block."))?;
-        if self.stream.is_none() && !self.legacy {
-            let batch: Vec<_> = self.pending.iter().take(READ_BATCH).collect();
+        while self.stream.is_none() && !self.legacy {
+            let count = if self.publication {
+                self.pending.len()
+            } else {
+                READ_BATCH
+            };
+            let batch: Vec<_> = self.pending.iter().take(count).collect();
             let length: u64 = batch.iter().map(|(_, size)| *size).sum();
             let hashes: Vec<_> = batch.iter().map(|(hash, _)| hash).collect();
-            let response = self
+            let endpoint = if self.publication {
+                "publication"
+            } else {
+                "blocks"
+            };
+            let mut request = self
                 .http
-                .post(format!("{}/blocks", self.url))
+                .post(format!("{}/{endpoint}", self.url))
                 .bearer_auth(&self.credential)
-                .json(&json!({ "hashes": hashes }))
-                .timeout(std::time::Duration::from_secs(120))
-                .send()
+                .json(&json!({ "hashes": hashes }));
+            if !self.publication {
+                request = request.timeout(TRANSFER_IDLE);
+            }
+            let response = tokio::time::timeout(TRANSFER_IDLE, request.send())
                 .await
+                .map_err(|_| Error::unavailable("Backup block transfer interrupted."))?
                 .map_err(|_| Error::unavailable("Backup block transfer interrupted."))?;
             // Old relays translate unsupported operations into 503. Retry the
             // existing endpoint once; actual unavailability still fails there.
             if matches!(response.status().as_u16(), 404 | 405 | 503) {
+                if self.publication {
+                    self.publication = false;
+                    continue;
+                }
                 self.legacy = true;
             } else {
                 if !response.status().is_success() {
@@ -446,15 +491,15 @@ impl Fetch {
         }
         let bytes = if let Some(stream) = &mut self.stream {
             let mut bytes = vec![0; size as usize];
-            stream
-                .read_exact(&mut bytes)
+            tokio::time::timeout(TRANSFER_IDLE, stream.read_exact(&mut bytes))
                 .await
+                .map_err(|_| Error::unavailable("Backup block batch interrupted."))?
                 .map_err(|_| Error::unavailable("Backup block batch interrupted."))?;
             self.remaining -= 1;
             if self.remaining == 0 {
-                if stream
-                    .read(&mut [0])
+                if tokio::time::timeout(TRANSFER_IDLE, stream.read(&mut [0]))
                     .await
+                    .map_err(|_| Error::unavailable("Backup block batch interrupted."))?
                     .map_err(|_| Error::unavailable("Backup block batch interrupted."))?
                     != 0
                 {
@@ -496,6 +541,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_publication_stream_keeps_one_response_beyond_batch_limit() {
+        let requests = Arc::new(Mutex::new(0));
+        let count = requests.clone();
+        let app = Router::new().fallback(any(move |request: Request| {
+            let count = count.clone();
+            async move {
+                if request.uri().path() != "/publication" {
+                    return axum::http::StatusCode::NOT_FOUND.into_response();
+                }
+                assert_eq!(request.method(), "POST");
+                assert_eq!(request.headers()["authorization"], "Bearer fixture");
+                let bytes = axum::body::to_bytes(request.into_body(), 4096)
+                    .await
+                    .unwrap();
+                let body: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(body["hashes"].as_array().unwrap().len(), READ_BATCH + 1);
+                *count.lock().unwrap() += 1;
+                let bytes: Vec<_> = (0..READ_BATCH + 1)
+                    .flat_map(|index| vec![index as u8; index + 1])
+                    .collect();
+                bytes.into_response()
+            }
+        }));
+        let (url, server) = peer(app).await;
+        let blocks: Vec<_> = (0..READ_BATCH + 1)
+            .map(|index| (format!("{index:064x}"), index as u64 + 1))
+            .collect();
+        let mut fetch = Fetch::new(
+            reqwest::Client::new(),
+            url,
+            "fixture".into(),
+            blocks.clone(),
+        );
+        for (index, (hash, size)) in blocks.iter().enumerate() {
+            assert_eq!(
+                fetch.block(hash).await.unwrap(),
+                vec![index as u8; *size as usize]
+            );
+        }
+        assert_eq!(*requests.lock().unwrap(), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn fetch_batches_in_order_and_falls_back_once_for_old_runners() {
         for legacy_status in [None, Some(404), Some(405), Some(503)] {
             let legacy = legacy_status.is_some();
@@ -507,6 +596,12 @@ mod tests {
                     assert_eq!(request.headers()["authorization"], "Bearer fixture");
                     let method = request.method().clone();
                     let path = request.uri().path().to_owned();
+                    if path == "/publication" {
+                        captured.lock().unwrap().push((method, Vec::new()));
+                        return axum::http::StatusCode::from_u16(legacy_status.unwrap_or(404))
+                            .unwrap()
+                            .into_response();
+                    }
                     let bytes = axum::body::to_bytes(request.into_body(), 4096)
                         .await
                         .unwrap();
@@ -565,12 +660,12 @@ mod tests {
                 .filter(|(method, _)| *method == "POST")
                 .collect();
             if legacy {
-                assert_eq!(posts.len(), 1);
-                assert_eq!(requests.len(), READ_BATCH + 2);
+                assert_eq!(posts.len(), 2);
+                assert_eq!(requests.len(), READ_BATCH + 3);
             } else {
-                assert_eq!(requests.len(), 2);
-                assert_eq!(posts[0].1.len(), READ_BATCH);
-                assert_eq!(posts[1].1.len(), 1);
+                assert_eq!(requests.len(), 3);
+                assert_eq!(posts[1].1.len(), READ_BATCH);
+                assert_eq!(posts[2].1.len(), 1);
             }
             server.abort();
         }
@@ -616,6 +711,107 @@ mod tests {
                 .err()
                 .unwrap();
             assert_eq!(error.status, 400);
+        }
+        for hashes in [
+            vec![],
+            vec!["a".repeat(64); MAX_PUBLICATION_BLOCKS + 1],
+            vec!["../invalid".into()],
+        ] {
+            let error = served_publication(Path::new("/nonexistent-snapshot-fixture"), hashes)
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(error.status, 400);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit stopped-journal publication benchmark; run alone with --nocapture"]
+    async fn stopped_publication_reader_benchmark() {
+        use crate::storage::Disk;
+        use futures_util::StreamExt;
+        let count: usize = std::env::var("LEO_PUBLICATION_BENCH_BLOCKS")
+            .ok()
+            .map_or(128, |value| value.parse().unwrap());
+        assert!((READ_BATCH + 1..=2048).contains(&count));
+        let root = tempfile::Builder::new()
+            .prefix("leo-publication-bench-")
+            .tempdir_in("/var/tmp")
+            .unwrap();
+        let run = crate::config::id();
+        let directory = root.path().join("disks").join(&run);
+        let base = json!({
+            "version": 1,
+            "size": count as u64 * BLOCK,
+            "blockSize": BLOCK,
+            "blocks": (0..count).map(|index| json!({
+                "offset": index as u64 * BLOCK, "size": BLOCK, "hash": null
+            })).collect::<Vec<_>>()
+        });
+        let source = json!({ "master": "http://127.0.0.1:9/", "grant": "fixture" });
+        let disk = crate::storage::runtime::create(&directory.join("lazy"), &base, &source)
+            .await
+            .unwrap();
+        let mut bytes = vec![7; BLOCK as usize];
+        for index in 0..count {
+            bytes[..8].copy_from_slice(&(index as u64).to_le_bytes());
+            disk.write_at(index as u64 * BLOCK, &bytes).unwrap();
+        }
+        let generation = disk.seal().unwrap();
+        let mut manifest = disk.capture(generation).unwrap();
+        manifest["onDemand"] = true.into();
+        manifest["generation"] = generation.into();
+        drop(disk);
+        let captured = root.path().join("snapshots").join(crate::config::id());
+        tokio::fs::create_dir_all(&captured).await.unwrap();
+        tokio::fs::write(captured.join("run"), &run).await.unwrap();
+        tokio::fs::write(captured.join("manifest.json"), manifest.to_string())
+            .await
+            .unwrap();
+        let hashes: Vec<_> = hashes(&manifest).map(str::to_owned).collect();
+        for trial in 0..3 {
+            let modes = if trial % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            };
+            for publication in modes {
+                let batch = if publication { count } else { READ_BATCH };
+                let started = std::time::Instant::now();
+                let mut open_ms = 0.0;
+                let mut opened = 0;
+                let mut transferred = 0;
+                for group in hashes.chunks(batch) {
+                    let opening = std::time::Instant::now();
+                    let (length, body) = served_blocks(&captured, group.to_vec(), batch)
+                        .await
+                        .unwrap();
+                    open_ms += opening.elapsed().as_secs_f64() * 1000.0;
+                    let volume = crate::storage::runtime::load(&directory).await.unwrap();
+                    let identity = Arc::downgrade(&volume);
+                    drop(volume);
+                    opened += 1;
+                    assert_eq!(length, group.len() as u64 * BLOCK);
+                    let mut stream = body.into_data_stream();
+                    for hash in group {
+                        let data = stream.next().await.unwrap().unwrap();
+                        assert!(crate::storage::digest::matches(hash, &data));
+                        transferred += data.len() as u64;
+                    }
+                    assert!(stream.next().await.is_none());
+                    assert!(identity.upgrade().is_none());
+                }
+                assert_eq!(transferred, count as u64 * BLOCK);
+                println!(
+                    "PUBLICATION_READER_PERF {}",
+                    json!({
+                        "trial": trial, "publication": publication, "blocks": count,
+                        "journalOpens": opened, "openMs": open_ms,
+                        "transferMs": started.elapsed().as_secs_f64() * 1000.0,
+                        "bytes": transferred
+                    })
+                );
+            }
         }
     }
 }
