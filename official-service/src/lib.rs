@@ -219,6 +219,18 @@ pub async fn router_with_relay(
             "/api/installations/{installation}/sharing/invitations",
             post(sharing::invite),
         )
+        .route(
+            "/api/installations/{installation}/sharing/invitations/{invitation}",
+            axum::routing::delete(sharing::cancel),
+        )
+        .route(
+            "/api/installations/{installation}/sharing/members/{member}",
+            axum::routing::delete(sharing::remove),
+        )
+        .route(
+            "/api/installations/{installation}/sharing/membership",
+            axum::routing::delete(sharing::leave),
+        )
         .route("/api/account/methods", get(methods::list))
         .route("/api/account/methods/remove", post(methods::remove))
         .route("/api/installations", get(installations::status))

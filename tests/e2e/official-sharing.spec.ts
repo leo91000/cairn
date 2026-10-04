@@ -13,24 +13,29 @@ test('owner shares an installation and member works without management controls'
   test.setTimeout(120000)
   const root = await mkdtemp(join(tmpdir(), 'leo-sharing-'))
   const children: ChildProcess[] = []
+  const diagnostics: string[] = []
   const messages: Array<{ to: string[], text: string }> = []
   const mail = createServer(async (request, response) => {
     let body = ''
     for await (const chunk of request)
       body += chunk
-    messages.push(JSON.parse(body))
+    const message = JSON.parse(body)
+    messages.push(message)
     response.writeHead(200, { 'content-type': 'application/json' }).end('{}')
   })
   mail.listen(0, '127.0.0.1')
   await once(mail, 'listening')
-  const url = 'http://localhost:4395'
+  const url = 'http://localhost:4397'
   const memberEmail = `member-${Date.now()}@example.test`
   const memberContext = await browser.newContext()
   const member = await memberContext.newPage()
 
   function start(binary: string, env: NodeJS.ProcessEnv) {
-    const child = spawn(binary, [], { env: { ...process.env, ...env }, stdio: 'ignore' })
+    const child = spawn(binary, [], { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] })
+    child.stdout!.on('data', chunk => diagnostics.push(String(chunk)))
+    child.stderr!.on('data', chunk => diagnostics.push(String(chunk)))
     children.push(child)
+    return child
   }
 
   async function signIn(target: Page, email: string) {
@@ -43,22 +48,26 @@ test('owner shares an installation and member works without management controls'
     await target.getByRole('button', { name: 'Sign in', exact: true }).click()
   }
 
-  start('target/debug/leo-official', {
+  const official = start('target/debug/leo-official', {
     LEO_OFFICIAL_DATABASE_URL: process.env.LEO_OFFICIAL_TEST_DATABASE_URL,
     LEO_OFFICIAL_ORIGIN: url,
-    LEO_OFFICIAL_LISTEN: '127.0.0.1:4395',
+    LEO_OFFICIAL_LISTEN: '127.0.0.1:4397',
     LEO_OFFICIAL_EMAIL_ENDPOINT: `http://127.0.0.1:${(mail.address() as { port: number }).port}/emails`,
     LEO_OFFICIAL_EMAIL_KEY: 'fixture-only',
     LEO_OFFICIAL_EMAIL_FROM: 'leo@example.test',
   })
   try {
-    await expect.poll(() => fetch(`${url}/health`).then(response => response.ok).catch(() => false)).toBe(true)
+    await expect.poll(() => {
+      if (official.exitCode !== null)
+        throw new Error(diagnostics.join('') || `Official service exited: ${official.exitCode}`)
+      return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
+    }, { timeout: 30000 }).toBe(true)
     await signIn(page, `owner-${Date.now()}@example.test`)
     await expect(page.getByRole('heading', { name: 'No installations yet' })).toBeVisible()
     await page.getByRole('button', { name: 'Add an installation', exact: true }).click()
     const code = await page.getByLabel('Installation claim code').inputValue()
     await Promise.all([mkdir(join(root, 'data')), mkdir(join(root, 'home'))])
-    start('target/debug/leo', {
+    const installation = start('target/debug/leo', {
       DATA_DIR: join(root, 'data'),
       AGENT_HOME: join(root, 'home'),
       WORKSPACE_ROOTS: root,
@@ -69,7 +78,13 @@ test('owner shares an installation and member works without management controls'
       LEO_INSTALLATION_CLAIM_CODE: code,
       LEO_INSTALLATION_NAME: 'Shared home',
     })
-    await expect.poll(async () => (await (await page.request.get(`${url}/api/account/session`)).json()).installations.length, { timeout: 30000 }).toBe(1)
+    await expect.poll(async () => {
+      if (installation.exitCode !== null)
+        throw new Error(diagnostics.join('') || `Installation exited: ${installation.exitCode}`)
+      return (await (await page.request.get(`${url}/api/account/session`)).json()).installations.length
+    }, { timeout: 30000 }).toBe(1).catch((cause) => {
+      throw new Error(`${cause.message}\n${diagnostics.join('')}`)
+    })
     await page.getByRole('button', { name: 'Refresh installations', exact: true }).click()
     await expect(page).toHaveURL(/\/installations\/[^/]+\/$/)
     await page.getByText('Installation options', { exact: true }).click()

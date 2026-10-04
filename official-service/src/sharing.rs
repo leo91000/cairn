@@ -193,3 +193,77 @@ pub(super) async fn accept(
     transaction.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
+
+async fn remove_membership(
+    service: &Service,
+    mut transaction: Transaction<'_, Postgres>,
+    installation: &str,
+    account: &str,
+) -> Result<StatusCode, ApiError> {
+    let removed =
+        query("DELETE FROM installation_members WHERE installation_id = $1 AND account_id = $2")
+            .bind(installation)
+            .bind(account)
+            .execute(&mut *transaction)
+            .await?;
+    if removed.rows_affected() == 0 {
+        return Err(ApiError(StatusCode::NOT_FOUND, "Member not found"));
+    }
+
+    transaction.commit().await?;
+    service.relay.revoke_access(installation, Some(account));
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(super) async fn remove(
+    State(service): State<Service>,
+    Path((installation, member)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let account = installations::account(&service, &headers, &Method::DELETE).await?;
+    consume_limit(&service.pool, &format!("sharing:{account}"), 30).await?;
+    let transaction = owner_transaction(&service, &installation, &account).await?;
+    remove_membership(&service, transaction, &installation, &member).await
+}
+
+pub(super) async fn leave(
+    State(service): State<Service>,
+    Path(installation): Path<String>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let account = installations::account(&service, &headers, &Method::DELETE).await?;
+    consume_limit(&service.pool, &format!("sharing:{account}"), 30).await?;
+    let mut transaction = service.pool.begin().await?;
+    let exists: Option<(String,)> =
+        query_as("SELECT id FROM installations WHERE id = $1 FOR UPDATE")
+            .bind(&installation)
+            .fetch_optional(&mut *transaction)
+            .await?;
+    if exists.is_none() {
+        return Err(ApiError(StatusCode::NOT_FOUND, "Installation not found"));
+    }
+
+    remove_membership(&service, transaction, &installation, &account).await
+}
+
+pub(super) async fn cancel(
+    State(service): State<Service>,
+    Path((installation, invitation)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let account = installations::account(&service, &headers, &Method::DELETE).await?;
+    consume_limit(&service.pool, &format!("sharing:{account}"), 30).await?;
+    let mut transaction = owner_transaction(&service, &installation, &account).await?;
+    let cancelled =
+        query("DELETE FROM installation_invitations WHERE installation_id = $1 AND id = $2")
+            .bind(installation)
+            .bind(invitation)
+            .execute(&mut *transaction)
+            .await?;
+    if cancelled.rows_affected() == 0 {
+        return Err(ApiError(StatusCode::NOT_FOUND, "Invitation not found"));
+    }
+
+    transaction.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
