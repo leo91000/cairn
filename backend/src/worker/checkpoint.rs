@@ -26,6 +26,9 @@ pub fn key(run_id: &str) -> String {
 pub struct RunCheckpoint {
     #[serde(default, with = "lenient", skip_serializing_if = "Option::is_none")]
     pub launched: Option<bool>,
+    /// Explicit controller rejection of this attempt; absent is not proof of rejection.
+    #[serde(default, with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub start_rejected: Option<bool>,
     /// `null` means the run has no time limit; absent means its budget is spent.
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
     pub remaining_ms: Nullable<i64>,

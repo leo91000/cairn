@@ -977,10 +977,23 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
     if request.method() == "DELETE" {
         return Json(json!({})).into_response();
     }
+    if !path.starts_with("/runs/") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let attempt = path.split('/').nth(2).unwrap();
     if path.ends_with("/logs") {
         let mut output =
             String::from("{\"type\":\"thread.started\",\"thread_id\":\"fixture-session\"}\n");
+        let plans = state.plans.lock().await;
+        let plan = plans.iter().find(|plan| plan["id"] == attempt).unwrap();
+        if plan["chat"]["execution"]["messageId"].is_string() {
+            let delivered = json!({
+                "type": "chat.delivered",
+                "messageId": plan["chat"]["execution"]["messageId"],
+            });
+            output.push_str(&format!("{delivered}\n"));
+        }
+        drop(plans);
         if state.attempt_index(attempt).await >= state.failures {
             output.push_str("{\"type\":\"item.completed\",\"item\":{\"id\":\"reply\",\"type\":\"agent_message\",\"text\":\"resumed VM\"}}\n{\"type\":\"turn.completed\",\"usage\":{}}\n");
         }
@@ -1165,6 +1178,177 @@ async fn refused_local_budget_keeps_presence_and_exposes_the_reason() {
     assert_eq!(node["executionReady"], true);
     assert_eq!(node["budgetError"], Value::Null);
     server.abort();
+}
+
+#[tokio::test]
+async fn failed_provider_startup_can_retry_without_replaying_an_uncertain_launch() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    for (provider, rejected, deferred_fence) in [
+        ("claude", true, true),
+        ("claude", true, false),
+        ("claude", false, false),
+        ("codex", true, false),
+    ] {
+        let mut fixture = Fixture::new().await;
+        fixture.stop(false).await;
+        let controller = Arc::new(Controller {
+            data: fixture.service.config.data_dir.clone(),
+            plans: tokio::sync::Mutex::new(Vec::new()),
+            failures: 0,
+            slots: 4,
+            hold: AtomicBool::new(false),
+        });
+        let failing = Arc::new(AtomicBool::new(false));
+        let failures = failing.clone();
+        let fence_failures = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .fallback(any(move |state: State<Arc<Controller>>, request: Request| {
+                let failing = failures.clone();
+                let fence_failures = fence_failures.clone();
+                async move {
+                    let path = request.uri().path();
+                    let starting = request.method() == "POST"
+                        && path.starts_with("/runs/")
+                        && path.trim_matches('/').split('/').count() == 2;
+                    let reject_start = rejected && starting;
+                    let lose_output = !rejected && path.ends_with("/logs");
+                    if request.method() == "DELETE"
+                        && fence_failures.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| remaining.checked_sub(1)).is_ok()
+                    {
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
+                    if failing.load(Ordering::SeqCst) && (reject_start || lose_output) {
+                        if deferred_fence && reject_start {
+                            // Client cleanup and the first worker fence fail;
+                            // execution cleanup must settle the rejection later.
+                            fence_failures.store(2, Ordering::SeqCst);
+                        }
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(json!({
+                                "error": "Temporary admission failure (Bearer fixture-private-token).",
+                            })),
+                        ).into_response();
+                    }
+                    serve_controller(state, request).await
+                }
+            }))
+            .with_state(controller.clone());
+        let (listener, address) = common::bind().await;
+        common::reconfigure(&mut fixture.service, |config| {
+            config.runner_url = format!("http://{address}");
+        })
+        .await;
+        let server = common::serve(listener, app);
+        let s = fixture.service.clone();
+        claude_account(&s, 4).await;
+        let home = s.config.home.join(".codex");
+        tokio::fs::create_dir_all(&home).await.unwrap();
+        tokio::fs::write(home.join("auth.json"), "{}")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            s.config.data_dir.join("storage-s3.json"),
+            json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
+        )
+        .await
+        .unwrap();
+        fixture.start().await;
+
+        let original = message("Keep the existing workspace and decisions.");
+        let chat_id = fixture.start_chat(original).await;
+        let run_id = fixture.chat_run(&chat_id).await;
+        let first = fixture
+            .until(&run_id, |run| run["status"] == RunStatus::Succeeded)
+            .await;
+        let marker = Path::new(text(&first, "workspace")).join("preserved.txt");
+        std::fs::write(&marker, "completed work").unwrap();
+
+        failing.store(true, Ordering::SeqCst);
+        let mut next = message("Continue the same work.");
+        next["provider"] = provider.into();
+        s.chat_send(&chat_id, next.clone()).await.unwrap();
+        let failed = fixture
+            .until(&run_id, |run| run["status"] == RunStatus::Failed)
+            .await;
+        let new_session = provider == "claude";
+        assert_eq!(failed["sessionId"].is_null(), new_session);
+        assert_eq!(
+            fixture.checkpoint(&run_id).await["launched"],
+            !new_session || !rejected
+        );
+        assert_eq!(failed["workspace"], first["workspace"]);
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "completed work");
+        if rejected {
+            let id = run_id.clone();
+            let events = s
+                .store
+                .read(move |db| db.events(&id, 0, 500))
+                .await
+                .unwrap();
+            assert!(events.iter().any(|event| {
+                text(event, "text").contains("HTTP 503")
+                    && text(event, "text").contains("Temporary admission failure")
+            }));
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| text(event, "text").contains("fixture-private-token"))
+            );
+        }
+        fixture
+            .until_chat(&chat_id, async |chat| {
+                chat["paused"] == true && chat["messages"][1]["status"] == "queued"
+            })
+            .await;
+
+        failing.store(false, Ordering::SeqCst);
+        let router = leo_agent_manager::http::router(s.clone()).await.unwrap();
+        let session = common::Session::new(&s.auth.session().await.unwrap());
+        let request = session
+            .authorize(common::request(
+                "POST",
+                &format!("/api/chats/{chat_id}/pause"),
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "paused": false }).to_string()))
+            .unwrap();
+        let response = common::send(&router, request).await;
+        if new_session && !rejected {
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert_eq!(s.chat_detail(&chat_id).await.unwrap()["paused"], true);
+        } else {
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{}",
+                common::read_json(response).await
+            );
+            let completed = fixture
+                .until(&run_id, |run| {
+                    run["status"] == RunStatus::Succeeded
+                        && run["chatExecution"]["messageId"] == next["id"]
+                })
+                .await;
+            assert_eq!(completed["workspace"], first["workspace"]);
+            assert_eq!(std::fs::read_to_string(&marker).unwrap(), "completed work");
+            let plans = controller.plans.lock().await;
+            let retried = plans.last().unwrap();
+            assert_eq!(retried["chat"]["sessionId"].is_null(), new_session);
+            assert_eq!(retried["chat"]["execution"]["recovery"], !new_session);
+            if new_session {
+                assert!(
+                    retried["chat"]["execution"]["context"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Keep the existing workspace")
+                );
+            }
+        }
+        fixture.stop(false).await;
+        server.abort();
+    }
 }
 
 #[tokio::test]

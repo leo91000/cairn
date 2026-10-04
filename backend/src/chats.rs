@@ -672,6 +672,10 @@ impl Service {
             }
             let id = text(&chat, "id").to_owned();
             if needs_attention(&chat, run.as_ref()) {
+                let chat_id = id.clone();
+                self.store
+                    .transaction(move |db| next_queued(db, &chat_id).map(|_| ()))
+                    .await?;
                 self.chat_pause(&id, true).await?;
                 continue;
             }
