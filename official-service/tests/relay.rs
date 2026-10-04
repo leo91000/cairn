@@ -5,6 +5,72 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 
 #[tokio::test]
+async fn owner_renames_a_relayed_installation_without_changing_its_identity() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let app = &relay.app;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let url = format!("{}/api/installations/{id}", app.url);
+    let rename = |cookie: &str, csrf: &str, name: &str| {
+        app.client
+            .patch(&url)
+            .header("origin", &app.url)
+            .header("cookie", cookie)
+            .header("x-csrf-token", csrf)
+            .json(&json!({ "name": name }))
+    };
+    let csrf = relay.session["csrf"].as_str().unwrap();
+    assert_eq!(
+        rename(&relay.cookie, "", "Forbidden")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let (foreign, session) = login(app, "foreign@example.test").await;
+    assert_eq!(
+        rename(&foreign, session["csrf"].as_str().unwrap(), "Foreign")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    for invalid in [" ".to_owned(), "x".repeat(101), "Invalid\nname".to_owned()] {
+        assert_eq!(
+            rename(&relay.cookie, csrf, &invalid)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let response = rename(&relay.cookie, csrf, "  Home installation  ")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let session: Value = app
+        .client
+        .get(format!("{}/api/account/session", app.url))
+        .header("cookie", &relay.cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(session["installations"][0]["name"], "Home installation");
+    assert_eq!(session["installations"][0]["id"], id);
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    relay.close().await;
+}
+
+#[tokio::test]
 async fn owner_claims_an_installation_with_a_single_use_code() {
     let app = Fixture::new().await;
     let (cookie, session) = login(&app, "owner@example.test").await;
