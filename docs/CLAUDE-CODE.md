@@ -49,6 +49,10 @@ unrelated to the current prompt. Léo correlates completion with consumed messag
 IDs and keeps the process alive while non-ambient background tasks and their
 follow-up responses are pending. A background build or CI wait therefore remains
 part of the running conversation. Ambient watchers do not keep a run open.
+When Claude finishes responding and only those tasks keep the run open, Léo emits
+`turn.waiting` with each task's description, and an empty list once they finish.
+The conversation then shows « Veille » instead of the working indicator, and the
+activity heartbeat reports `waiting_for_background` with the number of tasks.
 Resume ignores legacy completion receipts that never acknowledged the request,
 preventing an empty result from repeatedly restarting the same pending message.
 

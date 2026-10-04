@@ -270,6 +270,8 @@ else {
 
     if (prompt.includes('fixture:background')) {
       const ambient = prompt.includes('fixture:background-ambient')
+      // A slow build leaves time to observe the idle agent waiting for it.
+      const buildMs = prompt.includes('fixture:background-slow') ? 8000 : 500
       if (prompt.includes('fixture:background-ambient-flip'))
         out({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'build', task_type: 'local_bash', description: 'Wait for build' }] })
       out({
@@ -302,7 +304,7 @@ else {
             })
             complete('Build checked and task finished', false, { origin: { kind: 'task-notification' } })
           }, 200)
-        }, 500)
+        }, buildMs)
       }
 
       return

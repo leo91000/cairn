@@ -41,6 +41,8 @@ pub struct Activity {
     skipped_items: u64,
     items: HashMap<String, Item>,
     questions: HashMap<String, ()>,
+    /// Background tasks the idle agent waits for.
+    background_tasks: usize,
 }
 
 impl Activity {
@@ -64,6 +66,7 @@ impl Activity {
             skipped_items: 0,
             items: HashMap::new(),
             questions: HashMap::new(),
+            background_tasks: 0,
         }
     }
 
@@ -81,6 +84,7 @@ impl Activity {
                 | "turn.started"
                 | "turn.completed"
                 | "turn.failed"
+                | "turn.waiting"
                 | "error"
                 | "item.started"
                 | "item.updated"
@@ -92,6 +96,8 @@ impl Activity {
         }
         self.last_event = now;
         self.events += 1;
+        // Any other agent event means the agent is active again.
+        self.background_tasks = 0;
         match kind {
             "thread.started" if self.provider == Provider::Claude && self.turn == 0 => {
                 // Claude's adapter has no turn.started notification. Initialization
@@ -116,6 +122,10 @@ impl Activity {
                     self.items.clear();
                     self.questions.clear();
                 }
+            }
+            "turn.waiting" => {
+                self.background_tasks = event["tasks"].as_array().map_or(0, Vec::len);
+                self.record("background_wait", "none", 0, 0);
             }
             "item.started" | "item.updated" | "item.completed" => {
                 self.item(event, kind, now);
@@ -237,6 +247,9 @@ impl Activity {
         }) {
             return "tools_open";
         }
+        if self.background_tasks > 0 {
+            return "waiting_for_background";
+        }
         if self.turn_started.is_some() {
             return "waiting_for_agent_event";
         }
@@ -280,6 +293,7 @@ impl Activity {
             oldest_category = oldest.map_or("none", |item| item.category),
             oldest_item_ms = oldest.map(|item| ms(now - item.started)),
             open_questions = self.questions.len(),
+            background_tasks = self.background_tasks,
             skipped_items = self.skipped_items,
         );
     }
@@ -465,6 +479,33 @@ mod tests {
         assert_eq!(heartbeat["turn"], 1);
         activity.observe(&json!({"type":"turn.completed"}));
         assert_eq!(activity.state(), "between_turns");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn background_waits_are_reported_until_the_agent_continues() {
+        let logs = Logs::default();
+        let _subscriber = tracing::subscriber::set_default(logs.subscriber());
+        let mut activity = Activity::new(RUN, ATTEMPT, "adapter", Provider::Claude);
+        activity.observe(&json!({"type":"thread.started"}));
+        activity.observe(
+            &json!({"type":"turn.waiting","tasks":[{"id":"build","description":"Run tests"}]}),
+        );
+        activity.heartbeat("receive_agent_event");
+        let heartbeat = logs.events().pop().unwrap();
+        assert_eq!(heartbeat["state"], "waiting_for_background");
+        assert_eq!(heartbeat["background_tasks"], 1);
+
+        activity.observe(&json!({"type":"turn.waiting","tasks":[]}));
+        assert_eq!(activity.state(), "waiting_for_agent_event");
+
+        activity.observe(
+            &json!({"type":"turn.waiting","tasks":[{"id":"build","description":"Run tests"}]}),
+        );
+        activity.observe(
+            &json!({"type":"item.started","item":{"id":"check","type":"command_execution"}}),
+        );
+        assert_eq!(activity.state(), "tools_open");
+        assert_eq!(activity.background_tasks, 0);
     }
 
     #[tokio::test(start_paused = true)]

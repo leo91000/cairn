@@ -3,10 +3,12 @@ import type { RunEvent, RunListItem, Task } from '../shared/contracts'
 import { describe, expect, it } from 'vitest'
 import { activityEntries } from '../src/activity'
 import {
+  backgroundWait,
   filOf,
   identityColor,
   liveElapsed,
   shortAge,
+  waitingStep,
   workingStep,
 } from '../src/signal'
 
@@ -96,6 +98,17 @@ function user(id: number, at: number): RunEvent {
   }
 }
 
+function waiting(id: number, at: number, descriptions: string[]): RunEvent {
+  return {
+    id,
+    runId: 'chat',
+    createdAt: at,
+    type: 'turn.waiting',
+    text: '',
+    payload: { type: 'turn.waiting', tasks: descriptions.map((description, index) => ({ id: `task-${index}`, description })) },
+  }
+}
+
 describe('the Fil', () => {
   it('puts what needs the user first, then live work, then recent conversations', () => {
     const fil = filOf([
@@ -155,6 +168,37 @@ describe('the working indicator', () => {
     const done = activityEntries([user(1, 1), command(2, 2, 'pnpm lint')], true)
     expect(workingStep(done, 'Leo', null).detail).toMatch(/^Last step: /)
     expect(workingStep([], 'Leo', 3000)).toEqual({ title: 'Leo is working', detail: '', since: 3000 })
+  })
+
+  it('shows an idle agent waiting for its background tasks, timed from when it began waiting', () => {
+    const events = [user(1, 1000), command(2, 2000, 'pnpm test > log 2>&1'), waiting(3, 9000, ['Rebuild and run regression test'])]
+    const wait = backgroundWait(events)
+    expect(wait).toEqual({ tasks: ['Rebuild and run regression test'], since: 9000 })
+    expect(waitingStep(wait!)).toEqual({
+      title: 'Waiting for a background task',
+      detail: 'Rebuild and run regression test',
+      since: 9000,
+      waiting: ['Rebuild and run regression test'],
+    })
+    expect(waitingStep({ tasks: ['Build', ''], since: 1 }).title).toBe('Waiting for 2 background tasks')
+    expect(backgroundWait([waiting(1, 1, [' ', 'Watch CI'])])?.tasks).toEqual(['Background task', 'Watch CI'])
+  })
+
+  it('stops waiting once the tasks finish, the agent acts again or the user writes', () => {
+    const announced = [user(1, 1000), waiting(2, 2000, ['Build'])]
+    expect(backgroundWait([])).toBeNull()
+    expect(backgroundWait([...announced, waiting(3, 3000, [])])).toBeNull()
+    expect(backgroundWait([...announced, command(3, 3000, 'cat log', true)])).toBeNull()
+    expect(backgroundWait([...announced, user(3, 3000)])).toBeNull()
+    expect(backgroundWait([...announced, { ...user(3, 3000), type: 'diagnostic' }])).not.toBeNull()
+  })
+
+  it('labels background waits in the activity log', () => {
+    const [group] = activityEntries([waiting(1, 1, ['Build', 'Watch CI']), waiting(2, 2, [])])
+    expect(group?.kind === 'group' && group.artifacts.map(artifact => [artifact.title, artifact.subtitle])).toEqual([
+      ['Waiting for background tasks', 'Build · Watch CI'],
+      ['Background tasks finished', ''],
+    ])
   })
 
   it('shows elapsed time to the second and short ages', () => {

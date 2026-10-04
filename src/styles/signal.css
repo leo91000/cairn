@@ -90,6 +90,21 @@
   to { background-position: 0% 0; }
 }
 
+/* « Veille »: an idle agent waiting for its background tasks. A slow dashed ring and a calm dot,
+   never the breath, so a long wait reads as a process running rather than an agent thinking. */
+.veille-ring { position: relative; display: grid; place-items: center; }
+.veille-ring::before { content: ''; position: absolute; inset: 2px; border-radius: 999px; border: 1.5px dashed color-mix(in srgb, var(--color-subtle) 70%, transparent); animation: veille-turn 9s linear infinite; }
+.veille-core { position: relative; z-index: 1; background: var(--color-variant); color: var(--color-ink); }
+.veille-task { background: var(--color-inset); border: 1px solid var(--color-line); color: var(--color-ink); }
+.veille-dot { background: var(--color-accent); animation: veille-glow 2.4s ease-in-out infinite; }
+@keyframes veille-turn {
+  to { transform: rotate(360deg); }
+}
+@keyframes veille-glow {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
 /* A comet arc orbiting a working avatar; it overflows so rows stay aligned. */
 .avatar-orbit {
   position: absolute;
@@ -146,7 +161,7 @@
 .signal-veil-enter-from, .signal-veil-leave-to { opacity: 0; }
 
 @media (prefers-reduced-motion: reduce) {
-  .souffle-halo::after, .souffle-halo > .souffle-core, .working-wave > i, .live-dot, .avatar-orbit, .avatar-orbit::before { animation: none; }
+  .souffle-halo::after, .souffle-halo > .souffle-core, .veille-ring::before, .veille-dot, .working-wave > i, .live-dot, .avatar-orbit, .avatar-orbit::before { animation: none; }
   .souffle-sweep { color: var(--color-ink); background: none; }
   .avatar-orbit { background: none; }
   .avatar-orbit::before { opacity: 0.35; }
