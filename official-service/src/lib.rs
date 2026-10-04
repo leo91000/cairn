@@ -4,6 +4,7 @@ mod methods;
 mod oauth;
 mod passkeys;
 mod relay;
+mod sharing;
 
 pub use oauth::{OAuthProvider, OAuthProviders};
 pub use relay::Relay;
@@ -35,6 +36,13 @@ use subtle::ConstantTimeEq;
 pub trait EmailSender: Send + Sync {
     /// Deliver the code without retaining or logging it.
     async fn send_code(&self, email: &str, code: &str) -> Result<(), String>;
+
+    async fn send_invitation(
+        &self,
+        email: &str,
+        installation: &str,
+        url: &str,
+    ) -> Result<(), String>;
 }
 
 #[derive(Clone)]
@@ -151,6 +159,13 @@ pub async fn router_with_relay(
                 include_str!("../migrations/202610041950_device_review.sql").into(),
                 false,
             ),
+            Migration::new(
+                202610040053,
+                "installation sharing".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/202610040053_installation_sharing.sql").into(),
+                false,
+            ),
         ]),
         ..Migrator::DEFAULT
     };
@@ -190,6 +205,19 @@ pub async fn router_with_relay(
         .route(
             "/api/account/oauth/{provider}/callback",
             get(oauth::callback),
+        )
+        .route("/api/account/invitations", get(sharing::pending))
+        .route(
+            "/api/account/invitations/{invitation}/accept",
+            post(sharing::accept),
+        )
+        .route(
+            "/api/installations/{installation}/sharing",
+            get(sharing::list),
+        )
+        .route(
+            "/api/installations/{installation}/sharing/invitations",
+            post(sharing::invite),
         )
         .route("/api/account/methods", get(methods::list))
         .route("/api/account/methods/remove", post(methods::remove))

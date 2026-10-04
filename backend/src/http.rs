@@ -334,6 +334,7 @@ fn owner_operation(method: &str, path: &str) -> bool {
             ..,
         ] => true,
         ["agents"] | ["agents", _, "avatar"] => !read,
+        ["skills" | "projects", ..] => !read,
         ["agents", ..] => true,
         _ => false,
     }

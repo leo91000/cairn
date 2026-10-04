@@ -1,0 +1,195 @@
+use super::{
+    ApiError, EmailRequest, Service, consume_limit, installations, methods, normalized_email,
+};
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::{HeaderMap, Method, StatusCode},
+};
+use serde_json::{Value, json};
+use sqlx_core::transaction::Transaction;
+use sqlx_core::{query::query, query_as::query_as};
+use sqlx_postgres::{PgConnection, Postgres};
+
+async fn owner_transaction<'a>(
+    service: &'a Service,
+    installation: &str,
+    account: &str,
+) -> Result<Transaction<'a, Postgres>, ApiError> {
+    let mut transaction = service.pool.begin().await?;
+    let owner: Option<(String,)> =
+        query_as("SELECT id FROM installations WHERE id = $1 AND owner_id = $2 FOR UPDATE")
+            .bind(installation)
+            .bind(account)
+            .fetch_optional(&mut *transaction)
+            .await?;
+    if owner.is_none() {
+        return Err(ApiError(StatusCode::NOT_FOUND, "Installation not found"));
+    }
+
+    Ok(transaction)
+}
+
+async fn invitation_list(
+    connection: &mut PgConnection,
+    installation: &str,
+) -> Result<Vec<Value>, ApiError> {
+    let rows: Vec<(String, String)> = query_as("SELECT id, email FROM installation_invitations WHERE installation_id = $1 AND expires_at > now() ORDER BY created_at, id")
+        .bind(installation).fetch_all(connection).await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, email)| json!({ "id": id, "email": email }))
+        .collect())
+}
+
+pub(super) async fn list(
+    State(service): State<Service>,
+    Path(installation): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let account = installations::account(&service, &headers, &Method::GET).await?;
+    let mut transaction = owner_transaction(&service, &installation, &account).await?;
+    let rows: Vec<(String, String)> = query_as("SELECT a.id, a.email FROM installation_members m JOIN leo_accounts a ON a.id = m.account_id WHERE m.installation_id = $1 ORDER BY m.joined_at, a.id")
+        .bind(&installation).fetch_all(&mut *transaction).await?;
+    let members: Vec<Value> = rows
+        .into_iter()
+        .map(|(id, email)| json!({ "id": id, "email": email }))
+        .collect();
+    let invitations = invitation_list(&mut transaction, &installation).await?;
+    Ok(Json(
+        json!({ "members": members, "invitations": invitations }),
+    ))
+}
+
+pub(super) async fn invite(
+    State(service): State<Service>,
+    Path(installation): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<EmailRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let account = installations::account(&service, &headers, &Method::POST).await?;
+    consume_limit(&service.pool, &format!("invitation:{account}"), 10).await?;
+    let email = normalized_email(&input.email)?;
+    let mut transaction = owner_transaction(&service, &installation, &account).await?;
+    let existing: Option<(String,)> = query_as("SELECT a.id FROM leo_accounts a WHERE a.email = $1 AND (a.id = $2 OR EXISTS (SELECT 1 FROM installation_members WHERE installation_id = $3 AND account_id = a.id))")
+        .bind(&email).bind(&account).bind(&installation).fetch_optional(&mut *transaction).await?;
+    if existing.is_some() {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "This account already has access",
+        ));
+    }
+
+    query(
+        "DELETE FROM installation_invitations WHERE installation_id = $1 AND expires_at <= now()",
+    )
+    .bind(&installation)
+    .execute(&mut *transaction)
+    .await?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let inserted = query("INSERT INTO installation_invitations (id, installation_id, email) VALUES ($1, $2, $3) ON CONFLICT (installation_id, email) DO NOTHING")
+        .bind(&id).bind(&installation).bind(&email).execute(&mut *transaction).await?;
+    if inserted.rows_affected() == 0 {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "An invitation is already pending",
+        ));
+    }
+    let (name,): (String,) = query_as("SELECT name FROM installations WHERE id = $1")
+        .bind(&installation)
+        .fetch_one(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+
+    let url = format!("{}/?invitations=1", service.origin);
+    if service
+        .sender
+        .send_invitation(&email, &name, &url)
+        .await
+        .is_err()
+    {
+        query("DELETE FROM installation_invitations WHERE id = $1")
+            .bind(&id)
+            .execute(&service.pool)
+            .await?;
+        return Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Invitation email delivery unavailable. Please try again.",
+        ));
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "id": id, "email": email })),
+    ))
+}
+
+pub(super) async fn pending(
+    State(service): State<Service>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Value>>, ApiError> {
+    let (_, email) = methods::authenticated(&service, &headers, false).await?;
+    let rows: Vec<(String, String, String, String)> = query_as("SELECT v.id, i.id, i.name, a.email FROM installation_invitations v JOIN installations i ON i.id = v.installation_id JOIN leo_accounts a ON a.id = i.owner_id WHERE v.email = $1 AND v.expires_at > now() ORDER BY v.created_at, v.id")
+        .bind(email).fetch_all(&service.pool).await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|(id, installation_id, name, owner)| {
+                json!({
+                    "id": id,
+                    "installationId": installation_id,
+                    "installationName": name,
+                    "ownerEmail": owner,
+                })
+            })
+            .collect(),
+    ))
+}
+
+pub(super) async fn accept(
+    State(service): State<Service>,
+    Path(invitation): Path<String>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let (account, email) = methods::authenticated(&service, &headers, true).await?;
+    consume_limit(&service.pool, &format!("sharing:{account}"), 30).await?;
+    let mut transaction = service.pool.begin().await?;
+    let target: Option<(String,)> = query_as(
+        "SELECT installation_id FROM installation_invitations WHERE id = $1 AND email = $2",
+    )
+    .bind(&invitation)
+    .bind(&email)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let Some((installation,)) = target else {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "Invitation not found or expired",
+        ));
+    };
+    // Serialize acceptance with cancellation, removal and departure on this installation.
+    let exists: Option<(String,)> =
+        query_as("SELECT id FROM installations WHERE id = $1 FOR UPDATE")
+            .bind(&installation)
+            .fetch_optional(&mut *transaction)
+            .await?;
+    if exists.is_none() {
+        return Err(ApiError(StatusCode::NOT_FOUND, "Installation not found"));
+    }
+    let consumed = query(
+        "DELETE FROM installation_invitations WHERE id = $1 AND email = $2 AND expires_at > now()",
+    )
+    .bind(&invitation)
+    .bind(email)
+    .execute(&mut *transaction)
+    .await?;
+    if consumed.rows_affected() == 0 {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "Invitation not found or expired",
+        ));
+    }
+    query("INSERT INTO installation_members (installation_id, account_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+        .bind(installation).bind(account).execute(&mut *transaction).await?;
+    transaction.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}

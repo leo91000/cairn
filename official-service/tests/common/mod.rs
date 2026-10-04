@@ -14,12 +14,28 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 #[derive(Default)]
-pub struct Mailbox(pub Mutex<Vec<(String, String)>>);
+pub struct Mailbox(
+    pub Mutex<Vec<(String, String)>>,
+    pub Mutex<Vec<(String, String, String)>>,
+);
 
 #[async_trait]
 impl EmailSender for Mailbox {
     async fn send_code(&self, email: &str, code: &str) -> Result<(), String> {
         self.0.lock().unwrap().push((email.into(), code.into()));
+        Ok(())
+    }
+
+    async fn send_invitation(
+        &self,
+        email: &str,
+        installation: &str,
+        url: &str,
+    ) -> Result<(), String> {
+        self.1
+            .lock()
+            .unwrap()
+            .push((email.into(), installation.into(), url.into()));
         Ok(())
     }
 }

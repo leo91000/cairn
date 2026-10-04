@@ -11,7 +11,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use leo_relay_protocol::{
     ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_STREAM_CHUNK,
-    REQUEST_TIMEOUT, Role,
+    REQUEST_TIMEOUT,
 };
 use sqlx_core::query_as::query_as;
 use std::{
@@ -409,15 +409,7 @@ pub(super) async fn forward(
             .get(&account)
             .unwrap_or(&0)
     });
-    let owner: Option<(String,)> =
-        query_as("SELECT owner_id FROM installations WHERE id = $1 AND owner_id = $2")
-            .bind(&installation)
-            .bind(&account)
-            .fetch_optional(&service.pool)
-            .await?;
-    if owner.is_none() {
-        return Err(ApiError(StatusCode::NOT_FOUND, "Installation not found"));
-    }
+    let role = installations::role(&service, &installation, &account).await?;
 
     // Preserve the original encoding and query; Path decoding is only for routing.
     let prefix = format!("/api/installations/{installation}");
@@ -473,7 +465,7 @@ pub(super) async fn forward(
     let api_request = ApiRequest {
         id: uuid::Uuid::new_v4().to_string(),
         account_id: account.clone(),
-        role: Role::Owner,
+        role,
         method: request.method().to_string(),
         path: target.to_owned(),
         headers,

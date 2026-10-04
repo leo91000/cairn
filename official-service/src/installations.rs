@@ -26,18 +26,18 @@ pub(super) async fn list<'e>(
     account: &str,
     relay: &super::relay::Relay,
 ) -> Result<Vec<Value>, ApiError> {
-    let rows: Vec<(String, String)> =
-        query_as("SELECT id, name FROM installations WHERE owner_id = $1 ORDER BY created_at, id")
+    let rows: Vec<(String, String, bool)> =
+        query_as("SELECT i.id, i.name, i.owner_id = $1 FROM installations i LEFT JOIN installation_members m ON m.installation_id = i.id AND m.account_id = $1 WHERE i.owner_id = $1 OR m.account_id = $1 ORDER BY i.created_at, i.id")
             .bind(account)
             .fetch_all(executor)
             .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, name)| {
+        .map(|(id, name, owner)| {
             json!({
                 "id": id,
                 "name": name,
-                "role": "owner",
+                "role": if owner { "owner" } else { "member" },
                 "online": relay.online(&id),
             })
         })
@@ -417,4 +417,18 @@ pub(super) async fn poll_device(
             "token": token,
         })),
     ))
+}
+
+pub(super) async fn role(
+    service: &Service,
+    installation: &str,
+    account: &str,
+) -> Result<leo_relay_protocol::Role, ApiError> {
+    let access: Option<(bool,)> = query_as("SELECT i.owner_id = $2 FROM installations i LEFT JOIN installation_members m ON m.installation_id = i.id AND m.account_id = $2 WHERE i.id = $1 AND (i.owner_id = $2 OR m.account_id = $2)")
+        .bind(installation).bind(account).fetch_optional(&service.pool).await?;
+    match access {
+        Some((true,)) => Ok(leo_relay_protocol::Role::Owner),
+        Some((false,)) => Ok(leo_relay_protocol::Role::Member),
+        None => Err(ApiError(StatusCode::NOT_FOUND, "Installation not found")),
+    }
 }
