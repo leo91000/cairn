@@ -33,5 +33,15 @@ export default defineConfig({
       '/oauth': 'http://127.0.0.1:4310',
     },
   },
-  build: { chunkSizeWarningLimit: 400, rolldownOptions: { input: { installation: 'index.html', official: 'official.html' } } },
+  build: {
+    chunkSizeWarningLimit: 400,
+    rolldownOptions: {
+      input: { installation: 'index.html', official: 'official.html' },
+      output: {
+        // Both entries use the same workspace. Keep its initial dependencies
+        // together so each document loads one shared bundle; views stay lazy.
+        codeSplitting: { groups: [{ name: 'workspace', tags: ['$initial'], minShareCount: 2 }] },
+      },
+    },
+  },
 })
