@@ -41,6 +41,7 @@ const editingName = ref(false)
 const installationName = ref('')
 const installation = ref<{ id: string, name: string } | null>(null)
 const installationMenu = ref<HTMLDetailsElement>()
+const installationReturnKey = 'leo-installation-return'
 
 watch(session, (value) => {
   state.csrf = value?.csrf || ''
@@ -144,6 +145,7 @@ async function submit() {
 }
 
 async function signOut() {
+  const leavingInstallation = !!state.installationId
   busy.value = true
   error.value = ''
   try {
@@ -158,7 +160,8 @@ async function signOut() {
     email.value = ''
     code.value = ''
     challenge.value = ''
-    window.location.assign('/')
+    if (leavingInstallation)
+      window.location.assign('/')
   }
   catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Unable to sign out. Please try again.'
@@ -263,6 +266,13 @@ async function oauth(provider: 'google' | 'github') {
   error.value = ''
   try {
     const start = await accountRequest(`oauth/${provider}/start`, {})
+    try {
+      sessionStorage.removeItem(installationReturnKey)
+      if (state.installationId)
+        sessionStorage.setItem(installationReturnKey, `${window.location.pathname}${window.location.search}${window.location.hash}`)
+    }
+    catch {}
+
     window.location.assign(start.url)
   }
   catch (cause) {
@@ -349,8 +359,26 @@ function changeEmail() {
 }
 
 onMounted(async () => {
-  await loadSession()
   const url = new URL(window.location.href)
+  // OAuth callbacks return to the official root. Restore this tab's explicit
+  // installation URL before the session can choose a remembered installation.
+  try {
+    const destination = sessionStorage.getItem(installationReturnKey)
+    if (url.pathname === '/' && destination) {
+      sessionStorage.removeItem(installationReturnKey)
+      if (/^\/installations\/[\w-]+\//.test(destination)) {
+        const target = new URL(destination, url.origin)
+        const signInError = url.searchParams.get('sign_in_error')
+        if (signInError)
+          target.searchParams.set('sign_in_error', signInError)
+        redirect(target.href)
+        return
+      }
+    }
+  }
+  catch {}
+
+  await loadSession()
   if (url.searchParams.get('sign_in_error') === 'oauth') {
     error.value = 'Sign-in was cancelled or could not be verified. Try another method.'
     url.searchParams.delete('sign_in_error')

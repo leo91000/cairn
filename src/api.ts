@@ -8,6 +8,11 @@ import type { McpView } from '../shared/mcp'
 import { reactive, watch } from 'vue'
 import { clearHistoryCache } from './history-cache'
 
+// Resolve the official context before any shared view reads its local cache.
+// The native entry keeps its existing unprefixed transport and browser state.
+const officialEntry = typeof document !== 'undefined' && document.getElementById('app')?.hasAttribute('data-official')
+const installationId = officialEntry ? /^\/installations\/([\w-]+)(?:\/|$)/.exec(window.location.pathname)?.[1] || '' : ''
+
 export const state = reactive({
   ready: false,
   authenticated: false,
@@ -15,7 +20,7 @@ export const state = reactive({
   redirecting: false,
   setupRequired: false,
   csrf: '',
-  installationId: '',
+  installationId,
   agents: [] as Agent[],
   projects: [] as Project[],
   tasks: [] as Task[],

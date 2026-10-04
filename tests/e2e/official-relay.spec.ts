@@ -27,7 +27,7 @@ test('claims an installation and sends after relay restarts and official session
   const mailPort = (mail.address() as { port: number }).port
   const root = await mkdtemp(join(tmpdir(), 'leo-official-relay-'))
   await Promise.all([mkdir(join(root, 'data')), mkdir(join(root, 'home'))])
-  const url = 'http://localhost:4399'
+  const url = 'http://localhost:4395'
   const children: ChildProcess[] = []
   let hostilePeer: WebSocket | undefined
   // As in the native browser fixtures, open the seeding module before the
@@ -58,7 +58,7 @@ test('claims an installation and sends after relay restarts and official session
     return start('target/debug/leo-official', {
       LEO_OFFICIAL_DATABASE_URL: process.env.LEO_OFFICIAL_TEST_DATABASE_URL,
       LEO_OFFICIAL_ORIGIN: url,
-      LEO_OFFICIAL_LISTEN: '127.0.0.1:4399',
+      LEO_OFFICIAL_LISTEN: '127.0.0.1:4395',
       LEO_OFFICIAL_EMAIL_ENDPOINT: `http://127.0.0.1:${mailPort}/emails`,
       LEO_OFFICIAL_EMAIL_KEY: 'fixture-only',
       LEO_OFFICIAL_EMAIL_FROM: 'leo@example.test',
