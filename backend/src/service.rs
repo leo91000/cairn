@@ -604,6 +604,48 @@ pub fn policy(agent: &Value) -> Value {
     value
 }
 
+/// Whether the `current` agent still allows everything `granted` allowed. Work started
+/// under `granted` continues when access is unchanged or wider, but never with access
+/// the owner has since removed. Settings older versions saved (such as `maxResources`)
+/// do not count, and node grants are excluded: placement follows the current ones.
+pub fn covers(current: &Value, granted: &Value) -> bool {
+    let current = policy(current);
+    let granted = policy(granted);
+
+    let scopes = ["projects", "skills", "mcps"]
+        .iter()
+        .all(|key| within(&granted[*key], &current[*key]));
+    // A server without a tool selection allows all of its enabled tools.
+    let tools = current["mcpTools"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .all(|(server, selection)| within(&granted["mcpTools"][server], selection));
+    let github = current["github"] == true || granted["github"] != true;
+    let sandbox = sandbox_rank(&current["sandbox"]) >= sandbox_rank(&granted["sandbox"]);
+    scopes && tools && github && sandbox
+}
+
+/// Whether a granted scope stays within the current one; `null` means everything.
+fn within(granted: &Value, current: &Value) -> bool {
+    if current.is_null() {
+        return true;
+    }
+    let (Some(granted), Some(current)) = (granted.as_array(), current.as_array()) else {
+        return false;
+    };
+    granted.iter().all(|item| current.contains(item))
+}
+
+/// Sandboxes from the most restrictive to the most permissive.
+fn sandbox_rank(sandbox: &Value) -> u8 {
+    match sandbox.as_str() {
+        Some("yolo") => 2,
+        Some("workspace-write") => 1,
+        _ => 0,
+    }
+}
+
 pub fn allowed(scope: &Value, id: &str) -> bool {
     scope.is_null() || scope.as_array().is_some_and(|a| a.iter().any(|v| v == id))
 }

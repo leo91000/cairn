@@ -16,9 +16,13 @@ restrictions are configured on the agent; selecting a task project does not revo
 access to its other authorized projects. A task needs no project;
 it starts in a scratch workspace and opens repositories only when needed through
 `open_project`. Selecting a project prepares only that repository at startup. Runs snapshot the effective resources when
-queued. Changing an agent's access prevents its queued runs from executing under
-an outdated policy; enqueue again to use the new policy. Running work keeps its
-snapshot: cancel it before changing permissions when immediate revocation matters.
+queued. Reducing an agent's access (fewer projects, skills, MCP servers or tools,
+no GitHub, or a stricter sandbox) prevents its queued runs, resumptions and chat
+follow-ups from executing under the old grants, and revokes their project and MCP
+access; enqueue again or start a new chat to use the new policy. Unchanged or wider
+access, other agent settings, settings older versions saved and node grants do not
+interrupt work: it continues with the grants it was queued with. Running work keeps
+its snapshot: cancel it before changing permissions when immediate revocation matters.
 
 Existing tasks retain their project, explicit skills, schedules, and history.
 Existing agents retain unrestricted YOLO behavior. Database schema 3 is required;

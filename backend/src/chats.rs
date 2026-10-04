@@ -467,9 +467,10 @@ fn continue_run(
     mut execution: ChatExecution,
 ) -> Result<()> {
     let agent = &snapshot["snapshot"]["agent"];
-    if agent["access"] != run["snapshot"]["agent"]["access"] {
+    // The workspace keeps what earlier turns could reach, so reduced access needs a new chat.
+    if !crate::service::covers(agent, &run["snapshot"]["agent"]) {
         return Err(Error::conflict(
-            "Agent access changed. Start a new chat with the updated permissions.",
+            "Agent access was reduced. Start a new chat with the updated permissions.",
         ));
     }
     let run_id = text(run, "id");
