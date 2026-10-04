@@ -181,6 +181,9 @@ async fn run() -> Result<(), String> {
     let app = router_with_relay(pool, Arc::new(sender), origin, oauth, relay.clone())
         .await
         .map_err(|_| "Official database migration failed")?
+        .merge(leo_official_service::installer::release_router(
+            env::var("LEO_INSTALLATION_IMAGE").ok(),
+        )?)
         .route("/health", get(|| async { StatusCode::OK }))
         .route("/api/{*path}", any(|| async { StatusCode::NOT_FOUND }))
         .route_service("/", ServeFile::new(web.join("official.html")))

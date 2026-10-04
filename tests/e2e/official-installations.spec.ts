@@ -70,6 +70,8 @@ test('selects installations, remembers the last one and honours deep workspace U
     await expect(page.getByRole('heading', { name: 'No installations yet' })).toBeVisible()
     await page.getByRole('button', { name: 'Add an installation', exact: true }).click()
     const code = await page.getByLabel('Installation claim code').inputValue()
+    await expect(page.getByLabel('Installation command', { exact: true })).toHaveValue(`curl -fsSL '${url}/install.sh' | sudo bash -s -- --claim-code '${code}'`)
+    expect((await page.request.get(`${url}/install.sh`)).status()).toBe(200)
     start('target/debug/leo', {
       DATA_DIR: join(root, 'data'),
       AGENT_HOME: join(root, 'home'),
@@ -101,6 +103,7 @@ test('selects installations, remembers the last one and honours deep workspace U
     await page.getByText('Installation options', { exact: true }).click()
     await page.getByRole('button', { name: 'Add an installation', exact: true }).click()
     const secondCode = await page.getByLabel('Installation claim code').inputValue()
+    await expect(page.getByLabel('Installation command', { exact: true })).toHaveValue(`curl -fsSL '${url}/install.sh' | sudo bash -s -- --claim-code '${secondCode}'`)
     await Promise.all([mkdir(join(root, 'office-data')), mkdir(join(root, 'office-home'))])
     start('target/debug/leo', {
       DATA_DIR: join(root, 'office-data'),
@@ -223,6 +226,9 @@ test('selects installations, remembers the last one and honours deep workspace U
     await page.getByRole('link', { name: 'Settings', exact: true }).click()
     await expect(page).toHaveURL(/\/installations\/[^/]+\/settings$/)
     await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Conversation storage', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Configure external S3', exact: true }).click()
+    await expect(page.getByLabel('S3 endpoint', { exact: true })).toBeVisible()
     for (const width of [1440, 390, 320]) {
       await page.setViewportSize({ width, height: 900 })
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)

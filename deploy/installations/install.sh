@@ -5,7 +5,7 @@ fail() { echo "Leo installer: $*" >&2; exit 1; }
 [[ $(id -u) == 0 ]] || fail 'Run the command with sudo bash.'
 [[ $(uname -s) == Linux ]] || fail 'Linux is required.'
 [[ $(uname -m) == x86_64 ]] || fail 'An x86-64 machine is required.'
-for command in docker python3 curl systemctl; do
+for command in docker python3 curl; do
   command -v "$command" >/dev/null || fail "Install $command before installing Leo."
 done
 [[ -c /dev/kvm ]] || fail 'KVM is missing. Enable hardware virtualization and load the kvm module.'
@@ -13,7 +13,6 @@ done
 [[ -c /dev/fuse ]] || fail 'FUSE is missing. Install fuse3 and load the fuse module.'
 docker info >/dev/null 2>&1 || fail 'Docker is unavailable. Start the Docker daemon.'
 docker compose version >/dev/null 2>&1 || fail 'Install the Docker Compose plugin.'
-systemctl show-environment >/dev/null 2>&1 || fail 'A running systemd system is required.'
 LEO_INSTALLATION_ROOT=${LEO_INSTALLATION_ROOT:-/var/lib/leo-installation}
 LEO_DISK_PATH=$LEO_INSTALLATION_ROOT
 while [[ ! -d "$LEO_DISK_PATH" ]]; do LEO_DISK_PATH=$(dirname "$LEO_DISK_PATH"); done

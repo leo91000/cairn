@@ -12,6 +12,40 @@ REPO = Path(__file__).resolve().parents[1]
 
 
 class Installer(unittest.TestCase):
+    def test_failed_download_does_not_leave_a_claim_code_on_disk(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binaries = root / 'bin'
+            binaries.mkdir()
+            docker = binaries / 'docker'
+            docker.write_text('#!/bin/sh\nexit 1\n')
+            docker.chmod(0o755)
+            installation = root / 'installation'
+            installation.mkdir()
+            (installation / 'installation.json').write_text(json.dumps({
+                'origin': 'https://leo.example.test',
+                'image': 'ghcr.io/leo91000/leo-agent-manager@sha256:' + '1' * 64,
+            }))
+            result = subprocess.run(
+                ['python3', str(REPO / 'deploy/installations/host.py'),
+                 'https://leo.example.test', '--claim-code', 'a' * 64],
+                env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
+                     'LEO_INSTALLATION_ROOT': str(installation)}, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((installation / 'claim.env').exists())
+            self.assertNotIn('a' * 64, result.stdout + result.stderr)
+
+    def test_invalid_claim_code_has_an_actionable_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                ['python3', str(REPO / 'deploy/installations/host.py'),
+                 'https://leo.example.test', '--claim-code', 'invalid'],
+                env={**os.environ, 'LEO_INSTALLATION_ROOT': directory},
+                capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('Copy a new command', result.stderr)
+            self.assertNotIn('invalid', result.stderr)
+
     def test_non_root_explains_sudo_before_writing_data(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

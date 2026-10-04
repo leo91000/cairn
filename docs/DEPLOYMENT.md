@@ -1,5 +1,8 @@
 # Deployment and recovery
 
+For the official-service installation flow (one machine, integrated S3, no
+incoming ports), see [One-command installation](INSTALLATION.md).
+
 ## Required migration to the official service
 
 This release removes the installation's browser login and application hosting.
@@ -44,9 +47,8 @@ The restart uses the usual execution recovery; do it at a suitable maintenance
 window. No automatic migration of browser accounts, grants or installations is
 provided. Alternatively, reinstall with fresh volumes and claim the new
 installation. **Discarding old volumes discards their data**: retain backups
-until the replacement has been verified. The one-command installer and bundled
-S3 setup belong to #51; this manual Compose procedure still needs existing S3
-configuration.
+until the replacement has been verified. The one-command installer includes local S3 setup; this manual Compose
+procedure still needs existing S3 configuration.
 
 After migration, use the official site. Verify the installation appears, a
 conversation can be read and modified, and access returns after a manager

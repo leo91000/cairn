@@ -274,7 +274,11 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
     let attempt = text(&checkpoint, "runnerId");
     crate::validation::uuid(attempt)?;
     let settings = settings(s).await?;
-    let storage = Storage::configured(s)?;
+    let storage = if in_s3(&run["backup"]) {
+        storage_for(s, &run["backup"])?
+    } else {
+        Storage::configured(s)?
+    };
     collect_unused(s, run_id).await?;
 
     timing.next("snapshot");
@@ -1574,7 +1578,7 @@ pub(crate) fn storage_for(s: &Service, backup: &Value) -> Result<Storage> {
     if !in_s3(backup) {
         return Err(Error::unavailable("Local recovery block is missing."));
     }
-    let mut storage = Storage::configured(s)?;
+    let mut storage = Storage::for_location(s, backup)?;
     if storage.endpoint.as_deref() != backup["endpoint"].as_str() {
         return Err(Error::conflict(
             "This recovery point belongs to a different S3 endpoint. Restore its \

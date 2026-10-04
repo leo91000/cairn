@@ -1,0 +1,271 @@
+"""Public shell installer in a disposable Linux container, without KVM.
+
+Only the external Docker process is replaced. Claiming, relay, storage settings
+and S3 reads/writes use real binaries, Postgres and Garage.
+"""
+import http.server
+import http.client
+import json
+import os
+from pathlib import Path
+import signal
+import ssl
+import stat
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+
+ROOT = Path('/fixture/installation')
+ORIGIN = 'http://127.0.0.1:48151'
+IMAGE = 'ghcr.io/leo91000/leo-agent-manager@sha256:' + '1' * 64
+MAIL = []
+
+
+def request(route, body=None, cookie='', csrf='', method=None):
+    headers = {'Content-Type': 'application/json', 'Origin': ORIGIN,
+               'Cookie': cookie, 'X-CSRF-Token': csrf}
+    req = urllib.request.Request(ORIGIN + route, headers=headers, method=method,
+                                 data=None if body is None else json.dumps(body).encode())
+    with urllib.request.urlopen(req, timeout=10) as response:
+        data = response.read()
+        return json.loads(data) if data else None, response.headers
+
+
+def wait_for(check):
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        try:
+            if check():
+                return
+        except (OSError, urllib.error.HTTPError, KeyError):
+            pass
+        time.sleep(0.2)
+    raise AssertionError('The real official service or installation did not become ready')
+
+
+def run_installer(code=''):
+    script = Path('deploy/installations/install.sh').read_text().replace(
+        '__LEO_OFFICIAL_ORIGIN__', repr(ORIGIN))
+    result = subprocess.run(['bash', '-s', '--', '--claim-code', code], input=script,
+                            capture_output=True, text=True, timeout=240, env={
+                                **os.environ, 'LEO_INSTALLATION_ROOT': str(ROOT),
+                                'PATH': '/fixture/bin:' + os.environ['PATH'],
+                            })
+    assert code == '' or code not in result.stdout + result.stderr, 'Claim leaked in output'
+    return result
+
+
+def main(mode):
+    # Devices are inert character placeholders: no ioctl or VM boot is performed.
+    Path('/dev/net').mkdir(exist_ok=True)
+    for device in ('/dev/kvm', '/dev/net/tun', '/dev/fuse'):
+        if not Path(device).exists():
+            os.mknod(device, stat.S_IFCHR | 0o600, os.makedev(1, 3))
+    binaries = Path('/fixture/bin')
+    binaries.mkdir(exist_ok=True)
+    docker = binaries / 'docker'
+    docker.write_text('''#!/usr/bin/env python3
+import json, os, pathlib, signal, subprocess, sys, time, urllib.request
+root = pathlib.Path('/fixture/installation')
+args = sys.argv[1:]
+if 'up' in args and os.environ.get('INSTALLER_VERIFY'):
+    pid_file = root / 'manager.pid'
+    if pid_file.exists():
+        os.kill(int(pid_file.read_text()), signal.SIGTERM)
+        time.sleep(1)
+    code = ''
+    claim = root / 'claim.env'
+    if claim.exists():
+        code = dict(line.split('=', 1) for line in claim.read_text().splitlines()).get('LEO_INSTALLATION_CLAIM_CODE', '')
+    env = {**os.environ, 'DATA_DIR': str(root / 'data'), 'AGENT_HOME': str(root / 'home'),
+           'WORKSPACE_ROOTS': str(root / 'workspaces'), 'WORKER_ENABLED': 'false', 'NODE_ENV': 'test',
+           'HOST': '127.0.0.1', 'PORT': '48152', 'LEO_OFFICIAL_ORIGIN': 'http://127.0.0.1:48151',
+           'LEO_INSTALLATION_CLAIM_CODE': code}
+    # Synthetic child credentials only; isolate from any controller agent broker.
+    for name in list(env):
+        if name.startswith(('LEO_AUTH_', 'CODEX_', 'OPENAI_', 'ANTHROPIC_')):
+            env.pop(name)
+    log = open(root / 'manager.log', 'ab')
+    process = subprocess.Popen(['/repo/target/debug/leo', 'serve'], env=env, stdout=log, stderr=log, start_new_session=True)
+    pid_file.write_text(str(process.pid))
+if 'exec' in args and os.environ.get('INSTALLER_VERIFY'):
+    try:
+        urllib.request.urlopen('http://127.0.0.1:48152/health', timeout=2)
+    except Exception:
+        sys.exit(1)
+''')
+    docker.chmod(0o755)
+    for name, contents in {
+        'uname': '#!/bin/sh\nif [ "$1" = -s ]; then echo "${INSTALLER_OS:-Linux}"; else echo "${INSTALLER_ARCH:-x86_64}"; fi\n',
+        'df': '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted"\necho "fixture 67108864 0 ${INSTALLER_FREE_KB:-33554432} 0% /fixture"\n',
+    }.items():
+        binary = binaries / name
+        binary.write_text(contents)
+        binary.chmod(0o755)
+
+    class Official(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            if self.path == '/install/release':
+                self.wfile.write(json.dumps({'image': IMAGE}).encode())
+            else:
+                self.wfile.write(Path('deploy/installations/host.py').read_bytes())
+
+        def log_message(self, *_):
+            pass
+
+    class Mailbox(Official):
+        def do_POST(self):
+            MAIL.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{}')
+
+    if mode == 'prepare':
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 48151), Official)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            for variable, value, message in [('INSTALLER_OS', 'Darwin', 'Linux'),
+                                              ('INSTALLER_ARCH', 'aarch64', 'x86-64'),
+                                              ('INSTALLER_FREE_KB', '1024', '16 GiB')]:
+                os.environ[variable] = value
+                result = run_installer()
+                assert result.returncode != 0 and message in result.stderr, result.stderr
+                del os.environ[variable]
+            for device, message in [('/dev/kvm', 'KVM'), ('/dev/net/tun', 'TUN'), ('/dev/fuse', 'FUSE')]:
+                Path(device).unlink()
+                result = run_installer()
+                assert result.returncode != 0 and message in result.stderr, result.stderr
+                os.mknod(device, stat.S_IFCHR | 0o600, os.makedev(1, 3))
+            result = run_installer()
+            assert result.returncode == 0, result.stderr
+            config = json.loads((ROOT / 'compose.json').read_text())
+            assert not any('ports' in service for service in config['services'].values())
+            assert not (ROOT / 'claim.env').exists()
+            print('Container: KVM/TUN/FUSE diagnostics, automatic private Garage configuration passed')
+        finally:
+            server.shutdown()
+        return
+
+    mailbox = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Mailbox)
+    threading.Thread(target=mailbox.serve_forever, daemon=True).start()
+    subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+                    '-keyout', '/fixture/external.key', '-out', '/usr/local/share/ca-certificates/leo-fixture.crt',
+                    '-days', '1', '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost'],
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(['update-ca-certificates'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    env = {**os.environ,
+           'LEO_OFFICIAL_DATABASE_URL': os.environ['LEO_OFFICIAL_TEST_DATABASE_URL'],
+           'LEO_OFFICIAL_ORIGIN': ORIGIN, 'LEO_OFFICIAL_LISTEN': '127.0.0.1:48151',
+           'LEO_OFFICIAL_WEB_DIR': '/repo/dist', 'LEO_INSTALLATION_IMAGE': IMAGE,
+           'LEO_OFFICIAL_EMAIL_FROM': 'fixture@example.test', 'LEO_OFFICIAL_EMAIL_KEY': 'fixture-only',
+           'LEO_OFFICIAL_EMAIL_ENDPOINT': f'http://127.0.0.1:{mailbox.server_port}/emails'}
+    os.environ['INSTALLER_VERIFY'] = '1'
+    official = subprocess.Popen(['/repo/target/debug/leo-official'], env=env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    external = None
+    proxy = None
+    try:
+        wait_for(lambda: request('/api/account/options')[0] is not None)
+        challenge, _ = request('/api/account/email-code', {'email': 'installer@example.test'})
+        import re
+        code = re.search(r'\b\d{8}\b', MAIL[-1]['text'])[0]
+        session, headers = request('/api/account/verify', {'challenge': challenge['challenge'], 'code': code})
+        cookie = headers['Set-Cookie'].split(';')[0]
+        csrf = session['csrf']
+        claim, _ = request('/api/installations/claim-code', {}, cookie, csrf)
+        result = run_installer(claim['code'])
+        assert result.returncode == 0 and 'installed and claimed' in result.stdout, result.stderr
+        session, _ = request('/api/account/session', cookie=cookie)
+        assert len(session['installations']) == 1
+        installation = session['installations'][0]['id']
+        base = f'/api/installations/{installation}/api'
+        wait_for(lambda: request(base + '/chats', cookie=cookie)[0] == [])
+        storage, _ = request(base + '/settings/storage', cookie=cookie)
+        assert storage['configured'] and storage['integrated']
+        assert 'secretAccessKey' not in storage and 'accessKeyId' not in storage
+        # This uses the real SDK and integrated credentials, including write/read/delete.
+        checked, _ = request(base + '/settings/storage/check', {}, cookie, csrf)
+        assert checked == {'ok': True}
+        # External providers are replaced at their S3 HTTP seam, behind valid TLS.
+        from moto.server import ThreadedMotoServer
+        import boto3
+        external = ThreadedMotoServer(ip_address='127.0.0.1', port=0, verbose=False)
+        external.start()
+        host, port = external.get_host_and_port()
+        external_client = boto3.client('s3', endpoint_url=f'http://{host}:{port}',
+                                      region_name='us-east-1', aws_access_key_id='external-fixture',
+                                      aws_secret_access_key='external-fixture-secret')
+        external_client.create_bucket(Bucket='leo-external')
+        external_client.put_public_access_block(Bucket='leo-external', PublicAccessBlockConfiguration={
+            'BlockPublicAcls': True, 'IgnorePublicAcls': True,
+            'BlockPublicPolicy': True, 'RestrictPublicBuckets': True})
+
+        class ExternalS3(http.server.BaseHTTPRequestHandler):
+            def forward(self):
+                upstream = http.client.HTTPConnection(host, port)
+                body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
+                upstream.request(self.command, self.path, body=body, headers=dict(self.headers))
+                response = upstream.getresponse()
+                data = response.read()
+                self.send_response(response.status)
+                for name, value in response.getheaders():
+                    if name.lower() not in ('transfer-encoding', 'connection', 'server', 'date', 'content-length'):
+                        self.send_header(name, value)
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                if self.command != 'HEAD':
+                    self.wfile.write(data)
+                upstream.close()
+
+            do_GET = do_PUT = do_DELETE = do_POST = do_HEAD = forward
+
+            def log_message(self, *_):
+                pass
+
+        proxy = http.server.ThreadingHTTPServer(('127.0.0.1', 0), ExternalS3)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain('/usr/local/share/ca-certificates/leo-fixture.crt', '/fixture/external.key')
+        proxy.socket = context.wrap_socket(proxy.socket, server_side=True)
+        threading.Thread(target=proxy.serve_forever, daemon=True).start()
+        endpoint = f'https://localhost:{proxy.server_port}'
+        saved, _ = request(base + '/settings/storage', {
+            'bucket': 'leo-external', 'endpoint': endpoint, 'region': 'us-east-1',
+            'accessKeyId': 'external-fixture', 'secretAccessKey': 'external-fixture-secret',
+        }, cookie, csrf, method='PUT')
+        assert saved['endpoint'] == endpoint and not saved['integrated']
+        assert 'secretAccessKey' not in saved and 'accessKeyId' not in saved
+        checked, _ = request(base + '/settings/storage/check', {}, cookie, csrf)
+        assert checked == {'ok': True}
+        identity = (ROOT / 'data/installation-relay/identity.json').read_bytes()
+        credentials = (ROOT / 'garage.env').read_bytes()
+        result = run_installer(claim['code'])
+        assert result.returncode == 0, result.stderr
+        assert identity == (ROOT / 'data/installation-relay/identity.json').read_bytes()
+        assert credentials == (ROOT / 'garage.env').read_bytes()
+        assert not (ROOT / 'claim.env').exists()
+        assert (ROOT / 'data/storage-s3.json').stat().st_mode & 0o777 == 0o600
+        session, _ = request('/api/account/session', cookie=cookie)
+        assert len(session['installations']) == 1
+        wait_for(lambda: request(base + '/settings/storage', cookie=cookie)[0]['endpoint'] == endpoint)
+        print('Container: real claim, relay, Garage write/read/delete, external S3 settings and idempotent rerun passed')
+    finally:
+        pid = ROOT / 'manager.pid'
+        if pid.exists():
+            os.kill(int(pid.read_text()), signal.SIGTERM)
+        official.terminate()
+        official.wait(timeout=15)
+        mailbox.shutdown()
+        if proxy:
+            proxy.shutdown()
+            proxy.server_close()
+        if external:
+            external.stop()
+
+
+if __name__ == '__main__':
+    main(sys.argv[1])
