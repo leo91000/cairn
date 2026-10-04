@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { Deliverable } from '../../shared/artifacts'
-import { artifactUrl, fileSize } from '../../shared/artifacts'
+import { fileSize } from '../../shared/artifacts'
+import { artifactUrl } from '../deliverables'
 import {
   ChevronRight,
   FileCode,

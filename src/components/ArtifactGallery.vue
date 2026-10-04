@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import type { Deliverable } from '../../shared/artifacts'
 import { computed } from 'vue'
-import { artifactUrl, fileSize } from '../../shared/artifacts'
+import { fileSize } from '../../shared/artifacts'
+import { artifactUrl } from '../deliverables'
 import { FileCode, FileText, Play } from '../icons'
 import Icon from './Icon.vue'
 

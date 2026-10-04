@@ -8,8 +8,8 @@ import {
   onBeforeUnmount,
   ref,
 } from 'vue'
-import { artifactLink } from '../../shared/artifacts'
-import { api } from '../api'
+import { api, apiResourceUrl } from '../api'
+import { artifactLink } from '../deliverables'
 import { highlight } from '../highlight'
 
 const props = defineProps<{ content: string, compactLinks?: boolean }>()
@@ -92,6 +92,8 @@ const html = computed(() => {
     link.setAttribute('target', '_blank')
     link.setAttribute('rel', 'noopener noreferrer')
     const href = link.getAttribute('href')!
+    if (artifactLink(href, window.location.origin))
+      link.setAttribute('href', apiResourceUrl(href))
     if (props.compactLinks && link.textContent === href) {
       try {
         const url = new URL(href, window.location.href)
@@ -110,6 +112,9 @@ const html = computed(() => {
       catch { /* Keep the original label for malformed URLs. */ }
     }
   }
+
+  for (const image of container.querySelectorAll('img[src]'))
+    image.setAttribute('src', apiResourceUrl(image.getAttribute('src')!))
 
   return container.innerHTML
 })

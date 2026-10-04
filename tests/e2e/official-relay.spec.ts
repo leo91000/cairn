@@ -27,7 +27,7 @@ test('claims an installation and sends after relay restarts and official session
   const mailPort = (mail.address() as { port: number }).port
   const root = await mkdtemp(join(tmpdir(), 'leo-official-relay-'))
   await Promise.all([mkdir(join(root, 'data')), mkdir(join(root, 'home'))])
-  const url = 'http://localhost:4399'
+  const url = 'http://localhost:4395'
   const children: ChildProcess[] = []
   let hostilePeer: WebSocket | undefined
   // As in the native browser fixtures, open the seeding module before the
@@ -58,7 +58,7 @@ test('claims an installation and sends after relay restarts and official session
     return start('target/debug/leo-official', {
       LEO_OFFICIAL_DATABASE_URL: process.env.LEO_OFFICIAL_TEST_DATABASE_URL,
       LEO_OFFICIAL_ORIGIN: url,
-      LEO_OFFICIAL_LISTEN: '127.0.0.1:4399',
+      LEO_OFFICIAL_LISTEN: '127.0.0.1:4395',
       LEO_OFFICIAL_EMAIL_ENDPOINT: `http://127.0.0.1:${mailPort}/emails`,
       LEO_OFFICIAL_EMAIL_KEY: 'fixture-only',
       LEO_OFFICIAL_EMAIL_FROM: 'leo@example.test',
@@ -92,24 +92,23 @@ test('claims an installation and sends after relay restarts and official session
     await expect(async () => {
       expect(installation.exitCode, 'installation must remain running').toBeNull()
       await page.getByRole('button', { name: 'Refresh installations', exact: true }).click()
-      await expect(page.getByRole('button', { name: 'Browser installation', exact: true })).toBeVisible()
+      await expect(page).toHaveURL(/\/installations\/[^/]+\/$/)
     }).toPass()
-    await page.getByRole('button', { name: 'Browser installation', exact: true }).click()
-    await page.getByRole('button', { name: 'New conversation', exact: true }).click()
+    await page.getByRole('link', { name: 'New conversation', exact: true }).first().click()
     await page.getByLabel('Message', { exact: true }).fill('A message through the relay')
-    await page.getByRole('button', { name: 'Send message', exact: true }).click()
-    await expect(page.getByRole('list', { name: 'Pending messages' })).toContainText('A message through the relay')
-    await page.getByRole('button', { name: 'Back to conversations', exact: true }).click()
-    await page.getByRole('button', { name: 'A message through the relay', exact: true }).click()
-    await expect(page.getByRole('list', { name: 'Pending messages' })).toContainText('A message through the relay')
+    await page.getByRole('button', { name: /^(Send|Queue)$/, exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'A message through the relay', exact: true })).toBeVisible()
+    const conversationUrl = page.url()
+    await page.reload()
+    await expect(page.getByRole('heading', { name: 'A message through the relay', exact: true })).toBeVisible()
     // A process restart really closes every relay socket, unlike stopping a listener.
     await stop(service)
     official()
     await expect.poll(() => fetch(`${url}/health`).then(response => response.ok).catch(() => false)).toBe(true)
     await expect(async () => {
-      await page.getByRole('button', { name: 'Refresh conversation', exact: true }).click()
+      await page.reload()
       await expect(page.getByRole('alert')).toHaveCount(0)
-      await expect(page.getByRole('list', { name: 'Pending messages' })).toContainText('A message through the relay')
+      await expect(page.getByRole('heading', { name: 'A message through the relay', exact: true })).toBeVisible()
     }).toPass({ timeout: 15000 })
     await stop(installation)
     start('target/debug/leo', {
@@ -121,12 +120,12 @@ test('claims an installation and sends after relay restarts and official session
       PORT: '0',
     })
     await expect(async () => {
-      await page.getByRole('button', { name: 'Refresh conversation', exact: true }).click()
+      await page.reload()
       await expect(page.getByRole('alert')).toHaveCount(0)
     }).toPass({ timeout: 15000 })
     await page.getByLabel('Message', { exact: true }).fill('After reconnection')
-    await page.getByRole('button', { name: 'Send message', exact: true }).click()
-    await expect(page.getByRole('list', { name: 'Pending messages' })).toContainText('After reconnection')
+    await page.getByRole('button', { name: /^(Send|Queue)$/, exact: true }).click()
+    await expect(page.getByText('After reconnection', { exact: true })).toBeVisible()
     // Renew the official session while keeping the same installation selected.
     // Use the existing account UI and a resident authenticator, as in #52.
     const cdp = await page.context().newCDPSession(page)
@@ -141,6 +140,7 @@ test('claims an installation and sends after relay restarts and official session
         automaticPresenceSimulation: true,
       },
     })
+    await page.getByText('Installation options', { exact: true }).click()
     await page.getByRole('button', { name: 'Sign-in methods', exact: true }).click()
     await page.getByRole('button', { name: 'Add passkey', exact: true }).click()
     await expect(page.getByText('My passkey', { exact: true })).toBeVisible()
@@ -156,12 +156,13 @@ test('claims an installation and sends after relay restarts and official session
     await page.getByRole('button', { name: 'Confirm email code', exact: true }).click()
     await expect(page.getByRole('button', { name: /Remove Email/ })).toBeVisible()
     await page.getByRole('button', { name: 'Back to installations', exact: true }).click()
-    await page.getByRole('button', { name: 'A message through the relay', exact: true }).click()
+    await page.goto(conversationUrl)
     await page.getByLabel('Message', { exact: true }).fill('After session renewal')
     const sent = page.waitForResponse(response => response.url().endsWith('/messages') && response.request().method() === 'POST')
-    await page.getByRole('button', { name: 'Send message', exact: true }).click()
+    await page.getByRole('button', { name: /^(Send|Queue)$/, exact: true }).click()
     expect((await sent).status()).toBe(200)
-    await expect(page.getByRole('list', { name: 'Pending messages' })).toContainText('After session renewal')
+    await page.getByRole('button', { name: '+ 1 other message', exact: true }).click()
+    await expect(page.getByText('After session renewal', { exact: true })).toBeVisible()
 
     // Seed a finished run using the same fixture module as the native browser
     // journeys. Its detail is then read through the real official HTTP relay.
@@ -169,9 +170,17 @@ test('claims an installation and sends after relay restarts and official session
     const task = seed.task({ name: 'Finished conversation', prompt: 'Review the workspace', agentId: chat.agentId })
     const run = await seed.enqueue(task.id)
     seed.store.updateRun(run.id, { status: 'succeeded', summary: 'The **relayed agent reply** remains readable.', finishedAt: Date.now() })
+    seed.store.event(run.id, 'item.completed', 'The **relayed agent reply** remains readable.', { item: { id: 'relayed-reply', type: 'agent_message', text: 'The **relayed agent reply** remains readable.' } })
     seed.store.put('chats', { ...chat, runId: run.id })
-    await page.getByRole('button', { name: 'Refresh conversation', exact: true }).click()
-    await expect(page.getByRole('region', { name: 'Agent response' })).toContainText('The relayed agent reply remains readable.')
+    await page.reload()
+    await expect(page.locator('.activity-message').filter({ hasText: 'The relayed agent reply remains readable.' })).toBeVisible()
+
+    await page.getByRole('navigation', { name: 'Workspace navigation', exact: true }).getByRole('button', { name: 'Sign out', exact: true }).click()
+    await expect(page.getByLabel('Email address')).toBeVisible()
+    await page.goto(conversationUrl)
+    await page.getByRole('button', { name: 'Sign in with a passkey', exact: true }).click()
+    await expect(page).toHaveURL(conversationUrl)
+    await expect(page.locator('.activity-message').filter({ hasText: 'The relayed agent reply remains readable.' })).toBeVisible()
 
     // A separately claimed peer can send hostile protocol frames. The real
     // connector is covered above and by the HTTP duplicate-header regression.

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { state } from '../api'
+import { apiResourceUrl, state } from '../api'
 import {
   Clock,
   MessageCircleQuestion,
@@ -24,7 +24,7 @@ const props = withDefaults(defineProps<{
   working: false,
   badge: null,
 })
-const source = computed(() => state.agents.find(agent => agent.id === props.identity)?.avatar?.url || '')
+const source = computed(() => apiResourceUrl(state.agents.find(agent => agent.id === props.identity)?.avatar?.url || ''))
 const failed = ref(false)
 watch(source, () => {
   failed.value = false

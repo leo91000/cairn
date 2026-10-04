@@ -1,5 +1,22 @@
 import type { Deliverable } from '../shared/artifacts'
 import type { ActivityEntry } from './activity'
+import { artifactLink as sharedArtifactLink, artifactUrl as sharedArtifactUrl } from '../shared/artifacts'
+import { apiUrl, state } from './api'
+
+export function artifactUrl(item: Deliverable, action?: 'preview' | 'download') {
+  return apiUrl(sharedArtifactUrl(item, action).slice(4))
+}
+
+export function artifactLink(link: string, origin: string) {
+  try {
+    const url = new URL(link, origin)
+    const prefix = apiUrl('')
+    if (state.installationId && url.pathname.startsWith(`${prefix}/`))
+      url.pathname = `/api${url.pathname.slice(prefix.length)}`
+    return sharedArtifactLink(url.href, origin)
+  }
+  catch { return null }
+}
 
 export function deliveryEntries(entries: ActivityEntry[], files: Deliverable[]) {
   const groups = new Map<number, Deliverable[]>()

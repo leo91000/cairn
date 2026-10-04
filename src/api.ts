@@ -8,6 +8,11 @@ import type { McpView } from '../shared/mcp'
 import { reactive, watch } from 'vue'
 import { clearHistoryCache } from './history-cache'
 
+// Resolve the official context before any shared view reads its local cache.
+// The native entry keeps its existing unprefixed transport and browser state.
+const officialEntry = typeof document !== 'undefined' && document.getElementById('app')?.hasAttribute('data-official')
+const installationId = officialEntry ? /^\/installations\/([\w-]+)(?:\/|$)/.exec(window.location.pathname)?.[1] || '' : ''
+
 export const state = reactive({
   ready: false,
   authenticated: false,
@@ -15,7 +20,7 @@ export const state = reactive({
   redirecting: false,
   setupRequired: false,
   csrf: '',
-  installationId: '',
+  installationId,
   agents: [] as Agent[],
   projects: [] as Project[],
   tasks: [] as Task[],
@@ -61,10 +66,7 @@ export async function api<T = any>(
   url: string,
   options: RequestInit = {},
 ): Promise<T> {
-  const prefix = state.installationId
-    ? `/api/installations/${encodeURIComponent(state.installationId)}/api`
-    : '/api'
-  const response = await fetch(`${prefix}${url}`, {
+  const response = await fetch(apiUrl(url), {
     ...options,
     headers: {
       ...(options.body === undefined
@@ -82,6 +84,28 @@ export async function api<T = any>(
   }
 
   return data
+}
+
+export function apiUrl(path: string) {
+  const prefix = state.installationId
+    ? `/api/installations/${encodeURIComponent(state.installationId)}/api`
+    : '/api'
+  return `${prefix}${path}`
+}
+
+// Installation responses describe assets relative to their own API. Keep
+// external links intact and route these assets through the current relay.
+export function apiResourceUrl(value: string) {
+  if (!state.installationId || !value)
+    return value
+  try {
+    const url = new URL(value, window.location.origin)
+    if (url.origin === window.location.origin && url.pathname.startsWith('/api/') && !url.pathname.startsWith('/api/installations/'))
+      return apiUrl(`${url.pathname.slice(4)}${url.search}${url.hash}`)
+  }
+  catch {}
+
+  return value
 }
 
 export async function session() {
@@ -135,11 +159,29 @@ export function duration(start: number | null, end: number | null) {
     : `${Math.floor(seconds / 60)}m ${seconds % 60}s`
 }
 
+export async function logoutAccount() {
+  const response = await fetch('/api/account/logout', {
+    method: 'POST',
+    headers: { 'X-CSRF-Token': state.csrf },
+  })
+  if (!response.ok && response.status !== 401)
+    throw new Error('Unable to sign out. Please try again.')
+
+  state.authenticated = false
+  state.csrf = ''
+}
+
 export async function signOut() {
   if (state.signingOut)
     return
   state.signingOut = true
   try {
+    if (state.installationId) {
+      await logoutAccount()
+      window.location.assign('/')
+      return
+    }
+
     await api('/logout', { method: 'POST' })
     state.authenticated = false
     state.csrf = ''

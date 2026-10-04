@@ -106,7 +106,16 @@ test('Google and GitHub reuse a verified Leo account and manage its sign-in meth
     await page.getByRole('button', { name: 'Add Google' }).click()
     await expect(page.getByRole('heading', { name: 'No installations yet' })).toBeVisible()
     await page.getByRole('button', { name: 'Sign out' }).click()
+    await expect(page.getByLabel('Email address')).toBeVisible()
+    const deepUrl = `${url}/installations/00000000-0000-0000-0000-000000000049/agents`
+    await page.goto(deepUrl)
+    denyNextAuthorization = true
     await page.getByRole('button', { name: 'Continue with GitHub' }).click()
+    await expect(page.getByRole('alert')).toContainText('Sign-in was cancelled')
+    await expect(page).toHaveURL(deepUrl)
+    await page.getByRole('button', { name: 'Continue with GitHub' }).click()
+    await expect(page.getByRole('alert')).toContainText('unavailable or no longer accessible')
+    await expect(page).toHaveURL(deepUrl)
     await expect(page.getByRole('heading', { name: 'No installations yet' })).toBeVisible()
     const signedIn = await page.evaluate(() => fetch('/api/account/session').then(response => response.json()))
     expect(signedIn.account).toEqual(first.account)

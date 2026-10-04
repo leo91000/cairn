@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
-import { state } from './api'
+import { logoutAccount, redirect, state } from './api'
+import App from './App.vue'
 import ThemeControl from './components/ThemeControl.vue'
 import UiAlert from './components/UiAlert.vue'
 import UiButton from './components/UiButton.vue'
-import OfficialConversations from './OfficialConversations.vue'
 
 interface AccountSession {
   authenticated: boolean
@@ -37,10 +37,50 @@ const challenge = ref('')
 const busy = ref(false)
 const error = ref('')
 const claimCode = ref('')
+const editingName = ref(false)
+const installationName = ref('')
 const installation = ref<{ id: string, name: string } | null>(null)
+const installationMenu = ref<HTMLDetailsElement>()
+const installationReturnKey = 'leo-installation-return'
 
 watch(session, (value) => {
   state.csrf = value?.csrf || ''
+  state.authenticated = value?.authenticated || false
+  state.ready = ready.value
+  if (!value?.authenticated)
+    return
+
+  const requested = state.installationId
+  installation.value = value.installations.find(item => item.id === requested) || null
+  if (requested && !installation.value) {
+    error.value = 'This installation is unavailable or no longer accessible to your Leo account.'
+    return
+  }
+
+  if (installation.value) {
+    try {
+      localStorage.setItem(`leo-current-installation:${value.account?.id}`, installation.value.id)
+    }
+    catch {}
+  }
+
+  if (!requested && value.installations.length) {
+    let remembered = ''
+    try {
+      remembered = localStorage.getItem(`leo-current-installation:${value.account?.id}`) || ''
+    }
+    catch {}
+
+    openInstallation(value.installations.find(item => item.id === remembered) || value.installations[0]!)
+  }
+})
+
+watch(() => state.authenticated, (authenticated) => {
+  if (!authenticated && session.value?.authenticated) {
+    session.value = null
+    installation.value = null
+    showMethods.value = false
+  }
 })
 
 async function accountRequest(route: string, body?: unknown) {
@@ -50,11 +90,6 @@ async function accountRequest(route: string, body?: unknown) {
     headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': session.value?.csrf || '' },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
-  if (response.status === 401 && route === 'logout') {
-    session.value = null
-    return
-  }
-
   if (response.status === 204)
     return
   const text = await response.text()
@@ -72,6 +107,7 @@ async function loadSession() {
     session.value = account
     options.value = available
     ready.value = true
+    state.ready = true
   }
   catch {
     error.value = 'Unable to reach Leo. Please try again.'
@@ -104,20 +140,21 @@ async function submit() {
 }
 
 async function signOut() {
+  const leavingInstallation = !!state.installationId
   busy.value = true
   error.value = ''
   try {
-    await accountRequest('logout', {})
+    await logoutAccount()
     session.value = null
     showMethods.value = false
     installation.value = null
     claimCode.value = ''
     state.installationId = ''
-    state.csrf = ''
-    state.authenticated = false
     email.value = ''
     code.value = ''
     challenge.value = ''
+    if (leavingInstallation)
+      window.location.assign('/')
   }
   catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Unable to sign out. Please try again.'
@@ -222,6 +259,13 @@ async function oauth(provider: 'google' | 'github') {
   error.value = ''
   try {
     const start = await accountRequest(`oauth/${provider}/start`, {})
+    try {
+      sessionStorage.removeItem(installationReturnKey)
+      if (state.installationId)
+        sessionStorage.setItem(installationReturnKey, `${window.location.pathname}${window.location.search}${window.location.hash}`)
+    }
+    catch {}
+
     window.location.assign(start.url)
   }
   catch (cause) {
@@ -254,11 +298,51 @@ async function enableEmail() {
 }
 
 function openInstallation(value: { id: string, name: string }) {
-  state.installationId = value.id
-  state.csrf = session.value?.csrf || ''
-  state.authenticated = true
-  installation.value = value
-  claimCode.value = ''
+  if (state.redirecting)
+    return
+  try {
+    localStorage.setItem(`leo-current-installation:${session.value?.account?.id}`, value.id)
+  }
+  catch {}
+
+  redirect(`/installations/${encodeURIComponent(value.id)}/`)
+}
+
+function closeInstallationMenu() {
+  if (installationMenu.value)
+    installationMenu.value.open = false
+}
+
+async function renameInstallation() {
+  if (!installation.value || busy.value)
+    return
+  busy.value = true
+  error.value = ''
+  try {
+    const response = await fetch(`/api/installations/${encodeURIComponent(installation.value.id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf },
+      body: JSON.stringify({ name: installationName.value }),
+    })
+    const result = await response.json()
+    if (!response.ok)
+      throw new Error(result.error || 'Unable to rename this installation.')
+    installation.value.name = result.name
+    editingName.value = false
+  }
+  catch (cause) {
+    error.value = cause instanceof Error ? cause.message : 'Unable to rename this installation.'
+  }
+  finally {
+    busy.value = false
+  }
+}
+
+function selectInstallation(event: Event) {
+  const id = (event.target as HTMLSelectElement).value
+  const selected = session.value?.installations.find(item => item.id === id)
+  if (selected)
+    openInstallation(selected)
 }
 
 function changeEmail() {
@@ -268,8 +352,26 @@ function changeEmail() {
 }
 
 onMounted(async () => {
-  await loadSession()
   const url = new URL(window.location.href)
+  // OAuth callbacks return to the official root. Restore this tab's explicit
+  // installation URL before the session can choose a remembered installation.
+  try {
+    const destination = sessionStorage.getItem(installationReturnKey)
+    if (url.pathname === '/' && destination) {
+      sessionStorage.removeItem(installationReturnKey)
+      if (/^\/installations\/[\w-]+\//.test(destination)) {
+        const target = new URL(destination, url.origin)
+        const signInError = url.searchParams.get('sign_in_error')
+        if (signInError)
+          target.searchParams.set('sign_in_error', signInError)
+        redirect(target.href)
+        return
+      }
+    }
+  }
+  catch {}
+
+  await loadSession()
   if (url.searchParams.get('sign_in_error') === 'oauth') {
     error.value = 'Sign-in was cancelled or could not be verified. Try another method.'
     url.searchParams.delete('sign_in_error')
@@ -279,7 +381,69 @@ onMounted(async () => {
 </script>
 
 <template>
-  <main class="min-h-dvh bg-canvas text-ink px-6 py-10 grid place-items-center">
+  <div v-if="session?.authenticated && installation && !showMethods" class="flex h-dvh min-h-0 flex-col bg-canvas text-ink">
+    <header class="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2 text-sm" aria-label="Current installation">
+      <label v-if="session.installations.length > 1" class="min-w-0 max-w-full">
+        <span class="sr-only">Current installation</span>
+        <select :value="installation.id" :disabled="busy || state.redirecting" @change="selectInstallation">
+          <option v-for="item in session.installations" :key="item.id" :value="item.id">
+            {{ item.name }}
+          </option>
+        </select>
+      </label>
+      <span v-else class="min-w-0 truncate font-semibold" :title="installation.name">{{ installation.name }}</span>
+      <details ref="installationMenu" class="relative ml-auto shrink-0">
+        <summary class="cursor-pointer list-none rounded-lg border border-line px-3 py-2">
+          Installation options
+        </summary>
+        <div class="absolute right-0 z-50 mt-2 grid w-52 gap-2 rounded-xl border border-line bg-surface p-2 shadow-lg" @click="closeInstallationMenu">
+          <UiButton size="small" :disabled="busy" @click="editingName = !editingName; installationName = installation.name">
+            Rename installation
+          </UiButton>
+          <UiButton size="small" :disabled="busy" @click="addInstallation">
+            Add an installation
+          </UiButton>
+          <UiButton size="small" :disabled="busy" @click="openMethods">
+            Sign-in methods
+          </UiButton>
+          <UiButton size="small" :disabled="busy" @click="signOut">
+            Sign out
+          </UiButton>
+        </div>
+      </details>
+    </header>
+    <form v-if="editingName" class="flex flex-wrap items-end gap-3 border-b border-line px-4 py-3" @submit.prevent="renameInstallation">
+      <label>Installation name<input
+        v-model="installationName"
+        required
+        maxlength="100"
+        :disabled="busy"
+      ></label>
+      <UiButton type="submit" :disabled="busy">
+        Save installation name
+      </UiButton>
+      <UiButton :disabled="busy" @click="editingName = false">
+        Cancel
+      </UiButton>
+    </form>
+    <div v-if="claimCode" class="grid gap-3 border-b border-line px-4 py-3">
+      <label>Installation claim code<input :value="claimCode" readonly autocomplete="off"></label>
+      <p class="text-sm text-muted">
+        This code expires in 10 minutes.
+      </p>
+      <UiButton size="small" :disabled="busy" @click="loadSession">
+        Refresh installations
+      </UiButton>
+      <UiButton size="small" :disabled="busy" @click="claimCode = ''">
+        Close
+      </UiButton>
+    </div>
+    <UiAlert v-if="error" class="mx-4 my-2">
+      {{ error }}
+    </UiAlert>
+    <App />
+  </div>
+  <main v-else class="min-h-dvh bg-canvas text-ink px-6 py-10 grid place-items-center">
     <div class="absolute top-5 right-5">
       <ThemeControl compact />
     </div>
@@ -364,10 +528,11 @@ onMounted(async () => {
         <p class="text-muted mb-4">
           You’re signed in as {{ session.account?.email }}.
         </p>
-        <OfficialConversations v-if="installation" :key="installation.id" />
-        <template v-else>
+        <div>
           <p v-if="!session.installations.length" class="text-muted mb-8">
-            Your Leo account is ready. Your installations will appear here when you add one.
+            Your Leo account is ready. Choose Add an installation to get a claim code,
+            then use it to connect a Leo installation on your machine. The installation
+            will appear here; choose Refresh installations once it is connected.
           </p>
           <div class="grid gap-3 mb-6">
             <UiButton v-for="item in session.installations" :key="item.id" @click="openInstallation(item)">
@@ -386,7 +551,7 @@ onMounted(async () => {
               This code expires in 10 minutes.
             </p>
           </div>
-        </template>
+        </div>
         <UiAlert v-if="error">
           {{ error }}
         </UiAlert>

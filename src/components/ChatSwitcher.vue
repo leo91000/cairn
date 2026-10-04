@@ -8,7 +8,7 @@ import {
   useId,
   watch,
 } from 'vue'
-import { api, ApiError } from '../api'
+import { api, ApiError, state } from '../api'
 import {
   Clock,
   MessageCircle,
@@ -68,7 +68,8 @@ async function remove(chat: ChatView, confirm = false) {
   error.value = ''
   try {
     await api(`/chats/${chat.id}`, { method: 'DELETE', body: JSON.stringify({ confirm }) })
-    sessionStorage.removeItem(`leo-chat-draft:${chat.id}`)
+    const draftScope = state.installationId ? `${state.installationId}:` : ''
+    sessionStorage.removeItem(`leo-chat-draft:${draftScope}${chat.id}`)
     confirmation.value = undefined
     await load()
   }

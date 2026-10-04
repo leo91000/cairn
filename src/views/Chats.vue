@@ -222,10 +222,11 @@ const projects = computed(() => [{
   description: 'Use the agent’s available workspaces',
   icon: FolderGit2,
 }, ...state.projects.filter(project => selectedAgent.value?.access.projects === null || selectedAgent.value?.access.projects.includes(project.id)).map(project => ({ value: project.id, label: project.name, icon: FolderGit2 }))])
+const draftScope = state.installationId ? `${state.installationId}:` : ''
 let draftKey = ''
 
 function loadDraft() {
-  draftKey = `leo-chat-draft:${chatId.value || `new:${agentId.value}:${projectId.value}`}`
+  draftKey = `leo-chat-draft:${draftScope}${chatId.value || `new:${agentId.value}:${projectId.value}`}`
   draft.value = sessionStorage.getItem(draftKey) ?? (typeof route.query.draft === 'string' ? route.query.draft : '')
 }
 
@@ -333,7 +334,7 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
     clearAttachments()
     submission = undefined
     if (!detail.value) {
-      sessionStorage.setItem(`leo-chat-draft:${chat.id}`, draft.value)
+      sessionStorage.setItem(`leo-chat-draft:${draftScope}${chat.id}`, draft.value)
       await router.push(`/chats/${chat.id}`)
     }
 

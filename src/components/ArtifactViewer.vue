@@ -8,7 +8,8 @@ import {
   ref,
   watch,
 } from 'vue'
-import { artifactUrl, fileSize, latestArtifacts } from '../../shared/artifacts'
+import { fileSize, latestArtifacts } from '../../shared/artifacts'
+import { artifactUrl } from '../deliverables'
 import { highlight } from '../highlight'
 import {
   ArrowDown,

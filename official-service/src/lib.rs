@@ -156,6 +156,10 @@ pub async fn router_with_oauth(
             post(installations::claim_code),
         )
         .route(
+            "/api/installations/{installation}",
+            axum::routing::patch(installations::rename),
+        )
+        .route(
             "/api/installations/{installation}/api/{*path}",
             any(relay::forward),
         )
