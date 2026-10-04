@@ -16,6 +16,10 @@ use std::{os::fd::AsRawFd, path::PathBuf};
 use tokio_util::sync::CancellationToken;
 
 pub const CONTROLLER_INTERRUPTED: i32 = 75;
+/// The controller itself failed while running the attempt (EX_SOFTWARE). The
+/// disk is kept; the manager retries a bounded number of times, even on remote
+/// nodes, because such a failure may be deterministic.
+pub const CONTROLLER_FAILED: i32 = 70;
 
 fn router(broker: Broker) -> Router {
     Router::new()

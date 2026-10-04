@@ -87,6 +87,10 @@ impl Error {
         self.status == 503
     }
 
+    pub const fn is_internal(&self) -> bool {
+        self.status == 500
+    }
+
     pub fn oauth(code: &str, message: &str) -> Self {
         Self {
             status: 400,

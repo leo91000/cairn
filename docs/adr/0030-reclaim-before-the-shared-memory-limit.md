@@ -46,3 +46,19 @@ Le cache du journal n’est pas vidé explicitement après les synchronisations 
 il est relu par les VM, et la récupération par `memory.high` suffit à le
 contenir. Cette option reste à réévaluer si la pression mémoire du cgroup
 devient durable.
+
+## Complément du 2026-10-04 : échec interne pendant la reprise
+
+Le 2026-10-04 vers 19:03 UTC, deux exécutions de tâches ont été interrompues
+à quatre secondes d’intervalle sur la node locale, après environ 2 min 30
+sans activité. Leur reprise automatique a échoué en une à deux secondes avec
+l’erreur interne générique du contrôleur. Le broker enregistrait alors le code
+de sortie 1, et le manager affichait « Process exited with status 1 » comme un
+échec définitif, alors que l’agent n’avait pas démarré.
+
+Une erreur interne (500) d’une tentative est désormais enregistrée avec le code
+`CONTROLLER_FAILED` (70). Le manager la reprend comme une interruption, mais
+compte toujours ces reprises dans la limite de trois, y compris sur une node
+distante : une erreur interne peut être déterministe. Au-delà, l’échec indique
+que le contrôleur a échoué plutôt qu’un code de sortie de l’agent. Les autres
+erreurs (validation, conflit, image invitée incompatible) gardent le code 1.

@@ -450,13 +450,23 @@ impl Execution<'_> {
         if s.shutdown.is_cancelled() && !self.cancel.is_cancelled() && !saved.completed() {
             return Err(Error::conflict("Worker is restarting"));
         }
-        let interrupted = exit.code == Some(crate::runner::CONTROLLER_INTERRUPTED)
-            && !self.cancel.is_cancelled()
-            && !exit.timed_out
-            && !exit.exhausted;
-        if workspace.prepared["backend"] == "firecracker" && interrupted {
+        let stopped_by_controller =
+            !self.cancel.is_cancelled() && !exit.timed_out && !exit.exhausted;
+        let firecracker = workspace.prepared["backend"] == "firecracker";
+        let interrupted = exit.code == Some(crate::runner::CONTROLLER_INTERRUPTED);
+        if firecracker && stopped_by_controller && interrupted {
             return Err(Error::unavailable(
                 "VM controller interrupted execution. The saved conversation and workspace have been preserved.",
+            ));
+        }
+
+        // Remote nodes retry unavailable attempts without a cap; bound this
+        // possibly deterministic failure here instead.
+        let controller_failed = exit.code == Some(crate::runner::CONTROLLER_FAILED);
+        let may_retry = saved.controller_recoveries() < super::execution::MAX_CONTROLLER_RECOVERIES;
+        if firecracker && stopped_by_controller && controller_failed && may_retry {
+            return Err(Error::unavailable(
+                "VM controller failed while running this attempt. The saved conversation and workspace have been preserved.",
             ));
         }
         let session = s.store.run(&self.id).await?["sessionId"]
@@ -979,6 +989,9 @@ impl Execution<'_> {
             return saved.last_error().to_owned();
         }
         match exit.code {
+            Some(crate::runner::CONTROLLER_FAILED) => {
+                "VM controller failed while running this attempt. Resume the conversation to continue.".into()
+            }
             Some(code) => {
                 format!("Process exited with status {code}. Resume the conversation to continue.")
             }
