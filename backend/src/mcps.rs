@@ -5,7 +5,7 @@ use crate::{
     config::{id, now},
     error::{Error, Result, required},
     run_status::RunStatus,
-    service::{Service, allowed, policy},
+    service::{Service, allowed, covers, policy},
     store::Db,
     validation::{parse, text},
 };
@@ -638,8 +638,8 @@ impl Mcps {
                 let current = db
                     .get("agents", text(agent, "id"))?
                     .ok_or_else(|| Error::forbidden("Agent permissions changed."))?;
-                if policy(&current) != policy(agent) {
-                    return Err(Error::forbidden("Agent permissions changed."));
+                if !covers(&current, agent) {
+                    return Err(Error::forbidden("Agent permissions were reduced."));
                 }
                 Ok((server, scope.clone()))
             })
