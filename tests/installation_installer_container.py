@@ -238,7 +238,8 @@ if 'exec' in args and os.environ.get('INSTALLER_VERIFY'):
                 upstream = http.client.HTTPConnection(host, port)
                 body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
                 # Moto derives bucket routing from Host; the TLS proxy owns provider hostnames.
-                headers = {**dict(self.headers), 'Host': f'{host}:{port}'}
+                headers = {name: value for name, value in self.headers.items() if name.lower() != 'host'}
+                headers['Host'] = f'{host}:{port}'
                 upstream.request(self.command, self.path, body=body, headers=headers)
                 response = upstream.getresponse()
                 data = response.read()
