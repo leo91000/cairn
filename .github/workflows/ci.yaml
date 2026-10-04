@@ -290,6 +290,7 @@ jobs:
       - name: Start the disposable official database
         # The PR job changes Docker's image store above. Start this database
         # afterwards so restarting Docker cannot discard a service container.
+        # TCP health waits for the final server, beyond socket-only initialization.
         run: |
           docker run --detach --name leo-official-smoke-db \
             --network host \

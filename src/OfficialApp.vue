@@ -54,7 +54,8 @@ const claimStatus = ref('')
 const confirmDetach = ref(false)
 const installation = ref<{ id: string, name: string, online: boolean } | null>(null)
 const installationMenu = ref<HTMLDetailsElement>()
-const installationReturnKey = 'leo-installation-return'
+const officialReturnKey = 'leo-installation-return'
+const claimPage = window.location.pathname === '/claim'
 
 watch(session, (value) => {
   state.csrf = value?.csrf || ''
@@ -77,7 +78,7 @@ watch(session, (value) => {
     catch {}
   }
 
-  if (!requested && value.installations.length) {
+  if (!requested && value.installations.length && !claimPage) {
     let remembered = ''
     try {
       remembered = localStorage.getItem(`leo-current-installation:${value.account?.id}`) || ''
@@ -319,9 +320,11 @@ async function oauth(provider: 'google' | 'github') {
   try {
     const start = await accountRequest(`oauth/${provider}/start`, {})
     try {
-      sessionStorage.removeItem(installationReturnKey)
-      if (state.installationId)
-        sessionStorage.setItem(installationReturnKey, `${window.location.pathname}${window.location.search}${window.location.hash}`)
+      sessionStorage.removeItem(officialReturnKey)
+      if (state.installationId || claimPage) {
+        const destination = claimPage ? '/claim' : `${window.location.pathname}${window.location.search}${window.location.hash}`
+        sessionStorage.setItem(officialReturnKey, destination)
+      }
     }
     catch {}
 
@@ -461,12 +464,12 @@ function changeEmail() {
 onMounted(async () => {
   const url = new URL(window.location.href)
   // OAuth callbacks return to the official root. Restore this tab's explicit
-  // installation URL before the session can choose a remembered installation.
+  // account or installation page before the session chooses an installation.
   try {
-    const destination = sessionStorage.getItem(installationReturnKey)
+    const destination = sessionStorage.getItem(officialReturnKey)
     if (url.pathname === '/' && destination) {
-      sessionStorage.removeItem(installationReturnKey)
-      if (/^\/installations\/[\w-]+\//.test(destination)) {
+      sessionStorage.removeItem(officialReturnKey)
+      if (destination === '/claim' || /^\/installations\/[\w-]+\//.test(destination)) {
         const target = new URL(destination, url.origin)
         const signInError = url.searchParams.get('sign_in_error')
         if (signInError)
