@@ -4,7 +4,7 @@ use crate::{
     mcp_server::{ToolResult, empty_listing},
     mcps::{grant_key, record::RunGrant},
     run_status::RunStatus,
-    service::{Service, policy, run_projects},
+    service::{Service, covers, run_projects},
     validation::{text, uuid},
 };
 use serde::Deserialize;
@@ -43,8 +43,8 @@ pub fn authorize_in(db: &crate::store::Db<'_>, bearer: &str) -> Result<Value> {
     }
     let agent = &run["snapshot"]["agent"];
     let current = db.get("agents", text(agent, "id"))?.ok_or_else(denied)?;
-    if policy(&current) != policy(agent) {
-        return Err(Error::forbidden("Agent permissions changed."));
+    if !covers(&current, agent) {
+        return Err(Error::forbidden("Agent permissions were reduced."));
     }
     Ok(run)
 }

@@ -14,7 +14,7 @@ use crate::{
     provider::Provider,
     recovery, run_limits, run_output,
     run_status::RunStatus,
-    service::{Service, policy},
+    service::{Service, covers, policy},
     skills::{atomic_write, private_dir},
     storage::policy::Policy,
     store::merge,
@@ -216,22 +216,21 @@ impl Execution<'_> {
         private_dir(&self.directory).await
     }
 
-    /// Refuses grants that changed since the run was queued, except node grants:
-    /// placement follows the current ones, including whether execution needs a VM.
+    /// Refuses grants reduced since the run was queued. The run keeps the grants it
+    /// was queued with, except node grants: placement follows the current ones,
+    /// including whether execution needs a VM.
     async fn refresh_access(&mut self) -> Result<()> {
         let s = self.s;
         let current = s
             .get("agents", text(&self.run["snapshot"]["agent"], "id"))
             .await?;
         nodes::require_node(&current)?;
-        let current_policy = policy(&current);
-        let mut queued_policy = policy(&self.run["snapshot"]["agent"]);
-        queued_policy["nodes"] = current_policy["nodes"].clone();
-        if current_policy != queued_policy {
+        if !covers(&current, &self.run["snapshot"]["agent"]) {
             return Err(Error::conflict(
-                "Agent access changed after this run was queued. Run the task again with the current policy.",
+                "Agent access was reduced after this run was queued. Run the task again with the current policy.",
             ));
         }
+        let current_policy = policy(&current);
         self.run["snapshot"]["agent"]["access"]["nodes"] = current_policy["nodes"].clone();
         let patch = json!({ "snapshot": self.run["snapshot"] });
         s.store.patch_run(&self.id, patch).await?;

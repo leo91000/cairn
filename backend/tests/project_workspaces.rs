@@ -5,7 +5,7 @@ use leo_agent_manager::{
     config::{Config, MAIN_AGENT_ID, id},
     execution, outcome, project_git, project_workspaces, run_output,
     run_status::RunStatus,
-    service::Service,
+    service::{Service, covers},
     validation::text,
 };
 use serde_json::{Value, json};
@@ -135,8 +135,58 @@ async fn empty_start_does_not_touch_unselected_repositories_and_selected_start_l
     );
 }
 
+#[test]
+fn access_covers_unchanged_or_wider_grants_but_not_reduced_ones() {
+    let agent = |access: Value| json!({ "id": "agent", "access": access });
+    let granted = agent(json!({
+        "projects": ["a"],
+        "skills": null,
+        "mcps": ["m"],
+        "mcpTools": { "m": ["read"] },
+        "github": false,
+        "sandbox": "workspace-write",
+        "nodes": ["laptop"],
+        "maxResources": null,
+    }));
+    let same = agent(json!({
+        "projects": ["a"],
+        "mcps": ["m"],
+        "mcpTools": { "m": ["read"] },
+        "github": false,
+        "sandbox": "workspace-write",
+        "nodes": null,
+    }));
+    assert!(covers(&same, &granted));
+    let wider = agent(json!({
+        "projects": ["a", "b"],
+        "mcps": null,
+        "mcpTools": {},
+        "github": false,
+        "sandbox": "yolo",
+    }));
+    assert!(covers(&wider, &granted));
+
+    let reductions = [
+        ("projects", json!(["b"])),
+        ("skills", json!([])),
+        ("mcps", json!([])),
+        ("mcpTools", json!({ "m": [] })),
+        ("sandbox", json!("read-only")),
+    ];
+    for (key, value) in reductions {
+        let mut reduced = same.clone();
+        reduced["access"][key] = value;
+        assert!(!covers(&reduced, &granted), "{key}");
+    }
+    let mut github = same.clone();
+    github["access"]["github"] = false.into();
+    let mut with_github = granted.clone();
+    with_github["access"]["github"] = true.into();
+    assert!(!covers(&github, &with_github));
+}
+
 #[tokio::test]
-async fn scoped_access_rejects_other_projects_expired_grants_and_changed_permissions() {
+async fn scoped_access_rejects_other_projects_expired_grants_and_reduced_permissions() {
     let (_root, s, projects) = fixture().await;
     let mut restricted = restricted_agent("Restricted");
     restricted["access"]["projects"] = json!([projects[0]["id"]]);
@@ -155,6 +205,12 @@ async fn scoped_access_rejects_other_projects_expired_grants_and_changed_permiss
             .status,
         403
     );
+    // Wider access and settings older versions saved do not revoke the run's grant.
+    let mut widened = agent.clone();
+    widened["access"]["projects"] = json!([projects[0]["id"], projects[1]["id"]]);
+    widened["access"]["sandbox"] = "workspace-write".into();
+    s.store.put("agents", widened).await.unwrap();
+    project_workspaces::authorize(&s, token).await.unwrap();
     let mut changed = agent.clone();
     changed["access"]["projects"] = json!([]);
     s.store.put("agents", changed).await.unwrap();

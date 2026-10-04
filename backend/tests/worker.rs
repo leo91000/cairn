@@ -376,6 +376,51 @@ async fn chat_switches_codex_claude_and_back_without_losing_workspace_or_replayi
 }
 
 #[tokio::test]
+async fn chats_continue_with_equivalent_access_but_not_reduced_access() {
+    let mut fixture = Fixture::new().await;
+    let s = fixture.service.clone();
+    let chat_id = fixture.start_chat(message("Inspect the workspace.")).await;
+    let run_id = fixture.chat_run(&chat_id).await;
+    fixture
+        .until(&run_id, |r| r["status"] == RunStatus::Succeeded)
+        .await;
+    // Started by an older version that saved a setting the policy no longer has.
+    let mut snapshot = s.store.run(&run_id).await.unwrap()["snapshot"].clone();
+    snapshot["agent"]["access"]["maxResources"] = Value::Null;
+    s.store
+        .patch_run(&run_id, json!({ "snapshot": snapshot }))
+        .await
+        .unwrap();
+    let follow_up = message("Continue with the same access.");
+    s.chat_send(&chat_id, follow_up.clone()).await.unwrap();
+    fixture
+        .until(&run_id, |r| {
+            r["status"] == RunStatus::Succeeded
+                && r["chatExecution"]["messageId"] == follow_up["id"]
+        })
+        .await;
+
+    let mut agent = s.get("agents", MAIN_AGENT_ID).await.unwrap();
+    agent["access"]["sandbox"] = "read-only".into();
+    s.store.put("agents", agent).await.unwrap();
+    s.chat_send(&chat_id, message("Continue with less access."))
+        .await
+        .unwrap();
+    // The queue pauses with the reason instead of reusing the wider workspace.
+    let error = eventually(
+        Duration::from_secs(10),
+        Duration::from_millis(30),
+        async || {
+            let error = s.store.kv(&format!("chat-error:{chat_id}")).await.unwrap();
+            error.and_then(|error| error.as_str().map(str::to_owned))
+        },
+    )
+    .await;
+    assert!(error.contains("Agent access was reduced"), "{error}");
+    fixture.stop(false).await;
+}
+
+#[tokio::test]
 async fn chat_messages_invoke_dollar_skills_without_changing_the_visible_text() {
     let mut fixture = Fixture::new().await;
     let s = &fixture.service;
@@ -1174,6 +1219,45 @@ async fn queued_work_uses_current_node_grants_without_rejecting_unrelated_policy
     assert_eq!(
         completed["snapshot"]["agent"]["access"]["nodes"],
         json!([LOCAL_NODE_ID])
+    );
+    fixture.stop(false).await;
+}
+
+#[tokio::test]
+async fn queued_work_continues_with_equivalent_or_wider_access_but_not_reduced_access() {
+    let mut fixture = Fixture::new().await;
+    fixture.stop(false).await;
+    let s = fixture.service.clone();
+    let run = fixture
+        .enqueue("Inspect the fixture after an equivalent access change")
+        .await;
+    let id = text(&run, "id");
+    // Queued by an older version that saved a setting the policy no longer has.
+    let mut snapshot = s.store.run(id).await.unwrap()["snapshot"].clone();
+    snapshot["agent"]["access"]["maxResources"] = Value::Null;
+    s.store
+        .patch_run(id, json!({ "snapshot": snapshot }))
+        .await
+        .unwrap();
+    let mut agent = s.get("agents", MAIN_AGENT_ID).await.unwrap();
+    agent["name"] = "Renamed agent".into();
+    s.store.put("agents", agent.clone()).await.unwrap();
+    fixture.start().await;
+    let completed = fixture.until_finished(id).await;
+    assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
+
+    fixture.stop(false).await;
+    let reduced_run = fixture
+        .enqueue("Inspect the fixture after a reduction")
+        .await;
+    agent["access"]["sandbox"] = "read-only".into();
+    s.store.put("agents", agent).await.unwrap();
+    fixture.start().await;
+    let failed = fixture.until_finished(text(&reduced_run, "id")).await;
+    assert_eq!(failed["status"], RunStatus::Failed, "{failed}");
+    assert!(
+        text(&failed, "error").contains("Agent access was reduced"),
+        "{failed}"
     );
     fixture.stop(false).await;
 }
