@@ -104,7 +104,8 @@ const missionRunning = computed(() => fil.value.live.some(item => item.taskId &&
 
 onMounted(async () => {
   try {
-    await session()
+    if (!state.installationId)
+      await session()
     if (state.authenticated)
       await refresh()
   }
@@ -274,7 +275,7 @@ async function login() {
       </div>
     </div>
   </main>
-  <div v-else class="shell flex h-dvh min-h-0 overflow-hidden">
+  <div v-else class="shell flex min-h-0 overflow-hidden" :class="state.installationId ? 'flex-1' : 'h-dvh'">
     <nav class="rail z-30 flex w-19 shrink-0 flex-col items-center gap-1 border-r border-line bg-canvas pb-4 pt-4 phone:hidden" aria-label="Workspace navigation">
       <RouterLink to="/" class="press mb-4 grid size-10 place-items-center rounded-xl bg-brand text-white shadow-[0_6px_16px_-6px_#4545ef99]" aria-label="Leo home">
         <Icon :name="Zap" :size="20" />

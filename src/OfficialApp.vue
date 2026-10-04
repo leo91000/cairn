@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
 import { state } from './api'
+import App from './App.vue'
 import ThemeControl from './components/ThemeControl.vue'
 import UiAlert from './components/UiAlert.vue'
 import UiButton from './components/UiButton.vue'
-import OfficialConversations from './OfficialConversations.vue'
 
 interface AccountSession {
   authenticated: boolean
@@ -37,10 +37,40 @@ const challenge = ref('')
 const busy = ref(false)
 const error = ref('')
 const claimCode = ref('')
+const editingName = ref(false)
+const installationName = ref('')
 const installation = ref<{ id: string, name: string } | null>(null)
 
 watch(session, (value) => {
   state.csrf = value?.csrf || ''
+  state.authenticated = value?.authenticated || false
+  state.ready = ready.value
+  if (!value?.authenticated)
+    return
+
+  const requested = state.installationId
+  installation.value = value.installations.find(item => item.id === requested) || null
+  if (requested && !installation.value) {
+    error.value = 'This installation is unavailable or no longer accessible to your Leo account.'
+    return
+  }
+
+  if (installation.value) {
+    try {
+      localStorage.setItem(`leo-current-installation:${value.account?.id}`, installation.value.id)
+    }
+    catch {}
+  }
+
+  if (!requested && value.installations.length) {
+    let remembered = ''
+    try {
+      remembered = localStorage.getItem(`leo-current-installation:${value.account?.id}`) || ''
+    }
+    catch {}
+
+    openInstallation(value.installations.find(item => item.id === remembered) || value.installations[0]!)
+  }
 })
 
 async function accountRequest(route: string, body?: unknown) {
@@ -72,6 +102,7 @@ async function loadSession() {
     session.value = account
     options.value = available
     ready.value = true
+    state.ready = true
   }
   catch {
     error.value = 'Unable to reach Leo. Please try again.'
@@ -257,8 +288,46 @@ function openInstallation(value: { id: string, name: string }) {
   state.installationId = value.id
   state.csrf = session.value?.csrf || ''
   state.authenticated = true
+  try {
+    localStorage.setItem(`leo-current-installation:${session.value?.account?.id}`, value.id)
+  }
+  catch {}
+
+  window.location.assign(`/installations/${encodeURIComponent(value.id)}/`)
   installation.value = value
   claimCode.value = ''
+}
+
+async function renameInstallation() {
+  if (!installation.value || busy.value)
+    return
+  busy.value = true
+  error.value = ''
+  try {
+    const response = await fetch(`/api/installations/${encodeURIComponent(installation.value.id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf },
+      body: JSON.stringify({ name: installationName.value }),
+    })
+    const result = await response.json()
+    if (!response.ok)
+      throw new Error(result.error || 'Unable to rename this installation.')
+    installation.value.name = result.name
+    editingName.value = false
+  }
+  catch (cause) {
+    error.value = cause instanceof Error ? cause.message : 'Unable to rename this installation.'
+  }
+  finally {
+    busy.value = false
+  }
+}
+
+function selectInstallation(event: Event) {
+  const id = (event.target as HTMLSelectElement).value
+  const selected = session.value?.installations.find(item => item.id === id)
+  if (selected)
+    openInstallation(selected)
 }
 
 function changeEmail() {
@@ -279,7 +348,47 @@ onMounted(async () => {
 </script>
 
 <template>
-  <main class="min-h-dvh bg-canvas text-ink px-6 py-10 grid place-items-center">
+  <div v-if="session?.authenticated && installation && !showMethods" class="flex h-dvh min-h-0 flex-col bg-canvas text-ink">
+    <header class="flex flex-wrap items-center gap-3 border-b border-line px-4 py-2 text-sm">
+      <label v-if="session.installations.length > 1" class="min-w-0 max-w-full">
+        <span class="sr-only">Current installation</span>
+        <select :value="installation.id" :disabled="busy" @change="selectInstallation">
+          <option v-for="item in session.installations" :key="item.id" :value="item.id">
+            {{ item.name }}
+          </option>
+        </select>
+      </label>
+      <span v-else class="font-semibold break-all">{{ installation.name }}</span>
+      <UiButton size="small" :disabled="busy" @click="editingName = !editingName; installationName = installation.name">
+        Rename installation
+      </UiButton>
+      <UiButton size="small" :disabled="busy" @click="openMethods">
+        Sign-in methods
+      </UiButton>
+      <UiButton size="small" :disabled="busy" @click="signOut">
+        Sign out
+      </UiButton>
+    </header>
+    <form v-if="editingName" class="flex flex-wrap items-end gap-3 border-b border-line px-4 py-3" @submit.prevent="renameInstallation">
+      <label>Installation name<input
+        v-model="installationName"
+        required
+        maxlength="100"
+        :disabled="busy"
+      ></label>
+      <UiButton type="submit" :disabled="busy">
+        Save installation name
+      </UiButton>
+      <UiButton :disabled="busy" @click="editingName = false">
+        Cancel
+      </UiButton>
+    </form>
+    <UiAlert v-if="error" class="mx-4 my-2">
+      {{ error }}
+    </UiAlert>
+    <App />
+  </div>
+  <main v-else class="min-h-dvh bg-canvas text-ink px-6 py-10 grid place-items-center">
     <div class="absolute top-5 right-5">
       <ThemeControl compact />
     </div>
@@ -364,8 +473,7 @@ onMounted(async () => {
         <p class="text-muted mb-4">
           You’re signed in as {{ session.account?.email }}.
         </p>
-        <OfficialConversations v-if="installation" :key="installation.id" />
-        <template v-else>
+        <div>
           <p v-if="!session.installations.length" class="text-muted mb-8">
             Your Leo account is ready. Your installations will appear here when you add one.
           </p>
@@ -386,7 +494,7 @@ onMounted(async () => {
               This code expires in 10 minutes.
             </p>
           </div>
-        </template>
+        </div>
         <UiAlert v-if="error">
           {{ error }}
         </UiAlert>
