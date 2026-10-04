@@ -52,7 +52,9 @@ async fn authenticate(
         && !path.starts_with("/internal/")
         && !path.starts_with("/oauth/")
         && !path.starts_with("/.well-known/")
-        && !path.starts_with("/mcp")
+        && path != "/mcp"
+        && path != "/mcp-workspace"
+        && !path.starts_with("/mcp-gateway/")
         && path != "/health"
     {
         return ServeDir::new("dist")
@@ -159,11 +161,15 @@ async fn authorize(service: &Service, request: &mut Request) -> Result<Option<Re
     {
         // Fixture-only adapters for the legacy OAuth/public-link journeys. The
         // production binary rejects these even with an old local credential.
+        let session = service.auth.read(&cookie(request.headers())).await?;
+        let account_id = session
+            .as_ref()
+            .map_or("fixture-owner", |session| text(session, "csrf"));
         request
             .extensions_mut()
             .insert(InstallationIdentity::trusted(
                 InstallationRole::Owner,
-                "fixture-owner",
+                account_id,
             ));
     }
     Ok(None)

@@ -4,7 +4,7 @@ use crate::{
     error::{Error, Result},
     execution::secret,
     service::Service,
-    validation::{text, uuid},
+    validation::uuid,
 };
 use axum::{
     Json, Router,
@@ -682,10 +682,10 @@ async fn oauth(State(app): State<App>, request: Request) -> Result<Response> {
         {
             return Ok(native_callback_page());
         }
-        let result = if let Some(session) = auth.read(&cookie(&input.headers)).await? {
+        let result = if let Some(identity) = &input.identity {
             app.service
                 .mcps
-                .callback(&app.service, &input.query, text(&session, "csrf"))
+                .callback(&app.service, &input.query, identity.oauth_binding())
                 .await
                 .unwrap_or_else(|_| "expired".into())
         } else {

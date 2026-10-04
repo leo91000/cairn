@@ -200,17 +200,6 @@ jobs:
   image:
     # The exact-image smoke test uses the already validated official binary.
     needs: [resolve, quality]
-    services:
-      postgres:
-        image: postgres:17-alpine
-        env:
-          POSTGRES_USER: leo
-          POSTGRES_PASSWORD: test-only
-          POSTGRES_DB: leo_official_test
-        ports: ['5432:5432']
-        options: >-
-          --health-cmd "pg_isready -U leo -d leo_official_test"
-          --health-interval 5s --health-timeout 5s --health-retries 10
     if: needs.resolve.outputs.reuse != 'true'
     outputs:
       digest: ${{ steps.build.outputs.digest }}
@@ -298,6 +287,24 @@ jobs:
           name: browser-build
           path: dist/
       - run: chmod +x official-smoke-bin/leo-official
+      - name: Start the disposable official database
+        # The PR job changes Docker's image store above. Start this database
+        # afterwards so restarting Docker cannot discard a service container.
+        run: |
+          docker run --detach --name leo-official-smoke-db \
+            --publish 5432:5432 \
+            --env POSTGRES_USER=leo --env POSTGRES_PASSWORD=test-only \
+            --env POSTGRES_DB=leo_official_test \
+            --health-cmd "pg_isready -U leo -d leo_official_test" \
+            --health-interval 1s --health-timeout 5s --health-retries 30 \
+            postgres:17-alpine
+          for attempt in $(seq 1 30); do
+            if test "$(docker inspect --format '{{.State.Health.Status}}' leo-official-smoke-db)" = healthy; then
+              break
+            fi
+            sleep 1
+          done
+          test "$(docker inspect --format '{{.State.Health.Status}}' leo-official-smoke-db)" = healthy
       - name: Smoke-test the exact image
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -307,6 +314,9 @@ jobs:
         run: |
           node tests/container-smoke.mjs "$SMOKE_IMAGE"
           node tests/runner-smoke.mjs "$SMOKE_IMAGE"
+      - name: Remove the disposable official database
+        if: always()
+        run: docker rm --force leo-official-smoke-db
       - name: Verify retained conversation memory, crash recovery and active admission
         env:
           SMOKE_IMAGE: ${{ github.event_name == 'pull_request' && 'leo-agent-manager:test' || format('ghcr.io/{0}@{1}', github.repository, steps.build.outputs.digest) }}
