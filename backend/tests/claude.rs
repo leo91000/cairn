@@ -654,7 +654,20 @@ async fn run_events(c: &Config, p: Value) -> Vec<Value> {
 async fn background_work_and_its_followup_finish_before_the_run_completes() {
     let root = TempDir::new().unwrap();
     let c = setup(&root);
-    run_events(&c, plan(&root, "fixture:background")).await;
+    let events = run_events(&c, plan(&root, "fixture:background")).await;
+    let waits: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "turn.waiting")
+        .map(|e| e["tasks"].clone())
+        .collect();
+    // Idle while the build runs, then resuming once it finishes.
+    assert_eq!(
+        waits,
+        vec![
+            json!([{ "id": "build", "description": "Wait for build" }]),
+            json!([]),
+        ]
+    );
     assert_eq!(
         std::fs::read_to_string(root.path().join("result.md")).unwrap(),
         "Build checked and task finished"
@@ -674,7 +687,8 @@ async fn ambient_watchers_do_not_keep_the_run_alive() {
     ] {
         let root = TempDir::new().unwrap();
         let c = setup(&root);
-        run_events(&c, plan(&root, prompt)).await;
+        let events = run_events(&c, plan(&root, prompt)).await;
+        assert!(!events.iter().any(|e| e["type"] == "turn.waiting"));
     }
 }
 

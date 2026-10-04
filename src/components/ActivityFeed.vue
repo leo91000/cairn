@@ -16,7 +16,7 @@ import { latestArtifacts } from '../../shared/artifacts'
 import { activityEntries } from '../activity'
 import { deliveryEntries } from '../deliverables'
 import { ArrowDown, Maximize2, Minimize2 } from '../icons'
-import { workingStep } from '../signal'
+import { backgroundWait, waitingStep, workingStep } from '../signal'
 import { mentionSegments } from '../skill-mentions'
 import { iconButton } from '../ui'
 import ActivityContent from './ActivityContent.vue'
@@ -71,7 +71,12 @@ const entries = computed(() => {
 
   return deliveryEntries(entries, props.deliverables ?? [])
 })
-const working = computed(() => workingStep(entries.value.filter((entry): entry is ActivityEntry => entry.kind !== 'deliverables'), props.agent, props.events[0]?.createdAt ?? null))
+const working = computed(() => {
+  const wait = backgroundWait(props.events)
+  if (wait)
+    return waitingStep(wait)
+  return workingStep(entries.value.filter((entry): entry is ActivityEntry => entry.kind !== 'deliverables'), props.agent, props.events[0]?.createdAt ?? null)
+})
 const visibleOutcome = computed(() => !props.active && !props.sending?.length && !props.loading ? props.outcome : null)
 const outcomeEntryId = computed(() => {
   const items = entries.value

@@ -240,6 +240,7 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
         'item.started': 'Tool activity',
         'item.completed': 'Work completed',
         'turn.failed': 'Turn failed',
+        'turn.waiting': 'Waiting for background tasks',
       }
       artifact.title = event.type === 'status' ? readable(event.text) : type ? readable(type) : labels[event.type] || readable(event.type)
       const message = text(item.message) || text(data.message) || text(record(data.error).message)
@@ -252,6 +253,13 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
       const usage = record(data.usage)
       if (typeof usage.input_tokens === 'number' && typeof usage.output_tokens === 'number')
         artifact.subtitle = `${usage.input_tokens.toLocaleString()} input · ${usage.output_tokens.toLocaleString()} output tokens`
+      if (event.type === 'turn.waiting') {
+        const tasks = Array.isArray(data.tasks) ? data.tasks.map(task => text(record(task).description)).filter(Boolean) : []
+        artifact.status = 'info'
+        if (!tasks.length)
+          artifact.title = 'Background tasks finished'
+        artifact.subtitle = tasks.join(' · ')
+      }
     }
 
     if (artifact.kind === 'notice' && ['error', 'diagnostic', 'item.completed'].includes(event.type) && /websocket|reconnecting\.\.\.|reconnecting\s+\d+\//i.test(artifact.raw) && /503|reconnect|falling back|connection.*(?:closed|failed)/i.test(artifact.raw)) {

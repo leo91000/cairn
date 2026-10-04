@@ -58,6 +58,7 @@ import {
   Zap,
 } from '../icons'
 import { useRetryNotice } from '../run-retry'
+import { backgroundWait } from '../signal'
 import { chatSkills } from '../skill-mentions'
 import { iconButton } from '../ui'
 import { useLiveRun } from '../use-live-run'
@@ -191,7 +192,8 @@ const retryNotice = useRetryNotice(() => detail.value?.run)
 const waitNotice = computed(() => retryNotice.value
   ? { account: null, message: retryNotice.value }
   : chatWaitNotice(detail.value?.run))
-const chatStatus = computed(() => detail.value?.paused ? 'Paused' : active.value ? detail.value?.run?.status === 'queued' ? 'Waiting' : 'Working' : detail.value?.run?.status === 'failed' ? 'Failed' : detail.value?.run?.status === 'interrupted' ? 'Interrupted' : 'Ready')
+const backgroundTasks = computed(() => detail.value?.run?.status === 'running' ? backgroundWait(events.value)?.tasks.length ?? 0 : 0)
+const chatStatus = computed(() => detail.value?.paused ? 'Paused' : active.value ? detail.value?.run?.status === 'queued' ? 'Waiting' : backgroundTasks.value ? backgroundTasks.value === 1 ? 'Background task' : 'Background tasks' : 'Working' : detail.value?.run?.status === 'failed' ? 'Failed' : detail.value?.run?.status === 'interrupted' ? 'Interrupted' : 'Ready')
 const outgoing = ref<ChatMessage | null>(null)
 const delivery = computed(() => chatDelivery(detail.value, events.value, outgoing.value))
 const pending = computed(() => delivery.value.queued)
