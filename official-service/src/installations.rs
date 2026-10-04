@@ -129,11 +129,7 @@ pub(super) async fn claim(
     Json(input): Json<Claim>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     consume_limit(&service.pool, &format!("claim:{}", peer.ip()), 30).await?;
-    if !leo_relay_protocol::SUPPORTED_VERSIONS.contains(&input.protocol) {
-        return Err(ApiError(StatusCode::CONFLICT, "Unsupported relay protocol"));
-    }
-
-    let name = installation_name(&input.name)?;
+    let name = claim_name(&input.name, input.protocol)?;
 
     let mut transaction = service.pool.begin().await?;
     let owner: Option<(String,)> = query_as("DELETE FROM installation_claim_codes WHERE digest = $1 AND expires_at > now() RETURNING account_id")
@@ -181,4 +177,172 @@ pub(super) async fn detach(
 
     service.relay.disconnect(&installation);
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn claim_name(name: &str, protocol: u16) -> Result<&str, ApiError> {
+    if !leo_relay_protocol::SUPPORTED_VERSIONS.contains(&protocol) {
+        return Err(ApiError(StatusCode::CONFLICT, "Unsupported relay protocol"));
+    }
+
+    installation_name(name)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct MachineIdentity {
+    installation_id: String,
+    token: String,
+}
+
+#[derive(Deserialize)]
+pub(super) struct DeviceStart {
+    name: String,
+    protocol: u16,
+    identity: Option<MachineIdentity>,
+}
+
+/// Only possession of the private machine token can reclaim an existing record.
+pub(super) async fn start_device(
+    State(service): State<Service>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(input): Json<DeviceStart>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    consume_limit(&service.pool, &format!("device-start:{}", peer.ip()), 30).await?;
+    let name = claim_name(&input.name, input.protocol)?;
+    let mut transaction = service.pool.begin().await?;
+    let installation = if let Some(identity) = input.identity {
+        let row: Option<(Option<String>,)> = query_as(
+            "SELECT owner_id FROM installations WHERE id = $1 AND token_digest = $2 FOR UPDATE",
+        )
+        .bind(&identity.installation_id)
+        .bind(digest(&identity.token))
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some((owner,)) = row else {
+            return Err(ApiError(
+                StatusCode::UNAUTHORIZED,
+                "Invalid installation identity",
+            ));
+        };
+        if owner.is_some() {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "Detach the installation before claiming it again",
+            ));
+        }
+        identity.installation_id
+    } else {
+        let id = uuid::Uuid::new_v4().to_string();
+        query("INSERT INTO installations (id, owner_id, name, token_digest) VALUES ($1, NULL, $2, $3)")
+            .bind(&id).bind(name).bind(digest(&random_token())).execute(&mut *transaction).await?;
+        id
+    };
+
+    query(
+        "DELETE FROM installation_device_claims WHERE installation_id = $1 OR expires_at <= now()",
+    )
+    .bind(&installation)
+    .execute(&mut *transaction)
+    .await?;
+    let device = random_token();
+    let code = random_token()[..12].to_uppercase();
+    query("INSERT INTO installation_device_claims (device_digest, user_digest, installation_id, expires_at) VALUES ($1, $2, $3, now() + interval '10 minutes')")
+        .bind(digest(&device)).bind(digest(&code)).bind(&installation).execute(&mut *transaction).await?;
+    transaction.commit().await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "deviceCode": device,
+            "userCode": format!("{}-{}-{}", &code[..4], &code[4..8], &code[8..]),
+            "verificationUri": format!("{}/claim", service.origin),
+            "expiresIn": 600,
+            "interval": 2,
+        })),
+    ))
+}
+
+#[derive(Deserialize)]
+pub(super) struct DeviceApproval {
+    code: String,
+}
+
+pub(super) async fn approve_device(
+    State(service): State<Service>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(input): Json<DeviceApproval>,
+) -> Result<Json<Value>, ApiError> {
+    let account = account(&service, &headers, &Method::POST).await?;
+    consume_limit(&service.pool, &format!("device-approval:{account}"), 10).await?;
+    consume_limit(
+        &service.pool,
+        &format!("device-approval-ip:{}", peer.ip()),
+        30,
+    )
+    .await?;
+    let code = input.code.trim().replace('-', "").to_uppercase();
+    let approved: Option<(String,)> = query_as("UPDATE installation_device_claims SET approved_by = $1 WHERE user_digest = $2 AND approved_by IS NULL AND expires_at > now() RETURNING installation_id")
+        .bind(account).bind(digest(&code)).fetch_optional(&service.pool).await?;
+    let Some((installation,)) = approved else {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "Invalid, expired or already approved claim code",
+        ));
+    };
+    Ok(Json(json!({ "installationId": installation })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DevicePoll {
+    device_code: String,
+}
+
+pub(super) async fn poll_device(
+    State(service): State<Service>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(input): Json<DevicePoll>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    consume_limit(&service.pool, &format!("device-poll:{}", peer.ip()), 120).await?;
+    let device_digest = digest(&input.device_code);
+    let mut transaction = service.pool.begin().await?;
+    let row: Option<(String,)> = query_as("SELECT installation_id FROM installation_device_claims WHERE device_digest = $1 AND expires_at > now()")
+        .bind(&device_digest).fetch_optional(&mut *transaction).await?;
+    let invalid = || ApiError(StatusCode::UNAUTHORIZED, "Invalid or expired device claim");
+    let Some((installation,)) = row else {
+        return Err(invalid());
+    };
+    // All machine operations lock the installation before its challenge.
+    let row: Option<(Option<String>,)> =
+        query_as("SELECT owner_id FROM installations WHERE id = $1 FOR UPDATE")
+            .bind(&installation)
+            .fetch_optional(&mut *transaction)
+            .await?;
+    if !matches!(row, Some((None,))) {
+        return Err(invalid());
+    }
+    let row: Option<(Option<String>,)> = query_as("SELECT approved_by FROM installation_device_claims WHERE device_digest = $1 AND expires_at > now() FOR UPDATE")
+        .bind(&device_digest).fetch_optional(&mut *transaction).await?;
+    let Some((approved,)) = row else {
+        return Err(invalid());
+    };
+    let Some(owner) = approved else {
+        return Ok((StatusCode::ACCEPTED, Json(json!({ "pending": true }))));
+    };
+    let token = random_token();
+    query("UPDATE installations SET owner_id = $1, token_digest = $2 WHERE id = $3")
+        .bind(owner)
+        .bind(digest(&token))
+        .bind(&installation)
+        .execute(&mut *transaction)
+        .await?;
+    query("DELETE FROM installation_device_claims WHERE device_digest = $1")
+        .bind(device_digest)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "installationId": installation, "token": token })),
+    ))
 }

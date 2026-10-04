@@ -129,6 +129,13 @@ pub async fn router_with_relay(
                 include_str!("../migrations/202610030250_reclaim.sql").into(),
                 false,
             ),
+            Migration::new(
+                202610030350,
+                "device claims".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/202610030350_device_claims.sql").into(),
+                false,
+            ),
         ]),
         ..Migrator::DEFAULT
     };
@@ -180,6 +187,10 @@ pub async fn router_with_relay(
             axum::routing::patch(installations::rename),
         )
         .route(
+            "/api/installations/device-claim",
+            post(installations::approve_device),
+        )
+        .route(
             "/api/installations/{installation}/detach",
             post(installations::detach),
         )
@@ -194,6 +205,14 @@ pub async fn router_with_relay(
         .merge(
             Router::new()
                 .route("/api/relay/claim", post(installations::claim))
+                .route(
+                    "/api/relay/device-claim/start",
+                    post(installations::start_device),
+                )
+                .route(
+                    "/api/relay/device-claim/poll",
+                    post(installations::poll_device),
+                )
                 .route("/api/relay/{installation}/connect", get(relay::upgrade)),
         )
         .with_state(service))
