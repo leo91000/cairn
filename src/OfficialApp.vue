@@ -52,6 +52,7 @@ const installationCommand = computed(() => {
   const quote = (value: string) => `'${value.replaceAll('\'', '\'"\'"\'')}'`
   return `curl -fsSL ${quote(`${window.location.origin}/install.sh`)} | sudo bash -s -- --claim-code ${quote(claimCode.value)}`
 })
+const installationInstructions = 'This code expires in 10 minutes. Run this command on your Linux x86-64 machine. No domain, certificate, incoming port or S3 setup is needed.'
 const editingName = ref(false)
 const installationName = ref('')
 const deviceCode = ref('')
@@ -600,7 +601,7 @@ onMounted(async () => {
       /></label>
       <label>Installation claim code<input :value="claimCode" readonly autocomplete="off"></label>
       <p class="text-sm text-muted">
-        Run this command on your Linux x86-64 machine. It expires in 10 minutes. No domain, certificate, incoming port or S3 setup is needed.
+        {{ installationInstructions }}
       </p>
       <UiButton size="small" :disabled="busy" @click="loadSession">
         Refresh installations
@@ -765,7 +766,7 @@ onMounted(async () => {
             /></label>
             <label>Installation claim code<input :value="claimCode" readonly autocomplete="off"></label>
             <p class="text-muted">
-              Run this command on your Linux x86-64 machine. It expires in 10 minutes. No domain, certificate, incoming port or S3 setup is needed.
+              {{ installationInstructions }}
             </p>
           </div>
         </div>

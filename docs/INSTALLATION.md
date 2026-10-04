@@ -20,7 +20,8 @@ socket. Private identity and storage credentials must stay on this host. Do not
 publish the directory or `docker compose config` output.
 
 Reruns retain the chosen immutable Leo image, identity, Garage keys, storage
-settings and persistent data. Concurrent installers are refused. The one-use
+settings and persistent data. Concurrent installers are refused. An incomplete or unsafe identity stops the
+rerun with recovery instructions and is retained rather than overwritten. The one-use
 claim environment is cleared after success or failure; after startup the manager
 is recreated without it. A refused or expired code leaves Leo running unclaimed.
 Obtain a new command and rerun it, or run `sudo leo claim` and confirm its code in
@@ -35,13 +36,24 @@ creates the bucket and credentials automatically, with one small storage process
 and no provisioning client. Data and metadata persist in the installation
 directory. Only this integrated configuration accepts `http://garage:3900` on the
 private Compose network; external storage uses HTTPS. S3 remains mandatory for
-every disk under ADR-0009.
+every disk under ADR-0009. Garage has no object versioning; collection deletes
+exact object keys directly. External versioned providers retain the existing
+version and delete-marker cleanup.
 
 In **Settings → Conversation storage**, the owner supplies an external HTTPS
 endpoint, bucket, region and credentials. Use a dedicated private bucket without
 active lifecycle rules or Object Lock, allowing object read/write/delete.
 Validation and a write/read/delete probe run before saving. Credentials stay in
 the private manager configuration and are never returned to the browser.
+
+Cloudflare R2 uses `auto` as its region. Its
+[S3 interface](https://developers.cloudflare.com/r2/api/s3/api/) cannot report
+public domains, bucket locks or ACLs. For R2 endpoints the owner must confirm in
+the form that `r2.dev` and public custom domains are disabled and bucket locks
+are absent in the Cloudflare dashboard. Lifecycle rules and object access are
+still checked. Other providers retain the existing privacy and Object Lock
+checks. R2 uses its own encryption at rest; Leo does not send unsupported SSE-S3
+headers or version-list operations.
 
 The external target becomes the default for new disks. Existing disks keep using
 their original storage and its retained credentials. This does not migrate disk

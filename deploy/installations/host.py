@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import re
 import secrets
+import stat
+import uuid
 import shlex
 import subprocess
 import sys
@@ -109,7 +111,7 @@ def compose(image, origin):
                     'LEO_INSTALLATION_CLAIM_CODE': '${LEO_INSTALLATION_CLAIM_CODE:-}',
                 },
                 'volumes': ['./data:/data', './home:/home/node', './workspaces:/workspaces'],
-                'mem_limit': '4g', 'cpus': 2, 'logging': logs,
+                'mem_limit': '4g', 'logging': logs,
             },
             'runner': {
                 'image': image, 'user': '0:0', 'restart': 'unless-stopped',
@@ -123,7 +125,7 @@ def compose(image, origin):
                 'sysctls': {'net.ipv4.ip_forward': '1', 'net.ipv6.conf.all.disable_ipv6': '1'},
                 'tmpfs': ['/run', '/tmp'],
                 'volumes': ['./data:/data', './runner-state:/runner-state'],
-                'mem_limit': '20g', 'cpus': 8, 'logging': logs,
+                'mem_limit': '20g', 'logging': logs,
                 'healthcheck': {
                     'test': ['CMD', 'node', '-e', "fetch('http://127.0.0.1:4311/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"],
                     'start_period': '120s', 'interval': '5s', 'timeout': '5s', 'retries': 24,
@@ -131,6 +133,23 @@ def compose(image, origin):
             },
         },
     }
+
+
+def claimed_identity(origin):
+    identity = ROOT / 'data/installation-relay/identity.json'
+    if not identity.exists() and not identity.is_symlink():
+        return False
+    try:
+        metadata = identity.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077:
+            raise ValueError('Private regular file required')
+        data = json.loads(identity.read_text())
+        uuid.UUID(data['installationId'])
+        if data['origin'] != origin or not isinstance(data['token'], str) or not data['token']:
+            raise ValueError('Invalid identity')
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        raise RuntimeError('The saved installation identity is incomplete or unsafe. Restore its private backup, or detach the previous installation in the official app before recovering it. The file is retained.') from None
+    return True
 
 
 def install(origin, code):
@@ -142,6 +161,7 @@ def install(origin, code):
         raise RuntimeError('An unrelated /usr/local/bin/leo already exists. Move it before installing Leo; it will not be overwritten.')
     ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(ROOT, 0o700)
+    claimed = claimed_identity(origin)
     config_file = ROOT / 'installation.json'
     if config_file.exists():
         config = json.loads(config_file.read_text())
@@ -194,14 +214,14 @@ api_bind_addr = "0.0.0.0:3900"
     claim_file = ROOT / 'claim.env'
     identity = ROOT / 'data/installation-relay/identity.json'
     # Always replace a claim left by an interrupted install with the current code.
-    atomic(claim_file, 'LEO_INSTALLATION_CLAIM_CODE=' + (code if not identity.exists() else '') + '\n')
+    atomic(claim_file, 'LEO_INSTALLATION_CLAIM_CODE=' + (code if not claimed else '') + '\n')
     docker = ['docker', 'compose', '--project-directory', str(ROOT), '--env-file', str(claim_file), '-f', str(ROOT / 'compose.json')]
     print('Downloading Leo and Garage images…', flush=True)
     started = False
     try:
         run(docker + ['pull'], timeout=1200)
         print('Starting the manager, local runner and private S3 storage…', flush=True)
-        run(docker + ['up', '-d'], timeout=180)
+        run(docker + ['up', '-d'], timeout=360)
         started = True
         health = "fetch('http://127.0.0.1:4310/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
         deadline = time.monotonic() + 120
@@ -237,7 +257,7 @@ exec docker compose --project-directory ROOT -f COMPOSE exec -T manager /usr/loc
 '''.replace('ROOT', shlex.quote(str(ROOT))).replace('COMPOSE', shlex.quote(str(ROOT / 'compose.json')))
         atomic(Path('/usr/local/bin/leo'), wrapper)
         os.chmod('/usr/local/bin/leo', 0o755)
-    if identity.exists():
+    if claimed_identity(origin):
         print('Leo installed and claimed. Open the official app and refresh installations.')
     else:
         print('Leo installed but unclaimed. Run sudo leo claim and confirm its code in the official app.')

@@ -148,6 +148,7 @@ pub struct Storage {
     hot: Arc<HotS3>,
     credentials: Option<StorageCredentials>,
     integrated: bool,
+    r2: bool,
 }
 
 fn setting(config: &Value, suffix: &str, key: &str) -> String {
@@ -226,6 +227,7 @@ pub async fn save_settings(s: &Service, input: &Value) -> Result<Value> {
         "region": field("region", 100)?,
         "accessKeyId": field("accessKeyId", 256)?,
         "secretAccessKey": field("secretAccessKey", 256)?,
+        "privateBucketConfirmed": input["privateBucketConfirmed"] == true,
     });
     // Executable selection is server configuration, never user input.
     if previous["awsBinary"].is_string() {
@@ -341,6 +343,17 @@ impl Storage {
         }
         let endpoint = setting(config, "ENDPOINT", "endpoint");
         let integrated = config["integrated"] == true && endpoint == "http://garage:3900";
+        let r2 = url::Url::parse(&endpoint).is_ok_and(|url| {
+            url.scheme() == "https"
+                && url
+                    .host_str()
+                    .is_some_and(|host| host.ends_with(".r2.cloudflarestorage.com"))
+        });
+        if r2 && config["privateBucketConfirmed"] != true {
+            return Err(Error::bad(
+                "Confirm that R2 public domains and bucket locks are disabled in the Cloudflare dashboard.",
+            ));
+        }
         if !endpoint.is_empty() && !endpoint.starts_with("https://") && !integrated {
             return Err(Error::conflict(
                 "STORAGE_S3_ENDPOINT must be an https:// URL.",
@@ -372,6 +385,7 @@ impl Storage {
                 _ => return Err(Error::conflict("Configure both S3 access credentials.")),
             },
             integrated,
+            r2,
         })
     }
 
@@ -443,56 +457,78 @@ impl Storage {
             self.call(self.s3api("head-bucket", &[])).await?;
             return Ok(());
         }
-        let block = self
-            .optional(
-                self.s3api("get-public-access-block", &[]),
-                Some("NotImplemented"),
-            )
-            .await?;
-        if block.is_null() {
-            self.validate_private().await?;
-        } else if [
-            "BlockPublicAcls",
-            "IgnorePublicAcls",
-            "BlockPublicPolicy",
-            "RestrictPublicBuckets",
-        ]
-        .iter()
-        .any(|k| block["PublicAccessBlockConfiguration"][k] != true)
-        {
-            return Err(Error::bad(
-                "The storage bucket must block all public access.",
-            ));
-        }
-        let lifecycle = self
-            .optional(
-                self.s3api("get-bucket-lifecycle-configuration", &[]),
-                Some("NoSuchLifecycleConfiguration"),
-            )
-            .await?;
-        if lifecycle["Rules"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|r| r["Status"] == "Enabled")
-        {
-            return Err(Error::bad(
-                "Use a dedicated storage bucket without lifecycle rules that could remove active disk blocks.",
-            ));
-        }
-        let lock = self
-            .optional(
-                self.s3api("get-object-lock-configuration", &[]),
-                Some("ObjectLockConfigurationNotFoundError"),
-            )
-            .await?;
-        if lock["ObjectLockConfiguration"]["ObjectLockEnabled"] == "Enabled" {
-            return Err(Error::bad(
-                "Object Lock is incompatible with automatic trash deletion. Use a dedicated \
-                    bucket without Object Lock.",
-            ));
-        }
-        self.call(self.s3api("head-bucket", &[])).await?;
+        let privacy = async {
+            if self.r2 {
+                // R2 public domains and locks are provider controls confirmed by the owner.
+                return Ok(());
+            }
+            let block = self
+                .optional(
+                    self.s3api("get-public-access-block", &[]),
+                    Some("NotImplemented"),
+                )
+                .await?;
+            if block.is_null() {
+                self.validate_private().await?;
+            } else if [
+                "BlockPublicAcls",
+                "IgnorePublicAcls",
+                "BlockPublicPolicy",
+                "RestrictPublicBuckets",
+            ]
+            .iter()
+            .any(|k| block["PublicAccessBlockConfiguration"][k] != true)
+            {
+                return Err(Error::bad(
+                    "The storage bucket must block all public access.",
+                ));
+            }
+            Ok(())
+        };
+        let lifecycle = async {
+            let lifecycle = self
+                .optional(
+                    self.s3api("get-bucket-lifecycle-configuration", &[]),
+                    Some("NoSuchLifecycleConfiguration"),
+                )
+                .await?;
+            if lifecycle["Rules"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|r| r["Status"] == "Enabled")
+            {
+                return Err(Error::bad(
+                    "Use a dedicated storage bucket without lifecycle rules that could remove active disk blocks.",
+                ));
+            }
+            Ok(())
+        };
+        let object_lock = async {
+            if self.r2 {
+                return Ok(());
+            }
+            let lock = self
+                .optional(
+                    self.s3api("get-object-lock-configuration", &[]),
+                    Some("ObjectLockConfigurationNotFoundError"),
+                )
+                .await?;
+            if lock["ObjectLockConfiguration"]["ObjectLockEnabled"] == "Enabled" {
+                return Err(Error::bad(
+                    "Object Lock is incompatible with automatic trash deletion. Use a dedicated \
+                        bucket without Object Lock.",
+                ));
+            }
+            Ok(())
+        };
+        // These read-only checks are independent. Run together to fit the relay deadline.
+        tokio::try_join!(
+            privacy,
+            lifecycle,
+            object_lock,
+            self.call(self.s3api("head-bucket", &[]))
+        )?;
         Ok(())
     }
 
@@ -545,7 +581,9 @@ impl Storage {
             .put_object()
             .bucket(&self.bucket)
             .key(key)
-            .server_side_encryption(aws_sdk_s3::types::ServerSideEncryption::Aes256)
+            .set_server_side_encryption(
+                (!self.r2).then_some(aws_sdk_s3::types::ServerSideEncryption::Aes256),
+            )
             .body(aws_sdk_s3::primitives::ByteStream::from(bytes.clone()))
             .send()
             .await
@@ -667,6 +705,20 @@ impl Storage {
                 self.credentials.as_ref(),
             )
             .await;
+        // Garage and R2 do not implement versioning; delete the exact immutable key.
+        if self.integrated || self.r2 {
+            client
+                .delete_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .send()
+                .await
+                .map_err(|_| {
+                    Error::unavailable("Cannot delete obsolete disk object; cleanup will retry.")
+                })?;
+            sample.finish(0);
+            return Ok(());
+        }
         loop {
             let page = client
                 .list_object_versions()
@@ -735,29 +787,31 @@ impl Storage {
     }
 
     pub async fn purge(&self, prefix: &str) -> Result<()> {
-        let listed = self
-            .call(self.s3api("list-object-versions", &["--prefix", prefix]))
-            .await?;
-        for item in listed["Versions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .chain(listed["DeleteMarkers"].as_array().into_iter().flatten())
-        {
-            let key = item["Key"]
-                .as_str()
-                .filter(|k| k.starts_with(prefix))
-                .ok_or_else(|| Error::internal("Unexpected storage key"))?;
-            self.call(self.s3api(
-                "delete-object",
-                &[
-                    "--key",
-                    key,
-                    "--version-id",
-                    item["VersionId"].as_str().unwrap_or("null"),
-                ],
-            ))
-            .await?;
+        if !self.integrated && !self.r2 {
+            let listed = self
+                .call(self.s3api("list-object-versions", &["--prefix", prefix]))
+                .await?;
+            for item in listed["Versions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .chain(listed["DeleteMarkers"].as_array().into_iter().flatten())
+            {
+                let key = item["Key"]
+                    .as_str()
+                    .filter(|k| k.starts_with(prefix))
+                    .ok_or_else(|| Error::internal("Unexpected storage key"))?;
+                self.call(self.s3api(
+                    "delete-object",
+                    &[
+                        "--key",
+                        key,
+                        "--version-id",
+                        item["VersionId"].as_str().unwrap_or("null"),
+                    ],
+                ))
+                .await?;
+            }
         }
         let uploads = self
             .call(self.s3api("list-multipart-uploads", &["--prefix", prefix]))
@@ -846,6 +900,7 @@ mod tests {
                 region: "us-east-1".into(),
                 credentials: None,
                 integrated: false,
+                r2: false,
                 hot,
             };
             let error = storage.download_bytes("block", 4096).await.unwrap_err();

@@ -56,11 +56,22 @@ pub fn release_router(image: Option<String>) -> Result<Router, &'static str> {
         get(move || async move {
             let headers = [(header::CACHE_CONTROL, "no-store")];
             match image {
-            Some(image) => (headers, Json(json!({ "image": image }))).into_response(),
-            None => (StatusCode::SERVICE_UNAVAILABLE, headers, Json(json!({
-                "error": "The operator must configure LEO_INSTALLATION_IMAGE before installing Leo."
-            }))).into_response(),
-        }
+                Some(image) => (
+                    headers,
+                    Json(json!({
+                        "image": image
+                    })),
+                )
+                    .into_response(),
+                None => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    headers,
+                    Json(json!({
+                        "error": "The operator must configure LEO_INSTALLATION_IMAGE before installing Leo."
+                    })),
+                )
+                    .into_response(),
+            }
         }),
     ))
 }

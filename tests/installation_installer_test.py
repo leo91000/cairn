@@ -35,6 +35,23 @@ class Installer(unittest.TestCase):
             self.assertFalse((installation / 'claim.env').exists())
             self.assertNotIn('a' * 64, result.stdout + result.stderr)
 
+    def test_incomplete_identity_is_preserved_and_explains_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            identity = root / 'data/installation-relay/identity.json'
+            identity.parent.mkdir(parents=True)
+            identity.touch(mode=0o600)
+            result = subprocess.run(
+                ['python3', str(REPO / 'deploy/installations/host.py'),
+                 'https://leo.example.test', '--claim-code', 'a' * 64],
+                env={**os.environ, 'LEO_INSTALLATION_ROOT': directory},
+                capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('incomplete', result.stderr)
+            self.assertIn('Restore', result.stderr)
+            self.assertEqual(identity.read_bytes(), b'')
+            self.assertFalse((root / 'claim.env').exists())
+
     def test_invalid_claim_code_has_an_actionable_message(self):
         with tempfile.TemporaryDirectory() as directory:
             result = subprocess.run(
@@ -77,12 +94,16 @@ import json, os, pathlib, sys
 root = pathlib.Path(os.environ['LEO_INSTALLATION_ROOT'])
 args = sys.argv[1:]
 if 'up' in args:
+    # Docker refuses a NanoCPUs limit exceeding the fixture host's two CPUs.
+    config = json.loads((root / 'compose.json').read_text())
+    assert all(service.get('cpus', 2) <= 2 for service in config['services'].values())
     identity = root / 'data/installation-relay/identity.json'
     identity.parent.mkdir(parents=True, exist_ok=True)
     if not identity.exists():
         claim = dict(line.split('=', 1) for line in (root / 'claim.env').read_text().splitlines())
         assert claim['LEO_INSTALLATION_CLAIM_CODE'] == 'a' * 64
-        identity.write_text(json.dumps({'installationId': 'fixture-installation', 'token': 'fixture-only'}))
+        identity.touch(mode=0o600)
+        identity.write_text(json.dumps({'origin': os.environ['FIXTURE_OFFICIAL_ORIGIN'], 'installationId': '00000000-0000-4000-8000-000000000001', 'token': 'fixture-only'}))
 if 'exec' in args:
     sys.exit(0)
 """)
@@ -92,7 +113,8 @@ if 'exec' in args:
             thread.start()
             try:
                 env = {**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
-                       'LEO_INSTALLATION_ROOT': str(root / 'installation')}
+                       'LEO_INSTALLATION_ROOT': str(root / 'installation'),
+                       'FIXTURE_OFFICIAL_ORIGIN': f'http://127.0.0.1:{server.server_port}'}
                 command = ['python3', str(REPO / 'deploy/installations/host.py'),
                            f'http://127.0.0.1:{server.server_port}', '--claim-code', 'a' * 64]
                 result = subprocess.run(command, env=env, capture_output=True, text=True)

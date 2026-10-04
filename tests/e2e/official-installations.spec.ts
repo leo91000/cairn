@@ -229,6 +229,12 @@ test('selects installations, remembers the last one and honours deep workspace U
     await expect(page.getByRole('heading', { name: 'Conversation storage', exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Configure external S3', exact: true }).click()
     await expect(page.getByLabel('S3 endpoint', { exact: true })).toBeVisible()
+    await page.getByLabel('S3 endpoint', { exact: true }).fill('https://11111111111111111111111111111111.r2.cloudflarestorage.com')
+    const privacy = page.getByRole('checkbox', { name: /I confirm R2 public domains/ })
+    await expect(privacy).not.toBeChecked()
+    await privacy.check()
+    await page.getByLabel('S3 bucket', { exact: true }).fill('another-private-bucket')
+    await expect(privacy).not.toBeChecked()
     for (const width of [1440, 390, 320]) {
       await page.setViewportSize({ width, height: 900 })
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)

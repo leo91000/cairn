@@ -1,5 +1,10 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import {
+  computed,
+  onMounted,
+  ref,
+  watch,
+} from 'vue'
 import { api, notify } from '../api'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
@@ -23,6 +28,21 @@ const form = ref({
   region: '',
   accessKeyId: '',
   secretAccessKey: '',
+  privateBucketConfirmed: false,
+})
+
+const r2 = computed(() => {
+  try {
+    const endpoint = new URL(form.value.endpoint)
+    return endpoint.protocol === 'https:' && endpoint.hostname.endsWith('.r2.cloudflarestorage.com')
+  }
+  catch {
+    return false
+  }
+})
+
+watch(() => [form.value.endpoint, form.value.bucket], () => {
+  form.value.privateBucketConfirmed = false
 })
 
 onMounted(async () => {
@@ -41,6 +61,7 @@ async function save() {
     storage.value = await api('/settings/storage', { method: 'PUT', body: JSON.stringify(form.value) })
     form.value.accessKeyId = ''
     form.value.secretAccessKey = ''
+    form.value.privateBucketConfirmed = false
     editing.value = false
     notify('Storage settings saved')
   }
@@ -121,6 +142,10 @@ async function check() {
           required
           maxlength="256"
         ></label>
+        <label v-if="r2" class="checkbox flex items-start gap-3">
+          <input v-model="form.privateBucketConfirmed" type="checkbox" required>
+          I confirm R2 public domains (including r2.dev) and bucket locks are disabled in Cloudflare. Leo cannot check these through S3.
+        </label>
         <p class="text-sm text-muted">
           Use a dedicated private bucket without lifecycle rules or Object Lock. Leo checks access before saving.
         </p>

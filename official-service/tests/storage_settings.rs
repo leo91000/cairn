@@ -59,3 +59,28 @@ async fn storage_check_explains_missing_configuration_through_the_relay() {
     assert_eq!(response.status(), 409);
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn r2_requires_owner_confirmation_of_provider_privacy_and_retention() {
+    let fixture = RelayedInstallation::new(axum::Router::new()).await;
+    let response = fixture
+        .app
+        .client
+        .put(format!("{}/settings/storage", fixture.base))
+        .header("cookie", &fixture.cookie)
+        .header("origin", &fixture.app.url)
+        .header("x-csrf-token", fixture.session["csrf"].as_str().unwrap())
+        .json(&json!({
+            "bucket": "leo-disks",
+            "endpoint": "https://11111111111111111111111111111111.r2.cloudflarestorage.com",
+            "region": "auto",
+            "accessKeyId": "fixture-only",
+            "secretAccessKey": "fixture-secret"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    assert!(response.text().await.unwrap().contains("Confirm"));
+    fixture.close().await;
+}

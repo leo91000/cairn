@@ -22,6 +22,7 @@ ROOT = Path('/fixture/installation')
 ORIGIN = 'http://127.0.0.1:48151'
 IMAGE = 'ghcr.io/leo91000/leo-agent-manager@sha256:' + '1' * 64
 MAIL = []
+R2_HOST = '1' * 32 + '.r2.cloudflarestorage.com'
 
 
 def request(route, body=None, cookie='', csrf='', method=None):
@@ -29,9 +30,13 @@ def request(route, body=None, cookie='', csrf='', method=None):
                'Cookie': cookie, 'X-CSRF-Token': csrf}
     req = urllib.request.Request(ORIGIN + route, headers=headers, method=method,
                                  data=None if body is None else json.dumps(body).encode())
-    with urllib.request.urlopen(req, timeout=10) as response:
-        data = response.read()
-        return json.loads(data) if data else None, response.headers
+    try:
+        with urllib.request.urlopen(req, timeout=45) as response:
+            data = response.read()
+            return json.loads(data) if data else None, response.headers
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode()
+        raise AssertionError(f'{method or req.get_method()} {route}: HTTP {error.code}: {detail}') from error
 
 
 def wait_for(check):
@@ -40,7 +45,7 @@ def wait_for(check):
         try:
             if check():
                 return
-        except (OSError, urllib.error.HTTPError, KeyError):
+        except (OSError, urllib.error.HTTPError, KeyError, AssertionError):
             pass
         time.sleep(0.2)
     raise AssertionError('The real official service or installation did not become ready')
@@ -153,11 +158,23 @@ if 'exec' in args and os.environ.get('INSTALLER_VERIFY'):
 
     mailbox = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Mailbox)
     threading.Thread(target=mailbox.serve_forever, daemon=True).start()
-    subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
-                    '-keyout', '/fixture/external.key', '-out', '/usr/local/share/ca-certificates/leo-fixture.crt',
-                    '-days', '1', '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost'],
-                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    tls_extensions = Path('/fixture/external.ext')
+    tls_extensions.write_text(f'basicConstraints=critical,CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost,DNS:{R2_HOST}\n')
+    for command in [
+        ['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+         '-keyout', '/fixture/ca.key', '-out', '/usr/local/share/ca-certificates/leo-fixture.crt',
+         '-days', '1', '-subj', '/CN=Leo fixture CA', '-addext', 'basicConstraints=critical,CA:TRUE'],
+        ['openssl', 'req', '-new', '-newkey', 'rsa:2048', '-nodes',
+         '-keyout', '/fixture/external.key', '-out', '/fixture/external.csr', '-subj', '/CN=localhost'],
+        ['openssl', 'x509', '-req', '-in', '/fixture/external.csr',
+         '-CA', '/usr/local/share/ca-certificates/leo-fixture.crt', '-CAkey', '/fixture/ca.key',
+         '-CAserial', '/fixture/ca.srl', '-CAcreateserial', '-out', '/fixture/external.crt',
+         '-days', '1', '-extfile', str(tls_extensions)],
+    ]:
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run(['update-ca-certificates'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with open('/etc/hosts', 'a') as hosts:
+        hosts.write(f'\n127.0.0.1 {R2_HOST}\n')
     env = {**os.environ,
            'LEO_OFFICIAL_DATABASE_URL': os.environ['LEO_OFFICIAL_TEST_DATABASE_URL'],
            'LEO_OFFICIAL_ORIGIN': ORIGIN, 'LEO_OFFICIAL_LISTEN': '127.0.0.1:48151',
@@ -165,6 +182,7 @@ if 'exec' in args and os.environ.get('INSTALLER_VERIFY'):
            'LEO_OFFICIAL_EMAIL_FROM': 'fixture@example.test', 'LEO_OFFICIAL_EMAIL_KEY': 'fixture-only',
            'LEO_OFFICIAL_EMAIL_ENDPOINT': f'http://127.0.0.1:{mailbox.server_port}/emails'}
     os.environ['INSTALLER_VERIFY'] = '1'
+    os.environ['AWS_CA_BUNDLE'] = '/etc/ssl/certs/ca-certificates.crt'
     official = subprocess.Popen(['/repo/target/debug/leo-official'], env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     external = None
@@ -188,9 +206,11 @@ if 'exec' in args and os.environ.get('INSTALLER_VERIFY'):
         storage, _ = request(base + '/settings/storage', cookie=cookie)
         assert storage['configured'] and storage['integrated']
         assert 'secretAccessKey' not in storage and 'accessKeyId' not in storage
+        print('Container: real claim and relay passed', flush=True)
         # This uses the real SDK and integrated credentials, including write/read/delete.
         checked, _ = request(base + '/settings/storage/check', {}, cookie, csrf)
         assert checked == {'ok': True}
+        print('Container: Garage write/read/delete passed', flush=True)
         # External providers are replaced at their S3 HTTP seam, behind valid TLS.
         from moto.server import ThreadedMotoServer
         import boto3
@@ -207,9 +227,19 @@ if 'exec' in args and os.environ.get('INSTALLER_VERIFY'):
 
         class ExternalS3(http.server.BaseHTTPRequestHandler):
             def forward(self):
+                r2 = self.headers.get('Host', '').startswith(R2_HOST)
+                unsupported = any(query in self.path for query in ('?acl', '?publicAccessBlock', '?object-lock', '?versions'))
+                if r2 and (unsupported or self.headers.get('x-amz-server-side-encryption')):
+                    self.send_response(501)
+                    self.send_header('Content-Type', 'application/xml')
+                    self.end_headers()
+                    self.wfile.write(b'<Error><Code>NotImplemented</Code></Error>')
+                    return
                 upstream = http.client.HTTPConnection(host, port)
                 body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
-                upstream.request(self.command, self.path, body=body, headers=dict(self.headers))
+                # Moto derives bucket routing from Host; the TLS proxy owns provider hostnames.
+                headers = {**dict(self.headers), 'Host': f'{host}:{port}'}
+                upstream.request(self.command, self.path, body=body, headers=headers)
                 response = upstream.getresponse()
                 data = response.read()
                 self.send_response(response.status)
@@ -229,7 +259,7 @@ if 'exec' in args and os.environ.get('INSTALLER_VERIFY'):
 
         proxy = http.server.ThreadingHTTPServer(('127.0.0.1', 0), ExternalS3)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain('/usr/local/share/ca-certificates/leo-fixture.crt', '/fixture/external.key')
+        context.load_cert_chain('/fixture/external.crt', '/fixture/external.key')
         proxy.socket = context.wrap_socket(proxy.socket, server_side=True)
         threading.Thread(target=proxy.serve_forever, daemon=True).start()
         endpoint = f'https://localhost:{proxy.server_port}'
@@ -241,6 +271,22 @@ if 'exec' in args and os.environ.get('INSTALLER_VERIFY'):
         assert 'secretAccessKey' not in saved and 'accessKeyId' not in saved
         checked, _ = request(base + '/settings/storage/check', {}, cookie, csrf)
         assert checked == {'ok': True}
+        r2_endpoint = f'https://{R2_HOST}:{proxy.server_port}'
+        r2_settings = {
+            'bucket': 'leo-external', 'endpoint': r2_endpoint, 'region': 'auto',
+            'accessKeyId': 'external-fixture', 'secretAccessKey': 'external-fixture-secret',
+        }
+        try:
+            request(base + '/settings/storage', r2_settings, cookie, csrf, method='PUT')
+            raise AssertionError('R2 must require confirmation of provider-side privacy and retention')
+        except AssertionError as error:
+            assert 'HTTP 400' in str(error) and 'Confirm' in str(error), str(error)
+        r2_settings['privateBucketConfirmed'] = True
+        saved, _ = request(base + '/settings/storage', r2_settings, cookie, csrf, method='PUT')
+        assert saved['endpoint'] == r2_endpoint
+        checked, _ = request(base + '/settings/storage/check', {}, cookie, csrf)
+        assert checked == {'ok': True}
+        endpoint = r2_endpoint
         identity = (ROOT / 'data/installation-relay/identity.json').read_bytes()
         credentials = (ROOT / 'garage.env').read_bytes()
         result = run_installer(claim['code'])
@@ -252,7 +298,7 @@ if 'exec' in args and os.environ.get('INSTALLER_VERIFY'):
         session, _ = request('/api/account/session', cookie=cookie)
         assert len(session['installations']) == 1
         wait_for(lambda: request(base + '/settings/storage', cookie=cookie)[0]['endpoint'] == endpoint)
-        print('Container: real claim, relay, Garage write/read/delete, external S3 settings and idempotent rerun passed')
+        print('Container: real claim, relay, Garage write/read/delete, external S3/R2 settings and idempotent rerun passed')
     finally:
         pid = ROOT / 'manager.pid'
         if pid.exists():
