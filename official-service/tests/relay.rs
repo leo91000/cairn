@@ -19,6 +19,7 @@ async fn owner_renames_a_relayed_installation_without_changing_its_identity() {
             .json(&json!({ "name": name }))
     };
     let csrf = relay.session["csrf"].as_str().unwrap();
+
     assert_eq!(
         rename(&relay.cookie, "", "Forbidden")
             .send()
@@ -27,6 +28,7 @@ async fn owner_renames_a_relayed_installation_without_changing_its_identity() {
             .status(),
         StatusCode::FORBIDDEN
     );
+
     let (foreign, session) = login(app, "foreign@example.test").await;
     assert_eq!(
         rename(&foreign, session["csrf"].as_str().unwrap(), "Foreign")
@@ -36,6 +38,7 @@ async fn owner_renames_a_relayed_installation_without_changing_its_identity() {
             .status(),
         StatusCode::NOT_FOUND
     );
+
     for invalid in [" ".to_owned(), "x".repeat(101), "Invalid\nname".to_owned()] {
         assert_eq!(
             rename(&relay.cookie, csrf, &invalid)
@@ -46,11 +49,13 @@ async fn owner_renames_a_relayed_installation_without_changing_its_identity() {
             StatusCode::BAD_REQUEST
         );
     }
+
     let response = rename(&relay.cookie, csrf, "  Home installation  ")
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+
     let session: Value = app
         .client
         .get(format!("{}/api/account/session", app.url))
@@ -63,10 +68,12 @@ async fn owner_renames_a_relayed_installation_without_changing_its_identity() {
         .unwrap();
     assert_eq!(session["installations"][0]["name"], "Home installation");
     assert_eq!(session["installations"][0]["id"], id);
+
     assert_eq!(
         relay.get("/chats").send().await.unwrap().status(),
         StatusCode::OK
     );
+
     relay.close().await;
 }
 

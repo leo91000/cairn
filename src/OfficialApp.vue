@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
-import { redirect, state } from './api'
+import { logoutAccount, redirect, state } from './api'
 import App from './App.vue'
 import ThemeControl from './components/ThemeControl.vue'
 import UiAlert from './components/UiAlert.vue'
@@ -90,11 +90,6 @@ async function accountRequest(route: string, body?: unknown) {
     headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': session.value?.csrf || '' },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
-  if (response.status === 401 && route === 'logout') {
-    session.value = null
-    return
-  }
-
   if (response.status === 204)
     return
   const text = await response.text()
@@ -149,14 +144,12 @@ async function signOut() {
   busy.value = true
   error.value = ''
   try {
-    await accountRequest('logout', {})
+    await logoutAccount()
     session.value = null
     showMethods.value = false
     installation.value = null
     claimCode.value = ''
     state.installationId = ''
-    state.csrf = ''
-    state.authenticated = false
     email.value = ''
     code.value = ''
     challenge.value = ''

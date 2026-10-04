@@ -159,20 +159,25 @@ export function duration(start: number | null, end: number | null) {
     : `${Math.floor(seconds / 60)}m ${seconds % 60}s`
 }
 
+export async function logoutAccount() {
+  const response = await fetch('/api/account/logout', {
+    method: 'POST',
+    headers: { 'X-CSRF-Token': state.csrf },
+  })
+  if (!response.ok && response.status !== 401)
+    throw new Error('Unable to sign out. Please try again.')
+
+  state.authenticated = false
+  state.csrf = ''
+}
+
 export async function signOut() {
   if (state.signingOut)
     return
   state.signingOut = true
   try {
     if (state.installationId) {
-      const response = await fetch('/api/account/logout', {
-        method: 'POST',
-        headers: { 'X-CSRF-Token': state.csrf },
-      })
-      if (!response.ok && response.status !== 401)
-        throw new Error('Unable to sign out. Please try again.')
-      state.authenticated = false
-      state.csrf = ''
+      await logoutAccount()
       window.location.assign('/')
       return
     }
