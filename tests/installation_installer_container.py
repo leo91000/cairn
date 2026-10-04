@@ -184,11 +184,17 @@ if 'exec' in args and os.environ.get('INSTALLER_VERIFY'):
     os.environ['INSTALLER_VERIFY'] = '1'
     os.environ['AWS_CA_BUNDLE'] = '/etc/ssl/certs/ca-certificates.crt'
     official = subprocess.Popen(['/repo/target/debug/leo-official'], env=env,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+    def official_ready():
+        if official.poll() is not None:
+            raise RuntimeError('Fixture official service exited: ' + official.communicate()[1].decode())
+        return request('/api/account/options')[0] is not None
+
     external = None
     proxy = None
     try:
-        wait_for(lambda: request('/api/account/options')[0] is not None)
+        wait_for(official_ready)
         challenge, _ = request('/api/account/email-code', {'email': 'installer@example.test'})
         import re
         code = re.search(r'\b\d{8}\b', MAIL[-1]['text'])[0]
