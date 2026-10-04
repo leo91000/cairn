@@ -140,6 +140,9 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
     await expect(page.getByLabel('Device claim code')).toBeVisible()
     await expect(page).toHaveURL(device.verificationUri)
     await page.getByLabel('Device claim code').fill(device.userCode)
+    await page.getByRole('button', { name: 'Review installation', exact: true }).click()
+    await expect(page.getByRole('dialog', { name: 'Confirm installation claim' })).toContainText('OAuth claim machine')
+    await expect(page.getByLabel('Installation fingerprint')).toHaveValue(device.fingerprint)
     await page.getByRole('button', { name: 'Claim this installation', exact: true }).click()
     await expect(page.getByRole('status')).toContainText('Installation approved')
     const claimed = await page.request.post(`${url}/api/relay/device-claim/poll`, {

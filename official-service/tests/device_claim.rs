@@ -67,6 +67,67 @@ async fn device_claim_reclaims_a_detached_installation_and_preserves_its_data() 
     };
     assert_eq!(poll().await.status(), StatusCode::ACCEPTED);
     let (cookie, session) = login(&relay.app, "next-owner@example.test").await;
+    let blind_approval = relay
+        .app
+        .client
+        .post(format!("{}/api/installations/device-claim", relay.app.url))
+        .header("origin", &relay.app.url)
+        .header("cookie", &cookie)
+        .header("x-csrf-token", session["csrf"].as_str().unwrap())
+        .json(&json!({ "code": device["userCode"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        blind_approval.status(),
+        StatusCode::BAD_REQUEST,
+        "entering a code alone must never approve it"
+    );
+    let reviewed = relay
+        .app
+        .client
+        .post(format!(
+            "{}/api/installations/device-claim/preview",
+            relay.app.url
+        ))
+        .header("origin", &relay.app.url)
+        .header("cookie", &cookie)
+        .header("x-csrf-token", session["csrf"].as_str().unwrap())
+        .json(&json!({ "code": device["userCode"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reviewed.status(), StatusCode::OK);
+    let reviewed: Value = reviewed.json().await.unwrap();
+    assert_eq!(reviewed["name"], "Real installation");
+    assert_eq!(reviewed["fingerprint"], device["fingerprint"]);
+    assert_eq!(
+        poll().await.status(),
+        StatusCode::ACCEPTED,
+        "review alone must not approve the installation",
+    );
+    let (foreign_cookie, foreign_session) =
+        login(&relay.app, "foreign-reviewer@example.test").await;
+    let foreign_approval = relay
+        .app
+        .client
+        .post(format!("{}/api/installations/device-claim", relay.app.url))
+        .header("origin", &relay.app.url)
+        .header("cookie", foreign_cookie)
+        .header("x-csrf-token", foreign_session["csrf"].as_str().unwrap())
+        .json(&json!({
+            "code": device["userCode"],
+            "confirmation": reviewed["confirmation"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        foreign_approval.status(),
+        StatusCode::NOT_FOUND,
+        "confirmation is bound to the reviewing account"
+    );
+    assert_eq!(poll().await.status(), StatusCode::ACCEPTED);
     let approve = |csrf: &str| {
         relay
             .app
@@ -75,7 +136,10 @@ async fn device_claim_reclaims_a_detached_installation_and_preserves_its_data() 
             .header("origin", &relay.app.url)
             .header("cookie", &cookie)
             .header("x-csrf-token", csrf)
-            .json(&json!({"code": device["userCode"]}))
+            .json(&json!({
+                "code": device["userCode"],
+                "confirmation": reviewed["confirmation"],
+            }))
     };
     assert_eq!(
         approve("").send().await.unwrap().status(),
@@ -129,6 +193,23 @@ async fn device_claim_reclaims_a_detached_installation_and_preserves_its_data() 
         "lost identity delivery must remain recoverable"
     );
     let recovery: Value = recovery.json().await.unwrap();
+    let reviewed: Value = relay
+        .app
+        .client
+        .post(format!(
+            "{}/api/installations/device-claim/preview",
+            relay.app.url
+        ))
+        .header("origin", &relay.app.url)
+        .header("cookie", &cookie)
+        .header("x-csrf-token", session["csrf"].as_str().unwrap())
+        .json(&json!({ "code": recovery["userCode"] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(
         relay
             .app
@@ -137,7 +218,10 @@ async fn device_claim_reclaims_a_detached_installation_and_preserves_its_data() 
             .header("origin", &relay.app.url)
             .header("cookie", &cookie)
             .header("x-csrf-token", session["csrf"].as_str().unwrap())
-            .json(&json!({ "code": recovery["userCode"] }))
+            .json(&json!({
+                "code": recovery["userCode"],
+                "confirmation": reviewed["confirmation"],
+            }))
             .send()
             .await
             .unwrap()

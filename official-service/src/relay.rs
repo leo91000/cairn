@@ -114,14 +114,6 @@ impl Relay {
     }
 }
 
-impl Relay {
-    pub(super) fn disconnect(&self, installation: &str) {
-        if let Some(tunnel) = self.0.lock().unwrap().remove(installation) {
-            let _ = tunnel.stop.send(true);
-        }
-    }
-}
-
 pub(super) async fn upgrade(
     State(service): State<Service>,
     Path(installation): Path<String>,

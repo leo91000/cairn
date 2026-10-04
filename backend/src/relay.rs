@@ -13,7 +13,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use leo_relay_protocol::{
     ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_STREAM_CHUNK,
-    MIN_PROTOCOL_VERSION, REQUEST_TIMEOUT, Role, SUPPORTED_VERSIONS,
+    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, REQUEST_TIMEOUT, Role, SUPPORTED_VERSIONS,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -135,6 +135,8 @@ pub async fn claim(official: &str, directory: &Path, code: &str, name: &str) -> 
 struct DeviceStarted {
     device_code: String,
     user_code: String,
+    fingerprint: String,
+    name: String,
 }
 
 async fn read_identity(directory: &Path) -> Result<Option<Identity>> {
@@ -157,13 +159,13 @@ async fn read_identity(directory: &Path) -> Result<Option<Identity>> {
 }
 
 /// Approve through the official app before atomically replacing a private identity.
-/// `display` receives only the browser URL and temporary human code, never a token.
+/// `display` receives the URL, human code, name and public fingerprint, never a token.
 pub async fn device_claim(
     official: Option<&str>,
     directory: &Path,
     name: &str,
     stop: CancellationToken,
-    display: impl FnOnce(&str, &str),
+    display: impl FnOnce(&str, &str, &str, &str),
 ) -> Result<()> {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::OpenOptionsExt;
@@ -235,7 +237,26 @@ pub async fn device_claim(
     {
         return Err(Error::bad("Invalid device claim code."));
     }
-    display(browser.as_str(), &started.user_code);
+    if started.fingerprint.len() != 64
+        || !started
+            .fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(Error::bad("Invalid installation fingerprint."));
+    }
+    if started.name.is_empty()
+        || started.name.chars().count() > 100
+        || started.name.chars().any(char::is_control)
+    {
+        return Err(Error::bad("Invalid installation name."));
+    }
+    display(
+        browser.as_str(),
+        &started.user_code,
+        &started.name,
+        &started.fingerprint,
+    );
     let polling = async {
         loop {
             let response = client

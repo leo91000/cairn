@@ -178,7 +178,7 @@ pub(super) async fn detach(
         return Err(ApiError(StatusCode::NOT_FOUND, "Installation not found"));
     }
 
-    service.relay.disconnect(&installation);
+    service.relay.revoke_access(&installation, None);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -211,18 +211,19 @@ pub(super) async fn start_device(
     Json(input): Json<DeviceStart>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     consume_limit(&service.pool, &format!("device-start:{}", peer.ip()), 30).await?;
-    let name = claim_name(&input.name, input.protocol)?;
+    let requested_name = claim_name(&input.name, input.protocol)?;
     let mut transaction = service.pool.begin().await?;
-    let installation = if let Some(identity) = input.identity {
+    let recovering = input.identity.is_some();
+    let (installation, name) = if let Some(identity) = input.identity {
         let machine_digest = digest(&identity.token);
-        let row: Option<(Option<String>,)> = query_as(
-            "SELECT owner_id FROM installations WHERE id = $1 AND (token_digest = $2 OR recovery_digest = $2) FOR UPDATE",
+        let row: Option<(Option<String>, String)> = query_as(
+            "SELECT owner_id, name FROM installations WHERE id = $1 AND (token_digest = $2 OR recovery_digest = $2) FOR UPDATE",
         )
         .bind(&identity.installation_id)
         .bind(&machine_digest)
         .fetch_optional(&mut *transaction)
         .await?;
-        let Some((owner,)) = row else {
+        let Some((owner, name)) = row else {
             return Err(ApiError(
                 StatusCode::UNAUTHORIZED,
                 "Invalid installation identity",
@@ -241,12 +242,9 @@ pub(super) async fn start_device(
             .bind(&identity.installation_id)
             .execute(&mut *transaction)
             .await?;
-        identity.installation_id
+        (identity.installation_id, name)
     } else {
-        let id = uuid::Uuid::new_v4().to_string();
-        query("INSERT INTO installations (id, owner_id, name, token_digest) VALUES ($1, NULL, $2, $3)")
-            .bind(&id).bind(name).bind(digest(&random_token())).execute(&mut *transaction).await?;
-        id
+        (uuid::Uuid::new_v4().to_string(), requested_name.to_owned())
     };
 
     query(
@@ -257,8 +255,8 @@ pub(super) async fn start_device(
     .await?;
     let device = random_token();
     let code = random_token()[..12].to_uppercase();
-    query("INSERT INTO installation_device_claims (device_digest, user_digest, installation_id, expires_at) VALUES ($1, $2, $3, now() + interval '10 minutes')")
-        .bind(digest(&device)).bind(digest(&code)).bind(&installation).execute(&mut *transaction).await?;
+    query("INSERT INTO installation_device_claims (device_digest, user_digest, installation_id, installation_name, recovering, expires_at) VALUES ($1, $2, $3, $4, $5, now() + interval '10 minutes')")
+        .bind(digest(&device)).bind(digest(&code)).bind(&installation).bind(&name).bind(recovering).execute(&mut *transaction).await?;
     transaction.commit().await?;
     Ok((
         StatusCode::CREATED,
@@ -268,6 +266,8 @@ pub(super) async fn start_device(
             "verificationUri": format!("{}/claim", service.origin),
             "expiresIn": 600,
             "interval": 2,
+            "fingerprint": digest(&installation),
+            "name": name,
         })),
     ))
 }
@@ -275,6 +275,45 @@ pub(super) async fn start_device(
 #[derive(Deserialize)]
 pub(super) struct DeviceApproval {
     code: String,
+    confirmation: Option<String>,
+}
+
+pub(super) async fn preview_device(
+    State(service): State<Service>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(input): Json<DeviceApproval>,
+) -> Result<Json<Value>, ApiError> {
+    let account = account(&service, &headers, &Method::POST).await?;
+    consume_limit(&service.pool, &format!("device-review:{account}"), 10).await?;
+    consume_limit(
+        &service.pool,
+        &format!("device-review-ip:{}", peer.ip()),
+        30,
+    )
+    .await?;
+    let code = input.code.trim().replace('-', "").to_uppercase();
+    let confirmation = random_token();
+    let reviewed: Option<(String, String)> = query_as(
+        "UPDATE installation_device_claims AS claim SET reviewed_by = $1, confirmation_digest = $2 WHERE user_digest = $3 AND approved_by IS NULL AND expires_at > now() AND (NOT recovering OR EXISTS (SELECT 1 FROM installations WHERE id = claim.installation_id AND owner_id IS NULL)) RETURNING installation_id, installation_name",
+    )
+    .bind(account)
+    .bind(digest(&confirmation))
+    .bind(digest(&code))
+    .fetch_optional(&service.pool)
+    .await?;
+    let Some((installation, name)) = reviewed else {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "Invalid, expired or already approved claim code",
+        ));
+    };
+
+    Ok(Json(json!({
+        "name": name,
+        "fingerprint": digest(&installation),
+        "confirmation": confirmation,
+    })))
 }
 
 pub(super) async fn approve_device(
@@ -292,8 +331,12 @@ pub(super) async fn approve_device(
     )
     .await?;
     let code = input.code.trim().replace('-', "").to_uppercase();
-    let approved: Option<(String,)> = query_as("UPDATE installation_device_claims SET approved_by = $1 WHERE user_digest = $2 AND approved_by IS NULL AND expires_at > now() RETURNING installation_id")
-        .bind(account).bind(digest(&code)).fetch_optional(&service.pool).await?;
+    let confirmation = input.confirmation.ok_or(ApiError(
+        StatusCode::BAD_REQUEST,
+        "Review the installation before confirming its claim",
+    ))?;
+    let approved: Option<(String,)> = query_as("UPDATE installation_device_claims SET approved_by = $1 WHERE user_digest = $2 AND reviewed_by = $1 AND confirmation_digest = $3 AND approved_by IS NULL AND expires_at > now() RETURNING installation_id")
+        .bind(account).bind(digest(&code)).bind(digest(&confirmation)).fetch_optional(&service.pool).await?;
     let Some((installation,)) = approved else {
         return Err(ApiError(
             StatusCode::NOT_FOUND,
@@ -317,36 +360,51 @@ pub(super) async fn poll_device(
     consume_limit(&service.pool, &format!("device-poll:{}", peer.ip()), 120).await?;
     let device_digest = digest(&input.device_code);
     let mut transaction = service.pool.begin().await?;
-    let row: Option<(String,)> = query_as("SELECT installation_id FROM installation_device_claims WHERE device_digest = $1 AND expires_at > now()")
+    let row: Option<(String, bool)> = query_as("SELECT installation_id, recovering FROM installation_device_claims WHERE device_digest = $1 AND expires_at > now()")
         .bind(&device_digest).fetch_optional(&mut *transaction).await?;
     let invalid = || ApiError(StatusCode::UNAUTHORIZED, "Invalid or expired device claim");
-    let Some((installation,)) = row else {
+    let Some((installation, recovering)) = row else {
         return Err(invalid());
     };
-    // All machine operations lock the installation before its challenge.
-    let row: Option<(Option<String>,)> =
-        query_as("SELECT owner_id FROM installations WHERE id = $1 FOR UPDATE")
-            .bind(&installation)
-            .fetch_optional(&mut *transaction)
-            .await?;
-    if !matches!(row, Some((None,))) {
-        return Err(invalid());
+    // Existing records are always locked before their challenge, as in start.
+    // Fresh claims have no installation row until approval is collected.
+    if recovering {
+        let row: Option<(Option<String>,)> =
+            query_as("SELECT owner_id FROM installations WHERE id = $1 FOR UPDATE")
+                .bind(&installation)
+                .fetch_optional(&mut *transaction)
+                .await?;
+        if !matches!(row, Some((None,))) {
+            return Err(invalid());
+        }
     }
-    let row: Option<(Option<String>,)> = query_as("SELECT approved_by FROM installation_device_claims WHERE device_digest = $1 AND expires_at > now() FOR UPDATE")
+    let row: Option<(Option<String>, String)> = query_as("SELECT approved_by, installation_name FROM installation_device_claims WHERE device_digest = $1 AND expires_at > now() FOR UPDATE")
         .bind(&device_digest).fetch_optional(&mut *transaction).await?;
-    let Some((approved,)) = row else {
+    let Some((approved, name)) = row else {
         return Err(invalid());
     };
     let Some(owner) = approved else {
         return Ok((StatusCode::ACCEPTED, Json(json!({ "pending": true }))));
     };
     let token = random_token();
-    query("UPDATE installations SET owner_id = $1, token_digest = $2 WHERE id = $3")
-        .bind(owner)
-        .bind(digest(&token))
+    if recovering {
+        query("UPDATE installations SET owner_id = $1, token_digest = $2 WHERE id = $3")
+            .bind(owner)
+            .bind(digest(&token))
+            .bind(&installation)
+            .execute(&mut *transaction)
+            .await?;
+    } else {
+        query(
+            "INSERT INTO installations (id, owner_id, name, token_digest) VALUES ($1, $2, $3, $4)",
+        )
         .bind(&installation)
+        .bind(owner)
+        .bind(name)
+        .bind(digest(&token))
         .execute(&mut *transaction)
         .await?;
+    }
     query("DELETE FROM installation_device_claims WHERE device_digest = $1")
         .bind(device_digest)
         .execute(&mut *transaction)

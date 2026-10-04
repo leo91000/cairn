@@ -30,8 +30,14 @@ code and attaching the installation to its owner form one transaction.
 Run `leo claim` on the installation with its usual `DATA_DIR` and
 `LEO_OFFICIAL_ORIGIN` (the latter defaults to the origin of an existing private
 identity). It prints the official `/claim` URL and a temporary code. Sign in to
-that official app and enter the code under **Device claim code**. Only approve a
-code displayed by a machine you control. Codes expire in ten minutes; the CLI
+that official app and enter the code under **Device claim code**, then choose
+**Review installation**. Compare its name and public fingerprint with the
+fingerprint printed by `leo claim` on a machine you control before choosing
+**Claim this installation**. Cancel if they differ or someone sent you the code.
+The name is supplied by the machine (or the existing installation record during
+recovery), not a verified hostname. The fingerprint identifies the installation
+record; it is not a hardware attestation. The machine will hold your conversations,
+coding-agent accounts and secrets. Reviewing or cancelling does not approve it. Codes expire in ten minutes; the CLI
 polls every two seconds and can be cancelled without deleting its old identity.
 The CLI never prints the machine token or polling secret, and writes the new
 identity atomically with mode 0600 only after approval. Concurrent CLI claims
@@ -40,10 +46,14 @@ its running connector deliberately does not reload credentials from disk.
 
 The machine starts `/api/relay/device-claim/start` with its name, protocol and,
 when present, private installation identity. Only a valid machine token can
-reclaim that record. An owned installation refuses reclamation. The browser
-approves through `/api/installations/device-claim` with its official session,
-origin and CSRF token; `/api/relay/device-claim/poll` then attaches the owner and
-rotates the token in one transaction. Codes and polling secrets are stored only
+reclaim that record. An owned installation refuses reclamation. The browser first reviews through `/api/installations/device-claim/preview`
+with its official session, origin and CSRF token. It receives the name, fingerprint
+and a temporary confirmation proof bound to this claim and account. Explicit
+confirmation through `/api/installations/device-claim` requires that proof;
+`/api/relay/device-claim/poll` then attaches the owner and rotates the token in one
+transaction. A fresh start keeps only an expiring challenge, reserving no permanent
+installation row until approval is collected. Starting a subsequent claim deletes
+expired challenges. Recovery always preserves the existing installation row. Codes and polling secrets are stored only
 as digests, expire after ten minutes and are single-use. Start, approval and
 poll operations use persisted per-peer/account rate limits. Starting another
 claim for the same installation invalidates its previous pending challenge.

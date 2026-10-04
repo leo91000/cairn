@@ -50,12 +50,20 @@ const claimCode = ref('')
 const editingName = ref(false)
 const installationName = ref('')
 const deviceCode = ref('')
+const deviceReview = ref<{
+  code: string
+  name: string
+  fingerprint: string
+  confirmation: string
+} | null>(null)
 const claimStatus = ref('')
 const confirmDetach = ref(false)
 const installation = ref<{ id: string, name: string, online: boolean } | null>(null)
 const installationMenu = ref<HTMLDetailsElement>()
 const officialReturnKey = 'leo-installation-return'
 const claimPage = window.location.pathname === '/claim'
+
+watch(deviceCode, () => deviceReview.value = null)
 
 watch(session, (value) => {
   state.csrf = value?.csrf || ''
@@ -164,6 +172,7 @@ async function signOut() {
     installation.value = null
     claimCode.value = ''
     deviceCode.value = ''
+    deviceReview.value = null
     claimStatus.value = ''
     confirmDetach.value = false
     state.installationId = ''
@@ -264,13 +273,33 @@ async function installationRequest(route: string, body?: unknown) {
   return value
 }
 
+async function reviewDevice() {
+  busy.value = true
+  error.value = ''
+  claimStatus.value = ''
+  deviceReview.value = null
+  try {
+    const value = await installationRequest('device-claim/preview', { code: deviceCode.value })
+    deviceReview.value = { ...value, code: deviceCode.value }
+  }
+  catch (cause) {
+    error.value = cause instanceof Error ? cause.message : 'Unable to review the installation.'
+  }
+  finally {
+    busy.value = false
+  }
+}
+
 async function approveDevice() {
+  if (!deviceReview.value)
+    return
   busy.value = true
   error.value = ''
   claimStatus.value = ''
   try {
-    await installationRequest('device-claim', { code: deviceCode.value })
+    await installationRequest('device-claim', { code: deviceReview.value.code, confirmation: deviceReview.value.confirmation })
     deviceCode.value = ''
+    deviceReview.value = null
     claimStatus.value = 'Installation approved. Finish leo claim, then restart your manager and refresh installations.'
   }
   catch (cause) {
@@ -674,7 +703,7 @@ onMounted(async () => {
               Refresh installations
             </UiButton>
           </div>
-          <form class="grid gap-3 mb-6" @submit.prevent="approveDevice">
+          <form class="grid gap-3 mb-6" @submit.prevent="reviewDevice">
             <label>Device claim code<input
               v-model="deviceCode"
               required
@@ -686,8 +715,28 @@ onMounted(async () => {
               Only approve a code displayed by a machine you control.
             </p>
             <UiButton type="submit" :disabled="busy">
-              Claim this installation
+              Review installation
             </UiButton>
+            <div
+              v-if="deviceReview"
+              role="dialog"
+              aria-label="Confirm installation claim"
+              class="grid gap-3 rounded-xl border border-line p-4"
+            >
+              <p>Claim {{ deviceReview.name }}?</p>
+              <label>Installation fingerprint<input :value="deviceReview.fingerprint" readonly></label>
+              <p class="text-muted">
+                Compare this fingerprint with leo claim in the terminal on a machine you control.
+                This machine will store your conversations, coding-agent accounts and secrets.
+                Do not approve a code sent by someone else, even if they ask you to sign in.
+              </p>
+              <UiButton :disabled="busy" @click="approveDevice">
+                Claim this installation
+              </UiButton>
+              <UiButton :disabled="busy" @click="deviceReview = null">
+                Cancel claim
+              </UiButton>
+            </div>
             <p v-if="claimStatus" role="status">
               {{ claimStatus }}
             </p>

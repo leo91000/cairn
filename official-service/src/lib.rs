@@ -143,6 +143,13 @@ pub async fn router_with_relay(
                 include_str!("../migrations/202610040050_claim_recovery.sql").into(),
                 false,
             ),
+            Migration::new(
+                202610041950,
+                "device claim review".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/202610041950_device_review.sql").into(),
+                false,
+            ),
         ]),
         ..Migrator::DEFAULT
     };
@@ -192,6 +199,10 @@ pub async fn router_with_relay(
         .route(
             "/api/installations/{installation}",
             axum::routing::patch(installations::rename),
+        )
+        .route(
+            "/api/installations/device-claim/preview",
+            post(installations::preview_device),
         )
         .route(
             "/api/installations/device-claim",

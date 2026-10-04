@@ -9,12 +9,18 @@ also stop working; their official replacements are delivered separately (#55).
 MCP OAuth setup that redirects to the old manager `/oauth/mcp/callback` also
 needs an official callback route before it can work again; existing stored
 outbound MCP credentials remain usable by agents. Old Android clients that use
-local login need the separate official sign-in/client migration (#53).
+local login need the separate official sign-in/client migration (#57).
 Do not deploy this as a transparent upgrade of the old public site.
+**The `.env.example` default follows `:latest`. Pulling that tag after this
+release removes local browser access immediately.** Before any pull or automated
+upgrade, pin `LEO_IMAGE` to the currently verified immutable digest and complete
+the migration preparation below. Keep that digest for rollback.
 
 Before upgrading, back up the volumes below and deploy the official service
 with its own Postgres database, email delivery, HTTPS origin and web bundle
-([official service setup](OFFICIAL-SERVICE.md)). Sign in there. The installation
+([official service setup](OFFICIAL-SERVICE.md)). Upgrade its binary and web bundle
+together before running the new `leo claim`: earlier official binaries do not
+provide the device-review confirmation step. Sign in there. The installation
 and official service must use compatible relay protocols. Keep one relay process,
 and route both installation API requests and relay WebSockets to it.
 
@@ -83,6 +89,25 @@ new official installation ID while preserving existing data volumes. If you
 cannot detach an inaccessible installation yourself, contact the official
 service operator or reinstall; do not delete its official record as a workaround.
 Retain backups until access has been verified.
+
+### Roll back this access migration
+
+This ticket makes **no installation SQLite schema migration**. To restore the
+previous access model, stop the new manager, set `LEO_IMAGE` back to the exact
+previous verified image digest for both manager and runner, then run
+`docker compose pull && docker compose up -d`. Keep all four existing volumes.
+For Coolify, restore that same digest in `LEO_IMAGE` and restart the service.
+Restore the previous manager origin/proxy and its old setup configuration if
+removed; the previous image reads the preserved administrator/session records.
+Check its `/health` commit and local sign-in before declaring rollback complete.
+This deliberately restores the old local-access behavior. The private relay
+identity file can stay on disk; the old image ignores it. Detach the installation
+in the official app to revoke its relay identity if abandoning the migration.
+
+The official Postgres migrations are separate and remain applied: do not run an
+older official binary against that database without its matching backup. If a
+later installation release has changed SQLite, follow the image-and-backup
+rollback rule below instead of assuming this procedure is still sufficient.
 
 ## Docker on a VPS
 

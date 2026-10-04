@@ -121,8 +121,11 @@ where
                 &config.data_dir.join("installation-relay"),
                 &name,
                 stop,
-                |url, code| {
-                    println!("Open {url} and approve this device claim code: {code}");
+                |url, code, name, fingerprint| {
+                    println!("Open {url} and review this device claim code: {code}");
+                    println!("Installation: {name}");
+                    println!("Installation fingerprint: {fingerprint}");
+                    println!("Compare this fingerprint in the app before confirming the claim.");
                     let _ = std::io::Write::flush(&mut std::io::stdout());
                 },
             )
