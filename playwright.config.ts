@@ -1,3 +1,4 @@
+import process from 'node:process'
 import { defineConfig, devices } from '@playwright/test'
 import { isolateTestCredentials } from './scripts/test-environment.mjs'
 
@@ -8,6 +9,8 @@ export default defineConfig({
   fullyParallel: false,
   workers: 5,
   timeout: 30000,
+  // One CI retry absorbs a hosted-runner hiccup; the report still lists the test as flaky.
+  retries: process.env.CI ? 1 : 0,
   expect: { timeout: 7000 },
   reporter: [['list'], ['html', { open: 'never' }]],
   use: { trace: 'retain-on-failure', screenshot: 'only-on-failure', ...devices['Desktop Chrome'] },
