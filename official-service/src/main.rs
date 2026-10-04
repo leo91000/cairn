@@ -5,7 +5,7 @@ use axum::{
     http::StatusCode,
     routing::{any, get},
 };
-use leo_official_service::{EmailSender, OAuthProvider, OAuthProviders, router_with_oauth};
+use leo_official_service::{EmailSender, OAuthProvider, OAuthProviders, Relay, router_with_relay};
 use reqwest::Client;
 use serde_json::json;
 use sqlx_postgres::PgPoolOptions;
@@ -177,7 +177,8 @@ async fn run() -> Result<(), String> {
         google: configured_oauth("GOOGLE", loopback)?,
         github: configured_oauth("GITHUB", loopback)?,
     };
-    let app = router_with_oauth(pool, Arc::new(sender), origin, oauth)
+    let relay = Relay::default();
+    let app = router_with_relay(pool, Arc::new(sender), origin, oauth, relay.clone())
         .await
         .map_err(|_| "Official database migration failed")?
         .route("/health", get(|| async { StatusCode::OK }))
@@ -195,7 +196,7 @@ async fn run() -> Result<(), String> {
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(async {
+    .with_graceful_shutdown(async move {
         let mut terminate =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                 .expect("Could not register shutdown signal");
@@ -203,6 +204,7 @@ async fn run() -> Result<(), String> {
             _ = tokio::signal::ctrl_c() => {},
             _ = terminate.recv() => {},
         }
+        relay.shutdown();
     })
     .await
     .map_err(|_| "Official HTTP server stopped unexpectedly".to_owned())

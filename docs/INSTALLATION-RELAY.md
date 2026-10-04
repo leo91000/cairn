@@ -61,11 +61,44 @@ are held only in bounded memory, never in Postgres. This ticket uses one relay
 process; a deployment must route the installation's API requests and WebSocket
 to that process. Distributed connection routing is not implemented here.
 
-SSE and streaming responses are deferred to #48 (stream routes return 501).
-Their future frames can reuse request IDs while preserving finite request and
-response frames, with protocol version negotiation for incompatible changes.
-Online-state UI remains part of #48. The web selector and installation URLs
-are described below (#49).
+Version 2 adds SSE response headers, binary chunks, completion, credit and
+cancellation frames using the same request IDs. Hello offers `[2, 1]`; Welcome
+selects the highest shared version. The claim HTTP request declares the minimum
+supported version (1), so a new installation can still claim against a v1 service;
+the WebSocket handshake remains authoritative for the actual tunnel version.
+A v1 installation keeps finite API access;
+stream requests return 501 without sending unknown frames or closing its tunnel.
+A peer with no shared version is disconnected before it becomes online.
+
+Each stream gets one credit per downstream body read. Installation body polling
+pauses until credit arrives, chunks are limited to 64 KiB, and each official HTTP
+body has a one-chunk queue. Streams share the existing 32-request capacity limit.
+A slow reader, failed stream or failed handler affects only its own request.
+Closing the browser response cancels the remote subscription and releases its
+slot. The official service disables reverse-proxy SSE buffering and still imposes
+its own security headers. Configure proxies to permit long-lived responses.
+
+A lost tunnel ends open browser streams. The existing browser SSE client retries
+with its accepted cursor and history version, and the installation's existing
+stream replays events (or resets when that history is no longer available).
+No events are persisted by the official service. Tunnel loss does not stop an
+installation run. During official shutdown, relay bodies close before HTTP
+draining, allowing restart without waiting for infinite SSE bodies.
+
+The official session and authenticated `GET /api/installations` expose `online`
+from the local relay registry. Availability changes after successful negotiation
+and on disconnect; dead peers are detected by the existing heartbeat. The web
+shows each installation's status and refreshes only this small account-level
+list while visible, with backoff when the official service is unavailable.
+
+Access management uses the same `Relay` handle supplied to `router_with_relay`.
+After committing a detachment, call `revoke_access(installation, None)`; after
+removing a member, call it with that account ID. It immediately closes the
+corresponding browser bodies, including idle or backpressured streams. Account
+revocation preserves the tunnel and other accounts' streams. Access generations
+prevent an upload authorized before revocation from opening a stream afterward.
+The detachment and membership endpoints/UI remain separate tickets; tests
+simulate their committed access change and observe the real official HTTP body.
 
 Validation: run `pnpm test:backend -p leo-official-service --test relay` with a
 disposable `LEO_OFFICIAL_TEST_DATABASE_URL`; this uses the isolated backend
@@ -94,8 +127,7 @@ Owners can rename an installation through `PATCH /api/installations/{id}` with
 the claim contract (trimmed, 1–100 characters, no control characters). Renaming
 works even while the installation is offline and preserves its identity.
 
-Until live relay streams are available (#48), the existing reading views load
-finite HTTP snapshots and refresh them while visible. They keep retrying the
-scoped SSE connection, and live batches take over when supported. Conversations
-and run events remain usable without a live stream; no relay protocol or local
-authentication change is required by the selector.
+Reading views use the scoped SSE connection for updates and cursor-based replay.
+One initial finite snapshot keeps a v1 installation readable during a deployment;
+there is no recurring conversation snapshot polling. The existing live client
+retains its reconnect backoff and history cache.

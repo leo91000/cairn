@@ -99,18 +99,20 @@ test('claims an installation and sends after relay restarts and official session
     await page.getByRole('button', { name: /^(Send|Queue)$/, exact: true }).click()
     await expect(page.getByRole('heading', { name: 'A message through the relay', exact: true })).toBeVisible()
     const conversationUrl = page.url()
+    const availability = page.getByRole('status', { name: 'Installation availability', exact: true })
+    await expect(availability).toHaveText('Online')
     await page.reload()
     await expect(page.getByRole('heading', { name: 'A message through the relay', exact: true })).toBeVisible()
     // A process restart really closes every relay socket, unlike stopping a listener.
+    const resumedStream = page.waitForResponse(response => response.url().includes('/api/installations/') && /\/stream\?/.test(response.url()) && response.status() === 200, { timeout: 20000 })
     await stop(service)
     official()
     await expect.poll(() => fetch(`${url}/health`).then(response => response.ok).catch(() => false)).toBe(true)
-    await expect(async () => {
-      await page.reload()
-      await expect(page.getByRole('alert')).toHaveCount(0)
-      await expect(page.getByRole('heading', { name: 'A message through the relay', exact: true })).toBeVisible()
-    }).toPass({ timeout: 15000 })
+    await resumedStream
+    await expect(page.getByRole('alert')).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'A message through the relay', exact: true })).toBeVisible()
     await stop(installation)
+    await expect(availability).toHaveText('Offline', { timeout: 15000 })
     start('target/debug/leo', {
       DATA_DIR: join(root, 'data'),
       AGENT_HOME: join(root, 'home'),
@@ -119,10 +121,9 @@ test('claims an installation and sends after relay restarts and official session
       WORKER_ENABLED: 'false',
       PORT: '0',
     })
-    await expect(async () => {
-      await page.reload()
-      await expect(page.getByRole('alert')).toHaveCount(0)
-    }).toPass({ timeout: 15000 })
+    await expect(availability).toHaveText('Online', { timeout: 15000 })
+    await expect(page.getByRole('alert')).toHaveCount(0)
+    await expect(availability).toHaveText('Online', { timeout: 15000 })
     await page.getByLabel('Message', { exact: true }).fill('After reconnection')
     await page.getByRole('button', { name: /^(Send|Queue)$/, exact: true }).click()
     await expect(page.getByText('After reconnection', { exact: true })).toBeVisible()
@@ -174,8 +175,24 @@ test('claims an installation and sends after relay restarts and official session
     seed.store.put('chats', { ...chat, runId: run.id })
     await page.reload()
     await expect(page.locator('.activity-message').filter({ hasText: 'The relayed agent reply remains readable.' })).toBeVisible()
+    // An external installation commit reaches the open browser stream without
+    // navigation or the old three-second snapshot polling.
+    const liveRequests: string[] = []
+    const collectReads = (request: import('@playwright/test').Request) => {
+      if (request.method() === 'GET' && /\/api\/installations\/.*\/(?:events|artifacts)(?:\?|$)/.test(request.url()))
+        liveRequests.push(request.url())
+    }
+
+    page.on('request', collectReads)
+    seed.store.event(run.id, 'item.completed', 'A live update through the relay', {
+      item: { id: 'relayed-live-update', type: 'agent_message', text: 'A live update through the relay' },
+    })
+    await expect(page.locator('.activity-message').filter({ hasText: 'A live update through the relay' })).toBeVisible({ timeout: 20000 })
+    expect(liveRequests).toEqual([])
+    page.off('request', collectReads)
 
     await page.getByRole('navigation', { name: 'Workspace navigation', exact: true }).getByRole('button', { name: 'Sign out', exact: true }).click()
+    await expect(page).toHaveURL(`${url}/`)
     await expect(page.getByLabel('Email address')).toBeVisible()
     await page.goto(conversationUrl)
     await page.getByRole('button', { name: 'Sign in with a passkey', exact: true }).click()
