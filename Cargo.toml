@@ -11,10 +11,5 @@ lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
 
-# The application crate is rebuilt by every image build; parallel code generation
-# keeps that compile off the critical path. Dependencies stay in one unit.
-[profile.release.package.leo-agent-manager]
-codegen-units = 16
-
 [profile.bench]
 lto = "thin"
