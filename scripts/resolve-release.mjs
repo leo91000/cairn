@@ -50,10 +50,18 @@ async function validatedImage(config, gh) {
     if (!trustedRun(run, config) || run.status !== 'completed' || run.conclusion !== 'success')
       continue
 
+    // A run writes its own evidence, so bind it to the head commit GitHub recorded:
+    // the validating workflow is then part of the released tree. A pull request
+    // qualifies only if its branch already contained main's tip.
+    const head = JSON.parse(await gh(['api', `repos/${config.repository}/git/commits/${run.head_sha}`]))
+    if (head.tree?.sha !== config.tree)
+      continue
+
     const directory = await mkdtemp(path.join(os.tmpdir(), 'leo-release-'))
     try {
       await gh(['run', 'download', run.id.toString(), '--repo', config.repository, '--name', name, '--dir', directory])
       const evidence = JSON.parse(await readFile(path.join(directory, 'image.json'), 'utf8'))
+      // Evidence contradicting its own artifact stops reuse instead of being skipped.
       const image = verifiedImage(evidence, config, run.id)
       const currentTools = !config.tools || Object.entries(config.tools).every(([tool, version]) => evidence.tools?.[tool] === version)
       if (currentTools)

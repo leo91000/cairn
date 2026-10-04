@@ -1,9 +1,9 @@
 # CI and release performance
 
 Sections are dated; the release measurements below used the v0.1.5 workflow on
-2026-09-10. Timings are observations, not
-guarantees: hosted runner capacity, package mirrors, cache state, and registry
-transfers vary. Elapsed time includes job scheduling; runner time sums job durations.
+2026-09-10. Timings are observations, not guarantees: hosted runner capacity,
+package mirrors, cache state, and registry transfers vary. Elapsed time includes
+job scheduling; runner time sums job durations.
 
 ## Pull request to release, 2026-10-04
 
@@ -19,45 +19,65 @@ By October a release paid for the same validation twice:
 **Where the time went:**
 - The image job was the critical path at 14–19 min:
   - Deleting unused runner SDKs: 65–149 s.
-  - Docker build: 8–12 min, including 238 s for the application crate's release compile.
-  - Serial smoke tests: about 4 min. Main also pulled its pushed image back, which took about 73 s.
-- The quality job (7–10 min) had to finish before the browser jobs (about 5 min) could start.
+  - Docker build: 8–12 min, including 238 s for the application crate's
+    release compile.
+  - Serial smoke tests: about 4 min. Main also pulled its pushed image back,
+    which took about 73 s.
+- The quality job (7–10 min) had to finish before the browser jobs (about
+  5 min) could start.
 - Playwright had no retries.
 
 **Changes:**
-- Main and tags reuse validation for an identical tree, including a same-repository pull request's (see [Changes retained](#changes-retained)).
+- Main and tags reuse validation for an identical tree, including that of a
+  pull request from this repository (see [Changes retained](#changes-retained)).
 - Browser jobs start from a dedicated build job, and journeys run on two shards.
-- SDK deletion happens only below 40 GB free. Hosted runners had 87 GB available, and a full image job used 27 GB.
+- SDK deletion happens only below 40 GB free. Hosted runners had 87 GB
+  available, and a full image job used 27 GB.
 
-Measured in PR #74's [run 37241143537](https://github.com/leo91000/leo-agent-manager/actions/runs/37241143537), which took 18m17s elapsed:
+Measured on PR #74:
 
 | Step | Before | After |
 | --- | --- | --- |
-| Build, then browser tests | 12–15 min (quality, then browsers) | 7.9 min (build 2m04s, slowest shard 5m16s) |
+| Pull request CI, elapsed | 15–20 min | 8m50s ([run 37243176845](https://github.com/leo91000/leo-agent-manager/actions/runs/37243176845)) |
+| Build, then browser tests | 12–15 min (quality, then browsers) | 6.9–7.9 min (build about 2 min) |
 | Image job setup before the build | 1–2.5 min | 8 s |
 | Image publication | 42 s local load (PR only) | 40 s SBOM + 110 s export and push, so the image can be released |
 | Application crate compile | 238 s | 222 s with 16 codegen units; not retained |
 | Smoke tests | 3m40s; about 5 min on main with the pull | 3m45s without a pull |
 
-That run also rebuilt the dependency layer once (245 s) because the manifest had changed.
+How to read these numbers:
+- The 8m50s run changed no Rust source, so its application compile came from
+  the shared layer cache. Its image job took 8m16s and the quality job 8m30s.
+- A pull request that changes the backend adds the release compile. Its image
+  job takes about 12.5 minutes and remains the critical path.
+- [Run 37241143537](https://github.com/leo91000/leo-agent-manager/actions/runs/37241143537)
+  also rebuilt the dependency layer once (245 s) because the manifest had
+  changed. It took 18m17s.
 
-Without that rebuild, the image job takes about 13 minutes and remains the critical path. What is left is mostly serial:
+What is left on the image path is mostly serial:
 - the release compile;
 - pulling cached runtime layers from the registry (about 45 s);
 - guest disk creation (44 s);
 - publication;
 - the smoke tests.
 
-Faster, cache-persistent runners are evaluated in [CI runner research](CI-RUNNERS-RESEARCH.md).
+Faster, cache-persistent runners are evaluated in
+[CI runner research](CI-RUNNERS-RESEARCH.md).
 
 **Expected path to production:**
 1. Pull request CI.
-2. On merge, main promotes the same image within about a minute, if nothing else merged meanwhile.
-3. A tag promotes and deploys that image. The deployment step takes about 3 minutes.
+2. On merge, main promotes the same image within about a minute. This requires
+   that the branch contained main's tip when its CI passed; GitHub's "Update
+   branch" does this.
+3. A tag promotes and deploys that image. The deployment step takes about
+   3 minutes.
 
 **Rejected:**
-- **16 codegen units for the application crate.** About 7% is within run-to-run variation and does not justify a less optimized binary.
-- **Concurrent smoke tests.** The runner smoke test asserts host-derived budgets, and the retention test asserts memory admission, so concurrent runs risk new flakes.
+- **16 codegen units for the application crate.** About 7% is within
+  run-to-run variation and does not justify a less optimized binary.
+- **Concurrent smoke tests.** The runner smoke test asserts host-derived budgets,
+  and the retention test asserts memory admission, so concurrent runs risk new
+  flakes.
 
 ## Release measurements
 
@@ -88,24 +108,30 @@ took **8m53s** (528 aggregate runner seconds), without deployment.
   group, and the image job succeed.
 - On main and on a release, reuse a successful run of this workflow that validated
   the exact same Git tree: a `push` to this repository's `main`, or a pull request
-  from a branch of this repository. A pull request validates GitHub's merge commit,
-  whose tree is what main receives when nothing else merged meanwhile. Its
-  `validated-image-<tree>` artifact must match the repository, tree, run ID, schema,
-  SHA-256 digest, and Codex/GitHub CLI versions freshly resolved for main or the
-  release. Fork pull requests and manual runs cannot supply release proof. Missing
-  proof, a moved main or older tool versions runs full CI with a new image.
-- After reusing a pull request image, main still runs the quality checks, which
-  refresh the Rust cache, and refreshes the shared BuildKit cache without gating
-  any release. Deployment verifies the commit baked into the reused image.
+  from a branch of this repository. A pull request validates GitHub's merge commit.
+  A run writes its own evidence, so the head commit GitHub recorded for the run
+  must have that tree too. The validating workflow is then part of the released
+  code, and a pull request qualifies only if its branch contained main's tip. The
+  `validated-image-<tree>` artifact must match the repository, tree, run ID,
+  schema, SHA-256 digest, and Codex/GitHub CLI versions freshly resolved for main
+  or the release. Fork pull requests and manual runs cannot supply release proof.
+  Missing proof, an outdated branch or older tool versions runs full CI with a new
+  image.
+- After reusing a pull request image, main still runs the quality checks and
+  refreshes the shared BuildKit cache, without gating any release. The quality
+  checks also save the Rust cache when `Cargo.lock` changes. Deployment verifies
+  the commit baked into the reused image.
 - A tag waits for concurrent main validation instead of starting a duplicate build.
   Completed evidence is retained for 90 days. The image wait is bounded at 40
   minutes, covering the main image job's 35-minute limit. If main is still pending
   at that deadline, fail and ask for a retry instead of starting a duplicate build.
 - Build once, preserving SBOM and provenance, then smoke-test the published digest.
-  Pull requests from this repository publish their image by digest from Docker's
-  containerd store, so the smoke tests use the local copy; fork images stay local
-  and use no registry credentials. Promotion uses the runner's Buildx client without
-  starting another BuildKit daemon.
+  Pull requests from this repository build into Docker's containerd store, which
+  cannot push by digest. They publish under one candidate tag that moves with each
+  run, and the smoke tests check that the local copy is the published digest. Only
+  digests are ever promoted. Fork images stay local and use no registry
+  credentials. Promotion uses the runner's Buildx client without starting another
+  BuildKit daemon.
 - Give browser projects separate real applications, SQLite databases, workers, and
   production rate limiters. Keep ordered persistence journeys together; run the
   four Chromium/WebKit light/dark layout matrices independently. This removes

@@ -183,8 +183,8 @@ git push origin v0.1.1
 
 When the tagged tree was already validated, the tag only promotes and deploys that
 image. That validation can come from main or from a pull request of this repository
-that passed CI while main was unchanged. Such an image reports the pull request's
-tested merge commit, whose tree is identical to the tag's.
+whose branch contained main's tip when its CI passed. Such an image reports the
+pull request's tested merge commit, whose tree is identical to the tag's.
 The workflow run's deployment summary records the exact image and verified commit.
 If deployment fails, inspect that run and the Coolify service logs; there is no
 automatic rollback. For recovery, set `LEO_IMAGE` back to the previous verified

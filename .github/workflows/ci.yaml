@@ -106,7 +106,8 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 10
     needs: resolve
     # Main still runs these checks after reusing a pull request image: they report
-    # main's health and refresh the Rust cache that pull requests restore.
+    # main's health and save the Rust cache for a changed Cargo.lock, which pull
+    # requests cannot share with each other.
     if: needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -140,7 +141,7 @@ jobs:
           git diff --exit-code -- backend/schemas/inputs.json
           cargo clippy --locked --workspace --all-targets --features ublk-prototype -- -D warnings
           node scripts/test-backend.mjs --features ublk-prototype
-          # Also compile the browser-test binaries into the cache the build job restores.
+          # Also compile the browser-test binaries into the cache that later build jobs restore.
           cargo build --locked --bin leo --features ublk
           cargo build --locked -p leo-official-service --bin leo-official
       - name: Validate node supervisor and S3 recovery
@@ -309,15 +310,15 @@ jobs:
           image="ghcr.io/${GITHUB_REPOSITORY}"
           if [[ "$GITHUB_EVENT_NAME" != pull_request ]]; then
             # Publish only an untagged digest. Release/latest tags wait for all checks.
-            echo "outputs=type=image,name=$image,push-by-digest=true,name-canonical=true,push=true" >> "$GITHUB_OUTPUT"
+            echo "destination=type=image,name=$image,push-by-digest=true,name-canonical=true,push=true" >> "$GITHUB_OUTPUT"
           elif [[ "$PUBLISH" == true ]]; then
             # Pull requests build into the local containerd store, so smoke tests never
             # pull. That driver cannot push by digest: one candidate tag moves with each
             # run, and only digests are ever promoted.
-            echo "outputs=type=image,name=$image:pull-request,push=true" >> "$GITHUB_OUTPUT"
+            echo "destination=type=image,name=$image:pull-request,push=true" >> "$GITHUB_OUTPUT"
             echo "local=$image:pull-request" >> "$GITHUB_OUTPUT"
           else
-            echo "outputs=type=docker,name=leo-agent-manager:test" >> "$GITHUB_OUTPUT"
+            echo "destination=type=docker,name=leo-agent-manager:test" >> "$GITHUB_OUTPUT"
             echo "local=leo-agent-manager:test" >> "$GITHUB_OUTPUT"
           fi
       - uses: docker/build-push-action@v7.3.0
@@ -325,7 +326,7 @@ jobs:
         with:
           builder: ${{ github.event_name == 'pull_request' && 'default' || '' }}
           context: .
-          outputs: ${{ steps.target.outputs.outputs }}
+          outputs: ${{ steps.target.outputs.destination }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VCS_REF=${{ github.sha }}
@@ -421,7 +422,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v7.0.1
-      # Pull request images stay untagged until main or a release reuses them.
+      # Pull request images keep only the moving candidate tag until main or a
+      # release promotes their digest.
       - uses: ./.github/actions/promote-image
         if: github.event_name != 'pull_request'
         with:

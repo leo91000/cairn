@@ -52,7 +52,12 @@ function evidenceFor(run, commit, changes = {}) {
 }
 
 // Serves the GitHub API calls made by the resolver from in-memory runs and evidence.
-function github({ runs, evidence = {}, mainRuns = () => [] }) {
+function github({
+  runs,
+  evidence = {},
+  mainRuns = () => [],
+  trees = {},
+}) {
   return async (args) => {
     if (args[0] === 'run' && args[1] === 'download') {
       expect(args).toContain(evidenceArtifact(tree))
@@ -70,6 +75,9 @@ function github({ runs, evidence = {}, mainRuns = () => [] }) {
     const runId = endpoint.match(/actions\/runs\/(\d+)$/)?.[1]
     if (runId)
       return JSON.stringify(runs().find(run => run.id === Number(runId)))
+    const commit = endpoint.match(/git\/commits\/([a-f0-9]{40})$/)?.[1]
+    if (commit)
+      return JSON.stringify({ sha: commit, tree: { sha: trees[commit] ?? tree } })
     if (endpoint.startsWith(`repos/${repository}/actions/workflows/ci.yaml/runs?`))
       return JSON.stringify({ workflow_runs: mainRuns() })
     throw new Error(`Unexpected GitHub call: ${args.join(' ')}`)
@@ -100,6 +108,21 @@ describe('release validation reuse', () => {
 
     // The image keeps the commit it was built from; deployment verifies that commit.
     expect(result).toEqual({ digest, commit: pullRequestCommit, runId: pullRequestRun.id })
+  })
+
+  it('ignores evidence for a tree other than the one GitHub recorded for its run', async () => {
+    // A pull request branch that lacked main's tip validated a different merge tree;
+    // a workflow could also claim any tree, so only the run's own head commit counts.
+    const result = await resolveRelease(config, {
+      gh: github({
+        runs: () => [pullRequestRun],
+        evidence: { [pullRequestRun.id]: evidenceFor(pullRequestRun, pullRequestCommit) },
+        trees: { [pullRequestRun.head_sha]: 'c'.repeat(40) },
+      }),
+      wait: false,
+    })
+
+    expect(result).toBeNull()
   })
 
   it('never reuses failed, unfinished or forked validation', async () => {
