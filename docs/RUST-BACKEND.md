@@ -83,7 +83,7 @@ The tag deployment updates Coolify's stored runner entrypoint to
 `/usr/local/bin/leo runner-broker` while preserving volume declarations and secret
 expressions. CI builds dependency layers separately, tests the exact container,
 and promotes its digest only after native, frontend and browser checks pass. A tag
-reuses the validated main image.
+reuses the image validated for its source tree on main or a same-repository PR.
 
 Data formats remain readable by 0.11. If rolling back across the Rust migration,
 restore the runner entrypoint to `[node, --import, tsx, /app/server/runner-broker.ts]`

@@ -137,9 +137,10 @@ runtime, database compatibility, execution supervision and performance evidence.
 [Performance measurements](docs/PERFORMANCE.md) · [Security](SECURITY.md)
 
 CI runs quality checks and isolated browser suites alongside a container build and
-non-root smoke test. Image tags are published only after all checks pass. Release
-tags reuse the exact image already validated on main, then verify the deployed
-commit. See the [CI measurements and release paths](docs/CI-PERFORMANCE.md).
+non-root smoke test. Image tags are published only after all checks pass. Main and
+release tags reuse the exact image already validated for the same source tree, on
+main or on a pull request from this repository, then verify the deployed commit.
+See the [CI measurements and release paths](docs/CI-PERFORMANCE.md).
 
 ## Chats
 
