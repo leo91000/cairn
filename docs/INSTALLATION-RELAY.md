@@ -64,10 +64,38 @@ to that process. Distributed connection routing is not implemented here.
 SSE and streaming responses are deferred to #48 (stream routes return 501).
 Their future frames can reuse request IDs while preserving finite request and
 response frames, with protocol version negotiation for incompatible changes.
-Online-state UI and the multi-installation selector/URLs are #48 and #49.
+Online-state UI remains part of #48. The web selector and installation URLs
+are described below (#49).
 
 Validation: run `pnpm test:backend -p leo-official-service --test relay` with a
 disposable `LEO_OFFICIAL_TEST_DATABASE_URL`; this uses the isolated backend
 launcher and a real installation router. The Playwright project
 `journeys-official-relay` uses both real binaries and checks reconnection after
 restarting each process. Build those binaries and the web bundle first.
+
+## Current installation in the web application
+
+The official web entry point reuses the existing workspace views (Fil,
+conversations, Agents, Atelier and Settings). Browser routes are rooted at
+`/installations/{installation}/`; API requests, attachment/portrait/file reads
+and SSE connections use `/api/installations/{installation}/api/...`.
+The official account session provides authentication and CSRF; the web does
+not request the installation's browser session or sign-in endpoints.
+
+With one installation the header shows its name. With several, an accessible
+selector changes the current installation. Switching opens a fresh document at
+that installation's home, keeping transient workspace state separate. The last
+installation is remembered in this browser per Leo account; a valid explicit
+installation URL takes precedence. An inaccessible installation URL displays an
+account-level message instead of silently opening another installation.
+
+Owners can rename an installation through `PATCH /api/installations/{id}` with
+`{ "name": "New name" }`, an official session, origin and CSRF token. Names use
+the claim contract (trimmed, 1–100 characters, no control characters). Renaming
+works even while the installation is offline and preserves its identity.
+
+Until live relay streams are available (#48), the existing reading views load
+finite HTTP snapshots and refresh them while visible. They keep retrying the
+scoped SSE connection, and live batches take over when supported. Conversations
+and run events remain usable without a live stream; no relay protocol or local
+authentication change is required by the selector.

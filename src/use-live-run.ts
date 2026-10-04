@@ -1,4 +1,6 @@
-import type { RunEvent } from '../shared/contracts'
+import type { Deliverable } from '../shared/artifacts'
+import type { ChatDetail, ChatView } from '../shared/chats'
+import type { Run, RunEvent } from '../shared/contracts'
 import type { HistoryPage, LiveState } from '../shared/live'
 import type { ReadingPosition } from './history-cache'
 import type { LiveStatus } from './live-connection'
@@ -42,6 +44,7 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
   let persist: (() => void) | undefined
   let saveTimer: ReturnType<typeof setTimeout> | undefined
   let holdTimer: ReturnType<typeof setTimeout> | undefined
+  let snapshotTimer: ReturnType<typeof setInterval> | undefined
 
   function scheduleSave() {
     if (saveTimer !== undefined)
@@ -69,6 +72,7 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
     persist?.()
     const current = ++generation
     connection?.close()
+    clearInterval(snapshotTimer)
     clearTimeout(saveTimer)
     saveTimer = undefined
     persist = undefined
@@ -97,7 +101,7 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
       return
     }
 
-    const scope = await cacheScope(csrf).catch(() => undefined)
+    const scope = await cacheScope(state.installationId ? `${state.installationId}:${csrf}` : csrf).catch(() => undefined)
     const cached = scope ? await readHistory(scope, value) : undefined
     if (disposed || current !== generation)
       return
@@ -174,12 +178,84 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
     }
 
     let checking = false
+    let receivedBatches = 0
+    let readingSnapshot = false
+    let fallbackRun = ''
+    let fallbackRows: RunEvent[] = []
+    let fallbackCursor = 0
+    let fallbackAccumulator = new LiveEvents()
+
+    // Finite reads keep the existing views usable before the relay supports SSE,
+    // and during reconnects. A live batch always wins over an older HTTP read.
+    async function readSnapshot() {
+      if (readingSnapshot || document.hidden || status.value === 'live' || disposed || current !== generation)
+        return
+      readingSnapshot = true
+      const revision = receivedBatches
+      try {
+        const endpoint = value.replace(/\/stream$/, '')
+        const isList = endpoint === '/chats'
+        const isChat = endpoint.startsWith('/chats/')
+        const result = await api<ChatDetail | ChatView[] | Run>(endpoint)
+        const chat = isChat ? result as ChatDetail : null
+        const run = isList ? null : isChat ? chat!.run : result as Run
+        const runId = run?.id || ''
+        const nextRows = runId === fallbackRun ? fallbackRows.slice() : []
+        let nextCursor = runId === fallbackRun ? fallbackCursor : 0
+        const accumulator = runId === fallbackRun ? fallbackAccumulator.copy() : new LiveEvents()
+        let files: Deliverable[] = []
+        if (runId) {
+          files = await api<Deliverable[]>(`/runs/${runId}/artifacts`)
+          let page: RunEvent[]
+          do {
+            page = await api<RunEvent[]>(`/runs/${runId}/events?after=${nextCursor}&limit=500`)
+            accumulator.append(nextRows, page)
+            nextCursor = accumulator.cursor
+            if (disposed || current !== generation || revision !== receivedBatches)
+              return
+          } while (page.length === 500)
+        }
+
+        if (disposed || current !== generation || revision !== receivedBatches)
+          return
+        fallbackRun = runId
+        fallbackRows = nextRows
+        fallbackCursor = nextCursor
+        fallbackAccumulator = accumulator
+        // HTTP reads have no validated SSE history/cursor and must not replace
+        // the stream's persisted snapshot or advance its replay cursor.
+        complete = false
+        show(value)
+        snapshot.value = {
+          chat,
+          run,
+          artifacts: files,
+          ...(isList ? { chats: result as ChatView[] } : {}),
+        }
+        events.value = nextRows
+        catchingUp.value = false
+        hasOlder.value = false
+        error.value = ''
+      }
+      catch (cause) {
+        if (!disposed && current === generation && revision === receivedBatches) {
+          error.value = cause instanceof Error ? cause.message : 'Unable to reach your installation.'
+          catchingUp.value = false
+        }
+      }
+      finally {
+        readingSnapshot = false
+      }
+    }
+
     connection = liveConnection(value, (batch, accepted) => {
+      receivedBatches++
       if (batch.state?.cacheRevision) {
+        const revisionKey = state.installationId ? `conversation-cache-revision:${state.installationId}` : 'conversation-cache-revision'
         try {
-          if (localStorage.getItem('conversation-cache-revision') !== batch.state.cacheRevision) {
+          if (localStorage.getItem(revisionKey) !== batch.state.cacheRevision) {
             void clearHistoryCache()
-            localStorage.setItem('conversation-cache-revision', batch.state.cacheRevision)
+            localStorage.setItem(revisionKey, batch.state.cacheRevision)
           }
         }
         catch { void clearHistoryCache() }
@@ -243,6 +319,10 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
         }
       }).finally(() => { checking = false })
     }, cached ? { cursor: cached.cursor, history: cached.history } : undefined)
+    if (state.installationId) {
+      void readSnapshot()
+      snapshotTimer = setInterval(() => void readSnapshot(), 3000)
+    }
   }, { immediate: true, flush: 'sync' })
   const leaving = () => persist?.()
   window.addEventListener('pagehide', leaving)
@@ -251,6 +331,7 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
     persist?.()
     clearTimeout(saveTimer)
     clearTimeout(holdTimer)
+    clearInterval(snapshotTimer)
     disposed = true
     generation++
     connection?.close()

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { ChatAttachment } from '../../shared/chats'
 import { ref } from 'vue'
+import { apiUrl } from '../api'
 import { FileText, X } from '../icons'
 import Icon from './Icon.vue'
 import Modal from './Modal.vue'
@@ -15,7 +16,7 @@ defineEmits<{ remove: [id: string] }>()
 const expanded = ref<{ name: string, url: string }>()
 
 function url(attachment: ChatAttachment) {
-  return `/api/chats/${encodeURIComponent(attachment.chatId)}/attachments/${encodeURIComponent(attachment.id)}`
+  return apiUrl(`/chats/${encodeURIComponent(attachment.chatId)}/attachments/${encodeURIComponent(attachment.id)}`)
 }
 
 function size(bytes: number) {

@@ -61,10 +61,7 @@ export async function api<T = any>(
   url: string,
   options: RequestInit = {},
 ): Promise<T> {
-  const prefix = state.installationId
-    ? `/api/installations/${encodeURIComponent(state.installationId)}/api`
-    : '/api'
-  const response = await fetch(`${prefix}${url}`, {
+  const response = await fetch(apiUrl(url), {
     ...options,
     headers: {
       ...(options.body === undefined
@@ -82,6 +79,28 @@ export async function api<T = any>(
   }
 
   return data
+}
+
+export function apiUrl(path: string) {
+  const prefix = state.installationId
+    ? `/api/installations/${encodeURIComponent(state.installationId)}/api`
+    : '/api'
+  return `${prefix}${path}`
+}
+
+// Installation responses describe assets relative to their own API. Keep
+// external links intact and route these assets through the current relay.
+export function apiResourceUrl(value: string) {
+  if (!state.installationId || !value)
+    return value
+  try {
+    const url = new URL(value, window.location.origin)
+    if (url.origin === window.location.origin && url.pathname.startsWith('/api/') && !url.pathname.startsWith('/api/installations/'))
+      return apiUrl(`${url.pathname.slice(4)}${url.search}${url.hash}`)
+  }
+  catch {}
+
+  return value
 }
 
 export async function session() {
@@ -140,6 +159,19 @@ export async function signOut() {
     return
   state.signingOut = true
   try {
+    if (state.installationId) {
+      const response = await fetch('/api/account/logout', {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': state.csrf },
+      })
+      if (!response.ok && response.status !== 401)
+        throw new Error('Unable to sign out. Please try again.')
+      state.authenticated = false
+      state.csrf = ''
+      window.location.assign('/')
+      return
+    }
+
     await api('/logout', { method: 'POST' })
     state.authenticated = false
     state.csrf = ''

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
-import { state } from './api'
+import { redirect, state } from './api'
 import App from './App.vue'
 import ThemeControl from './components/ThemeControl.vue'
 import UiAlert from './components/UiAlert.vue'
@@ -40,6 +40,7 @@ const claimCode = ref('')
 const editingName = ref(false)
 const installationName = ref('')
 const installation = ref<{ id: string, name: string } | null>(null)
+const installationMenu = ref<HTMLDetailsElement>()
 
 watch(session, (value) => {
   state.csrf = value?.csrf || ''
@@ -70,6 +71,14 @@ watch(session, (value) => {
     catch {}
 
     openInstallation(value.installations.find(item => item.id === remembered) || value.installations[0]!)
+  }
+})
+
+watch(() => state.authenticated, (authenticated) => {
+  if (!authenticated && session.value?.authenticated) {
+    session.value = null
+    installation.value = null
+    showMethods.value = false
   }
 })
 
@@ -149,6 +158,7 @@ async function signOut() {
     email.value = ''
     code.value = ''
     challenge.value = ''
+    window.location.assign('/')
   }
   catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Unable to sign out. Please try again.'
@@ -285,17 +295,19 @@ async function enableEmail() {
 }
 
 function openInstallation(value: { id: string, name: string }) {
-  state.installationId = value.id
-  state.csrf = session.value?.csrf || ''
-  state.authenticated = true
+  if (state.redirecting)
+    return
   try {
     localStorage.setItem(`leo-current-installation:${session.value?.account?.id}`, value.id)
   }
   catch {}
 
-  window.location.assign(`/installations/${encodeURIComponent(value.id)}/`)
-  installation.value = value
-  claimCode.value = ''
+  redirect(`/installations/${encodeURIComponent(value.id)}/`)
+}
+
+function closeInstallationMenu() {
+  if (installationMenu.value)
+    installationMenu.value.open = false
 }
 
 async function renameInstallation() {
@@ -349,25 +361,35 @@ onMounted(async () => {
 
 <template>
   <div v-if="session?.authenticated && installation && !showMethods" class="flex h-dvh min-h-0 flex-col bg-canvas text-ink">
-    <header class="flex flex-wrap items-center gap-3 border-b border-line px-4 py-2 text-sm">
+    <header class="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2 text-sm" aria-label="Current installation">
       <label v-if="session.installations.length > 1" class="min-w-0 max-w-full">
         <span class="sr-only">Current installation</span>
-        <select :value="installation.id" :disabled="busy" @change="selectInstallation">
+        <select :value="installation.id" :disabled="busy || state.redirecting" @change="selectInstallation">
           <option v-for="item in session.installations" :key="item.id" :value="item.id">
             {{ item.name }}
           </option>
         </select>
       </label>
-      <span v-else class="font-semibold break-all">{{ installation.name }}</span>
-      <UiButton size="small" :disabled="busy" @click="editingName = !editingName; installationName = installation.name">
-        Rename installation
-      </UiButton>
-      <UiButton size="small" :disabled="busy" @click="openMethods">
-        Sign-in methods
-      </UiButton>
-      <UiButton size="small" :disabled="busy" @click="signOut">
-        Sign out
-      </UiButton>
+      <span v-else class="min-w-0 truncate font-semibold" :title="installation.name">{{ installation.name }}</span>
+      <details ref="installationMenu" class="relative ml-auto shrink-0">
+        <summary class="cursor-pointer list-none rounded-lg border border-line px-3 py-2">
+          Installation options
+        </summary>
+        <div class="absolute right-0 z-50 mt-2 grid w-52 gap-2 rounded-xl border border-line bg-surface p-2 shadow-lg" @click="closeInstallationMenu">
+          <UiButton size="small" :disabled="busy" @click="editingName = !editingName; installationName = installation.name">
+            Rename installation
+          </UiButton>
+          <UiButton size="small" :disabled="busy" @click="addInstallation">
+            Add an installation
+          </UiButton>
+          <UiButton size="small" :disabled="busy" @click="openMethods">
+            Sign-in methods
+          </UiButton>
+          <UiButton size="small" :disabled="busy" @click="signOut">
+            Sign out
+          </UiButton>
+        </div>
+      </details>
     </header>
     <form v-if="editingName" class="flex flex-wrap items-end gap-3 border-b border-line px-4 py-3" @submit.prevent="renameInstallation">
       <label>Installation name<input
@@ -383,6 +405,18 @@ onMounted(async () => {
         Cancel
       </UiButton>
     </form>
+    <div v-if="claimCode" class="grid gap-3 border-b border-line px-4 py-3">
+      <label>Installation claim code<input :value="claimCode" readonly autocomplete="off"></label>
+      <p class="text-sm text-muted">
+        This code expires in 10 minutes.
+      </p>
+      <UiButton size="small" :disabled="busy" @click="loadSession">
+        Refresh installations
+      </UiButton>
+      <UiButton size="small" :disabled="busy" @click="claimCode = ''">
+        Close
+      </UiButton>
+    </div>
     <UiAlert v-if="error" class="mx-4 my-2">
       {{ error }}
     </UiAlert>
@@ -475,7 +509,9 @@ onMounted(async () => {
         </p>
         <div>
           <p v-if="!session.installations.length" class="text-muted mb-8">
-            Your Leo account is ready. Your installations will appear here when you add one.
+            Your Leo account is ready. Choose Add an installation to get a claim code,
+            then use it to connect a Leo installation on your machine. The installation
+            will appear here; choose Refresh installations once it is connected.
           </p>
           <div class="grid gap-3 mb-6">
             <UiButton v-for="item in session.installations" :key="item.id" @click="openInstallation(item)">

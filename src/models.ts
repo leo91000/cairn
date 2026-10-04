@@ -1,12 +1,14 @@
 import type { ModelCatalog } from '../shared/models'
 import { reactive } from 'vue'
-import { api } from './api'
+import { api, state } from './api'
 
 // The last catalog is kept locally so pickers can label saved models without
 // fetching on every page load; opening a picker refreshes it.
+const installationScope = state.installationId ? `${state.installationId}:` : ''
+
 function stored(key: string): ModelCatalog['models'] {
   try {
-    return JSON.parse(localStorage.getItem(key) || 'null')?.models ?? []
+    return JSON.parse(localStorage.getItem(`${installationScope}${key}`) || 'null')?.models ?? []
   }
   catch {
     return []
@@ -15,7 +17,7 @@ function stored(key: string): ModelCatalog['models'] {
 
 function store(key: string, catalog: ModelCatalog) {
   try {
-    localStorage.setItem(key, JSON.stringify({ models: catalog.models }))
+    localStorage.setItem(`${installationScope}${key}`, JSON.stringify({ models: catalog.models }))
   }
   catch {}
 }

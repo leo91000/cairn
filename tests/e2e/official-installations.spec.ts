@@ -1,12 +1,22 @@
 import type { ChildProcess } from 'node:child_process'
+import { Buffer } from 'node:buffer'
 import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import {
+  mkdir,
+  mkdtemp,
+  rm,
+  writeFile,
+} from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
+import { config as loadConfig } from '../legacy/server/config'
+import { Service as SeedService } from '../legacy/server/service'
+import { Store } from '../legacy/server/store'
 
 test('selects installations, remembers the last one and honours deep workspace URLs', async ({ page }) => {
   test.setTimeout(120000)
@@ -14,6 +24,14 @@ test('selects installations, remembers the last one and honours deep workspace U
   const children: ChildProcess[] = []
   const messages: string[] = []
   let installationLog = ''
+  await Promise.all([mkdir(join(root, 'data')), mkdir(join(root, 'home'))])
+  const seed = new SeedService(new Store(join(root, 'data')), loadConfig({
+    dataDir: join(root, 'data'),
+    home: join(root, 'home'),
+    workspaceRoots: [root],
+    workerEnabled: false,
+    logger: false,
+  }))
   const mail = createServer(async (request, response) => {
     let body = ''
     for await (const chunk of request)
@@ -52,7 +70,6 @@ test('selects installations, remembers the last one and honours deep workspace U
     await expect(page.getByRole('heading', { name: 'No installations yet' })).toBeVisible()
     await page.getByRole('button', { name: 'Add an installation', exact: true }).click()
     const code = await page.getByLabel('Installation claim code').inputValue()
-    await Promise.all([mkdir(join(root, 'data')), mkdir(join(root, 'home'))])
     start('target/debug/leo', {
       DATA_DIR: join(root, 'data'),
       AGENT_HOME: join(root, 'home'),
@@ -81,11 +98,9 @@ test('selects installations, remembers the last one and honours deep workspace U
     await page.reload()
     await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
     const firstUrl = page.url()
-    const account = await (await page.request.get(`${url}/api/account/session`)).json()
-    const claim = await (await page.request.post(`${url}/api/installations/claim-code`, {
-      headers: { 'origin': url, 'x-csrf-token': account.csrf },
-      data: {},
-    })).json()
+    await page.getByText('Installation options', { exact: true }).click()
+    await page.getByRole('button', { name: 'Add an installation', exact: true }).click()
+    const secondCode = await page.getByLabel('Installation claim code').inputValue()
     await Promise.all([mkdir(join(root, 'office-data')), mkdir(join(root, 'office-home'))])
     start('target/debug/leo', {
       DATA_DIR: join(root, 'office-data'),
@@ -95,7 +110,7 @@ test('selects installations, remembers the last one and honours deep workspace U
       NODE_ENV: 'test',
       PORT: '0',
       LEO_OFFICIAL_ORIGIN: url,
-      LEO_INSTALLATION_CLAIM_CODE: claim.code,
+      LEO_INSTALLATION_CLAIM_CODE: secondCode,
       LEO_INSTALLATION_NAME: 'Office',
     })
     await expect.poll(async () => {
@@ -117,12 +132,114 @@ test('selects installations, remembers the last one and honours deep workspace U
     await expect(selector.locator('option:checked')).toHaveText('Home')
     await page.goto(url)
     await expect(page).toHaveURL(firstUrl.replace(/agents$/, ''))
+    await page.getByText('Installation options', { exact: true }).click()
     await page.getByRole('button', { name: 'Rename installation', exact: true }).click({ timeout: 7000 })
     await page.getByLabel('Installation name', { exact: true }).fill('My home')
     await page.getByRole('button', { name: 'Save installation name', exact: true }).click()
     await expect(selector.locator('option:checked')).toHaveText('My home')
     await page.reload()
     await expect(selector.locator('option:checked')).toHaveText('My home')
+    await page.getByRole('link', { name: 'New conversation', exact: true }).first().click()
+    await page.getByRole('textbox', { name: 'Message', exact: true }).fill('A conversation at home')
+    await page.getByRole('button', { name: 'Send', exact: true }).click()
+    await expect(page).toHaveURL(/\/installations\/[^/]+\/chats\/[^/]+$/)
+    await expect(page.getByRole('heading', { name: 'A conversation at home', exact: true })).toBeVisible()
+    const conversationUrl = page.url()
+    await page.reload()
+    await expect(page.getByRole('heading', { name: 'A conversation at home', exact: true })).toBeVisible()
+    await page.getByRole('textbox', { name: 'Message', exact: true }).fill('A home-only draft')
+    await selector.selectOption({ label: 'Office' })
+    await page.getByRole('link', { name: 'New conversation', exact: true }).first().click()
+    await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('')
+    await expect(page.getByRole('link', { name: /A conversation at home/ })).toHaveCount(0)
+    await page.goto(conversationUrl)
+    await expect(page.getByRole('heading', { name: 'A conversation at home', exact: true })).toBeVisible()
+    await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('A home-only draft')
+    await page.getByRole('link', { name: 'New conversation', exact: true }).first().click()
+    await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Only Home’s new conversation')
+    await selector.selectOption({ label: 'Office' })
+    await page.getByRole('link', { name: 'New conversation', exact: true }).first().click()
+    await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('')
+    await page.goto(`${firstUrl.replace(/agents$/, '')}chats`)
+    await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('Only Home’s new conversation')
+    await page.getByRole('textbox', { name: 'Message', exact: true }).fill('A file in my home installation')
+    await page.getByLabel('Attach files').setInputFiles({ name: 'hello.txt', mimeType: 'text/plain', buffer: Buffer.from('A relayed file') })
+    await page.getByRole('button', { name: 'Send', exact: true }).click()
+    const download = page.getByRole('link', { name: 'Download hello.txt', exact: true }).first()
+    await expect(download).toHaveAttribute('href', /\/api\/installations\/[^/]+\/api\/chats\/[^/]+\/attachments\//)
+    const file = await page.request.get(new URL((await download.getAttribute('href'))!, url).href)
+    expect(file.status()).toBe(200)
+    expect(await file.text()).toBe('A relayed file')
+    const chat = seed.store.list('chats').find(item => page.url().endsWith(item.id))!
+    const task = seed.task({ name: 'Relayed files', prompt: 'Publish notes', agentId: chat.agentId })
+    const run = await seed.enqueue(task.id)
+    seed.store.updateRun(run.id, { status: 'succeeded', finishedAt: Date.now() })
+    const artifact = {
+      id: randomUUID(),
+      runId: run.id,
+      messageId: null,
+      key: 'notes',
+      version: 1,
+      title: 'Relayed notes',
+      name: 'notes.md',
+      kind: 'markdown',
+      mediaType: 'text/markdown',
+      size: 23,
+      createdAt: Date.now(),
+      url: '',
+      group: '',
+      previewStatus: 'none',
+    }
+    await mkdir(join(root, 'data', 'artifacts'), { recursive: true })
+    await writeFile(join(root, 'data', 'artifacts', artifact.id), '# Notes from my machine')
+    seed.store.set(`artifact:${run.id}:${artifact.id}`, artifact)
+    seed.store.event(run.id, 'item.completed', 'Notes', {
+      item: {
+        id: 'notes-reply',
+        type: 'agent_message',
+        text: `[Read the notes](/api/runs/${run.id}/artifacts/${artifact.id})`,
+      },
+    })
+    seed.store.put('chats', { ...chat, runId: run.id })
+    await page.reload()
+    const notesLink = page.getByRole('link', { name: 'Read the notes', exact: true })
+    await expect(notesLink).toHaveAttribute('href', /\/api\/installations\/[^/]+\/api\/runs\//)
+    await notesLink.click()
+    await expect(page.getByRole('heading', { name: 'Notes from my machine', exact: true })).toBeVisible()
+    const notesDownload = page.getByRole('link', { name: 'Download original', exact: true })
+    await expect(notesDownload).toHaveAttribute('href', /\/api\/installations\/[^/]+\/api\/runs\//)
+    const notesResponse = await page.request.get(new URL((await notesDownload.getAttribute('href'))!, url).href)
+    expect(notesResponse.status()).toBe(200)
+    expect(await notesResponse.text()).toBe('# Notes from my machine')
+    await page.getByRole('button', { name: 'Close viewer', exact: true }).click()
+    await page.getByRole('link', { name: 'Atelier', exact: true }).first().click()
+    await page.getByRole('link', { name: 'Agents', exact: true }).click()
+    await page.getByRole('button', { name: 'Edit Main agent', exact: true }).click()
+    const portrait = page.getByRole('region', { name: 'Agent portrait' })
+    await portrait.getByLabel('Upload agent portrait').setInputFiles('tests/fixtures/artifacts/thumbnail.png')
+    await expect(portrait.locator('img')).toHaveJSProperty('naturalWidth', 256)
+    await expect(portrait.locator('img')).toHaveAttribute('src', /\/api\/installations\/[^/]+\/api\/agents\//)
+    await page.getByRole('button', { name: 'Save agent', exact: true }).click()
+    await page.getByRole('link', { name: 'Settings', exact: true }).click()
+    await expect(page).toHaveURL(/\/installations\/[^/]+\/settings$/)
+    await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible()
+    for (const width of [1440, 390, 320]) {
+      await page.setViewportSize({ width, height: 900 })
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+      expect((await page.getByRole('banner', { name: 'Current installation', exact: true }).boundingBox())!.height).toBeLessThan(80)
+      await page.screenshot({ path: test.info().outputPath(`installation-selector-${width}.png`) })
+    }
+
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto(`${url}/installations/${randomUUID()}/agents`)
+    await expect(page.getByRole('alert')).toContainText('unavailable or no longer accessible')
+    await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toHaveCount(0)
+    await page.goto(firstUrl)
+    await expect(selector.locator('option:checked')).toHaveText('My home')
+    await page.getByRole('navigation', { name: 'Workspace navigation', exact: true }).getByRole('button', { name: 'Sign out', exact: true }).click()
+    await expect(page.getByLabel('Email address')).toBeVisible()
+    await page.reload()
+    await expect(page.getByLabel('Email address')).toBeVisible()
   }
   finally {
     await Promise.all(children.map(async (child) => {
@@ -132,6 +249,8 @@ test('selects installations, remembers the last one and honours deep workspace U
       child.kill('SIGTERM')
       await exited
     }))
+    await seed.accounts.close()
+    seed.store.close()
     await new Promise<void>(resolve => mail.close(() => resolve()))
     await rm(root, { recursive: true, force: true })
   }

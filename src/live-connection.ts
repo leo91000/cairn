@@ -1,4 +1,5 @@
 import type { LiveBatch } from '../shared/live'
+import { apiUrl } from './api'
 
 export type LiveStatus = 'connecting' | 'live' | 'reconnecting' | 'offline'
 
@@ -45,7 +46,7 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
     }
 
     status(failures ? 'reconnecting' : 'connecting')
-    const current = new EventSource(`/api${path}?after=${cursor}${history ? `&history=${encodeURIComponent(history)}` : ''}${path === '/chats/stream' ? '' : '&window=1'}`)
+    const current = new EventSource(apiUrl(`${path}?after=${cursor}${history ? `&history=${encodeURIComponent(history)}` : ''}${path === '/chats/stream' ? '' : '&window=1'}`))
     source = current
     alive()
     current.addEventListener('ping', () => {
