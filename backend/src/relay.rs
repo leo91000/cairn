@@ -288,7 +288,10 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
                         let router = router.clone();
                         let credit = std::sync::Arc::new(Semaphore::new(0));
                         let streaming = if version >= 2 {
-                            Some(StreamOutput { frames: output.clone(), credit: credit.clone() })
+                            Some(StreamOutput {
+                                frames: output.clone(),
+                                credit: credit.clone(),
+                            })
                         } else {
                             None
                         };

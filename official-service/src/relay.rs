@@ -22,7 +22,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 
 struct Pending {
     reply: Option<oneshot::Sender<ApiResponse>>,
@@ -41,13 +41,17 @@ struct Tunnel {
     control: mpsc::Sender<Frame>,
     version: u16,
     access: Mutex<Access>,
+    access_changed: Notify,
     slots: Arc<Semaphore>,
     // Replacing a connection closes the old generation and its pending replies.
     stop: watch::Sender<bool>,
 }
 
 #[derive(Clone, Default)]
-pub struct Relay(Arc<Mutex<HashMap<String, Arc<Tunnel>>>>, Arc<AtomicBool>);
+pub struct Relay {
+    connections: Arc<Mutex<HashMap<String, Arc<Tunnel>>>>,
+    closing: Arc<AtomicBool>,
+}
 
 #[derive(Default)]
 struct Access {
@@ -63,8 +67,8 @@ struct StreamAccess {
 impl Relay {
     /// End live bodies before the official HTTP server drains on shutdown.
     pub fn shutdown(&self) {
-        let mut tunnels = self.0.lock().unwrap();
-        self.1.store(true, Ordering::SeqCst);
+        let mut tunnels = self.connections.lock().unwrap();
+        self.closing.store(true, Ordering::SeqCst);
         for (_, tunnel) in tunnels.drain() {
             tunnel.stop.send_replace(true);
         }
@@ -74,7 +78,7 @@ impl Relay {
     /// Call after committing the access change, before returning its HTTP response.
     pub fn revoke_access(&self, installation: &str, account: Option<&str>) {
         let tunnel = {
-            let mut tunnels = self.0.lock().unwrap();
+            let mut tunnels = self.connections.lock().unwrap();
             if account.is_none() {
                 tunnels.remove(installation)
             } else {
@@ -94,13 +98,15 @@ impl Relay {
             {
                 stream.revoked.send_replace(true);
             }
+            // Cancellation must not wait for a backpressured HTTP body to poll.
+            tunnel.access_changed.notify_one();
         } else {
             tunnel.stop.send_replace(true);
         }
     }
 
     pub(super) fn online(&self, installation: &str) -> bool {
-        self.0
+        self.connections
             .lock()
             .unwrap()
             .get(installation)
@@ -164,12 +170,13 @@ async fn serve_socket(relay: Relay, installation: String, mut socket: WebSocket)
         control,
         version,
         access: Mutex::new(Access::default()),
+        access_changed: Notify::new(),
         slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
         stop,
     });
     {
-        let mut tunnels = relay.0.lock().unwrap();
-        if relay.1.load(Ordering::SeqCst) {
+        let mut tunnels = relay.connections.lock().unwrap();
+        if relay.closing.load(Ordering::SeqCst) {
             return;
         }
         if let Some(previous) = tunnels.insert(installation.clone(), tunnel.clone()) {
@@ -181,9 +188,33 @@ async fn serve_socket(relay: Relay, installation: String, mut socket: WebSocket)
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut received = tokio::time::Instant::now();
-    loop {
+    'connection: loop {
         tokio::select! {
             _ = stopped.changed() => break,
+            _ = tunnel.access_changed.notified() => {
+                let revoked = {
+                    let mut access = tunnel.access.lock().unwrap();
+                    let ids: Vec<_> = access.streams.iter()
+                        .filter(|(_, stream)| *stream.revoked.borrow())
+                        .map(|(id, _)| id.clone())
+                        .collect();
+                    for id in &ids {
+                        access.streams.remove(id);
+                    }
+                    ids
+                };
+                for id in revoked {
+                    // A queued request is rejected below before dispatch. A
+                    // dispatched request releases its slot and is cancelled now.
+                    if pending.remove(&id).is_none() {
+                        continue;
+                    }
+                    let message = serde_json::to_string(&Frame::Cancel { id }).unwrap();
+                    if socket.send(Message::Text(message.into())).await.is_err() {
+                        break 'connection;
+                    }
+                }
+            }
             _ = heartbeat.tick() => {
                 if received.elapsed() > Duration::from_secs(45) {
                     break;
@@ -196,7 +227,12 @@ async fn serve_socket(relay: Relay, installation: String, mut socket: WebSocket)
                 let Some(command) = command else {
                     break;
                 };
-                if command.pending.reply.as_ref().is_some_and(oneshot::Sender::is_closed) {
+                let access_revoked = command.pending.stream.is_some()
+                    && !tunnel.access.lock().unwrap().streams.get(&command.request.id)
+                        .is_some_and(|stream| !*stream.revoked.borrow());
+                if access_revoked
+                    || command.pending.reply.as_ref().is_some_and(oneshot::Sender::is_closed)
+                {
                     continue;
                 }
 
@@ -246,21 +282,37 @@ async fn serve_socket(relay: Relay, installation: String, mut socket: WebSocket)
                                 if let Some(request) = pending.get_mut(&id) {
                                     let valid_stream = request.stream.is_some() && response.body.is_empty();
                                     if valid_stream && let Some(reply) = request.reply.take() {
-                                        if reply.send(response).is_ok() { None } else { Some(id) }
-                                    } else { Some(id) }
-                                } else { Some(id) }
+                                        if reply.send(response).is_ok() {
+                                            None
+                                        } else {
+                                            Some(id)
+                                        }
+                                    } else {
+                                        Some(id)
+                                    }
+                                } else {
+                                    Some(id)
+                                }
                             }
                             Frame::StreamChunk { id, body } if version >= 2 => {
                                 let delivered = body.len() <= MAX_STREAM_CHUNK
                                     && pending.get(&id).is_some_and(|request| {
-                                        request.reply.is_none() && request.stream.as_ref()
-                                            .is_some_and(|stream| stream.try_send(Ok(body)).is_ok())
+                                        request.reply.is_none()
+                                            && request.stream.as_ref().is_some_and(|stream| {
+                                                stream.try_send(Ok(body)).is_ok()
+                                            })
                                     });
-                                if delivered { None } else { Some(id) }
+                                if delivered {
+                                    None
+                                } else {
+                                    Some(id)
+                                }
                             }
                             Frame::StreamEnd { id, failed } if version >= 2 => {
                                 if let Some(completed) = pending.remove(&id)
-                                    && failed && let Some(stream) = completed.stream {
+                                    && failed
+                                    && let Some(stream) = completed.stream
+                                {
                                     let _ = stream.try_send(Err(std::io::Error::other("Installation stream failed")));
                                 }
                                 None
@@ -270,7 +322,9 @@ async fn serve_socket(relay: Relay, installation: String, mut socket: WebSocket)
                         if let Some(id) = cancel {
                             pending.remove(&id);
                             let message = serde_json::to_string(&Frame::Cancel { id }).unwrap();
-                            if socket.send(Message::Text(message.into())).await.is_err() { break; }
+                            if socket.send(Message::Text(message.into())).await.is_err() {
+                                break;
+                            }
                         }
                     }
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
@@ -281,7 +335,7 @@ async fn serve_socket(relay: Relay, installation: String, mut socket: WebSocket)
     }
     let _ = tunnel.stop.send(true);
     // An old connection must never remove the replacement's registry entry.
-    let mut connections = relay.0.lock().unwrap();
+    let mut connections = relay.connections.lock().unwrap();
     if connections
         .get(&installation)
         .is_some_and(|current| Arc::ptr_eq(current, &tunnel))
@@ -298,7 +352,13 @@ pub(super) async fn forward(
     let account = installations::account(&service, request.headers(), request.method()).await?;
     // Snapshot the access generation before checking ownership. Revocation
     // racing a slow upload must also prevent that stream from opening later.
-    let tunnel = service.relay.0.lock().unwrap().get(&installation).cloned();
+    let tunnel = service
+        .relay
+        .connections
+        .lock()
+        .unwrap()
+        .get(&installation)
+        .cloned();
     let access_generation = tunnel.as_ref().map_or(0, |tunnel| {
         *tunnel
             .access

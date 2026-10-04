@@ -26,11 +26,8 @@ impl Drop for Subscription {
     }
 }
 
-#[tokio::test]
-async fn a_slow_reader_backpressures_only_its_subscription_and_drop_cancels_it() {
-    let polls = Arc::new(AtomicUsize::new(0));
-    let dropped = Arc::new(AtomicBool::new(false));
-    let routes = Router::new().route(
+fn fast_subscription(polls: Arc<AtomicUsize>, dropped: Arc<AtomicBool>) -> Router {
+    Router::new().route(
         "/api/fixture/fast/stream",
         get({
             let polls = polls.clone();
@@ -57,17 +54,10 @@ async fn a_slow_reader_backpressures_only_its_subscription_and_drop_cancels_it()
                 }
             }
         }),
-    );
-    let relay = RelayedInstallation::new(routes).await;
-    let response = relay
-        .get("/fixture/fast/stream")
-        .timeout(Duration::from_secs(3))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    // HTTP/TCP buffers may accept several chunks. Once they fill, the actual
-    // installation body must stop being polled; memory cannot grow with time.
+    )
+}
+
+async fn wait_for_backpressure(polls: &AtomicUsize) {
     tokio::time::timeout(Duration::from_secs(3), async {
         let mut previous = 0;
         let mut stable = tokio::time::Instant::now();
@@ -89,6 +79,24 @@ async fn a_slow_reader_backpressures_only_its_subscription_and_drop_cancels_it()
     })
     .await
     .expect("the remote subscription must pause under back-pressure");
+}
+
+#[tokio::test]
+async fn a_slow_reader_backpressures_only_its_subscription_and_drop_cancels_it() {
+    let polls = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicBool::new(false));
+    let routes = fast_subscription(polls.clone(), dropped.clone());
+    let relay = RelayedInstallation::new(routes).await;
+    let response = relay
+        .get("/fixture/fast/stream")
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    // HTTP/TCP buffers may accept several chunks. Once they fill, the actual
+    // installation body must stop being polled; memory cannot grow with time.
+    wait_for_backpressure(&polls).await;
     assert_eq!(
         relay
             .get("/chats")
@@ -229,5 +237,37 @@ async fn finite_response_headers_do_not_extend_the_request_deadline_or_hold_its_
     })
     .await
     .expect("the original 30-second deadline must release timed-out finite requests");
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn revocation_cancels_a_backpressured_subscription_without_waiting_for_the_browser() {
+    let polls = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicBool::new(false));
+    let relay = RelayedInstallation::new(fast_subscription(polls.clone(), dropped.clone())).await;
+    let stalled = relay.get("/fixture/fast/stream").send().await.unwrap();
+    assert_eq!(stalled.status(), StatusCode::OK);
+    wait_for_backpressure(&polls).await;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let account = relay.session["account"]["id"].as_str().unwrap();
+    relay.app.relay.revoke_access(id, Some(account));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !dropped.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("revocation must cancel the remote subscription without another browser read");
+
+    // Keep the revoked browser response alive. Every tunnel slot must already
+    // be reusable by authorized requests in the new access generation.
+    let mut healthy = Vec::new();
+    for _ in 0..leo_relay_protocol::MAX_IN_FLIGHT {
+        let response = relay.get("/chats/stream").send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        healthy.push(response);
+    }
+    drop(healthy);
+    drop(stalled);
     relay.close().await;
 }

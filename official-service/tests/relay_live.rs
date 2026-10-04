@@ -90,9 +90,18 @@ async fn relay_disconnect_replays_activity_and_does_not_stop_the_run() {
     use tokio_util::sync::CancellationToken;
 
     let mut relay = RelayedInstallation::new(axum::Router::new()).await;
-    let task = relay.installation.task(json!({
-        "name": "Relay recovery", "prompt": "Continue independently", "agentId": MAIN_AGENT_ID,
-    }), None).await.unwrap();
+    let task = relay
+        .installation
+        .task(
+            json!({
+                "name": "Relay recovery",
+                "prompt": "Continue independently",
+                "agentId": MAIN_AGENT_ID,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
     let run = relay
         .installation
         .enqueue(task["id"].as_str().unwrap(), "manual", None)
