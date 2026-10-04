@@ -34,18 +34,20 @@ See [microVM requirements and architecture](docs/MICROVMS.md).
 
 ```sh
 cp .env.example .env
-# Set PUBLIC_URL to your HTTPS origin when deploying behind a reverse proxy.
+# Configure LEO_OFFICIAL_ORIGIN for the separate official service.
 codex_version=$(npm view @openai/codex version)
 gh_version=$(gh api repos/cli/cli/releases/latest --jq '.tag_name | ltrimstr("v")')
 docker compose build --build-arg CODEX_VERSION="$codex_version" --build-arg GH_VERSION="$gh_version"
 docker compose up -d
-# Read the generated bootstrap token locally; enter it in the setup screen.
-docker compose exec manager cat /data/setup-token
+# Approve the printed device code in the official app.
+docker compose exec manager leo claim
+docker compose restart manager
 ```
 
-Open `http://localhost:4310`, create your administrator password, then visit
-**Atelier → Connections, Agents and Projects**, then **Missions**. The Compose port is bound to localhost.
-For a remote server, use an HTTPS reverse proxy or an SSH tunnel for initial setup.
+Open the official app, sign in to your Leo account, and claim the installation.
+The manager port is private machine traffic; local passwords, pages and sessions
+no longer grant access. Existing deployments must follow the explicit migration
+in [DEPLOYMENT.md](docs/DEPLOYMENT.md) before upgrading.
 
 [Deployment, CLI login, project setup, backups, and Coolify](docs/DEPLOYMENT.md)
 
@@ -76,7 +78,8 @@ Install Rust through rustup; `rust-toolchain.toml` pins the compiler and checks.
 
 ```sh
 pnpm install --frozen-lockfile
-pnpm dev
+pnpm build
+docker compose -f deploy/official/compose.yaml up
 ```
 
 `pnpm install` installs a pre-commit hook that runs `pnpm lint:fix` across the
@@ -89,7 +92,12 @@ examples. Lint errors, compiler errors, and Clippy warnings block the commit.
 Run `pnpm prepare` to reinstall the hook.
 See [formatting and readability](docs/FORMATTING.md) for setup, commands, and CI checks.
 
-The UI is at `http://localhost:5178`; the backend is at `http://localhost:4310`.
+The official app is at `http://localhost:4311` with a development mailbox at
+`http://localhost:8025`; see [official service setup](docs/OFFICIAL-SERVICE.md).
+Build the web bundle after edits, and claim a separately running installation
+with `leo claim`. The historical `pnpm dev` manager/Vite pair no longer provides
+local browser sign-in. Legacy browser journeys use an example executable with
+synthetic authentication; that adapter is absent from production images.
 The UI uses Tailwind CSS and Egoist's Iconify plugin. See the
 [styling conventions](docs/UI-STYLING.md) for shared controls, theme tokens, icons,
 and responsive layout rules.
@@ -102,7 +110,7 @@ runs (`.env` is used by Compose, not loaded automatically by the development ser
 pnpm check                       # ESLint, rustfmt, types, JS tests and frontend build
 pnpm test:backend                # Native backend integration and migration tests
 cargo clippy --all-targets -- -D warnings
-cargo build --bin leo            # Native binary used by every browser fixture
+cargo build --locked --workspace --bin leo --bin leo-official --example browser_fixture # Browser test binaries
 pnpm exec playwright install chromium
 pnpm test:e2e                    # Full browser journeys against the Rust backend
 pnpm build:backend               # Optimized native production binary

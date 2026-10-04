@@ -300,11 +300,7 @@ where
     F: FnOnce(Arc<Service>) -> Fut,
     Fut: std::future::Future<Output = Result<axum::Router>>,
 {
-    let mut config = Config::load()?;
-    if config.setup_token.is_empty() {
-        config.setup_token =
-            leo_agent_manager::execution::secret(&config.data_dir, "setup-token").await?;
-    }
+    let config = Config::load()?;
     leo_agent_manager::toolkit::environment(&config.home, std::env::vars().collect()).await?;
     let service = Service::new(config).await?;
     let listener =

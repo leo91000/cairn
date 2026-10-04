@@ -149,7 +149,10 @@ async fn read_identity(directory: &Path) -> Result<Option<Identity>> {
             "Installation identity must be a private regular file.",
         ));
     }
-    let identity = serde_json::from_str(&crate::skills::small_file(&path).await?)?;
+    let identity =
+        serde_json::from_str(&crate::skills::small_file(&path).await?).map_err(|_| {
+            Error::bad("Invalid private installation identity. Back up the file before recovery.")
+        })?;
     Ok(Some(identity))
 }
 

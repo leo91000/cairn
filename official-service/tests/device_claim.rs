@@ -12,7 +12,11 @@ async fn device_claim_reclaims_a_detached_installation_and_preserves_its_data() 
     let path = dir.join("identity.json");
     let old: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
     let id = old["installationId"].as_str().unwrap();
-    let body = json!({"name": "Recovered installation", "protocol": 1, "identity": old});
+    let body = json!({
+        "name": "Recovered installation",
+        "protocol": 1,
+        "identity": old,
+    });
     let start = || {
         relay
             .app
@@ -97,8 +101,73 @@ async fn device_claim_reclaims_a_detached_installation_and_preserves_its_data() 
     assert_eq!(response.status(), StatusCode::OK);
     let claimed: Value = response.json().await.unwrap();
     assert_eq!(claimed["installationId"], old["installationId"]);
-    assert_ne!(claimed["token"], old["token"]);
+    assert!(
+        claimed["token"] != old["token"],
+        "reclamation must rotate the credential"
+    );
     assert_eq!(poll().await.status(), StatusCode::UNAUTHORIZED);
+    // A successful response can be lost before the private file is replaced.
+    // After detaching, the machine must still recover with the file it owns.
+    assert_eq!(
+        relay
+            .app
+            .client
+            .post(format!("{}/api/installations/{id}/detach", relay.app.url))
+            .header("origin", &relay.app.url)
+            .header("cookie", &cookie)
+            .header("x-csrf-token", session["csrf"].as_str().unwrap())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    let recovery = start().await;
+    assert_eq!(
+        recovery.status(),
+        StatusCode::CREATED,
+        "lost identity delivery must remain recoverable"
+    );
+    let recovery: Value = recovery.json().await.unwrap();
+    assert_eq!(
+        relay
+            .app
+            .client
+            .post(format!("{}/api/installations/device-claim", relay.app.url))
+            .header("origin", &relay.app.url)
+            .header("cookie", &cookie)
+            .header("x-csrf-token", session["csrf"].as_str().unwrap())
+            .json(&json!({ "code": recovery["userCode"] }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let response = relay
+        .app
+        .post(
+            "/api/relay/device-claim/poll",
+            json!({ "deviceCode": recovery["deviceCode"] }),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let claimed: Value = response.json().await.unwrap();
+    assert_eq!(claimed["installationId"], old["installationId"]);
+    // The recovery proof must never restore a revoked tunnel credential.
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        leo_agent_manager::relay::connect(
+            dir.clone(),
+            leo_agent_manager::http::router(relay.installation.clone())
+                .await
+                .unwrap(),
+            relay.stop.clone(),
+        ),
+    )
+    .await
+    .expect("old proof must be refused by the relay even after recovery")
+    .unwrap();
     // Machine adapter setup: the CLI's protected file replacement is covered
     // through the real leo claim process in Playwright.
     let mut identity = old;

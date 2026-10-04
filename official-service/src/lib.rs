@@ -136,6 +136,13 @@ pub async fn router_with_relay(
                 include_str!("../migrations/202610030350_device_claims.sql").into(),
                 false,
             ),
+            Migration::new(
+                202610040050,
+                "claim identity recovery".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/202610040050_claim_recovery.sql").into(),
+                false,
+            ),
         ]),
         ..Migrator::DEFAULT
     };

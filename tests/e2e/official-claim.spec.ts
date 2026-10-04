@@ -112,7 +112,7 @@ test('claims, detaches and reclaims the same private installation through the ap
     // A failed replacement must leave the current private identity intact.
     const refused = start('target/debug/leo', ['claim'], managerEnv)
     await expect.poll(() => refused.exitCode).toBe(1)
-    expect(JSON.parse(await readFile(join(root, 'data/installation-relay/identity.json'), 'utf8'))).toEqual(old)
+    expect(JSON.stringify(JSON.parse(await readFile(join(root, 'data/installation-relay/identity.json'), 'utf8'))) === JSON.stringify(old)).toBe(true)
     await page.getByRole('button', { name: 'Detach installation', exact: true }).click()
     await page.getByRole('button', { name: 'Cancel detachment', exact: true }).click()
     await expect(page.getByRole('list', { name: 'Pending messages' })).toContainText('Data survives detachment')
@@ -124,7 +124,7 @@ test('claims, detaches and reclaims the same private installation through the ap
     await stop(manager)
     const renewed = await claim()
     expect(renewed.installationId).toBe(old.installationId)
-    expect(renewed.token).not.toBe(old.token)
+    expect(renewed.token !== old.token).toBe(true)
     manager = start('target/debug/leo', [], managerEnv)
     await page.getByRole('button', { name: 'Claimed machine', exact: true }).click()
     await expect(async () => {

@@ -133,26 +133,34 @@ pub(super) async fn upgrade(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .unwrap_or("");
-    let row: Option<(String,)> = query_as(
-        "SELECT id FROM installations WHERE id = $1 AND token_digest = $2 AND owner_id IS NOT NULL",
-    )
-    .bind(&installation)
-    .bind(digest(token))
-    .fetch_optional(&service.pool)
-    .await?;
-    if row.is_none() {
+    let token_digest = digest(token);
+    if !identity_is_current(&service, &installation, &token_digest).await? {
         return Err(ApiError(
             StatusCode::UNAUTHORIZED,
             "Invalid installation identity",
         ));
     }
 
-    let token_digest = digest(token);
     Ok(ws
         .max_message_size(MAX_FRAME)
         .max_frame_size(MAX_FRAME)
         .on_upgrade(move |socket| serve_socket(service, installation, token_digest, socket))
         .into_response())
+}
+
+async fn identity_is_current(
+    service: &Service,
+    installation: &str,
+    token_digest: &str,
+) -> Result<bool, ApiError> {
+    let row: Option<(String,)> = query_as(
+        "SELECT id FROM installations WHERE id = $1 AND token_digest = $2 AND owner_id IS NOT NULL",
+    )
+    .bind(installation)
+    .bind(token_digest)
+    .fetch_optional(&service.pool)
+    .await?;
+    Ok(row.is_some())
 }
 
 async fn serve_socket(
@@ -203,14 +211,10 @@ async fn serve_socket(
     // Register before rechecking the persisted identity: detach may have raced
     // the HTTP upgrade/negotiation. Either it removes this generation or this
     // check stops it. An old generation never removes a replacement.
-    let current: Result<Option<(String,)>, _> = query_as(
-        "SELECT id FROM installations WHERE id = $1 AND token_digest = $2 AND owner_id IS NOT NULL",
-    )
-    .bind(&installation)
-    .bind(&token_digest)
-    .fetch_optional(&service.pool)
-    .await;
-    if !matches!(current, Ok(Some(_))) {
+    if !matches!(
+        identity_is_current(&service, &installation, &token_digest).await,
+        Ok(true)
+    ) {
         let _ = tunnel.stop.send(true);
     }
 
@@ -253,14 +257,10 @@ async fn serve_socket(
                 // Owner deletion can originate in account management (#59),
                 // another process, or an operator's transaction. The database
                 // remains authoritative even for an already open connection.
-                let current: Result<Option<(String,)>, _> = query_as(
-                    "SELECT id FROM installations WHERE id = $1 AND token_digest = $2 AND owner_id IS NOT NULL",
-                )
-                .bind(&installation)
-                .bind(&token_digest)
-                .fetch_optional(&service.pool)
-                .await;
-                if !matches!(current, Ok(Some(_))) {
+                if !matches!(
+                    identity_is_current(&service, &installation, &token_digest).await,
+                    Ok(true)
+                ) {
                     break;
                 }
             }

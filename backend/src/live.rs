@@ -1,7 +1,6 @@
 //! Durable replay and live delivery share one cursor. Notifications are hints;
 //! SQLite is authoritative, so a slow subscriber never buffers or blocks writes.
 use crate::{
-    auth::InstallationIdentity,
     error::{Error, Result},
     http::Input,
     service::Service,
@@ -227,9 +226,9 @@ pub async fn http(s: Arc<Service>, kind: &str, id: &str, input: Input) -> Result
         uuid(id)?;
     }
     let after = cursor(&input)?;
-    let identity = input
-        .identity
-        .ok_or_else(|| Error::unauthorized("Please sign in."))?;
+    if input.identity.is_none() {
+        return Err(Error::unauthorized("Access through the official service."));
+    }
     let scope = Scope::new(kind, id);
     // Subscribe before reading: commits during replay remain observable.
     let changes = s.store.subscribe();
@@ -257,7 +256,6 @@ pub async fn http(s: Arc<Service>, kind: &str, id: &str, input: Input) -> Result
         pending: Some(first),
         previous: None,
         history: None,
-        identity,
         deltas: crate::live_text::TextDeltas::default(),
     };
     let stream = futures_util::stream::try_unfold(subscription, |mut subscription| async move {
@@ -284,7 +282,6 @@ struct Subscription {
     pending: Option<Page>,
     previous: Option<State>,
     history: Option<String>,
-    identity: InstallationIdentity,
     deltas: crate::live_text::TextDeltas,
 }
 
@@ -304,12 +301,8 @@ impl Subscription {
             if self.s.shutdown.is_cancelled() {
                 return Ok(None);
             }
-            // Mark observed changes before reading auth. Otherwise a logout
-            // between the auth check and the page read can be consumed unseen.
+            // Mark observed changes before reading the next durable page.
             self.changes.borrow_and_update();
-            if !self.identity.is_active(&self.s.auth).await? {
-                return Ok(None);
-            }
             if let Some(event) = self.poll().await? {
                 // Coalesce rapid commits without an unbounded per-client queue.
                 tokio::time::sleep(Duration::from_millis(25)).await;
@@ -318,8 +311,8 @@ impl Subscription {
             tokio::select! {
                 () = self.s.shutdown.cancelled() => return Ok(None),
                 result = self.changes.changed() => if result.is_err() { return Ok(None); },
-                // Revalidate session expiry and recover writes by an external
-                // maintenance process; normal delivery is notification driven.
+                // Recover writes by an external maintenance process; normal
+                // delivery is notification driven. Transport owns revocation.
                 () = tokio::time::sleep(Duration::from_secs(15)) => {},
             }
         }

@@ -3,6 +3,8 @@
 //! Run alone with --ignored --nocapture --test-threads=1. All identities/data are fixtures.
 mod common;
 
+use common::browser_http::router;
+
 use axum::{
     Json, Router,
     body::Bytes,
@@ -13,7 +15,6 @@ use axum::{
 use leo_agent_manager::{
     auth,
     config::{Config, id, now},
-    http::router,
     nodes::{LOCAL_NODE_ID, publication, relay, snapshots},
     run_status::RunStatus,
     service::Service,

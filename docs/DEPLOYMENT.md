@@ -1,11 +1,96 @@
 # Deployment and recovery
 
+## Required migration to the official service
+
+This release removes the installation's browser login and application hosting.
+Administrator passwords, `SETUP_TOKEN`, local browser sessions and CSRF tokens no
+longer grant access. Local MCP OAuth/PAT entry points and public artifact URLs
+also stop working; their official replacements are delivered separately (#55).
+MCP OAuth setup that redirects to the old manager `/oauth/mcp/callback` also
+needs an official callback route before it can work again; existing stored
+outbound MCP credentials remain usable by agents. Old Android clients that use
+local login need the separate official sign-in/client migration (#53).
+Do not deploy this as a transparent upgrade of the old public site.
+
+Before upgrading, back up the volumes below and deploy the official service
+with its own Postgres database, email delivery, HTTPS origin and web bundle
+([official service setup](OFFICIAL-SERVICE.md)). Sign in there. The installation
+and official service must use compatible relay protocols. Keep one relay process,
+and route both installation API requests and relay WebSockets to it.
+
+For an existing installation, preserve all volumes, add `LEO_OFFICIAL_ORIGIN`
+to the manager environment, upgrade the image, then run:
+
+```sh
+docker compose exec manager leo claim
+```
+
+The command prints the official `/claim` URL and a temporary device code. Open
+that URL, sign in to the Leo account that will own the installation, and approve
+only the code displayed on your own machine. Wait for the command to confirm
+success, then restart the manager to load its new relay identity:
+
+```sh
+docker compose restart manager
+```
+
+The restart uses the usual execution recovery; do it at a suitable maintenance
+window. No automatic migration of browser accounts, grants or installations is
+provided. Alternatively, reinstall with fresh volumes and claim the new
+installation. **Discarding old volumes discards their data**: retain backups
+until the replacement has been verified. The one-command installer and bundled
+S3 setup belong to #51; this manual Compose procedure still needs existing S3
+configuration.
+
+After migration, use the official site. Verify the installation appears, a
+conversation can be read and modified, and access returns after a manager
+restart. Direct `/api/session`, `/api/setup`, `/api/login`, static pages, local
+OAuth, local `/mcp` and public artifact requests must be refused. Remove obsolete
+setup secrets and the installation's public browser domain/proxy. `PUBLIC_URL`
+is now an optional **internal manager origin** for execution nodes and run-scoped
+MCP, defaulting to loopback; it is not a browser address or a relay prerequisite.
+For additional nodes use a reachable private LAN/VPN origin and keep the node
+channel available. Agent execution and node traffic continue during an official
+service outage, while browser access is unavailable.
+
+The read-only `/health` readiness probe and authenticated deployment lease remain
+operational endpoints. `/internal/nodes`, disk/workspace/execution channels and
+run-scoped `/mcp-workspace` and `/mcp-gateway` retain their own machine credentials;
+they do not accept browser sessions or local personal tokens. Keep port 4310
+private, only reachable by runners/nodes and deployment health checks.
+
+Detaching an installation revokes access and disconnects the active tunnel while
+preserving the official installation record and its local data. Deleting its
+owner account has the same effect. To claim it again, run `leo claim` on its
+machine; successful approval rotates and atomically replaces the private identity
+file. A still-owned installation cannot be claimed by another account. A failed
+or expired claim keeps the existing identity file intact. Remove a used
+`LEO_INSTALLATION_CLAIM_CODE` from the environment. Protect
+`/data/installation-relay/identity.json` like node credentials and never publish it.
+
+If recovery is interrupted after the service attached the owner but before the
+machine saved its new token, detach that installation in the app and run
+`leo claim` again with the existing private file. The service retains the proof
+used to start recovery separately from the tunnel credential, so the same
+installation record remains recoverable; that proof never reconnects a tunnel.
+A still-owned installation must be detached before any recovery attempt.
+
+If the identity file is missing/corrupt (or an initial claim response was lost
+before any identity was saved), detach the inaccessible installation in the app,
+stop the manager, back up any private identity file outside the deployment
+volumes, and remove that file before running `leo claim` again. This creates a
+new official installation ID while preserving existing data volumes. If you
+cannot detach an inaccessible installation yourself, contact the official
+service operator or reinstall; do not delete its official record as a workaround.
+Retain backups until access has been verified.
+
 ## Docker on a VPS
 
 Install Docker Engine and the Compose plugin. Clone this repository on the server,
-copy `.env.example` to `.env`, and set `PUBLIC_URL=https://agents.example.com`.
-The URL must be an origin without a path and must match the address used by browsers
-and MCP clients. Keep one manager replica per SQLite data volume.
+copy `.env.example` to `.env`, and configure `LEO_OFFICIAL_ORIGIN`.
+Keep one manager replica per SQLite data volume. If using a prefilled claim code,
+set `LEO_INSTALLATION_CLAIM_CODE` and `LEO_INSTALLATION_NAME` before first startup;
+otherwise use `leo claim` as above.
 
 For a local build, resolve current stable CLI versions and pass them to Docker:
 
@@ -19,14 +104,14 @@ docker compose up -d
 For published images, use
 `docker compose pull && docker compose up -d` and pin `LEO_IMAGE` to a verified
 `ghcr.io/leo91000/leo-agent-manager:sha-<full-commit>` tag for controlled upgrades.
-Only expose port 4310 through your HTTPS reverse proxy. Preserve the public Host
-header; forwarded headers are not trusted as authentication evidence.
+Port 4310 is private machine traffic. The official service terminates browser
+access and receives the installation's outbound relay connection.
 
 The Compose file persists:
 
 | Volume | Container path | Contents |
 | --- | --- | --- |
-| `data` | `/data` | SQLite, bootstrap token, run results and worktrees |
+| `data` | `/data` | SQLite, private relay identity, run results and worktrees |
 | `agent-home` | `/home/node` | Codex/GitHub authentication, Git configuration, global skills |
 | `workspaces` | `/workspaces` | Project clones and project skills |
 | `runner-state` | `/runner-state` | Persistent container stop markers in the runner |
@@ -36,21 +121,11 @@ The image runs as UID/GID 1000. Bind mounts need matching ownership. Do not run
 The Compose defaults give the application two CPUs and 4 GB of memory; adjust these
 for the projects your agents build. Container logs rotate independently of run logs.
 
-For local access through SSH before configuring a domain:
+## Leo account and CLI accounts
 
-```sh
-ssh -L 4310:127.0.0.1:4310 your-server
-```
-
-Use `PUBLIC_URL=http://localhost:4310` for that setup route, then change it to the
-final HTTPS origin and restart before adding OAuth clients. Existing OAuth grants
-are audience-bound and must be reconnected after changing origins.
-
-## First login and CLI accounts
-
-Read `/data/setup-token` through your server terminal and enter it on the setup
-screen. The application creates an administrator password, then disables setup.
-Keep tokens and account files out of Git, images, screenshots, and support logs.
+Complete the claim above, then open the installation from your Leo account on the
+official site. Agent CLI accounts remain separate from your Leo account. Keep
+tokens and account files out of Git, images, screenshots and support logs.
 
 The **Connections** screen provides official CLI device sign-in. If a provider
 requires terminal interaction instead, run:
@@ -103,16 +178,16 @@ and [microVM deployment](MICROVMS.md) for privileges, storage and network rules.
 ## Coolify
 
 Create a Compose service from `compose.yaml`, using the published GHCR image for
-both manager and runner. Set container port **4310**, `PUBLIC_URL` to the
-chosen HTTPS domain, and persistent storage mounts for all paths above.
-Use the healthcheck path `/health`, one replica, and a shutdown grace period of
-60 seconds. Point the domain's DNS record at the selected server and enable TLS.
-Do not add an interactive proxy login in front of `/mcp`, `/oauth/*`, or the
-well-known metadata endpoints: MCP clients use the application's OAuth flow.
+both manager and runner. Configure the official origin and claim the manager as
+above. Preserve the persistent mounts, one replica and a 60-second shutdown grace
+period. Use `/health` only for the private readiness check. Do not configure a
+public browser domain for the installation; serve the official application on its
+own HTTPS origin. Additional nodes still need a direct private route to port 4310.
 
-After deployment, check HTTPS, bootstrap/login, Connections, a small task, restart
-persistence, and MCP discovery from outside the server. A working local container
-does not establish that DNS, TLS, reverse-proxy routing, or cloud connectors work.
+The historical tag deployment below targets the old publicly exposed manager.
+Before the first upgrade to this release, reconfigure its readiness target to a
+private route and migrate browser access to the official service. Do not expect
+bootstrap/login or MCP discovery on the installation to keep working.
 
 ### Deploy version tags through GitHub Actions
 
@@ -137,15 +212,18 @@ The GitHub `production` environment needs:
 | `COOLIFY_TOKEN` | Secret | Dedicated Coolify API token with `read`, `write`, and `deploy` abilities |
 | `COOLIFY_URL` | Variable | `https://coolify.leo-coletta.fr` |
 | `COOLIFY_SERVICE_UUID` | Variable | UUID of the Leo Compose service |
-| `LEO_PUBLIC_URL` | Variable | `https://agents.webdns.leo-coletta.fr` |
+| `LEO_PUBLIC_URL` | Variable | Installation readiness origin reachable from the deployment runner (historical name; never the official app origin) |
 
 In the Coolify service's raw Compose, set both `services.manager.image` and `services.runner.image` to
 `${LEO_IMAGE}` and create the `LEO_IMAGE` environment variable with the currently
 deployed image reference. The workflow updates only that variable to the image's
 immutable GHCR digest, requests a service restart, then waits up to ten minutes
-for public `/health` to return the tagged commit. It fails if the previous version
-is still running, even when that version is healthy. Volumes, domain and CLI
-credentials persist across deployments.
+for the installation’s `/health` to return the tagged commit. Give that runner
+a private network/VPN route to the manager and set `LEO_PUBLIC_URL` to that
+readiness origin before upgrading. The official app’s `/health` cannot validate
+an installation image. It fails if the previous version is still running, even
+when that version is healthy. Persistent volumes and agent CLI credentials
+survive deployments; old local browser access does not.
 
 The deployment script also adds the persistent `runner-state` volume to older
 service Compose definitions before restarting, then verifies it was saved. The
@@ -197,7 +275,7 @@ consistent database backup, but that does not include working directories or CLI
 accounts and is not a complete recovery point.
 
 Restore into fresh volumes while the manager is stopped, preserve UID/GID 1000,
-and start the same image version that created the backup. Check login, profiles,
+and start the same image version that created the backup. Check official claim/relay access, profiles,
 tasks, global/project skills, and worktree paths. Database schema versions newer
 than the application are rejected rather than silently downgraded. Roll back the
 image and its matching backup together when a future migration requires it.
@@ -209,13 +287,13 @@ cleanup refuses changes, including ignored/untracked files, and keeps Git branch
 
 ## Troubleshooting
 
-- **Unexpected host/origin:** correct `PUBLIC_URL`, proxy Host preservation, and the browser URL.
+- **Unexpected host/origin:** check the internal manager origin for node traffic, and the official origin for browser access.
 - **Project outside workspace root:** use a directory under `WORKSPACE_ROOTS` (colon-separated on Linux), then register its canonical path.
 - **Worktree preparation failed:** check that the project is a Git repository and the configured local base branch exists.
 - **Recovering:** active conversations resume after the previous process/container stops. If the runner is unavailable, recovery waits and retains project/account locks. **Interrupted:** older runs without a checkpoint need review and an explicit retry. See [restart recovery](RESTART-RECOVERY.md).
 - **No CLI installed/signed in:** use Connections and the commands above; provider account credentials are separate from the manager password.
 - **MCP rejects initialization:** verify the client uses Streamable HTTP and the deployed image includes stateless compatibility. Both 2026-07-28 and older 2025 clients are supported; standalone HTTP+SSE and stateful sessions are not.
-- **Lost administrator password:** restore a known backup or stop the service and remove only the `admin` and `session:*` keys from SQLite through a trusted server terminal, then restart and repeat bootstrap. OAuth grants remain unless separately revoked; preserve a backup first.
+- **Installation detached or owner account deleted:** run `leo claim` on the machine, approve its device code on the official site, then restart the manager. Old local passwords and sessions cannot restore access.
 
 See [Docker's volume documentation](https://docs.docker.com/engine/storage/volumes/)
 and [Codex authentication](https://learn.chatgpt.com/docs/auth) for the underlying tools.

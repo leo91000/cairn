@@ -1,5 +1,7 @@
 mod common;
 
+use common::browser_http::router;
+
 use axum::{
     Router,
     body::Body,
@@ -11,8 +13,7 @@ use http_body_util::BodyExt;
 use leo_agent_manager::{
     attachments::MAX_FILE,
     auth::{InstallationIdentity, InstallationRole, hex_digest},
-    config::{Config, MAIN_AGENT_ID, id, now},
-    http::router,
+    config::{MAIN_AGENT_ID, id, now},
     service::Service,
 };
 use serde_json::{Value, json};
@@ -22,10 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 async fn app() -> (TempDir, Router, Arc<Service>) {
     let root = TempDir::new().unwrap();
-    let config = Config {
-        setup_token: "test-setup".into(),
-        ..common::config(root.path())
-    };
+    let config = common::config(root.path());
     let service = Service::new(config).await.unwrap();
     let app = router(service.clone()).await.unwrap();
     (root, app, service)
@@ -41,7 +39,7 @@ fn setup_request() -> Builder {
 }
 
 fn setup_body() -> Body {
-    let setup = json!({ "setupToken": "test-setup", "password": "password-long-enough" });
+    let setup = json!({ "setupToken": "browser-test-setup", "password": "password-long-enough" });
     Body::from(setup.to_string())
 }
 
@@ -77,18 +75,28 @@ async fn health(app: &Router) -> Value {
 }
 
 #[tokio::test]
-async fn http_authentication_csrf_host_origin_and_cookie_contracts() {
-    let (_root, app, _service) = app().await;
-    let response = send(
-        &app,
-        json_request("GET", "/api/projects")
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
+async fn installation_http_accepts_only_trusted_context_and_checks_host_and_origin() {
+    let (_root, _fixture, service) = app().await;
+    let app = leo_agent_manager::http::router(service.clone())
+        .await
+        .unwrap();
+    let legacy = Session::new(&service.auth.session().await.unwrap());
+    for path in ["/api/session", "/api/projects", "/api/chats"] {
+        let response = send(
+            &app,
+            legacy
+                .authorize(json_request("GET", path))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.headers()["x-frame-options"], "DENY");
+    }
+    let response = send(&app, setup_request().body(setup_body()).unwrap()).await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(response.headers()["cache-control"], "no-store");
-    assert_eq!(response.headers()["x-frame-options"], "DENY");
+    assert!(!response.headers().contains_key("set-cookie"));
     let foreign_host = Request::builder()
         .uri("/api/session")
         .header("host", "attacker.example")
@@ -106,53 +114,14 @@ async fn http_authentication_csrf_host_origin_and_cookie_contracts() {
         send(&app, foreign_origin).await.status(),
         StatusCode::FORBIDDEN
     );
-    let response = send(&app, setup_request().body(setup_body()).unwrap()).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let cookie = response.headers()["set-cookie"].to_str().unwrap();
-    assert!(cookie.contains("HttpOnly"));
-    assert!(cookie.contains("SameSite=Lax"));
-    let session = setup_session(response).await;
-    let chats = |method: &str, credentials: Credentials| {
-        credentials.apply(json_request(method, "/api/chats"))
-    };
-    let response = send(
-        &app,
-        chats("POST", Credentials::Cookie(&session))
-            .body(Body::from("{}"))
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    let response = send(
-        &app,
-        chats("POST", Credentials::Owner(&session))
-            .body(Body::from("{}"))
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let response = send(
-        &app,
-        chats("GET", Credentials::Cookie(&session))
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(read_json(response).await.as_array().unwrap().len(), 1);
-    let logout = session
-        .authorize(json_request("POST", "/api/logout"))
+    let trusted = json_request("POST", "/api/chats")
+        .extension(InstallationIdentity::trusted(
+            InstallationRole::Owner,
+            "official-account",
+        ))
         .body(Body::from("{}"))
         .unwrap();
-    assert_eq!(send(&app, logout).await.status(), StatusCode::OK);
-    let response = send(
-        &app,
-        chats("GET", Credentials::Cookie(&session))
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(send(&app, trusted).await.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -278,19 +247,15 @@ async fn member_identity_can_create_and_stream_conversations_without_a_local_ses
 }
 
 #[tokio::test]
-async fn login_limits_ignore_forged_forwarded_ips() {
-    let (_root, app, _service) = app().await;
-    for n in 0..11 {
+async fn removed_login_cannot_be_enabled_by_forged_forwarded_ips() {
+    let (_root, _fixture, service) = app().await;
+    let app = leo_agent_manager::http::router(service).await.unwrap();
+    for n in 0..35 {
         let login = json_request("POST", "/api/login")
             .header("x-forwarded-for", format!("192.0.2.{n}"))
-            .body(Body::from(r#"{"password":"test"}"#))
+            .body(Body::from("{\"password\":\"password-long-enough\"}"))
             .unwrap();
-        let expected = if n < 10 {
-            StatusCode::UNAUTHORIZED
-        } else {
-            StatusCode::TOO_MANY_REQUESTS
-        };
-        assert_eq!(send(&app, login).await.status(), expected);
+        assert_eq!(send(&app, login).await.status(), StatusCode::UNAUTHORIZED);
     }
 }
 
@@ -499,7 +464,7 @@ async fn native_mcp_callback_requires_the_initiating_session_and_csrf_to_finish(
     let pending = json!({
         "native": true,
         "connectionId": connection,
-        "session": hex_digest(&session.csrf),
+        "session": hex_digest(&format!("leo-account:{}", session.csrf)),
         "nonce": nonce,
         "expiresAt": expires,
     });

@@ -186,7 +186,6 @@ impl RelayedInstallation {
             "publicUrl": "http://localhost:4310",
             "host": "127.0.0.1",
             "port": 0,
-            "setupToken": "fixture",
             "codexBin": "codex",
             "claudeBin": "claude",
             "ghBin": "gh",

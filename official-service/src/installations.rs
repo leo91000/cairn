@@ -154,7 +154,10 @@ pub(super) async fn claim(
 
     Ok((
         StatusCode::CREATED,
-        Json(json!({ "installationId": installation, "token": token })),
+        Json(json!({
+            "installationId": installation,
+            "token": token,
+        })),
     ))
 }
 
@@ -211,11 +214,12 @@ pub(super) async fn start_device(
     let name = claim_name(&input.name, input.protocol)?;
     let mut transaction = service.pool.begin().await?;
     let installation = if let Some(identity) = input.identity {
+        let machine_digest = digest(&identity.token);
         let row: Option<(Option<String>,)> = query_as(
-            "SELECT owner_id FROM installations WHERE id = $1 AND token_digest = $2 FOR UPDATE",
+            "SELECT owner_id FROM installations WHERE id = $1 AND (token_digest = $2 OR recovery_digest = $2) FOR UPDATE",
         )
         .bind(&identity.installation_id)
-        .bind(digest(&identity.token))
+        .bind(&machine_digest)
         .fetch_optional(&mut *transaction)
         .await?;
         let Some((owner,)) = row else {
@@ -230,6 +234,13 @@ pub(super) async fn start_device(
                 "Detach the installation before claiming it again",
             ));
         }
+        // Keep the actual file's proof across rotation and interrupted delivery.
+        // An owned installation still rejects recovery before this update.
+        query("UPDATE installations SET recovery_digest = $1 WHERE id = $2")
+            .bind(machine_digest)
+            .bind(&identity.installation_id)
+            .execute(&mut *transaction)
+            .await?;
         identity.installation_id
     } else {
         let id = uuid::Uuid::new_v4().to_string();
@@ -343,6 +354,9 @@ pub(super) async fn poll_device(
     transaction.commit().await?;
     Ok((
         StatusCode::OK,
-        Json(json!({ "installationId": installation, "token": token })),
+        Json(json!({
+            "installationId": installation,
+            "token": token,
+        })),
     ))
 }
