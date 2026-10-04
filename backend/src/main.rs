@@ -27,6 +27,16 @@ fn has_control_socket() -> bool {
 }
 
 fn main() -> ExitCode {
+    main_with_router(leo_agent_manager::http::router)
+}
+
+/// The test example supplies a browser adapter; the shipped binary always uses
+/// the installation router. This is an in-process seam, never an environment flag.
+pub fn main_with_router<F, Fut>(router: F) -> ExitCode
+where
+    F: FnOnce(Arc<Service>) -> Fut,
+    Fut: std::future::Future<Output = Result<axum::Router>>,
+{
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     // Validate the inherited control socket before Tokio creates any FDs.
     if args.first().is_some_and(|a| a == "supervise") && !has_control_socket() {
@@ -58,7 +68,7 @@ fn main() -> ExitCode {
         .enable_all()
         .build()
         .expect("Tokio runtime");
-    match runtime.block_on(entry(args)) {
+    match runtime.block_on(entry(args, router)) {
         Ok(code) => ExitCode::from(code.clamp(0, 255) as u8),
         Err(error) => {
             eprintln!("{}", error.message);
@@ -81,7 +91,11 @@ fn arg<'a>(args: &'a [String], index: usize, missing: &str) -> Result<&'a String
     args.get(index).ok_or_else(|| Error::bad(missing))
 }
 
-async fn entry(args: Vec<String>) -> Result<i32> {
+async fn entry<F, Fut>(args: Vec<String>, router: F) -> Result<i32>
+where
+    F: FnOnce(Arc<Service>) -> Fut,
+    Fut: std::future::Future<Output = Result<axum::Router>>,
+{
     let mode = args.first().map_or("serve", String::as_str);
     if ["--version", "-V", "version"].contains(&mode) {
         println!("leo {}", env!("CARGO_PKG_VERSION"));
@@ -97,6 +111,24 @@ async fn entry(args: Vec<String>) -> Result<i32> {
     let stop = CancellationToken::new();
     tokio::spawn(shutdown(stop.clone()));
     match mode {
+        "claim" => {
+            let config = Config::load()?;
+            let official = std::env::var("LEO_OFFICIAL_ORIGIN").ok();
+            let name =
+                std::env::var("LEO_INSTALLATION_NAME").unwrap_or_else(|_| "My installation".into());
+            leo_agent_manager::relay::device_claim(
+                official.as_deref(),
+                &config.data_dir.join("installation-relay"),
+                &name,
+                stop,
+                |url, code| {
+                    println!("Open {url} and approve this device claim code: {code}");
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                },
+            )
+            .await?;
+            println!("Installation claimed. Restart the manager to load its new identity.");
+        }
         "node-enroll" => {
             leo_agent_manager::nodes::connector::enroll(
                 arg(&args, 1, "Missing master HTTPS origin.")?,
@@ -147,10 +179,10 @@ async fn entry(args: Vec<String>) -> Result<i32> {
             .await?;
         }
         "runner-entry" => return runner_entry(stop).await,
-        "serve" => serve(stop).await?,
+        "serve" => serve(stop, router).await?,
         _ => {
             return Err(Error::bad(
-                "Unknown command. Use serve, runner-broker, runner-entry, runner-client, chat, or --version.",
+                "Unknown command. Use serve, claim, runner-broker, runner-entry, runner-client, chat, or --version.",
             ));
         }
     }
@@ -263,7 +295,11 @@ fn spawn_periodic(
     })
 }
 
-async fn serve(stop: CancellationToken) -> Result<()> {
+async fn serve<F, Fut>(stop: CancellationToken, make_router: F) -> Result<()>
+where
+    F: FnOnce(Arc<Service>) -> Fut,
+    Fut: std::future::Future<Output = Result<axum::Router>>,
+{
     let mut config = Config::load()?;
     if config.setup_token.is_empty() {
         config.setup_token =
@@ -273,7 +309,7 @@ async fn serve(stop: CancellationToken) -> Result<()> {
     let service = Service::new(config).await?;
     let listener =
         tokio::net::TcpListener::bind((service.config.host.as_str(), service.config.port)).await?;
-    let router = leo_agent_manager::http::router(service.clone()).await?;
+    let router = make_router(service.clone()).await?;
     let mut background = Vec::new();
     let relay_directory = service.config.data_dir.join("installation-relay");
     let identity_exists = tokio::fs::try_exists(relay_directory.join("identity.json")).await?;

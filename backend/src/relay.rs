@@ -130,16 +130,168 @@ pub async fn claim(official: &str, directory: &Path, code: &str, name: &str) -> 
     result
 }
 
-/// Reconnect until shutdown; failed in-flight writes are never automatically replayed.
-pub async fn connect(directory: PathBuf, router: Router, stop: CancellationToken) -> Result<()> {
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceStarted {
+    device_code: String,
+    user_code: String,
+}
+
+async fn read_identity(directory: &Path) -> Result<Option<Identity>> {
     let path = directory.join("identity.json");
-    let metadata = tokio::fs::symlink_metadata(&path).await?;
+    let metadata = match tokio::fs::symlink_metadata(&path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
     if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
         return Err(Error::bad(
             "Installation identity must be a private regular file.",
         ));
     }
-    let identity: Identity = serde_json::from_slice(&tokio::fs::read(&path).await?)?;
+    let identity = serde_json::from_str(&crate::skills::small_file(&path).await?)?;
+    Ok(Some(identity))
+}
+
+/// Approve through the official app before atomically replacing a private identity.
+/// `display` receives only the browser URL and temporary human code, never a token.
+pub async fn device_claim(
+    official: Option<&str>,
+    directory: &Path,
+    name: &str,
+    stop: CancellationToken,
+    display: impl FnOnce(&str, &str),
+) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    private_dir(directory).await?;
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(directory.join("claim.lock"))?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(Error::conflict("Another leo claim is already running."));
+    }
+    let previous = read_identity(directory).await?;
+    let official = origin(
+        official
+            .or_else(|| previous.as_ref().map(|identity| identity.origin.as_str()))
+            .ok_or_else(|| Error::bad("Set LEO_OFFICIAL_ORIGIN to claim this installation."))?,
+    )?;
+    if previous
+        .as_ref()
+        .is_some_and(|identity| identity.origin != official.origin().ascii_serialization())
+    {
+        return Err(Error::bad(
+            "Official origin differs from the private identity. Detach and back up that identity before changing origins.",
+        ));
+    }
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(Error::internal)?;
+    let start = client
+        .post(
+            official
+                .join("api/relay/device-claim/start")
+                .map_err(Error::internal)?,
+        )
+        .json(&serde_json::json!({
+            "name": name,
+            "protocol": PROTOCOL_VERSION,
+            "identity": previous,
+        }))
+        .send()
+        .await
+        .map_err(|_| Error::unavailable("Cannot reach the official service."))?;
+    if start.status() == reqwest::StatusCode::CONFLICT {
+        return Err(Error::conflict(
+            "Detach the installation in the official app before running leo claim.",
+        ));
+    }
+    if !start.status().is_success() {
+        return Err(Error::bad(
+            "Installation claim refused. Check the official origin and private identity.",
+        ));
+    }
+    let started: DeviceStarted = start
+        .json()
+        .await
+        .map_err(|_| Error::bad("Invalid device claim response."))?;
+    let browser = official.join("claim").map_err(Error::internal)?;
+    if started.user_code.len() != 14
+        || !started
+            .user_code
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+    {
+        return Err(Error::bad("Invalid device claim code."));
+    }
+    display(browser.as_str(), &started.user_code);
+    let polling = async {
+        loop {
+            let response = client
+                .post(
+                    official
+                        .join("api/relay/device-claim/poll")
+                        .map_err(Error::internal)?,
+                )
+                .json(&serde_json::json!({ "deviceCode": started.device_code }))
+                .send()
+                .await
+                .map_err(|_| {
+                    Error::unavailable("Cannot reach the official service; run leo claim again.")
+                })?;
+            if response.status() == reqwest::StatusCode::ACCEPTED {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+            if response.status() != reqwest::StatusCode::OK {
+                return Err(Error::bad(
+                    "Device claim expired or refused; run leo claim again.",
+                ));
+            }
+            let claimed: Claimed = response
+                .json()
+                .await
+                .map_err(|_| Error::bad("Invalid claim response."))?;
+            return Ok(claimed);
+        }
+    };
+    let claimed = tokio::select! {
+        () = stop.cancelled() => Err(Error::bad("Claim cancelled; run leo claim again.")),
+        result = tokio::time::timeout(Duration::from_secs(600), polling) => {
+            result.map_err(|_| Error::bad("Device claim expired; run leo claim again."))?
+        }
+    }?;
+    uuid::Uuid::parse_str(&claimed.installation_id)
+        .map_err(|_| Error::bad("Invalid installation identity."))?;
+    if claimed.token.len() != 64 || !claimed.token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Error::bad("Invalid installation credential."));
+    }
+    let identity = Identity {
+        origin: official.origin().ascii_serialization(),
+        installation_id: claimed.installation_id,
+        token: claimed.token,
+    };
+    crate::skills::atomic_write(
+        &directory.join("identity.json"),
+        &serde_json::to_vec(&identity)?,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Reconnect until shutdown; failed in-flight writes are never automatically replayed.
+pub async fn connect(directory: PathBuf, router: Router, stop: CancellationToken) -> Result<()> {
+    let identity = read_identity(&directory)
+        .await?
+        .ok_or_else(|| Error::bad("Run leo claim before starting the relay."))?;
     let official = origin(&identity.origin)?;
     let mut delay = Duration::from_millis(250);
     loop {
