@@ -5,6 +5,7 @@ mod passkeys;
 mod relay;
 
 pub use oauth::{OAuthProvider, OAuthProviders};
+pub use relay::Relay;
 
 use async_trait::async_trait;
 use axum::{
@@ -73,6 +74,17 @@ pub async fn router_with_oauth(
     origin: String,
     oauth: OAuthProviders,
 ) -> Result<Router, sqlx_core::migrate::MigrateError> {
+    router_with_relay(pool, sender, origin, oauth, Relay::default()).await
+}
+
+/// Supply the relay handle used by installation-access changes to revoke live readers.
+pub async fn router_with_relay(
+    pool: PgPool,
+    sender: Arc<dyn EmailSender>,
+    origin: String,
+    oauth: OAuthProviders,
+    relay: Relay,
+) -> Result<Router, sqlx_core::migrate::MigrateError> {
     let migrations = Migrator {
         migrations: Cow::Owned(vec![
             Migration::new(
@@ -120,7 +132,7 @@ pub async fn router_with_oauth(
         sender,
         origin,
         oauth,
-        relay: relay::Relay::default(),
+        relay,
     };
     Ok(Router::new()
         .route("/api/account/email-code", post(request_code))
@@ -151,6 +163,7 @@ pub async fn router_with_oauth(
         )
         .route("/api/account/methods", get(methods::list))
         .route("/api/account/methods/remove", post(methods::remove))
+        .route("/api/installations", get(installations::status))
         .route(
             "/api/installations/claim-code",
             post(installations::claim_code),
@@ -352,7 +365,7 @@ async fn create_session(
             "authenticated": true,
             "account": { "id": account_id, "email": email },
             "csrf": csrf,
-            "installations": installations::list(&mut *connection, account_id).await?,
+            "installations": installations::list(&mut *connection, account_id, &service.relay).await?,
         })),
     )
         .into_response())
@@ -370,7 +383,7 @@ async fn session(
             "authenticated": true,
             "account": { "id": id, "email": email },
             "csrf": csrf,
-            "installations": installations::list(&service.pool, &id).await?,
+            "installations": installations::list(&service.pool, &id, &service.relay).await?,
         }),
         None => json!({
             "authenticated": false,

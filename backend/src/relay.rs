@@ -12,8 +12,8 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use leo_relay_protocol::{
-    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, PROTOCOL_VERSION,
-    REQUEST_TIMEOUT, Role,
+    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_STREAM_CHUNK,
+    MIN_PROTOCOL_VERSION, REQUEST_TIMEOUT, Role, SUPPORTED_VERSIONS,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -23,7 +23,11 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-use tokio::{io::AsyncWriteExt, task::JoinSet};
+use tokio::{
+    io::AsyncWriteExt,
+    sync::{Semaphore, mpsc},
+    task::{AbortHandle, JoinSet},
+};
 use tokio_tungstenite::tungstenite::{
     Message, client::IntoClientRequest, protocol::WebSocketConfig,
 };
@@ -91,7 +95,7 @@ pub async fn claim(official: &str, directory: &Path, code: &str, name: &str) -> 
             .json(&serde_json::json!({
                 "code": code,
                 "name": name,
-                "protocol": PROTOCOL_VERSION,
+                "protocol": MIN_PROTOCOL_VERSION,
             }))
             .send()
             .await
@@ -193,7 +197,7 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
     socket
         .send(Message::Text(
             serde_json::to_string(&Frame::Hello {
-                versions: vec![PROTOCOL_VERSION],
+                versions: SUPPORTED_VERSIONS.to_vec(),
             })?
             .into(),
         ))
@@ -206,17 +210,17 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
     let Some(Ok(Message::Text(welcome))) = welcome else {
         return Err(Error::unavailable("Relay negotiation failed."));
     };
-    if !matches!(
-        serde_json::from_str::<Frame>(&welcome)?,
-        Frame::Welcome {
-            version: PROTOCOL_VERSION
-        }
-    ) {
+    let Frame::Welcome { version } = serde_json::from_str::<Frame>(&welcome)? else {
+        return Err(Error::bad("Incompatible relay protocol."));
+    };
+    if !SUPPORTED_VERSIONS.contains(&version) {
         return Err(Error::bad("Incompatible relay protocol."));
     }
 
     let mut requests = JoinSet::new();
     let mut request_ids = HashMap::new();
+    let mut active = HashMap::<String, (AbortHandle, std::sync::Arc<Semaphore>)>::new();
+    let (output, mut frames) = mpsc::channel::<Frame>(MAX_IN_FLIGHT);
     loop {
         tokio::select! {
             result = requests.join_next_with_id(), if !requests.is_empty() => {
@@ -232,8 +236,10 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
                 let request_id = request_ids
                     .remove(&task_id)
                     .ok_or_else(|| Error::bad_gateway("Unknown relay request."))?;
+                active.remove(&request_id);
                 let response = match result {
-                    Ok(response) => response,
+                    Ok(Some(response)) => response,
+                    Ok(None) => continue,
                     Err(error) => request_failure(request_id, error.status, &error.message),
                 };
 
@@ -243,12 +249,30 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
                     .await
                     .map_err(Error::internal)?;
             }
+            Some(frame) = frames.recv() => {
+                socket.send(Message::Text(serde_json::to_string(&frame)?.into()))
+                    .await.map_err(Error::internal)?;
+            }
             message = tokio::time::timeout(Duration::from_secs(45), socket.next()) => {
                 let message = message.map_err(|_| Error::unavailable("Relay heartbeat lost."))?;
                 match message {
                     Some(Ok(Message::Text(message))) => {
-                        let Frame::Request(request) = serde_json::from_str::<Frame>(&message)? else {
-                            return Err(Error::bad("Unexpected relay frame."));
+                        let request = match serde_json::from_str::<Frame>(&message)? {
+                            Frame::Request(request) => request,
+                            Frame::StreamCredit { id } if version >= 2 => {
+                                if let Some((_, credit)) = active.get(&id)
+                                    && credit.available_permits() == 0 {
+                                    credit.add_permits(1);
+                                }
+                                continue;
+                            }
+                            Frame::Cancel { id } if version >= 2 => {
+                                if let Some((task, _)) = active.remove(&id) {
+                                    task.abort();
+                                }
+                                continue;
+                            }
+                            _ => return Err(Error::bad("Unexpected relay frame.")),
                         };
                         if requests.len() >= MAX_IN_FLIGHT {
                             let response = request_failure(request.id, 503, "Installation busy.");
@@ -262,13 +286,17 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
 
                         let request_id = request.id.clone();
                         let router = router.clone();
-                        let task = requests.spawn(async move {
-                            tokio::time::timeout(REQUEST_TIMEOUT, dispatch(router, request))
-                                .await
-                                .unwrap_or_else(|_| {
-                                    Err(Error::gateway_timeout("Installation request timed out."))
-                                })
-                        });
+                        let credit = std::sync::Arc::new(Semaphore::new(0));
+                        let streaming = if version >= 2 {
+                            Some(StreamOutput {
+                                frames: output.clone(),
+                                credit: credit.clone(),
+                            })
+                        } else {
+                            None
+                        };
+                        let task = requests.spawn(dispatch(router, request, streaming));
+                        active.insert(request_id.clone(), (task.clone(), credit));
                         request_ids.insert(task.id(), request_id);
                     }
                     Some(Ok(Message::Ping(bytes))) => {
@@ -291,9 +319,25 @@ fn request_failure(id: String, status: u16, message: &str) -> ApiResponse {
     }
 }
 
-async fn dispatch(router: Router, input: ApiRequest) -> Result<ApiResponse> {
+struct StreamOutput {
+    frames: mpsc::Sender<Frame>,
+    credit: std::sync::Arc<Semaphore>,
+}
+
+async fn dispatch(
+    router: Router,
+    input: ApiRequest,
+    streaming: Option<StreamOutput>,
+) -> Result<Option<ApiResponse>> {
     if !leo_relay_protocol::api_path(&input.path) || input.body.len() > MAX_BODY {
         return Err(Error::bad("Invalid relayed API request."));
+    }
+    if leo_relay_protocol::stream_path(&input.path) && streaming.is_none() {
+        return Ok(Some(request_failure(
+            input.id,
+            501,
+            "Streaming requires relay protocol 2.",
+        )));
     }
     let role = match input.role {
         Role::Owner => InstallationRole::Owner,
@@ -321,9 +365,10 @@ async fn dispatch(router: Router, input: ApiRequest) -> Result<ApiResponse> {
         .extensions_mut()
         .insert(InstallationIdentity::trusted(role, &input.account_id));
 
-    let response = router
-        .oneshot(request)
+    let deadline = tokio::time::Instant::now() + REQUEST_TIMEOUT;
+    let response = tokio::time::timeout_at(deadline, router.oneshot(request))
         .await
+        .map_err(|_| Error::gateway_timeout("Installation request timed out."))?
         .map_err(|_| Error::bad_gateway("Installation handler failed."))?;
     let status = response.status().as_u16();
     let headers = response
@@ -337,8 +382,77 @@ async fn dispatch(router: Router, input: ApiRequest) -> Result<ApiResponse> {
                 .map(|value| (name.to_string(), value.to_owned()))
         })
         .collect();
-    let body = to_bytes(response.into_body(), MAX_BODY)
+    let is_stream = response
+        .headers()
+        .get("content-type")
+        .is_some_and(|value| value.as_bytes().starts_with(b"text/event-stream"));
+    if is_stream && let Some(output) = streaming {
+        let id = input.id;
+        output
+            .frames
+            .send(Frame::StreamStart(ApiResponse {
+                id: id.clone(),
+                status,
+                headers,
+                body: Vec::new(),
+            }))
+            .await
+            .map_err(|_| Error::unavailable("Relay closed."))?;
+
+        let mut body = response.into_body().into_data_stream();
+        let result: Result<()> = async {
+            // Acquire credit before polling the installation body. A slow browser
+            // therefore pauses this subscription, never the tunnel's receive loop.
+            loop {
+                output
+                    .credit
+                    .acquire()
+                    .await
+                    .map_err(Error::internal)?
+                    .forget();
+                let Some(chunk) = body.next().await else {
+                    break;
+                };
+                let chunk = chunk.map_err(|_| Error::bad_gateway("Installation stream failed."))?;
+                if chunk.is_empty() {
+                    output.credit.add_permits(1);
+                    continue;
+                }
+                for (index, piece) in chunk.chunks(MAX_STREAM_CHUNK).enumerate() {
+                    if index > 0 {
+                        output
+                            .credit
+                            .acquire()
+                            .await
+                            .map_err(Error::internal)?
+                            .forget();
+                    }
+                    output
+                        .frames
+                        .send(Frame::StreamChunk {
+                            id: id.clone(),
+                            body: piece.to_vec(),
+                        })
+                        .await
+                        .map_err(|_| Error::unavailable("Relay closed."))?;
+                }
+            }
+            Ok(())
+        }
+        .await;
+        let _ = output
+            .frames
+            .send(Frame::StreamEnd {
+                id,
+                failed: result.is_err(),
+            })
+            .await;
+        return Ok(None);
+    }
+
+    let body = tokio::time::timeout_at(deadline, to_bytes(response.into_body(), MAX_BODY))
         .await
+        .map_err(|_| Error::gateway_timeout("Installation response timed out."))?
         .map_err(|error| {
             let oversized = std::error::Error::source(&error)
                 .is_some_and(<dyn std::error::Error>::is::<http_body_util::LengthLimitError>);
@@ -350,10 +464,10 @@ async fn dispatch(router: Router, input: ApiRequest) -> Result<ApiResponse> {
         })?
         .to_vec();
 
-    Ok(ApiResponse {
+    Ok(Some(ApiResponse {
         id: input.id,
         status,
         headers,
         body,
-    })
+    }))
 }

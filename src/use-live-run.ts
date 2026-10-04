@@ -44,7 +44,6 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
   let persist: (() => void) | undefined
   let saveTimer: ReturnType<typeof setTimeout> | undefined
   let holdTimer: ReturnType<typeof setTimeout> | undefined
-  let snapshotTimer: ReturnType<typeof setInterval> | undefined
 
   function scheduleSave() {
     if (saveTimer !== undefined)
@@ -72,7 +71,6 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
     persist?.()
     const current = ++generation
     connection?.close()
-    clearInterval(snapshotTimer)
     clearTimeout(saveTimer)
     saveTimer = undefined
     persist = undefined
@@ -185,8 +183,8 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
     let fallbackCursor = 0
     let fallbackAccumulator = new LiveEvents()
 
-    // Finite reads keep the existing views usable before the relay supports SSE,
-    // and during reconnects. A live batch always wins over an older HTTP read.
+    // One initial finite read keeps v1 installations readable during deployment.
+    // Live batches own updates and replay; no recurring snapshot polling.
     async function readSnapshot() {
       if (readingSnapshot || document.hidden || status.value === 'live' || disposed || current !== generation)
         return
@@ -321,7 +319,6 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
     }, cached ? { cursor: cached.cursor, history: cached.history } : undefined)
     if (state.installationId) {
       void readSnapshot()
-      snapshotTimer = setInterval(() => void readSnapshot(), 3000)
     }
   }, { immediate: true, flush: 'sync' })
   const leaving = () => persist?.()
@@ -331,7 +328,6 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
     persist?.()
     clearTimeout(saveTimer)
     clearTimeout(holdTimer)
-    clearInterval(snapshotTimer)
     disposed = true
     generation++
     connection?.close()

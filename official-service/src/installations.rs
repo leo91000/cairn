@@ -24,6 +24,7 @@ pub(super) async fn account(
 pub(super) async fn list<'e>(
     executor: impl PgExecutor<'e>,
     account: &str,
+    relay: &super::relay::Relay,
 ) -> Result<Vec<Value>, ApiError> {
     let rows: Vec<(String, String)> =
         query_as("SELECT id, name FROM installations WHERE owner_id = $1 ORDER BY created_at, id")
@@ -37,9 +38,18 @@ pub(super) async fn list<'e>(
                 "id": id,
                 "name": name,
                 "role": "owner",
+                "online": relay.online(&id),
             })
         })
         .collect())
+}
+
+pub(super) async fn status(
+    State(service): State<Service>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Value>>, ApiError> {
+    let account = account(&service, &headers, &Method::GET).await?;
+    Ok(Json(list(&service.pool, &account, &service.relay).await?))
 }
 
 pub(super) async fn claim_code(
@@ -119,7 +129,7 @@ pub(super) async fn claim(
     Json(input): Json<Claim>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     consume_limit(&service.pool, &format!("claim:{}", peer.ip()), 30).await?;
-    if input.protocol != leo_relay_protocol::PROTOCOL_VERSION {
+    if !leo_relay_protocol::SUPPORTED_VERSIONS.contains(&input.protocol) {
         return Err(ApiError(StatusCode::CONFLICT, "Unsupported relay protocol"));
     }
 
