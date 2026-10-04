@@ -35,10 +35,13 @@ export async function startOfficial() {
       LEO_OFFICIAL_EMAIL_KEY: 'fixture-only',
       LEO_OFFICIAL_EMAIL_FROM: 'leo@example.test',
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'pipe'],
   })
   let spawnError
+  let startupOutput = ''
   child.on('error', error => spawnError = error)
+  for (const stream of [child.stdout, child.stderr])
+    stream.on('data', chunk => startupOutput = (startupOutput + chunk).slice(-8192))
 
   async function stop() {
     if (!spawnError && child.exitCode === null && child.signalCode === null) {
@@ -54,7 +57,14 @@ export async function startOfficial() {
     for (let attempt = 0; ; attempt++) {
       if (spawnError)
         throw spawnError
-      assert.ok(child.exitCode === null && attempt < 100, 'Official smoke service did not become ready')
+      // Never quote arbitrary child output: a startup error may carry secrets.
+      const startupDiagnostic = [
+        'Could not connect to the official Postgres database',
+        'Build the web application with pnpm build before starting the official service',
+        'Could not bind LEO_OFFICIAL_LISTEN',
+        'Official database migration failed',
+      ].find(message => startupOutput.includes(message)) || 'No safe startup diagnostic'
+      assert.ok(child.exitCode === null && attempt < 100, `Official smoke service did not become ready (exit ${child.exitCode}; ${startupDiagnostic})`)
       if (await fetch(`${origin}/health`).then(response => response.ok).catch(() => false))
         break
       await setTimeout(200)

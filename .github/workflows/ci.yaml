@@ -292,12 +292,12 @@ jobs:
         # afterwards so restarting Docker cannot discard a service container.
         run: |
           docker run --detach --name leo-official-smoke-db \
-            --publish 5432:5432 \
+            --network host \
             --env POSTGRES_USER=leo --env POSTGRES_PASSWORD=test-only \
             --env POSTGRES_DB=leo_official_test \
-            --health-cmd "pg_isready -U leo -d leo_official_test" \
+            --health-cmd "pg_isready -h 127.0.0.1 -U leo -d leo_official_test" \
             --health-interval 1s --health-timeout 5s --health-retries 30 \
-            postgres:17-alpine
+            postgres:17-alpine postgres -c listen_addresses=127.0.0.1
           for attempt in $(seq 1 30); do
             if test "$(docker inspect --format '{{.State.Health.Status}}' leo-official-smoke-db)" = healthy; then
               break
@@ -308,7 +308,7 @@ jobs:
       - name: Smoke-test the exact image
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          LEO_OFFICIAL_TEST_DATABASE_URL: postgres://leo:test-only@localhost:5432/leo_official_test
+          LEO_OFFICIAL_TEST_DATABASE_URL: postgres://leo:test-only@127.0.0.1:5432/leo_official_test
           LEO_SMOKE_OFFICIAL_BINARY: official-smoke-bin/leo-official
           SMOKE_IMAGE: ${{ github.event_name == 'pull_request' && 'leo-agent-manager:test' || format('ghcr.io/{0}@{1}', github.repository, steps.build.outputs.digest) }}
         run: |
