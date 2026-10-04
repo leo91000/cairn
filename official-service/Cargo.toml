@@ -49,6 +49,7 @@ base64 = "0.22"
 futures-util = "0.3"
 
 [dev-dependencies]
+tokio-tungstenite = "0.29"
 webauthn-authenticator-rs = { version = "0.5.4", features = [ "softpasskey" ] }
 leo-agent-manager = { path = "../backend" }
 tempfile = "3"

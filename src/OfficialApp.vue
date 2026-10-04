@@ -1,5 +1,10 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import {
+  onMounted,
+  onScopeDispose,
+  ref,
+  watch,
+} from 'vue'
 import { logoutAccount, redirect, state } from './api'
 import App from './App.vue'
 import ThemeControl from './components/ThemeControl.vue'
@@ -10,7 +15,12 @@ interface AccountSession {
   authenticated: boolean
   account: { id: string, email: string } | null
   csrf: string | null
-  installations: Array<{ id: string, name: string, role: 'owner' }>
+  installations: Array<{
+    id: string
+    name: string
+    role: 'owner'
+    online: boolean
+  }>
 }
 
 interface SignInMethod {
@@ -39,7 +49,7 @@ const error = ref('')
 const claimCode = ref('')
 const editingName = ref(false)
 const installationName = ref('')
-const installation = ref<{ id: string, name: string } | null>(null)
+const installation = ref<{ id: string, name: string, online: boolean } | null>(null)
 const installationMenu = ref<HTMLDetailsElement>()
 const installationReturnKey = 'leo-installation-return'
 
@@ -338,6 +348,54 @@ async function renameInstallation() {
   }
 }
 
+let availabilityTimer: ReturnType<typeof setTimeout> | undefined
+let availabilityFailures = 0
+let availabilityStopped = false
+
+async function refreshAvailability() {
+  clearTimeout(availabilityTimer)
+  if (availabilityStopped || !session.value?.authenticated || document.hidden || state.redirecting)
+    return
+  const current = session.value
+  try {
+    const response = await fetch('/api/installations', { credentials: 'same-origin' })
+    if (!response.ok)
+      throw new Error('Installation status unavailable')
+    const statuses = await response.json() as AccountSession['installations']
+    if (session.value !== current || availabilityStopped)
+      return
+    for (const item of current.installations)
+      item.online = statuses.find(status => status.id === item.id)?.online ?? false
+    availabilityFailures = 0
+  }
+  catch {
+    if (session.value === current) {
+      for (const item of current.installations)
+        item.online = false
+    }
+
+    availabilityFailures++
+  }
+  finally {
+    if (!availabilityStopped)
+      availabilityTimer = setTimeout(refreshAvailability, Math.min(15000, 3000 * 2 ** Math.min(availabilityFailures, 3)))
+  }
+}
+
+watch(() => session.value?.authenticated, () => void refreshAvailability())
+
+function visibleAvailability() {
+  if (!document.hidden)
+    void refreshAvailability()
+}
+
+document.addEventListener('visibilitychange', visibleAvailability)
+onScopeDispose(() => {
+  availabilityStopped = true
+  clearTimeout(availabilityTimer)
+  document.removeEventListener('visibilitychange', visibleAvailability)
+})
+
 function selectInstallation(event: Event) {
   const id = (event.target as HTMLSelectElement).value
   const selected = session.value?.installations.find(item => item.id === id)
@@ -386,12 +444,19 @@ onMounted(async () => {
       <label v-if="session.installations.length > 1" class="min-w-0 max-w-full">
         <span class="sr-only">Current installation</span>
         <select :value="installation.id" :disabled="busy || state.redirecting" @change="selectInstallation">
-          <option v-for="item in session.installations" :key="item.id" :value="item.id">
-            {{ item.name }}
+          <option
+            v-for="item in session.installations"
+            :key="item.id"
+            :value="item.id"
+          >
+            {{ item.name }} · {{ item.online ? 'Online' : 'Offline' }}
           </option>
         </select>
       </label>
       <span v-else class="min-w-0 truncate font-semibold" :title="installation.name">{{ installation.name }}</span>
+      <span role="status" aria-label="Installation availability" class="shrink-0 text-xs text-muted">
+        {{ installation.online ? 'Online' : 'Offline' }}
+      </span>
       <details ref="installationMenu" class="relative ml-auto shrink-0">
         <summary class="cursor-pointer list-none rounded-lg border border-line px-3 py-2">
           Installation options
@@ -536,7 +601,7 @@ onMounted(async () => {
           </p>
           <div class="grid gap-3 mb-6">
             <UiButton v-for="item in session.installations" :key="item.id" @click="openInstallation(item)">
-              {{ item.name }}
+              {{ item.name }} · {{ item.online ? 'Online' : 'Offline' }}
             </UiButton>
             <UiButton :disabled="busy" @click="addInstallation">
               Add an installation

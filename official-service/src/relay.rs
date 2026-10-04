@@ -16,7 +16,10 @@ use leo_relay_protocol::{
 use sqlx_core::query_as::query_as;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
@@ -37,13 +40,73 @@ struct Tunnel {
     commands: mpsc::Sender<Command>,
     control: mpsc::Sender<Frame>,
     version: u16,
+    access: Mutex<Access>,
     slots: Arc<Semaphore>,
     // Replacing a connection closes the old generation and its pending replies.
     stop: watch::Sender<bool>,
 }
 
 #[derive(Clone, Default)]
-pub(super) struct Relay(Arc<Mutex<HashMap<String, Arc<Tunnel>>>>);
+pub struct Relay(Arc<Mutex<HashMap<String, Arc<Tunnel>>>>, Arc<AtomicBool>);
+
+#[derive(Default)]
+struct Access {
+    generations: HashMap<String, u64>,
+    streams: HashMap<String, StreamAccess>,
+}
+
+struct StreamAccess {
+    account: String,
+    revoked: watch::Sender<bool>,
+}
+
+impl Relay {
+    /// End live bodies before the official HTTP server drains on shutdown.
+    pub fn shutdown(&self) {
+        let mut tunnels = self.0.lock().unwrap();
+        self.1.store(true, Ordering::SeqCst);
+        for (_, tunnel) in tunnels.drain() {
+            tunnel.stop.send_replace(true);
+        }
+    }
+
+    /// Close existing streams when an installation is detached or a member is removed.
+    /// Call after committing the access change, before returning its HTTP response.
+    pub fn revoke_access(&self, installation: &str, account: Option<&str>) {
+        let tunnel = {
+            let mut tunnels = self.0.lock().unwrap();
+            if account.is_none() {
+                tunnels.remove(installation)
+            } else {
+                tunnels.get(installation).cloned()
+            }
+        };
+        let Some(tunnel) = tunnel else {
+            return;
+        };
+        if let Some(account) = account {
+            let mut access = tunnel.access.lock().unwrap();
+            *access.generations.entry(account.to_owned()).or_default() += 1;
+            for stream in access
+                .streams
+                .values()
+                .filter(|stream| stream.account == account)
+            {
+                stream.revoked.send_replace(true);
+            }
+        } else {
+            tunnel.stop.send_replace(true);
+        }
+    }
+
+    pub(super) fn online(&self, installation: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap()
+            .get(installation)
+            .is_some_and(|tunnel| !*tunnel.stop.borrow() && !tunnel.commands.is_closed())
+    }
+}
 
 pub(super) async fn upgrade(
     State(service): State<Service>,
@@ -100,16 +163,18 @@ async fn serve_socket(relay: Relay, installation: String, mut socket: WebSocket)
         commands,
         control,
         version,
+        access: Mutex::new(Access::default()),
         slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
         stop,
     });
-    if let Some(previous) = relay
-        .0
-        .lock()
-        .unwrap()
-        .insert(installation.clone(), tunnel.clone())
     {
-        let _ = previous.stop.send(true);
+        let mut tunnels = relay.0.lock().unwrap();
+        if relay.1.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Some(previous) = tunnels.insert(installation.clone(), tunnel.clone()) {
+            previous.stop.send_replace(true);
+        }
     }
 
     let mut pending = HashMap::<String, Pending>::new();
@@ -231,6 +296,18 @@ pub(super) async fn forward(
     request: Request,
 ) -> Result<Response, ApiError> {
     let account = installations::account(&service, request.headers(), request.method()).await?;
+    // Snapshot the access generation before checking ownership. Revocation
+    // racing a slow upload must also prevent that stream from opening later.
+    let tunnel = service.relay.0.lock().unwrap().get(&installation).cloned();
+    let access_generation = tunnel.as_ref().map_or(0, |tunnel| {
+        *tunnel
+            .access
+            .lock()
+            .unwrap()
+            .generations
+            .get(&account)
+            .unwrap_or(&0)
+    });
     let owner: Option<(String,)> =
         query_as("SELECT owner_id FROM installations WHERE id = $1 AND owner_id = $2")
             .bind(&installation)
@@ -259,17 +336,16 @@ pub(super) async fn forward(
     let streaming = leo_relay_protocol::stream_path(target);
 
     // Reserve capacity before reading the body, including requests not yet sent.
-    let tunnel = service
-        .relay
-        .0
-        .lock()
-        .unwrap()
-        .get(&installation)
-        .cloned()
-        .ok_or(ApiError(
+    let tunnel = tunnel.ok_or(ApiError(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Installation unavailable",
+    ))?;
+    if *tunnel.stop.borrow() {
+        return Err(ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
             "Installation unavailable",
-        ))?;
+        ));
+    }
     if streaming && tunnel.version < 2 {
         return Err(ApiError(
             StatusCode::NOT_IMPLEMENTED,
@@ -295,7 +371,7 @@ pub(super) async fn forward(
         .collect();
     let api_request = ApiRequest {
         id: uuid::Uuid::new_v4().to_string(),
-        account_id: account,
+        account_id: account.clone(),
         role: Role::Owner,
         method: request.method().to_string(),
         path: target.to_owned(),
@@ -308,12 +384,30 @@ pub(super) async fn forward(
     let (reply, response) = oneshot::channel();
     let id = api_request.id.clone();
     let (chunks, receiver) = mpsc::channel(1);
-    let browser = streaming.then(|| BrowserStream {
-        receiver,
-        control: tunnel.control.clone(),
-        stopped: tunnel.stop.subscribe(),
-        id,
-    });
+    let browser = if streaming {
+        let (revoked, revocation) = watch::channel(false);
+        let mut access = tunnel.access.lock().unwrap();
+        if *access.generations.get(&account).unwrap_or(&0) != access_generation
+            || *tunnel.stop.borrow()
+        {
+            return Err(ApiError(
+                StatusCode::NOT_FOUND,
+                "Installation access revoked",
+            ));
+        }
+        access
+            .streams
+            .insert(id.clone(), StreamAccess { account, revoked });
+        Some(BrowserStream {
+            receiver,
+            tunnel: tunnel.clone(),
+            stopped: tunnel.stop.subscribe(),
+            revoked: revocation,
+            id,
+        })
+    } else {
+        None
+    };
     tunnel
         .commands
         .try_send(Command {
@@ -347,10 +441,11 @@ pub(super) async fn forward(
         .any(|(name, value)| name == "content-type" && value.starts_with("text/event-stream"));
     let body = if is_stream && let Some(browser) = browser {
         let stream = futures_util::stream::unfold(browser, |mut browser| async move {
-            if *browser.stopped.borrow() {
+            if *browser.stopped.borrow() || *browser.revoked.borrow() {
                 return None;
             }
             if browser
+                .tunnel
                 .control
                 .try_send(Frame::StreamCredit {
                     id: browser.id.clone(),
@@ -362,6 +457,7 @@ pub(super) async fn forward(
             let chunk = tokio::select! {
                 biased;
                 _ = browser.stopped.changed() => None,
+                _ = browser.revoked.changed() => None,
                 chunk = browser.receiver.recv() => chunk,
             };
             chunk.map(|chunk| (chunk, browser))
@@ -406,14 +502,16 @@ pub(super) async fn forward(
 // use their own bounded queue so a stalled stream cannot stall the tunnel.
 struct BrowserStream {
     receiver: mpsc::Receiver<Result<Vec<u8>, std::io::Error>>,
-    control: mpsc::Sender<Frame>,
+    tunnel: Arc<Tunnel>,
     stopped: watch::Receiver<bool>,
+    revoked: watch::Receiver<bool>,
     id: String,
 }
 
 impl Drop for BrowserStream {
     fn drop(&mut self) {
-        let _ = self.control.try_send(Frame::Cancel {
+        self.tunnel.access.lock().unwrap().streams.remove(&self.id);
+        let _ = self.tunnel.control.try_send(Frame::Cancel {
             id: self.id.clone(),
         });
     }

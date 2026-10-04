@@ -2960,6 +2960,7 @@ dependencies = [
  "subtle",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
  "tower-http",
  "tracing",

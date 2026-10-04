@@ -32,6 +32,7 @@ pub struct Fixture {
     pub admin: PgPool,
     pub schema: String,
     pub server: JoinHandle<()>,
+    pub relay: leo_official_service::Relay,
 }
 
 impl Fixture {
@@ -67,10 +68,16 @@ impl Fixture {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://localhost:{}", listener.local_addr().unwrap().port());
         let mail = Arc::new(Mailbox::default());
-        let app =
-            leo_official_service::router_with_oauth(pool.clone(), mail.clone(), url.clone(), oauth)
-                .await
-                .unwrap();
+        let relay = leo_official_service::Relay::default();
+        let app = leo_official_service::router_with_relay(
+            pool.clone(),
+            mail.clone(),
+            url.clone(),
+            oauth,
+            relay.clone(),
+        )
+        .await
+        .unwrap();
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
@@ -87,6 +94,7 @@ impl Fixture {
             admin,
             schema,
             server,
+            relay,
         }
     }
 
@@ -188,6 +196,8 @@ impl RelayedInstallation {
             "runnerUrl": "",
         }))
         .unwrap();
+        std::fs::create_dir_all(root.path().join("home/.codex")).unwrap();
+        std::fs::write(root.path().join("home/.codex/leo-managed-auth"), "1").unwrap();
         let installation = Service::new(config).await.unwrap();
         let router = leo_agent_manager::http::router(installation.clone())
             .await

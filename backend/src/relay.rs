@@ -13,7 +13,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use leo_relay_protocol::{
     ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_STREAM_CHUNK,
-    PROTOCOL_VERSION, REQUEST_TIMEOUT, Role, SUPPORTED_VERSIONS,
+    MIN_PROTOCOL_VERSION, REQUEST_TIMEOUT, Role, SUPPORTED_VERSIONS,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -95,7 +95,7 @@ pub async fn claim(official: &str, directory: &Path, code: &str, name: &str) -> 
             .json(&serde_json::json!({
                 "code": code,
                 "name": name,
-                "protocol": PROTOCOL_VERSION,
+                "protocol": MIN_PROTOCOL_VERSION,
             }))
             .send()
             .await
@@ -239,10 +239,7 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
                 active.remove(&request_id);
                 let response = match result {
                     Ok(Some(response)) => response,
-                    Ok(None) => {
-                        active.remove(&request_id);
-                        continue;
-                    },
+                    Ok(None) => continue,
                     Err(error) => request_failure(request_id, error.status, &error.message),
                 };
 
@@ -365,7 +362,8 @@ async fn dispatch(
         .extensions_mut()
         .insert(InstallationIdentity::trusted(role, &input.account_id));
 
-    let response = tokio::time::timeout(REQUEST_TIMEOUT, router.oneshot(request))
+    let deadline = tokio::time::Instant::now() + REQUEST_TIMEOUT;
+    let response = tokio::time::timeout_at(deadline, router.oneshot(request))
         .await
         .map_err(|_| Error::gateway_timeout("Installation request timed out."))?
         .map_err(|_| Error::bad_gateway("Installation handler failed."))?;
@@ -413,6 +411,10 @@ async fn dispatch(
                     break;
                 };
                 let chunk = chunk.map_err(|_| Error::bad_gateway("Installation stream failed."))?;
+                if chunk.is_empty() {
+                    output.credit.add_permits(1);
+                    continue;
+                }
                 for (index, piece) in chunk.chunks(MAX_STREAM_CHUNK).enumerate() {
                     if index > 0 {
                         output
@@ -445,7 +447,7 @@ async fn dispatch(
         return Ok(None);
     }
 
-    let body = tokio::time::timeout(REQUEST_TIMEOUT, to_bytes(response.into_body(), MAX_BODY))
+    let body = tokio::time::timeout_at(deadline, to_bytes(response.into_body(), MAX_BODY))
         .await
         .map_err(|_| Error::gateway_timeout("Installation response timed out."))?
         .map_err(|error| {

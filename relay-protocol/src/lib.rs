@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u16 = 2;
-pub const SUPPORTED_VERSIONS: &[u16] = &[2, 1];
+pub const MIN_PROTOCOL_VERSION: u16 = 1;
+pub const SUPPORTED_VERSIONS: &[u16] = &[PROTOCOL_VERSION, MIN_PROTOCOL_VERSION];
 pub const MAX_STREAM_CHUNK: usize = 65_536;
 pub const MAX_BODY: usize = 8_000_000;
 // Base64 expands by four bytes per three body bytes, plus envelope metadata.
