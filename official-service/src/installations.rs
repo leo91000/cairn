@@ -119,7 +119,7 @@ pub(super) async fn claim(
     Json(input): Json<Claim>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     consume_limit(&service.pool, &format!("claim:{}", peer.ip()), 30).await?;
-    if input.protocol != leo_relay_protocol::PROTOCOL_VERSION {
+    if !leo_relay_protocol::SUPPORTED_VERSIONS.contains(&input.protocol) {
         return Err(ApiError(StatusCode::CONFLICT, "Unsupported relay protocol"));
     }
 

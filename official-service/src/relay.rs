@@ -10,7 +10,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use leo_relay_protocol::{
-    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, PROTOCOL_VERSION,
+    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_STREAM_CHUNK,
     REQUEST_TIMEOUT, Role,
 };
 use sqlx_core::query_as::query_as;
@@ -22,7 +22,8 @@ use std::{
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 
 struct Pending {
-    reply: oneshot::Sender<ApiResponse>,
+    reply: Option<oneshot::Sender<ApiResponse>>,
+    stream: Option<mpsc::Sender<Result<Vec<u8>, std::io::Error>>>,
     // Browser cancellation does not release a slot for work still running remotely.
     _permit: OwnedSemaphorePermit,
 }
@@ -34,6 +35,8 @@ struct Command {
 
 struct Tunnel {
     commands: mpsc::Sender<Command>,
+    control: mpsc::Sender<Frame>,
+    version: u16,
     slots: Arc<Semaphore>,
     // Replacing a connection closes the old generation and its pending replies.
     stop: watch::Sender<bool>,
@@ -81,22 +84,22 @@ async fn serve_socket(relay: Relay, installation: String, mut socket: WebSocket)
     let Ok(Frame::Hello { versions }) = serde_json::from_str::<Frame>(&hello) else {
         return;
     };
-    if !versions.contains(&PROTOCOL_VERSION) {
+    let Some(version) = leo_relay_protocol::negotiate(&versions) else {
         let _ = socket.close().await;
         return;
-    }
-    let welcome = serde_json::to_string(&Frame::Welcome {
-        version: PROTOCOL_VERSION,
-    })
-    .unwrap();
+    };
+    let welcome = serde_json::to_string(&Frame::Welcome { version }).unwrap();
     if socket.send(Message::Text(welcome.into())).await.is_err() {
         return;
     }
 
     let (commands, mut receiver) = mpsc::channel::<Command>(MAX_IN_FLIGHT);
     let (stop, mut stopped) = watch::channel(false);
+    let (control, mut controls) = mpsc::channel::<Frame>(MAX_IN_FLIGHT * 2);
     let tunnel = Arc::new(Tunnel {
         commands,
+        control,
+        version,
         slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
         stop,
     });
@@ -128,7 +131,7 @@ async fn serve_socket(relay: Relay, installation: String, mut socket: WebSocket)
                 let Some(command) = command else {
                     break;
                 };
-                if command.pending.reply.is_closed() {
+                if command.pending.reply.as_ref().is_some_and(oneshot::Sender::is_closed) {
                     continue;
                 }
 
@@ -139,19 +142,70 @@ async fn serve_socket(relay: Relay, installation: String, mut socket: WebSocket)
                     break;
                 }
             }
+            Some(frame) = controls.recv(), if version >= 2 => {
+                let id = match &frame {
+                    Frame::Cancel { id } | Frame::StreamCredit { id } => id,
+                    _ => continue,
+                };
+                if !pending.contains_key(id) {
+                    continue;
+                }
+                if matches!(frame, Frame::Cancel { .. }) {
+                    pending.remove(id);
+                }
+                let message = serde_json::to_string(&frame).unwrap();
+                if socket.send(Message::Text(message.into())).await.is_err() {
+                    break;
+                }
+            }
             message = socket.next() => {
                 received = tokio::time::Instant::now();
                 match message {
                     Some(Ok(Message::Text(message))) => {
-                        let Ok(Frame::Response(response)) = serde_json::from_str::<Frame>(&message) else {
+                        let Ok(frame) = serde_json::from_str::<Frame>(&message) else {
                             break;
                         };
-                        if response.body.len() > MAX_BODY {
-                            break;
-                        }
-
-                        if let Some(completed) = pending.remove(&response.id) {
-                            let _ = completed.reply.send(response);
+                        let cancel = match frame {
+                            Frame::Response(response) => {
+                                if let Some(mut completed) = pending.remove(&response.id) {
+                                    if let Some(reply) = completed.reply.take() {
+                                        let _ = reply.send(response);
+                                    } else if let Some(stream) = completed.stream {
+                                        let _ = stream.try_send(Err(std::io::Error::other("Installation handler failed")));
+                                    }
+                                }
+                                None
+                            }
+                            Frame::StreamStart(response) if version >= 2 => {
+                                let id = response.id.clone();
+                                if let Some(request) = pending.get_mut(&id) {
+                                    let valid_stream = request.stream.is_some() && response.body.is_empty();
+                                    if valid_stream && let Some(reply) = request.reply.take() {
+                                        if reply.send(response).is_ok() { None } else { Some(id) }
+                                    } else { Some(id) }
+                                } else { Some(id) }
+                            }
+                            Frame::StreamChunk { id, body } if version >= 2 => {
+                                let delivered = body.len() <= MAX_STREAM_CHUNK
+                                    && pending.get(&id).is_some_and(|request| {
+                                        request.reply.is_none() && request.stream.as_ref()
+                                            .is_some_and(|stream| stream.try_send(Ok(body)).is_ok())
+                                    });
+                                if delivered { None } else { Some(id) }
+                            }
+                            Frame::StreamEnd { id, failed } if version >= 2 => {
+                                if let Some(completed) = pending.remove(&id)
+                                    && failed && let Some(stream) = completed.stream {
+                                    let _ = stream.try_send(Err(std::io::Error::other("Installation stream failed")));
+                                }
+                                None
+                            }
+                            _ => break,
+                        };
+                        if let Some(id) = cancel {
+                            pending.remove(&id);
+                            let message = serde_json::to_string(&Frame::Cancel { id }).unwrap();
+                            if socket.send(Message::Text(message.into())).await.is_err() { break; }
                         }
                     }
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
@@ -160,6 +214,7 @@ async fn serve_socket(relay: Relay, installation: String, mut socket: WebSocket)
             }
         }
     }
+    let _ = tunnel.stop.send(true);
     // An old connection must never remove the replacement's registry entry.
     let mut connections = relay.0.lock().unwrap();
     if connections
@@ -201,12 +256,7 @@ pub(super) async fn forward(
             "Installation API route not found",
         ));
     }
-    if target.split('?').next().unwrap_or("").ends_with("/stream") {
-        return Err(ApiError(
-            StatusCode::NOT_IMPLEMENTED,
-            "Streaming relay is not available yet",
-        ));
-    }
+    let streaming = leo_relay_protocol::stream_path(target);
 
     // Reserve capacity before reading the body, including requests not yet sent.
     let tunnel = service
@@ -220,6 +270,12 @@ pub(super) async fn forward(
             StatusCode::SERVICE_UNAVAILABLE,
             "Installation unavailable",
         ))?;
+    if streaming && tunnel.version < 2 {
+        return Err(ApiError(
+            StatusCode::NOT_IMPLEMENTED,
+            "Streaming requires relay protocol 2",
+        ));
+    }
     let permit = tunnel
         .slots
         .clone()
@@ -250,12 +306,21 @@ pub(super) async fn forward(
             .to_vec(),
     };
     let (reply, response) = oneshot::channel();
+    let id = api_request.id.clone();
+    let (chunks, receiver) = mpsc::channel(1);
+    let browser = streaming.then(|| BrowserStream {
+        receiver,
+        control: tunnel.control.clone(),
+        stopped: tunnel.stop.subscribe(),
+        id,
+    });
     tunnel
         .commands
         .try_send(Command {
             request: api_request,
             pending: Pending {
-                reply,
+                reply: Some(reply),
+                stream: streaming.then_some(chunks),
                 _permit: permit,
             },
         })
@@ -276,7 +341,41 @@ pub(super) async fn forward(
         .map_err(|_| ApiError(StatusCode::BAD_GATEWAY, "Installation connection lost"))?;
     let status = StatusCode::from_u16(response.status)
         .map_err(|_| ApiError(StatusCode::BAD_GATEWAY, "Invalid installation response"))?;
-    let mut output = (status, Body::from(response.body)).into_response();
+    let is_stream = response
+        .headers
+        .iter()
+        .any(|(name, value)| name == "content-type" && value.starts_with("text/event-stream"));
+    let body = if is_stream && let Some(browser) = browser {
+        let stream = futures_util::stream::unfold(browser, |mut browser| async move {
+            if *browser.stopped.borrow() {
+                return None;
+            }
+            if browser
+                .control
+                .try_send(Frame::StreamCredit {
+                    id: browser.id.clone(),
+                })
+                .is_err()
+            {
+                return None;
+            }
+            let chunk = tokio::select! {
+                biased;
+                _ = browser.stopped.changed() => None,
+                chunk = browser.receiver.recv() => chunk,
+            };
+            chunk.map(|chunk| (chunk, browser))
+        });
+        Body::from_stream(stream)
+    } else {
+        Body::from(response.body)
+    };
+    let mut output = (status, body).into_response();
+    if is_stream {
+        output
+            .headers_mut()
+            .insert("x-accel-buffering", HeaderValue::from_static("no"));
+    }
     for (name, value) in response.headers {
         if leo_relay_protocol::response_header(&name)
             && let (Ok(name), Ok(value)) =
@@ -301,4 +400,21 @@ pub(super) async fn forward(
         .insert("cache-control", HeaderValue::from_static("no-store"));
 
     Ok(output)
+}
+
+// Dropping an HTTP body cancels only this remote subscription. Control messages
+// use their own bounded queue so a stalled stream cannot stall the tunnel.
+struct BrowserStream {
+    receiver: mpsc::Receiver<Result<Vec<u8>, std::io::Error>>,
+    control: mpsc::Sender<Frame>,
+    stopped: watch::Receiver<bool>,
+    id: String,
+}
+
+impl Drop for BrowserStream {
+    fn drop(&mut self) {
+        let _ = self.control.try_send(Frame::Cancel {
+            id: self.id.clone(),
+        });
+    }
 }

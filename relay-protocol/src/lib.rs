@@ -2,7 +2,9 @@
 //! Requests are independent: future streaming frames can share their request ID.
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
+pub const SUPPORTED_VERSIONS: &[u16] = &[2, 1];
+pub const MAX_STREAM_CHUNK: usize = 65_536;
 pub const MAX_BODY: usize = 8_000_000;
 // Base64 expands by four bytes per three body bytes, plus envelope metadata.
 pub const MAX_FRAME: usize = MAX_BODY.div_ceil(3) * 4 + 65_536;
@@ -64,16 +66,53 @@ mod body {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Frame {
-    Hello { versions: Vec<u16> },
-    Welcome { version: u16 },
+    Hello {
+        versions: Vec<u16>,
+    },
+    Welcome {
+        version: u16,
+    },
     Request(ApiRequest),
     Response(ApiResponse),
+    // Version 2 only. Credit permits one bounded chunk, independently per stream.
+    StreamStart(ApiResponse),
+    StreamChunk {
+        id: String,
+        #[serde(with = "body")]
+        body: Vec<u8>,
+    },
+    StreamEnd {
+        id: String,
+        failed: bool,
+    },
+    StreamCredit {
+        id: String,
+    },
+    Cancel {
+        id: String,
+    },
+}
+
+pub fn negotiate(versions: &[u16]) -> Option<u16> {
+    SUPPORTED_VERSIONS
+        .iter()
+        .copied()
+        .find(|version| versions.contains(version))
+}
+
+pub fn stream_path(path: &str) -> bool {
+    path.split('?').next().unwrap_or("").ends_with("/stream")
 }
 
 pub fn request_header(name: &str) -> bool {
     matches!(
         name,
-        "content-type" | "accept" | "range" | "if-none-match" | "if-modified-since"
+        "content-type"
+            | "accept"
+            | "range"
+            | "if-none-match"
+            | "if-modified-since"
+            | "last-event-id"
     )
 }
 
