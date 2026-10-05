@@ -27,7 +27,7 @@ pub(super) async fn list<'e>(
     relay: &super::relay::Relay,
 ) -> Result<Vec<Value>, ApiError> {
     let rows: Vec<(String, String, bool)> =
-        query_as("SELECT i.id, i.name, i.owner_id = $1 FROM installations i LEFT JOIN installation_members m ON m.installation_id = i.id AND m.account_id = $1 WHERE i.owner_id = $1 OR m.account_id = $1 ORDER BY i.created_at, i.id")
+        query_as("SELECT i.id, i.name, i.owner_id = $1 FROM installations i LEFT JOIN installation_members m ON m.installation_id = i.id AND m.account_id = $1 WHERE i.owner_id IS NOT NULL AND (i.owner_id = $1 OR m.account_id = $1) ORDER BY i.created_at, i.id")
             .bind(account)
             .fetch_all(executor)
             .await?;
@@ -169,16 +169,19 @@ pub(super) async fn detach(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let owner = account(&service, &headers, &Method::POST).await?;
+    let mut transaction = service.pool.begin().await?;
     let detached =
         query("UPDATE installations SET owner_id = NULL WHERE id = $1 AND owner_id = $2")
             .bind(&installation)
             .bind(owner)
-            .execute(&service.pool)
+            .execute(&mut *transaction)
             .await?;
     if detached.rows_affected() == 0 {
         return Err(ApiError(StatusCode::NOT_FOUND, "Installation not found"));
     }
 
+    super::sharing::clear(&mut transaction, &installation).await?;
+    transaction.commit().await?;
     service.relay.revoke_access(&installation, None);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -389,6 +392,7 @@ pub(super) async fn poll_device(
     };
     let token = random_token();
     if recovering {
+        super::sharing::clear(&mut transaction, &installation).await?;
         query("UPDATE installations SET owner_id = $1, token_digest = $2 WHERE id = $3")
             .bind(owner)
             .bind(digest(&token))
@@ -425,7 +429,7 @@ pub(super) async fn role(
     installation: &str,
     account: &str,
 ) -> Result<leo_relay_protocol::Role, ApiError> {
-    let access: Option<(bool,)> = query_as("SELECT i.owner_id = $2 FROM installations i LEFT JOIN installation_members m ON m.installation_id = i.id AND m.account_id = $2 WHERE i.id = $1 AND (i.owner_id = $2 OR m.account_id = $2)")
+    let access: Option<(bool,)> = query_as("SELECT i.owner_id = $2 FROM installations i LEFT JOIN installation_members m ON m.installation_id = i.id AND m.account_id = $2 WHERE i.id = $1 AND i.owner_id IS NOT NULL AND (i.owner_id = $2 OR m.account_id = $2)")
         .bind(installation).bind(account).fetch_optional(&service.pool).await?;
     match access {
         Some((true,)) => Ok(leo_relay_protocol::Role::Owner),

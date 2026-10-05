@@ -168,7 +168,7 @@ pub(super) async fn accept(
     };
     // Serialize acceptance with cancellation, removal and departure on this installation.
     let exists: Option<(String,)> =
-        query_as("SELECT id FROM installations WHERE id = $1 FOR UPDATE")
+        query_as("SELECT id FROM installations WHERE id = $1 AND owner_id IS NOT NULL FOR UPDATE")
             .bind(&installation)
             .fetch_optional(&mut *transaction)
             .await?;
@@ -235,7 +235,7 @@ pub(super) async fn leave(
     consume_limit(&service.pool, &format!("sharing:{account}"), 30).await?;
     let mut transaction = service.pool.begin().await?;
     let exists: Option<(String,)> =
-        query_as("SELECT id FROM installations WHERE id = $1 FOR UPDATE")
+        query_as("SELECT id FROM installations WHERE id = $1 AND owner_id IS NOT NULL FOR UPDATE")
             .bind(&installation)
             .fetch_optional(&mut *transaction)
             .await?;
@@ -266,4 +266,20 @@ pub(super) async fn cancel(
 
     transaction.commit().await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Sharing belongs to an ownership period, never to a reclaimed machine.
+pub(super) async fn clear(
+    connection: &mut PgConnection,
+    installation: &str,
+) -> Result<(), ApiError> {
+    query("DELETE FROM installation_members WHERE installation_id = $1")
+        .bind(installation)
+        .execute(&mut *connection)
+        .await?;
+    query("DELETE FROM installation_invitations WHERE installation_id = $1")
+        .bind(installation)
+        .execute(connection)
+        .await?;
+    Ok(())
 }

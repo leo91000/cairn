@@ -669,5 +669,94 @@ async fn detachment_forgets_members_and_pending_invitations() {
     .await
     .unwrap();
     assert_eq!(pending, json!([]));
+
+    let identity: Value = serde_json::from_slice(
+        &tokio::fs::read(relay.root.path().join("relay/identity.json"))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let started = relay
+        .app
+        .post(
+            "/api/relay/device-claim/start",
+            json!({
+                "name": "Recovered",
+                "protocol": 2,
+                "identity": identity,
+            }),
+        )
+        .await;
+    assert_eq!(started.status(), StatusCode::CREATED);
+    let device: Value = started.json().await.unwrap();
+    let reviewed = request(
+        &relay,
+        &later_cookie,
+        &later_session,
+        Method::POST,
+        "/api/installations/device-claim/preview",
+    )
+    .json(&json!({ "code": device["userCode"] }))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(reviewed.status(), StatusCode::OK);
+    let reviewed: Value = reviewed.json().await.unwrap();
+    assert_eq!(
+        request(
+            &relay,
+            &later_cookie,
+            &later_session,
+            Method::POST,
+            "/api/installations/device-claim"
+        )
+        .json(&json!({
+            "code": device["userCode"],
+            "confirmation": reviewed["confirmation"],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::OK
+    );
+    let reclaimed = relay
+        .app
+        .post(
+            "/api/relay/device-claim/poll",
+            json!({ "deviceCode": device["deviceCode"] }),
+        )
+        .await;
+    assert_eq!(reclaimed.status(), StatusCode::OK);
+    assert_eq!(
+        reclaimed.json::<Value>().await.unwrap()["installationId"],
+        id
+    );
+    let sharing = request(
+        &relay,
+        &later_cookie,
+        &later_session,
+        Method::GET,
+        &format!("{path}/sharing"),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(sharing.status(), StatusCode::OK);
+    assert_eq!(
+        sharing.json::<Value>().await.unwrap(),
+        json!({ "members": [], "invitations": [] })
+    );
+    assert_eq!(
+        request(&relay, &cookie, &session, Method::GET, "/api/installations")
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap(),
+        json!([])
+    );
+
     relay.close().await;
 }
