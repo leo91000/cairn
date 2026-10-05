@@ -505,6 +505,90 @@ async fn enrollment_uses_a_configurable_direct_manager_origin() {
 }
 
 #[tokio::test]
+async fn direct_node_channel_accepts_private_proxy_hosts_and_keeps_credentials_required() {
+    let owner = Owner::new().await;
+    let (listener, address) = common::bind().await;
+    let server = owner.serve(listener);
+    let client = reqwest::Client::new();
+    let base = format!("http://{address}");
+
+    // TLS proxies preserve Host while forwarding to the private HTTP listener.
+    for host in ["manager.vpn.example:443", "192.168.1.20"] {
+        let invitation = owner
+            .send(
+                "POST",
+                "/api/nodes/enrollments",
+                json!({ "name": "Direct node", "managerUrl": format!("https://{host}") }),
+            )
+            .await
+            .1;
+        let response = client
+            .post(format!("{base}{ENROLL}"))
+            .header("host", host)
+            .json(&enrollment(
+                &invitation,
+                "Direct node",
+                &capabilities(true, 2, 4096, 32768),
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let identity: Value = response.json().await.unwrap();
+        let token = identity["token"].as_str().unwrap();
+
+        for credential in [None, Some("invalid"), Some(token)] {
+            let mut request = client
+                .post(format!("{base}{HEARTBEAT}"))
+                .header("host", host)
+                .json(&json!({}));
+            if let Some(credential) = credential {
+                request = request.bearer_auth(credential);
+            }
+            let expected = if credential == Some(token) {
+                StatusCode::OK
+            } else {
+                StatusCode::UNAUTHORIZED
+            };
+            assert_eq!(request.send().await.unwrap().status(), expected);
+        }
+
+        let node = identity["nodeId"].as_str().unwrap();
+        assert_eq!(
+            owner
+                .send("POST", &format!("/api/nodes/{node}/revoke"), json!({}))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            client
+                .post(format!("{base}{HEARTBEAT}"))
+                .header("host", host)
+                .bearer_auth(token)
+                .json(&json!({}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            client
+                .get(format!("{base}/api/nodes"))
+                .header("host", host)
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    server.abort();
+}
+
+#[tokio::test]
 async fn enrollment_rejects_insecure_or_non_origin_manager_addresses() {
     let owner = Owner::new().await;
     for origin in [
