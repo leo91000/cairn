@@ -542,12 +542,28 @@ async fn seed_codex() -> Result<usize> {
 
 /// Warmup never reads a previous conversation or an imported configuration.
 async fn prepare_anonymous_codex() -> Result<()> {
-    if Path::new(INITIALIZED).exists() {
+    prepare_anonymous_codex_home(
+        Path::new("/home/node/.codex"),
+        Path::new("/opt/leo-codex-state"),
+        Path::new(INITIALIZED),
+        AGENT_ID,
+        AGENT_ID,
+    )
+    .await
+}
+
+async fn prepare_anonymous_codex_home(
+    home: &Path,
+    templates: &Path,
+    initialized: &Path,
+    uid: u32,
+    gid: u32,
+) -> Result<()> {
+    if initialized.exists() {
         return Err(Error::conflict(
             "Only a fresh VM can initialize anonymous Codex.",
         ));
     }
-    let home = Path::new("/home/node/.codex");
     match tokio::fs::symlink_metadata(home).await {
         Ok(metadata) if metadata.is_dir() => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -568,7 +584,7 @@ async fn prepare_anonymous_codex() -> Result<()> {
         return Err(Error::conflict("Codex home already contains state."));
     }
     tokio::fs::set_permissions(home, std::os::unix::fs::PermissionsExt::from_mode(0o700)).await?;
-    std::os::unix::fs::chown(home, Some(AGENT_ID), Some(AGENT_ID))?;
+    std::os::unix::fs::chown(home, Some(uid), Some(gid))?;
     // This is the same account-free credential-store policy used by managed
     // homes. External tokens still arrive only through an active attempt relay.
     atomic_write(
@@ -576,9 +592,13 @@ async fn prepare_anonymous_codex() -> Result<()> {
         b"cli_auth_credentials_store = \"file\"\n",
     )
     .await?;
-    std::os::unix::fs::chown(home.join("config.toml"), Some(AGENT_ID), Some(AGENT_ID))?;
+    std::os::unix::fs::chown(home.join("config.toml"), Some(uid), Some(gid))?;
     atomic_write(&home.join("leo-managed-auth"), b"1").await?;
-    seed_codex().await?;
+    let home = home.to_owned();
+    let templates = templates.to_owned();
+    tokio::task::spawn_blocking(move || super::codex_state::install(&home, &templates, uid, gid))
+        .await
+        .map_err(Error::internal)??;
     Ok(())
 }
 
@@ -760,6 +780,65 @@ async fn read_result(plan: &Plan) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn anonymous_warmup_replaces_preinstalled_home_without_inheriting_state() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let templates = root.path().join("schemas");
+        tokio::fs::create_dir(&home).await.unwrap();
+        tokio::fs::create_dir(&templates).await.unwrap();
+        tokio::fs::write(home.join("auth.json"), b"inherited-secret")
+            .await
+            .unwrap();
+        tokio::fs::write(home.join("state_5.sqlite"), b"inherited-state")
+            .await
+            .unwrap();
+        tokio::fs::write(templates.join("state_5.sqlite"), b"schema-only")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            templates.join("manifest.json"),
+            br#"{"version":1,"files":["state_5.sqlite"]}"#,
+        )
+        .await
+        .unwrap();
+        let initialized = root.path().join("initialized");
+        prepare_anonymous_codex_home(
+            &home,
+            &templates,
+            &initialized,
+            unsafe { libc::geteuid() },
+            unsafe { libc::getegid() },
+        )
+        .await
+        .unwrap();
+        assert!(!home.join("auth.json").exists());
+        assert_eq!(
+            tokio::fs::read(home.join("state_5.sqlite")).await.unwrap(),
+            b"schema-only"
+        );
+        assert_eq!(
+            tokio::fs::read(home.join("config.toml")).await.unwrap(),
+            b"cli_auth_credentials_store = \"file\"\n"
+        );
+        tokio::fs::write(&initialized, b"1").await.unwrap();
+        assert!(
+            prepare_anonymous_codex_home(
+                &home,
+                &templates,
+                &initialized,
+                unsafe { libc::geteuid() },
+                unsafe { libc::getegid() }
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            tokio::fs::read(home.join("state_5.sqlite")).await.unwrap(),
+            b"schema-only"
+        );
+    }
 
     #[test]
     fn resident_imports_preserve_open_database_and_executable_paths() {

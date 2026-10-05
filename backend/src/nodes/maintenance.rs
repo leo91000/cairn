@@ -95,17 +95,26 @@ async fn advertise(s: &Service) -> Result<String> {
     let mut release = release()?;
     let runtime = std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into());
     if super::valid_runtime(&runtime) {
-        s.store
-            .set(
-                &format!("node-runtime:{runtime}"),
-                json!({ "runtimeId": runtime, "image": release.image }),
-                None,
-            )
-            .await?;
+        advertise_runtime(&s.store, &runtime, &release.image, crate::config::now()).await?;
     }
     release.shutdown_timeout_seconds =
         super::publication::settings(s).await?["shutdownTimeoutSeconds"].clone();
     Ok(serde_json::to_value(release)?.to_string())
+}
+
+async fn advertise_runtime(
+    store: &crate::store::Store,
+    runtime: &str,
+    image: &str,
+    _now: i64,
+) -> Result<()> {
+    store
+        .set(
+            &format!("node-runtime:{runtime}"),
+            json!({ "runtimeId": runtime, "image": image }),
+            None,
+        )
+        .await
 }
 
 pub async fn request(s: &Service, node: &str, input: &Value) -> Result<Value> {
@@ -272,4 +281,33 @@ async fn drain(s: &Service, node: &str) -> Result<()> {
         }
     }
     failure.map_or(Ok(()), Err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn runtime_announcements_expire_without_refresh_and_migrate_permanent_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .set(
+                "node-runtime:legacy",
+                json!({ "runtimeId": "legacy", "image": "legacy-image" }),
+                None,
+            )
+            .await
+            .unwrap();
+        let previous = crate::config::now() - 86_400_001;
+        advertise_runtime(&store, "previous", "previous-image", previous)
+            .await
+            .unwrap();
+        advertise_runtime(&store, "current", "current-image", crate::config::now())
+            .await
+            .unwrap();
+        let entries = store.keys("node-runtime:").await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1["runtimeId"], "current");
+    }
 }
