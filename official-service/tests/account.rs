@@ -254,13 +254,8 @@ async fn email_delivery_is_limited_across_processes_and_pending_codes_keep_worki
             json!({ "email": " RATE@EXAMPLE.TEST " }),
         )
         .await;
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
     assert_eq!(app.mail.0.lock().unwrap().len(), 1);
-    // Advance the persisted limiter's time; observe behavior only through HTTP.
-    query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second'")
-        .execute(&app.pool)
-        .await
-        .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let second_url = format!("http://{}", listener.local_addr().unwrap());
     let second_router = router(app.pool.clone(), app.mail.clone(), second_url.clone())
@@ -282,8 +277,20 @@ async fn email_delivery_is_limited_across_processes_and_pending_codes_keep_worki
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(app.verify(&challenge, &code).await.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let second_challenge: Value = response.json().await.unwrap();
+    assert_ne!(second_challenge["challenge"], challenge);
+    assert_eq!(app.mail.0.lock().unwrap().len(), 1);
+    assert_eq!(
+        app.verify(&second_challenge["challenge"], &code)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.verify(&challenge, &code).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
     assert_eq!(
         app.post(
             "/api/account/email-code",

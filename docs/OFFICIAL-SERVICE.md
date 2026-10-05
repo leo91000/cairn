@@ -74,9 +74,14 @@ Missing or malformed trusted suffixes fall back to the TCP peer. Do not expose
 Postgres or the development mailbox publicly.
 
 Codes expire after 10 minutes and allow five verification attempts. Requesting
-another code while one is unexpired returns 429 and preserves the pending code,
-including its remaining verification attempts. Requests are limited
-to one per minute per normalized email and ten per minute per resolved client;
+another code while one is unexpired returns a fresh challenge for the same mailed
+code, without sending another email. All challenges share its five attempts and
+original expiration; consuming the code invalidates every challenge. This lets
+the mailbox owner sign in even if a third party requested the code first, including
+during the delivery cooldown or after the address's delivery budget is exhausted.
+Existing codes retain their original challenges when the migration is applied.
+Code requests are limited to ten per minute per resolved client. New email deliveries
+are limited to one per minute per normalized email;
 verification is limited to thirty per minute per resolved client. Each address
 can receive at most six codes per hour and twenty per day. These delivery budgets
 are committed together under an address lock, so concurrent processes cannot

@@ -316,8 +316,6 @@ async fn request_code(
 
     let email = normalized_email(&input.email)?;
 
-    consume_limit(&service.pool, &format!("email:{}", digest(&email)), 1).await?;
-
     let challenge = random_token();
     let code = format!("{:08}", rand::rng().random_range(0..100_000_000_u32));
     let code_digest = digest(&format!("{challenge}:{code}"));
@@ -330,18 +328,34 @@ async fn request_code(
         .execute(&mut *transaction)
         .await?;
     let pending: Option<(String,)> = query_as(
-        "SELECT challenge FROM email_codes WHERE email = $1 AND expires_at > now() LIMIT 1",
+        "SELECT challenge FROM email_codes WHERE email = $1 AND expires_at > now() LIMIT 1 FOR UPDATE",
     )
     .bind(&email)
     .fetch_optional(&mut *transaction)
     .await?;
-    if pending.is_some() {
-        return Err(ApiError(
-            StatusCode::TOO_MANY_REQUESTS,
-            "A code is already pending. Use it or wait for it to expire.",
-        ));
+    if let Some((code_challenge,)) = pending {
+        // Give the mailbox owner a usable proof even if a third party requested
+        // the code first. Every challenge shares the original attempts/deadline.
+        query("INSERT INTO email_code_challenges (challenge, code_challenge) VALUES ($1, $2)")
+            .bind(&challenge)
+            .bind(&code_challenge)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(json!({ "challenge": challenge })),
+        )
+            .into_response());
     }
 
+    consume_limit_on(
+        &mut transaction,
+        &format!("email:{}", digest(&email)),
+        1,
+        60,
+    )
+    .await?;
     consume_limit_on(
         &mut transaction,
         &format!("email-hour:{}", digest(&email)),
@@ -363,6 +377,10 @@ async fn request_code(
         .await?;
     query("INSERT INTO email_codes (challenge, email, code_digest, expires_at) VALUES ($1, $2, $3, now() + interval '10 minutes')")
         .bind(&challenge).bind(&email).bind(code_digest).execute(&mut *transaction).await?;
+    query("INSERT INTO email_code_challenges (challenge, code_challenge) VALUES ($1, $1)")
+        .bind(&challenge)
+        .execute(&mut *transaction)
+        .await?;
     transaction.commit().await?;
 
     if service.sender.send_code(&email, &code).await.is_err() {
@@ -398,18 +416,18 @@ async fn verify_code(
     consume_limit(&service.pool, &format!("verification:{}", peer.ip()), 30).await?;
 
     let mut transaction = service.pool.begin().await?;
-    let row: Option<(String, String, bool, i32)> = query_as("SELECT email, code_digest, expires_at > now(), attempts FROM email_codes WHERE challenge = $1 FOR UPDATE")
+    let row: Option<(String, String, String, bool, i32)> = query_as("SELECT e.challenge, e.email, e.code_digest, e.expires_at > now(), e.attempts FROM email_codes e JOIN email_code_challenges c ON c.code_challenge = e.challenge WHERE c.challenge = $1 FOR UPDATE OF e")
         .bind(&input.challenge).fetch_optional(&mut *transaction).await?;
 
     let invalid = || ApiError(StatusCode::UNAUTHORIZED, "Invalid or expired code");
-    let Some((email, expected, unexpired, attempts)) = row else {
+    let Some((code_challenge, email, expected, unexpired, attempts)) = row else {
         return Err(invalid());
     };
 
-    let supplied = digest(&format!("{}:{}", input.challenge, input.code));
+    let supplied = digest(&format!("{code_challenge}:{}", input.code));
     if !unexpired || attempts >= 5 || !bool::from(expected.as_bytes().ct_eq(supplied.as_bytes())) {
-        query("UPDATE email_codes SET attempts = attempts + 1 WHERE challenge = $1")
-            .bind(&input.challenge)
+        query("UPDATE email_codes SET attempts = LEAST(attempts + 1, 5) WHERE challenge = $1")
+            .bind(&code_challenge)
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
@@ -417,7 +435,7 @@ async fn verify_code(
     }
 
     query("DELETE FROM email_codes WHERE challenge = $1")
-        .bind(&input.challenge)
+        .bind(&code_challenge)
         .execute(&mut *transaction)
         .await?;
 

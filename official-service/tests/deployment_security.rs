@@ -53,6 +53,99 @@ async fn recipient_can_use_the_emailed_code_when_someone_else_requested_it_first
 }
 
 #[tokio::test]
+async fn renewed_challenges_share_the_codes_attempt_budget_and_original_expiration() {
+    let app = Fixture::new().await;
+    for scenario in ["attempts", "expiry"] {
+        let email = format!("{scenario}@example.test");
+        let first: Value = app
+            .post("/api/account/email-code", json!({ "email": email }))
+            .await
+            .json()
+            .await
+            .unwrap();
+        let code = app.mail.0.lock().unwrap().last().unwrap().1.clone();
+        if scenario == "attempts" {
+            for _ in 0..4 {
+                assert_eq!(
+                    app.post(
+                        "/api/account/verify",
+                        json!({
+                            "challenge": first["challenge"],
+                            "code": "wrong",
+                        })
+                    )
+                    .await
+                    .status(),
+                    StatusCode::UNAUTHORIZED
+                );
+            }
+        }
+        let response = app
+            .post("/api/account/email-code", json!({ "email": email }))
+            .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let renewed: Value = response.json().await.unwrap();
+        if scenario == "attempts" {
+            assert_eq!(
+                app.post(
+                    "/api/account/verify",
+                    json!({
+                        "challenge": renewed["challenge"],
+                        "code": "wrong",
+                    })
+                )
+                .await
+                .status(),
+                StatusCode::UNAUTHORIZED
+            );
+            // Reissuing another challenge must not reset the five failed attempts.
+            let response = app
+                .post("/api/account/email-code", json!({ "email": email }))
+                .await;
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let last: Value = response.json().await.unwrap();
+            assert_eq!(
+                app.post(
+                    "/api/account/verify",
+                    json!({
+                        "challenge": last["challenge"],
+                        "code": code,
+                    })
+                )
+                .await
+                .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        } else {
+            // Advance the original proof's clock, without editing the renewed challenge.
+            query(
+                "UPDATE email_codes SET expires_at = now() - interval '1 second' WHERE email = $1",
+            )
+            .bind(&email)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        }
+        for challenge in [&first, &renewed] {
+            assert_eq!(
+                app.post(
+                    "/api/account/verify",
+                    json!({
+                        "challenge": challenge["challenge"],
+                        "code": code,
+                    })
+                )
+                .await
+                .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+    }
+    assert_eq!(app.mail.0.lock().unwrap().len(), 2);
+    app.close().await;
+}
+
+#[tokio::test]
 async fn an_address_has_hourly_and_daily_delivery_caps_beyond_the_minute_cooldown() {
     let app = Fixture::new().await;
     for delivered in 0..20 {
@@ -86,6 +179,27 @@ async fn an_address_has_hourly_and_daily_delivery_caps_beyond_the_minute_cooldow
             StatusCode::ACCEPTED
         );
     }
+    let response = app
+        .post(
+            "/api/account/email-code",
+            json!({ "email": "budget@example.test" }),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let pending: Value = response.json().await.unwrap();
+    let code = app.mail.0.lock().unwrap().last().unwrap().1.clone();
+    assert_eq!(
+        app.post(
+            "/api/account/verify",
+            json!({
+                "challenge": pending["challenge"],
+                "code": code,
+            })
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
     query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key NOT LIKE 'email-day:%'")
         .execute(&app.pool).await.unwrap();
     query("UPDATE email_codes SET expires_at = now() - interval '1 second'")
