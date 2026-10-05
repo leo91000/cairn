@@ -64,6 +64,19 @@ async fn incompatible_protocol_is_refused_and_v1_rejects_only_the_stream() {
         .await
         .unwrap();
     assert!(matches!(message, None | Some(Ok(Message::Close(_)))));
+    let installations: serde_json::Value = relay
+        .app
+        .client
+        .get(format!("{}/api/installations", relay.app.url))
+        .header("cookie", &relay.cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(installations[0]["updateRequired"], true);
+    assert_eq!(installations[0]["online"], false);
     assert_eq!(
         relay.get("/chats").send().await.unwrap().status(),
         StatusCode::SERVICE_UNAVAILABLE
@@ -77,6 +90,18 @@ async fn incompatible_protocol_is_refused_and_v1_rejects_only_the_stream() {
         serde_json::from_str::<Frame>(&welcome).unwrap(),
         Frame::Welcome { version: 1 }
     ));
+    let installations: serde_json::Value = relay
+        .app
+        .client
+        .get(format!("{}/api/installations", relay.app.url))
+        .header("cookie", &relay.cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(installations[0]["updateRequired"], false);
     assert_eq!(
         relay.get("/chats/stream").send().await.unwrap().status(),
         StatusCode::NOT_IMPLEMENTED

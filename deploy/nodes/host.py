@@ -245,19 +245,35 @@ def complete(master, image, error=None):
     request(master, '/internal/nodes/maintenance', {'action': 'complete', 'image': image, 'error': error})
 
 
+def update_image(previous, image, pull, prepare, launch_image):
+    """Both host supervisors pull before draining and verify rollback before committing."""
+    pull(image)
+    if not prepare():
+        return None
+    try:
+        launch_image(image)
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+        launch_image(previous)
+        return False
+    return True
+
+
 def update(config, release):
     image = release['image']
-    command(['docker', 'pull', image], timeout=1200)
-    if STOP:
-        return
     previous = config['image']
-    drain(config['master'])
-    if STOP:
+
+    def prepare():
+        if STOP:
+            return False
+        drain(config['master'])
+        return not STOP
+
+    updated = update_image(previous, image,
+                           lambda image: command(['docker', 'pull', image], timeout=1200),
+                           prepare, launch)
+    if updated is None:
         return
-    try:
-        launch(image)
-    except (OSError, ValueError, RuntimeError):
-        launch(previous)
+    if not updated:
         config.update(failedImage=image, pendingCompletion=True, updateError='Update health check failed; previous image restored')
         atomic(ROOT / 'config.json', config)
         reconcile(config)

@@ -30,13 +30,14 @@ main() {
   set -euo pipefail
   LEO_OFFICIAL_ORIGIN=__LEO_OFFICIAL_ORIGIN__
   LEO_HOST_SHA256=__LEO_HOST_SHA256__
+  LEO_NODE_HOST_SHA256=__LEO_NODE_HOST_SHA256__
   fail() { echo "Leo installer: $*" >&2; exit 1; }
 
   [[ $(id -u) == 0 ]] || fail 'Run the command with sudo bash.'
   [[ $(uname -s) == Linux ]] || fail 'Linux is required.'
   [[ $(uname -m) == x86_64 ]] || fail 'An x86-64 machine is required.'
 
-  for command in docker python3 curl; do
+  for command in docker python3 curl systemctl; do
     command -v "$command" >/dev/null || fail "Install $command before installing Leo."
   done
 
@@ -67,12 +68,52 @@ sys.exit(0 if hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest() == sys.
 PYTHON
   python3 -m py_compile "$LEO_INSTALL_TEMP"
   install -m 0700 "$LEO_INSTALL_TEMP" "$LEO_INSTALLATION_ROOT/host.py"
+  curl --fail --silent --show-error --proto '=https' --max-time 30 "${LEO_OFFICIAL_ORIGIN}/install/node-host.py" > "$LEO_INSTALL_TEMP" || fail 'Cannot download the shared node supervisor.'
+  python3 - "$LEO_INSTALL_TEMP" "$LEO_NODE_HOST_SHA256" <<'PYTHON' || fail 'Node supervisor checksum mismatch.'
+import hashlib
+from pathlib import Path
+import sys
+sys.exit(0 if hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest() == sys.argv[2] else 1)
+PYTHON
+  python3 -m py_compile "$LEO_INSTALL_TEMP"
+  install -m 0700 "$LEO_INSTALL_TEMP" "$LEO_INSTALLATION_ROOT/node-host.py"
   if [[ $# == 2 && $1 == --claim-code ]]; then
     export LEO_INSTALLATION_CLAIM_CODE=$2
   elif [[ $# != 0 ]]; then
     fail 'Copy the complete command from Add an installation.'
   fi
   python3 "$LEO_INSTALLATION_ROOT/host.py" "$LEO_OFFICIAL_ORIGIN"
+  python3 - "$LEO_INSTALLATION_ROOT" "$LEO_OFFICIAL_ORIGIN" <<'PYTHON'
+from pathlib import Path
+import shlex
+import sys
+root, origin = sys.argv[1:]
+# A timer survives reboots and shares the installer's nonblocking lock. The
+# supervisor runs only on the host; containers never receive the Docker socket.
+command = ' '.join(shlex.quote(value).replace('%', '%%') for value in ['/usr/bin/python3', str(Path(root) / 'host.py'), origin, '--update'])
+Path('/etc/systemd/system/leo-installation-update.service').write_text(f'''[Unit]
+Description=Leo approved installation update
+Requires=docker.service
+After=network-online.target docker.service
+Wants=network-online.target
+[Service]
+Type=oneshot
+Environment="LEO_INSTALLATION_ROOT={root.replace('%', '%%')}"
+ExecStart={command}
+TimeoutStartSec=1800
+''')
+Path('/etc/systemd/system/leo-installation-update.timer').write_text('''[Unit]
+Description=Check the official approved Leo installation release
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30
+[Install]
+WantedBy=timers.target
+''')
+PYTHON
+  systemctl daemon-reload
+  systemctl enable --now leo-installation-update.timer
 }
 
 main "$@"

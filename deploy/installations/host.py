@@ -2,6 +2,7 @@
 """One-machine installation. The manager owns claiming; containers have no Docker socket."""
 import argparse
 import fcntl
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -113,6 +114,10 @@ def compose(image, origin):
                 },
                 'volumes': ['./data:/data', './home:/home/node', './workspaces:/workspaces'],
                 'mem_limit': '4g', 'logging': logs,
+                'healthcheck': {
+                    'test': ['CMD', 'node', '-e', "fetch('http://127.0.0.1:4310/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"],
+                    'start_period': '120s', 'interval': '5s', 'timeout': '5s', 'retries': 24,
+                },
             },
             'runner': {
                 'image': image, 'user': '0:0', 'restart': 'unless-stopped',
@@ -264,10 +269,104 @@ exec docker compose --project-directory ROOT -f COMPOSE exec -T manager /usr/loc
         print('Leo installed but unclaimed. Copy a fresh command from Add an installation and rerun it.')
 
 
+def docker_output(args):
+    result = subprocess.run(['docker', *args], stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, timeout=30, check=False)
+    if result.returncode:
+        raise RuntimeError('Docker inspection failed; current image and data are retained.')
+    return json.loads(result.stdout)
+
+
+def update(origin):
+    origin = official_origin(origin)
+    config_file = ROOT / 'installation.json'
+    config = json.loads(config_file.read_text())
+    if config['origin'] != origin or not IMAGE.fullmatch(config['image']):
+        raise RuntimeError('Invalid saved installation configuration.')
+    docker = ['docker', 'compose', '--project-directory', str(ROOT), '-f', str(ROOT / 'compose.json')]
+
+    def lease(owner, release=False):
+        # Read the credential inside the manager, never in argv or diagnostics.
+        script = "const fs=require('fs');fetch('http://127.0.0.1:4310/internal/deployment-lease',{method:" + json.dumps('DELETE' if release else 'POST') + ",headers:{'Content-Type':'application/json',Authorization:'Bearer '+fs.readFileSync('/data/maintenance-token','utf8').trim()},body:JSON.stringify({owner:" + json.dumps(owner) + "})}).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        run(docker + ['exec', '-T', 'manager', 'node', '-e', script], timeout=10)
+
+    def inspect(image):
+        metadata = docker_output(['image', 'inspect', image])[0]
+        if image not in metadata.get('RepoDigests', []):
+            raise RuntimeError('Downloaded image digest does not match the approved release.')
+        runtime = next((value.removeprefix('APP_RUNTIME_ID=') for value in metadata['Config'].get('Env', [])
+                        if value.startswith('APP_RUNTIME_ID=')), '')
+        if not runtime:
+            raise RuntimeError('Approved image lacks runtime identity.')
+        return runtime
+
+    def launch(image):
+        runtime = inspect(image)
+        # The manager saves checkpoints before the runner is stopped. Persistent
+        # volumes and Garage are never recreated or removed by this supervisor.
+        run(docker + ['stop', '--timeout', '300', 'manager'], timeout=330)
+        run(docker + ['stop', '--timeout', '60', 'runner'], timeout=90)
+        atomic(ROOT / 'compose.json', json.dumps(compose(image, origin), indent=2))
+        run(docker + ['up', '-d', '--wait', '--wait-timeout', '240', '--pull', 'never', '--no-deps', 'runner', 'manager'], timeout=300)
+        health = "fetch('http://127.0.0.1:4310/health').then(r=>{if(!r.ok)throw Error();return r.json()}).then(v=>{if(v.status!=='ok'||v.runtimeId!==" + json.dumps(runtime) + ")process.exit(1)}).catch(()=>process.exit(1))"
+        # Reuse Compose's runner health deadline; the manager also checks the
+        # runner's runtime. An exited candidate fails immediately.
+        run(docker + ['exec', '-T', 'manager', 'node', '-e', health], timeout=10)
+
+    def finish(updated):
+        pending = config.pop('pendingImage')
+        if updated:
+            config.update(previousImage=config['image'], image=pending, failedImage=None)
+        else:
+            config['failedImage'] = pending
+        # Keep the lease acknowledgement durable, including a lost DELETE reply.
+        atomic(config_file, json.dumps(config))
+
+    if config.get('pendingImage'):
+        # A stopped supervisor never guesses whether the candidate was healthy.
+        # Recover the last committed approved image before accepting another.
+        launch(config['image'])
+        finish(False)
+    if config.get('leaseOwner'):
+        lease(config['leaseOwner'], release=True)
+        config.pop('leaseOwner')
+        atomic(config_file, json.dumps(config))
+        return
+
+    image = release(origin)
+    if image in (config['image'], config.get('failedImage')):
+        return
+
+    def pull(image):
+        run(['docker', 'pull', image], timeout=1200)
+        inspect(image)
+
+    def prepare():
+        owner = str(uuid.uuid4())
+        # Record before requesting the lease: its response can be lost.
+        config.update(pendingImage=image, leaseOwner=owner)
+        atomic(config_file, json.dumps(config))
+        lease(owner)
+        return True
+
+    module_path = Path(__file__).with_name('node-host.py')
+    if not module_path.exists():
+        module_path = Path(__file__).parent.parent / 'nodes/host.py'
+    spec = importlib.util.spec_from_file_location('node_supervisor', module_path)
+    supervisor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(supervisor)
+    updated = supervisor.update_image(config['image'], image, pull, prepare, launch)
+    finish(updated)
+    lease(config['leaseOwner'], release=True)
+    config.pop('leaseOwner')
+    atomic(config_file, json.dumps(config))
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('origin')
     parser.add_argument('--claim-code', default=os.environ.pop('LEO_INSTALLATION_CLAIM_CODE', ''))
+    parser.add_argument('--update', action='store_true')
     args = parser.parse_args()
     try:
         ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -276,7 +375,10 @@ if __name__ == '__main__':
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise RuntimeError('Another Leo installer is running. Wait for it to finish and retry.') from None
-            install(args.origin, args.claim_code)
+            if args.update:
+                update(args.origin)
+            else:
+                install(args.origin, args.claim_code)
     except RuntimeError as error:
         print(str(error), file=sys.stderr)
         sys.exit(1)
