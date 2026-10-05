@@ -62,3 +62,20 @@ compte toujours ces reprises dans la limite de trois, y compris sur une node
 distante : une erreur interne peut être déterministe. Au-delà, l’échec indique
 que le contrôleur a échoué plutôt qu’un code de sortie de l’agent. Les autres
 erreurs (validation, conflit, image invitée incompatible) gardent le code 1.
+
+## Complément du 2026-10-05 : ballon de pression à double seuil
+
+Le ballon de pression de l’ADR-0012 ne faisait que gonfler. Au-delà de 85 % du
+budget, chaque guest en marche rendait jusqu’à ne garder que 256 Mio
+disponibles, et rien ne lui rendait cette mémoire une fois la pression passée.
+Une VM de 34 Gio est ainsi restée plusieurs heures avec environ 2 Gio
+utilisables, sans cache de fichiers : une compilation Rust y a duré plus de
+deux heures. Comprimer un guest à ce point déplace aussi ses lectures vers le
+journal de l’hôte, dont le cache compte dans le même cgroup.
+
+Le ballon reste piloté depuis la surveillance du pool, avec deux seuils.
+Au-dessus de 85 %, un guest en marche rend au plus 256 Mio par tick, en gardant
+1 Gio disponible. Sous 75 %, le ballon de pression se dégonfle de 256 Mio par
+tick jusqu’à zéro. Entre les deux, sa taille ne change pas, pour éviter les
+oscillations. Une VM en pause, ou dont le ballon est en train de gonfler pour
+la rétention, n’est jamais dégonflée.
