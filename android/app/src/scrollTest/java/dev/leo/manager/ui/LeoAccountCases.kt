@@ -1,0 +1,157 @@
+package dev.leo.manager.ui
+
+import android.app.Application
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.test.*
+import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.test.core.app.ApplicationProvider
+import dev.leo.manager.data.*
+import kotlinx.coroutines.flow.first
+import okhttp3.mockwebserver.*
+import org.junit.Assert.*
+import org.junit.Rule
+
+abstract class LeoAccountCases {
+    @get:Rule val compose = createComposeRule()
+
+    fun emailCodeOpensTheOnlyInstallationAndLogoutRevokesTheAccount() {
+        MockWebServer().use { server ->
+            var signedIn = false
+            val accountSession =
+                """{"authenticated":true,"csrf":"account-csrf","account":{"id":"person","email":"member@example.test"},"installations":[{"id":"home","name":"Maison","role":"owner","online":true}]}"""
+            val paths = java.util.concurrent.CopyOnWriteArrayList<String>()
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val path = request.path.orEmpty().substringBefore('?')
+                        paths += path
+                        val result =
+                            when (path) {
+                                "/api/account/session" ->
+                                    if (signedIn) accountSession
+                                    else
+                                        """{"authenticated":false,"csrf":null,"account":null,"installations":[]}"""
+                                "/api/account/email-code" -> {
+                                    assertEquals(
+                                        server.url("/").toString().removeSuffix("/"),
+                                        request.getHeader("Origin"),
+                                    )
+                                    assertEquals(
+                                        """{"email":"member@example.test"}""",
+                                        request.body.readUtf8(),
+                                    )
+                                    "{}"
+                                }
+                                "/api/account/verify" -> {
+                                    val input = request.body.readUtf8()
+                                    if (!input.contains("123456"))
+                                        return MockResponse()
+                                            .setResponseCode(400)
+                                            .setBody("""{"error":"Code invalide ou expiré"}""")
+                                    signedIn = true
+                                    return MockResponse()
+                                        .addHeader(
+                                            "Set-Cookie",
+                                            "leo_session=account-fixture; Path=/; HttpOnly; Max-Age=3600",
+                                        )
+                                        .setBody(accountSession)
+                                }
+                                "/api/installations" ->
+                                    """[{"id":"home","name":"Maison","role":"owner","online":true}]"""
+                                "/api/account/logout" -> {
+                                    assertEquals("account-csrf", request.getHeader("X-CSRF-Token"))
+                                    assertEquals(
+                                        "leo_session=account-fixture",
+                                        request.getHeader("Cookie"),
+                                    )
+                                    signedIn = false
+                                    return MockResponse()
+                                        .addHeader("Set-Cookie", "leo_session=; Path=/; Max-Age=0")
+                                        .setBody("{}")
+                                }
+                                else -> {
+                                    if (!path.startsWith("/api/installations/home/api/"))
+                                        return MockResponse()
+                                            .setResponseCode(404)
+                                            .setBody("""{"error":"Not an official endpoint"}""")
+                                    assertEquals(
+                                        "leo_session=account-fixture",
+                                        request.getHeader("Cookie"),
+                                    )
+                                    when (path.removePrefix("/api/installations/home/api")) {
+                                        "/overview",
+                                        "/codex/models",
+                                        "/claude/models" -> "{}"
+                                        "/accounts" -> """{"accounts":[]}"""
+                                        "/chats/stream" ->
+                                            return MockResponse()
+                                                .setHeader("Content-Type", "text/event-stream")
+                                                .setBody(
+                                                    "event: snapshot\ndata: {\"state\":{\"chats\":[]},\"cursor\":0}\n\n"
+                                                )
+                                        else -> "[]"
+                                    }
+                                }
+                            }
+                        return MockResponse().setBody(result)
+                    }
+                }
+            server.start()
+            val vault = AccountFixtureVault()
+            val vm = LeoViewModel(ApplicationProvider.getApplicationContext<Application>(), vault)
+            compose.setContent {
+                LaunchedEffect(Unit) {
+                    vm.state.first { it.ready }
+                    vm.perform { connect(server.url("/").toString()) }
+                }
+                LeoTheme { LeoApp(vm = vm) }
+            }
+            compose.waitUntil(30000) { vm.state.value.ready && !vm.state.value.busy }
+            compose.onNodeWithText("Adresse du serveur").assertDoesNotExist()
+            compose.onNodeWithText("Mot de passe").assertDoesNotExist()
+            compose.onNodeWithText("Adresse e-mail").performTextInput("member@example.test")
+            compose.onNodeWithText("Recevoir un code").performClick()
+            compose.waitUntil(30000) {
+                compose
+                    .onAllNodesWithText("Code reçu par e-mail")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Code reçu par e-mail").performTextInput("000000")
+            compose.onNodeWithText("Se connecter").performClick()
+            compose.waitUntil(30000) {
+                compose
+                    .onAllNodesWithText("Code invalide ou expiré")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Code reçu par e-mail").performTextReplacement("123456")
+            compose.onNodeWithText("Se connecter").performClick()
+            compose.waitUntil(30000) {
+                compose.onAllNodesWithText("Maison · En ligne").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithContentDescription("Choisir une installation").assertDoesNotExist()
+            assertTrue(vault.read(server.url("/").toString()).orEmpty().contains("account-fixture"))
+            assertTrue(paths.contains("/api/installations/home/api/agents"))
+            compose.onNodeWithContentDescription("Atelier").performClick()
+            compose.onNodeWithText("Se déconnecter").performScrollTo().performClick()
+            compose.onNodeWithText("Se déconnecter ?").assertIsDisplayed()
+            compose.onNodeWithText("Confirmer").performClick()
+            compose.waitUntil(30000) {
+                compose.onAllNodesWithText("Adresse e-mail").fetchSemanticsNodes().isNotEmpty()
+            }
+            assertNull(vault.read(server.url("/").toString()))
+            assertTrue(paths.contains("/api/account/logout"))
+        }
+    }
+}
+
+private class AccountFixtureVault : SessionVault {
+    private var cookie: String? = null
+
+    override fun read(origin: String) = cookie
+
+    override fun write(origin: String, cookie: String?) {
+        this.cookie = cookie
+    }
+}

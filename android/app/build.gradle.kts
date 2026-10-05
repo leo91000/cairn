@@ -1,3 +1,5 @@
+import java.net.URI
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
@@ -15,6 +17,27 @@ require(versionParts[0] in 0..1999 && versionParts[1] in 0..999 && versionParts[
 val releaseCode =
     100_000_000 + versionParts[0] * 1_000_000 + versionParts[1] * 1000 + versionParts[2]
 val releaseKeystore = providers.environmentVariable("LEO_ANDROID_KEYSTORE").orNull
+val officialOrigin = providers.environmentVariable("LEO_OFFICIAL_ORIGIN").orElse("").get()
+
+if (officialOrigin.isNotEmpty()) {
+    val origin = URI(officialOrigin)
+    require(
+        origin.host != null &&
+            origin.rawUserInfo == null &&
+            origin.rawQuery == null &&
+            origin.rawFragment == null &&
+            origin.rawPath in listOf("", "/") &&
+            (origin.scheme == "https" ||
+                (origin.scheme == "http" &&
+                    origin.host in listOf("localhost", "127.0.0.1", "10.0.2.2")))
+    ) {
+        "LEO_OFFICIAL_ORIGIN must be an HTTPS origin (HTTP only on loopback for development)."
+    }
+}
+
+require(releaseKeystore == null || officialOrigin.startsWith("https://")) {
+    "Signed distribution requires the fixed HTTPS LEO_OFFICIAL_ORIGIN."
+}
 
 android {
     namespace = "dev.leo.manager"
@@ -25,6 +48,11 @@ android {
         targetSdk = 37
         versionCode = releaseCode
         versionName = releaseVersion
+        buildConfigField(
+            "String",
+            "OFFICIAL_SERVICE_ORIGIN",
+            "\"${officialOrigin.removeSuffix("/")}\"",
+        )
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildFeatures {

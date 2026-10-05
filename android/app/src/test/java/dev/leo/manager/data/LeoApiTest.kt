@@ -21,6 +21,44 @@ class MemoryVault : SessionVault {
 
 class LeoApiTest {
     @Test
+    fun `selected installation scopes reads writes files and streams but not account calls`() =
+        runTest {
+            MockWebServer().use { server ->
+                repeat(4) { server.enqueue(MockResponse().setBody("{}")) }
+                server.start()
+                val api = LeoApi(server.url("/"), MemoryVault(), installationId = "shared")
+                api.csrf = "account-csrf"
+                api.request("GET", "/chats?before=4")
+                assertEquals(
+                    "/api/installations/shared/api/chats?before=4",
+                    server.takeRequest().path,
+                )
+                api.request("POST", "/chats", body("prompt" to "Hello"))
+                val write = server.takeRequest()
+                assertEquals("/api/installations/shared/api/chats", write.path)
+                assertEquals("account-csrf", write.getHeader("X-CSRF-Token"))
+                api.request("GET", "/account/session")
+                assertEquals("/api/account/session", server.takeRequest().path)
+                assertEquals(
+                    "/api/installations/shared/api/chats/chat/stream?after=12",
+                    api.url("/chats/chat/stream?after=12").encodedPath +
+                        "?" +
+                        api.url("/chats/chat/stream?after=12").encodedQuery,
+                )
+                val file = java.io.File.createTempFile("leo-fixture", ".txt")
+                try {
+                    api.download("/runs/run/artifacts/file", file)
+                    assertEquals(
+                        "/api/installations/shared/api/runs/run/artifacts/file",
+                        server.takeRequest().path,
+                    )
+                } finally {
+                    file.delete()
+                }
+            }
+        }
+
+    @Test
     fun `email code uses the official origin and restores the account cookie`() = runTest {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody("{}"))
