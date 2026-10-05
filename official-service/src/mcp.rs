@@ -34,6 +34,7 @@ impl<'r> FromRow<'r, PgRow> for GrantListing {
 }
 
 struct AuthorizationCode {
+    grant_id: Option<String>,
     account_id: String,
     installation_id: String,
     client_id: String,
@@ -46,6 +47,7 @@ struct AuthorizationCode {
 impl<'r> FromRow<'r, PgRow> for AuthorizationCode {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx_core::error::Error> {
         Ok(Self {
+            grant_id: row.try_get("grant_id")?,
             account_id: row.try_get("account_id")?,
             installation_id: row.try_get("installation_id")?,
             client_id: row.try_get("client_id")?,
@@ -333,6 +335,28 @@ struct Authorization {
     scopes: Vec<String>,
 }
 
+fn redirect_matches(registered: &str, requested: &str) -> bool {
+    if registered == requested {
+        return true;
+    }
+    let (Ok(mut registered_url), Ok(requested_url)) =
+        (url::Url::parse(registered), url::Url::parse(requested))
+    else {
+        return false;
+    };
+    // RFC 8252: native apps obtain an ephemeral loopback port. Keep every
+    // other byte of the redirect fixed, and bind the code to the chosen URI.
+    if registered_url.scheme() != "http"
+        || !matches!(registered_url.host_str(), Some("127.0.0.1" | "[::1]"))
+    {
+        return false;
+    }
+    if registered_url.set_port(requested_url.port()).is_err() {
+        return false;
+    }
+    registered_url.as_str() == requested
+}
+
 async fn authorization(service: &Service, params: &Value) -> Result<Authorization, ApiError> {
     let client_id = text(params, "client_id");
     let client: Option<(String, Vec<String>)> =
@@ -355,7 +379,7 @@ async fn authorization(service: &Service, params: &Value) -> Result<Authorizatio
         && challenge
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
-    let valid_redirect = redirects.iter().any(|uri| uri == redirect);
+    let valid_redirect = redirects.iter().any(|uri| redirect_matches(uri, redirect));
     let valid_resource = resource.is_empty() || resource == format!("{}/mcp", service.origin);
 
     if !valid_redirect
@@ -366,7 +390,7 @@ async fn authorization(service: &Service, params: &Value) -> Result<Authorizatio
     {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
-            "Authorization requires an exact redirect, MCP resource and S256 PKCE",
+            "Authorization requires a registered redirect, MCP resource and S256 PKCE",
         ));
     }
 
@@ -456,7 +480,7 @@ pub(super) async fn consent(
         if owned.is_none() {
             return Err(ApiError(StatusCode::NOT_FOUND, "Installation not found"));
         }
-        query("DELETE FROM mcp_codes WHERE expires_at <= now()")
+        query("DELETE FROM mcp_codes WHERE grant_id IS NULL AND expires_at <= now()")
             .execute(&mut *transaction)
             .await?;
         query("INSERT INTO mcp_codes (digest, account_id, installation_id, client_id, redirect_uri, challenge, scopes, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, now() + interval '5 minutes')")
@@ -499,10 +523,19 @@ async fn exchange_tokens(service: &Service, params: &Value) -> Result<Response, 
     let mut transaction = service.pool.begin().await?;
     let (grant_id, scopes) = match text(params, "grant_type") {
         "authorization_code" => {
-            let code: Option<AuthorizationCode> = query_as("SELECT c.account_id, c.installation_id, c.client_id, c.redirect_uri, c.challenge, c.scopes, cl.name AS label FROM mcp_codes c JOIN mcp_clients cl ON cl.id = c.client_id JOIN installations i ON i.id = c.installation_id AND i.owner_id = c.account_id WHERE c.digest = $1 AND c.expires_at > now() FOR UPDATE OF c FOR SHARE OF i")
+            let code: Option<AuthorizationCode> = query_as("SELECT c.grant_id, c.account_id, c.installation_id, c.client_id, c.redirect_uri, c.challenge, c.scopes, cl.name AS label FROM mcp_codes c JOIN mcp_clients cl ON cl.id = c.client_id JOIN installations i ON i.id = c.installation_id AND i.owner_id = c.account_id WHERE c.digest = $1 AND c.grant_id IS NULL AND c.expires_at > now() FOR UPDATE OF c FOR SHARE OF i")
                 .bind(digest(text(params, "code"))).fetch_optional(&mut *transaction).await?;
-            let Some(code) = code else {
-                return Ok(OAuthError("invalid_grant").into_response());
+            let code = if let Some(code) = code {
+                code
+            } else {
+                // Lock the grant, not its immutable consumed code, so refresh
+                // replay and code replay use the same deletion lock order.
+                let used: Option<AuthorizationCode> = query_as("SELECT c.grant_id, c.account_id, c.installation_id, c.client_id, c.redirect_uri, c.challenge, c.scopes, cl.name AS label FROM mcp_codes c JOIN mcp_grants g ON g.id = c.grant_id JOIN mcp_clients cl ON cl.id = c.client_id JOIN installations i ON i.id = c.installation_id AND i.owner_id = c.account_id WHERE c.digest = $1 FOR UPDATE OF g FOR SHARE OF i")
+                    .bind(digest(text(params, "code"))).fetch_optional(&mut *transaction).await?;
+                let Some(used) = used else {
+                    return Ok(OAuthError("invalid_grant").into_response());
+                };
+                used
             };
             let verifier = text(params, "code_verifier");
             if text(params, "client_id") != code.client_id
@@ -516,13 +549,22 @@ async fn exchange_tokens(service: &Service, params: &Value) -> Result<Response, 
             {
                 return Ok(OAuthError("invalid_grant").into_response());
             }
-            query("DELETE FROM mcp_codes WHERE digest = $1")
-                .bind(digest(text(params, "code")))
-                .execute(&mut *transaction)
-                .await?;
+            if let Some(grant) = code.grant_id {
+                query("DELETE FROM mcp_grants WHERE id = $1")
+                    .bind(grant)
+                    .execute(&mut *transaction)
+                    .await?;
+                transaction.commit().await?;
+                return Ok(OAuthError("invalid_grant").into_response());
+            }
             let grant = random_token();
             query("INSERT INTO mcp_grants (id, account_id, installation_id, client_id, label, scopes, expires_at) VALUES ($1, $2, $3, $4, $5, $6, now() + interval '30 days')")
                 .bind(&grant).bind(code.account_id).bind(code.installation_id).bind(code.client_id).bind(code.label).bind(&code.scopes).execute(&mut *transaction).await?;
+            query("UPDATE mcp_codes SET grant_id = $2 WHERE digest = $1")
+                .bind(digest(text(params, "code")))
+                .bind(&grant)
+                .execute(&mut *transaction)
+                .await?;
             (grant, code.scopes)
         }
         "refresh_token" => {

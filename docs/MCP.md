@@ -56,7 +56,7 @@ An offline installation returns 503 without replaying a tool call.
 The application advertises protected-resource metadata at
 `/.well-known/oauth-protected-resource/mcp` and authorization-server metadata at
 `/.well-known/oauth-authorization-server`. OAuth supports public-client dynamic
-registration, authorization code flow, S256 PKCE, exact redirect validation,
+registration, authorization code flow, S256 PKCE, registered redirect validation,
 audience-bound opaque tokens, rotating refresh tokens, reuse detection, and
 revocation. Authorization codes expire after five minutes, access tokens after one
 hour, and refresh tokens after 30 days. Browser sessions are separate credentials.
@@ -153,3 +153,19 @@ Sources: [MCP v2 HTTP](https://ts.sdk.modelcontextprotocol.io/v2/serving/http.ht
 [Codex MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli),
 [MCP authorization](https://ts.sdk.modelcontextprotocol.io/v2/serving/authorization.html),
 [OpenAI authentication](https://developers.openai.com/plugins/build/auth).
+
+Native HTTP loopback redirects using `127.0.0.1` or `[::1]` may choose a different
+port when authorizing; the host, path and query stay fixed. The token exchange
+must use the exact URI chosen at authorization, including that port, as required
+by [RFC 8252 §7.3](https://www.rfc-editor.org/rfc/rfc8252#section-7.3).
+Other redirects, including HTTPS and localhost names, use exact matching.
+Custom URI schemes are not supported. The consent screen shows the redirect
+host and warns that dynamically registered client names are unverified; see
+[RFC 7591 §5](https://www.rfc-editor.org/rfc/rfc7591#section-5).
+
+Reusing an authorization code with its correct client, redirect and PKCE proof
+revokes every access and refresh token issued from that code, including rotated
+tokens ([RFC 6749 §4.1.2](https://www.rfc-editor.org/rfc/rfc6749#section-4.1.2)).
+Consumed code digests and bindings remain linked to their grant for detection
+beyond the initial five-minute code expiry; deleting the grant removes them.
+Wrong client or PKCE attempts cannot revoke another client's grant.

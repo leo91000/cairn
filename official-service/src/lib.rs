@@ -174,6 +174,13 @@ pub async fn router_with_relay(
                 include_str!("../migrations/202610050055_mcp.sql").into(),
                 false,
             ),
+            Migration::new(
+                202610050155,
+                "authorization code replay".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/202610050155_code_replay.sql").into(),
+                false,
+            ),
         ]),
         ..Migrator::DEFAULT
     };

@@ -229,3 +229,6 @@ The public file route also allows at most 30 requests per minute per TCP peer
 across installations, using the existing persisted rate-limit module. Forwarded
 IP headers supplied by clients are ignored; a reverse proxy shares this limit.
 Authenticated account routes use their own quotas.
+Used authorization code digests remain linked to the issued grant. A replay
+with the matching client, redirect and PKCE proof revokes the whole token family,
+including rotated refresh tokens. Revocation removes the consumed code too.
