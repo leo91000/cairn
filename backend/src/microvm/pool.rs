@@ -335,16 +335,18 @@ impl Pool {
                 },
                 () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
             }
+
             if Instant::now() >= next_image_gc {
                 next_image_gc = Instant::now() + Duration::from_secs(600);
                 if let Err(error) = super::images::collect(&self.state, &self.image).await {
                     tracing::warn!(message = %error.message, "Runtime image collection skipped");
                 }
             }
+
             if let Err(error) = self.maintain_retained().await {
                 tracing::warn!(message = %error.message, "Could not maintain idle conversation VMs");
             }
-            if let Err(error) = self.maintain_ready().await {
+            if let Err(error) = self.maintain_ready(Instant::now()).await {
                 tracing::warn!(message = %error.message, "Could not maintain prepared VM");
             }
             if let Ok((usage, _)) = self.usage().await
@@ -673,7 +675,7 @@ impl Pool {
         }
     }
 
-    async fn maintain_ready(self: &Arc<Self>) -> Result<()> {
+    async fn maintain_ready(self: &Arc<Self>, now: Instant) -> Result<()> {
         let _admission = self.admission.lock().await;
         if self.stop.is_cancelled() || !self.warm_enabled {
             return Ok(());
@@ -731,7 +733,7 @@ impl Pool {
         if self.stop.is_cancelled()
             || slots.ready.len() >= self.warm_capacity
             || slots.preparing.is_some()
-            || !slots.warming_allowed(Instant::now())
+            || !slots.warming_allowed(now)
         {
             return Ok(());
         }
@@ -1207,54 +1209,61 @@ mod tests {
     #[tokio::test]
     async fn repeated_preparation_errors_back_off_then_open_the_circuit() {
         let root = tempfile::tempdir().unwrap();
-        let pool = Pool::new(
-            root.path().into(),
-            root.path().into(),
-            CancellationToken::new(),
-            1,
-        )
-        .await
-        .unwrap();
+        let state = root.path().join("state");
+        let cgroup = root.path().join("cgroup");
+        std::fs::create_dir(&state).unwrap();
+        std::fs::create_dir(&cgroup).unwrap();
+        std::fs::write(root.path().join("memory.current"), "0").unwrap();
+        std::fs::write(root.path().join("memory.stat"), "inactive_file 0\n").unwrap();
+        std::fs::write(cgroup.join("memory.current"), "0").unwrap();
+        std::fs::write(cgroup.join("memory.max"), "max").unwrap();
+        std::fs::write(cgroup.join("cpu.max"), "max 100000").unwrap();
         let budget = Budget {
             slots: 1,
-            limits: crate::nodes::Resources {
-                cpu: 1,
-                memory_mi_b: 2048,
-                disk_mi_b: 32768,
-            },
+            limits: crate::nodes::Resources { cpu: 1, memory_mi_b: 2048, disk_mi_b: 32768 },
         };
+        std::fs::write(state.join(budget::FILE), serde_json::to_vec(&budget).unwrap()).unwrap();
+        // Invalid storage limits make each real background preparation fail
+        // deterministically before formatting a disk or starting a guest.
+        std::fs::write(state.join("storage-policy.json"), br#"{"reserveMiB":0}"#).unwrap();
+
+        let pool = Pool::new(state, root.path().into(), CancellationToken::new(), 1).await.unwrap();
+        pool.initialize(cgroup).await.unwrap();
+        let mut now = Instant::now();
         for seconds in [10, 20, 40, 80, 160, 3600] {
-            let mut reservation = pool.reserve(&cold_plan("anonymous")).await.unwrap();
-            // A deterministic infrastructure failure before a guest can boot.
-            // This traverses the same error/cleanup path as a rejected WarmCodex.
-            reservation.anonymous = Some(root.path().join("invalid-environment"));
-            reservation
-                .prepare(
-                    budget.clone(),
-                    crate::storage::policy::Policy::default(),
-                    CancellationToken::new(),
-                )
-                .await;
+            pool.maintain_ready(now).await.unwrap();
+            let mut done = pool.slots.lock().await.preparing.as_ref().expect("retry must start preparation").done.clone();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !*done.borrow() { done.changed().await.unwrap(); }
+            }).await.unwrap();
+
             let retry_after = pool.slots.lock().await.retry_after.unwrap();
             let remaining = retry_after.saturating_duration_since(Instant::now());
-            assert!(
-                remaining >= Duration::from_secs(seconds - 1),
-                "expected {seconds}s, got {remaining:?}"
-            );
+            assert!(remaining >= Duration::from_secs(seconds - 1), "expected {seconds}s, got {remaining:?}");
             assert_eq!(pool.health().await.occupied, 0);
+            pool.maintain_ready(retry_after - Duration::from_nanos(1)).await.unwrap();
+            assert!(!pool.health().await.preparing, "no anonymous start before {seconds}s deadline");
+            assert_eq!(pool.health().await.occupied, 0);
+            now = retry_after;
         }
-        {
-            let mut slots = pool.slots.lock().await;
-            assert!(slots.warm_circuit_open);
-            assert!(!slots.warming_allowed(Instant::now()));
-            let retry_at = slots.retry_after.unwrap();
-            assert!(slots.warming_allowed(retry_at));
-            assert_eq!(slots.warm_failures, 0);
-            assert!(!slots.warm_circuit_open);
-        }
-        // The circuit does not affect foreground admission.
+
+        // Foreground admission remains available while the circuit is open.
+        assert!(pool.slots.lock().await.warm_circuit_open);
         let mut live = pool.reserve(&cold_plan("live")).await.unwrap();
         live.finish().await;
+        assert!(pool.slots.lock().await.warm_circuit_open);
+
+        // Re-enter through the production gate at the cooldown deadline.
+        pool.maintain_ready(now).await.unwrap();
+        let mut done = pool.slots.lock().await.preparing.as_ref().unwrap().done.clone();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !*done.borrow() { done.changed().await.unwrap(); }
+        }).await.unwrap();
+        let slots = pool.slots.lock().await;
+        assert_eq!(slots.warm_failures, 1);
+        assert!(!slots.warm_circuit_open);
+        assert!(slots.retry_after.unwrap().saturating_duration_since(Instant::now()) >= Duration::from_secs(9));
+        drop(slots);
         pool.drain().await;
     }
 

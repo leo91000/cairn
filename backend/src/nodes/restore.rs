@@ -126,7 +126,7 @@ pub async fn controller(state: &Path, run: &str, value: Value) -> Result<Value> 
     if !super::valid_runtime(runtime) {
         return Err(Error::bad("Invalid runtime identity."));
     }
-    let _images = crate::microvm::images::CONTROL.read().await;
+    let _images = crate::microvm::images::IMAGE_LIFECYCLE.read().await;
     let image = state.join("images").join(runtime);
     if !image.join("root.ext4").exists() || !image.join("vmlinux").exists() {
         return Err(Error::conflict(

@@ -384,6 +384,7 @@ mod tests {
         let image = root.path().join("images/current");
         std::fs::create_dir_all(&image).unwrap();
         std::fs::write(image.join("root.ext4"), vec![7; 8192]).unwrap();
+
         assert_eq!(disk_bytes(root.path()).unwrap(), 8192);
     }
 

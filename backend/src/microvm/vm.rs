@@ -316,7 +316,7 @@ impl Vm {
     ) -> Result<Self> {
         // GC cannot unlink a runtime between selecting it, publishing the disk
         // pin and linking the immutable files into the new jail.
-        let _images = super::images::CONTROL.read().await;
+        let _images = super::images::IMAGE_LIFECYCLE.read().await;
         let run_id = disk_dir.file_name().and_then(|v| v.to_str()).unwrap_or("");
         let mut timing = Operation::new("vm_boot", run_id, "prepare");
         let resources = self::resources(resources)?;

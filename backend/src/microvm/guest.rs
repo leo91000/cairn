@@ -547,6 +547,7 @@ async fn prepare_anonymous_codex() -> Result<()> {
             "Only a fresh VM can initialize anonymous Codex.",
         ));
     }
+
     prepare_anonymous_codex_home(
         Path::new("/home/node/.codex"),
         Path::new("/opt/leo-codex-state"),
@@ -569,6 +570,7 @@ async fn prepare_anonymous_codex_home(
             "Only a fresh VM can initialize anonymous Codex.",
         ));
     }
+
     match tokio::fs::symlink_metadata(home).await {
         Ok(metadata) if metadata.is_dir() => {
             // This home belongs to the immutable image, not a conversation.
@@ -585,8 +587,10 @@ async fn prepare_anonymous_codex_home(
             ));
         }
     }
+
     tokio::fs::set_permissions(home, std::os::unix::fs::PermissionsExt::from_mode(0o700)).await?;
     std::os::unix::fs::chown(home, Some(uid), Some(gid))?;
+
     // This is the same account-free credential-store policy used by managed
     // homes. External tokens still arrive only through an active attempt relay.
     atomic_write(
@@ -596,6 +600,7 @@ async fn prepare_anonymous_codex_home(
     .await?;
     std::os::unix::fs::chown(home.join("config.toml"), Some(uid), Some(gid))?;
     atomic_write(&home.join("leo-managed-auth"), b"1").await?;
+
     let home = home.to_owned();
     let templates = templates.to_owned();
     tokio::task::spawn_blocking(move || super::codex_state::install(&home, &templates, uid, gid))
@@ -806,6 +811,7 @@ mod tests {
         .await
         .unwrap();
         let initialized = root.path().join("initialized");
+
         prepare_anonymous_codex_home(
             &home,
             &templates,
@@ -815,6 +821,7 @@ mod tests {
         )
         .await
         .unwrap();
+
         assert!(!home.join("auth.json").exists());
         assert_eq!(
             tokio::fs::read(home.join("state_5.sqlite")).await.unwrap(),
@@ -824,7 +831,9 @@ mod tests {
             tokio::fs::read(home.join("config.toml")).await.unwrap(),
             b"cli_auth_credentials_store = \"file\"\n"
         );
+
         tokio::fs::write(&initialized, b"1").await.unwrap();
+
         assert!(
             prepare_anonymous_codex_home(
                 &home,
