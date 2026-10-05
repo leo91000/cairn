@@ -313,10 +313,11 @@ Versions 1 and 2 retain their finite API and SSE contracts and never receive
 notification frames.
 
 Questions and node alerts enter a single installation outbox independently of
-registered browsers. The connector sends up to 32 pending events and retries
-unacknowledged events after ten seconds. Events expire after one hour; questions
-answered or cancelled before forwarding are dropped. Acknowledgement removes
-the installation event. Chat deletion retains its existing outbox cleanup.
+registered browsers. The connector keeps at most four notification events in
+flight, independently of API requests. Completion acknowledges whether delivery
+succeeded: success removes the installation event, while failure releases its
+slot and retries after ten seconds. Events expire after one hour; questions
+answered or cancelled before forwarding are dropped. Chat deletion retains its existing outbox cleanup.
 
 The event carries its chat and question or alert identifier; the authenticated
 tunnel supplies the installation identity. It never supplies account IDs or a
@@ -325,6 +326,8 @@ sends through its operator-configured web push adapter. Push delivery jobs have
 bounded concurrency and run separately from API traffic and heartbeat handling.
 The official service does not persist event payloads or recipient queues.
 
-Retry cooldowns are applied before selecting a bounded notification batch.
-An unavailable device therefore does not prevent newer events from reaching
-healthy devices while earlier events await retry.
+The connector rotates its cursor after each successful frame send, then applies
+retry cooldowns before selecting a bounded notification batch. Completion refills
+available slots immediately. Even a backlog larger than the cooldown window
+cannot keep newer events behind persistently failing deliveries or overflow the
+official service’s notification concurrency.

@@ -91,6 +91,7 @@ async fn web_push_devices_belong_to_the_signed_in_leo_account() {
 struct PushMailbox {
     messages: std::sync::Mutex<Vec<(String, Value)>>,
     failures_remaining: std::sync::atomic::AtomicUsize,
+    send_delay: std::time::Duration,
 }
 
 #[async_trait::async_trait]
@@ -104,6 +105,10 @@ impl leo_official_service::PushSender for PushMailbox {
         subscription: &leo_official_service::PushSubscription,
         payload: &Value,
     ) -> Result<(), leo_official_service::PushError> {
+        if !self.send_delay.is_zero() {
+            tokio::time::sleep(self.send_delay).await;
+        }
+
         if subscription.endpoint.ends_with("/expired") {
             return Err(leo_official_service::PushError::Gone);
         }
@@ -639,7 +644,10 @@ async fn transient_push_failures_retry_after_reconnection_and_expired_devices_ar
 
 #[tokio::test]
 async fn a_failing_device_does_not_starve_newer_events_on_healthy_devices() {
-    let mail = std::sync::Arc::new(PushMailbox::default());
+    let mail = std::sync::Arc::new(PushMailbox {
+        send_delay: std::time::Duration::from_millis(5),
+        ..PushMailbox::default()
+    });
     let mut relay = common::RelayedInstallation::with_push(mail.clone()).await;
     for endpoint in [
         "https://fcm.googleapis.com/unavailable",
@@ -649,7 +657,7 @@ async fn a_failing_device_does_not_starve_newer_events_on_healthy_devices() {
     }
     let (_, run) = chat_run(&relay).await;
     pause(&mut relay).await;
-    for index in 0..32 {
+    for index in 0..400 {
         question(&relay, &run, &format!("{index:064x}")).await;
     }
     let newest = "f".repeat(64);
@@ -659,7 +667,7 @@ async fn a_failing_device_does_not_starve_newer_events_on_healthy_devices() {
         .unwrap();
     resume(&mut relay, router);
 
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
             let newest_delivered = mail.messages.lock().unwrap().iter()
                 .any(|(_, payload)| payload["questionId"] == newest);

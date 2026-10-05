@@ -10,7 +10,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use leo_relay_protocol::{
-    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_PUBLIC_IN_FLIGHT,
+    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_PUBLIC_IN_FLIGHT, MAX_NOTIFICATION_IN_FLIGHT,
     MAX_STREAM_CHUNK, REQUEST_TIMEOUT, Role,
 };
 use sqlx_core::query_as::query_as;
@@ -374,11 +374,9 @@ async fn serve_socket(
             Some(completed) = notification_jobs.join_next(), if !notification_jobs.is_empty() => {
                 if let Ok((id, delivered)) = completed {
                     notification_ids.remove(&id);
-                    if delivered {
-                        let frame = serde_json::to_string(&Frame::NotificationAck { id }).unwrap();
-                        if socket.send(Message::Text(frame.into())).await.is_err() {
-                            break;
-                        }
+                    let frame = serde_json::to_string(&Frame::NotificationAck { id, delivered }).unwrap();
+                    if socket.send(Message::Text(frame.into())).await.is_err() {
+                        break;
                     }
                 }
             }
@@ -495,7 +493,7 @@ async fn serve_socket(
                         };
                         let cancel = match frame {
                             Frame::Notification(event) if version >= 3 => {
-                                if notification_jobs.len() < 4 && notification_ids.insert(event.id.clone()) {
+                                if notification_jobs.len() < MAX_NOTIFICATION_IN_FLIGHT && notification_ids.insert(event.id.clone()) {
                                     let service = service.clone();
                                     let installation = installation.clone();
                                     let token_digest = token_digest.clone();

@@ -53,19 +53,26 @@ pub fn enqueue_alert(db: &Db<'_>, alert: &Value) -> Result<()> {
 pub async fn pending(
     service: &Service,
     recently_sent: HashSet<String>,
+    after: String,
 ) -> Result<Vec<NotificationEvent>> {
     service
         .store
         .transaction(move |db| {
             let mut events = Vec::new();
-            for (key, value) in db.keys("push-outbox:")? {
+            let mut pending = db.keys("push-outbox:")?;
+            pending.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            let after_key = format!("push-outbox:{after}");
+            let start = pending.partition_point(|(key, _)| key <= &after_key);
+            pending.rotate_left(start);
+
+            for (key, value) in pending {
                 // Old local deliveries are not registrations on the official service.
                 let Ok(event) = serde_json::from_value::<NotificationEvent>(value) else {
                     db.delete(&key)?;
                     continue;
                 };
-                // Apply the retry cooldown before the batch limit so failed deliveries
-                // cannot keep newer events behind the first batch indefinitely.
+                // Rotate before applying cooldowns and the limit so every pending
+                // event gets a turn even when earlier deliveries keep failing.
                 if recently_sent.contains(&event.id) {
                     continue;
                 }

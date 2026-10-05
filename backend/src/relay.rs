@@ -12,13 +12,13 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use leo_relay_protocol::{
-    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_PUBLIC_IN_FLIGHT,
+    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_PUBLIC_IN_FLIGHT, MAX_NOTIFICATION_IN_FLIGHT,
     MAX_STREAM_CHUNK, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, REQUEST_TIMEOUT, Role,
     SUPPORTED_VERSIONS,
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::SocketAddr,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -525,20 +525,50 @@ async fn connected(
     let mut notifications = tokio::time::interval(Duration::from_secs(1));
     notifications.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut sent = HashMap::<String, tokio::time::Instant>::new();
+    let mut notification_in_flight = HashSet::new();
+    let mut notification_cursor = String::new();
+    let mut poll_notifications = true;
     loop {
-        tokio::select! {
-            _ = notifications.tick(), if version >= 3 => {
-                let recently_sent = sent.iter()
-                    .filter(|(_, at)| at.elapsed() < Duration::from_secs(10))
+        if version >= 3 && poll_notifications {
+            poll_notifications = false;
+            let available = MAX_NOTIFICATION_IN_FLIGHT - notification_in_flight.len();
+            if available > 0 {
+                let recently_sent = sent
+                    .iter()
+                    .filter(|(id, at)| {
+                        notification_in_flight.contains(*id)
+                            || at.elapsed() < Duration::from_secs(10)
+                    })
                     .map(|(id, _)| id.clone())
                     .collect();
+                let events = crate::notifications::pending(
+                    service,
+                    recently_sent,
+                    notification_cursor.clone(),
+                )
+                .await?;
 
-                for event in crate::notifications::pending(service, recently_sent).await? {
-                    sent.insert(event.id.clone(), tokio::time::Instant::now());
-                    socket.send(Message::Text(serde_json::to_string(&Frame::Notification(event))?.into()))
-                        .await.map_err(Error::internal)?;
+                for event in events.into_iter().take(available) {
+                    let id = event.id.clone();
+                    socket
+                        .send(Message::Text(
+                            serde_json::to_string(&Frame::Notification(event))?.into(),
+                        ))
+                        .await
+                        .map_err(Error::internal)?;
+                    notification_cursor = id.clone();
+                    notification_in_flight.insert(id.clone());
+                    sent.insert(id, tokio::time::Instant::now());
                 }
-                sent.retain(|_, at| at.elapsed() < Duration::from_secs(60));
+                sent.retain(|id, at| {
+                    notification_in_flight.contains(id) || at.elapsed() < Duration::from_secs(60)
+                });
+            }
+        }
+
+        tokio::select! {
+            _ = notifications.tick(), if version >= 3 => {
+                poll_notifications = true;
             }
             result = requests.join_next_with_id(), if !requests.is_empty() => {
                 let completed = result
@@ -589,9 +619,15 @@ async fn connected(
                                 }
                                 continue;
                             }
-                            Frame::NotificationAck { id } if version >= 3 => {
-                                if sent.remove(&id).is_some() {
-                                    crate::notifications::acknowledge(service, &id).await?;
+                            Frame::NotificationAck { id, delivered } if version >= 3 => {
+                                if notification_in_flight.remove(&id) {
+                                    if delivered {
+                                        sent.remove(&id);
+                                        crate::notifications::acknowledge(service, &id).await?;
+                                    } else {
+                                        sent.insert(id, tokio::time::Instant::now());
+                                    }
+                                    poll_notifications = true;
                                 }
                                 continue;
                             }
