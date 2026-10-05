@@ -60,7 +60,7 @@ async fn recipient_can_use_the_emailed_code_when_someone_else_requested_it_first
 
 #[tokio::test]
 async fn exhausting_an_attackers_challenge_preserves_the_recipients_attempts() {
-    let app = Fixture::new().await;
+    let app = Fixture::with_network(Default::default(), 5, "127.0.0.1".parse().unwrap()).await;
     let attacker: Value = app
         .post(
             "/api/account/email-code",
@@ -85,6 +85,23 @@ async fn exhausting_an_attackers_challenge_preserves_the_recipients_attempts() {
             StatusCode::UNAUTHORIZED
         );
     }
+    // Replaying the dead challenge cannot spend the shared fifty-guess budget.
+    for index in 0..50 {
+        let response = app
+            .client
+            .post(format!("{}/api/account/verify", app.url))
+            .header("origin", &app.url)
+            .header("x-forwarded-for", format!("192.0.2.{}", index + 1))
+            .json(&json!({
+                "challenge": attacker["challenge"],
+                "code": "wrong",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
     let response = app
         .post(
             "/api/account/email-code",
@@ -119,6 +136,139 @@ async fn exhausting_an_attackers_challenge_preserves_the_recipients_attempts() {
         .status(),
         StatusCode::OK
     );
+    app.close().await;
+}
+
+#[tokio::test]
+async fn a_globally_exhausted_code_is_replaced_within_the_address_delivery_caps() {
+    let app = Fixture::with_network(Default::default(), 5, "127.0.0.1".parse().unwrap()).await;
+    let email = "global-budget@example.test";
+    let recipient: Value = app
+        .post("/api/account/email-code", json!({ "email": email }))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let mut challenges = Vec::new();
+    for index in 0..10 {
+        let peer = format!("192.0.2.{}", index + 1);
+        let response = app
+            .client
+            .post(format!("{}/api/account/email-code", app.url))
+            .header("origin", &app.url)
+            .header("x-forwarded-for", &peer)
+            .json(&json!({ "email": email }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let challenge: Value = response.json().await.unwrap();
+        challenges.push(challenge["challenge"].clone());
+        // Distinct real clients behind a trusted proxy still share the code ceiling.
+        for _ in 0..5 {
+            assert_eq!(
+                app.client
+                    .post(format!("{}/api/account/verify", app.url))
+                    .header("origin", &app.url)
+                    .header("x-forwarded-for", &peer)
+                    .json(&json!({
+                        "challenge": challenge["challenge"],
+                        "code": "wrong",
+                    }))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+    }
+    let old_code = app.mail.0.lock().unwrap()[0].1.clone();
+    // Even an unused challenge cannot bypass fifty failed guesses on the code.
+    assert_eq!(
+        app.post(
+            "/api/account/verify",
+            json!({
+                "challenge": recipient["challenge"],
+                "code": old_code,
+            })
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    // Never issue a challenge for the dead code, even during the delivery cooldown.
+    assert_eq!(
+        app.post("/api/account/email-code", json!({ "email": email }))
+            .await
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(app.mail.0.lock().unwrap().len(), 1);
+    query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key LIKE 'email:%'")
+        .execute(&app.pool).await.unwrap();
+    let response = app
+        .post("/api/account/email-code", json!({ "email": email }))
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let fresh: Value = response.json().await.unwrap();
+    assert_eq!(app.mail.0.lock().unwrap().len(), 2);
+    for challenge in &challenges {
+        assert_eq!(
+            app.post(
+                "/api/account/verify",
+                json!({
+                    "challenge": challenge,
+                    "code": old_code,
+                })
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let new_code = app.mail.0.lock().unwrap()[1].1.clone();
+    assert_eq!(
+        app.post(
+            "/api/account/verify",
+            json!({
+                "challenge": fresh["challenge"],
+                "code": new_code,
+            })
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    // Renewal spent the same hourly delivery budget as any other new code.
+    // The first two deliveries leave four, rather than resetting that budget.
+    for _ in 0..4 {
+        query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key LIKE 'email:%' OR key LIKE 'delivery:%'")
+            .execute(&app.pool).await.unwrap();
+        query("UPDATE email_codes SET expires_at = now() - interval '1 second'")
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            app.post("/api/account/email-code", json!({ "email": email }))
+                .await
+                .status(),
+            StatusCode::ACCEPTED
+        );
+    }
+    query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key LIKE 'email:%' OR key LIKE 'delivery:%'")
+        .execute(&app.pool).await.unwrap();
+    query("UPDATE email_codes SET expires_at = now() - interval '1 second'")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        app.post("/api/account/email-code", json!({ "email": email }))
+            .await
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(app.mail.0.lock().unwrap().len(), 6);
     app.close().await;
 }
 

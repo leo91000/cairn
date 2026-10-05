@@ -73,12 +73,22 @@ Trust only your controlled proxy hops; headers from other peers are ignored.
 Missing or malformed trusted suffixes fall back to the TCP peer. Do not expose
 Postgres or the development mailbox publicly.
 
-Codes expire after 10 minutes and allow five verification attempts. Requesting
-another code while one is unexpired returns a fresh challenge for the same mailed
-code, without sending another email. All challenges share its five attempts and
-original expiration; consuming the code invalidates every challenge. This lets
-the mailbox owner sign in even if a third party requested the code first, including
-during the delivery cooldown or after the address's delivery budget is exhausted.
+Codes expire after 10 minutes and allow five failed verification attempts per
+challenge, with a shared ceiling of fifty failures per mailed code. An exhausted
+challenge is refused without spending other challenges' attempts. Requesting
+another code while an unexpired code still has a global budget returns a fresh
+challenge for the same mailed code, without sending another email or resetting
+its original expiration or global failures. Consuming the code invalidates every
+challenge. This lets the mailbox owner sign in if a third party requested the
+code first or exhausted their own challenge, including during the delivery
+cooldown or after the address's delivery budget is exhausted.
+At fifty failures, the code is unusable for every challenge; the next request must
+send a new code within the same per-address delivery budgets. During the cooldown
+or after those budgets are exhausted it returns 429, never a challenge for a dead
+code. A distributed attacker can still exhaust global codes and the address's
+delivery budgets to deny email sign-in temporarily; passkeys and OAuth remain
+available. Already issued challenges preserve their consumed attempts during the
+per-challenge migration, and code failures count toward the new global ceiling.
 Existing codes retain their original challenges when the migration is applied.
 Code requests are limited to ten per minute per resolved client. New email deliveries
 are limited to one per minute per normalized email;

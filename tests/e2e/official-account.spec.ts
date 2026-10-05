@@ -4,7 +4,7 @@ import { createServer } from 'node:http'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
 
-test('email sign-in works after a third-party code request, persists and signs out', async ({ page, context, request }) => {
+test('email sign-in works after a third party exhausts their challenge, persists and signs out', async ({ page, context, request }) => {
   const messages: Array<{ to: string[], text: string }> = []
   const mail = createServer(async (request, response) => {
     let body = ''
@@ -57,6 +57,15 @@ test('email sign-in works after a third-party code request, persists and signs o
       data: { email },
     })
     expect(unsolicited.status()).toBe(202)
+    const attacker = await unsolicited.json()
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const rejected = await request.post(`${url}/api/account/verify`, {
+        headers: { origin: url },
+        data: { challenge: attacker.challenge, code: 'wrong' },
+      })
+      expect(rejected.status()).toBe(401)
+    }
+
     await expect.poll(() => messages.length).toBe(1)
 
     await page.goto(url)

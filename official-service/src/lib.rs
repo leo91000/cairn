@@ -270,6 +270,9 @@ pub async fn router_with_network(
         )))
 }
 
+const EMAIL_CHALLENGE_ATTEMPT_LIMIT: i32 = 5;
+const EMAIL_CODE_ATTEMPT_LIMIT: i32 = 50;
+
 fn random_token() -> String {
     let mut bytes = [0; 32];
     rand::rng().fill_bytes(&mut bytes);
@@ -328,14 +331,16 @@ async fn request_code(
         .execute(&mut *transaction)
         .await?;
     let pending: Option<(String,)> = query_as(
-        "SELECT challenge FROM email_codes WHERE email = $1 AND expires_at > now() LIMIT 1 FOR UPDATE",
+        "SELECT challenge FROM email_codes WHERE email = $1 AND expires_at > now() AND attempts < $2 LIMIT 1 FOR UPDATE",
     )
     .bind(&email)
+    .bind(EMAIL_CODE_ATTEMPT_LIMIT)
     .fetch_optional(&mut *transaction)
     .await?;
     if let Some((code_challenge,)) = pending {
         // Give the mailbox owner a usable proof even if a third party requested
-        // the code first. Every challenge shares the original attempts/deadline.
+        // the code first. Each challenge gets its own attempts and keeps the
+        // original deadline.
         query("INSERT INTO email_code_challenges (challenge, code_challenge) VALUES ($1, $2)")
             .bind(&challenge)
             .bind(&code_challenge)
@@ -416,17 +421,31 @@ async fn verify_code(
     consume_limit(&service.pool, &format!("verification:{}", peer.ip()), 30).await?;
 
     let mut transaction = service.pool.begin().await?;
-    let row: Option<(String, String, String, bool, i32)> = query_as("SELECT e.challenge, e.email, e.code_digest, e.expires_at > now(), e.attempts FROM email_codes e JOIN email_code_challenges c ON c.code_challenge = e.challenge WHERE c.challenge = $1 FOR UPDATE OF e")
+    let row: Option<(String, String, String, bool, i32, i32)> = query_as("SELECT e.challenge, e.email, e.code_digest, e.expires_at > now(), e.attempts, c.attempts FROM email_codes e JOIN email_code_challenges c ON c.code_challenge = e.challenge WHERE c.challenge = $1 FOR UPDATE OF e, c")
         .bind(&input.challenge).fetch_optional(&mut *transaction).await?;
 
     let invalid = || ApiError(StatusCode::UNAUTHORIZED, "Invalid or expired code");
-    let Some((code_challenge, email, expected, unexpired, attempts)) = row else {
+    let Some((code_challenge, email, expected, unexpired, code_attempts, challenge_attempts)) = row
+    else {
         return Err(invalid());
     };
 
+    if !unexpired
+        || challenge_attempts >= EMAIL_CHALLENGE_ATTEMPT_LIMIT
+        || code_attempts >= EMAIL_CODE_ATTEMPT_LIMIT
+    {
+        return Err(invalid());
+    }
+
     let supplied = digest(&format!("{code_challenge}:{}", input.code));
-    if !unexpired || attempts >= 5 || !bool::from(expected.as_bytes().ct_eq(supplied.as_bytes())) {
-        query("UPDATE email_codes SET attempts = LEAST(attempts + 1, 5) WHERE challenge = $1")
+    if !bool::from(expected.as_bytes().ct_eq(supplied.as_bytes())) {
+        // Locked code and challenge rows bound guesses across concurrent clients.
+        // An already exhausted challenge never burns someone else's budget.
+        query("UPDATE email_code_challenges SET attempts = attempts + 1 WHERE challenge = $1")
+            .bind(&input.challenge)
+            .execute(&mut *transaction)
+            .await?;
+        query("UPDATE email_codes SET attempts = attempts + 1 WHERE challenge = $1")
             .bind(&code_challenge)
             .execute(&mut *transaction)
             .await?;

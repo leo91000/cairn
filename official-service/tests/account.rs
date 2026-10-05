@@ -222,7 +222,7 @@ async fn logout_requires_origin_and_csrf_and_revokes_the_server_session() {
 }
 
 #[tokio::test]
-async fn five_failed_attempts_invalidate_a_code_and_success_is_single_use() {
+async fn five_failed_attempts_invalidate_a_challenge_and_success_is_single_use() {
     let app = Fixture::new().await;
     let (challenge, code) = app.code("attempts@example.test").await;
     for _ in 0..5 {
