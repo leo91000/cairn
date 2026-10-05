@@ -143,7 +143,10 @@ class LeoApi(val origin: HttpUrl, vault: SessionVault, client: OkHttpClient = Ok
     }
 
     internal fun builder(path: String) =
-        Request.Builder().url(url(path)).header("X-CSRF-Token", csrf)
+        Request.Builder()
+            .url(url(path))
+            .header("Origin", origin.toString().removeSuffix("/"))
+            .header("X-CSRF-Token", csrf)
 
     suspend inline fun <reified T> get(path: String): T =
         wireJson.decodeFromString(request("GET", path))
