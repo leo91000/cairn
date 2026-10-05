@@ -1148,6 +1148,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeated_preparation_errors_back_off_then_open_the_circuit() {
+        let root = tempfile::tempdir().unwrap();
+        let pool = Pool::new(
+            root.path().into(),
+            root.path().into(),
+            CancellationToken::new(),
+            1,
+        )
+        .await
+        .unwrap();
+        let budget = Budget {
+            slots: 1,
+            limits: crate::nodes::Resources {
+                cpu: 1,
+                memory_mi_b: 2048,
+                disk_mi_b: 32768,
+            },
+        };
+        for seconds in [10, 20, 40, 80, 160, 3600] {
+            let mut reservation = pool.reserve(&cold_plan("anonymous")).await.unwrap();
+            // A deterministic infrastructure failure before a guest can boot.
+            // This traverses the same error/cleanup path as a rejected WarmCodex.
+            reservation.anonymous = Some(root.path().join("invalid-environment"));
+            reservation
+                .prepare(
+                    budget.clone(),
+                    crate::storage::policy::Policy::default(),
+                    CancellationToken::new(),
+                )
+                .await;
+            let retry_after = pool.slots.lock().await.retry_after.unwrap();
+            let remaining = retry_after.saturating_duration_since(Instant::now());
+            assert!(
+                remaining >= Duration::from_secs(seconds - 1),
+                "expected {seconds}s, got {remaining:?}"
+            );
+            assert_eq!(pool.health().await.occupied, 0);
+        }
+        // The circuit does not affect foreground admission.
+        let mut live = pool.reserve(&cold_plan("live")).await.unwrap();
+        live.finish().await;
+        pool.drain().await;
+    }
+
+    #[tokio::test]
     async fn admission_and_explicit_eviction_preserve_unacknowledged_journals() {
         use crate::storage::Disk;
         let root = tempfile::tempdir().unwrap();

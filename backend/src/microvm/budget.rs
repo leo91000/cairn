@@ -376,6 +376,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn disk_budget_counts_runtime_images() {
+        let root = tempfile::tempdir().unwrap();
+        let image = root.path().join("images/current");
+        std::fs::create_dir_all(&image).unwrap();
+        std::fs::write(image.join("root.ext4"), vec![7; 8192]).unwrap();
+        assert_eq!(disk_bytes(root.path()).unwrap(), 8192);
+    }
+
+    #[test]
     fn guest_memory_leaves_controller_headroom_without_dividing_by_slots() {
         let mut budget = Budget {
             slots: 1,
