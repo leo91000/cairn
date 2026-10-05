@@ -32,8 +32,6 @@ struct Fixture {
     _root: TempDir,
     s: Arc<Service>,
     app: Router,
-    cookie: String,
-    csrf: String,
     requests: mpsc::UnboundedReceiver<(Value, Reply)>,
     provider: tokio::task::JoinHandle<()>,
     endpoint: String,
@@ -73,7 +71,6 @@ impl Fixture {
             "publicUrl": "http://localhost:4310",
             "host": "127.0.0.1",
             "port": 0,
-            "setupToken": "test",
             "codexBin": codex,
             "ghBin": "gh",
             "concurrency": 1,
@@ -100,36 +97,10 @@ impl Fixture {
             s.accounts.refresh(&s, text(&account, "id")).await.unwrap();
         }
         let app = crate::http::router(s.clone()).await.unwrap();
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/setup")
-                    .header("host", "localhost:4310")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        json!({ "setupToken": "test", "password": "portrait-test-password" })
-                            .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let cookie = response.headers()["set-cookie"]
-            .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_owned();
-        let csrf = body(response).await["csrf"].as_str().unwrap().to_owned();
         Self {
             _root: root,
             s,
             app,
-            cookie,
-            csrf,
             requests,
             provider,
             endpoint,
@@ -144,8 +115,10 @@ impl Fixture {
                     .method(method)
                     .uri(path)
                     .header("host", "localhost:4310")
-                    .header("cookie", &self.cookie)
-                    .header("x-csrf-token", &self.csrf)
+                    .extension(crate::auth::InstallationIdentity::trusted(
+                        crate::auth::InstallationRole::Owner,
+                        "avatar-fixture",
+                    ))
                     .header("content-type", "application/json")
                     .body(Body::from(bytes))
                     .unwrap(),
@@ -283,7 +256,10 @@ async fn creation_is_nonblocking_and_portrait_survives_edits_with_private_authen
                 .method("PUT")
                 .uri(url)
                 .header("host", "localhost:4310")
-                .header("cookie", &f.cookie)
+                .extension(crate::auth::InstallationIdentity::trusted(
+                    crate::auth::InstallationRole::Member,
+                    "avatar-member-fixture",
+                ))
                 .body(Body::from(png([0, 0, 0])))
                 .unwrap(),
         )

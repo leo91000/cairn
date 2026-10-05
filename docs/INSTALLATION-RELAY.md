@@ -2,16 +2,15 @@
 
 The official account API and its Postgres database remain those introduced in
 ticket #46. Sign in to the official web app, choose **Add an installation**, and use the
-claim code within ten minutes. The installer and fallback `leo claim` command
-are separate tickets (#51 and #50).
+claim code within ten minutes. The installer remains ticket #51. The fallback `leo claim` command is described below.
 
 For a manager deployment, provide `LEO_OFFICIAL_ORIGIN`,
 `LEO_INSTALLATION_CLAIM_CODE`, and optionally `LEO_INSTALLATION_NAME` in its
 private environment. The origin must be HTTPS; HTTP is permitted on loopback
 for development. The existing manager data and agent-home directories must
 already exist. Start the usual `leo serve` command. No public installation URL
-or inbound connection is needed by the relay; existing local access is retained
-until #50. Remove the claim code from deployment configuration after success.
+or inbound browser connection is needed. Installation browser routes accept only
+the trusted in-process identity from the authenticated relay. Remove the claim code from deployment configuration after success.
 If a claim is refused, misconfigured or cannot reach the official service, the
 manager logs the failure and still starts without a relay identity. Obtain a
 new code and restart after fixing connectivity. A lost claim response can mean
@@ -21,9 +20,58 @@ The installation stores its identity in
 `DATA_DIR/installation-relay/identity.json` (directory mode 0700, file mode 0600).
 The file contains the official origin, installation ID and bearer credential.
 Do not copy it into logs or source control. Later starts use that file and need
-no new claim code. A second claim never overwrites an existing identity.
+no new claim code. Startup never overwrites an existing identity; only an
+approved `leo claim` can replace it after detachment.
 Postgres stores only a hash of the credential and claim code. Consuming a claim
 code and attaching the installation to its owner form one transaction.
+
+## Fallback claim and detachment
+
+Run `leo claim` on the installation with its usual `DATA_DIR` and
+`LEO_OFFICIAL_ORIGIN` (the latter defaults to the origin of an existing private
+identity). It prints the official `/claim` URL and a temporary code. Sign in to
+that official app and enter the code under **Device claim code**, then choose
+**Review installation**. Compare its name and public fingerprint with the
+fingerprint printed by `leo claim` on a machine you control before choosing
+**Claim this installation**. Cancel if they differ or someone sent you the code.
+The name is supplied by the machine (or the existing installation record during
+recovery), not a verified hostname. The fingerprint identifies the installation
+record; it is not a hardware attestation. The machine will hold your conversations,
+coding-agent accounts and secrets. Reviewing or cancelling does not approve it. Codes expire in ten minutes; the CLI
+polls every two seconds and can be cancelled without deleting its old identity.
+The CLI never prints the machine token or polling secret, and writes the new
+identity atomically with mode 0600 only after approval. Concurrent CLI claims
+against the same identity directory are refused. Restart the manager afterward;
+its running connector deliberately does not reload credentials from disk.
+
+The machine starts `/api/relay/device-claim/start` with its name, protocol and,
+when present, private installation identity. Only a valid machine token can
+reclaim that record. An owned installation refuses reclamation. The browser first reviews through `/api/installations/device-claim/preview`
+with its official session, origin and CSRF token. It receives the name, fingerprint
+and a temporary confirmation proof bound to this claim and account. Explicit
+confirmation through `/api/installations/device-claim` requires that proof;
+`/api/relay/device-claim/poll` then attaches the owner and rotates the token in one
+transaction. A fresh start keeps only an expiring challenge, reserving no permanent
+installation row until approval is collected. Starting a subsequent claim deletes
+expired challenges. Recovery always preserves the existing installation row. Codes and polling secrets are stored only
+as digests, expire after ten minutes and are single-use. Start, approval and
+poll operations use persisted per-peer/account rate limits. Starting another
+claim for the same installation invalidates its previous pending challenge.
+
+Choose **Detach installation** inside the installation and confirm explicitly.
+The owner is cleared and the active relay is cut; local data and the official
+installation row remain. Deleting its owning Leo account also clears ownership
+rather than cascading deletion of the installation. Active relays recheck the
+identity every second, covering account deletion and the upgrade/detach race.
+The digest of the private proof used to start recovery is retained separately
+from the current tunnel credential. If its successful response is lost before the
+file is saved, detach in the app and retry with that file to recover the same ID.
+This proof remains solely for reclamation of an unowned record; it cannot connect
+while unclaimed. Successful reclamation rotates it and keeps the same ID.
+
+For deployment migration, interrupted claims and recovery after losing the
+private identity file, follow [DEPLOYMENT.md](DEPLOYMENT.md). Execution nodes
+continue to use their authenticated direct manager channel.
 
 The installation initiates a TLS WebSocket at
 `/api/relay/{installation}/connect` with its bearer credential. `Hello` offers
@@ -47,7 +95,8 @@ origin and CSRF token. A foreign or unknown installation returns 404. Local
 browser authentication routes are excluded from the tunnel. Offline requests
 return 503; lost connections fail pending requests, without replaying writes.
 The connector retries with exponential backoff from 250 ms to 15 seconds;
-WebSocket ping/pong detects dead peers. Existing agent execution is independent
+WebSocket ping/pong detects dead peers. A revoked identity (HTTP 401) stops
+reconnection; run `leo claim`, approve it, and restart the manager. Existing agent execution is independent
 of the connector's availability.
 
 Finite request and response bodies are limited to 8 MB, with at most 32 requests

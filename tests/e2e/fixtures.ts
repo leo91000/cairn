@@ -62,7 +62,7 @@ export const test = base.extend<object, { workspace: Workspace }>({
     // A developer may rebuild Cargo while this fixture is active. Keep the
     // supervisor's current executable stable for the entire browser journey.
     const binary = path.join(directory, 'leo')
-    await copyFile(process.env.LEO_TEST_BINARY || path.resolve('target/debug/leo'), binary)
+    await copyFile(process.env.LEO_TEST_BINARY || path.resolve('target/debug/examples/browser_fixture'), binary)
     let log = ''
     const start = () => {
       const child = spawn(binary, [], { env: { ...process.env, LEO_CONFIG: configuration, LEO_FIXTURE_USAGE: usageFile }, stdio: ['ignore', 'pipe', 'pipe'] })

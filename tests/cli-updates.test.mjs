@@ -198,3 +198,23 @@ describe('global toolkit update selection', () => {
     expect(() => toolkitUpdate({ installedToolkit }, { ...available, mise: '2026.9.5-beta' }, now)).toThrow(/stable/)
   })
 })
+
+describe('candidate image verification', () => {
+  it('uses smoke tests from the deployed application commit with official prerequisites', () => {
+    const workflow = parse(readFileSync('.github/workflows/cli-updates.yaml', 'utf8'))
+    const steps = workflow.jobs.image.steps
+    const verify = steps.findIndex(step => step.name === 'Verify the candidate image before deployment')
+    const checkout = steps.findIndex(step => step.name === 'Check out the deployed application for its smoke tests')
+    expect(checkout).toBeGreaterThan(steps.findIndex(step => step.id === 'build'))
+    expect(checkout).toBeLessThan(verify)
+    // eslint-disable-next-line no-template-curly-in-string -- GitHub Actions resolves this expression.
+    expect(steps[checkout].with.ref).toBe('${{ needs.check.outputs.commit }}')
+    expect(workflow.jobs.image.services.postgres.env.POSTGRES_DB).toBe('leo_official_test')
+    expect(steps.slice(checkout, verify).some(step => step.uses === './.github/actions/setup-pnpm')).toBe(true)
+    const prepare = steps.find(step => step.name === 'Build official smoke prerequisites when present')
+    expect(prepare.run).toContain('test -f official-service/Cargo.toml')
+    expect(prepare.run).toContain('pnpm build')
+    expect(prepare.run).toContain('cargo build --locked --bin leo-official')
+    expect(steps[verify].env.LEO_OFFICIAL_TEST_DATABASE_URL).toBe('postgres://leo:test-only@127.0.0.1:5432/leo_official_test')
+  })
+})

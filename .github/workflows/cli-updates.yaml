@@ -42,10 +42,24 @@ jobs:
           path: cli-update-plan.json
           retention-days: 30
   image:
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: leo
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: leo_official_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U leo -d leo_official_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
     needs: check
     if: needs.check.outputs.changed == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     permissions:
       contents: read
       packages: write
@@ -77,11 +91,28 @@ jobs:
           secrets: github_token=${{ github.token }}
           provenance: mode=max
           sbom: true
+      # CLI updates preserve the application binary: test its exact source,
+      # including the local-login smoke contract of pre-relay images.
+      - name: Check out the deployed application for its smoke tests
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.check.outputs.commit }}
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          cache: true
+      - name: Build official smoke prerequisites when present
+        run: |
+          if test -f official-service/Cargo.toml; then
+            rustup toolchain install --profile minimal "$(sed -n 's/channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+            pnpm build
+            cargo build --locked --bin leo-official
+          fi
       - name: Verify the candidate image before deployment
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SMOKE_IMAGE: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
           SMOKE_COMMIT: ${{ needs.check.outputs.commit }}
+          LEO_OFFICIAL_TEST_DATABASE_URL: postgres://leo:test-only@127.0.0.1:5432/leo_official_test
         run: |
           node tests/container-smoke.mjs "$SMOKE_IMAGE"
           node tests/runner-smoke.mjs "$SMOKE_IMAGE"

@@ -12,7 +12,6 @@ use tokio_util::sync::CancellationToken;
 
 fn config(root: &TempDir) -> Config {
     Config {
-        setup_token: String::new(),
         codex_bin: common::fixture("codex.mjs"),
         ..common::config(root.path())
     }

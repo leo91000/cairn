@@ -49,9 +49,21 @@ const error = ref('')
 const claimCode = ref('')
 const editingName = ref(false)
 const installationName = ref('')
+const deviceCode = ref('')
+const deviceReview = ref<{
+  code: string
+  name: string
+  fingerprint: string
+  confirmation: string
+} | null>(null)
+const claimStatus = ref('')
+const confirmDetach = ref(false)
 const installation = ref<{ id: string, name: string, online: boolean } | null>(null)
 const installationMenu = ref<HTMLDetailsElement>()
-const installationReturnKey = 'leo-installation-return'
+const officialReturnKey = 'leo-installation-return'
+const claimPage = window.location.pathname === '/claim'
+
+watch(deviceCode, () => deviceReview.value = null)
 
 watch(session, (value) => {
   state.csrf = value?.csrf || ''
@@ -74,7 +86,7 @@ watch(session, (value) => {
     catch {}
   }
 
-  if (!requested && value.installations.length) {
+  if (!requested && value.installations.length && !claimPage) {
     let remembered = ''
     try {
       remembered = localStorage.getItem(`leo-current-installation:${value.account?.id}`) || ''
@@ -159,6 +171,10 @@ async function signOut() {
     showMethods.value = false
     installation.value = null
     claimCode.value = ''
+    deviceCode.value = ''
+    deviceReview.value = null
+    claimStatus.value = ''
+    confirmDetach.value = false
     state.installationId = ''
     email.value = ''
     code.value = ''
@@ -242,18 +258,81 @@ async function passkey(register: boolean) {
   }
 }
 
+async function installationRequest(route: string, body?: unknown) {
+  const response = await fetch(`/api/installations/${route}`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': session.value?.csrf || '' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  if (response.status === 204)
+    return
+  const value = await response.json()
+  if (!response.ok)
+    throw new Error(value.error || 'Unable to update the installation.')
+  return value
+}
+
+async function reviewDevice() {
+  busy.value = true
+  error.value = ''
+  claimStatus.value = ''
+  deviceReview.value = null
+  try {
+    const value = await installationRequest('device-claim/preview', { code: deviceCode.value })
+    deviceReview.value = { ...value, code: deviceCode.value }
+  }
+  catch (cause) {
+    error.value = cause instanceof Error ? cause.message : 'Unable to review the installation.'
+  }
+  finally {
+    busy.value = false
+  }
+}
+
+async function approveDevice() {
+  if (!deviceReview.value)
+    return
+  busy.value = true
+  error.value = ''
+  claimStatus.value = ''
+  try {
+    await installationRequest('device-claim', { code: deviceReview.value.code, confirmation: deviceReview.value.confirmation })
+    deviceCode.value = ''
+    deviceReview.value = null
+    claimStatus.value = 'Installation approved. Finish leo claim, then restart your manager and refresh installations.'
+  }
+  catch (cause) {
+    error.value = cause instanceof Error ? cause.message : 'Unable to claim the installation.'
+  }
+  finally {
+    busy.value = false
+  }
+}
+
+async function detachInstallation() {
+  if (!installation.value)
+    return
+  busy.value = true
+  error.value = ''
+  try {
+    await installationRequest(`${installation.value.id}/detach`)
+    redirect('/')
+  }
+  catch (cause) {
+    error.value = cause instanceof Error ? cause.message : 'Unable to detach the installation.'
+  }
+  finally {
+    busy.value = false
+  }
+}
+
 async function addInstallation() {
   busy.value = true
   error.value = ''
   claimCode.value = ''
   try {
-    const response = await fetch('/api/installations/claim-code', {
-      method: 'POST',
-      headers: { 'X-CSRF-Token': session.value?.csrf || '' },
-    })
-    const value = await response.json()
-    if (!response.ok)
-      throw new Error(value.error || 'Unable to add an installation.')
+    const value = await installationRequest('claim-code')
     claimCode.value = value.code
   }
   catch (cause) {
@@ -270,9 +349,11 @@ async function oauth(provider: 'google' | 'github') {
   try {
     const start = await accountRequest(`oauth/${provider}/start`, {})
     try {
-      sessionStorage.removeItem(installationReturnKey)
-      if (state.installationId)
-        sessionStorage.setItem(installationReturnKey, `${window.location.pathname}${window.location.search}${window.location.hash}`)
+      sessionStorage.removeItem(officialReturnKey)
+      if (state.installationId || claimPage) {
+        const destination = claimPage ? '/claim' : `${window.location.pathname}${window.location.search}${window.location.hash}`
+        sessionStorage.setItem(officialReturnKey, destination)
+      }
     }
     catch {}
 
@@ -412,12 +493,12 @@ function changeEmail() {
 onMounted(async () => {
   const url = new URL(window.location.href)
   // OAuth callbacks return to the official root. Restore this tab's explicit
-  // installation URL before the session can choose a remembered installation.
+  // account or installation page before the session chooses an installation.
   try {
-    const destination = sessionStorage.getItem(installationReturnKey)
+    const destination = sessionStorage.getItem(officialReturnKey)
     if (url.pathname === '/' && destination) {
-      sessionStorage.removeItem(installationReturnKey)
-      if (/^\/installations\/[\w-]+\//.test(destination)) {
+      sessionStorage.removeItem(officialReturnKey)
+      if (destination === '/claim' || /^\/installations\/[\w-]+\//.test(destination)) {
         const target = new URL(destination, url.origin)
         const signInError = url.searchParams.get('sign_in_error')
         if (signInError)
@@ -468,6 +549,9 @@ onMounted(async () => {
           <UiButton size="small" :disabled="busy" @click="addInstallation">
             Add an installation
           </UiButton>
+          <UiButton size="small" :disabled="busy" @click="confirmDetach = true">
+            Detach installation
+          </UiButton>
           <UiButton size="small" :disabled="busy" @click="openMethods">
             Sign-in methods
           </UiButton>
@@ -477,6 +561,15 @@ onMounted(async () => {
         </div>
       </details>
     </header>
+    <div v-if="confirmDetach" class="grid gap-3 border-b border-line px-4 py-3">
+      <p>Detach this installation? Access through Leo will stop. Its data stays on the machine, which can be claimed again.</p>
+      <UiButton :disabled="busy" @click="detachInstallation">
+        Confirm detachment
+      </UiButton>
+      <UiButton :disabled="busy" @click="confirmDetach = false">
+        Cancel detachment
+      </UiButton>
+    </div>
     <form v-if="editingName" class="flex flex-wrap items-end gap-3 border-b border-line px-4 py-3" @submit.prevent="renameInstallation">
       <label>Installation name<input
         v-model="installationName"
@@ -610,6 +703,44 @@ onMounted(async () => {
               Refresh installations
             </UiButton>
           </div>
+          <form class="grid gap-3 mb-6" @submit.prevent="reviewDevice">
+            <label>Device claim code<input
+              v-model="deviceCode"
+              required
+              maxlength="30"
+              autocomplete="off"
+              :disabled="busy"
+            ></label>
+            <p class="text-muted">
+              Only approve a code displayed by a machine you control.
+            </p>
+            <UiButton type="submit" :disabled="busy">
+              Review installation
+            </UiButton>
+            <div
+              v-if="deviceReview"
+              role="dialog"
+              aria-label="Confirm installation claim"
+              class="grid gap-3 rounded-xl border border-line p-4"
+            >
+              <p>Claim {{ deviceReview.name }}?</p>
+              <label>Installation fingerprint<input :value="deviceReview.fingerprint" readonly></label>
+              <p class="text-muted">
+                Compare this fingerprint with leo claim in the terminal on a machine you control.
+                This machine will store your conversations, coding-agent accounts and secrets.
+                Do not approve a code sent by someone else, even if they ask you to sign in.
+              </p>
+              <UiButton :disabled="busy" @click="approveDevice">
+                Claim this installation
+              </UiButton>
+              <UiButton :disabled="busy" @click="deviceReview = null">
+                Cancel claim
+              </UiButton>
+            </div>
+            <p v-if="claimStatus" role="status">
+              {{ claimStatus }}
+            </p>
+          </form>
           <div v-if="claimCode" class="grid gap-3 mb-6">
             <label>Installation claim code<input :value="claimCode" readonly autocomplete="off"></label>
             <p class="text-muted">

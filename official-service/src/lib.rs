@@ -122,6 +122,34 @@ pub async fn router_with_relay(
                 include_str!("../migrations/202610030152_removed_methods.sql").into(),
                 false,
             ),
+            Migration::new(
+                202610030250,
+                "reclaim installations".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/202610030250_reclaim.sql").into(),
+                false,
+            ),
+            Migration::new(
+                202610030350,
+                "device claims".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/202610030350_device_claims.sql").into(),
+                false,
+            ),
+            Migration::new(
+                202610040050,
+                "claim identity recovery".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/202610040050_claim_recovery.sql").into(),
+                false,
+            ),
+            Migration::new(
+                202610041950,
+                "device claim review".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/202610041950_device_review.sql").into(),
+                false,
+            ),
         ]),
         ..Migrator::DEFAULT
     };
@@ -173,6 +201,18 @@ pub async fn router_with_relay(
             axum::routing::patch(installations::rename),
         )
         .route(
+            "/api/installations/device-claim/preview",
+            post(installations::preview_device),
+        )
+        .route(
+            "/api/installations/device-claim",
+            post(installations::approve_device),
+        )
+        .route(
+            "/api/installations/{installation}/detach",
+            post(installations::detach),
+        )
+        .route(
             "/api/installations/{installation}/api/{*path}",
             any(relay::forward),
         )
@@ -183,6 +223,14 @@ pub async fn router_with_relay(
         .merge(
             Router::new()
                 .route("/api/relay/claim", post(installations::claim))
+                .route(
+                    "/api/relay/device-claim/start",
+                    post(installations::start_device),
+                )
+                .route(
+                    "/api/relay/device-claim/poll",
+                    post(installations::poll_device),
+                )
                 .route("/api/relay/{installation}/connect", get(relay::upgrade)),
         )
         .with_state(service))

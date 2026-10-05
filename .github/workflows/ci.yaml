@@ -90,7 +90,7 @@ jobs:
           git diff --exit-code -- backend/schemas/inputs.json
           cargo clippy --locked --workspace --all-targets --features ublk-prototype -- -D warnings
           node scripts/test-backend.mjs --features ublk-prototype
-          cargo build --locked --bin leo --features ublk
+          cargo build --locked --bin leo --example browser_fixture --features ublk
           cargo build --locked -p leo-official-service --bin leo-official
       - name: Validate node supervisor and S3 recovery
         run: |
@@ -105,6 +105,7 @@ jobs:
           path: |
             target/debug/leo
             target/debug/leo-official
+            target/debug/examples/browser_fixture
           retention-days: 1
       - uses: actions/upload-artifact@v7.0.1
         with:
@@ -176,7 +177,7 @@ jobs:
         with:
           name: browser-backend
           path: target/debug/
-      - run: chmod +x target/debug/leo target/debug/leo-official
+      - run: chmod +x target/debug/leo target/debug/leo-official target/debug/examples/browser_fixture
       - run: |
           args=(--project="$BROWSER_PROJECTS" --workers="$BROWSER_WORKERS")
           if [[ -n "$BROWSER_SHARD" ]]; then
@@ -197,7 +198,8 @@ jobs:
             docs/screenshots/
           retention-days: 14
   image:
-    needs: resolve
+    # The exact-image smoke test uses the already validated official binary.
+    needs: [resolve, quality]
     if: needs.resolve.outputs.reuse != 'true'
     outputs:
       digest: ${{ steps.build.outputs.digest }}
@@ -276,13 +278,46 @@ jobs:
       - uses: ./.github/actions/setup-pnpm
         with:
           cache: true
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: browser-backend
+          path: official-smoke-bin/
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: browser-build
+          path: dist/
+      - run: chmod +x official-smoke-bin/leo-official
+      - name: Start the disposable official database
+        # The PR job changes Docker's image store above. Start this database
+        # afterwards so restarting Docker cannot discard a service container.
+        # TCP health waits for the final server, beyond socket-only initialization.
+        run: |
+          docker run --detach --name leo-official-smoke-db \
+            --network host \
+            --env POSTGRES_USER=leo --env POSTGRES_PASSWORD=test-only \
+            --env POSTGRES_DB=leo_official_test \
+            --health-cmd "pg_isready -h 127.0.0.1 -U leo -d leo_official_test" \
+            --health-interval 1s --health-timeout 5s --health-retries 30 \
+            postgres:17-alpine postgres -c listen_addresses=127.0.0.1
+          for attempt in $(seq 1 30); do
+            if test "$(docker inspect --format '{{.State.Health.Status}}' leo-official-smoke-db)" = healthy; then
+              break
+            fi
+            sleep 1
+          done
+          test "$(docker inspect --format '{{.State.Health.Status}}' leo-official-smoke-db)" = healthy
       - name: Smoke-test the exact image
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          LEO_OFFICIAL_TEST_DATABASE_URL: postgres://leo:test-only@127.0.0.1:5432/leo_official_test
+          LEO_SMOKE_OFFICIAL_BINARY: official-smoke-bin/leo-official
           SMOKE_IMAGE: ${{ github.event_name == 'pull_request' && 'leo-agent-manager:test' || format('ghcr.io/{0}@{1}', github.repository, steps.build.outputs.digest) }}
         run: |
           node tests/container-smoke.mjs "$SMOKE_IMAGE"
           node tests/runner-smoke.mjs "$SMOKE_IMAGE"
+      - name: Remove the disposable official database
+        if: always()
+        run: docker rm --force leo-official-smoke-db
       - name: Verify retained conversation memory, crash recovery and active admission
         env:
           SMOKE_IMAGE: ${{ github.event_name == 'pull_request' && 'leo-agent-manager:test' || format('ghcr.io/{0}@{1}', github.repository, steps.build.outputs.digest) }}

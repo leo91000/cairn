@@ -11,7 +11,6 @@ pub struct Config {
     pub public_url: String,
     pub host: String,
     pub port: u16,
-    pub setup_token: String,
     pub codex_bin: String,
     #[serde(default = "default_claude_bin")]
     pub claude_bin: String,
@@ -38,7 +37,6 @@ impl Config {
             "publicUrl": get("PUBLIC_URL", "http://localhost:4310"),
             "host": get("HOST", "127.0.0.1"),
             "port": port,
-            "setupToken": get("SETUP_TOKEN", ""),
             "codexBin": get("CODEX_BIN", "codex"),
             "claudeBin": get("CLAUDE_BIN", "claude"),
             "ghBin": get("GH_BIN", "gh"),

@@ -10,7 +10,11 @@ services:
       - '127.0.0.1:4310:4310'
     environment:
       LEO_NODE_IMAGE: ${LEO_IMAGE:-}
+      # Private origin used by execution nodes and run-scoped MCP.
       PUBLIC_URL: ${PUBLIC_URL:-http://localhost:4310}
+      LEO_OFFICIAL_ORIGIN: ${LEO_OFFICIAL_ORIGIN:-}
+      LEO_INSTALLATION_CLAIM_CODE: ${LEO_INSTALLATION_CLAIM_CODE:-}
+      LEO_INSTALLATION_NAME: ${LEO_INSTALLATION_NAME:-My installation}
       RUNNER_URL: http://runner:4311
       STORAGE_S3_BUCKET: ${STORAGE_S3_BUCKET:-${ARCHIVE_S3_BUCKET:-}}
       STORAGE_S3_ENDPOINT: ${STORAGE_S3_ENDPOINT:-${ARCHIVE_S3_ENDPOINT:-}}

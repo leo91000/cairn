@@ -34,7 +34,6 @@ pub fn config(root: &Path) -> Config {
         public_url: format!("http://{HOST}"),
         host: "127.0.0.1".into(),
         port: 0,
-        setup_token: "fixture".into(),
         codex_bin: "codex".into(),
         claude_bin: "claude".into(),
         gh_bin: "gh".into(),
@@ -204,3 +203,8 @@ impl Credentials<'_> {
         }
     }
 }
+
+/// Legacy fixture authentication is compiled only into test/example executables.
+/// The real installation router is covered through the official HTTP relay.
+#[path = "../../examples/support/browser_http.rs"]
+pub mod browser_http;

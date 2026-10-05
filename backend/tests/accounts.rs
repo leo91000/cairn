@@ -55,7 +55,6 @@ async fn valid_available_usage_does_not_wait_for_due_account_refresh() {
 
 fn config(root: &TempDir) -> Config {
     Config {
-        setup_token: "test".into(),
         codex_bin: "/nonexistent-codex".into(),
         claude_bin: common::fixture("claude.mjs"),
         ..common::config(root.path())

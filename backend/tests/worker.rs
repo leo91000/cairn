@@ -31,7 +31,9 @@ use tokio::{
     process::{Child, Command},
 };
 
-/// A service whose worker runs in a separate `leo serve` process.
+/// The real manager runtime in a separate process, with the test-only browser
+/// adapter for legacy worker control journeys. Production access is tested
+/// through the official service and real installation relay.
 struct Fixture {
     root: TempDir,
     service: Arc<Service>,
@@ -44,7 +46,6 @@ impl Fixture {
         let root = TempDir::new().unwrap();
         std::fs::create_dir(root.path().join("home")).unwrap();
         let config = Config {
-            setup_token: String::new(),
             codex_bin: common::fixture("codex.mjs"),
             claude_bin: common::fixture("claude.mjs"),
             concurrency: 2,
@@ -79,7 +80,11 @@ impl Fixture {
                 .arg(common::fixture_path("legacy-worker.mjs"));
             command
         } else {
-            let mut command = Command::new(env!("CARGO_BIN_EXE_leo"));
+            let binary = std::path::Path::new(env!("CARGO_BIN_EXE_leo"))
+                .parent()
+                .unwrap()
+                .join("examples/browser_fixture");
+            let mut command = Command::new(binary);
             command.arg("serve");
             command
         };

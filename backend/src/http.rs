@@ -4,7 +4,7 @@ use crate::{
     error::{Error, Result},
     execution::secret,
     service::Service,
-    validation::{text, uuid},
+    validation::uuid,
 };
 use axum::{
     Json, Router,
@@ -22,10 +22,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
 };
-use tower_http::{
-    compression::CompressionLayer,
-    services::{ServeDir, ServeFile},
-};
+use tower_http::compression::CompressionLayer;
 
 #[derive(Clone)]
 pub struct App {
@@ -90,7 +87,9 @@ pub async fn router(service: Arc<Service>) -> Result<Router> {
         .route("/api/{*path}", any(api))
         .route("/oauth/{*path}", any(oauth))
         .route("/.well-known/{*path}", any(metadata))
-        .fallback_service(ServeDir::new("dist").fallback(ServeFile::new("dist/index.html")))
+        .fallback(|| async {
+            Error::unauthorized("Access this installation through the official service.")
+        })
         .layer(CompressionLayer::new())
         .layer(middleware::from_fn_with_state(app.clone(), security))
         .with_state(app))
@@ -119,7 +118,7 @@ async fn security(State(app): State<App>, mut request: Request, next: Next) -> R
         .get::<ConnectInfo<SocketAddr>>()
         .map_or(IpAddr::from([127, 0, 0, 1]), |peer| peer.0.ip());
     let head = request.method() == "HEAD";
-    let outcome = async {
+    let outcome = (|| {
         check_security(
             &app,
             request.headers(),
@@ -127,9 +126,8 @@ async fn security(State(app): State<App>, mut request: Request, next: Next) -> R
             &path,
             peer,
         )?;
-        authenticate_api(&app, &mut request).await
-    }
-    .await;
+        authenticate_installation(&request)
+    })();
     let mut response = match outcome {
         Ok(()) => {
             if head {
@@ -179,7 +177,7 @@ fn is_dynamic(path: &str) -> bool {
 
 /// Dynamic responses are never cached; the app shell revalidates; assets are cached.
 fn cache_policy(path: &str, response: &Response) -> &'static str {
-    if is_dynamic(path) {
+    if is_dynamic(path) || !response.status().is_success() {
         return "no-store";
     }
     let html = response
@@ -213,8 +211,6 @@ fn general_limit(path: &str) -> (&'static str, u32) {
 /// Stricter limits on credential endpoints: `(limit, window in ms)`.
 fn endpoint_limit(path: &str) -> Option<(u32, i64)> {
     match path {
-        "/api/setup" => Some((5, 60_000)),
-        "/api/login" => Some((10, 60_000)),
         "/oauth/register" => Some((10, 3_600_000)),
         _ => None,
     }
@@ -291,45 +287,34 @@ fn check_security(
     Ok(())
 }
 
-/// The authentication seam for every protected API route, including raw bodies
-/// and SSE. Only trusted in-process context can replace local session auth.
-async fn authenticate_api(app: &App, request: &mut Request) -> Result<()> {
+/// Browser credentials never authenticate an installation. Only the outbound
+/// relay attaches verified in-process context; machine channels keep their own
+/// credentials and remain independent of official-account availability.
+fn authenticate_installation(request: &Request) -> Result<()> {
     let path = request.uri().path();
-    let method = request.method().as_str();
-    if !path.starts_with("/api/")
-        || ["/api/session", "/api/setup", "/api/login"].contains(&path)
-        || crate::artifacts::sharing::public_read(path, method)
-    {
+    let machine = path == "/health"
+        || path == "/internal/deployment-lease"
+        || path.starts_with("/internal/nodes/")
+        || path.starts_with("/internal/node-restore/")
+        || path.starts_with("/internal/node-workspace/")
+        || path.starts_with("/internal/execution/")
+        || path == "/mcp-workspace"
+        || path.starts_with("/mcp-gateway/");
+    if machine {
         return Ok(());
     }
-
-    let identity = if let Some(identity) = request.extensions().get::<InstallationIdentity>() {
-        identity.clone()
-    } else {
-        let headers = request.headers();
-        let credential = cookie(headers);
-        let session = app
-            .service
-            .auth
-            .read(&credential)
-            .await?
-            .ok_or_else(|| Error::unauthorized("Please sign in."))?;
-        if !["GET", "HEAD", "OPTIONS"].contains(&method)
-            && !safe_equal(header(headers, "x-csrf-token"), text(&session, "csrf"))
-        {
-            return Err(Error::forbidden(
-                "Invalid CSRF token. Refresh the page and try again.",
-            ));
-        }
-        InstallationIdentity::local_owner(credential, text(&session, "csrf").to_owned())
-    };
-
-    if identity.role != InstallationRole::Owner && owner_operation(method, path) {
+    let identity = request
+        .extensions()
+        .get::<InstallationIdentity>()
+        .ok_or_else(|| {
+            Error::unauthorized("Access this installation through the official service.")
+        })?;
+    if identity.role != InstallationRole::Owner && owner_operation(request.method().as_str(), path)
+    {
         return Err(Error::forbidden(
             "Only the installation owner can manage this resource.",
         ));
     }
-    request.extensions_mut().insert(identity);
     Ok(())
 }
 
@@ -433,27 +418,6 @@ impl Input {
             .as_bool()
             .ok_or_else(|| Error::bad(format!("{name}: expected a boolean")))
     }
-}
-
-fn session_response(app: &App, session: &Value) -> Response {
-    let secure = if app.service.config.public_url.starts_with("https:") {
-        "; Secure"
-    } else {
-        ""
-    };
-    let cookie = format!(
-        "leo_session={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800{secure}",
-        text(session, "value"),
-    );
-    let mut response = Json(json!({
-        "authenticated": true,
-        "csrf": session["csrf"]
-    }))
-    .into_response();
-    response
-        .headers_mut()
-        .insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
-    response
 }
 
 #[derive(Serialize)]
@@ -633,48 +597,6 @@ async fn set_artifact_visibility(
     Ok(Json(result).into_response())
 }
 
-/// Sign-in routes, reachable without a session.
-async fn session_route(app: &App, input: &Input) -> Result<Option<Response>> {
-    let s = &app.service;
-    let response = match (input.method.as_str(), input.path.as_str()) {
-        ("GET", "/api/session") => {
-            let session = s.auth.read(&cookie(&input.headers)).await?;
-            let mut result = json!({
-                "authenticated": session.is_some(),
-                "setupRequired": s.store.kv("admin").await?.is_none(),
-            });
-            if let Some(session) = session {
-                result["csrf"] = session["csrf"].clone();
-            }
-            Json(result).into_response()
-        }
-        ("POST", "/api/setup") => {
-            let token = input.string("setupToken", 200)?;
-            if s.config.setup_token.is_empty() || !safe_equal(token, &s.config.setup_token) {
-                return Err(Error::forbidden("Incorrect setup token."));
-            }
-            s.auth.setup(input.string("password", 200)?).await?;
-            s.store.audit("admin.setup", json!({})).await?;
-            session_response(app, &s.auth.session().await?)
-        }
-        ("POST", "/api/login") => {
-            let session = s.auth.login(input.string("password", 200)?).await?;
-            session_response(app, &session)
-        }
-        ("POST", "/api/logout") => {
-            s.auth.logout(&cookie(&input.headers)).await?;
-            let mut response = Json(json!({ "ok": true })).into_response();
-            response.headers_mut().insert(
-                header::SET_COOKIE,
-                HeaderValue::from_static("leo_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"),
-            );
-            response
-        }
-        _ => return Ok(None),
-    };
-    Ok(Some(response))
-}
-
 fn json_bytes(bytes: Vec<u8>) -> Response {
     ([(header::CONTENT_TYPE, "application/json")], bytes).into_response()
 }
@@ -726,9 +648,6 @@ async fn api(State(app): State<App>, request: Request) -> Result<Response> {
         Route::Next(request) => request,
     };
     let input = Input::read(request).await?;
-    if let Some(response) = session_route(&app, &input).await? {
-        return Ok(response);
-    }
     let s = &app.service;
     if let Some(response) = run_pages(s, &input).await? {
         return Ok(response);
@@ -763,10 +682,10 @@ async fn oauth(State(app): State<App>, request: Request) -> Result<Response> {
         {
             return Ok(native_callback_page());
         }
-        let result = if let Some(session) = auth.read(&cookie(&input.headers)).await? {
+        let result = if let Some(identity) = &input.identity {
             app.service
                 .mcps
-                .callback(&app.service, &input.query, text(&session, "csrf"))
+                .callback(&app.service, &input.query, identity.oauth_binding())
                 .await
                 .unwrap_or_else(|_| "expired".into())
         } else {

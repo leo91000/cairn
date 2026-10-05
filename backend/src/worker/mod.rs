@@ -204,7 +204,6 @@ mod tests {
             public_url: "http://localhost:4310".into(),
             host: "127.0.0.1".into(),
             port: 0,
-            setup_token: String::new(),
             codex_bin: "unused".into(),
             claude_bin: "claude".into(),
             gh_bin: "unused".into(),
