@@ -770,10 +770,9 @@ async fn revoked_members_cannot_finish_previously_authorized_uploads() {
         let relay = RelayedInstallation::new(axum::Router::new()).await;
         let (cookie, session) = member(&relay, "member@example.test").await;
         let id = relay.session["installations"][0]["id"].as_str().unwrap();
-        let mut uploads = Vec::new();
         // Filling finite-request capacity observes that all uploads passed access
         // checking and reached body reading, without inspecting relay internals.
-        for _ in 0..leo_relay_protocol::MAX_IN_FLIGHT {
+        let start_upload = || {
             let (sender, receiver) = mpsc::channel::<String>(2);
             let body = reqwest::Body::wrap_stream(futures_util::stream::unfold(
                 receiver,
@@ -784,7 +783,7 @@ async fn revoked_members_cannot_finish_previously_authorized_uploads() {
                         .map(|chunk| (Ok::<_, std::io::Error>(chunk), receiver))
                 },
             ));
-            sender.send("{".into()).await.unwrap();
+            sender.try_send("{".into()).unwrap();
             let upload = request(
                 &relay,
                 &cookie,
@@ -794,11 +793,14 @@ async fn revoked_members_cannot_finish_previously_authorized_uploads() {
             )
             .header("content-type", "application/json")
             .body(body);
-            uploads.push((
+            (
                 sender,
                 tokio::spawn(async move { upload.send().await.unwrap() }),
-            ));
-        }
+            )
+        };
+        let mut uploads: Vec<_> = (0..leo_relay_protocol::MAX_IN_FLIGHT)
+            .map(|_| start_upload())
+            .collect();
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let status = relay.get("/chats").send().await.unwrap().status();
@@ -806,6 +808,17 @@ async fn revoked_members_cannot_finish_previously_authorized_uploads() {
                     break;
                 }
                 assert_eq!(status, StatusCode::OK);
+                // The probe can take the last slot while uploads are entering.
+                // Replace only uploads rejected as busy, before revoking access.
+                for upload in &mut uploads {
+                    if upload.1.is_finished() {
+                        let (_, rejected) = std::mem::replace(upload, start_upload());
+                        assert_eq!(
+                            rejected.await.unwrap().status(),
+                            StatusCode::SERVICE_UNAVAILABLE
+                        );
+                    }
+                }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         })
