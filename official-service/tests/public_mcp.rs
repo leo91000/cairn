@@ -118,6 +118,10 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
         .await
         .unwrap();
     assert_eq!(
+        preview["client"]["redirect_uri"],
+        "http://localhost:9999/callback"
+    );
+    assert_eq!(
         preview["installations"][0]["id"],
         relay.session["installations"][0]["id"]
     );

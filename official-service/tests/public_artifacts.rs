@@ -220,3 +220,93 @@ async fn public_svg_is_downloaded_as_an_attachment() {
     assert_eq!(response.text().await.unwrap(), "<svg></svg>");
     relay.close().await;
 }
+
+#[tokio::test]
+async fn stalled_public_downloads_cannot_exhaust_live_streams_and_expire_without_another_read() {
+    use std::time::Duration;
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let (run, artifact) =
+        seeded_artifact(&relay, &vec![b'x'; 12_000_000], "application/octet-stream").await;
+    let shared = visibility(&relay, &run, &artifact, "public").await;
+    let public = shared["publicUrl"].as_str().unwrap();
+    let mut downloads = Vec::new();
+    for _ in 0..4 {
+        let response = relay.app.client.get(public).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        downloads.push(response);
+    }
+    assert_eq!(
+        relay.app.client.get(public).send().await.unwrap().status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Public downloads must have their own small capacity pool"
+    );
+    let mut live = Vec::new();
+    for _ in 0..24 {
+        let response = relay.get("/chats/stream").send().await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "All live-stream slots must remain available"
+        );
+        live.push(response);
+    }
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    // Keep the stalled responses alive and never poll their bodies. Expiry must
+    // be driven by the tunnel, not by a downstream HTTP body read.
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let replacement = tokio::time::timeout(Duration::from_secs(25), async {
+        loop {
+            let response = relay.app.client.get(public).send().await.unwrap();
+            if response.status() == StatusCode::OK {
+                break response;
+            }
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+    })
+    .await
+    .expect("Idle public downloads must release their slots");
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    drop(replacement);
+    drop(downloads);
+    drop(live);
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn public_download_rate_limit_uses_the_peer_and_preserves_account_access() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let (run, artifact) = seeded_artifact(&relay, b"Report", "text/plain").await;
+    let shared = visibility(&relay, &run, &artifact, "public").await;
+    let public = shared["publicUrl"].as_str().unwrap();
+    for _ in 0..30 {
+        let response = relay.app.client.get(public).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.text().await.unwrap(), "Report");
+    }
+    let limited = relay
+        .app
+        .client
+        .get(public)
+        .header("x-forwarded-for", "198.51.100.1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        limited.headers()["content-security-policy"],
+        "default-src 'none'; sandbox"
+    );
+    assert!(!limited.headers().contains_key("set-cookie"));
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    relay.close().await;
+}

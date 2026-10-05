@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { api, officialEntry, redirect } from '../api'
 import Icon from '../components/Icon.vue'
 import UiAlert from '../components/UiAlert.vue'
@@ -8,6 +8,7 @@ import { ShieldCheck } from '../icons'
 
 const parameters = Object.fromEntries(new URLSearchParams(location.search))
 const details = ref<any>()
+const redirectHost = computed(() => details.value?.client.redirect_uri ? new URL(details.value.client.redirect_uri).host : '')
 const error = ref('')
 const busy = ref(false)
 const installationId = ref('')
@@ -53,6 +54,13 @@ async function consent(approved: boolean) {
         <strong>{{ details.client.client_name }}</strong> is requesting access
         to one Leo installation.
       </p>
+      <template v-if="officialEntry">
+        <p>Redirect destination: <strong class="break-all">{{ redirectHost }}</strong></p>
+        <UiAlert>
+          Unverified client. Its name is supplied by the client and has not been checked by Leo.
+          Continue only if you trust this redirect destination.
+        </UiAlert>
+      </template>
       <label v-if="officialEntry">Installation
         <select v-model="installationId" aria-label="Installation">
           <option v-for="item in details.installations" :key="item.id" :value="item.id">

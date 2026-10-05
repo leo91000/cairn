@@ -224,3 +224,10 @@ An offline installation returns an explicit public-file availability message.
 Detachment removes MCP grants and outstanding authorization codes in the same
 transaction as ownership. Grant creation holds the installation ownership lock,
 so reclaiming the same machine never restores its previous MCP credentials.
+
+Public files have a separate pool of four requests at both tunnel ends. They do
+not consume the 32 authenticated API slots or the 24 live-stream slots. The
+relay cancels a public download after 30 seconds without delivered file chunks,
+even if the recipient no longer polls the HTTP body. Public GET/HEAD payloads
+are ignored so a slow anonymous upload cannot hold an untracked slot. The
+version-2 frame format is unchanged.

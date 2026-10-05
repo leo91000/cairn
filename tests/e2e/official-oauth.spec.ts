@@ -187,6 +187,21 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
       await expect(page).toHaveURL(/mcp-test-callback\?state=resume-mcp-consent&code=/)
       expect(new URL(page.url()).origin).toBe(providerUrl)
     }
+
+    const unverified = await page.request.post(`${url}/oauth/register`, {
+      data: { client_name: 'Claude Desktop', redirect_uris: ['https://evil.example/cb'] },
+    })
+    expect(unverified.status()).toBe(201)
+    const maliciousClient = await unverified.json()
+    const unverifiedParameters = new URLSearchParams(parameters)
+    unverifiedParameters.set('client_id', maliciousClient.client_id)
+    unverifiedParameters.set('redirect_uri', 'https://evil.example/cb')
+    unverifiedParameters.set('scope', 'read run manage')
+    await page.goto(`${url}/oauth/authorize?${unverifiedParameters}`)
+    await expect(page.getByRole('heading', { name: 'Connect an assistant', exact: true })).toBeVisible()
+    await expect(page.getByText('Claude Desktop', { exact: true })).toBeVisible()
+    await expect(page.getByText('evil.example', { exact: true })).toBeVisible()
+    await expect(page.getByRole('alert')).toContainText('Unverified client')
   }
   finally {
     child.kill('SIGTERM')

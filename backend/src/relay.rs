@@ -12,8 +12,9 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use leo_relay_protocol::{
-    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_STREAM_CHUNK,
-    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, REQUEST_TIMEOUT, Role, SUPPORTED_VERSIONS,
+    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_PUBLIC_IN_FLIGHT,
+    MAX_STREAM_CHUNK, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, REQUEST_TIMEOUT, Role,
+    SUPPORTED_VERSIONS,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -406,7 +407,9 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
     let mut requests = JoinSet::new();
     let mut request_ids = HashMap::new();
     let mut active = HashMap::<String, (AbortHandle, std::sync::Arc<Semaphore>)>::new();
-    let (output, mut frames) = mpsc::channel::<Frame>(MAX_IN_FLIGHT);
+    let slots = std::sync::Arc::new(Semaphore::new(MAX_IN_FLIGHT));
+    let public_slots = std::sync::Arc::new(Semaphore::new(MAX_PUBLIC_IN_FLIGHT));
+    let (output, mut frames) = mpsc::channel::<Frame>(MAX_IN_FLIGHT + MAX_PUBLIC_IN_FLIGHT);
     loop {
         tokio::select! {
             result = requests.join_next_with_id(), if !requests.is_empty() => {
@@ -460,7 +463,12 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
                             }
                             _ => return Err(Error::bad("Unexpected relay frame.")),
                         };
-                        if requests.len() >= MAX_IN_FLIGHT {
+                        let capacity = if request.public_artifact.is_some() {
+                            &public_slots
+                        } else {
+                            &slots
+                        };
+                        let Ok(permit) = capacity.clone().try_acquire_owned() else {
                             let response = request_failure(request.id, 503, "Installation busy.");
                             let frame = serde_json::to_string(&Frame::Response(response))?;
                             socket
@@ -468,7 +476,7 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
                                 .await
                                 .map_err(Error::internal)?;
                             continue;
-                        }
+                        };
 
                         let request_id = request.id.clone();
                         let router = router.clone();
@@ -481,7 +489,10 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
                         } else {
                             None
                         };
-                        let task = requests.spawn(dispatch(router, request, streaming));
+                        let task = requests.spawn(async move {
+                            let _permit = permit;
+                            dispatch(router, request, streaming).await
+                        });
                         active.insert(request_id.clone(), (task.clone(), credit));
                         request_ids.insert(task.id(), request_id);
                     }

@@ -10,6 +10,8 @@ pub const MAX_BODY: usize = 8_000_000;
 // Base64 expands by four bytes per three body bytes, plus envelope metadata.
 pub const MAX_FRAME: usize = MAX_BODY.div_ceil(3) * 4 + 65_536;
 pub const MAX_IN_FLIGHT: usize = 32;
+// Public files never borrow authenticated API or live-stream capacity.
+pub const MAX_PUBLIC_IN_FLIGHT: usize = 4;
 pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -128,6 +130,7 @@ pub fn response_header(name: &str) -> bool {
     matches!(
         name,
         "content-type"
+            | "content-length"
             | "content-disposition"
             | "etag"
             | "last-modified"

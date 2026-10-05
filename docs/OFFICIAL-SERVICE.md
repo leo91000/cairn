@@ -219,3 +219,13 @@ last 30 days and are returned once. Every credential is pinned to that
 installation and its read/run/manage scopes; it stops working after revocation,
 detachment or account deletion. Installation management permissions remain
 reserved for its owner. Use Settings in the current installation to manage them.
+
+Public file downloads have four dedicated relay slots per installation, separate
+from authenticated API and live streams. Idle downloads are cancelled after 30
+seconds without file progress, independently of downstream reads. HTML and SVG
+are always served as attachments, and Content-Length is preserved for downloads,
+byte ranges and HEAD responses.
+The public file route also allows at most 30 requests per minute per TCP peer
+across installations, using the existing persisted rate-limit module. Forwarded
+IP headers supplied by clients are ignored; a reverse proxy shares this limit.
+Authenticated account routes use their own quotas.

@@ -409,7 +409,11 @@ pub(super) async fn preview(
         .collect::<Vec<_>>();
 
     Ok(Json(json!({
-        "client": { "client_id": details.client_id, "client_name": details.name },
+        "client": {
+            "client_id": details.client_id,
+            "client_name": details.name,
+            "redirect_uri": details.redirect_uri,
+        },
         "resource": format!("{}/mcp", service.origin),
         "scopes": details.scopes,
         "installations": owned_installations,
@@ -633,6 +637,20 @@ pub(super) async fn public_security(request: Request, next: axum::middleware::Ne
     if public_file {
         headers.insert("access-control-allow-origin", HeaderValue::from_static("*"));
         headers.remove("access-control-allow-credentials");
+        let active_content = headers
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|media_type| {
+                media_type.trim().eq_ignore_ascii_case("text/html")
+                    || media_type.trim().eq_ignore_ascii_case("image/svg+xml")
+            });
+        if active_content {
+            headers.insert(
+                "content-disposition",
+                HeaderValue::from_static("attachment"),
+            );
+        }
     }
 
     response
