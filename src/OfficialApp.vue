@@ -10,6 +10,8 @@ import { logoutAccount, redirect, state } from './api'
 import App from './App.vue'
 import AccountSecurity from './components/AccountSecurity.vue'
 import InstallationSharing from './components/InstallationSharing.vue'
+import Modal from './components/Modal.vue'
+import NotificationSettings from './components/NotificationSettings.vue'
 import PendingInvitations from './components/PendingInvitations.vue'
 import ThemeControl from './components/ThemeControl.vue'
 import UiAlert from './components/UiAlert.vue'
@@ -42,6 +44,7 @@ const showMethods = ref(false)
 const showSecurity = ref(false)
 const showIdentityConfirmation = ref(false)
 const confirmationTitle = ref('')
+const showNotifications = ref(false)
 const passkeyName = ref('My passkey')
 const methodNames = {
   email: 'Email',
@@ -92,6 +95,7 @@ const claimPage = window.location.pathname === '/claim'
 watch(deviceCode, () => deviceReview.value = null)
 
 watch(session, (value) => {
+  state.accountId = value?.account?.id || ''
   state.csrf = value?.csrf || ''
   state.authenticated = value?.authenticated || false
   state.ready = ready.value
@@ -688,6 +692,9 @@ onMounted(async () => {
           <UiButton size="small" :disabled="busy" @click="showInvitations = !showInvitations">
             Invitations
           </UiButton>
+          <UiButton size="small" :disabled="busy" @click="showNotifications = true">
+            Notifications
+          </UiButton>
           <UiButton size="small" :disabled="busy" @click="openMethods">
             Sign-in methods
           </UiButton>
@@ -958,6 +965,9 @@ onMounted(async () => {
         <UiAlert v-if="error">
           {{ error }}
         </UiAlert>
+        <UiButton class="mb-3" :disabled="busy" @click="showNotifications = true">
+          Notifications
+        </UiButton>
         <UiButton class="mb-3" :disabled="busy" @click="openMethods">
           Sign-in methods
         </UiButton>
@@ -1017,4 +1027,9 @@ onMounted(async () => {
       </template>
     </section>
   </main>
+  <Modal v-if="session?.authenticated && showNotifications" title="Notifications" @close="showNotifications = false">
+    <div class="p-6 phone:p-4">
+      <NotificationSettings />
+    </div>
+  </Modal>
 </template>

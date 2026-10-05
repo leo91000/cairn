@@ -415,7 +415,12 @@ pub async fn device_claim(
 }
 
 /// Reconnect until shutdown; failed in-flight writes are never automatically replayed.
-pub async fn connect(directory: PathBuf, router: Router, stop: CancellationToken) -> Result<()> {
+pub async fn connect(
+    directory: PathBuf,
+    router: Router,
+    service: std::sync::Arc<crate::service::Service>,
+    stop: CancellationToken,
+) -> Result<()> {
     let identity = read_identity(&directory)
         .await?
         .ok_or_else(|| Error::bad("Run leo claim before starting the relay."))?;
@@ -425,7 +430,7 @@ pub async fn connect(directory: PathBuf, router: Router, stop: CancellationToken
         let started = tokio::time::Instant::now();
         tokio::select! {
             () = stop.cancelled() => return Ok(()),
-            result = connected(&identity, &official, router.clone()) => {
+            result = connected(&identity, &official, router.clone(), &service) => {
                 if let Err(error) = result {
                     if error.status == 401 {
                         tracing::warn!("Installation identity revoked; run leo claim, then restart the manager");
@@ -446,7 +451,12 @@ pub async fn connect(directory: PathBuf, router: Router, stop: CancellationToken
     }
 }
 
-async fn connected(identity: &Identity, official: &url::Url, router: Router) -> Result<()> {
+async fn connected(
+    identity: &Identity,
+    official: &url::Url,
+    router: Router,
+    service: &crate::service::Service,
+) -> Result<()> {
     let mut url = official
         .join(&format!("api/relay/{}/connect", identity.installation_id))
         .map_err(Error::internal)?;
@@ -512,8 +522,22 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
     let slots = std::sync::Arc::new(Semaphore::new(MAX_IN_FLIGHT));
     let public_slots = std::sync::Arc::new(Semaphore::new(MAX_PUBLIC_IN_FLIGHT));
     let (output, mut frames) = mpsc::channel::<Frame>(MAX_IN_FLIGHT + MAX_PUBLIC_IN_FLIGHT);
+    let mut notifications = tokio::time::interval(Duration::from_secs(1));
+    notifications.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut sent = HashMap::<String, tokio::time::Instant>::new();
     loop {
         tokio::select! {
+            _ = notifications.tick(), if version >= 3 => {
+                for event in crate::notifications::pending(service).await? {
+                    if sent.get(&event.id).is_some_and(|at| at.elapsed() < Duration::from_secs(10)) {
+                        continue;
+                    }
+                    sent.insert(event.id.clone(), tokio::time::Instant::now());
+                    socket.send(Message::Text(serde_json::to_string(&Frame::Notification(event))?.into()))
+                        .await.map_err(Error::internal)?;
+                }
+                sent.retain(|_, at| at.elapsed() < Duration::from_secs(60));
+            }
             result = requests.join_next_with_id(), if !requests.is_empty() => {
                 let completed = result
                     .ok_or_else(|| Error::unavailable("Relay request stopped."))?;
@@ -560,6 +584,12 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
                             Frame::Cancel { id } if version >= 2 => {
                                 if let Some((task, _)) = active.remove(&id) {
                                     task.abort();
+                                }
+                                continue;
+                            }
+                            Frame::NotificationAck { id } if version >= 3 => {
+                                if sent.remove(&id).is_some() {
+                                    crate::notifications::acknowledge(service, &id).await?;
                                 }
                                 continue;
                             }

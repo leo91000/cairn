@@ -292,11 +292,7 @@ fn spawn_periodic(
             tokio::select! {
                 () = s.shutdown.cancelled() => break,
                 _ = timer.tick() => {
-                    let result = if operation == "accounts" {
-                        s.accounts.poll(&s, true).await
-                    } else {
-                        s.notifications.flush(&s).await
-                    };
+                    let result = s.accounts.poll(&s, true).await;
                     if let Err(error) = result {
                         tracing::warn!(operation, error = %error, "Background operation failed");
                     }
@@ -340,10 +336,16 @@ where
     if identity_exists || tokio::fs::try_exists(relay_directory.join("identity.json")).await? {
         let relay_router = router.clone();
         let relay_stop = service.shutdown.clone();
+        let relay_service = service.clone();
         background.push(tokio::spawn(async move {
-            if leo_agent_manager::relay::connect(relay_directory, relay_router, relay_stop)
-                .await
-                .is_err()
+            if leo_agent_manager::relay::connect(
+                relay_directory,
+                relay_router,
+                relay_service,
+                relay_stop,
+            )
+            .await
+            .is_err()
             {
                 tracing::error!(
                     "Installation relay could not start; check the private installation identity"
@@ -358,11 +360,6 @@ where
             &service,
             "accounts",
             Duration::from_secs(15),
-        ));
-        background.push(spawn_periodic(
-            &service,
-            "notifications",
-            Duration::from_secs(1),
         ));
     }
     println!("Listening on http://{}", listener.local_addr()?);

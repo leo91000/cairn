@@ -30,7 +30,6 @@ pub struct Service {
     pub accounts: Arc<crate::accounts::Accounts>,
     pub models: Arc<crate::models::Models>,
     pub connections: Arc<crate::connections::Connections>,
-    pub notifications: crate::notifications::Notifications,
     pub conversation_storage_lock: Arc<tokio::sync::Mutex<()>>,
     pub attachment_upload: Arc<tokio::sync::Mutex<()>>,
     pub config: Config,
@@ -73,7 +72,6 @@ impl Service {
             accounts: Arc::default(),
             models: Arc::default(),
             connections: Arc::default(),
-            notifications: crate::notifications::Notifications::default(),
             conversation_storage_lock: Arc::default(),
             attachment_upload: Arc::default(),
             skills: Skills {

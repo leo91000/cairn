@@ -9,12 +9,14 @@ pub mod installer;
 mod mcp;
 mod methods;
 mod network;
+mod notifications;
 mod oauth;
 mod passkeys;
 mod relay;
 mod sharing;
 
 pub use network::TrustedProxies;
+pub use notifications::{PushError, PushSender, PushSubscription, WebPushSender};
 pub use oauth::{OAuthProvider, OAuthProviders};
 pub use relay::Relay;
 
@@ -57,6 +59,7 @@ struct Service {
     origin: String,
     oauth: OAuthProviders,
     relay: relay::Relay,
+    push: Option<Arc<dyn PushSender>>,
 }
 
 enum ApiError {
@@ -140,6 +143,38 @@ pub async fn router_with_network(
     relay: Relay,
     trusted_proxies: TrustedProxies,
 ) -> Result<Router, sqlx_core::migrate::MigrateError> {
+    router_with_network_and_push(pool, sender, origin, oauth, relay, trusted_proxies, None).await
+}
+
+pub async fn router_with_push(
+    pool: PgPool,
+    sender: Arc<dyn EmailSender>,
+    origin: String,
+    oauth: OAuthProviders,
+    relay: Relay,
+    push: Option<Arc<dyn PushSender>>,
+) -> Result<Router, sqlx_core::migrate::MigrateError> {
+    router_with_network_and_push(
+        pool,
+        sender,
+        origin,
+        oauth,
+        relay,
+        TrustedProxies::default(),
+        push,
+    )
+    .await
+}
+
+pub async fn router_with_network_and_push(
+    pool: PgPool,
+    sender: Arc<dyn EmailSender>,
+    origin: String,
+    oauth: OAuthProviders,
+    relay: Relay,
+    trusted_proxies: TrustedProxies,
+    push: Option<Arc<dyn PushSender>>,
+) -> Result<Router, sqlx_core::migrate::MigrateError> {
     sqlx_macros::migrate!("./migrations").run(&pool).await?;
 
     let installer = installer::router(origin.clone());
@@ -149,6 +184,7 @@ pub async fn router_with_network(
         origin,
         oauth,
         relay,
+        push,
     };
     Ok(Router::new()
         .route("/api/account/email-code", post(request_code))
@@ -166,6 +202,18 @@ pub async fn router_with_network(
         .route(
             "/api/account/sessions/{session}",
             axum::routing::delete(account::revoke_session),
+        )
+        .route(
+            "/api/account/notifications",
+            get(notifications::configuration),
+        )
+        .route(
+            "/api/account/notifications/subscriptions",
+            post(notifications::subscribe),
+        )
+        .route(
+            "/api/account/notifications/subscriptions/{id}",
+            get(notifications::registered).delete(notifications::unsubscribe),
         )
         .route(
             "/api/account/passkeys/register/start",

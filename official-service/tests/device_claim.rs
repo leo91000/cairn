@@ -250,6 +250,7 @@ async fn device_claim_reclaims_a_detached_installation_and_preserves_its_data() 
             leo_agent_manager::http::router(relay.installation.clone())
                 .await
                 .unwrap(),
+            relay.installation.clone(),
             relay.stop.clone(),
         ),
     )
@@ -270,6 +271,7 @@ async fn device_claim_reclaims_a_detached_installation_and_preserves_its_data() 
         leo_agent_manager::http::router(relay.installation.clone())
             .await
             .unwrap(),
+        relay.installation.clone(),
         relay.stop.clone(),
     ));
     tokio::time::timeout(Duration::from_secs(5), async {

@@ -9,7 +9,6 @@ import {
 } from '../api'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
-import NotificationSettings from '../components/NotificationSettings.vue'
 import StorageSettings from '../components/StorageSettings.vue'
 import ThemeControl from '../components/ThemeControl.vue'
 import UiAlert from '../components/UiAlert.vue'
@@ -104,9 +103,6 @@ async function copy(value: string) {
       <p class="appearance-hint text-2xs text-muted mt-4">
         Saved in this browser. System follows your device’s appearance automatically.
       </p>
-    </section>
-    <section class="panel border-b border-line settings-section mb-5.5 px-0 py-7 phone:py-5">
-      <NotificationSettings />
     </section>
     <section class="panel border-b border-line overflow-hidden settings-section mb-5.5 px-0 py-7 phone:py-5">
       <div class="section-intro flex gap-[17px] items-center mb-6 phone:items-start phone:gap-[13px]">

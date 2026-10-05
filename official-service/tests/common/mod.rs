@@ -72,10 +72,42 @@ impl Fixture {
         .await
     }
 
+    pub async fn with_push(push: Arc<dyn leo_official_service::PushSender>) -> Self {
+        Self::with_options(
+            leo_official_service::OAuthProviders::default(),
+            5,
+            Some(push),
+        )
+        .await
+    }
+
+    async fn with_options(
+        oauth: leo_official_service::OAuthProviders,
+        connections: u32,
+        push: Option<Arc<dyn leo_official_service::PushSender>>,
+    ) -> Self {
+        Self::with_network_and_push(
+            oauth,
+            connections,
+            leo_official_service::TrustedProxies::default(),
+            push,
+        )
+        .await
+    }
+
     pub async fn with_network(
         oauth: leo_official_service::OAuthProviders,
         connections: u32,
         proxies: leo_official_service::TrustedProxies,
+    ) -> Self {
+        Self::with_network_and_push(oauth, connections, proxies, None).await
+    }
+
+    async fn with_network_and_push(
+        oauth: leo_official_service::OAuthProviders,
+        connections: u32,
+        proxies: leo_official_service::TrustedProxies,
+        push: Option<Arc<dyn leo_official_service::PushSender>>,
     ) -> Self {
         let database = std::env::var("LEO_OFFICIAL_TEST_DATABASE_URL")
             .expect("Set LEO_OFFICIAL_TEST_DATABASE_URL to a disposable Postgres database");
@@ -98,13 +130,14 @@ impl Fixture {
         let url = format!("http://localhost:{}", listener.local_addr().unwrap().port());
         let mail = Arc::new(Mailbox::default());
         let relay = leo_official_service::Relay::default();
-        let app = leo_official_service::router_with_network(
+        let app = leo_official_service::router_with_network_and_push(
             pool.clone(),
             mail.clone(),
             url.clone(),
             oauth,
             relay.clone(),
             proxies,
+            push,
         )
         .await
         .unwrap();
@@ -207,6 +240,15 @@ impl RelayedInstallation {
 
     pub async fn with_runner_url(extra_routes: axum::Router, runner_url: String) -> Self {
         Self::with_app(extra_routes, runner_url, Fixture::new().await).await
+    }
+
+    pub async fn with_push(push: Arc<dyn leo_official_service::PushSender>) -> Self {
+        Self::with_app(
+            axum::Router::new(),
+            String::new(),
+            Fixture::with_push(push).await,
+        )
+        .await
     }
 
     pub async fn with_pool_size(extra_routes: axum::Router, connections: u32) -> Self {

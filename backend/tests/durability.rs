@@ -455,11 +455,6 @@ async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
         "fields": [{ "id": "choice", "title": "Which approach?", "secret": true }],
     });
     service
-        .store
-        .set("push-device:fixture", json!({ "createdAt": now() }), None)
-        .await
-        .unwrap();
-    service
         .question_receive(&run_id, question.clone())
         .await
         .unwrap();

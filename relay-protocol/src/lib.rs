@@ -2,9 +2,9 @@
 //! Requests are independent: future streaming frames can share their request ID.
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 pub const MIN_PROTOCOL_VERSION: u16 = 1;
-pub const SUPPORTED_VERSIONS: &[u16] = &[PROTOCOL_VERSION, MIN_PROTOCOL_VERSION];
+pub const SUPPORTED_VERSIONS: &[u16] = &[PROTOCOL_VERSION, 2, MIN_PROTOCOL_VERSION];
 pub const MAX_STREAM_CHUNK: usize = 65_536;
 pub const MAX_BODY: usize = 8_000_000;
 // Base64 expands by four bytes per three body bytes, plus envelope metadata.
@@ -44,6 +44,32 @@ pub struct ApiResponse {
     pub headers: Vec<(String, String)>,
     #[serde(with = "body")]
     pub body: Vec<u8>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationEvent {
+    pub id: String,
+    pub chat_id: String,
+    #[serde(flatten)]
+    pub kind: NotificationKind,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum NotificationKind {
+    Question {
+        question_id: String,
+    },
+    Alert {
+        alert_id: String,
+        title: String,
+        body: String,
+    },
 }
 
 mod body {
@@ -96,6 +122,11 @@ pub enum Frame {
         id: String,
     },
     Cancel {
+        id: String,
+    },
+    // Version 3 only. Pending events stay on the installation until acknowledged.
+    Notification(NotificationEvent),
+    NotificationAck {
         id: String,
     },
 }
