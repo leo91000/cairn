@@ -465,6 +465,100 @@ async fn enrollment_is_single_use_and_revocation_removes_node_access() {
 }
 
 #[tokio::test]
+async fn enrollment_uses_a_configurable_direct_manager_origin() {
+    let owner = Owner::new().await;
+    for origin in [
+        "https://192.168.1.20:4310",
+        "https://manager.vpn.example",
+        "https://manager.example.test",
+    ] {
+        let (status, invitation) = owner
+            .send(
+                "POST",
+                "/api/nodes/enrollments",
+                json!({ "name": "Direct node", "managerUrl": origin }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{invitation}");
+        assert_eq!(invitation["managerUrl"], origin);
+        let (status, identity) = owner
+            .call(
+                "POST",
+                ENROLL,
+                enrollment(
+                    &invitation,
+                    "Direct node",
+                    &capabilities(true, 2, 4096, 32768),
+                ),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{identity}");
+        assert_eq!(
+            owner
+                .call("POST", HEARTBEAT, json!({}), identity["token"].as_str())
+                .await
+                .0,
+            StatusCode::OK
+        );
+    }
+}
+
+#[tokio::test]
+async fn node_installer_keeps_the_chosen_direct_manager_address() {
+    let owner = Owner::new().await;
+    let (listener, address) = common::bind().await;
+    drop(listener);
+    let mut config = owner.service.config.clone();
+    config.port = address.port();
+    let config_file = owner.root().join("manager-config.json");
+    std::fs::write(&config_file, serde_json::to_vec(&config).unwrap()).unwrap();
+    let mut manager = tokio::process::Command::new(env!("CARGO_BIN_EXE_leo"))
+        .env("LEO_CONFIG", &config_file)
+        .env(
+            "LEO_NODE_IMAGE",
+            format!("registry.example/leo@sha256:{}", "1".repeat(64)),
+        )
+        .env_remove("LEO_OFFICIAL_ORIGIN")
+        .env_remove("LEO_INSTALLATION_CLAIM_CODE")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let client = reqwest::Client::new();
+    let base = format!("http://{address}");
+    common::eventually(
+        Duration::from_secs(10),
+        Duration::from_millis(20),
+        async || {
+            client
+                .get(format!("{base}/health"))
+                .send()
+                .await
+                .ok()
+                .filter(|response| response.status().is_success())
+        },
+    )
+    .await;
+    let response = client
+        .get(format!(
+            "{base}/internal/nodes/install.sh?managerUrl=https%3A%2F%2Fmanager.vpn.example%3A4310"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let script = response.text().await.unwrap();
+    assert!(
+        script.contains("LEO_MASTER='https://manager.vpn.example:4310/'"),
+        "installer must keep the chosen address"
+    );
+    assert!(!script.contains("http://localhost:4310"));
+    manager.kill().await.unwrap();
+}
+
+#[tokio::test]
 async fn node_configuration_validates_capacity_and_never_grants_agent_access() {
     let owner = Owner::new().await;
     let invitation = owner.invite("Small node").await;

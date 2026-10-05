@@ -111,6 +111,38 @@ older official binary against that database without its matching backup. If a
 later installation release has changed SQLite, follow the image-and-backup
 rollback rule below instead of assuming this procedure is still sufficient.
 
+## Additional execution nodes
+
+In the official app, open the installation’s **Nodes → Add a machine** screen.
+Supply the **Direct manager address** reachable from that machine: a LAN address,
+VPN hostname or optional public HTTPS origin, including its port. The browser
+continues to use the official relay; the additional node connects directly to
+this address. No public domain is required. The manager needs a listener or
+reverse proxy reachable from that LAN/VPN. The one-command installation keeps
+its manager on the private Docker network; expose only the manager’s node
+channel through a TLS proxy on your chosen private interface. For Compose,
+keep its loopback binding behind that proxy rather than exposing plaintext 4310.
+Use a certificate trusted by the node host and its container. Self-signed
+certificates are not silently trusted.
+
+HTTPS remains mandatory outside loopback, even on a private network or VPN.
+HTTP on loopback is the existing development/test exception, which does not
+send credentials across the network. Node identities and enrollment codes
+remain stored as hashes on the manager; enrollment codes expire and can be
+consumed only once. The address is connection configuration, not authorization.
+Disk blocks travel over the authenticated direct node channel or to configured
+S3 storage, never through the official relay.
+
+The chosen address is carried by the generated installer download and saved
+in the node’s protected identity and supervisor configuration. The manager’s
+optional `PUBLIC_URL` remains a fallback for older enrollment clients and
+manager-local calls; it need not be the browser’s origin. Installers require
+`LEO_NODE_IMAGE` to pin the manager’s approved image digest. Without it, use the
+matching `leo node-enroll` binary with the address and temporary code shown in
+the app. Changes of address after installation require updating the node’s
+private identity and supervisor configuration together while its service is
+stopped; no credential is displayed by the app.
+
 ## Docker on a VPS
 
 Install Docker Engine and the Compose plugin. Clone this repository on the server,

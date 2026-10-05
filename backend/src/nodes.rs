@@ -614,11 +614,20 @@ async fn configure_node(s: &Service, node: &str, body: Value) -> Result<Value> {
 #[serde(deny_unknown_fields)]
 struct Invitation {
     name: String,
+    #[serde(rename = "managerUrl")]
+    manager_url: Option<String>,
 }
 
 async fn invite(s: &Service, body: Value) -> Result<Value> {
     let request: Invitation = decode(body)?;
     let name = name(&request.name)?;
+    let origin = match request.manager_url {
+        Some(value) => Some(connector::master(value.trim())?),
+        None => connector::master(&s.config.public_url).ok(),
+    };
+    let manager_url = origin
+        .as_ref()
+        .map(|url| url.as_str().trim_end_matches('/').to_owned());
     let code = token();
     let expires = now() + ENROLLMENT_TTL_MS;
     s.store
@@ -628,14 +637,21 @@ async fn invite(s: &Service, body: Value) -> Result<Value> {
             Some(expires),
         )
         .await?;
-    let install = maintenance::release()
-        .ok()
-        .and_then(|_| connector::master(&s.config.public_url).ok())
-        .map(|origin| {
-            let script = format!("{origin}internal/nodes/install.sh").replace('\'', "'\\''");
-            format!("curl --fail --silent --show-error '{script}' | sudo bash")
-        });
-    Ok(json!({ "code": code, "expiresAt": expires, "installCommand": install }))
+    let install = maintenance::release().ok().and(origin).map(|origin| {
+        let mut script = origin.clone();
+        script.set_path("/internal/nodes/install.sh");
+        script
+            .query_pairs_mut()
+            .append_pair("managerUrl", origin.as_str());
+        let quoted = script.as_str().replace('\'', "'\\''");
+        format!("curl --fail --silent --show-error '{quoted}' | sudo bash")
+    });
+    Ok(json!({
+        "code": code,
+        "expiresAt": expires,
+        "managerUrl": manager_url,
+        "installCommand": install,
+    }))
 }
 
 async fn delete_stale_disks(s: &Service, node: &str) -> Result<Value> {
