@@ -148,7 +148,11 @@ async fn relay_disconnect_replays_activity_and_does_not_stop_the_run() {
         .unwrap();
     relay.stop = CancellationToken::new();
     relay.connector = tokio::spawn(leo_agent_manager::relay::connect(
-        relay.root.path().join("relay"),
+        relay
+            .installation
+            .config
+            .data_dir
+            .join("installation-relay"),
         leo_agent_manager::http::router(relay.installation.clone())
             .await
             .unwrap(),

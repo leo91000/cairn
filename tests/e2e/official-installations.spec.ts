@@ -33,6 +33,11 @@ test('selects installations, remembers the last one and honours deep workspace U
     logger: false,
   }))
   const mail = createServer(async (request, response) => {
+    if (new URL(request.url!, 'http://localhost').pathname === '/test-callback') {
+      response.writeHead(200, { 'content-type': 'text/html' }).end('<!doctype html><title>MCP client</title><p>Authorization received</p>')
+      return
+    }
+
     let body = ''
     for await (const chunk of request)
       body += chunk
@@ -261,17 +266,18 @@ test('selects installations, remembers the last one and honours deep workspace U
     await page.getByText('Browser MCP client', { exact: true }).locator('..').locator('..').getByRole('button', { name: 'Revoke', exact: true }).click()
     await expect(page.getByText('Browser MCP client', { exact: true })).toHaveCount(0)
 
+    const callbackUrl = `http://127.0.0.1:${mailPort}/test-callback`
     const client = await (await page.request.post(`${url}/oauth/register`, {
       data: {
         client_name: 'Browser OAuth client',
-        redirect_uris: [`${url}/test-callback`],
+        redirect_uris: [callbackUrl],
       },
     })).json()
     const { createHash } = await import('node:crypto')
     const verifier = 'a'.repeat(43)
     const parameters = new URLSearchParams({
       client_id: client.client_id,
-      redirect_uri: `${url}/test-callback`,
+      redirect_uri: callbackUrl,
       response_type: 'code',
       code_challenge_method: 'S256',
       code_challenge: createHash('sha256').update(verifier).digest('base64url'),
@@ -284,12 +290,13 @@ test('selects installations, remembers the last one and honours deep workspace U
     await page.getByLabel('Installation', { exact: true }).selectOption(firstUrl.split('/')[4]!)
     await page.getByRole('button', { name: 'Allow access', exact: true }).click()
     await expect(page).toHaveURL(/test-callback\?state=browser-state&code=/)
+    expect(new URL(page.url()).origin).toBe(new URL(callbackUrl).origin)
     const authorizationCode = new URL(page.url()).searchParams.get('code')!
     const exchange = await page.request.post(`${url}/oauth/token`, {
       form: {
         grant_type: 'authorization_code',
         client_id: client.client_id,
-        redirect_uri: `${url}/test-callback`,
+        redirect_uri: callbackUrl,
         code: authorizationCode,
         code_verifier: verifier,
         resource: `${url}/mcp`,

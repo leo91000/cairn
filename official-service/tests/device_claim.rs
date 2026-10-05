@@ -8,7 +8,11 @@ use std::time::Duration;
 #[tokio::test]
 async fn device_claim_reclaims_a_detached_installation_and_preserves_its_data() {
     let mut relay = RelayedInstallation::new(axum::Router::new()).await;
-    let dir = relay.root.path().join("relay");
+    let dir = relay
+        .installation
+        .config
+        .data_dir
+        .join("installation-relay");
     let path = dir.join("identity.json");
     let old: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
     let id = old["installationId"].as_str().unwrap();

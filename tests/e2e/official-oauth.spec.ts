@@ -46,6 +46,10 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
     else if (url.pathname === '/github/emails') {
       response.end(JSON.stringify([{ email, verified: true, primary: true }]))
     }
+    else if (url.pathname === '/mcp-test-callback') {
+      response.setHeader('content-type', 'text/html')
+      response.end('<!doctype html><title>MCP client</title><p>Authorization received</p>')
+    }
     else {
       response.writeHead(404).end('{}')
     }
@@ -152,14 +156,15 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
     })
     expect(claimed.status()).toBe(200)
     const installationId = (await claimed.json()).installationId
+    const callbackUrl = `${providerUrl}/mcp-test-callback`
     const clientResponse = await page.request.post(`${url}/oauth/register`, {
-      data: { client_name: 'Sign-in MCP client', redirect_uris: [`${url}/mcp-test-callback`] },
+      data: { client_name: 'Sign-in MCP client', redirect_uris: [callbackUrl] },
     })
     expect(clientResponse.status()).toBe(201)
     const client = await clientResponse.json()
     const parameters = new URLSearchParams({
       client_id: client.client_id,
-      redirect_uri: `${url}/mcp-test-callback`,
+      redirect_uri: callbackUrl,
       response_type: 'code',
       code_challenge_method: 'S256',
       code_challenge: createHash('sha256').update('a'.repeat(43)).digest('base64url'),
@@ -180,6 +185,7 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
       await page.getByLabel('Installation', { exact: true }).selectOption(installationId)
       await page.getByRole('button', { name: 'Allow access', exact: true }).click()
       await expect(page).toHaveURL(/mcp-test-callback\?state=resume-mcp-consent&code=/)
+      expect(new URL(page.url()).origin).toBe(providerUrl)
     }
   }
   finally {
