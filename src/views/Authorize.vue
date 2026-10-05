@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { api, redirect } from '../api'
+import { api, officialEntry, redirect } from '../api'
 import Icon from '../components/Icon.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
@@ -10,12 +10,15 @@ const parameters = Object.fromEntries(new URLSearchParams(location.search))
 const details = ref<any>()
 const error = ref('')
 const busy = ref(false)
+const installationId = ref('')
+const endpoint = officialEntry ? '/mcp/oauth' : '/oauth'
 onMounted(async () => {
   try {
-    details.value = await api('/oauth/preview', {
+    details.value = await api(`${endpoint}/preview`, {
       method: 'POST',
       body: JSON.stringify(parameters),
     })
+    installationId.value = details.value.installations?.[0]?.id || ''
   }
   catch (e) {
     error.value = (e as Error).message
@@ -25,9 +28,9 @@ onMounted(async () => {
 async function consent(approved: boolean) {
   busy.value = true
   try {
-    const result = await api('/oauth/consent', {
+    const result = await api(`${endpoint}/consent`, {
       method: 'POST',
-      body: JSON.stringify({ parameters, approved }),
+      body: JSON.stringify({ parameters, approved, installationId: installationId.value }),
     })
     redirect(result.redirect)
   }
@@ -48,7 +51,17 @@ async function consent(approved: boolean) {
     <template v-if="details">
       <p>
         <strong>{{ details.client.client_name }}</strong> is requesting access
-        to your Leo workspace.
+        to one Leo installation.
+      </p>
+      <label v-if="officialEntry">Installation
+        <select v-model="installationId" aria-label="Installation">
+          <option v-for="item in details.installations" :key="item.id" :value="item.id">
+            {{ item.name }} · {{ item.online ? 'Online' : 'Offline' }}
+          </option>
+        </select>
+      </label>
+      <p v-if="officialEntry && !details.installations.length">
+        Add an installation before granting access.
       </p>
       <ul class="consent-permissions pr-5 pl-[33px] leading-[2] bg-surface rounded-[9px] text-sm text-muted py-5 mx-0 my-6">
         <li v-for="scope in details.scopes" :key="scope">
@@ -67,7 +80,7 @@ async function consent(approved: boolean) {
       <div class="consent-actions flex justify-end gap-3 mt-[25px]">
         <UiButton :disabled="busy" @click="consent(false)">
           Deny
-        </UiButton><UiButton variant="primary" :disabled="busy" @click="consent(true)">
+        </UiButton><UiButton variant="primary" :disabled="busy || (officialEntry && !installationId)" @click="consent(true)">
           Allow access
         </UiButton>
       </div>

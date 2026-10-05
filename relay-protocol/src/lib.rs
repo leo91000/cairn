@@ -106,7 +106,8 @@ pub fn negotiate(versions: &[u16]) -> Option<u16> {
 }
 
 pub fn stream_path(path: &str) -> bool {
-    path.split('?').next().unwrap_or("").ends_with("/stream")
+    let route = path.split('?').next().unwrap_or("");
+    route.ends_with("/stream") || route.starts_with("/api/shared-artifacts/")
 }
 
 pub fn request_header(name: &str) -> bool {

@@ -43,8 +43,15 @@ pub struct Mcps {
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
-pub fn callback_url(s: &Service) -> String {
-    format!("{}/oauth/mcp/callback", s.config.public_url)
+pub async fn callback_url(s: &Service) -> Result<String> {
+    let (origin, installation) = crate::relay::official_address(&s.config.data_dir)
+        .await?
+        .ok_or_else(|| {
+            Error::unavailable("Claim this installation before connecting an MCP server.")
+        })?;
+    Ok(format!(
+        "{origin}/installations/{installation}/mcps/callback"
+    ))
 }
 
 pub(crate) fn grant_key(bearer: &str) -> String {
@@ -423,7 +430,7 @@ impl Mcps {
             has_token: !secrets.token().is_empty(),
             has_client_secret: !secrets.client_secret().is_empty(),
             env_keys: secrets.env_keys(),
-            callback_url: callback_url(s),
+            callback_url: callback_url(s).await.unwrap_or_default(),
         };
         Ok(serde_json::to_value(view)?)
     }
@@ -448,8 +455,10 @@ impl Mcps {
             .await
             .get(id)
             .is_some_and(|lock| lock.try_lock().is_err());
-        let self_connection =
-            url.origin().ascii_serialization() == s.config.public_url && url.path() == "/mcp";
+        let official = crate::relay::official_address(&s.config.data_dir).await?;
+        let self_connection = official.is_some_and(|(origin, _)| {
+            url.origin().ascii_serialization() == origin && url.path() == "/mcp"
+        });
         if busy && self_connection {
             return Err(Error::conflict(
                 "This self-connection is serving an active request. Manage other connections here; test or change this connection directly from the MCPs UI after the request finishes.",

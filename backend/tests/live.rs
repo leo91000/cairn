@@ -35,7 +35,14 @@ impl Fixture {
             ..common::config(root.path())
         };
         let service = Service::new(config).await.unwrap();
-        let token = text(&service.auth.session().await.unwrap(), "value").to_owned();
+        let token = text(
+            &common::browser_http::auth(&service)
+                .session()
+                .await
+                .unwrap(),
+            "value",
+        )
+        .to_owned();
         let task = service
             .task(
                 json!({ "name": "Live test", "prompt": "Test", "agentId": MAIN_AGENT_ID }),
@@ -339,7 +346,14 @@ async fn metadata_shutdown_and_invalid_requests() {
             .status(),
         StatusCode::UNAUTHORIZED
     );
-    let token = text(&f.service.auth.session().await.unwrap(), "value").to_owned();
+    let token = text(
+        &common::browser_http::auth(&f.service)
+            .session()
+            .await
+            .unwrap(),
+        "value",
+    )
+    .to_owned();
     for (path, code) in [
         (
             format!("/api/runs/{}/stream?after=-1", f.run),

@@ -1,5 +1,4 @@
 use crate::{
-    auth::Auth,
     config::{Config, MAIN_AGENT_ID, id, now},
     error::{Error, Result, required},
     run_status::RunStatus,
@@ -36,7 +35,6 @@ pub struct Service {
     pub attachment_upload: Arc<tokio::sync::Mutex<()>>,
     pub config: Config,
     pub store: Store,
-    pub auth: Auth,
     pub vault: Vault,
     pub skills: Skills,
     pub http: reqwest::Client,
@@ -78,7 +76,6 @@ impl Service {
             notifications: crate::notifications::Notifications::default(),
             conversation_storage_lock: Arc::default(),
             attachment_upload: Arc::default(),
-            auth: Auth::new(store.clone(), config.public_url.clone()),
             skills: Skills {
                 config: config.clone(),
             },

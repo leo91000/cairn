@@ -93,6 +93,7 @@ impl Fixture {
         })
         .await
         .unwrap();
+        common::browser_http::claimed(&s).await.unwrap();
         let run = start_run(&s, "Artifacts", "Create a report").await;
         let run_id = text(&run, "id").to_owned();
         common::set_checkpoint(&s.store, &run_id, json!({ "runnerId": id() })).await;
@@ -405,7 +406,7 @@ async fn preview_is_prepared_asynchronously_or_reports_missing_optional_tools_wi
 
 /// Makes `item` public through the owner route, which requires the session and its CSRF token.
 async fn share_from_the_owner_route(app: &Router, s: &Service, item: &Value) {
-    let session = Session::new(&s.auth.session().await.unwrap());
+    let session = Session::new(&common::browser_http::auth(s).session().await.unwrap());
     let endpoint = format!("{}/visibility", text(item, "url"));
     for (credentials, expected) in [
         (Credentials::Anonymous, StatusCode::UNAUTHORIZED),

@@ -10,7 +10,7 @@ import { clearHistoryCache } from './history-cache'
 
 // Resolve the official context before any shared view reads its local cache.
 // The native entry keeps its existing unprefixed transport and browser state.
-const officialEntry = typeof document !== 'undefined' && document.getElementById('app')?.hasAttribute('data-official')
+export const officialEntry = typeof document !== 'undefined' && document.getElementById('app')?.hasAttribute('data-official')
 const installationId = officialEntry ? /^\/installations\/([\w-]+)(?:\/|$)/.exec(window.location.pathname)?.[1] || '' : ''
 
 export const state = reactive({
@@ -88,6 +88,9 @@ export async function api<T = any>(
 }
 
 export function apiUrl(path: string) {
+  if (officialEntry && state.installationId && /^\/tokens(?:\/|$)/.test(path))
+    return `/api/installations/${encodeURIComponent(state.installationId)}${path}`
+
   const prefix = state.installationId
     ? `/api/installations/${encodeURIComponent(state.installationId)}/api`
     : '/api'
@@ -101,7 +104,7 @@ export function apiResourceUrl(value: string) {
     return value
   try {
     const url = new URL(value, window.location.origin)
-    if (url.origin === window.location.origin && url.pathname.startsWith('/api/') && !url.pathname.startsWith('/api/installations/'))
+    if (url.origin === window.location.origin && url.pathname.startsWith('/api/') && !url.pathname.startsWith('/api/installations/') && !url.pathname.startsWith('/api/public/'))
       return apiUrl(`${url.pathname.slice(4)}${url.search}${url.hash}`)
   }
   catch {}

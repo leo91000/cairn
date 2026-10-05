@@ -205,3 +205,22 @@ available to ordinary API requests, so idle member streams cannot exhaust the
 capacity needed to send messages. At the stream limit the next stream receives
 503 and uses the existing client retry behavior; streams are not evicted.
 Cancelling or revoking a stream releases both its stream permit and tunnel slot.
+
+
+## Public files and scoped MCP requests
+
+The official service authorizes `/mcp` with an installation-scoped grant and
+relays it to `/api/mcp`. The relay context carries `mcpScopes`; the installation
+applies read/run/manage checks using its existing management tools. Browser
+sessions and token secrets never travel to the installation.
+
+Public URLs at `/api/public/installations/{id}/artifacts/{token}` use a separate
+read capability. The context carries `publicArtifact`, no account identity, and
+permits only GET/HEAD of `/api/shared-artifacts/{token}`. Share-token validation
+and revocation stay on the installation. Public files use the existing credited
+streams; the official service overwrites security headers and removes cookies.
+An offline installation returns an explicit public-file availability message.
+
+Detachment removes MCP grants and outstanding authorization codes in the same
+transaction as ownership. Grant creation holds the installation ownership lock,
+so reclaiming the same machine never restores its previous MCP credentials.

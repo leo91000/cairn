@@ -1,10 +1,12 @@
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { once } from 'node:events'
 import { createServer } from 'node:http'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
 
 test('Google and GitHub reuse an account, manage sign-in methods and preserve claim navigation', async ({ page }) => {
+  test.setTimeout(90000)
   let denyNextAuthorization = false
   const githubId = Date.now()
   const email = `oauth-browser-${Date.now()}@example.test`
@@ -83,7 +85,7 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
       if (child.exitCode !== null)
         throw new Error(`Official service exited: ${log}`)
       return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
-    }).toBe(true)
+    }, { timeout: 30000 }).toBe(true)
     await page.goto(url)
     await expect(page.getByRole('button', { name: 'Continue with Google' })).toBeVisible()
     denyNextAuthorization = true
@@ -149,6 +151,36 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
       data: { deviceCode: device.deviceCode },
     })
     expect(claimed.status()).toBe(200)
+    const installationId = (await claimed.json()).installationId
+    const clientResponse = await page.request.post(`${url}/oauth/register`, {
+      data: { client_name: 'Sign-in MCP client', redirect_uris: [`${url}/mcp-test-callback`] },
+    })
+    expect(clientResponse.status()).toBe(201)
+    const client = await clientResponse.json()
+    const parameters = new URLSearchParams({
+      client_id: client.client_id,
+      redirect_uri: `${url}/mcp-test-callback`,
+      response_type: 'code',
+      code_challenge_method: 'S256',
+      code_challenge: createHash('sha256').update('a'.repeat(43)).digest('base64url'),
+      state: 'resume-mcp-consent',
+      scope: 'read',
+    })
+    for (const provider of ['Google', 'GitHub']) {
+      const current = await (await page.request.get(`${url}/api/account/session`)).json()
+      expect((await page.request.post(`${url}/api/account/logout`, {
+        headers: { 'origin': url, 'x-csrf-token': current.csrf },
+        data: {},
+      })).status()).toBe(204)
+      await page.goto(`${url}/oauth/authorize?${parameters}`)
+      await page.getByRole('button', { name: `Continue with ${provider}`, exact: true }).click()
+      await expect(page.getByRole('heading', { name: 'Connect an assistant', exact: true })).toBeVisible()
+      await expect(page).toHaveURL(/\/authorize\?/)
+      expect(Object.fromEntries(new URL(page.url()).searchParams)).toEqual(Object.fromEntries(parameters))
+      await page.getByLabel('Installation', { exact: true }).selectOption(installationId)
+      await page.getByRole('button', { name: 'Allow access', exact: true }).click()
+      await expect(page).toHaveURL(/mcp-test-callback\?state=resume-mcp-consent&code=/)
+    }
   }
   finally {
     child.kill('SIGTERM')

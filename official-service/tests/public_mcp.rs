@@ -207,3 +207,229 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
     }
     relay.close().await;
 }
+
+#[tokio::test]
+async fn an_external_mcp_connection_returns_through_the_official_installation_and_account() {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let provider_script = "import { mcpProvider } from './tests/mcp-provider.ts'; const p = await mcpProvider(); console.log(p.origin); await new Promise(() => {});";
+    let mut provider = tokio::process::Command::new("node")
+        .args([
+            "--import",
+            "tsx",
+            "--input-type=module",
+            "-e",
+            provider_script,
+        ])
+        .current_dir(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap(),
+        )
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let origin = BufReader::new(provider.stdout.take().unwrap())
+        .lines()
+        .next_line()
+        .await
+        .unwrap()
+        .unwrap();
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let mutate = |path: &str, body: Value| {
+        relay
+            .app
+            .client
+            .post(format!("{}{path}", relay.base))
+            .header("cookie", &relay.cookie)
+            .header("origin", &relay.app.url)
+            .header("x-csrf-token", relay.session["csrf"].as_str().unwrap())
+            .json(&body)
+    };
+    let saved: Value = mutate("/mcps", json!({ "name": "External", "url": format!("{origin}/mcp"), "auth": "oauth", "allowPrivateNetwork": true }))
+        .send().await.unwrap().json().await.unwrap();
+    let installation = relay.session["installations"][0]["id"].as_str().unwrap();
+    assert_eq!(
+        saved["callbackUrl"],
+        format!(
+            "{}/installations/{installation}/mcps/callback",
+            relay.app.url
+        )
+    );
+    let id = saved["id"].as_str().unwrap();
+    let consent: Value = mutate(&format!("/mcps/{id}/connect"), json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let response = http
+        .get(consent["url"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap();
+    let callback = url::Url::parse(response.headers()["location"].to_str().unwrap()).unwrap();
+    let parameters: std::collections::HashMap<String, String> = callback
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    let completed = mutate("/mcps/oauth/callback", json!(parameters))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(completed.status(), StatusCode::OK);
+    assert_eq!(
+        completed.json::<Value>().await.unwrap()["result"],
+        "connected"
+    );
+    let replay = mutate("/mcps/oauth/callback", json!(parameters))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::NOT_FOUND);
+    let tested = mutate(&format!("/mcps/{id}/test"), json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tested.status(), StatusCode::OK);
+    assert_eq!(tested.json::<Value>().await.unwrap()["state"], "connected");
+    provider.kill().await.unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn detaching_and_reclaiming_an_installation_permanently_revokes_its_mcp_grants() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let minted: Value = owner_post(
+        &relay,
+        &format!("/api/installations/{id}/tokens"),
+        json!({ "label": "Before detachment", "scopes": ["read"] }),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let identity: Value = serde_json::from_slice(
+        &std::fs::read(
+            relay
+                .installation
+                .config
+                .data_dir
+                .join("installation-relay/identity.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let detached = owner_post(
+        &relay,
+        &format!("/api/installations/{id}/detach"),
+        json!({}),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(detached.status(), StatusCode::NO_CONTENT);
+
+    let start = relay
+        .app
+        .post(
+            "/api/relay/device-claim/start",
+            json!({
+                "name": "Reclaimed machine",
+                "protocol": 1,
+                "identity": { "installationId": id, "token": identity["token"] },
+            }),
+        )
+        .await;
+    assert_eq!(start.status(), StatusCode::CREATED);
+    let device: Value = start.json().await.unwrap();
+    let preview: Value = owner_post(
+        &relay,
+        "/api/installations/device-claim/preview",
+        json!({ "code": device["userCode"] }),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let approved = owner_post(
+        &relay,
+        "/api/installations/device-claim",
+        json!({
+            "code": device["userCode"], "confirmation": preview["confirmation"],
+        }),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(approved.status(), StatusCode::OK);
+    let reclaimed = relay
+        .app
+        .post(
+            "/api/relay/device-claim/poll",
+            json!({ "deviceCode": device["deviceCode"] }),
+        )
+        .await;
+    assert_eq!(reclaimed.status(), StatusCode::OK);
+
+    let response = relay
+        .app
+        .client
+        .post(format!("{}/mcp", relay.app.url))
+        .bearer_auth(minted["token"].as_str().unwrap())
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let grants: Value = relay
+        .app
+        .client
+        .get(format!("{}/api/installations/{id}/tokens", relay.app.url))
+        .header("cookie", &relay.cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(grants, json!([]));
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn dynamic_registration_has_no_permanent_global_client_ceiling() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    for index in 0..101u8 {
+        // Distinct callers stay within the per-IP limiter while exercising the
+        // central registration contract beyond the former installation cap.
+        let client = reqwest::Client::builder()
+            .local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                127,
+                0,
+                0,
+                index / 10 + 1,
+            )))
+            .build()
+            .unwrap();
+        let response = client.post(format!("{}/oauth/register", relay.app.url))
+            .json(&json!({ "client_name": "Public client", "redirect_uris": ["http://localhost:9999/callback"] }))
+            .send().await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::CREATED,
+            "registration {index}"
+        );
+    }
+    relay.close().await;
+}

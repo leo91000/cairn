@@ -186,3 +186,35 @@ with agents. The installation refuses management of agents, projects, skills,
 nodes, coding-agent accounts, connections, secrets and settings. The web hides
 these actions and owner-only pages, skips owner-only requests in shared views,
 and offers skills for reading only.
+
+## Public deliverables and MCP access
+
+Public deliverable URLs are `/api/public/installations/{id}/artifacts/{token}`
+on the official origin. The installation retains file bytes, share-token
+verification and revocation. The public request carries no account identity,
+cookie or bearer credential through the relay, and permits only GET/HEAD of
+that file. Recipients need no session. Revoking visibility or moving a
+conversation to trash invalidates the link; republication creates a new link.
+An offline installation returns 503 with an explicit offline message.
+
+The official service imposes no-store, nosniff, a sandbox CSP, no-referrer and
+noindex headers on public responses, including errors. Headers from an
+installation cannot relax this policy. Downloads and byte ranges use the
+existing credit-controlled relay streams, including files larger than a
+finite relay frame. The service never persists their contents.
+
+External MCP clients use the official `/mcp` URL. Discovery is at
+`/.well-known/oauth-protected-resource/mcp` and
+`/.well-known/oauth-authorization-server`; `/oauth/register` registers public
+clients. Authorization uses the Leo account session, an explicit installation
+choice and S256 PKCE. Codes expire after five minutes; access tokens after an
+hour. Refresh tokens rotate, expire after 30 days and revoke their entire
+authorization when a used token is replayed. A resource parameter, when supplied,
+must match the official MCP URL. Only credential digests are retained.
+
+Create, list and revoke grants at `/api/installations/{id}/tokens` (DELETE
+`/{grant}`), using the official session, origin and CSRF rules. Personal tokens
+last 30 days and are returned once. Every credential is pinned to that
+installation and its read/run/manage scopes; it stops working after revocation,
+detachment or account deletion. Installation management permissions remain
+reserved for its owner. Use Settings in the current installation to manage them.

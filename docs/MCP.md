@@ -46,6 +46,13 @@ handshake without an adapter or server-side transport sessions.
 
 ## Authorization
 
+The public `/mcp`, OAuth discovery and token endpoints belong to the official
+service. Sign in with a Leo account and choose one owned installation on the
+consent screen. Tools execute on that installation through its outbound relay.
+Its local `/mcp`, OAuth endpoints and personal tokens have been removed.
+An offline installation returns 503 without replaying a tool call.
+
+
 The application advertises protected-resource metadata at
 `/.well-known/oauth-protected-resource/mcp` and authorization-server metadata at
 `/.well-known/oauth-authorization-server`. OAuth supports public-client dynamic
@@ -89,7 +96,7 @@ Tool metadata includes OAuth scopes and
 read/write annotations; denied tool calls carry an OAuth challenge for clients
 that support relinking with additional scopes.
 
-OAuth grants and 30-day personal tokens can be revoked from **Settings**. Personal
+OAuth grants and 30-day personal tokens are limited to one installation and the selected scopes. They can be revoked from that installation’s **Settings** on the official web app. Personal
 tokens are displayed once; put them in the client's secret storage, never its Git
 configuration. Dynamic registration is rate-limited and capped at 100 clients.
 A `run` grant starts existing tasks in YOLO mode inside Docker and can cause the

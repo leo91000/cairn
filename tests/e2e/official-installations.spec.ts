@@ -249,6 +249,58 @@ test('selects installations, remembers the last one and honours deep workspace U
     await expect(page).toHaveURL(/\/installations\/[^/]+\/settings$/)
     await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible()
     await expect(page.getByRole('heading', { name: 'Conversation storage', exact: true })).toBeVisible()
+    await expect(page.getByLabel('MCP server URL', { exact: true })).toHaveValue(`${url}/mcp`)
+    await page.getByRole('button', { name: 'New token', exact: true }).click()
+    await page.getByRole('dialog').getByLabel('Name', { exact: true }).fill('Browser MCP client')
+    await page.getByRole('button', { name: 'Create token', exact: true }).click()
+    await expect(page.getByText('Browser MCP client', { exact: true })).toBeVisible()
+
+    const tokenDialog = page.getByRole('dialog')
+    await expect(tokenDialog).toContainText('This token is shown once')
+    await tokenDialog.getByRole('button', { name: 'Close dialog', exact: true }).click()
+    await page.getByText('Browser MCP client', { exact: true }).locator('..').locator('..').getByRole('button', { name: 'Revoke', exact: true }).click()
+    await expect(page.getByText('Browser MCP client', { exact: true })).toHaveCount(0)
+
+    const client = await (await page.request.post(`${url}/oauth/register`, {
+      data: {
+        client_name: 'Browser OAuth client',
+        redirect_uris: [`${url}/test-callback`],
+      },
+    })).json()
+    const { createHash } = await import('node:crypto')
+    const verifier = 'a'.repeat(43)
+    const parameters = new URLSearchParams({
+      client_id: client.client_id,
+      redirect_uri: `${url}/test-callback`,
+      response_type: 'code',
+      code_challenge_method: 'S256',
+      code_challenge: createHash('sha256').update(verifier).digest('base64url'),
+      scope: 'read',
+      state: 'browser-state',
+      resource: `${url}/mcp`,
+    })
+    await page.goto(`${url}/oauth/authorize?${parameters}`)
+    await expect(page.getByRole('heading', { name: 'Connect an assistant', exact: true })).toBeVisible()
+    await page.getByLabel('Installation', { exact: true }).selectOption(firstUrl.split('/')[4]!)
+    await page.getByRole('button', { name: 'Allow access', exact: true }).click()
+    await expect(page).toHaveURL(/test-callback\?state=browser-state&code=/)
+    const authorizationCode = new URL(page.url()).searchParams.get('code')!
+    const exchange = await page.request.post(`${url}/oauth/token`, {
+      form: {
+        grant_type: 'authorization_code',
+        client_id: client.client_id,
+        redirect_uri: `${url}/test-callback`,
+        code: authorizationCode,
+        code_verifier: verifier,
+        resource: `${url}/mcp`,
+      },
+    })
+    expect(exchange.status()).toBe(200)
+    const oauthToken = (await exchange.json()).access_token
+    await page.goto(firstUrl.replace(/agents$/, 'settings'))
+    await expect(page.getByText('Browser OAuth client', { exact: true })).toBeVisible()
+    await page.getByText('Browser OAuth client', { exact: true }).locator('..').locator('..').getByRole('button', { name: 'Revoke', exact: true }).click()
+    expect((await page.request.post(`${url}/mcp`, { headers: { authorization: `Bearer ${oauthToken}` }, data: { jsonrpc: '2.0', id: 1, method: 'tools/list' } })).status()).toBe(401)
     await page.getByRole('button', { name: 'Configure external S3', exact: true }).click()
     await expect(page.getByLabel('S3 endpoint', { exact: true })).toBeVisible()
     await page.getByLabel('S3 endpoint', { exact: true }).fill('https://11111111111111111111111111111111.r2.cloudflarestorage.com')

@@ -171,3 +171,21 @@ async fn public_file_is_an_official_read_only_link_with_security_headers_revocat
     assert!(!body.contains("relay-owner") && !body.contains("accountId"));
     relay.close().await;
 }
+
+#[tokio::test]
+async fn public_files_larger_than_a_relay_frame_stream_without_truncation() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let bytes = vec![b'x'; leo_relay_protocol::MAX_BODY + 100_000];
+    let (run, artifact) = seeded_artifact(&relay, &bytes).await;
+    let shared = visibility(&relay, &run, &artifact, "public").await;
+    let response = relay
+        .app
+        .client
+        .get(shared["publicUrl"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.bytes().await.unwrap().as_ref(), bytes.as_slice());
+    relay.close().await;
+}

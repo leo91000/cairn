@@ -16,7 +16,7 @@ use axum::{
     routing::any,
 };
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
@@ -57,7 +57,6 @@ pub async fn router(service: Arc<Service>) -> Result<Router> {
     };
     Ok(Router::new()
         .route("/health", any(health))
-        .route("/mcp", any(crate::mcp_server::handle))
         .route("/api/mcp", any(crate::mcp_server::handle))
         .route("/mcp-workspace", any(crate::mcp_server::handle))
         .route("/mcp-gateway/{id}", any(crate::mcp_server::handle))
@@ -92,8 +91,6 @@ pub async fn router(service: Arc<Service>) -> Result<Router> {
             any(crate::nodes::transport::proxy),
         )
         .route("/api/{*path}", any(api))
-        .route("/oauth/{*path}", any(oauth))
-        .route("/.well-known/{*path}", any(metadata))
         .fallback(|| async {
             Error::unauthorized("Access this installation through the official service.")
         })
@@ -181,10 +178,8 @@ async fn security(State(app): State<App>, mut request: Request, next: Next) -> R
 
 fn is_dynamic(path: &str) -> bool {
     path.starts_with("/api/")
-        || path == "/mcp"
         || path == "/mcp-workspace"
         || path.starts_with("/mcp-gateway/")
-        || path.starts_with("/oauth/")
         || path.starts_with("/internal/")
         || path == "/health"
 }
@@ -222,14 +217,6 @@ fn general_limit(path: &str) -> (&'static str, u32) {
     }
 }
 
-/// Stricter limits on credential endpoints: `(limit, window in ms)`.
-fn endpoint_limit(path: &str) -> Option<(u32, i64)> {
-    match path {
-        "/oauth/register" => Some((10, 3_600_000)),
-        _ => None,
-    }
-}
-
 fn too_many_requests() -> Error {
     Error::too_many_requests("Too many requests. Try again later.")
 }
@@ -244,8 +231,7 @@ fn rate_limit(app: &App, subject: &RateLimitSubject, path: &str) -> Result<()> {
         }
     }
     let (bucket, max) = general_limit(path);
-    let buckets = std::iter::once((bucket, max, 60_000))
-        .chain(endpoint_limit(path).map(|(max, window)| (path, max, window)));
+    let buckets = std::iter::once((bucket, max, 60_000));
     for (key, max, window) in buckets {
         let entry = limits
             .entry((subject.clone(), key.to_owned()))
@@ -680,108 +666,4 @@ async fn api(State(app): State<App>, request: Request) -> Result<Response> {
         return Ok(response);
     }
     Ok(Json(crate::api::dispatch(s, &input).await?).into_response())
-}
-
-/// Shown in the browser tab after the Android app captured an MCP OAuth callback.
-fn native_callback_page() -> Response {
-    let headers = [
-        (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-        (header::CACHE_CONTROL, "no-store"),
-        (header::REFERRER_POLICY, "no-referrer"),
-        (
-            header::CONTENT_SECURITY_POLICY,
-            "default-src 'none'; frame-ancestors 'none'",
-        ),
-    ];
-    let page = "<!doctype html><html lang=fr><meta name=viewport content='width=device-width,initial-scale=1'><title>Leo</title><h1>Revenez dans Leo</h1><p>Fermez cet onglet pour terminer la connexion dans l’application Android.</p></html>";
-    (headers, page).into_response()
-}
-
-async fn oauth(State(app): State<App>, request: Request) -> Result<Response> {
-    let input = Input::read(request).await?;
-    let auth = &app.service.auth;
-    if input.method == "GET" && input.path == "/oauth/mcp/callback" {
-        if app
-            .service
-            .mcps
-            .capture_native_callback(&app.service, &input.query)
-            .await?
-        {
-            return Ok(native_callback_page());
-        }
-        let result = if let Some(identity) = &input.identity {
-            app.service
-                .mcps
-                .callback(&app.service, &input.query, identity.oauth_binding())
-                .await
-                .unwrap_or_else(|_| "expired".into())
-        } else {
-            "expired".into()
-        };
-        let mut response =
-            axum::response::Redirect::temporary(&format!("/mcps?oauth={result}")).into_response();
-        response
-            .headers_mut()
-            .insert("referrer-policy", HeaderValue::from_static("no-referrer"));
-        return Ok(response);
-    }
-    let result = match (input.method.as_str(), input.path.as_str()) {
-        ("POST", "/oauth/register") => {
-            return Ok(
-                (StatusCode::CREATED, Json(auth.register(input.body).await?)).into_response(),
-            );
-        }
-        ("GET", "/oauth/authorize") => {
-            let parameters = serde_json::to_value(&input.query)?;
-            auth.authorization(&parameters).await?;
-            let location = format!(
-                "/authorize?{}",
-                serde_urlencoded::to_string(&input.query).map_err(Error::internal)?
-            );
-            return Ok(axum::response::Redirect::temporary(&location).into_response());
-        }
-        ("POST", "/oauth/token") => auth.exchange(input.body).await?,
-        ("POST", "/oauth/revoke") => {
-            auth.revoke_token(
-                input.string("token", 10000)?,
-                input.string("client_id", 200)?,
-            )
-            .await?;
-            json!({})
-        }
-        _ => return Err(Error::not_found("Not found")),
-    };
-    Ok(Json(result).into_response())
-}
-
-async fn metadata(State(app): State<App>, request: Request) -> Result<Json<Value>> {
-    if request.method() != "GET" {
-        return Err(Error::method_not_allowed("Method not allowed."));
-    }
-    let url = &app.service.config.public_url;
-    let scopes = ["read", "run", "manage"];
-    match request.uri().path() {
-        "/.well-known/oauth-protected-resource" | "/.well-known/oauth-protected-resource/mcp" => {
-            Ok(Json(json!({
-                "resource": format!("{url}/mcp"),
-                "authorization_servers": [url],
-                "scopes_supported": scopes,
-                "bearer_methods_supported": ["header"],
-                "resource_name": "Leo Agent Manager",
-            })))
-        }
-        "/.well-known/oauth-authorization-server" => Ok(Json(json!({
-            "issuer": url,
-            "authorization_endpoint": format!("{url}/oauth/authorize"),
-            "token_endpoint": format!("{url}/oauth/token"),
-            "registration_endpoint": format!("{url}/oauth/register"),
-            "revocation_endpoint": format!("{url}/oauth/revoke"),
-            "response_types_supported": ["code"],
-            "grant_types_supported": ["authorization_code", "refresh_token"],
-            "code_challenge_methods_supported": ["S256"],
-            "token_endpoint_auth_methods_supported": ["none"],
-            "scopes_supported": scopes,
-        }))),
-        _ => Err(Error::not_found("Not found")),
-    }
 }

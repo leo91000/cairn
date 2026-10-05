@@ -13,6 +13,7 @@ import PendingInvitations from './components/PendingInvitations.vue'
 import ThemeControl from './components/ThemeControl.vue'
 import UiAlert from './components/UiAlert.vue'
 import UiButton from './components/UiButton.vue'
+import Authorize from './views/Authorize.vue'
 
 interface AccountSession {
   authenticated: boolean
@@ -78,6 +79,7 @@ const installation = ref<{
 } | null>(null)
 const installationMenu = ref<HTMLDetailsElement>()
 const officialReturnKey = 'leo-installation-return'
+const authorizePage = window.location.pathname === '/authorize'
 const claimPage = window.location.pathname === '/claim'
 
 watch(deviceCode, () => deviceReview.value = null)
@@ -105,7 +107,7 @@ watch(session, (value) => {
     catch {}
   }
 
-  if (!requested && value.installations.length && !claimPage && !invitationsPage) {
+  if (!requested && value.installations.length && !claimPage && !invitationsPage && !authorizePage) {
     let remembered = ''
     try {
       remembered = localStorage.getItem(`leo-current-installation:${value.account?.id}`) || ''
@@ -394,7 +396,7 @@ async function oauth(provider: 'google' | 'github') {
     const start = await accountRequest(`oauth/${provider}/start`, {})
     try {
       sessionStorage.removeItem(officialReturnKey)
-      if (state.installationId || claimPage) {
+      if (state.installationId || claimPage || authorizePage) {
         const destination = claimPage ? '/claim' : `${window.location.pathname}${window.location.search}${window.location.hash}`
         sessionStorage.setItem(officialReturnKey, destination)
       }
@@ -542,7 +544,7 @@ onMounted(async () => {
     const destination = sessionStorage.getItem(officialReturnKey)
     if (url.pathname === '/' && destination) {
       sessionStorage.removeItem(officialReturnKey)
-      if (destination === '/claim' || /^\/installations\/[\w-]+\//.test(destination)) {
+      if (destination === '/claim' || /^\/authorize(?:\?|$)/.test(destination) || /^\/installations\/[\w-]+\//.test(destination)) {
         const target = new URL(destination, url.origin)
         const signInError = url.searchParams.get('sign_in_error')
         if (signInError)
@@ -564,7 +566,10 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div v-if="session?.authenticated && installation && !showMethods" class="flex h-dvh min-h-0 flex-col bg-canvas text-ink">
+  <main v-if="session?.authenticated && authorizePage" class="min-h-dvh bg-canvas text-ink px-6 py-10">
+    <Authorize />
+  </main>
+  <div v-else-if="session?.authenticated && installation && !showMethods" class="flex h-dvh min-h-0 flex-col bg-canvas text-ink">
     <header class="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2 text-sm" aria-label="Current installation">
       <label v-if="session.installations.length > 1" class="min-w-0 max-w-full">
         <span class="sr-only">Current installation</span>

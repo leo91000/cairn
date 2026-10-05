@@ -569,10 +569,7 @@ async fn dispatch(
                 .map(|value| (name.to_string(), value.to_owned()))
         })
         .collect();
-    let is_stream = response
-        .headers()
-        .get("content-type")
-        .is_some_and(|value| value.as_bytes().starts_with(b"text/event-stream"));
+    let is_stream = leo_relay_protocol::stream_path(&input.path);
     if is_stream && let Some(output) = streaming {
         let id = input.id;
         output

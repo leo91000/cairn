@@ -8,9 +8,54 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sqlx_core::{query::query, query_as::query_as};
+use sqlx_core::{from_row::FromRow, query::query, query_as::query_as, row::Row};
+use sqlx_postgres::PgRow;
 
-type GrantListing = (String, String, Vec<String>, Option<String>, i64, i64);
+struct GrantListing {
+    id: String,
+    label: String,
+    scopes: Vec<String>,
+    client_id: Option<String>,
+    created_at: i64,
+    expires_at: i64,
+}
+
+impl<'r> FromRow<'r, PgRow> for GrantListing {
+    fn from_row(row: &'r PgRow) -> Result<Self, sqlx_core::error::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            label: row.try_get("label")?,
+            scopes: row.try_get("scopes")?,
+            client_id: row.try_get("client_id")?,
+            created_at: row.try_get("created_at")?,
+            expires_at: row.try_get("expires_at")?,
+        })
+    }
+}
+
+struct AuthorizationCode {
+    account_id: String,
+    installation_id: String,
+    client_id: String,
+    redirect_uri: String,
+    challenge: String,
+    scopes: Vec<String>,
+    label: String,
+}
+
+impl<'r> FromRow<'r, PgRow> for AuthorizationCode {
+    fn from_row(row: &'r PgRow) -> Result<Self, sqlx_core::error::Error> {
+        Ok(Self {
+            account_id: row.try_get("account_id")?,
+            installation_id: row.try_get("installation_id")?,
+            client_id: row.try_get("client_id")?,
+            redirect_uri: row.try_get("redirect_uri")?,
+            challenge: row.try_get("challenge")?,
+            scopes: row.try_get("scopes")?,
+            label: row.try_get("label")?,
+        })
+    }
+}
 
 const SCOPES: [&str; 3] = ["read", "run", "manage"];
 
@@ -49,8 +94,8 @@ pub(super) async fn personal(
     Json(input): Json<Personal>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let account = installations::account(&service, &headers, &Method::POST).await?;
-    owner(&service, &installation, &account).await?;
     valid_scopes(&input.scopes)?;
+
     let label = input.label.trim();
     if label.is_empty() || label.chars().count() > 100 || label.chars().any(char::is_control) {
         return Err(ApiError(
@@ -62,6 +107,16 @@ pub(super) async fn personal(
     let id = random_token();
     let token = random_token();
     let mut transaction = service.pool.begin().await?;
+    let owned: Option<(String,)> =
+        query_as("SELECT id FROM installations WHERE id = $1 AND owner_id = $2 FOR SHARE")
+            .bind(&installation)
+            .bind(&account)
+            .fetch_optional(&mut *transaction)
+            .await?;
+    if owned.is_none() {
+        return Err(ApiError(StatusCode::NOT_FOUND, "Installation not found"));
+    }
+
     query("INSERT INTO mcp_grants (id, account_id, installation_id, label, scopes, expires_at) VALUES ($1, $2, $3, $4, $5, now() + interval '30 days')")
         .bind(&id).bind(&account).bind(&installation).bind(label).bind(&input.scopes)
         .execute(&mut *transaction).await?;
@@ -82,19 +137,19 @@ pub(super) async fn list(
 ) -> Result<Json<Vec<Value>>, ApiError> {
     let account = installations::account(&service, &headers, &Method::GET).await?;
     owner(&service, &installation, &account).await?;
-    let rows: Vec<GrantListing> = query_as("SELECT id, label, scopes, client_id, (extract(epoch FROM created_at) * 1000)::bigint, (extract(epoch FROM expires_at) * 1000)::bigint FROM mcp_grants WHERE account_id = $1 AND installation_id = $2 AND expires_at > now() ORDER BY created_at")
+    let rows: Vec<GrantListing> = query_as("SELECT id, label, scopes, client_id, (extract(epoch FROM created_at) * 1000)::bigint AS created_at, (extract(epoch FROM expires_at) * 1000)::bigint AS expires_at FROM mcp_grants WHERE account_id = $1 AND installation_id = $2 AND expires_at > now() ORDER BY created_at")
         .bind(account).bind(&installation).fetch_all(&service.pool).await?;
     Ok(Json(
         rows.into_iter()
-            .map(|(id, label, scopes, client, created, expires)| {
+            .map(|grant| {
                 json!({
-                    "id": id,
-                    "label": label,
-                    "scopes": scopes,
-                    "clientId": client.unwrap_or_else(|| "personal".into()),
+                    "id": grant.id,
+                    "label": grant.label,
+                    "scopes": grant.scopes,
+                    "clientId": grant.client_id.unwrap_or_else(|| "personal".into()),
                     "installationId": installation,
-                    "createdAt": created,
-                    "expiresAt": expires,
+                    "createdAt": grant.created_at,
+                    "expiresAt": grant.expires_at,
                 })
             })
             .collect(),
@@ -184,12 +239,12 @@ pub(super) async fn register(
                 && (url.scheme() == "https" || loopback)
         })
     };
-    if !(1..=10).contains(&input.redirect_uris.len())
-        || !input.redirect_uris.iter().all(valid_redirect)
-        || input
-            .token_endpoint_auth_method
-            .as_deref()
-            .is_some_and(|method| method != "none")
+    let valid_redirects = (1..=10).contains(&input.redirect_uris.len())
+        && input.redirect_uris.iter().all(valid_redirect);
+    let unsupported_client_metadata = input
+        .token_endpoint_auth_method
+        .as_deref()
+        .is_some_and(|method| method != "none")
         || input.grant_types.as_ref().is_some_and(|types| {
             types
                 .iter()
@@ -201,8 +256,9 @@ pub(super) async fn register(
             .is_some_and(|types| types.iter().any(|kind| kind != "code"))
         || input.client_name.is_empty()
         || input.client_name.chars().count() > 100
-        || input.client_name.chars().any(char::is_control)
-    {
+        || input.client_name.chars().any(char::is_control);
+
+    if !valid_redirects || unsupported_client_metadata {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
             "Register a public code-flow client with valid redirect URIs",
@@ -210,26 +266,12 @@ pub(super) async fn register(
     }
 
     let id = random_token();
-    let mut transaction = service.pool.begin().await?;
-    query("LOCK TABLE mcp_clients IN SHARE ROW EXCLUSIVE MODE")
-        .execute(&mut *transaction)
-        .await?;
-    let (count,): (i64,) = query_as("SELECT count(*) FROM mcp_clients")
-        .fetch_one(&mut *transaction)
-        .await?;
-    if count >= 100 {
-        return Err(ApiError(
-            StatusCode::TOO_MANY_REQUESTS,
-            "Client registration limit reached",
-        ));
-    }
     query("INSERT INTO mcp_clients (id, name, redirect_uris) VALUES ($1, $2, $3)")
         .bind(&id)
         .bind(&input.client_name)
         .bind(&input.redirect_uris)
-        .execute(&mut *transaction)
+        .execute(&service.pool)
         .await?;
-    transaction.commit().await?;
 
     Ok((
         StatusCode::CREATED,
@@ -269,17 +311,22 @@ async fn authorization(service: &Service, params: &Value) -> Result<Authorizatio
             "Unknown client or redirect URI",
         ));
     };
+
     let redirect = text(params, "redirect_uri");
     let challenge = text(params, "code_challenge");
     let resource = text(params, "resource");
-    if !redirects.iter().any(|uri| uri == redirect)
-        || params["response_type"] != "code"
-        || params["code_challenge_method"] != "S256"
-        || challenge.len() != 43
-        || !challenge
+    let valid_pkce = params["code_challenge_method"] == "S256"
+        && challenge.len() == 43
+        && challenge
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-        || (!resource.is_empty() && resource != format!("{}/mcp", service.origin))
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
+    let valid_redirect = redirects.iter().any(|uri| uri == redirect);
+    let valid_resource = resource.is_empty() || resource == format!("{}/mcp", service.origin);
+
+    if !valid_redirect
+        || params["response_type"] != "code"
+        || !valid_pkce
+        || !valid_resource
         || text(params, "state").len() > 2048
     {
         return Err(ApiError(
@@ -287,6 +334,7 @@ async fn authorization(service: &Service, params: &Value) -> Result<Authorizatio
             "Authorization requires an exact redirect, MCP resource and S256 PKCE",
         ));
     }
+
     let scopes: Vec<String> = match text(params, "scope") {
         "" => vec!["read".into()],
         scopes => scopes.split_whitespace().map(str::to_owned).collect(),
@@ -405,21 +453,19 @@ async fn exchange_tokens(service: &Service, params: &Value) -> Result<Response, 
     let mut transaction = service.pool.begin().await?;
     let (grant_id, scopes) = match text(params, "grant_type") {
         "authorization_code" => {
-            type Code = (String, String, String, String, String, Vec<String>, String);
-            let code: Option<Code> = query_as("SELECT c.account_id, c.installation_id, c.client_id, c.redirect_uri, c.challenge, c.scopes, cl.name FROM mcp_codes c JOIN mcp_clients cl ON cl.id = c.client_id JOIN installations i ON i.id = c.installation_id AND i.owner_id = c.account_id WHERE c.digest = $1 AND c.expires_at > now() FOR UPDATE OF c FOR SHARE OF i")
+            let code: Option<AuthorizationCode> = query_as("SELECT c.account_id, c.installation_id, c.client_id, c.redirect_uri, c.challenge, c.scopes, cl.name AS label FROM mcp_codes c JOIN mcp_clients cl ON cl.id = c.client_id JOIN installations i ON i.id = c.installation_id AND i.owner_id = c.account_id WHERE c.digest = $1 AND c.expires_at > now() FOR UPDATE OF c FOR SHARE OF i")
                 .bind(digest(text(params, "code"))).fetch_optional(&mut *transaction).await?;
-            let Some((account, installation, client, redirect, challenge, scopes, label)) = code
-            else {
+            let Some(code) = code else {
                 return Ok(OAuthError("invalid_grant").into_response());
             };
             let verifier = text(params, "code_verifier");
-            if text(params, "client_id") != client
-                || text(params, "redirect_uri") != redirect
+            if text(params, "client_id") != code.client_id
+                || text(params, "redirect_uri") != code.redirect_uri
                 || !(43..=128).contains(&verifier.len())
                 || !verifier
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || b"-._~".contains(&byte))
-                || URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())) != challenge
+                || URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())) != code.challenge
                 || !resource_matches(service, params)
             {
                 return Ok(OAuthError("invalid_grant").into_response());
@@ -430,8 +476,8 @@ async fn exchange_tokens(service: &Service, params: &Value) -> Result<Response, 
                 .await?;
             let grant = random_token();
             query("INSERT INTO mcp_grants (id, account_id, installation_id, client_id, label, scopes, expires_at) VALUES ($1, $2, $3, $4, $5, $6, now() + interval '30 days')")
-                .bind(&grant).bind(account).bind(installation).bind(client).bind(label).bind(&scopes).execute(&mut *transaction).await?;
-            (grant, scopes)
+                .bind(&grant).bind(code.account_id).bind(code.installation_id).bind(code.client_id).bind(code.label).bind(&code.scopes).execute(&mut *transaction).await?;
+            (grant, code.scopes)
         }
         "refresh_token" => {
             let previous: Option<(String, Vec<String>, bool, String)> = query_as("SELECT g.id, t.scopes, t.used, g.client_id FROM mcp_tokens t JOIN mcp_grants g ON g.id = t.grant_id JOIN installations i ON i.id = g.installation_id AND i.owner_id = g.account_id WHERE t.digest = $1 AND t.kind = 'refresh' AND t.expires_at > now() AND g.expires_at > now() FOR UPDATE OF g, t FOR SHARE OF i")

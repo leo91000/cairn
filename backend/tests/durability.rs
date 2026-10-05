@@ -1,7 +1,9 @@
+use common::browser_http::legacy_auth::Auth;
+
 mod common;
 
 use leo_agent_manager::{
-    auth::{Auth, digest},
+    auth::digest,
     config::{Config, MAIN_AGENT_ID, id, now},
     error::{Error, Result},
     execution,

@@ -691,10 +691,7 @@ async fn send(
         .map_err(|_| ApiError(StatusCode::BAD_GATEWAY, "Installation connection lost"))?;
     let status = StatusCode::from_u16(response.status)
         .map_err(|_| ApiError(StatusCode::BAD_GATEWAY, "Invalid installation response"))?;
-    let is_stream = response
-        .headers
-        .iter()
-        .any(|(name, value)| name == "content-type" && value.starts_with("text/event-stream"));
+    let is_stream = streaming && response.body.is_empty();
     let body = if is_stream && let Some(browser) = browser {
         let stream = futures_util::stream::unfold(browser, |mut browser| async move {
             if *browser.stopped.borrow() || *browser.revoked.borrow() {

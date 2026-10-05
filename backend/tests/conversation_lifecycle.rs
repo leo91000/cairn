@@ -23,7 +23,12 @@ impl App {
         let root = TempDir::new().unwrap();
         let service = Service::new(common::config(root.path())).await.unwrap();
         let router = router(service.clone()).await.unwrap();
-        let session = Session::new(&service.auth.session().await.unwrap());
+        let session = Session::new(
+            &common::browser_http::auth(&service)
+                .session()
+                .await
+                .unwrap(),
+        );
         Self {
             _root: root,
             router,

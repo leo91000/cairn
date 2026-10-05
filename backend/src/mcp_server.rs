@@ -151,10 +151,14 @@ fn bearer(request: &Request) -> String {
         .unwrap_or_default()
 }
 
-fn resource_metadata(s: &Service) -> String {
+async fn resource_metadata(s: &Service) -> String {
     format!(
         "{}/.well-known/oauth-protected-resource/mcp",
-        s.config.public_url
+        crate::relay::official_address(&s.config.data_dir)
+            .await
+            .ok()
+            .flatten()
+            .map_or_else(String::new, |(origin, _)| origin)
     )
 }
 
@@ -170,20 +174,7 @@ async fn authenticate(s: &Service, endpoint: &Endpoint, bearer: &str) -> Result<
             s.mcps.grant(s, id, bearer).await?;
         }
         Endpoint::Management => {
-            if s.auth.verify(bearer, None).await.is_ok() {
-                return Ok(None);
-            }
-            let mut response = (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({ "error": "unauthorized" })),
-            )
-                .into_response();
-            let challenge = format!("Bearer resource_metadata=\"{}\"", resource_metadata(s));
-            response.headers_mut().insert(
-                "www-authenticate",
-                HeaderValue::from_str(&challenge).unwrap(),
-            );
-            return Ok(Some(response));
+            return Err(Error::unauthorized("Use the official MCP endpoint."));
         }
     }
     Ok(None)
@@ -379,14 +370,13 @@ async fn dispatch(
         _ => match endpoint {
             Endpoint::Workspace => crate::project_workspaces::rpc(s, bearer, method, params).await,
             Endpoint::Gateway(id) => proxy(s, id, bearer, method, params.clone()).await,
-            Endpoint::Management => management(s, bearer, scopes, method, params).await,
+            Endpoint::Management => management(s, scopes, method, params).await,
         },
     }
 }
 
 async fn management(
     s: &Arc<Service>,
-    bearer: &str,
     scopes: Option<&[String]>,
     method: &str,
     params: &Value,
@@ -401,7 +391,7 @@ async fn management(
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            call(s, bearer, scopes, text(params, "name"), args).await
+            call(s, scopes, text(params, "name"), args).await
         }
         _ => Err(Error::not_found("Method not found")),
     }
@@ -461,7 +451,6 @@ fn catalog() -> Vec<ToolDescriptor> {
 
 async fn call(
     s: &Arc<Service>,
-    bearer: &str,
     scopes: Option<&[String]>,
     name: &str,
     args: Value,
@@ -477,7 +466,9 @@ async fn call(
                 return Err(Error::forbidden(format!("The {scope} scope is required.")));
             }
         } else {
-            s.auth.verify(bearer, Some(scope)).await?;
+            return Err(Error::unauthorized(
+                "A verified official MCP grant is required.",
+            ));
         }
         let args = parse(&format!("mcp:{name}"), args)?;
         invoke(s, name, args).await
@@ -490,7 +481,7 @@ async fn call(
             if [401, 403].contains(&error.status) {
                 let challenge = format!(
                     "Bearer error=\"insufficient_scope\", error_description=\"The {scope} scope is required\", scope=\"{scope}\", resource_metadata=\"{}\"",
-                    resource_metadata(s)
+                    resource_metadata(s).await
                 );
                 result.meta = Some(json!({ "mcp/www_authenticate": challenge }));
             }
@@ -698,8 +689,13 @@ async fn skills_tool(s: &Service, name: &str, args: &Value) -> Result<Value> {
 }
 
 async fn connection_tool(s: &Service, name: &str, args: Value) -> Result<Value> {
+    let management_url = crate::relay::official_address(&s.config.data_dir)
+        .await?
+        .map(|(origin, installation)| format!("{origin}/installations/{installation}/mcps"));
     let with_management_url = |mut result: Value| {
-        result["managementUrl"] = format!("{}/mcps", s.config.public_url).into();
+        if let Some(url) = &management_url {
+            result["managementUrl"] = url.clone().into();
+        }
         result
     };
     match name {
@@ -792,6 +788,17 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         .collect::<Vec<_>>();
     match (input.method.as_str(), segments.as_slice()) {
         ("GET", ["mcps"]) => Ok(s.mcps.list(s).await?.into()),
+        ("POST", ["mcps", "oauth", "callback"]) => {
+            let parameters = serde_json::from_value(input.body.clone())?;
+            if s.mcps.capture_native_callback(s, &parameters).await? {
+                return Ok(json!({ "result": "native" }));
+            }
+            let result = s
+                .mcps
+                .callback(s, &parameters, oauth_binding(input)?)
+                .await?;
+            Ok(json!({ "result": result }))
+        }
         ("POST", ["mcps"]) => s.mcps.save(s, input.body.clone(), None).await,
         ("PUT", ["mcps", id]) => {
             crate::validation::uuid(id)?;

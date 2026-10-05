@@ -1,5 +1,12 @@
 //! Synthetic local browser sessions are confined to this example executable.
 //! All application handlers and workers remain the real Rust implementation.
+pub mod legacy_auth;
+mod legacy_http;
+
+pub fn auth(service: &Service) -> legacy_auth::Auth {
+    legacy_auth::Auth::new(service.store.clone(), service.config.public_url.clone())
+}
+
 use axum::{
     Json, Router,
     extract::{Request, State},
@@ -20,6 +27,7 @@ use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
 
 pub async fn router(service: Arc<Service>) -> Result<Router> {
+    claimed(&service).await?;
     Ok(leo_agent_manager::http::router(service.clone())
         .await?
         .layer(middleware::from_fn_with_state(service, authenticate)))
@@ -64,6 +72,11 @@ async fn authenticate(
             .unwrap()
             .into_response();
     }
+    match legacy_http::handle(&service, &mut request).await {
+        Ok(Some(response)) => return response,
+        Ok(None) => {}
+        Err(error) => return error.into_response(),
+    }
     match authorize(&service, &mut request).await {
         Ok(Some(response)) => response,
         Ok(None) => next.run(request).await,
@@ -79,7 +92,7 @@ async fn authorize(service: &Service, request: &mut Request) -> Result<Option<Re
         let input = Input::read(owned).await?;
         let response = match (input.method.as_str(), path.as_str()) {
             ("GET", "/api/session") => {
-                let session = service.auth.read(&cookie(&input.headers)).await?;
+                let session = auth(service).read(&cookie(&input.headers)).await?;
                 Json(json!({
                     "authenticated": session.is_some(),
                     "csrf": session.as_ref().map(|value| value["csrf"].clone()),
@@ -91,15 +104,14 @@ async fn authorize(service: &Service, request: &mut Request) -> Result<Option<Re
                 if input.string("setupToken", 200)? != "browser-test-setup" {
                     return Err(Error::forbidden("Incorrect fixture setup token."));
                 }
-                service.auth.setup(input.string("password", 200)?).await?;
-                signed_in(&service.auth.session().await?)
+                auth(service).setup(input.string("password", 200)?).await?;
+                signed_in(&auth(service).session().await?)
             }
             ("POST", "/api/login") => {
-                signed_in(&service.auth.login(input.string("password", 200)?).await?)
+                signed_in(&auth(service).login(input.string("password", 200)?).await?)
             }
             ("POST", "/api/logout") => {
-                let session = service
-                    .auth
+                let session = auth(service)
                     .read(&cookie(&input.headers))
                     .await?
                     .ok_or_else(|| Error::unauthorized("Please sign in."))?;
@@ -111,7 +123,7 @@ async fn authorize(service: &Service, request: &mut Request) -> Result<Option<Re
                 {
                     return Err(Error::forbidden("Invalid CSRF token."));
                 }
-                service.auth.logout(&cookie(&input.headers)).await?;
+                auth(service).logout(&cookie(&input.headers)).await?;
                 let mut response = Json(json!({ "ok": true })).into_response();
                 response.headers_mut().insert(
                     header::SET_COOKIE,
@@ -131,8 +143,7 @@ async fn authorize(service: &Service, request: &mut Request) -> Result<Option<Re
     if path.starts_with("/api/")
         && !leo_agent_manager::artifacts::sharing::public_read(&path, request.method().as_str())
     {
-        let session = service
-            .auth
+        let session = auth(service)
             .read(&cookie(request.headers()))
             .await?
             .ok_or_else(|| Error::unauthorized("Please sign in."))?;
@@ -161,7 +172,7 @@ async fn authorize(service: &Service, request: &mut Request) -> Result<Option<Re
     {
         // Fixture-only adapters for the legacy OAuth/public-link journeys. The
         // production binary rejects these even with an old local credential.
-        let session = service.auth.read(&cookie(request.headers())).await?;
+        let session = auth(service).read(&cookie(request.headers())).await?;
         let account_id = session
             .as_ref()
             .map_or("fixture-owner", |session| text(session, "csrf"));
@@ -173,4 +184,23 @@ async fn authorize(service: &Service, request: &mut Request) -> Result<Option<Re
             ));
     }
     Ok(None)
+}
+
+/// Synthetic identity for historical installation-only browser fixtures.
+pub async fn claimed(service: &Service) -> Result<()> {
+    let directory = service.config.data_dir.join("installation-relay");
+    tokio::fs::create_dir_all(&directory).await?;
+    let path = directory.join("identity.json");
+    if !path.exists() {
+        tokio::fs::write(
+            path,
+            serde_json::to_vec(&json!({
+                "origin": service.config.public_url,
+                "installationId": "00000000-0000-4000-8000-000000000055",
+                "token": "fixture-only",
+            }))?,
+        )
+        .await?;
+    }
+    Ok(())
 }

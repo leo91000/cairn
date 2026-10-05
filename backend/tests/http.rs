@@ -80,7 +80,12 @@ async fn installation_http_accepts_only_trusted_context_and_checks_host_and_orig
     let app = leo_agent_manager::http::router(service.clone())
         .await
         .unwrap();
-    let legacy = Session::new(&service.auth.session().await.unwrap());
+    let legacy = Session::new(
+        &common::browser_http::auth(&service)
+            .session()
+            .await
+            .unwrap(),
+    );
     for path in ["/api/session", "/api/projects", "/api/chats"] {
         let response = send(
             &app,
@@ -365,7 +370,12 @@ async fn assert_hostile_uploads_are_neutralized(app: &Router, session: &Session,
 #[tokio::test]
 async fn attachments_are_private_scoped_bounded_and_durable() {
     let (_root, app, service) = app().await;
-    let session = Session::new(&service.auth.session().await.unwrap());
+    let session = Session::new(
+        &common::browser_http::auth(&service)
+            .session()
+            .await
+            .unwrap(),
+    );
     let (anonymous, cookie, owner) = (
         Credentials::Anonymous,
         Credentials::Cookie(&session),
@@ -454,9 +464,17 @@ async fn attachments_are_private_scoped_bounded_and_durable() {
 #[tokio::test]
 async fn native_mcp_callback_requires_the_initiating_session_and_csrf_to_finish() {
     let (_root, app, service) = app().await;
-    let initiating = service.auth.session().await.unwrap();
+    let initiating = common::browser_http::auth(&service)
+        .session()
+        .await
+        .unwrap();
     let session = Session::new(&initiating);
-    let other = Session::new(&service.auth.session().await.unwrap());
+    let other = Session::new(
+        &common::browser_http::auth(&service)
+            .session()
+            .await
+            .unwrap(),
+    );
     let connection = "00000000-0000-4000-8000-000000000099";
     let nonce = "native-callback-test-nonce";
     let key = format!("mcp-oauth:{}", hex_digest(nonce));
@@ -509,8 +527,7 @@ async fn native_mcp_callback_requires_the_initiating_session_and_csrf_to_finish(
         }
         assert!(service.store.kv(&key).await.unwrap().is_some());
     }
-    service
-        .auth
+    common::browser_http::auth(&service)
         .logout(initiating["value"].as_str().unwrap())
         .await
         .unwrap();

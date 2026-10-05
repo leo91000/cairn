@@ -237,7 +237,7 @@ async fn register(s: &Service, server: &McpServer, endpoint: &str) -> Result<Val
     valid_url(server, endpoint)?;
     let registration = ClientRegistration {
         client_name: "Leo Agent Manager",
-        redirect_uris: [callback_url(s)],
+        redirect_uris: [callback_url(s).await?],
         grant_types: ["authorization_code", "refresh_token"],
         response_types: ["code"],
         token_endpoint_auth_method: "none",
@@ -418,7 +418,7 @@ pub async fn refresh(s: &Service, server: &McpServer) -> Result<()> {
 }
 
 /// The authorization endpoint URL with PKCE, state, resource and scope parameters.
-fn authorization_url(
+async fn authorization_url(
     s: &Service,
     server: &McpServer,
     discovery: &OAuthDiscovery,
@@ -426,11 +426,12 @@ fn authorization_url(
     verifier: &str,
     nonce: &str,
 ) -> Result<url::Url> {
+    let redirect_uri = callback_url(s).await?;
     let mut url = valid_url(server, discovery.server("authorization_endpoint"))?;
     url.query_pairs_mut().extend_pairs([
         ("response_type", "code"),
         ("client_id", &client.id),
-        ("redirect_uri", &callback_url(s)),
+        ("redirect_uri", &redirect_uri),
         ("code_challenge", &digest(verifier)),
         ("code_challenge_method", "S256"),
         ("state", nonce),
@@ -508,7 +509,7 @@ impl Mcps {
         let client = client(s, server, &discovery).await?;
         let verifier = token();
         let nonce = token();
-        let url = authorization_url(s, server, &discovery, &client, &verifier, &nonce)?;
+        let url = authorization_url(s, server, &discovery, &client, &verifier, &nonce).await?;
         self.update_secrets(s, &server.id, |secrets| secrets.verifier = Some(verifier))
             .await?;
         let expires = now() + PENDING_TTL_MS;
@@ -686,7 +687,7 @@ impl Mcps {
         let parameters = HashMap::from([
             ("grant_type".into(), "authorization_code".into()),
             ("code".into(), code.to_owned()),
-            ("redirect_uri".into(), callback_url(s)),
+            ("redirect_uri".into(), callback_url(s).await?),
             ("code_verifier".into(), secrets.verifier().to_owned()),
         ]);
         exchange(s, server, parameters, discovery).await?;
