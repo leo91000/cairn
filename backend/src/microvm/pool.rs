@@ -1220,29 +1220,59 @@ mod tests {
         std::fs::write(cgroup.join("cpu.max"), "max 100000").unwrap();
         let budget = Budget {
             slots: 1,
-            limits: crate::nodes::Resources { cpu: 1, memory_mi_b: 2048, disk_mi_b: 32768 },
+            limits: crate::nodes::Resources {
+                cpu: 1,
+                memory_mi_b: 2048,
+                disk_mi_b: 32768,
+            },
         };
-        std::fs::write(state.join(budget::FILE), serde_json::to_vec(&budget).unwrap()).unwrap();
+        std::fs::write(
+            state.join(budget::FILE),
+            serde_json::to_vec(&budget).unwrap(),
+        )
+        .unwrap();
         // Invalid storage limits make each real background preparation fail
         // deterministically before formatting a disk or starting a guest.
         std::fs::write(state.join("storage-policy.json"), br#"{"reserveMiB":0}"#).unwrap();
 
-        let pool = Pool::new(state, root.path().into(), CancellationToken::new(), 1).await.unwrap();
+        let pool = Pool::new(state, root.path().into(), CancellationToken::new(), 1)
+            .await
+            .unwrap();
         pool.initialize(cgroup).await.unwrap();
         let mut now = Instant::now();
         for seconds in [10, 20, 40, 80, 160, 3600] {
             pool.maintain_ready(now).await.unwrap();
-            let mut done = pool.slots.lock().await.preparing.as_ref().expect("retry must start preparation").done.clone();
+            let mut done = pool
+                .slots
+                .lock()
+                .await
+                .preparing
+                .as_ref()
+                .expect("retry must start preparation")
+                .done
+                .clone();
             tokio::time::timeout(Duration::from_secs(2), async {
-                while !*done.borrow() { done.changed().await.unwrap(); }
-            }).await.unwrap();
+                while !*done.borrow() {
+                    done.changed().await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
 
             let retry_after = pool.slots.lock().await.retry_after.unwrap();
             let remaining = retry_after.saturating_duration_since(Instant::now());
-            assert!(remaining >= Duration::from_secs(seconds - 1), "expected {seconds}s, got {remaining:?}");
+            assert!(
+                remaining >= Duration::from_secs(seconds - 1),
+                "expected {seconds}s, got {remaining:?}"
+            );
             assert_eq!(pool.health().await.occupied, 0);
-            pool.maintain_ready(retry_after - Duration::from_nanos(1)).await.unwrap();
-            assert!(!pool.health().await.preparing, "no anonymous start before {seconds}s deadline");
+            pool.maintain_ready(retry_after - Duration::from_nanos(1))
+                .await
+                .unwrap();
+            assert!(
+                !pool.health().await.preparing,
+                "no anonymous start before {seconds}s deadline"
+            );
             assert_eq!(pool.health().await.occupied, 0);
             now = retry_after;
         }
@@ -1255,14 +1285,32 @@ mod tests {
 
         // Re-enter through the production gate at the cooldown deadline.
         pool.maintain_ready(now).await.unwrap();
-        let mut done = pool.slots.lock().await.preparing.as_ref().unwrap().done.clone();
+        let mut done = pool
+            .slots
+            .lock()
+            .await
+            .preparing
+            .as_ref()
+            .unwrap()
+            .done
+            .clone();
         tokio::time::timeout(Duration::from_secs(2), async {
-            while !*done.borrow() { done.changed().await.unwrap(); }
-        }).await.unwrap();
+            while !*done.borrow() {
+                done.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
         let slots = pool.slots.lock().await;
         assert_eq!(slots.warm_failures, 1);
         assert!(!slots.warm_circuit_open);
-        assert!(slots.retry_after.unwrap().saturating_duration_since(Instant::now()) >= Duration::from_secs(9));
+        assert!(
+            slots
+                .retry_after
+                .unwrap()
+                .saturating_duration_since(Instant::now())
+                >= Duration::from_secs(9)
+        );
         drop(slots);
         pool.drain().await;
     }
