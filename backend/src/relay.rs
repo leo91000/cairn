@@ -528,10 +528,12 @@ async fn connected(
     loop {
         tokio::select! {
             _ = notifications.tick(), if version >= 3 => {
-                for event in crate::notifications::pending(service).await? {
-                    if sent.get(&event.id).is_some_and(|at| at.elapsed() < Duration::from_secs(10)) {
-                        continue;
-                    }
+                let recently_sent = sent.iter()
+                    .filter(|(_, at)| at.elapsed() < Duration::from_secs(10))
+                    .map(|(id, _)| id.clone())
+                    .collect();
+
+                for event in crate::notifications::pending(service, recently_sent).await? {
                     sent.insert(event.id.clone(), tokio::time::Instant::now());
                     socket.send(Message::Text(serde_json::to_string(&Frame::Notification(event))?.into()))
                         .await.map_err(Error::internal)?;

@@ -88,10 +88,10 @@ async fn web_push_devices_belong_to_the_signed_in_leo_account() {
 }
 
 #[derive(Default)]
-struct PushMailbox(
-    std::sync::Mutex<Vec<(String, Value)>>,
-    std::sync::atomic::AtomicUsize,
-);
+struct PushMailbox {
+    messages: std::sync::Mutex<Vec<(String, Value)>>,
+    failures_remaining: std::sync::atomic::AtomicUsize,
+}
 
 #[async_trait::async_trait]
 impl leo_official_service::PushSender for PushMailbox {
@@ -107,8 +107,11 @@ impl leo_official_service::PushSender for PushMailbox {
         if subscription.endpoint.ends_with("/expired") {
             return Err(leo_official_service::PushError::Gone);
         }
+        if subscription.endpoint.ends_with("/unavailable") {
+            return Err(leo_official_service::PushError::Unavailable);
+        }
         if self
-            .1
+            .failures_remaining
             .fetch_update(
                 std::sync::atomic::Ordering::SeqCst,
                 std::sync::atomic::Ordering::SeqCst,
@@ -118,7 +121,7 @@ impl leo_official_service::PushSender for PushMailbox {
         {
             return Err(leo_official_service::PushError::Unavailable);
         }
-        self.0
+        self.messages
             .lock()
             .unwrap()
             .push((subscription.endpoint.clone(), payload.clone()));
@@ -216,13 +219,13 @@ async fn chat_run(relay: &common::RelayedInstallation) -> (String, String) {
     (chat_id, run_id)
 }
 
-async fn question(relay: &common::RelayedInstallation, run: &str, id: char) {
+async fn question(relay: &common::RelayedInstallation, run: &str, id: &str) {
     relay
         .installation
         .question_receive(
             run,
             json!({
-                "id": id.to_string().repeat(64),
+                "id": id,
                 "blocking": true,
                 "fields": [{ "id": "choice", "title": "Private question content" }],
             }),
@@ -234,7 +237,7 @@ async fn question(relay: &common::RelayedInstallation, run: &str, id: char) {
 async fn wait_pushes(mail: &PushMailbox, count: usize) {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if mail.0.lock().unwrap().len() >= count {
+            if mail.messages.lock().unwrap().len() >= count {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -242,7 +245,7 @@ async fn wait_pushes(mail: &PushMailbox, count: usize) {
     })
     .await
     .expect("the official service must deliver the installation event through the push provider");
-    assert_eq!(mail.0.lock().unwrap().len(), count);
+    assert_eq!(mail.messages.lock().unwrap().len(), count);
 }
 
 #[tokio::test]
@@ -263,9 +266,9 @@ async fn relayed_questions_and_alerts_target_only_current_installation_accounts(
     )
     .await;
     let (chat, run) = chat_run(&relay).await;
-    question(&relay, &run, 'a').await;
+    question(&relay, &run, &"a".repeat(64)).await;
     wait_pushes(&mail, 2).await;
-    let sent = mail.0.lock().unwrap().clone();
+    let sent = mail.messages.lock().unwrap().clone();
     let mut endpoints: Vec<_> = sent.iter().map(|entry| entry.0.as_str()).collect();
     endpoints.sort();
     assert_eq!(endpoints, vec![member, owner]);
@@ -291,9 +294,9 @@ async fn relayed_questions_and_alerts_target_only_current_installation_accounts(
         .status(),
         StatusCode::NO_CONTENT
     );
-    question(&relay, &run, 'b').await;
+    question(&relay, &run, &"b".repeat(64)).await;
     wait_pushes(&mail, 3).await;
-    assert_eq!(mail.0.lock().unwrap()[2].0, owner);
+    assert_eq!(mail.messages.lock().unwrap()[2].0, owner);
     leo_agent_manager::nodes::alerts::raise(
         &relay.installation,
         &run,
@@ -304,7 +307,7 @@ async fn relayed_questions_and_alerts_target_only_current_installation_accounts(
     .await
     .unwrap();
     wait_pushes(&mail, 4).await;
-    let alert = mail.0.lock().unwrap()[3].clone();
+    let alert = mail.messages.lock().unwrap()[3].clone();
     assert_eq!(alert.0, owner);
     assert_eq!(alert.1["title"], "Node unavailable");
     assert_eq!(alert.1["installationId"], installation);
@@ -473,7 +476,7 @@ async fn queued_events_exclude_removed_members_after_reconnection() {
     .await;
     let (_, run) = chat_run(&relay).await;
     pause(&mut relay).await;
-    question(&relay, &run, 'c').await;
+    question(&relay, &run, &"c".repeat(64)).await;
     let installation = relay.session["installations"][0]["id"].as_str().unwrap();
     let member = session["account"]["id"].as_str().unwrap();
     assert_eq!(
@@ -496,7 +499,7 @@ async fn queued_events_exclude_removed_members_after_reconnection() {
     resume(&mut relay, router);
     wait_pushes(&mail, 1).await;
     assert_eq!(
-        mail.0.lock().unwrap()[0].0,
+        mail.messages.lock().unwrap()[0].0,
         "https://fcm.googleapis.com/owner"
     );
     let registered: Value = request(
@@ -529,7 +532,7 @@ async fn detached_installations_cannot_forward_queued_events() {
     .await;
     let (_, run) = chat_run(&relay).await;
     pause(&mut relay).await;
-    question(&relay, &run, 'd').await;
+    question(&relay, &run, &"d".repeat(64)).await;
     let installation = relay.session["installations"][0]["id"].as_str().unwrap();
     assert_eq!(
         request(
@@ -556,7 +559,7 @@ async fn detached_installations_cannot_forward_queued_events() {
     })
     .await
     .expect("the detached machine credential must stop reconnection");
-    assert!(mail.0.lock().unwrap().is_empty());
+    assert!(mail.messages.lock().unwrap().is_empty());
     assert_eq!(
         relay.get("/chats").send().await.unwrap().status(),
         StatusCode::NOT_FOUND
@@ -567,7 +570,8 @@ async fn detached_installations_cannot_forward_queued_events() {
 #[tokio::test]
 async fn transient_push_failures_retry_after_reconnection_and_expired_devices_are_removed() {
     let mail = std::sync::Arc::new(PushMailbox::default());
-    mail.1.store(1, std::sync::atomic::Ordering::SeqCst);
+    mail.failures_remaining
+        .store(1, std::sync::atomic::Ordering::SeqCst);
     let mut relay = common::RelayedInstallation::with_push(mail.clone()).await;
     let expired = register(
         &relay.app,
@@ -584,7 +588,7 @@ async fn transient_push_failures_retry_after_reconnection_and_expired_devices_ar
     )
     .await;
     let (_, run) = chat_run(&relay).await;
-    question(&relay, &run, 'e').await;
+    question(&relay, &run, &"e".repeat(64)).await;
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let registered: Value = request(
@@ -601,7 +605,10 @@ async fn transient_push_failures_retry_after_reconnection_and_expired_devices_ar
             .await
             .unwrap();
             if registered["registered"] == false
-                && mail.1.load(std::sync::atomic::Ordering::SeqCst) == 0
+                && mail
+                    .failures_remaining
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    == 0
             {
                 break;
             }
@@ -612,7 +619,7 @@ async fn transient_push_failures_retry_after_reconnection_and_expired_devices_ar
     .expect(
         "the provider's expired endpoint must be removed while transient delivery remains queued",
     );
-    assert!(mail.0.lock().unwrap().is_empty());
+    assert!(mail.messages.lock().unwrap().is_empty());
     assert_eq!(
         relay.get("/chats").send().await.unwrap().status(),
         StatusCode::OK
@@ -624,8 +631,50 @@ async fn transient_push_failures_retry_after_reconnection_and_expired_devices_ar
     resume(&mut relay, router);
     wait_pushes(&mail, 1).await;
     assert_eq!(
-        mail.0.lock().unwrap()[0].0,
+        mail.messages.lock().unwrap()[0].0,
         "https://fcm.googleapis.com/live"
+    );
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn a_failing_device_does_not_starve_newer_events_on_healthy_devices() {
+    let mail = std::sync::Arc::new(PushMailbox::default());
+    let mut relay = common::RelayedInstallation::with_push(mail.clone()).await;
+    for endpoint in [
+        "https://fcm.googleapis.com/unavailable",
+        "https://fcm.googleapis.com/healthy",
+    ] {
+        register(&relay.app, &relay.cookie, &relay.session, endpoint).await;
+    }
+    let (_, run) = chat_run(&relay).await;
+    pause(&mut relay).await;
+    for index in 0..32 {
+        question(&relay, &run, &format!("{index:064x}")).await;
+    }
+    let newest = "f".repeat(64);
+    question(&relay, &run, &newest).await;
+    let router = leo_agent_manager::http::router(relay.installation.clone())
+        .await
+        .unwrap();
+    resume(&mut relay, router);
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let newest_delivered = mail.messages.lock().unwrap().iter()
+                .any(|(_, payload)| payload["questionId"] == newest);
+
+            if newest_delivered {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("a newer question must reach a healthy device even when older events cannot be acknowledged");
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
     );
     relay.close().await;
 }

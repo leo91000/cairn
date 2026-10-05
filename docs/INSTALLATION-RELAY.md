@@ -324,3 +324,7 @@ recipient list. The official service selects current access holders itself and
 sends through its operator-configured web push adapter. Push delivery jobs have
 bounded concurrency and run separately from API traffic and heartbeat handling.
 The official service does not persist event payloads or recipient queues.
+
+Retry cooldowns are applied before selecting a bounded notification batch.
+An unavailable device therefore does not prevent newer events from reaching
+healthy devices while earlier events await retry.

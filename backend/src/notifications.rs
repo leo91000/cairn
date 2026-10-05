@@ -9,6 +9,7 @@ use crate::{
 };
 use leo_relay_protocol::{MAX_IN_FLIGHT, NotificationEvent, NotificationKind};
 use serde_json::Value;
+use std::collections::HashSet;
 
 const DELIVERY_TTL_MS: i64 = 3_600_000;
 
@@ -49,10 +50,13 @@ pub fn enqueue_alert(db: &Db<'_>, alert: &Value) -> Result<()> {
 }
 
 /// Questions answered while offline are discarded before they enter the relay.
-pub async fn pending(service: &Service) -> Result<Vec<NotificationEvent>> {
+pub async fn pending(
+    service: &Service,
+    recently_sent: HashSet<String>,
+) -> Result<Vec<NotificationEvent>> {
     service
         .store
-        .transaction(|db| {
+        .transaction(move |db| {
             let mut events = Vec::new();
             for (key, value) in db.keys("push-outbox:")? {
                 // Old local deliveries are not registrations on the official service.
@@ -60,6 +64,12 @@ pub async fn pending(service: &Service) -> Result<Vec<NotificationEvent>> {
                     db.delete(&key)?;
                     continue;
                 };
+                // Apply the retry cooldown before the batch limit so failed deliveries
+                // cannot keep newer events behind the first batch indefinitely.
+                if recently_sent.contains(&event.id) {
+                    continue;
+                }
+
                 if let NotificationKind::Question { question_id } = &event.kind {
                     let question = db.kv(&format!(
                         "{}{}",

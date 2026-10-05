@@ -75,12 +75,14 @@ pub(super) async fn subscribe(
     Json(input): Json<PushSubscription>,
 ) -> Result<Json<Value>, ApiError> {
     let account = installations::account(&service, &headers, &Method::POST).await?;
+
     if !valid_subscription(&input) {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
             "Invalid or unsupported browser push subscription",
         ));
     }
+
     let id = digest(&input.endpoint);
     let mut transaction = service.pool.begin().await?;
     // Serialize additions for this account so concurrent devices cannot exceed its limit.
@@ -88,22 +90,26 @@ pub(super) async fn subscribe(
         .bind(&account)
         .execute(&mut *transaction)
         .await?;
+
     let (count,): (i64,) =
         query_as("SELECT count(*) FROM notification_devices WHERE account_id = $1 AND id <> $2")
             .bind(&account)
             .bind(&id)
             .fetch_one(&mut *transaction)
             .await?;
+
     if count >= MAX_DEVICES {
         return Err(ApiError(
             StatusCode::CONFLICT,
             "Too many notification devices are registered",
         ));
     }
+
     // A browser endpoint has one current account, even after switching accounts.
     query("INSERT INTO notification_devices (id, account_id, endpoint, p256dh, auth) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO UPDATE SET account_id = EXCLUDED.account_id, endpoint = EXCLUDED.endpoint, p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth")
         .bind(&id).bind(account).bind(input.endpoint).bind(input.keys.p256dh).bind(input.keys.auth)
         .execute(&mut *transaction).await?;
+
     transaction.commit().await?;
     Ok(Json(json!({ "id": id })))
 }
@@ -194,11 +200,14 @@ pub(super) async fn deliver(
     let Some(payload) = payload(installation, event) else {
         return Ok(true);
     };
+
     let Some(sender) = &service.push else {
         return Ok(false);
     };
+
     let devices: Vec<(String,)> = query_as("SELECT d.id FROM notification_devices d WHERE EXISTS(SELECT 1 FROM installations i LEFT JOIN installation_members m ON m.installation_id = i.id AND m.account_id = d.account_id WHERE i.id = $1 AND i.token_digest = $2 AND i.owner_id IS NOT NULL AND (i.owner_id = d.account_id OR m.account_id = d.account_id)) ORDER BY d.id")
         .bind(installation).bind(token_digest).fetch_all(&service.pool).await?;
+
     let mut complete = true;
     for (id,) in devices {
         let mut transaction = service.pool.begin().await?;
@@ -207,15 +216,18 @@ pub(super) async fn deliver(
         if current.is_none() {
             return Ok(true);
         }
+
         let device: Option<(String, String, String)> = query_as("SELECT d.endpoint, d.p256dh, d.auth FROM notification_devices d WHERE d.id = $1 AND EXISTS(SELECT 1 FROM installations i LEFT JOIN installation_members m ON m.installation_id = i.id AND m.account_id = d.account_id WHERE i.id = $2 AND (i.owner_id = d.account_id OR m.account_id = d.account_id)) FOR UPDATE OF d")
             .bind(&id).bind(installation).fetch_optional(&mut *transaction).await?;
         let Some((endpoint, p256dh, auth)) = device else {
             continue;
         };
+
         let subscription = PushSubscription {
             endpoint,
             keys: PushKeys { p256dh, auth },
         };
+
         let result = if valid_subscription(&subscription) {
             tokio::time::timeout(
                 std::time::Duration::from_secs(5),
@@ -225,6 +237,7 @@ pub(super) async fn deliver(
         } else {
             Ok(Err(PushError::Gone))
         };
+
         match result {
             Ok(Ok(())) => {}
             Ok(Err(PushError::Gone)) => {
@@ -235,8 +248,10 @@ pub(super) async fn deliver(
             }
             _ => complete = false,
         }
+
         transaction.commit().await?;
     }
+
     Ok(complete)
 }
 
