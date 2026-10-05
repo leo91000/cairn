@@ -11,7 +11,8 @@ async fn additional_nodes_enroll_directly_and_keep_their_channel_outside_the_rel
         .await
         .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let manager_url = format!("http://{}", listener.local_addr().unwrap());
+    let direct_url = format!("http://{}", listener.local_addr().unwrap());
+    let manager_url = "https://manager.vpn.example";
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let response = relay
         .app
@@ -34,7 +35,8 @@ async fn additional_nodes_enroll_directly_and_keep_their_channel_outside_the_rel
     let response = relay
         .app
         .client
-        .post(format!("{manager_url}/internal/nodes/enroll"))
+        .post(format!("{direct_url}/internal/nodes/enroll"))
+        .header("host", "manager.vpn.example")
         .json(&json!({
             "code": invitation["code"],
             "name": "Direct execution node",
@@ -80,7 +82,8 @@ async fn additional_nodes_enroll_directly_and_keep_their_channel_outside_the_rel
     let heartbeat = relay
         .app
         .client
-        .post(format!("{manager_url}/internal/nodes/heartbeat"))
+        .post(format!("{direct_url}/internal/nodes/heartbeat"))
+        .header("host", "manager.vpn.example")
         .bearer_auth(identity["token"].as_str().unwrap())
         .json(&json!({}))
         .send()

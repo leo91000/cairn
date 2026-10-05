@@ -8,10 +8,10 @@ use crate::{
 };
 use axum::{
     body::Body,
-    extract::{Query, Request, State},
+    extract::{Request, State},
     response::Response,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::time::Duration;
 
@@ -61,17 +61,7 @@ pub(crate) fn release() -> Result<Release> {
     })
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InstallerDownload {
-    manager_url: Option<String>,
-}
-
-pub async fn downloads(
-    State(app): State<App>,
-    Query(download): Query<InstallerDownload>,
-    request: Request,
-) -> Result<Response> {
+pub async fn downloads(State(app): State<App>, request: Request) -> Result<Response> {
     if request.method() != "GET" {
         return Err(Error::method_not_allowed("Method not allowed."));
     }
@@ -82,12 +72,17 @@ pub async fn downloads(
             include_str!("../../../deploy/nodes/host.py").into(),
         ),
         "/internal/nodes/install.sh" => {
+            if request.uri().query().is_some() {
+                return Err(Error::bad(
+                    "Pass the direct manager address as an installer argument, not in its URL.",
+                ));
+            }
             release()?;
-            let manager_url = download
-                .manager_url
-                .as_deref()
-                .unwrap_or(&app.service.config.public_url);
-            let origin = super::connector::master(manager_url.trim())?.to_string();
+            // The manager's Docker-only origin need not be reachable or HTTPS.
+            // The generated command supplies the validated direct address.
+            let origin = super::connector::master(&app.service.config.public_url)
+                .map(|origin| origin.to_string())
+                .unwrap_or_default();
             let quoted = format!("'{}'", origin.replace('\'', "'\\''"));
             (
                 "text/x-shellscript",

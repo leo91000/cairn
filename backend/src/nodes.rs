@@ -640,11 +640,9 @@ async fn invite(s: &Service, body: Value) -> Result<Value> {
     let install = maintenance::release().ok().and(origin).map(|origin| {
         let mut script = origin.clone();
         script.set_path("/internal/nodes/install.sh");
-        script
-            .query_pairs_mut()
-            .append_pair("managerUrl", origin.as_str());
         let quoted = script.as_str().replace('\'', "'\\''");
-        format!("curl --fail --silent --show-error '{quoted}' | sudo bash")
+        let manager = origin.as_str().trim_end_matches('/').replace('\'', "'\\''");
+        format!("curl --fail --silent --show-error '{quoted}' | sudo bash -s -- '{manager}'")
     });
     Ok(json!({
         "code": code,

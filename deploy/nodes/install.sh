@@ -27,7 +27,21 @@ ensure_compressed_swap() {
   systemctl restart zramswap || echo 'Leo installer: zramswap did not start; continuing without compressed swap.' >&2
 }
 # <<< compressed swap
-LEO_MASTER=__LEO_MASTER_ORIGIN__
+LEO_MASTER=${1:-__LEO_MASTER_ORIGIN__}
+# Keep the chosen origin visible in the command and validate it before fetching
+# or executing the root-owned supervisor. Never follow manager redirects.
+LEO_MASTER=$(python3 - "$LEO_MASTER" <<'PY'
+import sys
+import urllib.parse
+
+value = sys.argv[1]
+parsed = urllib.parse.urlsplit(value)
+loopback = parsed.hostname in ('localhost', '127.0.0.1', '::1')
+if not parsed.hostname or not (parsed.scheme == 'https' or parsed.scheme == 'http' and loopback) or parsed.username or parsed.password or parsed.path not in ('', '/') or parsed.query or parsed.fragment:
+    sys.exit('Use an HTTPS manager origin (HTTP is allowed only on loopback for local tests).')
+print(value.rstrip('/'))
+PY
+)
 [[ $(id -u) == 0 ]] || { echo 'Run this installer with sudo.' >&2; exit 1; }
 [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || { echo 'Linux x86-64 is required.' >&2; exit 1; }
 for command in docker python3 curl systemctl; do

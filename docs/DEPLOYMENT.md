@@ -133,8 +133,13 @@ consumed only once. The address is connection configuration, not authorization.
 Disk blocks travel over the authenticated direct node channel or to configured
 S3 storage, never through the official relay.
 
-The chosen address is carried by the generated installer download and saved
-in the node’s protected identity and supervisor configuration. The node uses
+The chosen address is visible as an argument in the generated command:
+`curl …/internal/nodes/install.sh | sudo bash -s -- 'https://manager.vpn.example'`.
+The installer refuses URL query parameters that could hide a different download
+origin, and validates its argument before downloading the supervisor or changing
+the host. A usable configured manager origin remains the default for older
+commands without an argument; a Docker-only origin requires the explicit address.
+The address is saved in the node’s protected identity and supervisor configuration. The node uses
 this authenticated connection address for disk preparation and restoration,
 even if the manager’s internal origin is loopback. The manager’s optional
 `PUBLIC_URL` remains a fallback for older enrollment clients and
@@ -144,6 +149,12 @@ matching `leo node-enroll` binary with the address and temporary code shown in
 the app. Changes of address after installation require updating the node’s
 private identity and supervisor configuration together while its service is
 stopped; no credential is displayed by the app.
+
+The node channel accepts the Host preserved by a private TLS proxy independently
+of `PUBLIC_URL`. Enrollment still needs its single-use code; node traffic and
+disk reads still require their own bearer credentials and grants. Browser Origin
+checks remain active, and other routes retain their Host checks. The proxy must
+serve only the node channel, not an installation browser interface.
 
 ## Docker on a VPS
 

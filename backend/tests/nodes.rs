@@ -508,7 +508,10 @@ async fn enrollment_uses_a_configurable_direct_manager_origin() {
 async fn direct_node_channel_accepts_private_proxy_hosts_and_keeps_credentials_required() {
     let owner = Owner::new().await;
     let (listener, address) = common::bind().await;
-    let server = owner.serve(listener);
+    let router = leo_agent_manager::http::router(owner.service.clone())
+        .await
+        .unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let client = reqwest::Client::new();
     let base = format!("http://{address}");
 
@@ -621,82 +624,91 @@ async fn enrollment_rejects_insecure_or_non_origin_manager_addresses() {
 }
 
 #[tokio::test]
-async fn node_installer_keeps_the_chosen_direct_manager_address() {
-    let owner = Owner::new().await;
-    let (listener, address) = common::bind().await;
-    drop(listener);
-    let mut config = owner.service.config.clone();
-    config.port = address.port();
-    let config_file = owner.root().join("manager-config.json");
-    std::fs::write(&config_file, serde_json::to_vec(&config).unwrap()).unwrap();
-    let mut manager = tokio::process::Command::new(env!("CARGO_BIN_EXE_leo"))
-        .env("LEO_CONFIG", &config_file)
-        .env(
-            "LEO_NODE_IMAGE",
-            format!("registry.example/leo@sha256:{}", "1".repeat(64)),
-        )
-        .env_remove("LEO_OFFICIAL_ORIGIN")
-        .env_remove("LEO_INSTALLATION_CLAIM_CODE")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-    let client = reqwest::Client::new();
-    let base = format!("http://{address}");
-    common::eventually(
-        Duration::from_secs(10),
-        Duration::from_millis(20),
-        async || {
-            client
-                .get(format!("{base}/health"))
-                .send()
-                .await
-                .ok()
-                .filter(|response| response.status().is_success())
-        },
-    )
-    .await;
-    let response = client
-        .get(format!(
-            "{base}/internal/nodes/install.sh?managerUrl=https%3A%2F%2Fmanager.vpn.example%3A4310"
-        ))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let script = response.text().await.unwrap();
-    assert!(
-        script.contains("LEO_MASTER='https://manager.vpn.example:4310/'"),
-        "installer must keep the chosen address"
-    );
-    assert!(!script.contains("http://localhost:4310"));
-
-    let fallback = client
-        .get(format!("{base}/internal/nodes/install.sh"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(fallback.status(), StatusCode::OK);
-    assert!(
-        fallback
-            .text()
-            .await
-            .unwrap()
-            .contains("LEO_MASTER='http://localhost:4310/'")
-    );
-
-    for origin in [
-        "http://192.168.1.20:4310",
-        "https://manager.vpn.example/path",
-        "https://user:password@manager.vpn.example",
+async fn node_installer_cannot_hide_a_different_download_origin_in_its_url() {
+    for (configured, fallback) in [
+        ("http://localhost:4310", "http://localhost:4310/"),
+        ("http://manager:4310", ""),
     ] {
-        let mut download = url::Url::parse(&format!("{base}/internal/nodes/install.sh")).unwrap();
-        download.query_pairs_mut().append_pair("managerUrl", origin);
-        let response = client.get(download).send().await.unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{origin}");
+        let owner = Owner::new().await;
+        let (listener, address) = common::bind().await;
+        drop(listener);
+        let mut config = owner.service.config.clone();
+        config.port = address.port();
+        config.public_url = configured.into();
+        let config_file = owner.root().join("manager-config.json");
+        std::fs::write(&config_file, serde_json::to_vec(&config).unwrap()).unwrap();
+        let mut manager = tokio::process::Command::new(env!("CARGO_BIN_EXE_leo"))
+            .env("LEO_CONFIG", &config_file)
+            .env(
+                "LEO_NODE_IMAGE",
+                format!("registry.example/leo@sha256:{}", "1".repeat(64)),
+            )
+            .env_remove("LEO_OFFICIAL_ORIGIN")
+            .env_remove("LEO_INSTALLATION_CLAIM_CODE")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let client = reqwest::Client::new();
+        let base = format!("http://{address}");
+        common::eventually(
+            Duration::from_secs(10),
+            Duration::from_millis(20),
+            async || {
+                client
+                    .get(format!("{base}/health"))
+                    .send()
+                    .await
+                    .ok()
+                    .filter(|response| response.status().is_success())
+            },
+        )
+        .await;
+
+        let response = client
+            .get(format!(
+                "{base}/internal/nodes/install.sh?managerUrl=https%3A%2F%2Fattacker.example"
+            ))
+            .header("host", "manager.vpn.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = client
+            .get(format!("{base}/internal/nodes/install.sh"))
+            .header("host", "manager.vpn.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let script = response.text().await.unwrap();
+        assert!(script.contains(&format!("LEO_MASTER=${{1:-'{fallback}'}}")));
+        assert!(!script.contains("attacker.example"));
+
+        // Validate the served installer itself, before privileged host changes
+        // or downloading the supervisor from an argument supplied by the user.
+        let script_path = owner.root().join("install.sh");
+        std::fs::write(&script_path, script).unwrap();
+        for unsafe_origin in [
+            "http://192.168.1.20:4310",
+            "https://user:password@manager.vpn.example",
+            "https://manager.vpn.example/path",
+        ] {
+            let output = tokio::process::Command::new("bash")
+                .arg(&script_path)
+                .arg(unsafe_origin)
+                .output()
+                .await
+                .unwrap();
+            assert!(!output.status.success());
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("Use an HTTPS manager origin")
+            );
+        }
+        manager.kill().await.unwrap();
     }
-    manager.kill().await.unwrap();
 }
 
 #[tokio::test]

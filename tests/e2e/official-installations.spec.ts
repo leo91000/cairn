@@ -108,9 +108,9 @@ test('selects installations, remembers the last one and honours deep workspace U
     await expect(nodeDialog).toContainText('does not use the relay')
     await expect(nodeDialog).toContainText('Disk blocks never pass through the relay')
     await nodeDialog.getByLabel('Machine name').fill('VPN node')
-    await nodeDialog.getByLabel('Direct manager address').fill('https://manager.vpn.example:4310')
+    await nodeDialog.getByLabel('Direct manager address').fill('https://manager.vpn.example:4310/')
     await nodeDialog.getByRole('button', { name: 'Create enrollment code' }).click()
-    await expect(nodeDialog.getByLabel('Node installation command')).toContainText('https://manager.vpn.example:4310/internal/nodes/install.sh?managerUrl=')
+    await expect(nodeDialog.getByLabel('Node installation command')).toHaveText('curl --fail --silent --show-error \'https://manager.vpn.example:4310/internal/nodes/install.sh\' | sudo bash -s -- \'https://manager.vpn.example:4310\'')
     await expect(nodeDialog.getByLabel('Node installation command')).not.toContainText(url)
     await expect(nodeDialog.getByLabel('Single-use enrollment code')).toHaveText(/^[\w-]{43}$/)
     for (const width of [1440, 390, 320]) {
