@@ -84,3 +84,42 @@ async fn r2_requires_owner_confirmation_of_provider_privacy_and_retention() {
     assert!(response.text().await.unwrap().contains("Confirm"));
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn r2_environment_configuration_accepts_explicit_privacy_confirmation() {
+    if let Ok(confirmation) = std::env::var("LEO_TEST_R2_CONFIRMATION") {
+        let fixture = RelayedInstallation::new(axum::Router::new()).await;
+        let response = fixture.get("/settings/storage").send().await.unwrap();
+        assert_eq!(response.status(), 200);
+        let value: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(value["environmentManaged"], true);
+        assert_eq!(value["configured"], confirmation == "true");
+        fixture.close().await;
+        return;
+    }
+
+    // Separate processes isolate environment-managed installations from other tests.
+    for confirmation in ["false", "true"] {
+        let status = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "r2_environment_configuration_accepts_explicit_privacy_confirmation",
+                "--nocapture",
+            ])
+            .env("LEO_TEST_R2_CONFIRMATION", confirmation)
+            .env("STORAGE_S3_PRIVATE_BUCKET_CONFIRMED", confirmation)
+            .env("STORAGE_S3_BUCKET", "leo-disks")
+            .env(
+                "STORAGE_S3_ENDPOINT",
+                "https://11111111111111111111111111111111.r2.cloudflarestorage.com",
+            )
+            .env("STORAGE_S3_REGION", "auto")
+            .status()
+            .await
+            .unwrap();
+        assert!(
+            status.success(),
+            "R2 environment confirmation {confirmation}"
+        );
+    }
+}

@@ -1,5 +1,7 @@
 mod common;
 
+use sha2::{Digest, Sha256};
+
 #[tokio::test]
 async fn official_service_serves_a_root_installer_without_putting_claim_codes_in_urls() {
     let app = common::Fixture::new().await;
@@ -27,12 +29,11 @@ async fn official_service_serves_a_root_installer_without_putting_claim_codes_in
         .unwrap();
     assert_eq!(host.status(), 200);
     assert_eq!(host.headers()["cache-control"], "no-store");
-    assert!(
-        host.text()
-            .await
-            .unwrap()
-            .contains("LEO_INSTALLATION_CLAIM_CODE")
-    );
+    let host = host.text().await.unwrap();
+    assert!(host.contains("LEO_INSTALLATION_CLAIM_CODE"));
+    let checksum = hex::encode(Sha256::digest(host.as_bytes()));
+    assert!(script.contains(&format!("LEO_HOST_SHA256={checksum}")));
+    assert!(script.contains("--proto '=https'"));
     app.close().await;
 }
 

@@ -349,7 +349,11 @@ impl Storage {
                     .host_str()
                     .is_some_and(|host| host.ends_with(".r2.cloudflarestorage.com"))
         });
-        if r2 && config["privateBucketConfirmed"] != true {
+        let private_bucket_confirmed = non_empty_env("STORAGE_S3_PRIVATE_BUCKET_CONFIRMED")
+            .map_or(config["privateBucketConfirmed"] == true, |value| {
+                value == "true"
+            });
+        if r2 && !private_bucket_confirmed {
             return Err(Error::bad(
                 "Confirm that R2 public domains and bucket locks are disabled in the Cloudflare dashboard.",
             ));

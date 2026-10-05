@@ -12,6 +12,43 @@ REPO = Path(__file__).resolve().parents[1]
 
 
 class Installer(unittest.TestCase):
+    def test_truncated_download_never_starts_the_installer(self):
+        script = (REPO / 'deploy/installations/install.sh').read_text()
+        partial = script[:script.index('python3 -m py_compile')]
+        result = subprocess.run(['bash', '-s'], input=partial, text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('Run the command', result.stderr)
+        self.assertEqual(result.stdout, '')
+
+    def test_partial_startup_clears_claim_from_existing_manager(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binaries = root / 'bin'
+            binaries.mkdir()
+            docker = binaries / 'docker'
+            docker.write_text("""#!/usr/bin/env python3
+import os, pathlib, sys
+root = pathlib.Path(os.environ['LEO_INSTALLATION_ROOT'])
+if 'up' in sys.argv:
+    if '--no-deps' not in sys.argv:
+        sys.exit(1)
+    assert (root / 'claim.env').read_text() == ''
+    (root / 'cleaned').touch()
+""")
+            docker.chmod(0o755)
+            (root / 'installation.json').write_text(json.dumps({
+                'origin': 'https://leo.example.test',
+                'image': 'ghcr.io/leo91000/leo-agent-manager@sha256:' + '1' * 64,
+            }))
+            result = subprocess.run(
+                ['python3', str(REPO / 'deploy/installations/host.py'),
+                 'https://leo.example.test', '--claim-code', 'a' * 64],
+                env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
+                     'LEO_INSTALLATION_ROOT': directory}, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue((root / 'cleaned').exists())
+            self.assertFalse((root / 'claim.env').exists())
+
     def test_failed_download_does_not_leave_a_claim_code_on_disk(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -217,12 +217,12 @@ api_bind_addr = "0.0.0.0:3900"
     atomic(claim_file, 'LEO_INSTALLATION_CLAIM_CODE=' + (code if not claimed else '') + '\n')
     docker = ['docker', 'compose', '--project-directory', str(ROOT), '--env-file', str(claim_file), '-f', str(ROOT / 'compose.json')]
     print('Downloading Leo and Garage images…', flush=True)
-    started = False
+    startup_attempted = False
     try:
         run(docker + ['pull'], timeout=1200)
         print('Starting the manager, local runner and private S3 storage…', flush=True)
+        startup_attempted = True
         run(docker + ['up', '-d'], timeout=360)
-        started = True
         health = "fetch('http://127.0.0.1:4310/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
         deadline = time.monotonic() + 120
         while True:
@@ -241,7 +241,7 @@ api_bind_addr = "0.0.0.0:3900"
         # Remove the one-use code from both disk and the manager environment.
         atomic(claim_file, '')
         try:
-            if started:
+            if startup_attempted:
                 run(docker + ['up', '-d', '--no-deps', 'manager'], timeout=180)
         finally:
             claim_file.unlink(missing_ok=True)
