@@ -319,6 +319,7 @@ mod tests {
             )
             .await
             .unwrap();
+
         let previous = crate::config::now() - 86_400_001;
         advertise_runtime(&store, "previous", "previous-image", previous)
             .await
@@ -326,6 +327,7 @@ mod tests {
         advertise_runtime(&store, "current", "current-image", crate::config::now())
             .await
             .unwrap();
+
         let entries = store.keys("node-runtime:").await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].1["runtimeId"], "current");

@@ -2,12 +2,13 @@
 use crate::error::{Error, Result};
 use std::{collections::HashSet, fs, io, path::Path};
 
-pub(crate) static CONTROL: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+pub(crate) static IMAGE_LIFECYCLE: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 
 pub(super) async fn collect(state: &Path, current: &Path) -> Result<usize> {
-    let exclusive = CONTROL.write().await;
+    let exclusive = IMAGE_LIFECYCLE.write().await;
     let state = state.to_owned();
     let current = current.to_owned();
+
     tokio::task::spawn_blocking(move || {
         // Keep the lock in the worker even if its async caller is cancelled.
         let _exclusive = exclusive;
@@ -31,9 +32,11 @@ fn reference(path: &Path, field: &str, pins: &mut HashSet<String>) -> Result<()>
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
     };
+
     if !metadata.is_file() || metadata.len() > 64 * 1024 {
         return Err(Error::conflict("Invalid runtime image reference."));
     }
+
     let record: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
     let runtime = record[field]
         .as_str()
@@ -50,6 +53,7 @@ fn collect_locked(state: &Path, current: &Path) -> Result<usize> {
     if let Some(runtime) = current.file_name().and_then(|name| name.to_str()) {
         pins.insert(runtime.to_owned());
     }
+
     // All disk references live at the physical directory root; logical aliases
     // are also scanned. Do not traverse guest journals or follow symlinks.
     for (root, file, field) in [
@@ -69,6 +73,7 @@ fn collect_locked(state: &Path, current: &Path) -> Result<usize> {
             }
         }
     }
+
     // Finish reading every pin before making any destructive change.
     let mut removed = 0;
     for entry in entries(&state.join("images"))? {
@@ -104,6 +109,7 @@ mod tests {
         tokio::fs::write(disk.join("runtime.json"), b"invalid-json")
             .await
             .unwrap();
+
         assert!(
             collect(root.path(), &root.path().join("images/current"))
                 .await
@@ -117,7 +123,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let starting = root.path().join("images/starting");
         tokio::fs::create_dir_all(&starting).await.unwrap();
-        let pin = CONTROL.read().await;
+
+        let pin = IMAGE_LIFECYCLE.read().await;
         let state = root.path().to_owned();
         let mut collection =
             tokio::spawn(async move { collect(&state, &state.join("images/current")).await });
@@ -126,12 +133,14 @@ mod tests {
                 .await
                 .is_err()
         );
+
         let disk = root.path().join("environments/starting");
         tokio::fs::create_dir_all(&disk).await.unwrap();
         tokio::fs::write(disk.join("runtime.json"), br#"{"runtimeId":"starting"}"#)
             .await
             .unwrap();
         drop(pin);
+
         assert_eq!(collection.await.unwrap().unwrap(), 0);
         assert!(starting.exists());
     }
@@ -152,6 +161,7 @@ mod tests {
                 .await
                 .unwrap();
         }
+
         for (directory, file, record) in [
             (
                 "disks/conversation",
@@ -173,8 +183,10 @@ mod tests {
             tokio::fs::create_dir_all(&path).await.unwrap();
             tokio::fs::write(path.join(file), record).await.unwrap();
         }
+
         let current = root.path().join("images/current");
         assert_eq!(collect(root.path(), &current).await.unwrap(), 1);
+
         for runtime in ["current", "disk-pin", "environment-pin", "template-pin"] {
             assert!(
                 root.path()
