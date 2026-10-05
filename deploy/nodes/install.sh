@@ -36,9 +36,20 @@ import urllib.parse
 
 value = sys.argv[1]
 parsed = urllib.parse.urlsplit(value)
+
 loopback = parsed.hostname in ('localhost', '127.0.0.1', '::1')
-if not parsed.hostname or not (parsed.scheme == 'https' or parsed.scheme == 'http' and loopback) or parsed.username or parsed.password or parsed.path not in ('', '/') or parsed.query or parsed.fragment:
+secure_transport = parsed.scheme == 'https' or (parsed.scheme == 'http' and loopback)
+origin_only = (
+    not parsed.username
+    and not parsed.password
+    and parsed.path in ('', '/')
+    and not parsed.query
+    and not parsed.fragment
+)
+
+if not parsed.hostname or not secure_transport or not origin_only:
     sys.exit('Use an HTTPS manager origin (HTTP is allowed only on loopback for local tests).')
+
 print(value.rstrip('/'))
 PY
 )
