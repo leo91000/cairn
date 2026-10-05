@@ -10,6 +10,7 @@ test('registers, configures and revokes a node through the owner interface', asy
   await page.goto('/nodes')
   await page.getByRole('button', { name: 'Add a machine', exact: true }).click()
   await page.getByLabel('Machine name').fill('Browser Linux')
+  await page.getByLabel('Direct manager address').fill(workspace.url)
   await page.getByRole('button', { name: 'Create enrollment code' }).click()
   const code = await page.getByLabel('Single-use enrollment code').textContent()
   expect(code).toHaveLength(43)

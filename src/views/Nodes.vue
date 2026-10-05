@@ -29,11 +29,16 @@ const nodes = ref<ExecutionNode[]>([])
 const editing = ref<ExecutionNode | null>(null)
 const tags = ref('')
 const name = ref('')
+const managerUrl = ref('')
 // Ceilings are edited in GiB and stored in MiB.
 const memoryGiB = ref(0)
 const diskGiB = ref(0)
 const adding = ref(false)
 const enrollment = ref<NodeEnrollment | null>(null)
+const enrollmentCommand = computed(() => {
+  const origin = enrollment.value?.managerUrl
+  return origin ? `sudo leo node-enroll '${origin.replaceAll('\'', '\'\\\'\'')}' /var/lib/leo-node/data/node` : ''
+})
 // Machines known when the code was created, to recognise the newly connected one.
 let knownBeforeEnrollment = new Set<string>()
 const error = ref('')
@@ -96,7 +101,10 @@ async function action(operation: () => Promise<void>) {
 function enroll() {
   return action(async () => {
     knownBeforeEnrollment = new Set(nodes.value.map(node => node.id))
-    enrollment.value = await api<NodeEnrollment>('/nodes/enrollments', { method: 'POST', body: JSON.stringify({ name: name.value }) })
+    enrollment.value = await api<NodeEnrollment>('/nodes/enrollments', {
+      method: 'POST',
+      body: JSON.stringify({ name: name.value, managerUrl: managerUrl.value.trim() }),
+    })
   })
 }
 
@@ -199,7 +207,7 @@ function statusLabel(node: ExecutionNode) {
     <div class="fleet-summary">
       <span class="inline-flex gap-1"><strong>{{ active.length }}</strong><span>{{ active.length === 1 ? 'machine' : 'machines' }}</span></span><span class="inline-flex gap-1"><strong>{{ active.filter(n => n.local || n.status === 'online').length }}</strong><span>connected</span></span><span>Linux · isolated conversations</span>
     </div>
-    <UiAlert v-if="error" class="mt-4">
+    <UiAlert v-if="error && !adding" class="mt-4">
       {{ error }}
     </UiAlert>
     <Modal
@@ -212,13 +220,29 @@ function statusLabel(node: ExecutionNode) {
         <p class="text-sm text-muted">
           Connect a trusted Linux machine, then choose which agents can use it. GPU execution is not available yet.
         </p>
-        <form class="mt-3 flex flex-wrap items-end gap-3" @submit.prevent="enroll">
+        <p class="text-sm text-muted">
+          The node must reach the manager directly over your local network, VPN or an optional public URL. It does not use the relay. Disk blocks never pass through the relay.
+        </p>
+        <UiAlert v-if="error">
+          {{ error }}
+        </UiAlert>
+        <form class="mt-3 grid gap-3" @submit.prevent="enroll">
           <label>Machine name<input
             v-model="name"
             class="mt-1 block"
             maxlength="100"
             required
           ></label>
+          <label>Direct manager address<input
+            v-model="managerUrl"
+            type="url"
+            placeholder="https://manager.vpn.example:4310"
+            aria-describedby="node-manager-address-help"
+            required
+          ></label>
+          <p id="node-manager-address-help" class="text-sm text-muted">
+            Use HTTPS with a certificate trusted by the node. HTTP is allowed only on loopback for local tests. This is the manager’s address, not the official app’s address.
+          </p>
           <UiButton type="submit" :disabled="busy">
             Create enrollment code
           </UiButton>
@@ -226,12 +250,14 @@ function statusLabel(node: ExecutionNode) {
         <div v-if="enrollment" class="mt-4 grid gap-2">
           <template v-if="enrollment.installCommand">
             <p><strong>1.</strong> On the Linux machine (x86-64 with KVM, Docker, curl and systemd), run:</p>
-            <code class="block break-all select-all">{{ enrollment.installCommand }}</code>
+            <code class="block break-all select-all" aria-label="Node installation command">{{ enrollment.installCommand }}</code>
             <p><strong>2.</strong> When prompted, enter this single-use code. It expires {{ new Date(enrollment.expiresAt).toLocaleString() }}.</p>
           </template>
           <template v-else>
-            <p>Assisted installation is unavailable: the master has no pinned node image. Set <code>LEO_NODE_IMAGE</code> on the master to the deployed image with its digest (<code>image@sha256:…</code>) and create a new code.</p>
-            <p>Meanwhile, you can enroll a machine that already has the matching <code>leo</code> binary with <code>leo node-enroll</code> and this single-use code, which expires {{ new Date(enrollment.expiresAt).toLocaleString() }}:</p>
+            <p>Assisted installation is unavailable: the manager has no pinned node image. Set <code>LEO_NODE_IMAGE</code> on the manager to the deployed image with its digest (<code>image@sha256:…</code>) and create a new code.</p>
+            <p>Meanwhile, on a machine with the matching <code>leo</code> binary, run:</p>
+            <code v-if="enrollmentCommand" class="block break-all select-all" aria-label="Node enrollment command">{{ enrollmentCommand }}</code>
+            <p>Paste this single-use code, press Enter, then Ctrl+D to finish standard input. It expires {{ new Date(enrollment.expiresAt).toLocaleString() }}:</p>
           </template>
           <code class="block break-all select-all" aria-label="Single-use enrollment code">{{ enrollment.code }}</code>
           <p class="text-sm text-muted">

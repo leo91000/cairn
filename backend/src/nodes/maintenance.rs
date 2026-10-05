@@ -72,8 +72,17 @@ pub async fn downloads(State(app): State<App>, request: Request) -> Result<Respo
             include_str!("../../../deploy/nodes/host.py").into(),
         ),
         "/internal/nodes/install.sh" => {
+            if request.uri().query().is_some() {
+                return Err(Error::bad(
+                    "Pass the direct manager address as an installer argument, not in its URL.",
+                ));
+            }
             release()?;
-            let origin = super::connector::master(&app.service.config.public_url)?.to_string();
+            // The manager's Docker-only origin need not be reachable or HTTPS.
+            // The generated command supplies the validated direct address.
+            let origin = super::connector::master(&app.service.config.public_url)
+                .map(|origin| origin.to_string())
+                .unwrap_or_default();
             let quoted = format!("'{}'", origin.replace('\'', "'\\''"));
             (
                 "text/x-shellscript",

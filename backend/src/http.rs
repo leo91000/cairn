@@ -277,13 +277,17 @@ fn check_security(
     let authority = host
         .parse::<axum::http::uri::Authority>()
         .map_err(|_| Error::forbidden("Unexpected host."))?;
-    if ![
-        origin.host_str().unwrap_or(""),
-        "localhost",
-        "127.0.0.1",
-        "[::1]",
-    ]
-    .contains(&authority.host())
+    // A node's private TLS proxy can preserve a LAN/VPN Host unrelated to
+    // PUBLIC_URL. These routes authenticate their own codes, bearer tokens or
+    // disk grants; Host is not a node credential. Browser Origin checks remain.
+    if !is_node_traffic(path)
+        && ![
+            origin.host_str().unwrap_or(""),
+            "localhost",
+            "127.0.0.1",
+            "[::1]",
+        ]
+        .contains(&authority.host())
     {
         return Err(Error::forbidden("Unexpected host."));
     }
