@@ -8,10 +8,10 @@ use crate::{
 };
 use axum::{
     body::Body,
-    extract::{Request, State},
+    extract::{Query, Request, State},
     response::Response,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::time::Duration;
 
@@ -61,7 +61,17 @@ pub(crate) fn release() -> Result<Release> {
     })
 }
 
-pub async fn downloads(State(app): State<App>, request: Request) -> Result<Response> {
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallerDownload {
+    manager_url: Option<String>,
+}
+
+pub async fn downloads(
+    State(app): State<App>,
+    Query(download): Query<InstallerDownload>,
+    request: Request,
+) -> Result<Response> {
     if request.method() != "GET" {
         return Err(Error::method_not_allowed("Method not allowed."));
     }
@@ -73,7 +83,11 @@ pub async fn downloads(State(app): State<App>, request: Request) -> Result<Respo
         ),
         "/internal/nodes/install.sh" => {
             release()?;
-            let origin = super::connector::master(&app.service.config.public_url)?.to_string();
+            let manager_url = download
+                .manager_url
+                .as_deref()
+                .unwrap_or(&app.service.config.public_url);
+            let origin = super::connector::master(manager_url.trim())?.to_string();
             let quoted = format!("'{}'", origin.replace('\'', "'\\''"));
             (
                 "text/x-shellscript",

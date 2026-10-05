@@ -351,7 +351,7 @@ async fn call_controller(
     let method = text(command, "method");
     let path = text(command, "path");
     route(method, path)?;
-    let bytes = STANDARD
+    let mut bytes = STANDARD
         .decode(text(command, "body"))
         .map_err(|_| Error::bad("Invalid execution payload."))?;
     let limit = if path.ends_with("/restore") || path.ends_with("/publication") {
@@ -362,6 +362,16 @@ async fn call_controller(
     if bytes.len() > limit {
         return Err(Error::bad("Execution payload exceeds limit."));
     }
+
+    if method == "POST" && path.starts_with("/disks/") && path.ends_with("/restore") {
+        let mut body: Value = serde_json::from_slice(&bytes)?;
+        let restore = body
+            .as_object_mut()
+            .ok_or_else(|| Error::bad("Invalid disk restore request."))?;
+        restore.insert("master".into(), master.url.as_str().into());
+        bytes = serde_json::to_vec(&body)?;
+    }
+
     executor
         .before(
             master.client,

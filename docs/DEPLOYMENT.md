@@ -134,8 +134,10 @@ Disk blocks travel over the authenticated direct node channel or to configured
 S3 storage, never through the official relay.
 
 The chosen address is carried by the generated installer download and saved
-in the node’s protected identity and supervisor configuration. The manager’s
-optional `PUBLIC_URL` remains a fallback for older enrollment clients and
+in the node’s protected identity and supervisor configuration. The node uses
+this authenticated connection address for disk preparation and restoration,
+even if the manager’s internal origin is loopback. The manager’s optional
+`PUBLIC_URL` remains a fallback for older enrollment clients and
 manager-local calls; it need not be the browser’s origin. Installers require
 `LEO_NODE_IMAGE` to pin the manager’s approved image digest. Without it, use the
 matching `leo node-enroll` binary with the address and temporary code shown in

@@ -49,6 +49,7 @@ export interface NodeAgent {
 
 export interface NodeEnrollment {
   installCommand?: string | null
+  managerUrl?: string | null
   code: string
   expiresAt: number
 }
