@@ -83,7 +83,7 @@ test('claims, detaches and reclaims the same private installation through the ap
     await expect(page.getByRole('status')).toContainText('Installation approved')
     await expect.poll(() => child.exitCode).toBe(0)
     await page.getByRole('button', { name: 'Refresh installations', exact: true }).click()
-    await expect(page.getByRole('button', { name: 'Claimed machine', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Claimed machine · Offline', exact: true })).toBeVisible()
     const path = join(root, 'data/installation-relay/identity.json')
     expect((await stat(path)).mode & 0o777).toBe(0o600)
     return JSON.parse(await readFile(path, 'utf8'))
@@ -117,7 +117,7 @@ test('claims, detaches and reclaims the same private installation through the ap
     await stop(unclaimed)
     const old = await claim()
     let manager = start('target/debug/leo', [], managerEnv)
-    await page.getByRole('button', { name: 'Claimed machine', exact: true }).click()
+    await page.getByRole('button', { name: /^Claimed machine · (Online|Offline)$/ }).click()
     await expect(async () => {
       await page.reload()
       await expect(page.getByRole('heading', { name: 'Fil', exact: true })).toBeVisible()
@@ -147,7 +147,7 @@ test('claims, detaches and reclaims the same private installation through the ap
     expect(renewed.installationId).toBe(old.installationId)
     expect(renewed.token !== old.token).toBe(true)
     manager = start('target/debug/leo', [], managerEnv)
-    await page.getByRole('button', { name: 'Claimed machine', exact: true }).click()
+    await page.getByRole('button', { name: /^Claimed machine · (Online|Offline)$/ }).click()
     await expect(async () => {
       await page.goto(conversationUrl)
       await expect(page.getByRole('heading', { name: 'Data survives detachment', exact: true })).toBeVisible()
