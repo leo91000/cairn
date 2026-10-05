@@ -83,6 +83,8 @@ pub struct Health {
 
 /// Disk size used when a plan carries no placement resources.
 const DEFAULT_DISK_MIB: u64 = 32768;
+/// Longest wait for an interrupted attempt's VMM to release a conversation disk.
+const DISK_RELEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub struct Reservation {
     pool: Arc<Pool>,
@@ -895,11 +897,14 @@ impl Reservation {
                 );
                 timing.next("authorize_prepared_disk");
             } else {
+                // A resumed attempt can arrive while the interrupted one's VMM
+                // still holds this disk; wait for it instead of failing the run.
                 self.owner = Some(
-                    crate::storage::environment::ownership(
+                    crate::storage::environment::ownership_after_release(
                         &self.pool.state,
                         plan.run_id(),
                         "Conversation disk is in use.",
+                        DISK_RELEASE_WAIT,
                     )
                     .await?,
                 );

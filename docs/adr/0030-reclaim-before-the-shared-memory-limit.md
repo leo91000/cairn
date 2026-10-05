@@ -79,3 +79,10 @@ Au-dessus de 85 %, un guest en marche rend au plus 256 Mio par tick, en gardant
 tick jusqu’à zéro. Entre les deux, sa taille ne change pas, pour éviter les
 oscillations. Une VM en pause, ou dont le ballon est en train de gonfler pour
 la rétention, n’est jamais dégonflée.
+
+Lors du déploiement de v0.52.12, deux reprises ont expiré au démarrage (30 s),
+puis la tentative suivante est arrivée une seconde plus tard alors que la VM de
+la précédente tenait encore le disque : « Conversation disk is in use » (conflit,
+code 1) a fait échouer les deux exécutions. Une tentative attend désormais
+jusqu’à 60 s la libération du verrou du disque de sa conversation avant
+d’échouer. Les autres conflits de propriété restent immédiats.
