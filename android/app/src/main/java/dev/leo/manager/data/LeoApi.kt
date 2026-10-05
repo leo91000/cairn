@@ -85,7 +85,14 @@ class SessionCookies(private val origin: HttpUrl, private val vault: SessionVaul
     }
 }
 
-class LeoApi(val origin: HttpUrl, vault: SessionVault, client: OkHttpClient = OkHttpClient()) {
+class LeoApi(
+    val origin: HttpUrl,
+    vault: SessionVault,
+    client: OkHttpClient = OkHttpClient(),
+    val installationId: String? = null,
+) {
+    val cacheScope = origin.toString() + installationId.orEmpty()
+
     private val cookies = SessionCookies(origin, vault)
     internal val http =
         client
@@ -135,9 +142,16 @@ class LeoApi(val origin: HttpUrl, vault: SessionVault, client: OkHttpClient = Ok
 
     internal fun url(path: String): HttpUrl {
         require(path.startsWith("/") && !path.startsWith("//"))
+        val accountPath =
+            path.startsWith("/account/") ||
+                path == "/installations" ||
+                path.startsWith("/installations/")
+        val prefix =
+            if (installationId == null || accountPath) "/api"
+            else "/api/installations/${segment(installationId)}/api"
         return origin
             .newBuilder()
-            .encodedPath("/api" + path.substringBefore('?'))
+            .encodedPath(prefix + path.substringBefore('?'))
             .encodedQuery(path.substringAfter('?', "").ifEmpty { null })
             .build()
     }
