@@ -21,6 +21,27 @@ class MemoryVault : SessionVault {
 
 class LeoApiTest {
     @Test
+    fun `email code uses the official origin and restores the account cookie`() = runTest {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{}"))
+            server.enqueue(MockResponse().setBody("""{"authenticated":true,"csrf":"account-csrf"}""")
+                .addHeader("Set-Cookie", "leo_session=account-fixture; Path=/; HttpOnly; Max-Age=3600"))
+            server.enqueue(MockResponse().setBody("""{"authenticated":true,"csrf":"account-csrf"}"""))
+            server.start()
+            val vault = MemoryVault()
+            val api = LeoApi(server.url("/"), vault)
+            api.request("POST", "/account/email-code", body("email" to "member@example.test"))
+            val codeRequest = server.takeRequest()
+            assertEquals("/api/account/email-code", codeRequest.path)
+            assertEquals(server.url("/").toString().removeSuffix("/"), codeRequest.getHeader("Origin"))
+            api.send<Session>("POST", "/account/verify", body("email" to "member@example.test", "code" to "123456"))
+            server.takeRequest()
+            assertTrue(LeoApi(server.url("/"), vault).get<Session>("/account/session").authenticated)
+            assertEquals("leo_session=account-fixture", server.takeRequest().getHeader("Cookie"))
+        }
+    }
+
+    @Test
     fun `portraits use authenticated bounded transfers and preserve old agent compatibility`() =
         runTest {
             MockWebServer().use { server ->
