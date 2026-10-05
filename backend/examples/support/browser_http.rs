@@ -55,6 +55,13 @@ async fn authenticate(
     mut request: Request,
     next: Next,
 ) -> Response {
+    if request.uri().path().starts_with("/installations/")
+        && request.uri().path().ends_with("/mcps/callback")
+    {
+        let query = request.uri().query().unwrap_or("");
+        *request.uri_mut() = format!("/oauth/mcp/callback?{query}").parse().unwrap();
+    }
+
     let path = request.uri().path();
     if !path.starts_with("/api/")
         && !path.starts_with("/internal/")

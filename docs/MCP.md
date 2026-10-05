@@ -98,7 +98,7 @@ that support relinking with additional scopes.
 
 OAuth grants and 30-day personal tokens are limited to one installation and the selected scopes. They can be revoked from that installation’s **Settings** on the official web app. Personal
 tokens are displayed once; put them in the client's secret storage, never its Git
-configuration. Dynamic registration is rate-limited and capped at 100 clients.
+configuration. Dynamic registration is limited to 10 requests per minute per caller IP.
 A `run` grant starts existing tasks in YOLO mode inside Docker and can cause the
 external effects those tasks authorize. `manage` permits changing scheduled tasks
 and agent permissions, configuring external servers, and executing command

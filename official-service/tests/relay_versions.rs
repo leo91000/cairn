@@ -12,9 +12,15 @@ async fn peer(
     versions: Vec<u16>,
 ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
     let identity: serde_json::Value = serde_json::from_slice(
-        &tokio::fs::read(relay.root.path().join("relay/identity.json"))
-            .await
-            .unwrap(),
+        &tokio::fs::read(
+            relay
+                .installation
+                .config
+                .data_dir
+                .join("installation-relay/identity.json"),
+        )
+        .await
+        .unwrap(),
     )
     .unwrap();
     let url = format!(

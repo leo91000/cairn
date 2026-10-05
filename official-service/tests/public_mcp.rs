@@ -433,3 +433,118 @@ async fn dynamic_registration_has_no_permanent_global_client_ceiling() {
     }
     relay.close().await;
 }
+
+#[tokio::test]
+async fn a_revoked_mcp_token_cannot_finish_a_previously_authorized_upload() {
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let tokens_path = format!("/api/installations/{id}/tokens");
+    let minted: Value = owner_post(
+        &relay,
+        &tokens_path,
+        json!({ "label": "Revoked upload", "scopes": ["read", "manage"] }),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let start_upload = || {
+        let (sender, receiver) = mpsc::channel::<String>(2);
+        let body = reqwest::Body::wrap_stream(futures_util::stream::unfold(
+            receiver,
+            |mut receiver| async move {
+                receiver
+                    .recv()
+                    .await
+                    .map(|chunk| (Ok::<_, std::io::Error>(chunk), receiver))
+            },
+        ));
+        sender.try_send("{".into()).unwrap();
+        let request = relay
+            .app
+            .client
+            .post(format!("{}/mcp", relay.app.url))
+            .bearer_auth(minted["token"].as_str().unwrap())
+            .header("content-type", "application/json")
+            .body(body);
+        (
+            sender,
+            tokio::spawn(async move { request.send().await.unwrap() }),
+        )
+    };
+    // Capacity is an observable HTTP signal that authentication finished and
+    // body reading began. No sleep or internal state is used as admission proof.
+    let mut uploads: Vec<_> = (0..leo_relay_protocol::MAX_IN_FLIGHT)
+        .map(|_| start_upload())
+        .collect();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let status = relay.get("/projects").send().await.unwrap().status();
+            if status == StatusCode::SERVICE_UNAVAILABLE {
+                break;
+            }
+            assert_eq!(status, StatusCode::OK);
+            for upload in &mut uploads {
+                if upload.1.is_finished() {
+                    let (_, rejected) = std::mem::replace(upload, start_upload());
+                    assert_eq!(
+                        rejected.await.unwrap().status(),
+                        StatusCode::SERVICE_UNAVAILABLE
+                    );
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("uploads must occupy the installation request capacity");
+    let revoked = relay
+        .app
+        .client
+        .delete(format!(
+            "{}{tokens_path}/{}",
+            relay.app.url,
+            minted["id"].as_str().unwrap()
+        ))
+        .header("cookie", &relay.cookie)
+        .header("origin", &relay.app.url)
+        .header("x-csrf-token", relay.session["csrf"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), StatusCode::OK);
+
+    let payload = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "save_project",
+            "arguments": {
+                "name": "Rejected after revocation",
+                "path": relay.root.path().to_str().unwrap(),
+            },
+        },
+    })
+    .to_string();
+    for (sender, response) in uploads {
+        sender.send(payload[1..].into()).await.unwrap();
+        drop(sender);
+        assert_eq!(response.await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    }
+    let projects: Value = relay
+        .get("/projects")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(projects, json!([]));
+    relay.close().await;
+}

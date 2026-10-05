@@ -210,12 +210,12 @@ Cancelling or revoking a stream releases both its stream permit and tunnel slot.
 ## Public files and scoped MCP requests
 
 The official service authorizes `/mcp` with an installation-scoped grant and
-relays it to `/api/mcp`. The relay context carries `mcpScopes`; the installation
+relays it to `/api/mcp`. The relay context carries `mcp_scopes`; the installation
 applies read/run/manage checks using its existing management tools. Browser
 sessions and token secrets never travel to the installation.
 
 Public URLs at `/api/public/installations/{id}/artifacts/{token}` use a separate
-read capability. The context carries `publicArtifact`, no account identity, and
+read capability. The context carries `public_artifact`, no account identity, and
 permits only GET/HEAD of `/api/shared-artifacts/{token}`. Share-token validation
 and revocation stay on the installation. Public files use the existing credited
 streams; the official service overwrites security headers and removes cookies.

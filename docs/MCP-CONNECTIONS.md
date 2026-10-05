@@ -24,7 +24,7 @@ retain their values. The main agent always receives every enabled connection.
 
 For OAuth, creation returns a `managementUrl`. Open it in a signed-in browser
 and choose **Connect** on the saved connection. Consent stays bound to that
-browser session; MCP clients cannot bypass it. Refreshes are automatic after
+Leo account; MCP clients cannot bypass it. Refreshes are automatic after
 authorization. The callback page sends its parameters through the authenticated
 installation API and removes them from browser history. Bearer tokens, client secrets and command environment values
 are write-only and use the same encrypted vault as UI-created connections.

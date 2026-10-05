@@ -172,6 +172,49 @@ pub(super) async fn revoke(
     Ok(Json(json!({ "revoked": true })))
 }
 
+struct McpAccess {
+    account: String,
+    installation: String,
+    scopes: Vec<String>,
+}
+
+async fn access(service: &Service, credential_digest: &str) -> Result<Option<McpAccess>, ApiError> {
+    let grant: Option<(String, String, Vec<String>)> = query_as("SELECT g.account_id, g.installation_id, t.scopes FROM mcp_tokens t JOIN mcp_grants g ON g.id = t.grant_id JOIN installations i ON i.id = g.installation_id AND i.owner_id = g.account_id WHERE t.digest = $1 AND t.kind = 'access' AND NOT t.used AND t.expires_at > now() AND g.expires_at > now()")
+        .bind(credential_digest).fetch_optional(&service.pool).await?;
+    Ok(grant.map(|(account, installation, scopes)| McpAccess {
+        account,
+        installation,
+        scopes,
+    }))
+}
+
+pub(super) async fn still_authorized(
+    service: &Service,
+    credential_digest: &str,
+) -> Result<bool, ApiError> {
+    Ok(access(service, credential_digest).await?.is_some())
+}
+
+pub(super) fn unauthorized(service: &Service) -> Response {
+    let mut response = (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({ "error": "unauthorized" })),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        "www-authenticate",
+        HeaderValue::from_str(&format!(
+            "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp\"",
+            service.origin,
+        ))
+        .unwrap(),
+    );
+    response
+        .headers_mut()
+        .insert("cache-control", HeaderValue::from_static("no-store"));
+    response
+}
+
 pub(super) async fn handle(
     State(service): State<Service>,
     request: Request,
@@ -183,28 +226,20 @@ pub(super) async fn handle(
         .and_then(|value| value.split_once(' '))
         .filter(|(kind, _)| kind.eq_ignore_ascii_case("bearer"))
         .map_or("", |(_, value)| value);
-    let grant: Option<(String, String, Vec<String>)> = query_as("SELECT g.account_id, g.installation_id, t.scopes FROM mcp_tokens t JOIN mcp_grants g ON g.id = t.grant_id JOIN installations i ON i.id = g.installation_id AND i.owner_id = g.account_id WHERE t.digest = $1 AND t.kind = 'access' AND NOT t.used AND t.expires_at > now() AND g.expires_at > now()")
-        .bind(digest(token)).fetch_optional(&service.pool).await?;
-    let Some((account, installation, scopes)) = grant else {
-        let mut response = (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "unauthorized" })),
-        )
-            .into_response();
-        response.headers_mut().insert(
-            "www-authenticate",
-            HeaderValue::from_str(&format!(
-                "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp\"",
-                service.origin
-            ))
-            .unwrap(),
-        );
-        response
-            .headers_mut()
-            .insert("cache-control", HeaderValue::from_static("no-store"));
-        return Ok(response);
+    let credential_digest = digest(token);
+    let Some(grant) = access(&service, &credential_digest).await? else {
+        return Ok(unauthorized(&service));
     };
-    relay::mcp(&service, &installation, account, scopes, request).await
+
+    relay::mcp(
+        &service,
+        &grant.installation,
+        grant.account,
+        grant.scopes,
+        credential_digest,
+        request,
+    )
+    .await
 }
 
 #[derive(Deserialize)]
@@ -366,11 +401,18 @@ pub(super) async fn preview(
 ) -> Result<Json<Value>, ApiError> {
     let account = installations::account(&service, &headers, &Method::POST).await?;
     let details = authorization(&service, &params).await?;
+
+    let owned_installations = installations::list(&service.pool, &account, &service.relay)
+        .await?
+        .into_iter()
+        .filter(|installation| installation["role"] == "owner")
+        .collect::<Vec<_>>();
+
     Ok(Json(json!({
         "client": { "client_id": details.client_id, "client_name": details.name },
         "resource": format!("{}/mcp", service.origin),
         "scopes": details.scopes,
-        "installations": installations::list(&service.pool, &account, &service.relay).await?,
+        "installations": owned_installations,
     })))
 }
 

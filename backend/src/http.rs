@@ -130,13 +130,7 @@ async fn security(State(app): State<App>, mut request: Request, next: Next) -> R
         );
     let head = request.method() == "HEAD";
     let outcome = (|| {
-        check_security(
-            &app,
-            request.headers(),
-            request.method().as_str(),
-            &path,
-            &subject,
-        )?;
+        check_security(&app, request.headers(), &path, &subject)?;
         authenticate_installation(&request)
     })();
     let mut response = match outcome {
@@ -255,7 +249,6 @@ fn development_origin(origin: &str) -> bool {
 fn check_security(
     app: &App,
     headers: &HeaderMap,
-    method: &str,
     path: &str,
     subject: &RateLimitSubject,
 ) -> Result<()> {

@@ -432,7 +432,10 @@ async fn assert_public_link_is_scoped(app: &Router, run: &str, item: &Value, pub
             StatusCode::UNAUTHORIZED,
         ),
         (
-            format!("/api/public/artifacts/{}", id()),
+            format!(
+                "/api/public/installations/00000000-0000-4000-8000-000000000055/artifacts/{}",
+                id()
+            ),
             StatusCode::NOT_FOUND,
         ),
     ] {

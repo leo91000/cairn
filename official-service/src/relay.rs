@@ -11,7 +11,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use leo_relay_protocol::{
     ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_STREAM_CHUNK,
-    REQUEST_TIMEOUT,
+    REQUEST_TIMEOUT, Role,
 };
 use sqlx_core::query_as::query_as;
 use std::{
@@ -460,6 +460,7 @@ pub(super) async fn forward(
     }
     let target = target.to_owned();
     send(
+        &service,
         tunnel,
         access_generation,
         account,
@@ -475,6 +476,7 @@ pub(super) async fn mcp(
     installation: &str,
     account: String,
     scopes: Vec<String>,
+    credential_digest: String,
     request: Request,
 ) -> Result<Response, ApiError> {
     let tunnel = service
@@ -485,10 +487,14 @@ pub(super) async fn mcp(
         .get(installation)
         .cloned();
     send(
+        service,
         tunnel,
         0,
         account,
-        Capability::Mcp(scopes),
+        Capability::Mcp {
+            scopes,
+            credential_digest,
+        },
         "/api/mcp",
         request,
     )
@@ -497,7 +503,10 @@ pub(super) async fn mcp(
 
 enum Capability {
     Account(Role),
-    Mcp(Vec<String>),
+    Mcp {
+        scopes: Vec<String>,
+        credential_digest: String,
+    },
     PublicArtifact(String),
 }
 
@@ -536,6 +545,7 @@ pub(super) async fn public_artifact(
         target.push_str(query);
     }
     send(
+        &service,
         tunnel,
         0,
         String::new(),
@@ -547,6 +557,7 @@ pub(super) async fn public_artifact(
 }
 
 async fn send(
+    service: &Service,
     tunnel: Option<Arc<Tunnel>>,
     access_generation: u64,
     account: String,
@@ -607,10 +618,13 @@ async fn send(
                 .map(|value| (name.to_string(), value.to_owned()))
         })
         .collect();
-    let (role, mcp_scopes, public_artifact) = match capability {
-        Capability::Account(role) => (role, None, None),
-        Capability::Mcp(scopes) => (Role::Owner, Some(scopes), None),
-        Capability::PublicArtifact(token) => (Role::Member, None, Some(token)),
+    let (role, mcp_scopes, public_artifact, mcp_credential) = match capability {
+        Capability::Account(role) => (role, None, None, None),
+        Capability::Mcp {
+            scopes,
+            credential_digest,
+        } => (Role::Owner, Some(scopes), None, Some(credential_digest)),
+        Capability::PublicArtifact(token) => (Role::Member, None, Some(token), None),
     };
     let api_request = ApiRequest {
         id: uuid::Uuid::new_v4().to_string(),
@@ -626,6 +640,14 @@ async fn send(
             .map_err(|_| ApiError(StatusCode::PAYLOAD_TOO_LARGE, "API request is too large"))?
             .to_vec(),
     };
+    // Revoke before dispatch even when the caller suspended its upload after
+    // the initial bearer check. Reuse the same current grant/ownership rules.
+    if let Some(credential) = mcp_credential
+        && !super::mcp::still_authorized(service, &credential).await?
+    {
+        return Ok(super::mcp::unauthorized(service));
+    }
+
     if tunnel.access_revoked(&account, access_generation) {
         return Err(ApiError(
             StatusCode::NOT_FOUND,
