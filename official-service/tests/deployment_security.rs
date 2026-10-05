@@ -6,9 +6,9 @@ use serde_json::{Value, json};
 use sqlx_core::query::query;
 
 #[tokio::test]
-async fn requesting_another_code_does_not_replace_a_pending_code_even_after_the_cooldown() {
+async fn recipient_can_use_the_emailed_code_when_someone_else_requested_it_first() {
     let app = Fixture::new().await;
-    let challenge: Value = app
+    let attacker: Value = app
         .post(
             "/api/account/email-code",
             json!({ "email": "victim@example.test" }),
@@ -18,26 +18,37 @@ async fn requesting_another_code_does_not_replace_a_pending_code_even_after_the_
         .await
         .unwrap();
     let code = app.mail.0.lock().unwrap()[0].1.clone();
-    // Advance only the minute cooldown, not the lifetime of the pending proof.
-    query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second'")
-        .execute(&app.pool)
-        .await
-        .unwrap();
+    // The recipient requests their own challenge immediately, during the cooldown.
     let response = app
         .post(
             "/api/account/email-code",
             json!({ "email": " VICTIM@EXAMPLE.TEST " }),
         )
         .await;
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let recipient: Value = response.json().await.unwrap();
+    assert_ne!(recipient["challenge"], attacker["challenge"]);
+    assert!(recipient.get("code").is_none());
     assert_eq!(app.mail.0.lock().unwrap().len(), 1);
     let verified = app
         .post(
             "/api/account/verify",
-            json!({ "challenge": challenge["challenge"], "code": code }),
+            json!({ "challenge": recipient["challenge"], "code": code }),
         )
         .await;
     assert_eq!(verified.status(), StatusCode::OK);
+    let session: Value = verified.json().await.unwrap();
+    assert_eq!(session["account"]["email"], "victim@example.test");
+    // Consuming the code also invalidates every other challenge for that code.
+    assert_eq!(
+        app.post(
+            "/api/account/verify",
+            json!({ "challenge": attacker["challenge"], "code": code }),
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
     app.close().await;
 }
 

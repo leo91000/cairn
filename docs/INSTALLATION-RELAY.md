@@ -51,6 +51,13 @@ volume, remove that directory, then run `leo claim` with the official origin.
 The new claim creates a new installation ID with the same existing local data.
 Detachment below remains the option for recovering the same installation ID.
 
+If a machine credential is stolen, its holder can win the race to rotate it and
+prevent `leo rotate-token` from authenticating. Rotation alone is therefore not
+a recovery guarantee after theft. Use **Revoke and forget installation** from
+the owner's official session to revoke that record independently of the machine
+credential, then reclaim the trusted machine as above. Investigate the compromise
+and renew any secrets that may have passed through the stolen tunnel.
+
 ## Fallback claim and detachment
 
 Run `leo claim` on the installation with its usual `DATA_DIR` and
@@ -143,9 +150,13 @@ responds, even when the browser has abandoned its request. A timeout cancels the
 installation request and releases its slot through the response. Oversized
 responses return 413, handler/body failures return 502, and saturation returns
 503 for that request alone, preserving the tunnel and other requests. Contents
-are held only in bounded memory, never in Postgres. This ticket uses one relay
-process; a deployment must route the installation's API requests and WebSocket
-to that process. Distributed connection routing is not implemented here.
+are held only in bounded memory, never in Postgres. Only one official relay
+process is supported: route all account/access mutations, installation API
+requests and relay WebSockets to it. Revocation notifications for logout,
+detachment, member removal, rotation and forget reach only that process's
+in-memory registry. No inter-process notification or distributed connection
+routing is implemented; sticky routing per installation is insufficient for
+immediate session revocation across installations.
 
 Version 2 adds SSE response headers, binary chunks, completion, credit and
 cancellation frames using the same request IDs. Hello offers `[2, 1]`; Welcome

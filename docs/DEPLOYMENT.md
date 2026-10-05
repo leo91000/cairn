@@ -25,7 +25,10 @@ with its own Postgres database, email delivery, HTTPS origin and web bundle
 together before running the new `leo claim`: earlier official binaries do not
 provide the device-review confirmation step. Sign in there. The installation
 and official service must use compatible relay protocols. Keep one relay process,
-and route both installation API requests and relay WebSockets to it.
+and route account/access mutations, installation API requests and relay
+WebSockets to it. Revocation notifications are process-local; multiple official
+replicas are unsupported even with sticky installation routing. See
+[official process limits](OFFICIAL-SERVICE.md#configuration).
 
 For an existing installation, preserve all volumes, add `LEO_OFFICIAL_ORIGIN`
 to the manager environment, upgrade the image, then run:
@@ -90,7 +93,9 @@ credentials and recovery proofs. Stop the manager, back up the entire private
 `installation-relay` directory outside the deployment volumes, remove that
 directory, and run `leo claim` with `LEO_OFFICIAL_ORIGIN`. This creates a new
 official installation ID while preserving existing data volumes.
-Retain backups until access has been verified.
+Retain backups until access has been verified. Use this **Revoke and forget**
+path after machine-token theft too: the thief may rotate first, making the old
+local token unusable for `leo rotate-token`.
 
 To renew a credential while retaining the installation ID and its sharing,
 run `leo rotate-token` with the deployment's usual `DATA_DIR`, then restart the

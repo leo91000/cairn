@@ -53,7 +53,17 @@ This pre-public-deployment renumbering changes versions 1–3 to 202610030001–
 An old development database must be backed up and its three ledger versions
 updated to those timestamps before startup (SQL contents/checksums are unchanged),
 or replaced with an empty disposable development database. Do not run the old
-binary against the updated ledger. Multiple processes share the same database and rate limits.
+binary against the updated ledger. Rate limits are shared through Postgres.
+
+Only **one official relay process** is supported for deployment. Route all browser
+account/access mutations, installation API requests and relay WebSockets to that
+process. Logout, detachment, member removal, token rotation and **Revoke and forget**
+notify only its in-memory relay registry; there is no inter-process revocation
+notification. Sticky routing per installation alone does not provide immediate
+session revocation across installations. Persisted checks eventually detect
+machine revocation in another process, but do not make that deployment supported.
+Do not add official replicas until shared connection routing and revocation
+notifications are implemented.
 Terminate TLS at the public origin with a reverse proxy. The service checks the
 configured origin on every account mutation. IP limits use the TCP peer unless
 it matches `LEO_OFFICIAL_TRUSTED_PROXIES`. In that case they use the rightmost

@@ -4,7 +4,7 @@ import { createServer } from 'node:http'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
 
-test('email sign-in opens the empty installation screen, persists and signs out', async ({ page, context }) => {
+test('email sign-in works after a third-party code request, persists and signs out', async ({ page, context, request }) => {
   const messages: Array<{ to: string[], text: string }> = []
   const mail = createServer(async (request, response) => {
     let body = ''
@@ -50,8 +50,17 @@ test('email sign-in opens the empty installation screen, persists and signs out'
         automaticPresenceSimulation: true,
       },
     })
+    const email = `browser-${Date.now()}@example.test`
+    // A third party knows the address and gets a challenge, but cannot read its inbox.
+    const unsolicited = await request.post(`${url}/api/account/email-code`, {
+      headers: { origin: url },
+      data: { email },
+    })
+    expect(unsolicited.status()).toBe(202)
+    await expect.poll(() => messages.length).toBe(1)
+
     await page.goto(url)
-    await page.getByLabel('Email address').fill(`browser-${Date.now()}@example.test`)
+    await page.getByLabel('Email address').fill(email)
     await page.getByRole('button', { name: 'Send code', exact: true }).click()
     await expect(page.getByLabel('Email code')).toBeVisible()
     await expect.poll(() => messages.length).toBe(1)
