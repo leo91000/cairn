@@ -10,7 +10,17 @@ async fn seeded_artifact(
     media_type: &str,
 ) -> (String, String) {
     let installation = &relay.installation;
-    let task = installation.task(json!({ "name": "Report", "prompt": "Make a report", "agentId": leo_agent_manager::config::MAIN_AGENT_ID }), None).await.unwrap();
+    let task = installation
+        .task(
+            json!({
+                "name": "Report",
+                "prompt": "Make a report",
+                "agentId": leo_agent_manager::config::MAIN_AGENT_ID,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
     let run = installation
         .enqueue(task["id"].as_str().unwrap(), "manual", None)
         .await

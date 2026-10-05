@@ -80,7 +80,11 @@ pub async fn handle(service: &Arc<Service>, request: &mut Request) -> Result<Opt
             }
             ("POST", ["oauth", "preview"]) => auth(service).authorization(&input.body).await?,
             ("POST", ["oauth", "consent"]) => {
-                json!({ "redirect": auth(service).consent(input.body["parameters"].clone(), input.boolean("approved")?).await? })
+                let redirect = auth(service)
+                    .consent(input.body["parameters"].clone(), input.boolean("approved")?)
+                    .await?;
+
+                json!({ "redirect": redirect })
             }
             _ => return Err(Error::not_found("Not found")),
         };

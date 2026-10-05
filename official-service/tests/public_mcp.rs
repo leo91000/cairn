@@ -16,7 +16,10 @@ async fn personal_mcp_token_is_scoped_to_one_installation_and_revocable() {
         .header("cookie", &relay.cookie)
         .header("origin", &app.url)
         .header("x-csrf-token", relay.session["csrf"].as_str().unwrap())
-        .json(&json!({ "label": "Read client", "scopes": ["read"] }))
+        .json(&json!({
+            "label": "Read client",
+            "scopes": ["read"],
+        }))
         .send()
         .await
         .unwrap();
@@ -24,9 +27,18 @@ async fn personal_mcp_token_is_scoped_to_one_installation_and_revocable() {
     let created: Value = response.json().await.unwrap();
     let token = created["token"].as_str().unwrap();
     let call = |name: &str, args: Value| {
-        app.client.post(format!("{}/mcp", app.url))
-        .bearer_auth(token)
-        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": args } }))
+        app.client
+            .post(format!("{}/mcp", app.url))
+            .bearer_auth(token)
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": name,
+                    "arguments": args,
+                },
+            }))
     };
     let response = call("list_agents", json!({})).send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -35,13 +47,19 @@ async fn personal_mcp_token_is_scoped_to_one_installation_and_revocable() {
         result["result"]["structuredContent"]["result"].is_array(),
         "{result}"
     );
-    let denied: Value = call("save_project", json!({ "name": "Denied", "path": "/tmp" }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let denied: Value = call(
+        "save_project",
+        json!({
+            "name": "Denied",
+            "path": "/tmp",
+        }),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
     assert_eq!(denied["result"]["isError"], true);
     let response = app
         .client
@@ -94,9 +112,17 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
         .await
         .unwrap();
     assert_eq!(metadata["resource"], format!("{}/mcp", app.url));
-    let response = app.client.post(format!("{}/oauth/register", app.url))
-        .json(&json!({ "client_name": "OAuth client", "redirect_uris": ["http://localhost:9999/callback"], "token_endpoint_auth_method": "none" }))
-        .send().await.unwrap();
+    let response = app
+        .client
+        .post(format!("{}/oauth/register", app.url))
+        .json(&json!({
+            "client_name": "OAuth client",
+            "redirect_uris": ["http://localhost:9999/callback"],
+            "token_endpoint_auth_method": "none",
+        }))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
     let client: Value = response.json().await.unwrap();
     let verifier = "a".repeat(43);
@@ -176,7 +202,12 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
             .status(),
         StatusCode::BAD_REQUEST
     );
-    let refresh = json!({ "grant_type": "refresh_token", "client_id": client["client_id"], "refresh_token": tokens["refresh_token"], "scope": "read" });
+    let refresh = json!({
+        "grant_type": "refresh_token",
+        "client_id": client["client_id"],
+        "refresh_token": tokens["refresh_token"],
+        "scope": "read",
+    });
     let mut escalation = refresh.clone();
     escalation["scope"] = "read manage".into();
     assert_eq!(
@@ -195,7 +226,11 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
         app.client
             .post(format!("{}/mcp", app.url))
             .bearer_auth(token.as_str().unwrap())
-            .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/list",
+            }))
     };
     assert_eq!(
         call(&rotated["access_token"])
@@ -256,8 +291,21 @@ async fn an_external_mcp_connection_returns_through_the_official_installation_an
             .header("x-csrf-token", relay.session["csrf"].as_str().unwrap())
             .json(&body)
     };
-    let saved: Value = mutate("/mcps", json!({ "name": "External", "url": format!("{origin}/mcp"), "auth": "oauth", "allowPrivateNetwork": true }))
-        .send().await.unwrap().json().await.unwrap();
+    let saved: Value = mutate(
+        "/mcps",
+        json!({
+            "name": "External",
+            "url": format!("{origin}/mcp"),
+            "auth": "oauth",
+            "allowPrivateNetwork": true,
+        }),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
     let installation = relay.session["installations"][0]["id"].as_str().unwrap();
     assert_eq!(
         saved["callbackUrl"],
@@ -397,7 +445,11 @@ async fn detaching_and_reclaiming_an_installation_permanently_revokes_its_mcp_gr
         .client
         .post(format!("{}/mcp", relay.app.url))
         .bearer_auth(minted["token"].as_str().unwrap())
-        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+        }))
         .send()
         .await
         .unwrap();
@@ -432,9 +484,15 @@ async fn dynamic_registration_has_no_permanent_global_client_ceiling() {
             )))
             .build()
             .unwrap();
-        let response = client.post(format!("{}/oauth/register", relay.app.url))
-            .json(&json!({ "client_name": "Public client", "redirect_uris": ["http://localhost:9999/callback"] }))
-            .send().await.unwrap();
+        let response = client
+            .post(format!("{}/oauth/register", relay.app.url))
+            .json(&json!({
+                "client_name": "Public client",
+                "redirect_uris": ["http://localhost:9999/callback"],
+            }))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(
             response.status(),
             StatusCode::CREATED,
@@ -713,7 +771,11 @@ async fn native_loopback_ports_vary_but_other_redirects_and_code_bindings_stay_e
             .client
             .post(format!("{}/mcp", relay.app.url))
             .bearer_auth(tokens["access_token"].as_str().unwrap())
-            .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/list",
+            }))
             .send()
             .await
             .unwrap();
@@ -779,7 +841,11 @@ async fn replaying_an_authorization_code_revokes_its_access_and_rotated_refresh_
             .client
             .post(format!("{}/mcp", relay.app.url))
             .bearer_auth(tokens["access_token"].as_str().unwrap())
-            .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/list",
+            }))
             .send()
             .await
             .unwrap();

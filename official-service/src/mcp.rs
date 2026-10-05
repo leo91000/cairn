@@ -128,7 +128,10 @@ pub(super) async fn personal(
 
     Ok((
         StatusCode::CREATED,
-        Json(json!({ "id": id, "token": token })),
+        Json(json!({
+            "id": id,
+            "token": token,
+        })),
     ))
 }
 
