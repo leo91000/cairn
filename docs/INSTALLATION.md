@@ -9,7 +9,7 @@ single-use. The downloaded script executes only when complete, requires HTTPS,
 and verifies the embedded SHA-256 of `host.py` before installing it. No local password, domain, certificate, incoming port or S3 account
 is needed. The installation connects out using the existing claim and relay.
 
-Install Docker Engine with its Compose plugin, Python 3 and curl first. Enable
+Use a host with systemd. Install Docker Engine with its Compose plugin, Python 3 and curl first. Enable
 hardware virtualization, `/dev/kvm`, `/dev/net/tun` and `/dev/fuse` (install
 `fuse3` and load the kernel modules). The script checks each requirement before
 downloading or starting services, including a working Docker daemon and 16 GiB

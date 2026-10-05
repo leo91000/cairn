@@ -98,6 +98,7 @@ def main(mode):
     for device in ('/dev/kvm', '/dev/net/tun', '/dev/fuse'):
         if not Path(device).exists():
             os.mknod(device, stat.S_IFCHR | 0o600, os.makedev(1, 3))
+    Path('/etc/systemd/system').mkdir(parents=True, exist_ok=True)
     binaries = Path('/fixture/bin')
     binaries.mkdir(exist_ok=True)
     docker = binaries / 'docker'
@@ -226,6 +227,9 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
             config = json.loads((ROOT / 'compose.json').read_text())
             assert not any('ports' in service for service in config['services'].values())
             assert not (ROOT / 'claim.env').exists()
+            assert (ROOT / 'node-host.py').read_bytes() == Path('deploy/nodes/host.py').read_bytes()
+            assert 'OnUnitActiveSec=5min' in Path('/etc/systemd/system/leo-installation-update.timer').read_text()
+            assert '--update' in Path('/etc/systemd/system/leo-installation-update.service').read_text()
             os.chown(ROOT / 'data/storage-s3.json', 0, 0)
             result = run_installer()
             assert result.returncode == 0, result.stderr

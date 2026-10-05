@@ -228,6 +228,12 @@ test('claims an installation and sends after relay restarts and official session
     await expect(page.getByRole('status', { name: 'Installation availability' })).toHaveText('Mise à jour nécessaire')
     await expect(page.getByRole('alert')).toContainText('Mise à jour nécessaire')
     await expect(page.getByRole('navigation', { name: 'Workspace navigation', exact: true })).toHaveCount(0)
+    for (const width of [1440, 390, 320]) {
+      await page.setViewportSize({ width, height: 900 })
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    }
+
+    await page.setViewportSize({ width: 1440, height: 900 })
 
     // Node's WebSocket supports request headers in its init object; DOM
     // constructor types only expose the browser's protocol argument.
