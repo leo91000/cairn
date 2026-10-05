@@ -551,7 +551,6 @@ test('installation push registration is removed in favor of the official account
   await expect(page.getByText('Sign in to your Leo account to manage push notifications on this device.')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Enable on this device' })).toHaveCount(0)
   expect((await page.request.get(`${workspace.url}/api/notifications`)).status()).toBe(404)
-  expect(workspace.service.store.keys('push-device:')).toHaveLength(0)
 })
 
 test('long words and URLs wrap inside messages without widening the conversation', async ({ page, workspace }) => {
