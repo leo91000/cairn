@@ -12,6 +12,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useAgentPortraits } from './agent-avatars'
 import {
   api,
+  ownerPage,
   refresh,
   session,
   signOut,
@@ -57,7 +58,7 @@ provide(workspaceActionsKey, {
 
 // The three places of « Signal »: the Fil (home and conversations), Missions and the Atelier.
 const atelierPaths = ['/atelier', '/agents', '/projects', '/skills', '/mcps', '/connections', '/nodes', '/settings', '/runs']
-const atelierSections = [
+const atelierSections = computed(() => [
   { to: '/agents', label: 'Agents' },
   { to: '/projects', label: 'Projects' },
   { to: '/skills', label: 'Skills' },
@@ -66,8 +67,8 @@ const atelierSections = [
   { to: '/runs', label: 'Runs' },
   { to: '/nodes', label: 'Nodes' },
   { to: '/settings', label: 'Settings' },
-]
-const atelierSection = computed(() => atelierSections.find(item => route.path === item.to))
+].filter(item => state.installationRole === 'owner' || !ownerPage(item.to)))
+const atelierSection = computed(() => atelierSections.value.find(item => route.path === item.to))
 const places: Array<{
   to: string
   label: string
@@ -93,6 +94,11 @@ const places: Array<{
     keys: 'G A',
   },
 ]
+watch(() => [state.installationRole, route.path], () => {
+  if (state.installationRole === 'member' && ownerPage(route.path))
+    void router.replace('/atelier')
+}, { immediate: true })
+
 const place = computed(() => route.path === '/' || route.path.startsWith('/chats') ? 0 : route.path.startsWith('/tasks') ? 1 : atelierPaths.some(path => route.path.startsWith(path)) ? 2 : -1)
 // Reading screens take the whole phone; the dock returns on the three places.
 const reading = computed(() => route.path.startsWith('/chats') || /^\/runs\/./.test(route.path) || route.path === '/authorize')
@@ -386,7 +392,7 @@ async function login() {
         </RouterLink>
       </nav>
       <!-- Chats stays mounted between conversations so switching swaps content in place. -->
-      <RouterView :key="route.path.startsWith('/chats/') ? '/chats' : route.path" />
+      <RouterView v-if="state.installationRole === 'owner' || !ownerPage(route.path)" :key="route.path.startsWith('/chats/') ? '/chats' : route.path" />
     </main>
     <nav v-if="!reading" class="dock fixed bottom-[max(14px,env(safe-area-inset-bottom))] left-1/2 z-30 hidden -translate-x-1/2 items-center gap-1 rounded-full border border-line bg-surface/90 p-1.5 shadow-lift backdrop-blur-md phone:flex" aria-label="Quick navigation">
       <span v-if="place >= 0" class="dock-pill absolute left-1.5 top-1.5 h-13 w-19 rounded-full bg-hover" :style="{ transform: `translateX(${place * 80}px)` }" />

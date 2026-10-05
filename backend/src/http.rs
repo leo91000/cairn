@@ -32,7 +32,13 @@ pub struct App {
     pub toolkit: Value,
 }
 
-type RateLimits = HashMap<(IpAddr, String), (i64, u32)>;
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum RateLimitSubject {
+    Peer(IpAddr),
+    Account(String),
+}
+
+type RateLimits = HashMap<(RateLimitSubject, String), (i64, u32)>;
 
 pub async fn router(service: Arc<Service>) -> Result<Router> {
     let maintenance = secret(&service.config.data_dir, "maintenance-token").await?;
@@ -117,6 +123,13 @@ async fn security(State(app): State<App>, mut request: Request, next: Next) -> R
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map_or(IpAddr::from([127, 0, 0, 1]), |peer| peer.0.ip());
+    let subject = request
+        .extensions()
+        .get::<InstallationIdentity>()
+        .map_or_else(
+            || RateLimitSubject::Peer(peer),
+            |identity| RateLimitSubject::Account(identity.oauth_binding().to_owned()),
+        );
     let head = request.method() == "HEAD";
     let outcome = (|| {
         check_security(
@@ -124,7 +137,7 @@ async fn security(State(app): State<App>, mut request: Request, next: Next) -> R
             request.headers(),
             request.method().as_str(),
             &path,
-            peer,
+            &subject,
         )?;
         authenticate_installation(&request)
     })();
@@ -197,7 +210,7 @@ fn is_node_traffic(path: &str) -> bool {
         || path.starts_with("/internal/node-workspace/")
 }
 
-/// Requests per minute shared by every path of a peer: `(bucket, limit)`.
+/// Requests per minute shared by every path of a Leo account or machine peer: `(bucket, limit)`.
 fn general_limit(path: &str) -> (&'static str, u32) {
     if is_node_traffic(path) {
         ("nodes", 100_000)
@@ -220,7 +233,7 @@ fn too_many_requests() -> Error {
     Error::too_many_requests("Too many requests. Try again later.")
 }
 
-fn rate_limit(app: &App, peer: IpAddr, path: &str) -> Result<()> {
+fn rate_limit(app: &App, subject: &RateLimitSubject, path: &str) -> Result<()> {
     let mut limits = app.limits.lock().unwrap();
     // Expiration also bounds memory used by unauthenticated clients.
     if limits.len() > 10000 {
@@ -234,7 +247,7 @@ fn rate_limit(app: &App, peer: IpAddr, path: &str) -> Result<()> {
         .chain(endpoint_limit(path).map(|(max, window)| (path, max, window)));
     for (key, max, window) in buckets {
         let entry = limits
-            .entry((peer, key.to_owned()))
+            .entry((subject.clone(), key.to_owned()))
             .or_insert((now() + window, 0));
         if entry.0 <= now() {
             *entry = (now() + window, 0);
@@ -257,7 +270,7 @@ fn check_security(
     headers: &HeaderMap,
     method: &str,
     path: &str,
-    peer: IpAddr,
+    subject: &RateLimitSubject,
 ) -> Result<()> {
     let origin = url::Url::parse(&app.service.config.public_url).unwrap();
     let host = header(headers, "host");
@@ -283,7 +296,7 @@ fn check_security(
     {
         return Err(Error::forbidden("Unexpected origin."));
     }
-    rate_limit(app, peer, path)?;
+    rate_limit(app, subject, path)?;
     Ok(())
 }
 

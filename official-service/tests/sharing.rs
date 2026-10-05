@@ -497,3 +497,177 @@ async fn only_the_recipient_can_accept_and_only_the_owner_can_cancel_an_invitati
     assert_eq!(pending, json!([]));
     relay.close().await;
 }
+
+#[tokio::test]
+async fn relay_rate_limits_are_per_leo_account_and_headers_cannot_choose_a_bucket() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let (cookie, session) = member(&relay, "member@example.test").await;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let path = format!("/api/installations/{id}/api/chats");
+    for _ in 0..300 {
+        assert_eq!(
+            request(&relay, &cookie, &session, Method::GET, &path)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+    assert_eq!(
+        request(&relay, &cookie, &session, Method::GET, &path)
+            .header(
+                "x-leo-account-id",
+                relay.session["account"]["id"].as_str().unwrap()
+            )
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn member_streams_leave_capacity_for_owner_messages() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let (cookie, session) = member(&relay, "member@example.test").await;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let path = format!("/api/installations/{id}/api/chats/stream");
+    let mut streams = Vec::new();
+    for _ in 0..leo_relay_protocol::MAX_IN_FLIGHT {
+        let response = request(&relay, &cookie, &session, Method::GET, &path)
+            .send()
+            .await
+            .unwrap();
+        if response.status() == StatusCode::SERVICE_UNAVAILABLE {
+            break;
+        }
+        assert_eq!(response.status(), StatusCode::OK);
+        streams.push(response);
+    }
+    assert!(!streams.is_empty());
+    assert_eq!(
+        request(
+            &relay,
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            &format!("/api/installations/{id}/api/chats")
+        )
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::OK
+    );
+    drop(streams);
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn installation_renames_are_rate_limited_per_account() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let path = format!("/api/installations/{id}");
+    for _ in 0..10 {
+        assert_eq!(
+            request(&relay, &relay.cookie, &relay.session, Method::PATCH, &path)
+                .json(&json!({ "name": "Renamed installation" }))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+    assert_eq!(
+        request(&relay, &relay.cookie, &relay.session, Method::PATCH, &path)
+            .json(&json!({ "name": "Too many renames" }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn detachment_forgets_members_and_pending_invitations() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let (cookie, session) = member(&relay, "member@example.test").await;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let path = format!("/api/installations/{id}");
+    assert_eq!(
+        request(
+            &relay,
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            &format!("{path}/sharing/invitations")
+        )
+        .json(&json!({ "email": "later@example.test" }))
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        request(
+            &relay,
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            &format!("{path}/detach")
+        )
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    let response = request(&relay, &cookie, &session, Method::GET, "/api/installations")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.json::<Value>().await.unwrap(), json!([]));
+    assert_eq!(
+        request(
+            &relay,
+            &cookie,
+            &session,
+            Method::GET,
+            &format!("{path}/api/chats")
+        )
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    let (later_cookie, later_session) = login(&relay.app, "later@example.test").await;
+    let pending: Value = request(
+        &relay,
+        &later_cookie,
+        &later_session,
+        Method::GET,
+        "/api/account/invitations",
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(pending, json!([]));
+    relay.close().await;
+}

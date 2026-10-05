@@ -182,3 +182,17 @@ Reading views use the scoped SSE connection for updates and cursor-based replay.
 One initial finite snapshot keeps a v1 installation readable during a deployment;
 there is no recurring conversation snapshot polling. The existing live client
 retains its reconnect backoff and history cache.
+
+## Shared-installation limits
+
+Installation HTTP rate limits use the trusted Leo account identity for relayed
+requests (300 requests per minute per account), while machine traffic retains
+its existing peer-based limits. Browser headers cannot select an identity or
+quota. Installation rename requests are limited separately at the official
+account level.
+
+At most 24 SSE requests share the tunnel's 32 in-flight slots. Eight slots remain
+available to ordinary API requests, so idle member streams cannot exhaust the
+capacity needed to send messages. At the stream limit the next stream receives
+503 and uses the existing client retry behavior; streams are not evicted.
+Cancelling or revoking a stream releases both its stream permit and tunnel slot.

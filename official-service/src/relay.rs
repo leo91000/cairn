@@ -24,11 +24,15 @@ use std::{
 };
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 
+// Keep ordinary API capacity available even when browsers hold idle SSE bodies.
+const RESERVED_API_SLOTS: usize = 8;
+
 struct Pending {
     reply: Option<oneshot::Sender<ApiResponse>>,
     stream: Option<mpsc::Sender<Result<Vec<u8>, std::io::Error>>>,
     // Browser cancellation does not release a slot for work still running remotely.
     _permit: OwnedSemaphorePermit,
+    _stream_permit: Option<OwnedSemaphorePermit>,
 }
 
 struct Command {
@@ -43,6 +47,7 @@ struct Tunnel {
     access: Mutex<Access>,
     access_changed: Notify,
     slots: Arc<Semaphore>,
+    stream_slots: Arc<Semaphore>,
     // Replacing a connection closes the old generation and its pending replies.
     stop: watch::Sender<bool>,
 }
@@ -188,6 +193,7 @@ async fn serve_socket(
         access: Mutex::new(Access::default()),
         access_changed: Notify::new(),
         slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
+        stream_slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT - RESERVED_API_SLOTS)),
         stop,
     });
     {
@@ -451,6 +457,23 @@ pub(super) async fn forward(
         .try_acquire_owned()
         .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "Installation busy"))?;
 
+    let stream_permit = if streaming {
+        Some(
+            tunnel
+                .stream_slots
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| {
+                    ApiError(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Installation stream capacity reached",
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+
     let headers = request
         .headers()
         .iter()
@@ -509,6 +532,7 @@ pub(super) async fn forward(
                 reply: Some(reply),
                 stream: streaming.then_some(chunks),
                 _permit: permit,
+                _stream_permit: stream_permit,
             },
         })
         .map_err(|_| {

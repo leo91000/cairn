@@ -103,6 +103,7 @@ pub(super) async fn rename(
     Json(input): Json<Rename>,
 ) -> Result<Json<Value>, ApiError> {
     let owner = account(&service, &headers, &Method::PATCH).await?;
+    consume_limit(&service.pool, &format!("installation-rename:{owner}"), 10).await?;
     let name = installation_name(&input.name)?;
     let updated: Option<(String, String)> = query_as(
         "UPDATE installations SET name = $1 WHERE id = $2 AND owner_id = $3 RETURNING id, name",

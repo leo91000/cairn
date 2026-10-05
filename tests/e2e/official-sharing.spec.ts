@@ -8,6 +8,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
+import { config as loadConfig } from '../legacy/server/config'
+import { Service as SeedService } from '../legacy/server/service'
+import { Store } from '../legacy/server/store'
 
 test('owner shares an installation and member works without management controls', async ({ page, browser }) => {
   test.setTimeout(120000)
@@ -26,9 +29,15 @@ test('owner shares an installation and member works without management controls'
   mail.listen(0, '127.0.0.1')
   await once(mail, 'listening')
   const url = 'http://localhost:4397'
+  let seed: SeedService | undefined
   const memberEmail = `member-${Date.now()}@example.test`
   const memberContext = await browser.newContext()
   const member = await memberContext.newPage()
+  const forbidden: string[] = []
+  member.on('response', (response) => {
+    if (response.status() === 403 && response.url().includes('/api/installations/'))
+      forbidden.push(response.url())
+  })
 
   function start(binary: string, env: NodeJS.ProcessEnv) {
     const child = spawn(binary, [], { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -67,6 +76,13 @@ test('owner shares an installation and member works without management controls'
     await page.getByRole('button', { name: 'Add an installation', exact: true }).click()
     const code = await page.getByLabel('Installation claim code').inputValue()
     await Promise.all([mkdir(join(root, 'data')), mkdir(join(root, 'home'))])
+    seed = new SeedService(new Store(join(root, 'data')), loadConfig({
+      dataDir: join(root, 'data'),
+      home: join(root, 'home'),
+      workspaceRoots: [root],
+      workerEnabled: false,
+      logger: false,
+    }))
     const installation = start('target/debug/leo', {
       DATA_DIR: join(root, 'data'),
       AGENT_HOME: join(root, 'home'),
@@ -110,6 +126,10 @@ test('owner shares an installation and member works without management controls'
     await member.getByRole('link', { name: 'Agents', exact: true }).click()
     await expect(member.getByRole('button', { name: /New agent|Edit Main agent|Delete/ })).toHaveCount(0)
     await expect(member.getByRole('link', { name: 'Start chat', exact: true }).first()).toBeVisible()
+    await member.getByRole('link', { name: 'Projects', exact: true }).first().click()
+    await expect(member.getByRole('button', { name: /New project|Add a project/ })).toHaveCount(0)
+    await member.getByRole('link', { name: 'Skills', exact: true }).first().click()
+    await expect(member.getByRole('button', { name: /New skill|Create your first skill/ })).toHaveCount(0)
     await member.goto(`${installationUrl}settings`)
     await expect(member.getByRole('heading', { name: 'Settings', exact: true })).toHaveCount(0)
     await member.getByRole('link', { name: 'New conversation', exact: true }).first().click()
@@ -118,12 +138,32 @@ test('owner shares an installation and member works without management controls'
     await expect(member.getByRole('heading', { name: 'Shared conversation', exact: true })).toBeVisible()
     await member.reload()
     await expect(member.getByRole('heading', { name: 'Shared conversation', exact: true })).toBeVisible()
+    expect(forbidden).toEqual([])
     await page.reload()
     await page.getByText('Installation options', { exact: true }).click()
     await page.getByRole('button', { name: 'Share installation', exact: true }).click()
     await page.getByRole('button', { name: `Remove ${memberEmail}`, exact: true }).click()
     await member.reload()
     await expect(member.getByRole('alert')).toContainText('no longer accessible')
+    await page.getByLabel('Invite by email', { exact: true }).fill(memberEmail)
+    await page.getByRole('button', { name: 'Send invitation', exact: true }).click()
+    await expect(page.getByRole('region', { name: 'Installation sharing' }).getByText(memberEmail, { exact: true })).toBeVisible()
+    await member.goto(`${url}/?invitations=1`)
+    await member.getByRole('button', { name: 'Accept invitation', exact: true }).click()
+    await expect(member).toHaveURL(/\/installations\/[^/]+\/$/)
+    await member.getByText('Installation options', { exact: true }).click()
+    await member.getByRole('button', { name: 'Leave installation', exact: true }).click()
+    await member.getByRole('button', { name: 'Confirm leaving', exact: true }).click()
+    await expect(member.getByRole('heading', { name: 'No installations yet' })).toBeVisible()
+    await page.getByRole('button', { name: 'Close sharing', exact: true }).click()
+    await page.getByText('Installation options', { exact: true }).click()
+    await page.getByRole('button', { name: 'Share installation', exact: true }).click()
+    await expect(page.getByText('No members yet.', { exact: true })).toBeVisible()
+    const cancelledEmail = `cancelled-${Date.now()}@example.test`
+    await page.getByLabel('Invite by email', { exact: true }).fill(cancelledEmail)
+    await page.getByRole('button', { name: 'Send invitation', exact: true }).click()
+    await page.getByRole('button', { name: `Cancel invitation to ${cancelledEmail}`, exact: true }).click()
+    await expect(page.getByText('No pending invitations.', { exact: true })).toBeVisible()
   }
   finally {
     await memberContext.close()
@@ -134,6 +174,8 @@ test('owner shares an installation and member works without management controls'
       child.kill('SIGTERM')
       await exited
     }))
+    await seed?.accounts.close()
+    seed?.store.close()
     await new Promise<void>(resolve => mail.close(() => resolve()))
     await rm(root, { recursive: true, force: true })
   }
