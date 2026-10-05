@@ -271,12 +271,14 @@ pub(super) async fn rotate_token(
         "SELECT token_digest FROM installations WHERE id = $1 AND owner_id IS NOT NULL AND (token_digest = $2 OR token_digest = $3) FOR UPDATE",
     ).bind(&installation).bind(digest(previous)).bind(&replacement)
         .fetch_optional(&mut *transaction).await?;
+
     let Some((current,)) = current else {
         return Err(ApiError(
             StatusCode::UNAUTHORIZED,
             "Invalid installation identity",
         ));
     };
+
     let changed = current != replacement;
     if changed {
         query("UPDATE installations SET token_digest = $1, recovery_digest = NULL WHERE id = $2")
@@ -289,10 +291,13 @@ pub(super) async fn rotate_token(
             .execute(&mut *transaction)
             .await?;
     }
+
     transaction.commit().await?;
+
     if changed {
         service.relay.revoke_access(&installation, None);
     }
+
     Ok(StatusCode::NO_CONTENT)
 }
 

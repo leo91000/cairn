@@ -212,25 +212,28 @@ pub async fn rotate_token(directory: &Path) -> Result<()> {
             pending
         }
     };
+
     let already_saved = crate::auth::safe_equal(&current.token, &pending.identity.token);
-    if pending.identity.origin != current.origin
-        || pending.identity.installation_id != current.installation_id
-        || pending.identity.token.len() != 64
-        || !pending
+    let same_installation = pending.identity.origin == current.origin
+        && pending.identity.installation_id == current.installation_id;
+    let valid_replacement = pending.identity.token.len() == 64
+        && pending
             .identity
             .token
             .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-        || (!already_saved
-            && !crate::auth::safe_equal(
-                &pending.previous_digest,
-                &crate::auth::hex_digest(&current.token),
-            ))
-    {
+            .all(|byte| byte.is_ascii_hexdigit());
+    let matches_previous_generation = already_saved
+        || crate::auth::safe_equal(
+            &pending.previous_digest,
+            &crate::auth::hex_digest(&current.token),
+        );
+
+    if !same_installation || !valid_replacement || !matches_previous_generation {
         return Err(Error::conflict(
             "Pending rotation belongs to a different installation identity. Back up rotation.json before retrying.",
         ));
     }
+
     if !already_saved {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())

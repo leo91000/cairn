@@ -13,11 +13,13 @@ impl FromStr for TrustedProxies {
         if input.trim().is_empty() {
             return Ok(Self::default());
         }
+
         let entries = input.split(',').map(|entry| {
             let entry = entry.trim();
             entry.parse::<IpNet>().or_else(|_| entry.parse::<IpAddr>().map(IpNet::from))
                 .map_err(|_| "LEO_OFFICIAL_TRUSTED_PROXIES requires comma-separated IP addresses or CIDRs")
         }).collect::<Result<Vec<_>, _>>()?;
+
         Ok(Self(entries))
     }
 }
@@ -33,21 +35,25 @@ impl TrustedProxies {
         if !self.contains(peer) {
             return peer.to_canonical();
         }
+
         // Traverse only the trusted suffix. Untrusted left-hand text cannot
         // force fallback to the shared proxy quota or select a different client.
         for value in headers.get_all("x-forwarded-for").iter().rev() {
             let Ok(value) = value.to_str() else {
                 return peer.to_canonical();
             };
+
             for entry in value.rsplit(',') {
                 let Ok(address) = entry.trim().parse::<IpAddr>() else {
                     return peer.to_canonical();
                 };
+
                 if !self.contains(address) {
                     return address.to_canonical();
                 }
             }
         }
+
         peer.to_canonical()
     }
 }
@@ -70,5 +76,6 @@ pub(super) async fn client_peer(
                 peer.port(),
             )));
     }
+
     next.run(request).await
 }
