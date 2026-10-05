@@ -164,8 +164,8 @@ give memory back while keeping 1 GiB available; below 75%, they get it back. Dis
 retained disks keep their logical size. See [the shared-budget decision](adr/0012-shared-node-budgets.md).
 Guest RAM is a shared memfd, so the host can only reclaim pages the guest gives
 back. Without host swap, a peak above `memory.high` stalls every VM and can still
-end in an OOM kill at `memory.max`. A compressed swap on the host (for example
-zram sized to a quarter of RAM) lets such peaks slow down instead.
+end in an OOM kill at `memory.max`. A compressed host swap lets such peaks slow
+down instead; see [compressed host swap](DEPLOYMENT.md#compressed-host-swap).
 The Compose controller initially allows 8 CPUs, 20 GiB RAM and 256 host processes.
 Guest process counts are not host process counts. Additional slots do not raise
 resource budgets; simultaneous peaks can still exhaust shared RAM. VM networks

@@ -1,4 +1,31 @@
 #!/usr/bin/env bash
+# >>> compressed swap
+# Guest RAM shares one cgroup limit. Without swap, a peak above it stalls every
+# VM instead of slowing them down; zram compresses those pages in memory.
+ensure_compressed_swap() {
+  local swaps=${LEO_PROC_SWAPS:-/proc/swaps} etc=${LEO_ETC_DIR:-/etc}
+  if grep -q '^/dev/zram' "$swaps" 2>/dev/null; then
+    return 0
+  fi
+  if ! command -v apt-get >/dev/null; then
+    echo 'Leo installer: enable zram compressed swap so memory peaks slow VMs down instead of stalling them.' >&2
+    return 0
+  fi
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zram-tools >/dev/null; then
+    apt-get update -qq >/dev/null || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zram-tools >/dev/null || {
+      echo 'Leo installer: could not install zram-tools; continuing without compressed swap.' >&2
+      return 0
+    }
+  fi
+  printf 'ALGO=zstd\nPERCENT=25\nPRIORITY=100\n' > "$etc/default/zramswap"
+  echo 'vm.swappiness=100' > "$etc/sysctl.d/99-leo-zram.conf"
+  sysctl -q -p "$etc/sysctl.d/99-leo-zram.conf" || true
+  systemctl enable zramswap >/dev/null 2>&1 || true
+  systemctl restart zramswap || echo 'Leo installer: zramswap did not start; continuing without compressed swap.' >&2
+}
+# <<< compressed swap
+
 main() {
   set -euo pipefail
   LEO_OFFICIAL_ORIGIN=__LEO_OFFICIAL_ORIGIN__
@@ -19,6 +46,7 @@ main() {
 
   docker info >/dev/null 2>&1 || fail 'Docker is unavailable. Start the Docker daemon.'
   docker compose version >/dev/null 2>&1 || fail 'Install the Docker Compose plugin.'
+  ensure_compressed_swap
 
   LEO_INSTALLATION_ROOT=${LEO_INSTALLATION_ROOT:-/var/lib/leo-installation}
   LEO_DISK_PATH=$LEO_INSTALLATION_ROOT

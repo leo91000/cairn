@@ -86,3 +86,10 @@ la précédente tenait encore le disque : « Conversation disk is in use » (con
 code 1) a fait échouer les deux exécutions. Une tentative attend désormais
 jusqu’à 60 s la libération du verrou du disque de sa conversation avant
 d’échouer. Les autres conflits de propriété restent immédiats.
+
+Le 2026-10-05, la node de production restait au seuil `memory.high` du cgroup
+partagé (1,78 million d’événements `high`, aucun OOM) avec 1 Gio de swap disque
+plein : les VM gelaient de 70 à 280 s puis étaient interrompues. Un swap zram
+(zstd, un quart de la RAM) y a été activé et ramené l’usage sous le seuil. Les
+installateurs de node et d’installation l’activent désormais sur les hôtes apt ;
+les autres hôtes suivent la procédure de DEPLOYMENT.md.

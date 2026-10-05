@@ -202,6 +202,26 @@ including Main, use the VM runner. It requires a Linux x86-64 host with KVM and
 TUN; it does not mount the host Docker socket. See [agent scope](AGENT-ACCESS.md)
 and [microVM deployment](MICROVMS.md) for privileges, storage and network rules.
 
+## Compressed host swap
+
+VMs share one RAM limit. Without swap, a peak above it stalls every VM for minutes
+instead of slowing them down, and their attempts are then interrupted. The node and
+installation installers enable zram on apt-based hosts (zstd, a quarter of RAM,
+priority 100, `vm.swappiness=100`) and leave an existing zram swap unchanged. On
+hosts deployed by hand, such as Docker on a VPS or Coolify, enable it once as root:
+
+```sh
+apt-get install -y zram-tools
+printf 'ALGO=zstd\nPERCENT=25\nPRIORITY=100\n' > /etc/default/zramswap
+echo 'vm.swappiness=100' > /etc/sysctl.d/99-leo-zram.conf
+sysctl -p /etc/sysctl.d/99-leo-zram.conf
+systemctl enable zramswap && systemctl restart zramswap
+swapon --show
+```
+
+`swapon --show` must list `/dev/zram0`. The runner container must allow swap: keep
+the default `memswap_limit` rather than setting it equal to `mem_limit`.
+
 ## Coolify
 
 Create a Compose service from `compose.yaml`, using the published GHCR image for
