@@ -11,7 +11,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use leo_relay_protocol::{
     ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_STREAM_CHUNK,
-    REQUEST_TIMEOUT, Role,
+    REQUEST_TIMEOUT,
 };
 use sqlx_core::query_as::query_as;
 use std::{
@@ -24,11 +24,17 @@ use std::{
 };
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 
+// Keep ordinary API capacity available even when browsers hold idle SSE bodies.
+const RESERVED_API_SLOTS: usize = 8;
+
 struct Pending {
+    account: String,
+    access_generation: u64,
     reply: Option<oneshot::Sender<ApiResponse>>,
     stream: Option<mpsc::Sender<Result<Vec<u8>, std::io::Error>>>,
     // Browser cancellation does not release a slot for work still running remotely.
     _permit: OwnedSemaphorePermit,
+    _stream_permit: Option<OwnedSemaphorePermit>,
 }
 
 struct Command {
@@ -43,8 +49,23 @@ struct Tunnel {
     access: Mutex<Access>,
     access_changed: Notify,
     slots: Arc<Semaphore>,
+    stream_slots: Arc<Semaphore>,
     // Replacing a connection closes the old generation and its pending replies.
     stop: watch::Sender<bool>,
+}
+
+impl Tunnel {
+    fn access_revoked(&self, account: &str, generation: u64) -> bool {
+        *self
+            .access
+            .lock()
+            .unwrap()
+            .generations
+            .get(account)
+            .unwrap_or(&0)
+            != generation
+            || *self.stop.borrow()
+    }
 }
 
 #[derive(Clone, Default)]
@@ -188,6 +209,7 @@ async fn serve_socket(
         access: Mutex::new(Access::default()),
         access_changed: Notify::new(),
         slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
+        stream_slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT - RESERVED_API_SLOTS)),
         stop,
     });
     {
@@ -265,15 +287,25 @@ async fn serve_socket(
                 }
             }
             command = receiver.recv() => {
-                let Some(command) = command else {
+                let Some(mut command) = command else {
                     break;
                 };
-                let access_revoked = command.pending.stream.is_some()
+                let access_revoked = tunnel.access_revoked(&command.pending.account, command.pending.access_generation)
+                    || command.pending.stream.is_some()
                     && !tunnel.access.lock().unwrap().streams.get(&command.request.id)
                         .is_some_and(|stream| !*stream.revoked.borrow());
-                if access_revoked
-                    || command.pending.reply.as_ref().is_some_and(oneshot::Sender::is_closed)
-                {
+                if access_revoked {
+                    if let Some(reply) = command.pending.reply.take() {
+                        let _ = reply.send(ApiResponse {
+                            id: command.request.id,
+                            status: 404,
+                            headers: Vec::new(),
+                            body: br#"{"error":"Installation access revoked"}"#.to_vec(),
+                        });
+                    }
+                    continue;
+                }
+                if command.pending.reply.as_ref().is_some_and(oneshot::Sender::is_closed) {
                     continue;
                 }
 
@@ -409,15 +441,7 @@ pub(super) async fn forward(
             .get(&account)
             .unwrap_or(&0)
     });
-    let owner: Option<(String,)> =
-        query_as("SELECT owner_id FROM installations WHERE id = $1 AND owner_id = $2")
-            .bind(&installation)
-            .bind(&account)
-            .fetch_optional(&service.pool)
-            .await?;
-    if owner.is_none() {
-        return Err(ApiError(StatusCode::NOT_FOUND, "Installation not found"));
-    }
+    let role = installations::role(&service, &installation, &account).await?;
 
     // Preserve the original encoding and query; Path decoding is only for routing.
     let prefix = format!("/api/installations/{installation}");
@@ -459,6 +483,23 @@ pub(super) async fn forward(
         .try_acquire_owned()
         .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "Installation busy"))?;
 
+    let stream_permit = if streaming {
+        Some(
+            tunnel
+                .stream_slots
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| {
+                    ApiError(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Installation stream capacity reached",
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+
     let headers = request
         .headers()
         .iter()
@@ -473,7 +514,7 @@ pub(super) async fn forward(
     let api_request = ApiRequest {
         id: uuid::Uuid::new_v4().to_string(),
         account_id: account.clone(),
-        role: Role::Owner,
+        role,
         method: request.method().to_string(),
         path: target.to_owned(),
         headers,
@@ -482,6 +523,13 @@ pub(super) async fn forward(
             .map_err(|_| ApiError(StatusCode::PAYLOAD_TOO_LARGE, "API request is too large"))?
             .to_vec(),
     };
+    if tunnel.access_revoked(&account, access_generation) {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "Installation access revoked",
+        ));
+    }
+
     let (reply, response) = oneshot::channel();
     let id = api_request.id.clone();
     let (chunks, receiver) = mpsc::channel(1);
@@ -509,14 +557,18 @@ pub(super) async fn forward(
     } else {
         None
     };
+    let pending_account = api_request.account_id.clone();
     tunnel
         .commands
         .try_send(Command {
             request: api_request,
             pending: Pending {
+                account: pending_account,
+                access_generation,
                 reply: Some(reply),
                 stream: streaming.then_some(chunks),
                 _permit: permit,
+                _stream_permit: stream_permit,
             },
         })
         .map_err(|_| {

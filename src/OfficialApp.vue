@@ -8,6 +8,8 @@ import {
 } from 'vue'
 import { logoutAccount, redirect, state } from './api'
 import App from './App.vue'
+import InstallationSharing from './components/InstallationSharing.vue'
+import PendingInvitations from './components/PendingInvitations.vue'
 import ThemeControl from './components/ThemeControl.vue'
 import UiAlert from './components/UiAlert.vue'
 import UiButton from './components/UiButton.vue'
@@ -19,7 +21,7 @@ interface AccountSession {
   installations: Array<{
     id: string
     name: string
-    role: 'owner'
+    role: 'owner' | 'member'
     online: boolean
   }>
 }
@@ -53,6 +55,10 @@ const installationCommand = computed(() => {
   return `curl -fsSL ${quote(`${window.location.origin}/install.sh`)} | sudo bash -s -- --claim-code ${quote(claimCode.value)}`
 })
 const installationInstructions = 'This code expires in 10 minutes. Run this command on your Linux x86-64 machine. No domain, certificate, incoming port or S3 setup is needed.'
+const showSharing = ref(false)
+const showInvitations = ref(false)
+const confirmLeave = ref(false)
+const invitationsPage = new URLSearchParams(window.location.search).has('invitations')
 const editingName = ref(false)
 const installationName = ref('')
 const deviceCode = ref('')
@@ -64,7 +70,12 @@ const deviceReview = ref<{
 } | null>(null)
 const claimStatus = ref('')
 const confirmDetach = ref(false)
-const installation = ref<{ id: string, name: string, online: boolean } | null>(null)
+const installation = ref<{
+  id: string
+  name: string
+  online: boolean
+  role: 'owner' | 'member'
+} | null>(null)
 const installationMenu = ref<HTMLDetailsElement>()
 const officialReturnKey = 'leo-installation-return'
 const claimPage = window.location.pathname === '/claim'
@@ -85,6 +96,8 @@ watch(session, (value) => {
     return
   }
 
+  state.installationRole = installation.value?.role || 'owner'
+
   if (installation.value) {
     try {
       localStorage.setItem(`leo-current-installation:${value.account?.id}`, installation.value.id)
@@ -92,7 +105,7 @@ watch(session, (value) => {
     catch {}
   }
 
-  if (!requested && value.installations.length && !claimPage) {
+  if (!requested && value.installations.length && !claimPage && !invitationsPage) {
     let remembered = ''
     try {
       remembered = localStorage.getItem(`leo-current-installation:${value.account?.id}`) || ''
@@ -277,6 +290,31 @@ async function installationRequest(route: string, body?: unknown) {
   if (!response.ok)
     throw new Error(value.error || 'Unable to update the installation.')
   return value
+}
+
+async function leaveInstallation() {
+  if (!installation.value)
+    return
+  busy.value = true
+  error.value = ''
+  try {
+    const response = await fetch(`/api/installations/${encodeURIComponent(installation.value.id)}/sharing/membership`, {
+      method: 'DELETE',
+      headers: { 'X-CSRF-Token': state.csrf },
+    })
+    if (!response.ok) {
+      const value = await response.json()
+      throw new Error(value.error || 'Unable to leave this installation.')
+    }
+
+    redirect('/')
+  }
+  catch (cause) {
+    error.value = cause instanceof Error ? cause.message : 'Unable to leave this installation.'
+  }
+  finally {
+    busy.value = false
+  }
 }
 
 async function reviewDevice() {
@@ -549,14 +587,43 @@ onMounted(async () => {
           Installation options
         </summary>
         <div class="absolute right-0 z-50 mt-2 grid w-52 gap-2 rounded-xl border border-line bg-surface p-2 shadow-lg" @click="closeInstallationMenu">
-          <UiButton size="small" :disabled="busy" @click="editingName = !editingName; installationName = installation.name">
+          <UiButton
+            v-if="installation.role === 'owner'"
+            size="small"
+            :disabled="busy"
+            @click="editingName = !editingName; installationName = installation.name"
+          >
             Rename installation
           </UiButton>
           <UiButton size="small" :disabled="busy" @click="addInstallation">
             Add an installation
           </UiButton>
-          <UiButton size="small" :disabled="busy" @click="confirmDetach = true">
+          <UiButton
+            v-if="installation.role === 'owner'"
+            size="small"
+            :disabled="busy"
+            @click="confirmDetach = true"
+          >
             Detach installation
+          </UiButton>
+          <UiButton
+            v-if="installation.role === 'owner'"
+            size="small"
+            :disabled="busy"
+            @click="showSharing = !showSharing"
+          >
+            Share installation
+          </UiButton>
+          <UiButton
+            v-else
+            size="small"
+            :disabled="busy"
+            @click="confirmLeave = true"
+          >
+            Leave installation
+          </UiButton>
+          <UiButton size="small" :disabled="busy" @click="showInvitations = !showInvitations">
+            Invitations
           </UiButton>
           <UiButton size="small" :disabled="busy" @click="openMethods">
             Sign-in methods
@@ -567,6 +634,17 @@ onMounted(async () => {
         </div>
       </details>
     </header>
+    <InstallationSharing v-if="showSharing && installation.role === 'owner'" :installation-id="installation.id" @close="showSharing = false" />
+    <PendingInvitations v-if="showInvitations" class="px-4" @accepted="id => openInstallation({ id, name: '' })" />
+    <div v-if="confirmLeave" class="grid gap-3 border-b border-line px-4 py-3">
+      <p>Leave this shared installation? You will need a new invitation to return.</p>
+      <UiButton :disabled="busy" @click="leaveInstallation">
+        Confirm leaving
+      </UiButton>
+      <UiButton :disabled="busy" @click="confirmLeave = false">
+        Cancel leaving
+      </UiButton>
+    </div>
     <div v-if="confirmDetach" class="grid gap-3 border-b border-line px-4 py-3">
       <p>Detach this installation? Access through Leo will stop. Its data stays on the machine, which can be claimed again.</p>
       <UiButton :disabled="busy" @click="detachInstallation">
@@ -700,6 +778,7 @@ onMounted(async () => {
         <p class="text-muted mb-4">
           You’re signed in as {{ session.account?.email }}.
         </p>
+        <PendingInvitations @accepted="id => openInstallation({ id, name: '' })" />
         <div>
           <p v-if="!session.installations.length" class="text-muted mb-8">
             Your Leo account is ready. Choose Add an installation to get a command,

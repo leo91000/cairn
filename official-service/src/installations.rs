@@ -26,18 +26,18 @@ pub(super) async fn list<'e>(
     account: &str,
     relay: &super::relay::Relay,
 ) -> Result<Vec<Value>, ApiError> {
-    let rows: Vec<(String, String)> =
-        query_as("SELECT id, name FROM installations WHERE owner_id = $1 ORDER BY created_at, id")
+    let rows: Vec<(String, String, bool)> =
+        query_as("SELECT i.id, i.name, i.owner_id = $1 FROM installations i LEFT JOIN installation_members m ON m.installation_id = i.id AND m.account_id = $1 WHERE i.owner_id IS NOT NULL AND (i.owner_id = $1 OR m.account_id = $1) ORDER BY i.created_at, i.id")
             .bind(account)
             .fetch_all(executor)
             .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, name)| {
+        .map(|(id, name, owner)| {
             json!({
                 "id": id,
                 "name": name,
-                "role": "owner",
+                "role": if owner { "owner" } else { "member" },
                 "online": relay.online(&id),
             })
         })
@@ -103,6 +103,7 @@ pub(super) async fn rename(
     Json(input): Json<Rename>,
 ) -> Result<Json<Value>, ApiError> {
     let owner = account(&service, &headers, &Method::PATCH).await?;
+    consume_limit(&service.pool, &format!("installation-rename:{owner}"), 10).await?;
     let name = installation_name(&input.name)?;
     let updated: Option<(String, String)> = query_as(
         "UPDATE installations SET name = $1 WHERE id = $2 AND owner_id = $3 RETURNING id, name",
@@ -168,16 +169,19 @@ pub(super) async fn detach(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let owner = account(&service, &headers, &Method::POST).await?;
+    let mut transaction = service.pool.begin().await?;
     let detached =
         query("UPDATE installations SET owner_id = NULL WHERE id = $1 AND owner_id = $2")
             .bind(&installation)
             .bind(owner)
-            .execute(&service.pool)
+            .execute(&mut *transaction)
             .await?;
     if detached.rows_affected() == 0 {
         return Err(ApiError(StatusCode::NOT_FOUND, "Installation not found"));
     }
 
+    super::sharing::clear(&mut transaction, &installation).await?;
+    transaction.commit().await?;
     service.relay.revoke_access(&installation, None);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -388,6 +392,7 @@ pub(super) async fn poll_device(
     };
     let token = random_token();
     if recovering {
+        super::sharing::clear(&mut transaction, &installation).await?;
         query("UPDATE installations SET owner_id = $1, token_digest = $2 WHERE id = $3")
             .bind(owner)
             .bind(digest(&token))
@@ -417,4 +422,18 @@ pub(super) async fn poll_device(
             "token": token,
         })),
     ))
+}
+
+pub(super) async fn role(
+    service: &Service,
+    installation: &str,
+    account: &str,
+) -> Result<leo_relay_protocol::Role, ApiError> {
+    let access: Option<(bool,)> = query_as("SELECT i.owner_id = $2 FROM installations i LEFT JOIN installation_members m ON m.installation_id = i.id AND m.account_id = $2 WHERE i.id = $1 AND i.owner_id IS NOT NULL AND (i.owner_id = $2 OR m.account_id = $2)")
+        .bind(installation).bind(account).fetch_optional(&service.pool).await?;
+    match access {
+        Some((true,)) => Ok(leo_relay_protocol::Role::Owner),
+        Some((false,)) => Ok(leo_relay_protocol::Role::Member),
+        None => Err(ApiError(StatusCode::NOT_FOUND, "Installation not found")),
+    }
 }

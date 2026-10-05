@@ -28,6 +28,26 @@ impl EmailSender for HttpEmailSender {
             "subject": "Your Leo sign-in code",
             "text": format!("Your Leo sign-in code is {code}. It expires in 10 minutes. If you did not request it, ignore this email."),
         });
+        self.deliver(message).await
+    }
+
+    async fn send_invitation(
+        &self,
+        email: &str,
+        installation: &str,
+        url: &str,
+    ) -> Result<(), String> {
+        self.deliver(json!({
+            "from": self.from,
+            "to": [email],
+            "subject": "Invitation to a Leo installation",
+            "text": format!("You have been invited to the Leo installation \"{installation}\". Sign in or create your Leo account with this email address to accept: {url}\nMembers use the owner's coding-agent accounts and secrets. This invitation expires in 7 days."),
+        })).await
+    }
+}
+
+impl HttpEmailSender {
+    async fn deliver(&self, message: serde_json::Value) -> Result<(), String> {
         let response = self
             .client
             .post(&self.endpoint)

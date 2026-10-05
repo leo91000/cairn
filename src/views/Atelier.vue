@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { IconName } from '../icons'
 import { computed } from 'vue'
-import { signOut, state } from '../api'
+import { ownerPage, signOut, state } from '../api'
 import Icon from '../components/Icon.vue'
 import ThemeControl from '../components/ThemeControl.vue'
 import {
@@ -51,13 +51,13 @@ const resources = computed<Array<{
     count: state.mcps.length,
     detail: 'MCP servers and the tools agents can call',
   },
-])
-const workspace: Array<{
+].filter(item => state.installationRole === 'owner' || !ownerPage(item.to)))
+const workspace = computed<Array<{
   to: string
   label: string
   icon: IconName
   detail: string
-}> = [
+}>>(() => [
   {
     to: '/connections',
     label: 'Connections',
@@ -82,7 +82,7 @@ const workspace: Array<{
     icon: Settings,
     detail: 'Notifications, access and security',
   },
-]
+].filter(item => state.installationRole === 'owner' || !ownerPage(item.to)))
 </script>
 
 <template>

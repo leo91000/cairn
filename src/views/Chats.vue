@@ -586,14 +586,14 @@ function key(event: KeyboardEvent) {
               <span class="flex min-w-0 items-center gap-1.5"><Icon :name="FolderGit2" :size="13" /><span class="truncate max-w-48 phone:max-w-32">{{ detail.projectName }}</span></span>
             </template>
             <span class="flex items-center gap-1.5 font-semibold" :class="chatStatus === 'Working' ? 'text-accent' : chatStatus === 'Failed' || chatStatus === 'Interrupted' ? 'text-coral' : ''"><span v-if="chatStatus !== 'Working'" class="size-1 shrink-0 rounded-full" :class="active ? 'bg-accent' : 'bg-muted'" />{{ chatStatus }}<span v-if="chatStatus === 'Working'" class="working-wave"><i /><i /><i /></span></span>
-            <NodeExecution v-if="detail.run" :key="detail.run.id" :run="detail.run" />
+            <NodeExecution v-if="detail.run && state.installationRole === 'owner'" :key="detail.run.id" :run="detail.run" />
           </div>
         </div>
       </div>
       <h1 v-else class="sr-only">
         Chats
       </h1>
-      <div v-if="detail?.run" class="hidden phone:block">
+      <div v-if="detail?.run && state.installationRole === 'owner'" class="hidden phone:block">
         <NodeExecution :key="detail.run.id" :run="detail.run" class="mx-4 mb-2" />
       </div>
       <div class="flex min-h-0 flex-1 flex-col">
@@ -700,7 +700,7 @@ function key(event: KeyboardEvent) {
                 {{ waitNotice.account }} account needed
               </p>
               <p>{{ waitNotice.message }}</p>
-              <RouterLink v-if="waitNotice.account" to="/connections" class="mt-2 inline-flex font-semibold text-accent underline">
+              <RouterLink v-if="waitNotice.account && state.installationRole === 'owner'" to="/connections" class="mt-2 inline-flex font-semibold text-accent underline">
                 Open Connections
               </RouterLink>
             </div>

@@ -75,6 +75,9 @@ const items = computed(() =>
 )
 
 async function edit(skill?: Skill) {
+  if (state.installationRole === 'member' && !skill)
+    return
+
   original.value = skill
   name.value = skill?.name ?? ''
   scope.value = skill?.scope ?? 'global'
@@ -83,7 +86,7 @@ async function edit(skill?: Skill) {
       ?? '---\nname: my-skill\ndescription: Describe when this skill should be used.\n---\n\n# My skill\n\nDescribe the workflow and how to verify completion.\n'
   file.value = 'SKILL.md'
   error.value = ''
-  preview.value = false
+  preview.value = state.installationRole === 'member'
   open.value = true
   files.value = skill
     ? await api(`/skills/${skill.scope}/${skill.name}/files`)
@@ -157,7 +160,7 @@ async function remove() {
     <div>
       <h1>Skills library</h1>
     </div>
-    <UiButton variant="primary" @click="edit()">
+    <UiButton v-if="state.installationRole === 'owner'" variant="primary" @click="edit()">
       <Icon :name="Plus" :size="17" />New skill
     </UiButton>
   </div>
@@ -193,6 +196,7 @@ async function remove() {
               ? "Global"
               : state.projects.find((p) => p.id === skill.scope)?.name
         }}</span><button
+          v-if="state.installationRole === 'owner'"
           :class="twMerge(iconButton, 'icon-button')"
           :aria-label="`Edit ${skill.name}`"
           @click="edit(skill)"
@@ -206,6 +210,7 @@ async function remove() {
       <p>{{ skill.description }}</p>
       <footer>
         <code>.agents/skills</code><button
+          v-if="state.installationRole === 'owner'"
           :class="twMerge(iconButton, 'icon-button')"
           :aria-label="`Delete ${skill.name}`"
           @click="deleting = skill"
@@ -220,12 +225,12 @@ async function remove() {
     title="Your playbook starts here"
     description="Add repeatable instructions for reviews, releases, research, and the work you do often."
   >
-    <UiButton @click="edit()">
+    <UiButton v-if="state.installationRole === 'owner'" @click="edit()">
       <Icon :name="Plus" :size="16" />Create your first skill
     </UiButton>
   </Empty><Modal
     v-if="open"
-    :title="original ? 'Edit skill' : 'Add to your playbook'"
+    :title="state.installationRole === 'member' ? 'View skill' : original ? 'Edit skill' : 'Add to your playbook'"
     wide
     @close="open = false"
   >
@@ -257,6 +262,7 @@ async function remove() {
             @update:model-value="readFile"
           /><span v-else>SKILL.md</span>
           <UiSegments
+            v-if="state.installationRole === 'owner'"
             v-model="preview"
             label="Skill editor view"
             compact
@@ -281,7 +287,7 @@ async function remove() {
           spellcheck="false"
           aria-label="Supporting file content"
         />
-        <div v-if="original" class="supporting-file flex gap-2.5 mt-3.5 phone:flex-wrap">
+        <div v-if="original && state.installationRole === 'owner'" class="supporting-file flex gap-2.5 mt-3.5 phone:flex-wrap">
           <input
             v-model="newFile"
             placeholder="Add supporting file, e.g. checklist.md"
@@ -307,7 +313,12 @@ async function remove() {
       <footer class="modal-actions flex justify-end gap-2.5 bg-surface border-t border-line sticky bottom-0 phone:flex-wrap px-6.5 py-4.5 phone:px-5 phone:py-4">
         <UiButton type="button" @click="open = false">
           Cancel
-        </UiButton><UiButton variant="primary" type="submit" :disabled="busy">
+        </UiButton><UiButton
+          v-if="state.installationRole === 'owner'"
+          variant="primary"
+          type="submit"
+          :disabled="busy"
+        >
           {{ busy ? "Saving…" : "Save skill" }}
         </UiButton>
       </footer>

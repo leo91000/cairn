@@ -259,14 +259,22 @@ async fn revocation_cancels_a_backpressured_subscription_without_waiting_for_the
     .await
     .expect("revocation must cancel the remote subscription without another browser read");
 
-    // Keep the revoked browser response alive. Every tunnel slot must already
-    // be reusable by authorized requests in the new access generation.
+    // Keep the revoked browser response alive. The full stream capacity must
+    // already be reusable, with eight slots reserved for ordinary requests.
     let mut healthy = Vec::new();
-    for _ in 0..leo_relay_protocol::MAX_IN_FLIGHT {
+    for _ in 0..24 {
         let response = relay.get("/chats/stream").send().await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         healthy.push(response);
     }
+    assert_eq!(
+        relay.get("/chats/stream").send().await.unwrap().status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
     drop(healthy);
     drop(stalled);
     relay.close().await;

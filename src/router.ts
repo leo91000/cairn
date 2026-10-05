@@ -1,7 +1,8 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { ownerPage, state } from './api'
 
 export function workspaceRouter(base = '/') {
-  return createRouter({
+  const router = createRouter({
     history: createWebHistory(base),
     routes: [
       { path: '/', component: () => import('./views/Fil.vue') },
@@ -32,4 +33,6 @@ export function workspaceRouter(base = '/') {
       { path: '/:pathMatch(.*)*', redirect: '/' },
     ],
   })
+  router.beforeEach(to => state.installationRole === 'member' && ownerPage(to.path) ? '/atelier' : true)
+  return router
 }

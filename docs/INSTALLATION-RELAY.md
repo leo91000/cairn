@@ -81,8 +81,8 @@ protocol versions; `Welcome` chooses a supported version before API traffic.
 An incompatible peer is disconnected. The shared `leo-relay-protocol` crate
 owns the frames, limits and transport header rules. Version 1 multiplexes finite
 API requests and responses by request ID, carrying method, encoded path/query,
-selected headers and binary bodies. Owner identity comes from the official
-session and installation ownership record, then enters the installation's
+selected headers and binary bodies. Account identity and owner/member role come from the official
+session and installation access record, then enters the installation's
 existing in-memory request extension (#45). HTTP identity headers, browser
 cookies and browser authorization credentials are never forwarded.
 Bodies are base64 strings in the JSON frames, rather than arrays of byte numbers.
@@ -92,7 +92,7 @@ JSON. This prevents ambiguous content types from bypassing the official policy;
 the browser can still fetch and read JSON normally.
 
 The browser calls `/api/installations/{installation}/api/...`. Every request
-checks the official session and owner; mutations also require the official
+checks the official session and installation role; mutations also require the official
 origin and CSRF token. A foreign or unknown installation returns 404. Local
 browser authentication routes are excluded from the tunnel. Offline requests
 return 503; lost connections fail pending requests, without replaying writes.
@@ -123,7 +123,8 @@ A peer with no shared version is disconnected before it becomes online.
 
 Each stream gets one credit per downstream body read. Installation body polling
 pauses until credit arrives, chunks are limited to 64 KiB, and each official HTTP
-body has a one-chunk queue. Streams share the existing 32-request capacity limit.
+body has a one-chunk queue. Streams can use 24 of the 32 request slots;
+eight slots remain available to finite API requests.
 A slow reader, failed stream or failed handler affects only its own request.
 Closing the browser response cancels the remote subscription and releases its
 slot. The official service disables reverse-proxy SSE buffering and still imposes
@@ -147,9 +148,12 @@ After committing a detachment, call `revoke_access(installation, None)`; after
 removing a member, call it with that account ID. It immediately closes the
 corresponding browser bodies, including idle or backpressured streams. Account
 revocation preserves the tunnel and other accounts' streams. Access generations
-prevent an upload authorized before revocation from opening a stream afterward.
-The detachment and membership endpoints/UI remain separate tickets; tests
-simulate their committed access change and observe the real official HTTP body.
+prevent an upload authorized before revocation from dispatching any request
+afterward, including an ordinary queued request. Work admitted before revocation
+is preserved; revocation does not cancel the installation's agent executions.
+The detachment, member removal and departure endpoints commit their access
+change before revoking the real official HTTP bodies. Detachment also forgets
+all memberships and invitations; reclaiming never restores previous sharing.
 
 Validation: run `pnpm test:backend -p leo-official-service --test relay` with a
 disposable `LEO_OFFICIAL_TEST_DATABASE_URL`; this uses the isolated backend
@@ -182,3 +186,17 @@ Reading views use the scoped SSE connection for updates and cursor-based replay.
 One initial finite snapshot keeps a v1 installation readable during a deployment;
 there is no recurring conversation snapshot polling. The existing live client
 retains its reconnect backoff and history cache.
+
+## Shared-installation limits
+
+Installation HTTP rate limits use the trusted Leo account identity for relayed
+requests (300 requests per minute per account), while machine traffic retains
+its existing peer-based limits. Browser headers cannot select an identity or
+quota. Installation rename requests are limited separately at the official
+account level.
+
+At most 24 SSE requests share the tunnel's 32 in-flight slots. Eight slots remain
+available to ordinary API requests, so idle member streams cannot exhaust the
+capacity needed to send messages. At the stream limit the next stream receives
+503 and uses the existing client retry behavior; streams are not evicted.
+Cancelling or revoking a stream releases both its stream permit and tunnel slot.

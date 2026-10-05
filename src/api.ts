@@ -21,6 +21,7 @@ export const state = reactive({
   setupRequired: false,
   csrf: '',
   installationId,
+  installationRole: 'owner' as 'owner' | 'member',
   agents: [] as Agent[],
   projects: [] as Project[],
   tasks: [] as Task[],
@@ -113,13 +114,17 @@ export async function session() {
   state.ready = true
 }
 
+export function ownerPage(path: string) {
+  return ['/mcps', '/connections', '/nodes', '/settings', '/authorize'].includes(path)
+}
+
 export async function refresh() {
   const [agents, projects, tasks, skills, mcps] = await Promise.all([
     api<Agent[]>('/agents'),
     api<Project[]>('/projects'),
     api<Task[]>('/tasks'),
     api<Skill[]>('/skills'),
-    api<McpView[]>('/mcps'),
+    state.installationRole === 'owner' ? api<McpView[]>('/mcps') : Promise.resolve([]),
   ])
   Object.assign(state, {
     agents,

@@ -125,6 +125,9 @@ const allSkills = computed({
 const permittedSkills = computed(() => state.skills.filter(skill => skill.valid && (skill.scope === 'global' || form.value.access?.projects === null || form.value.access?.projects?.includes(skill.scope))))
 
 async function edit(item?: any) {
+  if (state.installationRole === 'member')
+    return
+
   projectMode.value = 'local'
   repository.value = ''
   githubToken.value = ''
@@ -238,7 +241,7 @@ async function remove() {
     <div>
       <h1>{{ isAgent ? "Agents" : "Projects" }}</h1>
     </div>
-    <UiButton variant="primary" @click="edit()">
+    <UiButton v-if="state.installationRole === 'owner'" variant="primary" @click="edit()">
       <Icon :name="Plus" :size="17" />{{ isAgent ? "New agent" : "Add project" }}
     </UiButton>
   </div>
@@ -257,9 +260,15 @@ async function remove() {
       <div class="min-w-0" :class="!isAgent ? 'flex items-center gap-5 phone:block' : ''">
         <div class="min-w-0 flex-1">
           <h2 class="text-sm font-semibold">
-            <button class="max-w-full truncate text-left hover:text-accent focus-visible:rounded" :title="item.name" @click="edit(item)">
+            <button
+              v-if="state.installationRole === 'owner'"
+              class="max-w-full truncate text-left hover:text-accent focus-visible:rounded"
+              :title="item.name"
+              @click="edit(item)"
+            >
               {{ item.name }}
             </button>
+            <span v-else>{{ item.name }}</span>
           </h2>
           <p v-if="isAgent && item.description" class="mt-1 line-clamp-2 text-xs text-muted" :title="item.description">
             {{ item.description }}
@@ -281,7 +290,7 @@ async function remove() {
         <RouterLink :to="{ path: '/chats', query: { [isAgent ? 'agent' : 'project']: item.id } }" class="inline-flex min-h-8 items-center gap-2 rounded-lg text-xs font-medium text-accent hover:underline focus-visible:outline-2 focus-visible:outline-accent phone:min-h-11">
           <Icon :name="MessageCircle" :size="15" />Start chat
         </RouterLink>
-        <div class="flex items-center gap-1">
+        <div v-if="state.installationRole === 'owner'" class="flex items-center gap-1">
           <button
             :class="iconButton"
             :aria-label="`Edit ${item.name}`"
@@ -312,7 +321,7 @@ async function remove() {
         : 'Choose a GitHub repository or an existing directory on your server. Agents work on private copies in their VMs.'
     "
   >
-    <UiButton @click="edit()">
+    <UiButton v-if="state.installationRole === 'owner'" @click="edit()">
       <Icon :name="Plus" :size="16" />{{ isAgent ? "Create an agent" : "Add a project" }}
     </UiButton>
   </Empty><Modal
