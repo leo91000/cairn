@@ -1,6 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # Run only on a trusted Linux machine; this installs the node's system service.
+# >>> compressed swap
+# Guest RAM shares one cgroup limit. Without swap, a peak above it stalls every
+# VM instead of slowing them down; zram compresses those pages in memory.
+ensure_compressed_swap() {
+  local swaps=${LEO_PROC_SWAPS:-/proc/swaps} etc=${LEO_ETC_DIR:-/etc}
+  if grep -q '^/dev/zram' "$swaps" 2>/dev/null; then
+    return 0
+  fi
+  if ! command -v apt-get >/dev/null; then
+    echo 'Leo installer: enable zram compressed swap so memory peaks slow VMs down instead of stalling them.' >&2
+    return 0
+  fi
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zram-tools >/dev/null; then
+    apt-get update -qq >/dev/null || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zram-tools >/dev/null || {
+      echo 'Leo installer: could not install zram-tools; continuing without compressed swap.' >&2
+      return 0
+    }
+  fi
+  printf 'ALGO=zstd\nPERCENT=25\nPRIORITY=100\n' > "$etc/default/zramswap"
+  echo 'vm.swappiness=100' > "$etc/sysctl.d/99-leo-zram.conf"
+  sysctl -q -p "$etc/sysctl.d/99-leo-zram.conf" || true
+  systemctl enable zramswap >/dev/null 2>&1 || true
+  systemctl restart zramswap || echo 'Leo installer: zramswap did not start; continuing without compressed swap.' >&2
+}
+# <<< compressed swap
 LEO_MASTER=__LEO_MASTER_ORIGIN__
 [[ $(id -u) == 0 ]] || { echo 'Run this installer with sudo.' >&2; exit 1; }
 [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || { echo 'Linux x86-64 is required.' >&2; exit 1; }
@@ -13,6 +39,7 @@ install -d -m 0700 /var/lib/leo-node /var/lib/leo-node/data /var/lib/leo-node/st
 LEO_FREE_KB=$(df -Pk /var/lib/leo-node | awk 'NR==2 {print $4}')
 [[ "$LEO_FREE_KB" -ge 16777216 ]] || { echo 'At least 16 GiB free is required for the runtime and recovery staging.' >&2; exit 1; }
 docker info >/dev/null
+ensure_compressed_swap
 install -d -m 0755 /opt/leo-node
 LEO_INSTALL_TEMP=$(mktemp /opt/leo-node/install.XXXXXX)
 trap 'rm -f "$LEO_INSTALL_TEMP"' EXIT
