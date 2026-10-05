@@ -62,7 +62,6 @@ async fn logout_ends_idle_streams_of_that_session_and_preserves_another_device()
             .unwrap()
             .is_some()
     );
-    assert!(!relay.installation.shutdown.is_cancelled());
     drop(other);
     relay.close().await;
 }

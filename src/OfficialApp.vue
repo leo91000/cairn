@@ -71,6 +71,7 @@ const deviceReview = ref<{
 } | null>(null)
 const claimStatus = ref('')
 const confirmDetach = ref(false)
+const confirmForget = ref(false)
 const installation = ref<{
   id: string
   name: string
@@ -196,6 +197,7 @@ async function signOut() {
     deviceReview.value = null
     claimStatus.value = ''
     confirmDetach.value = false
+    confirmForget.value = false
     state.installationId = ''
     email.value = ''
     code.value = ''
@@ -279,9 +281,9 @@ async function passkey(register: boolean) {
   }
 }
 
-async function installationRequest(route: string, body?: unknown) {
+async function installationRequest(route: string, body?: unknown, method: 'POST' | 'DELETE' = 'POST') {
   const response = await fetch(`/api/installations/${route}`, {
-    method: 'POST',
+    method,
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': session.value?.csrf || '' },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -367,6 +369,23 @@ async function detachInstallation() {
   }
   catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Unable to detach the installation.'
+  }
+  finally {
+    busy.value = false
+  }
+}
+
+async function forgetInstallation() {
+  if (!installation.value)
+    return
+  busy.value = true
+  error.value = ''
+  try {
+    await installationRequest(encodeURIComponent(installation.value.id), undefined, 'DELETE')
+    redirect('/')
+  }
+  catch (cause) {
+    error.value = cause instanceof Error ? cause.message : 'Unable to revoke the installation.'
   }
   finally {
     busy.value = false
@@ -621,6 +640,14 @@ onMounted(async () => {
             v-if="installation.role === 'owner'"
             size="small"
             :disabled="busy"
+            @click="confirmForget = true"
+          >
+            Revoke and forget installation
+          </UiButton>
+          <UiButton
+            v-if="installation.role === 'owner'"
+            size="small"
+            :disabled="busy"
             @click="showSharing = !showSharing"
           >
             Share installation
@@ -663,6 +690,16 @@ onMounted(async () => {
       </UiButton>
       <UiButton :disabled="busy" @click="confirmDetach = false">
         Cancel detachment
+      </UiButton>
+    </div>
+    <div v-if="confirmForget" class="grid gap-3 border-b border-line px-4 py-3">
+      <p>Revoke this installation permanently? Its credentials and shared access will stop working. Claim the machine again to return.</p>
+      <p>Its data stays on the machine.</p>
+      <UiButton :disabled="busy" @click="forgetInstallation">
+        Confirm revocation
+      </UiButton>
+      <UiButton :disabled="busy" @click="confirmForget = false">
+        Cancel revocation
       </UiButton>
     </div>
     <form v-if="editingName" class="flex flex-wrap items-end gap-3 border-b border-line px-4 py-3" @submit.prevent="renameInstallation">
