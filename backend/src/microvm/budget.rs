@@ -214,7 +214,10 @@ pub fn disk_bytes(state: &Path) -> io::Result<u64> {
         return Ok(value.bytes);
     }
     let mut bytes = 0_u64;
-    for root in crate::storage::environment::ROOTS {
+    for root in crate::storage::environment::ROOTS
+        .into_iter()
+        .chain(["images"])
+    {
         bytes = bytes.saturating_add(allocated(&state.join(root))?);
     }
     usage.insert(

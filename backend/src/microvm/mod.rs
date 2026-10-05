@@ -3,7 +3,7 @@ pub mod budget;
 mod codex_state;
 pub mod guest;
 pub mod host;
-mod images;
+pub(crate) mod images;
 mod listener;
 mod network;
 pub mod plan;
