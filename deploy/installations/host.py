@@ -50,7 +50,8 @@ def run(args, timeout=120):
                             env={key: value for key, value in os.environ.items()
                                  if key != 'LEO_INSTALLATION_CLAIM_CODE'})
     if result.returncode:
-        raise RuntimeError('Docker operation failed. Check the daemon and outbound registry connectivity; existing data is retained.')
+        operation = next((arg for arg in args if arg in ('pull', 'up', 'exec')), 'operation')
+        raise RuntimeError(f'Docker {operation} failed (exit {result.returncode}). Check the daemon and outbound registry connectivity; existing data is retained.')
 
 
 def official_origin(value):
@@ -96,7 +97,7 @@ def compose(image, origin):
                 'logging': logs,
             },
             'manager': {
-                'image': image, 'init': True, 'restart': 'unless-stopped',
+                'image': image, 'user': '1000:1000', 'init': True, 'restart': 'unless-stopped',
                 'stop_grace_period': '60s',
                 'depends_on': {
                     'garage': {'condition': 'service_healthy'},
@@ -207,8 +208,8 @@ api_bind_addr = "0.0.0.0:3900"
             'accessKeyId': values['GARAGE_DEFAULT_ACCESS_KEY'],
             'secretAccessKey': values['GARAGE_DEFAULT_SECRET_KEY'],
         }))
-        if os.getuid() == 0:
-            os.chown(storage, 1000, 1000)
+    if os.getuid() == 0:
+        os.chown(storage, 1000, 1000)
 
     atomic(ROOT / 'compose.json', json.dumps(compose(image, origin), indent=2))
     claim_file = ROOT / 'claim.env'
@@ -260,13 +261,13 @@ exec docker compose --project-directory ROOT -f COMPOSE exec -T manager /usr/loc
     if claimed_identity(origin):
         print('Leo installed and claimed. Open the official app and refresh installations.')
     else:
-        print('Leo installed but unclaimed. Run sudo leo claim and confirm its code in the official app.')
+        print('Leo installed but unclaimed. Copy a fresh command from Add an installation and rerun it.')
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('origin')
-    parser.add_argument('--claim-code', default='')
+    parser.add_argument('--claim-code', default=os.environ.pop('LEO_INSTALLATION_CLAIM_CODE', ''))
     args = parser.parse_args()
     try:
         ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)

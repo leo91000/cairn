@@ -2,6 +2,7 @@
 main() {
   set -euo pipefail
   LEO_OFFICIAL_ORIGIN=__LEO_OFFICIAL_ORIGIN__
+  LEO_HOST_SHA256=__LEO_HOST_SHA256__
   fail() { echo "Leo installer: $*" >&2; exit 1; }
   
   [[ $(id -u) == 0 ]] || fail 'Run the command with sudo bash.'
@@ -29,10 +30,21 @@ main() {
   LEO_INSTALL_TEMP=$(mktemp "$LEO_INSTALLATION_ROOT/install.XXXXXX")
   trap 'rm -f "$LEO_INSTALL_TEMP"' EXIT
   
-  curl --fail --silent --show-error --proto '=https,http' --max-time 30 "${LEO_OFFICIAL_ORIGIN}/install/host.py" > "$LEO_INSTALL_TEMP" || fail 'Cannot download the installer. Check outbound HTTPS connectivity.'
+  curl --fail --silent --show-error --proto '=https' --max-time 30 "${LEO_OFFICIAL_ORIGIN}/install/host.py" > "$LEO_INSTALL_TEMP" || fail 'Cannot download the installer. Check outbound HTTPS connectivity.'
+  python3 - "$LEO_INSTALL_TEMP" "$LEO_HOST_SHA256" <<'PYTHON' || fail 'Installer checksum mismatch. Download a fresh command from the official app and retry.'
+import hashlib
+from pathlib import Path
+import sys
+sys.exit(0 if hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest() == sys.argv[2] else 1)
+PYTHON
   python3 -m py_compile "$LEO_INSTALL_TEMP"
   install -m 0700 "$LEO_INSTALL_TEMP" "$LEO_INSTALLATION_ROOT/host.py"
-  python3 "$LEO_INSTALLATION_ROOT/host.py" "$LEO_OFFICIAL_ORIGIN" "$@"
+  if [[ $# == 2 && $1 == --claim-code ]]; then
+    export LEO_INSTALLATION_CLAIM_CODE=$2
+  elif [[ $# != 0 ]]; then
+    fail 'Copy the complete command from Add an installation.'
+  fi
+  python3 "$LEO_INSTALLATION_ROOT/host.py" "$LEO_OFFICIAL_ORIGIN"
 }
 
 main "$@"

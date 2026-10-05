@@ -23,7 +23,7 @@ type ReadKey = (String, String, u64, Option<String>, String);
 
 pub(crate) const HOT_WRITE_CONCURRENCY: usize = 4;
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Hash)]
 struct ClientKey {
     endpoint: Option<String>,
     region: String,
@@ -32,16 +32,16 @@ struct ClientKey {
     credentials: Option<StorageCredentials>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct StorageCredentials {
     access_key: String,
     secret_key: String,
 }
 
-/// One connection and identity cache per server configuration, shared by all
-/// recovery operations. A changed endpoint or region replaces the cached client.
+/// Recovery operations reuse a client for each storage configuration, including
+/// retained disks on a previously selected endpoint.
 pub struct HotS3 {
-    client: Mutex<Option<(ClientKey, aws_sdk_s3::Client)>>,
+    clients: Mutex<HashMap<ClientKey, aws_sdk_s3::Client>>,
     settings_lock: Mutex<()>,
     reads: Semaphore,
     writes: Semaphore,
@@ -54,7 +54,7 @@ pub struct HotS3 {
 impl HotS3 {
     pub fn new() -> Self {
         Self {
-            client: Mutex::new(None),
+            clients: Mutex::new(HashMap::new()),
             settings_lock: Mutex::new(()),
             reads: Semaphore::new(8),
             writes: Semaphore::new(HOT_WRITE_CONCURRENCY),
@@ -86,10 +86,8 @@ impl HotS3 {
             profile: std::env::var("AWS_PROFILE").ok(),
             credentials: credentials.cloned(),
         };
-        let mut cached = self.client.lock().await;
-        if let Some((key, client)) = &*cached
-            && key == &identity
-        {
+        let mut cached = self.clients.lock().await;
+        if let Some(client) = cached.get(&identity) {
             return client.clone();
         }
         let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
@@ -127,7 +125,7 @@ impl HotS3 {
             builder = builder.force_path_style(true);
         }
         let client = aws_sdk_s3::Client::from_conf(builder.build());
-        *cached = Some((identity, client.clone()));
+        cached.insert(identity, client.clone());
         client
     }
 }
@@ -887,7 +885,7 @@ mod tests {
                     .build(),
             );
             let hot = Arc::new(HotS3::new());
-            *hot.client.lock().await = Some((
+            hot.clients.lock().await.insert(
                 ClientKey {
                     endpoint: Some(endpoint.clone()),
                     region: "us-east-1".into(),
@@ -896,7 +894,7 @@ mod tests {
                     credentials: None,
                 },
                 sdk,
-            ));
+            );
             let storage = Storage {
                 bucket: "fixture".into(),
                 binary: "unused".into(),

@@ -19,6 +19,12 @@ docker run -d --name "$name-postgres" --network "$name" --network-alias postgres
 args=(--rm --network "$name" -v "$PWD:/repo:ro" -v "$fixture:/fixture" \
   -e LEO_OFFICIAL_TEST_DATABASE_URL=postgres://leo:test-only@postgres/leo_official_test)
 docker run "${args[@]}" leo-installer-fixture python tests/installation_installer_container.py prepare
+# Parse the actual generated Compose with the controller's installed plugin.
+# The parser runs as root to read private fixture files; it receives no Docker socket.
+compose_plugin=$(docker info --format '{{range .ClientInfo.Plugins}}{{if eq .Name "compose"}}{{.Path}}{{end}}{{end}}')
+docker run "${args[@]}" \
+  -v "$compose_plugin:/usr/local/bin/docker-compose:ro" \
+  leo-installer-fixture python tests/installation_installer_container.py compose
 docker run "${args[@]}" leo-installer-fixture cat /fixture/installation/garage.env | \
   docker run -d --name "$name-garage" --network "$name" --network-alias garage \
   --env-file /proc/self/fd/0 \

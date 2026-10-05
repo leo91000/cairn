@@ -5,11 +5,18 @@ use axum::{
     routing::get,
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
-/// Public installer assets contain no credentials. The code is supplied on stdin's command line.
+/// Public installer assets contain no credentials; the launcher supplies the claim code.
 pub fn router(origin: String) -> Router {
     let script = include_str!("../../deploy/installations/install.sh")
-        .replace("__LEO_OFFICIAL_ORIGIN__", &shell_quote(&origin));
+        .replace("__LEO_OFFICIAL_ORIGIN__", &shell_quote(&origin))
+        .replace(
+            "__LEO_HOST_SHA256__",
+            &hex::encode(Sha256::digest(include_bytes!(
+                "../../deploy/installations/host.py"
+            ))),
+        );
     Router::new()
         .route(
             "/install.sh",

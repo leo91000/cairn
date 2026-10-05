@@ -274,10 +274,13 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
     let attempt = text(&checkpoint, "runnerId");
     crate::validation::uuid(attempt)?;
     let settings = settings(s).await?;
-    let storage = if in_s3(&run["backup"]) {
-        storage_for(s, &run["backup"])?
-    } else {
-        Storage::configured(s)?
+    let previous_point = match run["backup"]["id"].as_str() {
+        Some(id) => s.store.get("node-backups", id).await?,
+        None => None,
+    };
+    let storage = match previous_point.as_ref() {
+        Some(point) if in_s3(point) => storage_for(s, point)?,
+        _ => Storage::configured(s)?,
     };
     collect_unused(s, run_id).await?;
 

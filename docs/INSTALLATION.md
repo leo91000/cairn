@@ -2,8 +2,11 @@
 
 Sign in to the official service and choose **Add an installation**. Copy the
 complete `curl … | sudo bash` command onto a trusted Linux x86-64 machine. Its
-single-use code lasts ten minutes and is passed as a shell argument, never in a
-download URL. No local password, domain, certificate, incoming port or S3 account
+single-use code lasts ten minutes and is passed by the launcher through a private
+environment to `host.py`, never in a download URL. The copied shell command can
+still appear in shell history and sudo audit logs; its code is short-lived and
+single-use. The downloaded script executes only when complete, requires HTTPS,
+and verifies the embedded SHA-256 of `host.py` before installing it. No local password, domain, certificate, incoming port or S3 account
 is needed. The installation connects out using the existing claim and relay.
 
 Install Docker Engine with its Compose plugin, Python 3 and curl first. Enable
@@ -79,9 +82,15 @@ sudo docker compose --project-directory /var/lib/leo-installation \
 
 For a disposable test, build the current binaries and web output, then run
 `bash tests/installation-installer-container.sh`. It uses the real official
-service, manager, Postgres and Garage. Only the external Docker process that
-would boot the runner is replaced, so claim, relay and S3 checks need no KVM.
-Inert devices and command adapters exercise prerequisite messages without
-changing the controller. Containers, network and data are cleaned up on exit.
+service, manager, Postgres and Garage. All Docker lifecycle commands (pull,
+startup, recreation and container health execution) are simulated by an adapter
+that starts the manager binary as a fixture process. The generated configuration
+is independently parsed by real `docker compose config`, including healthchecks,
+claim substitution, dependencies and uid 1000. Loopback HTTP download transport
+is adapted only in the fixture; the production script requires HTTPS. Inert
+devices and command adapters exercise prerequisite and checksum failures.
+Claim, relay and S3 write/read/delete checks are real. A disk published to Garage
+continues publishing, reading remotely and purging there after relayed settings
+select external HTTPS S3. No VM boots; this is not runtime/KVM coverage. Containers, network and data are cleaned up on exit.
 `python3 tests/installation_installer_test.py` checks failure cleanup and
 idempotent configuration separately.
