@@ -5,6 +5,7 @@ import { api, date, notify } from '../api'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
 import NotificationSettings from '../components/NotificationSettings.vue'
+import StorageSettings from '../components/StorageSettings.vue'
 import ThemeControl from '../components/ThemeControl.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
@@ -87,6 +88,7 @@ async function copy(value: string) {
     {{ error }}
   </UiAlert>
   <template v-if="settings">
+    <StorageSettings />
     <section class="panel border-b border-line overflow-hidden settings-section mb-5.5 appearance-section px-0 py-7 phone:py-5">
       <div class="section-intro flex gap-[17px] items-center mb-6 phone:items-start phone:gap-[13px]">
         <div><h2>Appearance</h2></div>

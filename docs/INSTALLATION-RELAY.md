@@ -2,7 +2,9 @@
 
 The official account API and its Postgres database remain those introduced in
 ticket #46. Sign in to the official web app, choose **Add an installation**, and use the
-claim code within ten minutes. The installer remains ticket #51. The fallback `leo claim` command is described below.
+claim code within ten minutes. The app includes this code in the command served
+at `/install.sh`; see [One-command installation](INSTALLATION.md). The fallback
+`leo claim` command is described below.
 
 For a manager deployment, provide `LEO_OFFICIAL_ORIGIN`,
 `LEO_INSTALLATION_CLAIM_CODE`, and optionally `LEO_INSTALLATION_NAME` in its

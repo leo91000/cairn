@@ -1,4 +1,5 @@
 mod installations;
+pub mod installer;
 mod methods;
 mod oauth;
 mod passkeys;
@@ -155,6 +156,7 @@ pub async fn router_with_relay(
     };
     migrations.run(&pool).await?;
 
+    let installer = installer::router(origin.clone());
     let service = Service {
         pool,
         sender,
@@ -233,7 +235,8 @@ pub async fn router_with_relay(
                 )
                 .route("/api/relay/{installation}/connect", get(relay::upgrade)),
         )
-        .with_state(service))
+        .with_state(service)
+        .merge(installer))
 }
 
 fn random_token() -> String {

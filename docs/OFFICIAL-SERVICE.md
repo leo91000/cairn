@@ -32,6 +32,7 @@ variables through the operator's secret management:
 | `LEO_OFFICIAL_ORIGIN` | Required browser origin, HTTPS except localhost/loopback development; no path, query, or fragment |
 | `LEO_OFFICIAL_LISTEN` | Bind address, default `127.0.0.1:4311` |
 | `LEO_OFFICIAL_WEB_DIR` | Frontend output directory, default `dist` |
+| `LEO_INSTALLATION_IMAGE` | Tested immutable `ghcr.io/leo91000/leo-agent-manager@sha256:<64 lowercase hex>` approved for new installations; unset returns 503 from `/install/release` |
 | `LEO_OFFICIAL_EMAIL_FROM` | Required sender address on a verified email domain |
 | `LEO_OFFICIAL_EMAIL_KEY` | Required email provider bearer key; never logged |
 | `LEO_OFFICIAL_EMAIL_ENDPOINT` | Default `https://api.resend.com/emails`; override only for the loopback development setup |

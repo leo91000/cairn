@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {
+  computed,
   onMounted,
   onScopeDispose,
   ref,
@@ -47,6 +48,11 @@ const challenge = ref('')
 const busy = ref(false)
 const error = ref('')
 const claimCode = ref('')
+const installationCommand = computed(() => {
+  const quote = (value: string) => `'${value.replaceAll('\'', '\'"\'"\'')}'`
+  return `curl -fsSL ${quote(`${window.location.origin}/install.sh`)} | sudo bash -s -- --claim-code ${quote(claimCode.value)}`
+})
+const installationInstructions = 'This code expires in 10 minutes. Run this command on your Linux x86-64 machine. No domain, certificate, incoming port or S3 setup is needed.'
 const editingName = ref(false)
 const installationName = ref('')
 const deviceCode = ref('')
@@ -585,9 +591,17 @@ onMounted(async () => {
       </UiButton>
     </form>
     <div v-if="claimCode" class="grid gap-3 border-b border-line px-4 py-3">
+      <label>Installation command<textarea
+        :value="installationCommand"
+        readonly
+        autocomplete="off"
+        rows="4"
+        spellcheck="false"
+        class="w-full font-mono text-xs"
+      /></label>
       <label>Installation claim code<input :value="claimCode" readonly autocomplete="off"></label>
       <p class="text-sm text-muted">
-        This code expires in 10 minutes.
+        {{ installationInstructions }}
       </p>
       <UiButton size="small" :disabled="busy" @click="loadSession">
         Refresh installations
@@ -688,8 +702,8 @@ onMounted(async () => {
         </p>
         <div>
           <p v-if="!session.installations.length" class="text-muted mb-8">
-            Your Leo account is ready. Choose Add an installation to get a claim code,
-            then use it to connect a Leo installation on your machine. The installation
+            Your Leo account is ready. Choose Add an installation to get a command,
+            then run it on your Linux x86-64 machine. The installation
             will appear here; choose Refresh installations once it is connected.
           </p>
           <div class="grid gap-3 mb-6">
@@ -742,9 +756,17 @@ onMounted(async () => {
             </p>
           </form>
           <div v-if="claimCode" class="grid gap-3 mb-6">
+            <label>Installation command<textarea
+              :value="installationCommand"
+              readonly
+              autocomplete="off"
+              rows="4"
+              spellcheck="false"
+              class="w-full font-mono text-xs"
+            /></label>
             <label>Installation claim code<input :value="claimCode" readonly autocomplete="off"></label>
             <p class="text-muted">
-              This code expires in 10 minutes.
+              {{ installationInstructions }}
             </p>
           </div>
         </div>

@@ -8,6 +8,7 @@ use crate::{
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
+    io::Write,
     path::Path,
     process::Stdio,
     sync::{Arc, Weak},
@@ -22,18 +23,26 @@ type ReadKey = (String, String, u64, Option<String>, String);
 
 pub(crate) const HOT_WRITE_CONCURRENCY: usize = 4;
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Hash)]
 struct ClientKey {
     endpoint: Option<String>,
     region: String,
     environment_endpoint: Option<String>,
     profile: Option<String>,
+    credentials: Option<StorageCredentials>,
 }
 
-/// One connection and identity cache per server configuration, shared by all
-/// recovery operations. A changed endpoint or region replaces the cached client.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct StorageCredentials {
+    access_key: String,
+    secret_key: String,
+}
+
+/// Recovery operations reuse a client for each storage configuration, including
+/// retained disks on a previously selected endpoint.
 pub struct HotS3 {
-    client: Mutex<Option<(ClientKey, aws_sdk_s3::Client)>>,
+    clients: Mutex<HashMap<ClientKey, aws_sdk_s3::Client>>,
+    settings_lock: Mutex<()>,
     reads: Semaphore,
     writes: Semaphore,
     pending: Mutex<HashMap<ReadKey, Weak<PendingRead>>>,
@@ -45,7 +54,8 @@ pub struct HotS3 {
 impl HotS3 {
     pub fn new() -> Self {
         Self {
-            client: Mutex::new(None),
+            clients: Mutex::new(HashMap::new()),
+            settings_lock: Mutex::new(()),
             reads: Semaphore::new(8),
             writes: Semaphore::new(HOT_WRITE_CONCURRENCY),
             pending: Mutex::new(HashMap::new()),
@@ -63,22 +73,35 @@ impl HotS3 {
         })
     }
 
-    async fn client(&self, endpoint: Option<&str>, region: &str) -> aws_sdk_s3::Client {
+    async fn client(
+        &self,
+        endpoint: Option<&str>,
+        region: &str,
+        credentials: Option<&StorageCredentials>,
+    ) -> aws_sdk_s3::Client {
         let identity = ClientKey {
             endpoint: endpoint.map(str::to_owned),
             region: region.to_owned(),
             environment_endpoint: std::env::var("AWS_ENDPOINT_URL_S3").ok(),
             profile: std::env::var("AWS_PROFILE").ok(),
+            credentials: credentials.cloned(),
         };
-        let mut cached = self.client.lock().await;
-        if let Some((key, client)) = &*cached
-            && key == &identity
-        {
+        let mut cached = self.clients.lock().await;
+        if let Some(client) = cached.get(&identity) {
             return client.clone();
         }
         let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
         if !region.is_empty() {
             loader = loader.region(aws_config::Region::new(region.to_owned()));
+        }
+        if let Some(credentials) = credentials {
+            loader = loader.credentials_provider(aws_sdk_s3::config::Credentials::new(
+                &credentials.access_key,
+                &credentials.secret_key,
+                None,
+                None,
+                "installation-storage",
+            ));
         }
         let config = loader
             .timeout_config(
@@ -102,7 +125,7 @@ impl HotS3 {
             builder = builder.force_path_style(true);
         }
         let client = aws_sdk_s3::Client::from_conf(builder.build());
-        *cached = Some((identity, client.clone()));
+        cached.insert(identity, client.clone());
         client
     }
 }
@@ -121,6 +144,9 @@ pub struct Storage {
     pub(crate) endpoint: Option<String>,
     region: String,
     hot: Arc<HotS3>,
+    credentials: Option<StorageCredentials>,
+    integrated: bool,
+    r2: bool,
 }
 
 fn setting(config: &Value, suffix: &str, key: &str) -> String {
@@ -131,6 +157,106 @@ fn setting(config: &Value, suffix: &str, key: &str) -> String {
 
 fn non_empty_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+fn read_config(s: &Service) -> Result<Value> {
+    let primary = s.config.data_dir.join("storage-s3.json");
+    let file = if primary.exists() {
+        primary
+    } else {
+        s.config.data_dir.join("archive-s3.json")
+    };
+    if file.exists() {
+        Ok(serde_json::from_slice(&std::fs::read(file)?)?)
+    } else {
+        Ok(json!({}))
+    }
+}
+
+pub fn settings(s: &Service) -> Result<Value> {
+    let config = read_config(s)?;
+    let environment_managed = ["BUCKET", "ENDPOINT", "REGION"].iter().any(|suffix| {
+        non_empty_env(&format!("STORAGE_S3_{suffix}")).is_some()
+            || non_empty_env(&format!("ARCHIVE_S3_{suffix}")).is_some()
+    });
+    Ok(json!({
+        "configured": Storage::configured(s).is_ok(),
+        "bucket": setting(&config, "BUCKET", "bucket"),
+        "endpoint": setting(&config, "ENDPOINT", "endpoint"),
+        "region": setting(&config, "REGION", "region"),
+        "integrated": config["integrated"] == true,
+        "environmentManaged": environment_managed,
+    }))
+}
+
+pub async fn save_settings(s: &Service, input: &Value) -> Result<Value> {
+    let _lock = s.hot_s3.settings_lock.lock().await;
+    if settings(s)?["environmentManaged"] == true {
+        return Err(Error::conflict(
+            "Remove server S3 environment overrides before using storage settings.",
+        ));
+    }
+    let field = |name: &str, max: usize| -> Result<String> {
+        let value = input[name]
+            .as_str()
+            .filter(|value| {
+                !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control)
+            })
+            .ok_or_else(|| Error::bad(format!("{name}: enter a valid value.")))?;
+        Ok(value.to_owned())
+    };
+    let endpoint = field("endpoint", 2048)?;
+    let url = url::Url::parse(&endpoint).map_err(|_| Error::bad("Use an HTTPS S3 endpoint."))?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(Error::bad(
+            "Use an HTTPS S3 endpoint without credentials, query or fragment.",
+        ));
+    }
+    let mut previous = read_config(s)?;
+    let mut next = json!({
+        "bucket": field("bucket", 63)?,
+        "endpoint": endpoint,
+        "region": field("region", 100)?,
+        "accessKeyId": field("accessKeyId", 256)?,
+        "secretAccessKey": field("secretAccessKey", 256)?,
+        "privateBucketConfirmed": input["privateBucketConfirmed"] == true,
+    });
+    // Executable selection is server configuration, never user input.
+    if previous["awsBinary"].is_string() {
+        next["awsBinary"] = previous["awsBinary"].clone();
+    }
+    let candidate = Storage::from_config(s, &next)?;
+    candidate.validate().await?;
+    candidate.probe().await?;
+
+    let mut retained = previous
+        .as_object_mut()
+        .and_then(|object| object.remove("previous"))
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    retained
+        .retain(|saved| saved["endpoint"] != next["endpoint"] || saved["bucket"] != next["bucket"]);
+    if previous["bucket"].is_string()
+        && (previous["endpoint"] != next["endpoint"] || previous["bucket"] != next["bucket"])
+    {
+        retained.push(previous);
+    }
+    next["previous"] = retained.into();
+    let path = s.config.data_dir.join("storage-s3.json");
+    let mut temporary = tempfile::NamedTempFile::new_in(&s.config.data_dir)?;
+    temporary.write_all(&serde_json::to_vec(&next)?)?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(&path)
+        .map_err(|error| Error::internal(error.error))?;
+    std::fs::File::open(&s.config.data_dir)?.sync_all()?;
+    settings(s)
 }
 
 /// Missing blocks conflict; other client errors are permanent refusals; the rest retry.
@@ -167,19 +293,43 @@ fn read_error(
 }
 
 impl Storage {
+    /// Existing disks keep their original storage; changing the default does not move or orphan them.
+    pub(crate) fn for_location(s: &Service, location: &Value) -> Result<Self> {
+        let config = read_config(s)?;
+        let current = Self::configured(s)?;
+        if current.endpoint.as_deref() == location["endpoint"].as_str()
+            && current.bucket == location["bucket"]
+        {
+            return Ok(current);
+        }
+        for saved in config["previous"].as_array().into_iter().flatten() {
+            if saved["endpoint"] == location["endpoint"] && saved["bucket"] == location["bucket"] {
+                return Self::from_config(s, saved);
+            }
+        }
+        // Preserve the existing contract for older recovery points in a different bucket on the same endpoint.
+        if current.endpoint.as_deref() == location["endpoint"].as_str() {
+            return Ok(current);
+        }
+        Err(Error::conflict(
+            "This recovery point belongs to a different S3 endpoint. Restore its storage configuration before accessing it.",
+        ))
+    }
+
+    pub async fn probe(&self) -> Result<()> {
+        let key = format!("installation-check/{}", uuid::Uuid::new_v4());
+        let uploaded = self.upload_bytes(b"Leo storage check".to_vec(), &key).await;
+        let cleanup = self.purge_key(&key).await;
+        uploaded?;
+        cleanup
+    }
+
     pub fn configured(s: &Service) -> Result<Self> {
-        let primary = s.config.data_dir.join("storage-s3.json");
-        let file = if primary.exists() {
-            primary
-        } else {
-            s.config.data_dir.join("archive-s3.json")
-        };
-        let config: Value = if file.exists() {
-            serde_json::from_slice(&std::fs::read(file)?)?
-        } else {
-            json!({})
-        };
-        let bucket = setting(&config, "BUCKET", "bucket");
+        Self::from_config(s, &read_config(s)?)
+    }
+
+    fn from_config(s: &Service, config: &Value) -> Result<Self> {
+        let bucket = setting(config, "BUCKET", "bucket");
         if bucket.is_empty()
             || !bucket
                 .bytes()
@@ -189,8 +339,24 @@ impl Storage {
                 "Configure a valid STORAGE_S3_BUCKET on the server.",
             ));
         }
-        let endpoint = setting(&config, "ENDPOINT", "endpoint");
-        if !endpoint.is_empty() && !endpoint.starts_with("https://") {
+        let endpoint = setting(config, "ENDPOINT", "endpoint");
+        let integrated = config["integrated"] == true && endpoint == "http://garage:3900";
+        let r2 = url::Url::parse(&endpoint).is_ok_and(|url| {
+            url.scheme() == "https"
+                && url
+                    .host_str()
+                    .is_some_and(|host| host.ends_with(".r2.cloudflarestorage.com"))
+        });
+        let private_bucket_confirmed = non_empty_env("STORAGE_S3_PRIVATE_BUCKET_CONFIRMED")
+            .map_or(config["privateBucketConfirmed"] == true, |value| {
+                value == "true"
+            });
+        if r2 && !private_bucket_confirmed {
+            return Err(Error::bad(
+                "Confirm that R2 public domains and bucket locks are disabled in the Cloudflare dashboard.",
+            ));
+        }
+        if !endpoint.is_empty() && !endpoint.starts_with("https://") && !integrated {
             return Err(Error::conflict(
                 "STORAGE_S3_ENDPOINT must be an https:// URL.",
             ));
@@ -199,12 +365,29 @@ impl Storage {
             bucket,
             binary: config["awsBinary"].as_str().unwrap_or("aws").into(),
             endpoint: Some(endpoint).filter(|e| !e.is_empty()),
-            region: Some(setting(&config, "REGION", "region"))
+            region: Some(setting(config, "REGION", "region"))
                 .filter(|region| !region.is_empty())
                 .or_else(|| non_empty_env("AWS_REGION"))
                 .or_else(|| non_empty_env("AWS_DEFAULT_REGION"))
                 .unwrap_or_default(),
             hot: s.hot_s3.clone(),
+            credentials: match (
+                config["accessKeyId"].as_str(),
+                config["secretAccessKey"].as_str(),
+            ) {
+                (Some(access_key), Some(secret_key))
+                    if !access_key.is_empty() && !secret_key.is_empty() =>
+                {
+                    Some(StorageCredentials {
+                        access_key: access_key.into(),
+                        secret_key: secret_key.into(),
+                    })
+                }
+                (None, None) => None,
+                _ => return Err(Error::conflict("Configure both S3 access credentials.")),
+            },
+            integrated,
+            r2,
         })
     }
 
@@ -229,6 +412,16 @@ impl Storage {
         command.args(args).args(["--output", "json"]);
         if let Some(endpoint) = &self.endpoint {
             command.args(["--endpoint-url", endpoint]);
+        }
+        if !self.region.is_empty() {
+            command.args(["--region", &self.region]);
+        }
+        if let Some(credentials) = &self.credentials {
+            command
+                .env("AWS_ACCESS_KEY_ID", &credentials.access_key)
+                .env("AWS_SECRET_ACCESS_KEY", &credentials.secret_key)
+                .env_remove("AWS_SESSION_TOKEN")
+                .env_remove("AWS_PROFILE");
         }
         command
             .env("AWS_PAGER", "")
@@ -261,56 +454,83 @@ impl Storage {
     }
 
     pub async fn validate(&self) -> Result<()> {
-        let block = self
-            .optional(
-                self.s3api("get-public-access-block", &[]),
-                Some("NotImplemented"),
-            )
-            .await?;
-        if block.is_null() {
-            self.validate_private().await?;
-        } else if [
-            "BlockPublicAcls",
-            "IgnorePublicAcls",
-            "BlockPublicPolicy",
-            "RestrictPublicBuckets",
-        ]
-        .iter()
-        .any(|k| block["PublicAccessBlockConfiguration"][k] != true)
-        {
-            return Err(Error::bad(
-                "The storage bucket must block all public access.",
-            ));
+        // Garage has neither public ACLs nor bucket policies, and is private on the Compose network.
+        if self.integrated {
+            self.call(self.s3api("head-bucket", &[])).await?;
+            return Ok(());
         }
-        let lifecycle = self
-            .optional(
-                self.s3api("get-bucket-lifecycle-configuration", &[]),
-                Some("NoSuchLifecycleConfiguration"),
-            )
-            .await?;
-        if lifecycle["Rules"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|r| r["Status"] == "Enabled")
-        {
-            return Err(Error::bad(
-                "Use a dedicated storage bucket without lifecycle rules that could remove active disk blocks.",
-            ));
-        }
-        let lock = self
-            .optional(
-                self.s3api("get-object-lock-configuration", &[]),
-                Some("ObjectLockConfigurationNotFoundError"),
-            )
-            .await?;
-        if lock["ObjectLockConfiguration"]["ObjectLockEnabled"] == "Enabled" {
-            return Err(Error::bad(
-                "Object Lock is incompatible with automatic trash deletion. Use a dedicated \
-                    bucket without Object Lock.",
-            ));
-        }
-        self.call(self.s3api("head-bucket", &[])).await?;
+        let privacy = async {
+            if self.r2 {
+                // R2 public domains and locks are provider controls confirmed by the owner.
+                return Ok(());
+            }
+            let block = self
+                .optional(
+                    self.s3api("get-public-access-block", &[]),
+                    Some("NotImplemented"),
+                )
+                .await?;
+            if block.is_null() {
+                self.validate_private().await?;
+            } else if [
+                "BlockPublicAcls",
+                "IgnorePublicAcls",
+                "BlockPublicPolicy",
+                "RestrictPublicBuckets",
+            ]
+            .iter()
+            .any(|k| block["PublicAccessBlockConfiguration"][k] != true)
+            {
+                return Err(Error::bad(
+                    "The storage bucket must block all public access.",
+                ));
+            }
+            Ok(())
+        };
+        let lifecycle = async {
+            let lifecycle = self
+                .optional(
+                    self.s3api("get-bucket-lifecycle-configuration", &[]),
+                    Some("NoSuchLifecycleConfiguration"),
+                )
+                .await?;
+            if lifecycle["Rules"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|r| r["Status"] == "Enabled")
+            {
+                return Err(Error::bad(
+                    "Use a dedicated storage bucket without lifecycle rules that could remove active disk blocks.",
+                ));
+            }
+            Ok(())
+        };
+        let object_lock = async {
+            if self.r2 {
+                return Ok(());
+            }
+            let lock = self
+                .optional(
+                    self.s3api("get-object-lock-configuration", &[]),
+                    Some("ObjectLockConfigurationNotFoundError"),
+                )
+                .await?;
+            if lock["ObjectLockConfiguration"]["ObjectLockEnabled"] == "Enabled" {
+                return Err(Error::bad(
+                    "Object Lock is incompatible with automatic trash deletion. Use a dedicated \
+                        bucket without Object Lock.",
+                ));
+            }
+            Ok(())
+        };
+        // These read-only checks are independent. Run together to fit the relay deadline.
+        tokio::try_join!(
+            privacy,
+            lifecycle,
+            object_lock,
+            self.call(self.s3api("head-bucket", &[]))
+        )?;
         Ok(())
     }
 
@@ -352,14 +572,20 @@ impl Storage {
         let _permit = self.hot.writes.acquire().await.map_err(Error::internal)?;
         let client = self
             .hot
-            .client(self.endpoint.as_deref(), &self.region)
+            .client(
+                self.endpoint.as_deref(),
+                &self.region,
+                self.credentials.as_ref(),
+            )
             .await;
         let bytes = bytes::Bytes::from(bytes);
         client
             .put_object()
             .bucket(&self.bucket)
             .key(key)
-            .server_side_encryption(aws_sdk_s3::types::ServerSideEncryption::Aes256)
+            .set_server_side_encryption(
+                (!self.r2).then_some(aws_sdk_s3::types::ServerSideEncryption::Aes256),
+            )
             .body(aws_sdk_s3::primitives::ByteStream::from(bytes.clone()))
             .send()
             .await
@@ -426,7 +652,11 @@ impl Storage {
         let _permit = self.hot.reads.acquire().await.map_err(Error::internal)?;
         let client = self
             .hot
-            .client(self.endpoint.as_deref(), &self.region)
+            .client(
+                self.endpoint.as_deref(),
+                &self.region,
+                self.credentials.as_ref(),
+            )
             .await;
         let bytes = tokio::time::timeout(Duration::from_secs(60), async {
             let output = client
@@ -471,8 +701,26 @@ impl Storage {
         let sample = self.hot.purge_metrics.start();
         let client = self
             .hot
-            .client(self.endpoint.as_deref(), &self.region)
+            .client(
+                self.endpoint.as_deref(),
+                &self.region,
+                self.credentials.as_ref(),
+            )
             .await;
+        // Garage and R2 do not implement versioning; delete the exact immutable key.
+        if self.integrated || self.r2 {
+            client
+                .delete_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .send()
+                .await
+                .map_err(|_| {
+                    Error::unavailable("Cannot delete obsolete disk object; cleanup will retry.")
+                })?;
+            sample.finish(0);
+            return Ok(());
+        }
         loop {
             let page = client
                 .list_object_versions()
@@ -541,29 +789,31 @@ impl Storage {
     }
 
     pub async fn purge(&self, prefix: &str) -> Result<()> {
-        let listed = self
-            .call(self.s3api("list-object-versions", &["--prefix", prefix]))
-            .await?;
-        for item in listed["Versions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .chain(listed["DeleteMarkers"].as_array().into_iter().flatten())
-        {
-            let key = item["Key"]
-                .as_str()
-                .filter(|k| k.starts_with(prefix))
-                .ok_or_else(|| Error::internal("Unexpected storage key"))?;
-            self.call(self.s3api(
-                "delete-object",
-                &[
-                    "--key",
-                    key,
-                    "--version-id",
-                    item["VersionId"].as_str().unwrap_or("null"),
-                ],
-            ))
-            .await?;
+        if !self.integrated && !self.r2 {
+            let listed = self
+                .call(self.s3api("list-object-versions", &["--prefix", prefix]))
+                .await?;
+            for item in listed["Versions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .chain(listed["DeleteMarkers"].as_array().into_iter().flatten())
+            {
+                let key = item["Key"]
+                    .as_str()
+                    .filter(|k| k.starts_with(prefix))
+                    .ok_or_else(|| Error::internal("Unexpected storage key"))?;
+                self.call(self.s3api(
+                    "delete-object",
+                    &[
+                        "--key",
+                        key,
+                        "--version-id",
+                        item["VersionId"].as_str().unwrap_or("null"),
+                    ],
+                ))
+                .await?;
+            }
         }
         let uploads = self
             .call(self.s3api("list-multipart-uploads", &["--prefix", prefix]))
@@ -635,20 +885,24 @@ mod tests {
                     .build(),
             );
             let hot = Arc::new(HotS3::new());
-            *hot.client.lock().await = Some((
+            hot.clients.lock().await.insert(
                 ClientKey {
                     endpoint: Some(endpoint.clone()),
                     region: "us-east-1".into(),
                     environment_endpoint: std::env::var("AWS_ENDPOINT_URL_S3").ok(),
                     profile: std::env::var("AWS_PROFILE").ok(),
+                    credentials: None,
                 },
                 sdk,
-            ));
+            );
             let storage = Storage {
                 bucket: "fixture".into(),
                 binary: "unused".into(),
                 endpoint: Some(endpoint),
                 region: "us-east-1".into(),
+                credentials: None,
+                integrated: false,
+                r2: false,
                 hot,
             };
             let error = storage.download_bytes("block", 4096).await.unwrap_err();

@@ -158,6 +158,10 @@ pub struct RelayedInstallation {
 
 impl RelayedInstallation {
     pub async fn new(extra_routes: axum::Router) -> Self {
+        Self::with_runner_url(extra_routes, String::new()).await
+    }
+
+    pub async fn with_runner_url(extra_routes: axum::Router, runner_url: String) -> Self {
         use leo_agent_manager::{config::Config, service::Service};
         use serde_json::json;
         use std::time::Duration;
@@ -192,7 +196,7 @@ impl RelayedInstallation {
             "concurrency": 1,
             "logger": false,
             "workerEnabled": false,
-            "runnerUrl": "",
+            "runnerUrl": runner_url,
         }))
         .unwrap();
         std::fs::create_dir_all(root.path().join("home/.codex")).unwrap();
