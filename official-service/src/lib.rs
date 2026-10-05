@@ -564,6 +564,7 @@ async fn logout(State(service): State<Service>, headers: HeaderMap) -> Result<Re
         .execute(&mut *transaction)
         .await?;
     transaction.commit().await?;
+    service.relay.revoke_session(&digest(token));
 
     let secure = if service.origin.starts_with("https://") {
         "; Secure"

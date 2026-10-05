@@ -192,12 +192,22 @@ impl RelayedInstallation {
     }
 
     pub async fn with_runner_url(extra_routes: axum::Router, runner_url: String) -> Self {
+        Self::with_app(extra_routes, runner_url, Fixture::new().await).await
+    }
+
+    pub async fn with_pool_size(extra_routes: axum::Router, connections: u32) -> Self {
+        let app =
+            Fixture::with_pool_size(leo_official_service::OAuthProviders::default(), connections)
+                .await;
+        Self::with_app(extra_routes, String::new(), app).await
+    }
+
+    async fn with_app(extra_routes: axum::Router, runner_url: String, app: Fixture) -> Self {
         use leo_agent_manager::{config::Config, service::Service};
         use serde_json::json;
         use std::time::Duration;
         use tokio_util::sync::CancellationToken;
 
-        let app = Fixture::new().await;
         let (cookie, session) = login(&app, "relay-owner@example.test").await;
         let claim: Value = app
             .client

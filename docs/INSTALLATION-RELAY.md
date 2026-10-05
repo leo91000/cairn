@@ -54,8 +54,7 @@ and a temporary confirmation proof bound to this claim and account. Explicit
 confirmation through `/api/installations/device-claim` requires that proof;
 `/api/relay/device-claim/poll` then attaches the owner and rotates the token in one
 transaction. A fresh start keeps only an expiring challenge, reserving no permanent
-installation row until approval is collected. Starting a subsequent claim deletes
-expired challenges. Recovery always preserves the existing installation row. Codes and polling secrets are stored only
+installation row until approval is collected. Expired challenges are removed by the official service’s hourly maintenance. Recovery always preserves the existing installation row. Codes and polling secrets are stored only
 as digests, expire after ten minutes and are single-use. Start, approval and
 poll operations use persisted per-peer/account rate limits. Starting another
 claim for the same installation invalidates its previous pending challenge.
@@ -63,8 +62,13 @@ claim for the same installation invalidates its previous pending challenge.
 Choose **Detach installation** inside the installation and confirm explicitly.
 The owner is cleared and the active relay is cut; local data and the official
 installation row remain. Deleting its owning Leo account also clears ownership
-rather than cascading deletion of the installation. Active relays recheck the
-identity every second, covering account deletion and the upgrade/detach race.
+rather than cascading deletion of the installation. Active relays recheck the persisted machine identity every 30 seconds, covering
+account deletion outside this process. A confirmed revocation closes the tunnel
+on that check. Local detachment still closes it immediately. Upgrade and
+post-registration authentication fail closed; an established tunnel tolerates
+temporary database errors and five-second check timeouts until three consecutive
+checks fail (about 90 seconds). A successful check resets that budget. Checks run separately from the socket loop,
+so database latency cannot delay session expiry or cancellation.
 The digest of the private proof used to start recovery is retained separately
 from the current tunnel credential. If its successful response is lost before the
 file is saved, detach in the app and retry with that file to recover the same ID.
@@ -131,8 +135,9 @@ pauses until credit arrives, chunks are limited to 64 KiB, and each official HTT
 body has a one-chunk queue. Streams can use 24 of the 32 request slots;
 eight slots remain available to finite API requests.
 A slow reader, failed stream or failed handler affects only its own request.
-Closing the browser response cancels the remote subscription and releases its
-slot. The official service disables reverse-proxy SSE buffering and still imposes
+Closing the browser response records cancellation and wakes the socket loop,
+which cancels the remote subscription and releases its slot. Cancellation is
+kept outside the bounded credit queue, so a full queue cannot lose it. The official service disables reverse-proxy SSE buffering and still imposes
 its own security headers. Configure proxies to permit long-lived responses.
 
 A lost tunnel ends open browser streams. The existing browser SSE client retries
@@ -156,6 +161,12 @@ revocation preserves the tunnel and other accounts' streams. Access generations
 prevent an upload authorized before revocation from dispatching any request
 afterward, including an ordinary queued request. Work admitted before revocation
 is preserved; revocation does not cancel the installation's agent executions.
+Logging out revokes streams of that browser session, including its other tabs,
+while preserving other devices. A stream’s session is rechecked after uploading
+its request and registering its revocation watch. Its expiry is scheduled locally
+from the persisted session deadline; an idle or backpressured body cannot keep
+an expired session alive. These changes do not stop agent executions.
+
 The detachment, member removal and departure endpoints commit their access
 change before revoking the real official HTTP bodies. Detachment also forgets
 all memberships and invitations; reclaiming never restores previous sharing.
