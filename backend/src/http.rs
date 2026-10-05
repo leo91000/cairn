@@ -58,6 +58,7 @@ pub async fn router(service: Arc<Service>) -> Result<Router> {
     Ok(Router::new()
         .route("/health", any(health))
         .route("/mcp", any(crate::mcp_server::handle))
+        .route("/api/mcp", any(crate::mcp_server::handle))
         .route("/mcp-workspace", any(crate::mcp_server::handle))
         .route("/mcp-gateway/{id}", any(crate::mcp_server::handle))
         .route("/internal/deployment-lease", any(lease))
@@ -291,10 +292,8 @@ fn check_security(
     {
         return Err(Error::forbidden("Unexpected host."));
     }
-    let public_artifact = crate::artifacts::sharing::public_read(path, method);
     let requested = header(headers, "origin");
-    if !public_artifact
-        && !requested.is_empty()
+    if !requested.is_empty()
         && requested != app.service.config.public_url
         && !development_origin(requested)
     {
@@ -326,6 +325,16 @@ fn authenticate_installation(request: &Request) -> Result<()> {
         .ok_or_else(|| {
             Error::unauthorized("Access this installation through the official service.")
         })?;
+    if let Some(token) = &identity.public_artifact {
+        if path == format!("/api/shared-artifacts/{token}")
+            && crate::artifacts::sharing::public_read(path, request.method().as_str())
+        {
+            return Ok(());
+        }
+        return Err(Error::forbidden(
+            "This public link only permits reading its file.",
+        ));
+    }
     if identity.role != InstallationRole::Owner && owner_operation(request.method().as_str(), path)
     {
         return Err(Error::forbidden(
@@ -565,7 +574,7 @@ async fn raw_route(app: &App, path: &str, request: Request) -> Result<Route> {
         ["", "api", "agents", agent, "avatar"] => {
             crate::agent_avatars::http(s, agent, request).await?
         }
-        ["", "api", "public", "artifacts", token] => {
+        ["", "api", "shared-artifacts", token] => {
             crate::artifacts::sharing::http(s, token, request).await?
         }
         ["", "api", "runs", run, rest @ ..] => {

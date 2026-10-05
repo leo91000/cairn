@@ -215,7 +215,18 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
     let s = &app.service;
     let bearer = bearer(&request);
     let endpoint = Endpoint::of(request.uri().path());
-    if let Some(challenge) = authenticate(s, &endpoint, &bearer).await? {
+    let scopes = request
+        .extensions()
+        .get::<crate::auth::InstallationIdentity>()
+        .and_then(|identity| identity.mcp_scopes.clone());
+    let relayed_management = request.uri().path() == "/api/mcp";
+    if relayed_management {
+        if scopes.is_none() {
+            return Err(Error::unauthorized(
+                "A verified official MCP grant is required.",
+            ));
+        }
+    } else if let Some(challenge) = authenticate(s, &endpoint, &bearer).await? {
         return Ok(challenge);
     }
     if request.method() != "POST" {
@@ -257,7 +268,16 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
     if id.is_null() {
         return Ok(StatusCode::ACCEPTED.into_response());
     }
-    let dispatched = dispatch(s, &endpoint, &bearer, method, &body["params"], modern).await;
+    let dispatched = dispatch(
+        s,
+        &endpoint,
+        &bearer,
+        scopes.as_deref(),
+        method,
+        &body["params"],
+        modern,
+    )
+    .await;
     if matches!(method, "initialize" | "tools/list") {
         let (endpoint, connection_id) = match &endpoint {
             Endpoint::Management => ("management", "unknown"),
@@ -312,6 +332,7 @@ async fn dispatch(
     s: &Arc<Service>,
     endpoint: &Endpoint,
     bearer: &str,
+    scopes: Option<&[String]>,
     method: &str,
     params: &Value,
     modern: bool,
@@ -358,12 +379,18 @@ async fn dispatch(
         _ => match endpoint {
             Endpoint::Workspace => crate::project_workspaces::rpc(s, bearer, method, params).await,
             Endpoint::Gateway(id) => proxy(s, id, bearer, method, params.clone()).await,
-            Endpoint::Management => management(s, bearer, method, params).await,
+            Endpoint::Management => management(s, bearer, scopes, method, params).await,
         },
     }
 }
 
-async fn management(s: &Arc<Service>, bearer: &str, method: &str, params: &Value) -> Result<Value> {
+async fn management(
+    s: &Arc<Service>,
+    bearer: &str,
+    scopes: Option<&[String]>,
+    method: &str,
+    params: &Value,
+) -> Result<Value> {
     if let Some(listing) = empty_listing(method) {
         return Ok(listing);
     }
@@ -374,7 +401,7 @@ async fn management(s: &Arc<Service>, bearer: &str, method: &str, params: &Value
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            call(s, bearer, text(params, "name"), args).await
+            call(s, bearer, scopes, text(params, "name"), args).await
         }
         _ => Err(Error::not_found("Method not found")),
     }
@@ -432,14 +459,26 @@ fn catalog() -> Vec<ToolDescriptor> {
         .collect()
 }
 
-async fn call(s: &Arc<Service>, bearer: &str, name: &str, args: Value) -> Result<Value> {
+async fn call(
+    s: &Arc<Service>,
+    bearer: &str,
+    scopes: Option<&[String]>,
+    name: &str,
+    args: Value,
+) -> Result<Value> {
     let tool = CATALOG
         .iter()
         .find(|tool| tool.name == name)
         .ok_or_else(|| Error::not_found("Unknown tool"))?;
     let scope = tool.scope.as_str();
     let operation = async {
-        s.auth.verify(bearer, Some(scope)).await?;
+        if let Some(scopes) = scopes {
+            if !scopes.iter().any(|allowed| allowed == scope) {
+                return Err(Error::forbidden(format!("The {scope} scope is required.")));
+            }
+        } else {
+            s.auth.verify(bearer, Some(scope)).await?;
+        }
         let args = parse(&format!("mcp:{name}"), args)?;
         invoke(s, name, args).await
     }

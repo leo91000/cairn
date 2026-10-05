@@ -547,9 +547,10 @@ async fn dispatch(
     request
         .extensions_mut()
         .insert(ConnectInfo("127.0.0.1:0".parse::<SocketAddr>().unwrap()));
-    request
-        .extensions_mut()
-        .insert(InstallationIdentity::trusted(role, &input.account_id));
+    let mut identity = InstallationIdentity::trusted(role, &input.account_id);
+    identity.mcp_scopes = input.mcp_scopes;
+    identity.public_artifact = input.public_artifact;
+    request.extensions_mut().insert(identity);
 
     let deadline = tokio::time::Instant::now() + REQUEST_TIMEOUT;
     let response = tokio::time::timeout_at(deadline, router.oneshot(request))
@@ -656,4 +657,17 @@ async fn dispatch(
         headers,
         body,
     }))
+}
+
+/// Public addressing comes from the claimed identity, never from PUBLIC_URL.
+pub async fn official_address(data_dir: &Path) -> Result<Option<(String, String)>> {
+    let Some(identity) = read_identity(&data_dir.join("installation-relay")).await? else {
+        return Ok(None);
+    };
+    let official = origin(&identity.origin)?;
+    crate::validation::uuid(&identity.installation_id)?;
+    Ok(Some((
+        official.origin().ascii_serialization(),
+        identity.installation_id,
+    )))
 }

@@ -24,6 +24,10 @@ pub struct ApiRequest {
     pub id: String,
     pub account_id: String,
     pub role: Role,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_scopes: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_artifact: Option<String>,
     pub method: String,
     pub path: String,
     pub headers: Vec<(String, String)>,
@@ -114,6 +118,8 @@ pub fn request_header(name: &str) -> bool {
             | "if-none-match"
             | "if-modified-since"
             | "last-event-id"
+            | "mcp-protocol-version"
+            | "mcp-method"
     )
 }
 
@@ -127,6 +133,8 @@ pub fn response_header(name: &str) -> bool {
             | "accept-ranges"
             | "content-range"
             | "retry-after"
+            | "mcp-protocol-version"
+            | "www-authenticate"
     )
 }
 

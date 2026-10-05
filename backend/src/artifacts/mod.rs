@@ -370,7 +370,11 @@ async fn commit(
     visibility: &str,
 ) -> Result<Value> {
     let visibility = visibility.to_owned();
-    let origin = s.config.public_url.clone();
+    let origin = if visibility == "public" {
+        sharing::public_origin(s).await?
+    } else {
+        String::new()
+    };
     let token = bearer.to_owned();
     let expected_attempt = attempt.to_owned();
     s.store

@@ -1,5 +1,6 @@
 mod installations;
 pub mod installer;
+mod mcp;
 mod methods;
 mod oauth;
 mod passkeys;
@@ -166,6 +167,13 @@ pub async fn router_with_relay(
                 include_str!("../migrations/202610040053_installation_sharing.sql").into(),
                 false,
             ),
+            Migration::new(
+                202610050055,
+                "official MCP grants".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/202610050055_mcp.sql").into(),
+                false,
+            ),
         ]),
         ..Migrator::DEFAULT
     };
@@ -258,12 +266,47 @@ pub async fn router_with_relay(
             "/api/installations/{installation}/api/{*path}",
             any(relay::forward),
         )
+        .route("/api/mcp/oauth/preview", post(mcp::preview))
+        .route("/api/mcp/oauth/consent", post(mcp::consent))
+        .route(
+            "/api/installations/{installation}/tokens",
+            get(mcp::list).post(mcp::personal),
+        )
+        .route(
+            "/api/installations/{installation}/tokens/{grant}",
+            axum::routing::delete(mcp::revoke),
+        )
         .layer(middleware::from_fn_with_state(
             service.clone(),
             browser_security,
         ))
         .merge(
             Router::new()
+                .merge(
+                    Router::new()
+                        .route("/mcp", any(mcp::handle))
+                        .route(
+                            "/api/public/installations/{installation}/artifacts/{token}",
+                            get(relay::public_artifact),
+                        )
+                        .route("/oauth/register", post(mcp::register))
+                        .route("/oauth/authorize", get(mcp::authorize))
+                        .route("/oauth/token", post(mcp::exchange))
+                        .route("/oauth/revoke", post(mcp::revoke_token))
+                        .route(
+                            "/.well-known/oauth-protected-resource",
+                            get(mcp::resource_metadata),
+                        )
+                        .route(
+                            "/.well-known/oauth-protected-resource/mcp",
+                            get(mcp::resource_metadata),
+                        )
+                        .route(
+                            "/.well-known/oauth-authorization-server",
+                            get(mcp::server_metadata),
+                        )
+                        .layer(middleware::from_fn(mcp::public_security)),
+                )
                 .route("/api/relay/claim", post(installations::claim))
                 .route(
                     "/api/relay/device-claim/start",

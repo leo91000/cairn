@@ -458,6 +458,102 @@ pub(super) async fn forward(
             "Installation API route not found",
         ));
     }
+    let target = target.to_owned();
+    send(
+        tunnel,
+        access_generation,
+        account,
+        Capability::Account(role),
+        &target,
+        request,
+    )
+    .await
+}
+
+pub(super) async fn mcp(
+    service: &Service,
+    installation: &str,
+    account: String,
+    scopes: Vec<String>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    let tunnel = service
+        .relay
+        .connections
+        .lock()
+        .unwrap()
+        .get(installation)
+        .cloned();
+    send(
+        tunnel,
+        0,
+        account,
+        Capability::Mcp(scopes),
+        "/api/mcp",
+        request,
+    )
+    .await
+}
+
+enum Capability {
+    Account(Role),
+    Mcp(Vec<String>),
+    PublicArtifact(String),
+}
+
+pub(super) async fn public_artifact(
+    State(service): State<Service>,
+    Path((installation, token)): Path<(String, String)>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    if uuid::Uuid::parse_str(&installation).is_err() || uuid::Uuid::parse_str(&token).is_err() {
+        return Err(ApiError(StatusCode::NOT_FOUND, "Public file not found"));
+    }
+    let claimed: Option<(String,)> =
+        query_as("SELECT id FROM installations WHERE id = $1 AND owner_id IS NOT NULL")
+            .bind(&installation)
+            .fetch_optional(&service.pool)
+            .await?;
+    if claimed.is_none() {
+        return Err(ApiError(StatusCode::NOT_FOUND, "Public file not found"));
+    }
+    let tunnel = service
+        .relay
+        .connections
+        .lock()
+        .unwrap()
+        .get(&installation)
+        .cloned();
+    if tunnel.is_none() || tunnel.as_ref().is_some_and(|tunnel| *tunnel.stop.borrow()) {
+        return Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "This installation is offline. The public file will be available when it reconnects.",
+        ));
+    }
+    let mut target = format!("/api/shared-artifacts/{token}");
+    if let Some(query) = request.uri().query() {
+        target.push('?');
+        target.push_str(query);
+    }
+    send(
+        tunnel,
+        0,
+        String::new(),
+        Capability::PublicArtifact(token),
+        &target,
+        request,
+    )
+    .await
+}
+
+async fn send(
+    tunnel: Option<Arc<Tunnel>>,
+    access_generation: u64,
+    account: String,
+    capability: Capability,
+    target: &str,
+    request: Request,
+) -> Result<Response, ApiError> {
     let streaming = leo_relay_protocol::stream_path(target);
 
     // Reserve capacity before reading the body, including requests not yet sent.
@@ -511,10 +607,17 @@ pub(super) async fn forward(
                 .map(|value| (name.to_string(), value.to_owned()))
         })
         .collect();
+    let (role, mcp_scopes, public_artifact) = match capability {
+        Capability::Account(role) => (role, None, None),
+        Capability::Mcp(scopes) => (Role::Owner, Some(scopes), None),
+        Capability::PublicArtifact(token) => (Role::Member, None, Some(token)),
+    };
     let api_request = ApiRequest {
         id: uuid::Uuid::new_v4().to_string(),
         account_id: account.clone(),
         role,
+        mcp_scopes,
+        public_artifact,
         method: request.method().to_string(),
         path: target.to_owned(),
         headers,

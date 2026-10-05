@@ -35,6 +35,8 @@ pub enum InstallationRole {
 #[derive(Clone)]
 pub struct InstallationIdentity {
     pub role: InstallationRole,
+    pub mcp_scopes: Option<Vec<String>>,
+    pub public_artifact: Option<String>,
     oauth_binding: String,
 }
 
@@ -45,6 +47,8 @@ impl InstallationIdentity {
     pub fn trusted(role: InstallationRole, account_id: &str) -> Self {
         Self {
             role,
+            mcp_scopes: None,
+            public_artifact: None,
             oauth_binding: format!("leo-account:{account_id}"),
         }
     }
