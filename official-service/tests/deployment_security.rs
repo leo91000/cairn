@@ -33,7 +33,10 @@ async fn recipient_can_use_the_emailed_code_when_someone_else_requested_it_first
     let verified = app
         .post(
             "/api/account/verify",
-            json!({ "challenge": recipient["challenge"], "code": code }),
+            json!({
+                "challenge": recipient["challenge"],
+                "code": code,
+            }),
         )
         .await;
     assert_eq!(verified.status(), StatusCode::OK);
@@ -43,7 +46,10 @@ async fn recipient_can_use_the_emailed_code_when_someone_else_requested_it_first
     assert_eq!(
         app.post(
             "/api/account/verify",
-            json!({ "challenge": attacker["challenge"], "code": code }),
+            json!({
+                "challenge": attacker["challenge"],
+                "code": code,
+            }),
         )
         .await
         .status(),

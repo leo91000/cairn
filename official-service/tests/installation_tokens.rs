@@ -53,7 +53,9 @@ async fn rotating_a_machine_token_closes_old_streams_and_can_retry_a_lost_respon
             .post(
                 "/api/relay/device-claim/start",
                 json!({
-                    "name": "Old proof", "protocol": 1, "identity": identity,
+                    "name": "Old proof",
+                    "protocol": 1,
+                    "identity": identity,
                 })
             )
             .await

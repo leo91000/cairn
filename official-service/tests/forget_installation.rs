@@ -141,7 +141,9 @@ async fn only_the_owner_can_forget_an_installation_and_its_machine_keeps_its_dat
             .post(
                 "/api/relay/device-claim/start",
                 json!({
-                    "name": "Old proof", "protocol": 1, "identity": identity,
+                    "name": "Old proof",
+                    "protocol": 1,
+                    "identity": identity,
                 })
             )
             .await
