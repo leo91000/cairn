@@ -91,3 +91,7 @@ Le nombre maximal d’exécutions simultanées sur un compte. Le réduire laisse
 
 **Réinitialisation en réserve** :
 Une remise à zéro de fenêtre d’usage offerte par Codex, utilisée automatiquement quand la capacité restante d’un compte actif tombe à 2 %. Elle n’existe pas pour Claude Code.
+
+**Auteur d’une tâche** :
+Le compte Leo qui a créé une tâche. Le retrait de cet auteur met fin aux déclenchements planifiés de ses tâches ; leur travail reste partagé avec toute l’installation.
+

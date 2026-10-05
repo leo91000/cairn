@@ -245,7 +245,7 @@ async fn five_failed_attempts_invalidate_a_code_and_success_is_single_use() {
 }
 
 #[tokio::test]
-async fn email_delivery_is_limited_across_processes_and_replaced_codes_stop_working() {
+async fn email_delivery_is_limited_across_processes_and_pending_codes_keep_working() {
     let app = Fixture::new().await;
     let (challenge, code) = app.code("rate@example.test").await;
     let response = app
@@ -282,11 +282,8 @@ async fn email_delivery_is_limited_across_processes_and_replaced_codes_stop_work
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    assert_eq!(
-        app.verify(&challenge, &code).await.status(),
-        StatusCode::UNAUTHORIZED
-    );
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(app.verify(&challenge, &code).await.status(), StatusCode::OK);
     assert_eq!(
         app.post(
             "/api/account/email-code",

@@ -100,9 +100,6 @@ pub(super) async fn start(
             &URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
         );
 
-    query("DELETE FROM sign_in_challenges WHERE expires_at <= now()")
-        .execute(&service.pool)
-        .await?;
     query("INSERT INTO sign_in_challenges (id, kind, browser_digest, account_id, session_digest, state) VALUES ($1, $2, $3, $4, $5, $6)")
         .bind(&state).bind(format!("oauth:{name}")).bind(digest(&browser)).bind(account_id)
         .bind(digest(session_token(&headers)))

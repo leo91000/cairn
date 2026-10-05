@@ -58,9 +58,6 @@ pub(super) async fn claim_code(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let account = account(&service, &headers, &Method::POST).await?;
     consume_limit(&service.pool, &format!("claim-code:{account}"), 10).await?;
-    query("DELETE FROM installation_claim_codes WHERE expires_at <= now()")
-        .execute(&service.pool)
-        .await?;
 
     let code = random_token();
     query("INSERT INTO installation_claim_codes (digest, account_id, expires_at) VALUES ($1, $2, now() + interval '10 minutes')")
@@ -261,12 +258,10 @@ pub(super) async fn start_device(
         (uuid::Uuid::new_v4().to_string(), requested_name.to_owned())
     };
 
-    query(
-        "DELETE FROM installation_device_claims WHERE installation_id = $1 OR expires_at <= now()",
-    )
-    .bind(&installation)
-    .execute(&mut *transaction)
-    .await?;
+    query("DELETE FROM installation_device_claims WHERE installation_id = $1")
+        .bind(&installation)
+        .execute(&mut *transaction)
+        .await?;
     let device = random_token();
     let code = random_token()[..12].to_uppercase();
     query("INSERT INTO installation_device_claims (device_digest, user_digest, installation_id, installation_name, recovering, expires_at) VALUES ($1, $2, $3, $4, $5, now() + interval '10 minutes')")
