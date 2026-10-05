@@ -490,6 +490,7 @@ impl Templates {
                     () = stop.cancelled() => return Err(Error::unavailable("Template preparation cancelled.")),
                     guard = self.cache.write() => guard,
                 };
+                let _images = crate::microvm::images::CONTROL.read().await;
                 tokio::fs::rename(staging.path(), &template).await?;
                 tokio::fs::File::open(&root).await?.sync_all().await?;
                 Self::prune(&root, &name).await?;
@@ -537,6 +538,7 @@ impl Templates {
     }
 
     async fn clone_disk(source: &Path, target: &Path, stop: &CancellationToken) -> Result<()> {
+        let _images = crate::microvm::images::CONTROL.read().await;
         if target.exists() {
             return Err(Error::conflict("Snapshot destination already exists."));
         }

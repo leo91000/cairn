@@ -102,18 +102,38 @@ async fn advertise(s: &Service) -> Result<String> {
     Ok(serde_json::to_value(release)?.to_string())
 }
 
+const RUNTIME_ADVERTISEMENT_MS: i64 = 24 * 60 * 60 * 1000;
+
 async fn advertise_runtime(
     store: &crate::store::Store,
     runtime: &str,
     image: &str,
-    _now: i64,
+    now: i64,
 ) -> Result<()> {
+    let key = format!("node-runtime:{runtime}");
+    let runtime = runtime.to_owned();
+    let image = image.to_owned();
+    let deadline = now.saturating_add(RUNTIME_ADVERTISEMENT_MS);
     store
-        .set(
-            &format!("node-runtime:{runtime}"),
-            json!({ "runtimeId": runtime, "image": image }),
-            None,
-        )
+        .transaction(move |db| {
+            // Migrate permanent records once. Refreshing the current runtime must
+            // not keep extending every obsolete runtime's grace period.
+            for (old_key, mut value) in db.keys("node-runtime:")? {
+                if old_key != key && value["advertisedUntil"].as_i64().is_none() {
+                    value["advertisedUntil"] = deadline.into();
+                    db.set(&old_key, &value, Some(deadline))?;
+                }
+            }
+            db.set(
+                &key,
+                &json!({
+                    "runtimeId": runtime,
+                    "image": image,
+                    "advertisedUntil": deadline,
+                }),
+                Some(deadline),
+            )
+        })
         .await
 }
 

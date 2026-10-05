@@ -16,14 +16,14 @@ les schémas sans compte. Une VM déjà initialisée reste refusée.
 
 Les erreurs de préchauffage attendent 10, 20, 40, 80 puis 160 secondes ; le
 sixième échec ouvre le circuit pendant une heure. Le délai exponentiel est
-plafonné à cinq minutes. Un succès remet le compteur à zéro ; un nouveau
+plafonné à 160 secondes. Un succès remet le compteur à zéro ; un nouveau
 runtime, chargé par un nouveau contrôleur, repart sans historique d'erreurs.
 Les annulations ne comptent pas comme erreurs. Le refus de capacité des anciens
 guests continue à désactiver le préchauffage pour ce contrôleur.
 
 Au démarrage et toutes les dix minutes, le contrôleur récupère les images qui
 ne sont ni courantes ni référencées par un disque, un environnement ou un
-modèle. La publication des références et la récupération se sérialisent ; une
+modèle. La publication des références (y compris lors des restaurations distantes) et la récupération se sérialisent ; une
 référence illisible fait abandonner le cycle entier. Les images sont incluses
 dans le budget de disque alloué. Les annonces de runtimes sont des leases de
 24 heures renouvelées lors des annonces ; les anciennes annonces permanentes

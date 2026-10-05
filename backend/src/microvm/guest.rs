@@ -542,6 +542,11 @@ async fn seed_codex() -> Result<usize> {
 
 /// Warmup never reads a previous conversation or an imported configuration.
 async fn prepare_anonymous_codex() -> Result<()> {
+    if filesystems::mounted() {
+        return Err(Error::conflict(
+            "Only a fresh VM can initialize anonymous Codex.",
+        ));
+    }
     prepare_anonymous_codex_home(
         Path::new("/home/node/.codex"),
         Path::new("/opt/leo-codex-state"),
@@ -565,7 +570,12 @@ async fn prepare_anonymous_codex_home(
         ));
     }
     match tokio::fs::symlink_metadata(home).await {
-        Ok(metadata) if metadata.is_dir() => {}
+        Ok(metadata) if metadata.is_dir() => {
+            // This home belongs to the immutable image, not a conversation.
+            // Discard inherited CLI/build state before installing account-free schemas.
+            tokio::fs::remove_dir_all(home).await?;
+            tokio::fs::create_dir(home).await?;
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             tokio::fs::create_dir(home).await?;
         }
@@ -574,14 +584,6 @@ async fn prepare_anonymous_codex_home(
                 "Codex home must be an anonymous directory.",
             ));
         }
-    }
-    if tokio::fs::read_dir(home)
-        .await?
-        .next_entry()
-        .await?
-        .is_some()
-    {
-        return Err(Error::conflict("Codex home already contains state."));
     }
     tokio::fs::set_permissions(home, std::os::unix::fs::PermissionsExt::from_mode(0o700)).await?;
     std::os::unix::fs::chown(home, Some(uid), Some(gid))?;

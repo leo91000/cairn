@@ -32,6 +32,8 @@ struct Slots {
     preparing: Option<Preparing>,
     retry_after: Option<Instant>,
     warm_disabled: bool,
+    warm_failures: u32,
+    warm_circuit_open: bool,
 }
 
 struct Preparing {
@@ -40,7 +42,47 @@ struct Preparing {
     done: watch::Receiver<bool>,
 }
 
+const WARM_FAILURE_LIMIT: u32 = 6;
+const WARM_RETRY_MAX: Duration = Duration::from_secs(160);
+const WARM_CIRCUIT_COOLDOWN: Duration = Duration::from_secs(3600);
+
 impl Slots {
+    fn warming_allowed(&mut self, now: Instant) -> bool {
+        if self.warm_disabled || self.retry_after.is_some_and(|at| now < at) {
+            return false;
+        }
+
+        if self.warm_circuit_open {
+            self.warm_failures = 0;
+            self.warm_circuit_open = false;
+            tracing::info!(target: "leo_performance", operation = "vm_pool", event = "circuit_rearmed");
+        }
+
+        self.retry_after = None;
+        true
+    }
+
+    fn warm_failure(&mut self, now: Instant) {
+        self.warm_failures = self.warm_failures.saturating_add(1).min(WARM_FAILURE_LIMIT);
+        self.warm_circuit_open = self.warm_failures >= WARM_FAILURE_LIMIT;
+
+        let delay = if self.warm_circuit_open {
+            WARM_CIRCUIT_COOLDOWN
+        } else {
+            Duration::from_secs(10 * (1 << (self.warm_failures - 1))).min(WARM_RETRY_MAX)
+        };
+        self.retry_after = Some(now + delay);
+
+        tracing::warn!(
+            target: "leo_performance",
+            operation = "vm_pool",
+            event = if self.warm_circuit_open { "circuit_open" } else { "retry" },
+            consecutive_errors = self.warm_failures,
+            retry_seconds = delay.as_secs(),
+            "Anonymous VM preparation suspended"
+        );
+    }
+
     fn ready_bytes(&self) -> Option<u64> {
         self.ready.iter().try_fold(0u64, |bytes, reservation| {
             bytes.checked_add(reservation.vm.as_ref()?.resident_bytes()?)
@@ -147,6 +189,9 @@ impl Pool {
             tokio::fs::remove_dir_all(&prepared).await?;
         }
         crate::storage::environment::recover(&state).await?;
+        if let Err(error) = super::images::collect(&state, &image).await {
+            tracing::warn!(message = %error.message, "Runtime image collection skipped");
+        }
         // Retain the guest OS and toolchains, but never pin the chat adapter to
         // an obsolete image. Copy once per controller, then import into tmpfs.
         let entrypoint = state.join("entrypoint");
@@ -281,6 +326,7 @@ impl Pool {
     }
 
     pub async fn monitor(self: Arc<Self>) {
+        let mut next_image_gc = Instant::now() + Duration::from_secs(600);
         loop {
             tokio::select! {
                 () = self.stop.cancelled() => {
@@ -288,6 +334,12 @@ impl Pool {
                     return;
                 },
                 () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+            }
+            if Instant::now() >= next_image_gc {
+                next_image_gc = Instant::now() + Duration::from_secs(600);
+                if let Err(error) = super::images::collect(&self.state, &self.image).await {
+                    tracing::warn!(message = %error.message, "Runtime image collection skipped");
+                }
             }
             if let Err(error) = self.maintain_retained().await {
                 tracing::warn!(message = %error.message, "Could not maintain idle conversation VMs");
@@ -679,8 +731,7 @@ impl Pool {
         if self.stop.is_cancelled()
             || slots.ready.len() >= self.warm_capacity
             || slots.preparing.is_some()
-            || slots.warm_disabled
-            || slots.retry_after.is_some_and(|at| Instant::now() < at)
+            || !slots.warming_allowed(Instant::now())
         {
             return Ok(());
         }
@@ -766,6 +817,9 @@ impl Reservation {
         {
             let mut slots = pool.slots.lock().await;
             if matches!(operation, Ok(true)) && !stop.is_cancelled() && !pool.stop.is_cancelled() {
+                slots.warm_failures = 0;
+                slots.warm_circuit_open = false;
+                slots.retry_after = None;
                 self.prepared = Some(ready::Prepared { budget });
                 let completion = self.completion.take().unwrap();
                 slots.preparing = None;
@@ -774,10 +828,13 @@ impl Reservation {
                 tracing::info!(target: "leo_performance", operation = "vm_pool", event = "ready");
                 return;
             }
-            if matches!(operation, Ok(false)) {
-                slots.warm_disabled = true;
+            if !stop.is_cancelled() && !pool.stop.is_cancelled() {
+                if matches!(operation, Ok(false)) {
+                    slots.warm_disabled = true;
+                } else if operation.is_err() {
+                    slots.warm_failure(Instant::now());
+                }
             }
-            slots.retry_after = Some(Instant::now() + Duration::from_secs(10));
         }
         if let Err(error) = operation
             && !stop.is_cancelled()
@@ -1185,6 +1242,15 @@ mod tests {
                 "expected {seconds}s, got {remaining:?}"
             );
             assert_eq!(pool.health().await.occupied, 0);
+        }
+        {
+            let mut slots = pool.slots.lock().await;
+            assert!(slots.warm_circuit_open);
+            assert!(!slots.warming_allowed(Instant::now()));
+            let retry_at = slots.retry_after.unwrap();
+            assert!(slots.warming_allowed(retry_at));
+            assert_eq!(slots.warm_failures, 0);
+            assert!(!slots.warm_circuit_open);
         }
         // The circuit does not affect foreground admission.
         let mut live = pool.reserve(&cold_plan("live")).await.unwrap();
