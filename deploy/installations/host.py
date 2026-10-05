@@ -302,11 +302,16 @@ def update(origin):
 
     def launch(image):
         runtime = inspect(image)
+        deployment = json.loads((ROOT / 'compose.json').read_text())
+        deployment['services']['manager']['image'] = image
+        deployment['services']['manager']['environment']['LEO_NODE_IMAGE'] = image
+        deployment['services']['runner']['image'] = image
+
         # The manager saves checkpoints before the runner is stopped. Persistent
         # volumes and Garage are never recreated or removed by this supervisor.
         run(docker + ['stop', '--timeout', '300', 'manager'], timeout=330)
         run(docker + ['stop', '--timeout', '60', 'runner'], timeout=90)
-        atomic(ROOT / 'compose.json', json.dumps(compose(image, origin), indent=2))
+        atomic(ROOT / 'compose.json', json.dumps(deployment, indent=2))
         run(docker + ['up', '-d', '--wait', '--wait-timeout', '240', '--pull', 'never', '--no-deps', 'runner', 'manager'], timeout=300)
         health = "fetch('http://127.0.0.1:4310/health').then(r=>{if(!r.ok)throw Error();return r.json()}).then(v=>{if(v.status!=='ok'||v.runtimeId!==" + json.dumps(runtime) + ")process.exit(1)}).catch(()=>process.exit(1))"
         # Reuse Compose's runner health deadline; the manager also checks the
@@ -315,6 +320,7 @@ def update(origin):
 
     def finish(updated):
         pending = config.pop('pendingImage')
+        config.pop('leaseAcquired', None)
         if updated:
             config.update(previousImage=config['image'], image=pending, failedImage=None)
         else:
@@ -325,6 +331,10 @@ def update(origin):
     if config.get('pendingImage'):
         # A stopped supervisor never guesses whether the candidate was healthy.
         # Recover the last committed approved image before accepting another.
+        if not config.get('leaseAcquired'):
+            # A refused or lost POST must never let recovery bypass another
+            # deployment's lease. Retry the same owner before stopping anything.
+            lease(config['leaseOwner'])
         launch(config['image'])
         finish(False)
     if config.get('leaseOwner'):
@@ -347,6 +357,8 @@ def update(origin):
         config.update(pendingImage=image, leaseOwner=owner)
         atomic(config_file, json.dumps(config))
         lease(owner)
+        config['leaseAcquired'] = True
+        atomic(config_file, json.dumps(config))
         return True
 
     module_path = Path(__file__).with_name('node-host.py')

@@ -60,7 +60,8 @@ def run_installer(code=''):
         import hashlib
         checksum = hashlib.sha256(Path('deploy/installations/host.py').read_bytes()).hexdigest()
         script = Path('deploy/installations/install.sh').read_text().replace(
-            '__LEO_OFFICIAL_ORIGIN__', repr(ORIGIN)).replace('__LEO_HOST_SHA256__', checksum)
+            '__LEO_OFFICIAL_ORIGIN__', repr(ORIGIN)).replace('__LEO_HOST_SHA256__', checksum).replace(
+                '__LEO_NODE_HOST_SHA256__', hashlib.sha256(Path('deploy/nodes/host.py').read_bytes()).hexdigest())
     # Compressed swap is a host setting covered by compressed_swap_test.py.
     swaps = Path('/fixture/swaps')
     swaps.write_text('Filename Type Size Used Priority\n/dev/zram0 partition 1024 0 100\n')
@@ -108,6 +109,14 @@ if 'info' in args and os.environ.get('INSTALLER_DOCKER_DOWN'):
     sys.exit(1)
 if 'version' in args and os.environ.get('INSTALLER_COMPOSE_MISSING'):
     sys.exit(1)
+if 'inspect' in args:
+    print(json.dumps([{'RepoDigests': [args[-1]], 'Config': {'Env': ['APP_RUNTIME_ID=' + args[-1].split(':')[-1]]}}]))
+if 'stop' in args and args[-1] == 'manager':
+    pid_file = root / 'manager.pid'
+    if pid_file.exists():
+        os.kill(int(pid_file.read_text()), signal.SIGTERM)
+        time.sleep(1)
+        pid_file.unlink()
 if 'up' in args and os.environ.get('INSTALLER_VERIFY'):
     pid_file = root / 'manager.pid'
     if pid_file.exists():
@@ -120,7 +129,10 @@ if 'up' in args and os.environ.get('INSTALLER_VERIFY'):
     env = {**os.environ, 'DATA_DIR': str(root / 'data'), 'AGENT_HOME': str(root / 'home'),
            'WORKSPACE_ROOTS': str(root / 'workspaces'), 'WORKER_ENABLED': 'false', 'NODE_ENV': 'test',
            'HOST': '127.0.0.1', 'PORT': '48152', 'LEO_OFFICIAL_ORIGIN': 'http://127.0.0.1:48151',
-           'LEO_INSTALLATION_CLAIM_CODE': code}
+           'LEO_INSTALLATION_CLAIM_CODE': code,
+           'APP_RUNTIME_ID': json.loads((root / 'compose.json').read_text())['services']['manager']['image'].split(':')[-1]}
+    if os.environ.get('INSTALLER_FAIL_IMAGE') == env['APP_RUNTIME_ID']:
+        env['APP_RUNTIME_ID'] = 'wrong-runtime'
     # Synthetic child credentials only; isolate from any controller agent broker.
     for name in list(env):
         if name.startswith(('LEO_AUTH_', 'CODEX_', 'OPENAI_', 'ANTHROPIC_')):
@@ -128,11 +140,18 @@ if 'up' in args and os.environ.get('INSTALLER_VERIFY'):
     log = open(root / 'manager.log', 'ab')
     process = subprocess.Popen(['/repo/target/debug/leo', 'serve'], env=env, stdout=log, stderr=log, start_new_session=True)
     pid_file.write_text(str(process.pid))
+    if '--wait' in args:
+        for attempt in range(100):
+            try:
+                urllib.request.urlopen('http://127.0.0.1:48152/health', timeout=2)
+                break
+            except Exception:
+                time.sleep(0.1)
+        else:
+            sys.exit(1)
 if 'exec' in args and os.environ.get('INSTALLER_VERIFY'):
-    try:
-        urllib.request.urlopen('http://127.0.0.1:48152/health', timeout=2)
-    except Exception:
-        sys.exit(1)
+    script = args[-1].replace('127.0.0.1:4310', '127.0.0.1:48152').replace('/data/maintenance-token', str(root / 'data/maintenance-token'))
+    sys.exit(subprocess.run(['/usr/local/bin/node', '-e', script]).returncode)
 ''')
     docker.chmod(0o755)
     # Production downloads must require HTTPS. This isolated loopback fixture has
@@ -142,13 +161,14 @@ if 'exec' in args and os.environ.get('INSTALLER_VERIFY'):
 import subprocess, sys
 args = sys.argv[1:]
 assert args[args.index('--proto') + 1] == '=https'
-assert args[-1] == 'http://127.0.0.1:48151/install/host.py'
+assert args[-1] in ('http://127.0.0.1:48151/install/host.py', 'http://127.0.0.1:48151/install/node-host.py')
 args[args.index('--proto') + 1] = '=http'
 sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
 ''')
     curl.chmod(0o755)
     for name, contents in {
         'uname': '#!/bin/sh\nif [ "$1" = -s ]; then echo "${INSTALLER_OS:-Linux}"; else echo "${INSTALLER_ARCH:-x86_64}"; fi\n',
+        'systemctl': '#!/bin/sh\nexit 0\n',
         'df': '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted"\necho "fixture 67108864 0 ${INSTALLER_FREE_KB:-33554432} 0% /fixture"\n',
     }.items():
         binary = binaries / name
@@ -162,7 +182,7 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
             if self.path == '/install/release':
                 self.wfile.write(json.dumps({'image': IMAGE}).encode())
             else:
-                body = Path('deploy/installations/host.py').read_bytes()
+                body = Path('deploy/nodes/host.py' if self.path == '/install/node-host.py' else 'deploy/installations/host.py').read_bytes()
                 if os.environ.get('INSTALLER_TAMPER_HOST'):
                     body += b'\n# mismatched download\n'
                 self.wfile.write(body)
@@ -381,6 +401,36 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
         assert len(session['installations']) == 1
         wait_for(lambda: request(base + '/settings/storage', cookie=cookie)[0]['endpoint'] == endpoint)
         print('Container: real claim, relay, Garage write/read/delete, external S3/R2 settings and idempotent rerun passed')
+        # The Docker lifecycle adapter replaces only container orchestration.
+        # The supervisor executes real Node health/lease calls against the manager.
+        for digit, fail in [('b', False), ('c', True)]:
+            candidate = 'ghcr.io/leo91000/leo-agent-manager@sha256:' + digit * 64
+            official.terminate()
+            official.wait(timeout=15)
+            official = subprocess.Popen(['/repo/target/debug/leo-official'],
+                                        env={**env, 'LEO_INSTALLATION_IMAGE': candidate},
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            wait_for(official_ready)
+            update_env = {**os.environ, 'PATH': '/fixture/bin:' + os.environ['PATH'],
+                          'LEO_INSTALLATION_ROOT': str(ROOT)}
+            if fail:
+                update_env['INSTALLER_FAIL_IMAGE'] = digit * 64
+            result = subprocess.run(['python3', str(ROOT / 'host.py'), ORIGIN, '--update'],
+                                    env=update_env, capture_output=True, text=True, timeout=120)
+            assert result.returncode == 0, result.stderr
+            committed = json.loads((ROOT / 'installation.json').read_text())
+            assert committed['image'].endswith('b' * 64)
+            assert not committed.get('pendingImage') and not committed.get('leaseOwner')
+            health = json.loads(urllib.request.urlopen('http://127.0.0.1:48152/health').read())
+            assert health['runtimeId'] == 'b' * 64 and not health['maintenance']
+            assert identity == (ROOT / 'data/installation-relay/identity.json').read_bytes()
+            assert credentials == (ROOT / 'garage.env').read_bytes()
+            wait_for(lambda: request(base + '/settings/storage', cookie=cookie)[0]['endpoint'] == endpoint)
+            checked, _ = request(base + '/settings/storage/check', {}, cookie, csrf)
+            assert checked == {'ok': True}
+            if fail:
+                assert committed['failedImage'] == candidate
+        print('Container: approved update, wrong-runtime rollback, real deployment lease, retained identity and S3 passed')
     finally:
         pid = ROOT / 'manager.pid'
         if pid.exists():

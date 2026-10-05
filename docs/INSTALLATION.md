@@ -76,8 +76,46 @@ Nonempty `STORAGE_S3_*` or legacy `ARCHIVE_S3_*` overrides remain authoritative;
 remove them before editing the default in the app. For an environment-managed R2
 endpoint, set `STORAGE_S3_PRIVATE_BUCKET_CONFIRMED=true` only after checking in the
 Cloudflare dashboard that public domains and bucket locks are disabled. This
-explicit server confirmation replaces the form confirmation; `false` refuses R2. Automatic image updates
-belong to ticket #54.
+explicit server confirmation replaces the form confirmation; `false` refuses R2.
+
+## Automatic approved updates
+
+The installer enables `leo-installation-update.timer` on the host. It checks the
+saved official origin's `/install/release` every five minutes, with up to thirty
+seconds of jitter, and two minutes after boot. The operator selects the tested
+immutable image using `LEO_INSTALLATION_IMAGE`; no mutable tag is accepted.
+Downloads are verified against Docker's repository digest before any restart.
+If the official service or registry is unavailable, the current image keeps running.
+The update channel is independent of the relay, so an incompatible installation
+can still update.
+
+The supervisor reuses the node supervisor's pull/prepare/launch/rollback cycle.
+It takes the existing persisted deployment lease to pause new work, stops the
+manager gracefully to checkpoint active conversations, then stops the local runner.
+It replaces both images together, preserving Compose settings, Garage, identity,
+agent credentials, workspaces and runner state. Compose checks both containers;
+the manager's health must report the downloaded image's runtime identity.
+Failed health restores and verifies the previous approved image before releasing
+the lease. A journal written before replacement lets the next timer restore the
+last committed image after interruption. A failed candidate is retained in
+`installation.json` and is not retried automatically until the approved digest
+changes. After diagnosing and fixing a host problem, the operator may remove
+`failedImage` from that private file to retry the same approved digest.
+
+Only approve releases whose installation database remains readable by the previous
+release; this ticket adds no installation database migration. An image update
+cannot undo a destructive database migration. Keep the stopped-installation backups
+required above before approving a release with a new data format.
+
+```sh
+sudo systemctl status leo-installation-update.timer
+sudo systemctl start leo-installation-update.service
+sudo journalctl -u leo-installation-update.service
+```
+
+The timer and installer share the same nonblocking host lock. Containers receive
+no Docker socket. Rerun the current official installation command to refresh the
+checksum-verified host supervisors on an existing one-command installation.
 
 ## Operation and validation
 
@@ -97,7 +135,7 @@ is independently parsed by real `docker compose config`, including healthchecks,
 claim substitution, dependencies and uid 1000. Loopback HTTP download transport
 is adapted only in the fixture; the production script requires HTTPS. Inert
 devices and command adapters exercise prerequisite and checksum failures.
-Claim, relay and S3 write/read/delete checks are real. A disk published to Garage
+Claim, relay, deployment leases, runtime health and S3 write/read/delete checks are real. The fixture also verifies an approved update and rollback from a wrong-runtime candidate, preserving relay identity and S3 configuration. A disk published to Garage
 continues publishing, reading remotely and purging there after relayed settings
 select external HTTPS S3. No VM boots; this is not runtime/KVM coverage. Containers, network and data are cleaned up on exit.
 `python3 tests/installation_installer_test.py` checks failure cleanup and

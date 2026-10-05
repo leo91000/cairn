@@ -100,7 +100,7 @@ Wants=network-online.target
 Type=oneshot
 Environment="LEO_INSTALLATION_ROOT={root.replace('%', '%%')}"
 ExecStart={command}
-TimeoutStartSec=1800
+TimeoutStartSec=3000
 ''')
 Path('/etc/systemd/system/leo-installation-update.timer').write_text('''[Unit]
 Description=Check the official approved Leo installation release

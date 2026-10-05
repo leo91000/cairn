@@ -15,7 +15,7 @@ NEW = 'ghcr.io/leo91000/leo-agent-manager@sha256:' + '2' * 64
 
 class Updates(unittest.TestCase):
     def test_approved_update_and_failed_health_restore_previous_image_without_losing_data(self):
-        for failure in ('', 'health', 'digest', 'unapproved', 'interrupted'):
+        for failure in ('', 'health', 'digest', 'unapproved', 'interrupted', 'lease'):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 class Official(http.server.BaseHTTPRequestHandler):
@@ -38,6 +38,14 @@ class Updates(unittest.TestCase):
                 (root / 'data/kept').write_text('conversation and storage must survive')
                 (root / 'data/maintenance-token').write_text('fixture-private-token')
                 (root / '.env').write_text('')
+                (root / 'compose.json').write_text(json.dumps({
+                    'name': 'leo-installation',
+                    'services': {
+                        'manager': {'image': OLD, 'environment': {'LEO_NODE_IMAGE': OLD}, 'mem_limit': '6g'},
+                        'runner': {'image': OLD, 'mem_limit': '18g'},
+                        'garage': {'image': 'retained-storage'},
+                    },
+                }))
                 binaries = root / 'bin'
                 binaries.mkdir()
                 docker = binaries / 'docker'
@@ -53,6 +61,8 @@ if 'inspect' in args:
     else:
         print(json.dumps([{'Id': 'sha256:fixture', 'RepoDigests': [args[-1]], 'Config': {'Env': ['APP_RUNTIME_ID=fixture']}}]))
 if 'exec' in args:
+    if 'deployment-lease' in args[-1] and os.environ['FAILURE'] == 'lease':
+        sys.exit(1)
     if 'health' in args[-1] and os.environ['FAILURE'] == 'health':
         image = json.loads((root / 'compose.json').read_text())['services']['manager']['image']
         if image.endswith('2' * 64):
@@ -65,13 +75,18 @@ if 'exec' in args:
                                             env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
                                                  'LEO_INSTALLATION_ROOT': directory, 'FAILURE': failure},
                                             capture_output=True, text=True, timeout=90)
+                    if failure == 'lease':
+                        result = subprocess.run(['python3', str(REPO / 'deploy/installations/host.py'), origin, '--update'],
+                                                env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
+                                                     'LEO_INSTALLATION_ROOT': directory, 'FAILURE': failure},
+                                                capture_output=True, text=True, timeout=90)
                     self.assertEqual(result.returncode, 0 if failure in ('', 'health', 'interrupted') else 1, result.stderr)
                     updated = json.loads((root / 'installation.json').read_text())
                     self.assertEqual(updated['image'], NEW if not failure else OLD)
                     self.assertEqual((root / 'data/kept').read_text(), 'conversation and storage must survive')
                     self.assertNotIn('fixture-private-token', result.stdout + result.stderr)
                     events = [json.loads(line) for line in (root / 'events').read_text().splitlines()] if (root / 'events').exists() else []
-                    if failure in ('digest', 'unapproved'):
+                    if failure in ('digest', 'unapproved', 'lease'):
                         self.assertFalse(any('stop' in event or 'up' in event for event in events))
                     else:
                         self.assertTrue(any('deployment-lease' in event[-1] for event in events))
@@ -79,6 +94,9 @@ if 'exec' in args:
                         compose = json.loads((root / 'compose.json').read_text())
                         self.assertEqual(compose['services']['manager']['image'], updated['image'])
                         self.assertEqual(compose['services']['runner']['image'], updated['image'])
+                        self.assertEqual(compose['services']['manager']['mem_limit'], '6g')
+                        self.assertEqual(compose['services']['runner']['mem_limit'], '18g')
+                        self.assertEqual(compose['services']['garage']['image'], 'retained-storage')
                         self.assertNotIn('pendingImage', updated)
                 finally:
                     server.shutdown()
