@@ -86,6 +86,7 @@ pub(super) async fn invite(
     .bind(&installation)
     .execute(&mut *transaction)
     .await?;
+
     let id = uuid::Uuid::new_v4().to_string();
     let inserted = query("INSERT INTO installation_invitations (id, installation_id, email) VALUES ($1, $2, $3) ON CONFLICT (installation_id, email) DO NOTHING")
         .bind(&id).bind(&installation).bind(&email).execute(&mut *transaction).await?;
@@ -95,6 +96,7 @@ pub(super) async fn invite(
             "An invitation is already pending",
         ));
     }
+
     let (name,): (String,) = query_as("SELECT name FROM installations WHERE id = $1")
         .bind(&installation)
         .fetch_one(&mut *transaction)

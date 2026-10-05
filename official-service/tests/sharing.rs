@@ -760,3 +760,96 @@ async fn detachment_forgets_members_and_pending_invitations() {
 
     relay.close().await;
 }
+
+#[tokio::test]
+async fn revoked_members_cannot_finish_previously_authorized_uploads() {
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    for leaving in [false, true] {
+        let relay = RelayedInstallation::new(axum::Router::new()).await;
+        let (cookie, session) = member(&relay, "member@example.test").await;
+        let id = relay.session["installations"][0]["id"].as_str().unwrap();
+        let mut uploads = Vec::new();
+        // Filling finite-request capacity observes that all uploads passed access
+        // checking and reached body reading, without inspecting relay internals.
+        for _ in 0..leo_relay_protocol::MAX_IN_FLIGHT {
+            let (sender, receiver) = mpsc::channel::<String>(2);
+            let body = reqwest::Body::wrap_stream(futures_util::stream::unfold(
+                receiver,
+                |mut receiver| async move {
+                    receiver
+                        .recv()
+                        .await
+                        .map(|chunk| (Ok::<_, std::io::Error>(chunk), receiver))
+                },
+            ));
+            sender.send("{".into()).await.unwrap();
+            let upload = request(
+                &relay,
+                &cookie,
+                &session,
+                Method::POST,
+                &format!("/api/installations/{id}/api/chats"),
+            )
+            .header("content-type", "application/json")
+            .body(body);
+            uploads.push((
+                sender,
+                tokio::spawn(async move { upload.send().await.unwrap() }),
+            ));
+        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let status = relay.get("/chats").send().await.unwrap().status();
+                if status == StatusCode::SERVICE_UNAVAILABLE {
+                    break;
+                }
+                assert_eq!(status, StatusCode::OK);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("uploads must reach the relay's finite-request capacity");
+
+        let member_id = session["account"]["id"].as_str().unwrap();
+        let (actor_cookie, actor_session, path) = if leaving {
+            (
+                &cookie,
+                &session,
+                format!("/api/installations/{id}/sharing/membership"),
+            )
+        } else {
+            (
+                &relay.cookie,
+                &relay.session,
+                format!("/api/installations/{id}/sharing/members/{member_id}"),
+            )
+        };
+        assert_eq!(
+            request(&relay, actor_cookie, actor_session, Method::DELETE, &path)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+        for (sender, response) in uploads {
+            sender.send("}".into()).await.unwrap();
+            drop(sender);
+            assert_eq!(response.await.unwrap().status(), StatusCode::NOT_FOUND);
+        }
+        assert_eq!(
+            relay
+                .get("/chats")
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap(),
+            json!([])
+        );
+        relay.close().await;
+    }
+}

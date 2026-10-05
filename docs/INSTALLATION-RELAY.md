@@ -148,7 +148,9 @@ After committing a detachment, call `revoke_access(installation, None)`; after
 removing a member, call it with that account ID. It immediately closes the
 corresponding browser bodies, including idle or backpressured streams. Account
 revocation preserves the tunnel and other accounts' streams. Access generations
-prevent an upload authorized before revocation from opening a stream afterward.
+prevent an upload authorized before revocation from dispatching any request
+afterward, including an ordinary queued request. Work admitted before revocation
+is preserved; revocation does not cancel the installation's agent executions.
 The detachment, member removal and departure endpoints commit their access
 change before revoking the real official HTTP bodies. Detachment also forgets
 all memberships and invitations; reclaiming never restores previous sharing.

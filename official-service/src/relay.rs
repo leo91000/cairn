@@ -28,6 +28,8 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch}
 const RESERVED_API_SLOTS: usize = 8;
 
 struct Pending {
+    account: String,
+    access_generation: u64,
     reply: Option<oneshot::Sender<ApiResponse>>,
     stream: Option<mpsc::Sender<Result<Vec<u8>, std::io::Error>>>,
     // Browser cancellation does not release a slot for work still running remotely.
@@ -50,6 +52,20 @@ struct Tunnel {
     stream_slots: Arc<Semaphore>,
     // Replacing a connection closes the old generation and its pending replies.
     stop: watch::Sender<bool>,
+}
+
+impl Tunnel {
+    fn access_revoked(&self, account: &str, generation: u64) -> bool {
+        *self
+            .access
+            .lock()
+            .unwrap()
+            .generations
+            .get(account)
+            .unwrap_or(&0)
+            != generation
+            || *self.stop.borrow()
+    }
 }
 
 #[derive(Clone, Default)]
@@ -271,15 +287,25 @@ async fn serve_socket(
                 }
             }
             command = receiver.recv() => {
-                let Some(command) = command else {
+                let Some(mut command) = command else {
                     break;
                 };
-                let access_revoked = command.pending.stream.is_some()
+                let access_revoked = tunnel.access_revoked(&command.pending.account, command.pending.access_generation)
+                    || command.pending.stream.is_some()
                     && !tunnel.access.lock().unwrap().streams.get(&command.request.id)
                         .is_some_and(|stream| !*stream.revoked.borrow());
-                if access_revoked
-                    || command.pending.reply.as_ref().is_some_and(oneshot::Sender::is_closed)
-                {
+                if access_revoked {
+                    if let Some(reply) = command.pending.reply.take() {
+                        let _ = reply.send(ApiResponse {
+                            id: command.request.id,
+                            status: 404,
+                            headers: Vec::new(),
+                            body: br#"{"error":"Installation access revoked"}"#.to_vec(),
+                        });
+                    }
+                    continue;
+                }
+                if command.pending.reply.as_ref().is_some_and(oneshot::Sender::is_closed) {
                     continue;
                 }
 
@@ -497,6 +523,13 @@ pub(super) async fn forward(
             .map_err(|_| ApiError(StatusCode::PAYLOAD_TOO_LARGE, "API request is too large"))?
             .to_vec(),
     };
+    if tunnel.access_revoked(&account, access_generation) {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "Installation access revoked",
+        ));
+    }
+
     let (reply, response) = oneshot::channel();
     let id = api_request.id.clone();
     let (chunks, receiver) = mpsc::channel(1);
@@ -524,11 +557,14 @@ pub(super) async fn forward(
     } else {
         None
     };
+    let pending_account = api_request.account_id.clone();
     tunnel
         .commands
         .try_send(Command {
             request: api_request,
             pending: Pending {
+                account: pending_account,
+                access_generation,
                 reply: Some(reply),
                 stream: streaming.then_some(chunks),
                 _permit: permit,
