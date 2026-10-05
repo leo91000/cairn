@@ -87,8 +87,26 @@ test('email sign-in opens the empty installation screen, persists and signs out'
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     }
 
+    const sibling = await context.newPage()
+    await sibling.clock.install()
+    let expiredChecks = 0
+    sibling.on('response', (response) => {
+      if (new URL(response.url()).pathname === '/api/installations' && response.status() === 401)
+        expiredChecks++
+    })
+    await sibling.goto(url)
+    await expect(sibling.getByRole('heading', { name: 'No installations yet' })).toBeVisible()
+    await page.bringToFront()
     await page.getByRole('button', { name: 'Sign out' }).click()
     await expect(page.getByLabel('Email address')).toBeVisible()
+    await sibling.bringToFront()
+    await expect(sibling.getByLabel('Email address')).toBeVisible()
+    const checksAfterRedirect = expiredChecks
+    expect(checksAfterRedirect).toBeGreaterThan(0)
+    await sibling.clock.runFor(7000)
+    expect(expiredChecks).toBe(checksAfterRedirect)
+    await sibling.close()
+    await page.bringToFront()
     await page.reload()
     await expect(page.getByLabel('Email address')).toBeVisible()
   }

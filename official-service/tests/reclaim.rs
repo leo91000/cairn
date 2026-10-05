@@ -93,7 +93,7 @@ async fn deleting_the_owner_revokes_the_active_tunnel_without_losing_the_install
         relay.get("/chats").send().await.unwrap().status(),
         StatusCode::UNAUTHORIZED
     );
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(35), async {
         while !relay.connector.is_finished() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }

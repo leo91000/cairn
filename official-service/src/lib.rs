@@ -188,7 +188,7 @@ pub async fn router_with_network(
         )
         .route(
             "/api/installations/{installation}",
-            axum::routing::patch(installations::rename),
+            axum::routing::patch(installations::rename).delete(installations::forget),
         )
         .route(
             "/api/installations/device-claim/preview",
@@ -248,6 +248,10 @@ pub async fn router_with_network(
                         .layer(middleware::from_fn(mcp::public_security)),
                 )
                 .route("/api/relay/claim", post(installations::claim))
+                .route(
+                    "/api/relay/{installation}/rotate-token",
+                    post(installations::rotate_token),
+                )
                 .route(
                     "/api/relay/device-claim/start",
                     post(installations::start_device),

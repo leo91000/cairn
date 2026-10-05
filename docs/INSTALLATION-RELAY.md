@@ -22,10 +22,34 @@ The installation stores its identity in
 `DATA_DIR/installation-relay/identity.json` (directory mode 0700, file mode 0600).
 The file contains the official origin, installation ID and bearer credential.
 Do not copy it into logs or source control. Later starts use that file and need
-no new claim code. Startup never overwrites an existing identity; only an
-approved `leo claim` can replace it after detachment.
+no new claim code. Startup never overwrites an existing identity; an approved
+`leo claim` can replace it after detachment, and `leo rotate-token` can renew its
+credential while keeping its ownership.
 Postgres stores only a hash of the credential and claim code. Consuming a claim
 code and attaching the installation to its owner form one transaction.
+
+## Renewing a machine credential
+
+Run `leo rotate-token` on the machine with its usual `DATA_DIR`. The command uses
+the origin in its private identity. It closes the previous tunnel and invalidates
+both the previous credential and any old recovery proof, preserving the installation
+ID, sharing and all data. Restart the manager after success to use the new identity.
+
+The command saves a private `rotation.json` before contacting the official service
+and replaces `identity.json` atomically only after acknowledgement. If connectivity
+fails or the response is lost, run the same command again: it reuses the saved
+replacement. Do not delete `rotation.json` to retry. Claim and rotation share an
+exclusive machine lock. A pending rotation from a different identity generation
+is refused; back it up before recovering that installation.
+
+The owner can instead choose **Revoke and forget installation** in the official
+app, including for an offline or orphaned installation. Confirmation permanently
+invalidates the machine credential and recovery proofs, removes sharing and the
+official record, and closes active tunnels. Data stays on the machine. To return,
+stop the manager, back up its entire private identity directory outside its data
+volume, remove that directory, then run `leo claim` with the official origin.
+The new claim creates a new installation ID with the same existing local data.
+Detachment below remains the option for recovering the same installation ID.
 
 ## Fallback claim and detachment
 
@@ -105,6 +129,8 @@ checks the official session and installation role; mutations also require the of
 origin and CSRF token. A foreign or unknown installation returns 404. Local
 browser authentication routes are excluded from the tunnel. Offline requests
 return 503; lost connections fail pending requests, without replaying writes.
+An expired or revoked browser session redirects to sign-in at the current URL
+and stops availability polling, including in other tabs after logout.
 The connector retries with exponential backoff from 250 ms to 15 seconds;
 WebSocket ping/pong detects dead peers. A revoked identity (HTTP 401) stops
 reconnection; run `leo claim`, approve it, and restart the manager. Existing agent execution is independent

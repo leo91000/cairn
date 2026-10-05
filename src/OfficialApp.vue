@@ -486,6 +486,12 @@ async function refreshAvailability() {
   const current = session.value
   try {
     const response = await fetch('/api/installations', { credentials: 'same-origin' })
+    if (response.status === 401 && session.value === current && !availabilityStopped) {
+      availabilityStopped = true
+      redirect(window.location.href)
+      return
+    }
+
     if (!response.ok)
       throw new Error('Installation status unavailable')
     const statuses = await response.json() as AccountSession['installations']

@@ -84,13 +84,18 @@ installation record remains recoverable; that proof never reconnects a tunnel.
 A still-owned installation must be detached before any recovery attempt.
 
 If the identity file is missing/corrupt (or an initial claim response was lost
-before any identity was saved), detach the inaccessible installation in the app,
-stop the manager, back up any private identity file outside the deployment
-volumes, and remove that file before running `leo claim` again. This creates a
-new official installation ID while preserving existing data volumes. If you
-cannot detach an inaccessible installation yourself, contact the official
-service operator or reinstall; do not delete its official record as a workaround.
+before any identity was saved), choose **Revoke and forget installation** in the
+official app. This also works when it is offline and permanently invalidates old
+credentials and recovery proofs. Stop the manager, back up the entire private
+`installation-relay` directory outside the deployment volumes, remove that
+directory, and run `leo claim` with `LEO_OFFICIAL_ORIGIN`. This creates a new
+official installation ID while preserving existing data volumes.
 Retain backups until access has been verified.
+
+To renew a credential while retaining the installation ID and its sharing,
+run `leo rotate-token` with the deployment's usual `DATA_DIR`, then restart the
+manager. Retry the same command if its response is lost; retain `rotation.json`
+until the command succeeds. See [credential renewal](INSTALLATION-RELAY.md#renewing-a-machine-credential).
 
 ### Roll back this access migration
 
