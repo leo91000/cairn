@@ -80,6 +80,9 @@ async fn authenticate(
             .unwrap()
             .into_response();
     }
+
+    let legacy_management_mcp = path == "/mcp";
+
     match legacy_http::handle(&service, &mut request).await {
         Ok(Some(response)) => return response,
         Ok(None) => {}
@@ -87,6 +90,10 @@ async fn authenticate(
     }
     match authorize(&service, &mut request).await {
         Ok(Some(response)) => response,
+        Ok(None) if legacy_management_mcp => match leo_agent_manager::http::router(service).await {
+            Ok(app) => app.oneshot(request).await.unwrap(),
+            Err(error) => error.into_response(),
+        },
         Ok(None) => next.run(request).await,
         Err(error) => error.into_response(),
     }

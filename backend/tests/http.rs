@@ -155,7 +155,9 @@ async fn member_identity_can_list_conversations_but_cannot_manage_nodes() {
 
 #[tokio::test]
 async fn member_identity_cannot_manage_installation_resources() {
-    let (_root, app, _service) = app().await;
+    let (_root, _fixture, service) = app().await;
+    let app = leo_agent_manager::http::router(service).await.unwrap();
+
     let agent = MAIN_AGENT_ID;
     let management = [
         ("GET", "/api/accounts".to_owned()),
