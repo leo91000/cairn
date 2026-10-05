@@ -28,7 +28,15 @@ rerun with recovery instructions and is retained rather than overwritten. The on
 claim environment is cleared after success or failure; after startup the manager
 is recreated without it. A refused or expired code leaves Leo running unclaimed.
 Obtain a new command and rerun it, or run `sudo leo claim` and confirm its code in
-the official app. No installation is accessible before claiming. Refresh
+the official app. After the fallback command confirms success, restart the manager
+to load its new relay identity:
+
+```sh
+sudo docker compose --project-directory /var/lib/leo-installation \
+  -f /var/lib/leo-installation/compose.json restart manager
+```
+
+No installation is accessible before claiming. Refresh
 installations in the app after the command finishes.
 
 ## Integrated storage and external S3
