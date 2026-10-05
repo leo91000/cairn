@@ -295,10 +295,14 @@ impl Pool {
             }
             if let Ok((usage, _)) = self.usage().await
                 && let Some(budget) = self.budget().await
-                && usage["memoryMiB"].as_u64().unwrap_or(0) > budget.limits.memory_mi_b * 85 / 100
-                && let Err(error) = budget::reclaim(&self.state).await
+                && let Err(error) = budget::rebalance(
+                    &self.state,
+                    usage["memoryMiB"].as_u64().unwrap_or(0),
+                    budget.limits.memory_mi_b,
+                )
+                .await
             {
-                tracing::warn!(message = %error.message, "Could not reclaim shared VM memory");
+                tracing::warn!(message = %error.message, "Could not rebalance shared VM memory");
             }
         }
     }

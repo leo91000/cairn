@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
-const MAX_CONTROLLER_RECOVERIES: u64 = 3;
+pub(super) const MAX_CONTROLLER_RECOVERIES: u64 = 3;
 const VM_STOP_WAIT_REASON: &str = "Waiting for the previous VM to stop.";
 
 /// Executes a run, records how it ended and releases what it held once its

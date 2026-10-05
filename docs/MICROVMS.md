@@ -159,8 +159,13 @@ Execution slots start from `CONCURRENCY` (default 4), then follow the node's
 configuration. CPU and RAM are shared under the controller's private cgroup-v2
 limits. Each VM sees the node's RAM ceiling and up to 32 vCPUs, without reserving
 that physical capacity. Free-page reporting and cooperative ballooning return
-unused guest memory to the host. Disk budgets bound local journals and caches;
+unused guest memory to the host. Above 85% of the RAM budget, running guests
+give memory back while keeping 1 GiB available; below 75%, they get it back. Disk budgets bound local journals and caches;
 retained disks keep their logical size. See [the shared-budget decision](adr/0012-shared-node-budgets.md).
+Guest RAM is a shared memfd, so the host can only reclaim pages the guest gives
+back. Without host swap, a peak above `memory.high` stalls every VM and can still
+end in an OOM kill at `memory.max`. A compressed swap on the host (for example
+zram sized to a quarter of RAM) lets such peaks slow down instead.
 The Compose controller initially allows 8 CPUs, 20 GiB RAM and 256 host processes.
 Guest process counts are not host process counts. Additional slots do not raise
 resource budgets; simultaneous peaks can still exhaust shared RAM. VM networks

@@ -1,5 +1,5 @@
 //! Attempt lifecycle on the VM controller.
-use super::CONTROLLER_INTERRUPTED;
+use super::{CONTROLLER_FAILED, CONTROLLER_INTERRUPTED};
 use crate::{
     config::now,
     error::{Error, Result},
@@ -365,11 +365,14 @@ impl Execution {
 
 /// A lost lease or an unavailable VM (for example a guest killed by the
 /// shared memory limit) keeps its disk: the manager resumes the attempt
-/// instead of failing the run.
+/// instead of failing the run. An internal controller failure, such as a
+/// replacement VM that cannot start under memory pressure, is retried a few
+/// times rather than reported as the agent's own exit status.
 fn exit_code(result: Result<i32>, lease_expired: bool) -> i32 {
     match result {
         _ if lease_expired => CONTROLLER_INTERRUPTED,
         Err(error) if error.is_unavailable() => CONTROLLER_INTERRUPTED,
+        Err(error) if error.is_internal() => CONTROLLER_FAILED,
         Err(_) => 1,
         Ok(code) => code,
     }
@@ -646,6 +649,16 @@ mod tests {
         );
         let incompatible = Error::bad_gateway("Unsupported guest protocol.");
         assert_eq!(exit_code(Err(incompatible), false), 1);
+    }
+
+    #[test]
+    fn an_internal_controller_failure_is_reported_apart_from_agent_exits() {
+        let failure = Error::internal("Cannot allocate memory");
+        assert_eq!(exit_code(Err(failure), false), CONTROLLER_FAILED);
+        assert_ne!(
+            CONTROLLER_FAILED, 1,
+            "agent exit 1 must stay a final failure"
+        );
     }
 
     #[test]

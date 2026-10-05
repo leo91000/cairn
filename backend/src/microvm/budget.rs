@@ -281,9 +281,41 @@ pub fn pressure(
     None
 }
 
-/// Reclaim free pages and guest caches when the shared host budget gets tight.
-/// Ballooning is cooperative; the cgroup remains the hard host limit.
-pub async fn reclaim(state: &Path) -> Result<()> {
+/// Above this share of the shared RAM budget, running guests give memory back.
+const RECLAIM_ABOVE_PERCENT: u64 = 85;
+/// Below this share, guests get their pressure balloon back.
+const RETURN_BELOW_PERCENT: u64 = 75;
+/// Memory a guest keeps available under pressure, enough for a compiler or
+/// test run. Squeezing further only moves its file cache to the host and
+/// makes the guest thrash; the shared cgroup stays the hard limit.
+const GUEST_FLOOR_MIB: u64 = 1024;
+/// Largest balloon change per guest and monitor tick.
+const BALLOON_STEP_MIB: u64 = 256;
+
+/// The pressure balloon size a guest should move to, if any. Between the two
+/// thresholds the balloon holds its size so guests do not oscillate.
+pub fn balloon_target(
+    used_mib: u64,
+    limit_mib: u64,
+    actual_mib: u64,
+    available_mib: u64,
+) -> Option<u64> {
+    if used_mib * 100 > limit_mib * RECLAIM_ABOVE_PERCENT {
+        let extra = available_mib
+            .saturating_sub(GUEST_FLOOR_MIB)
+            .min(BALLOON_STEP_MIB);
+        return (extra > 0).then_some(actual_mib + extra);
+    }
+    if used_mib * 100 < limit_mib * RETURN_BELOW_PERCENT && actual_mib > 0 {
+        return Some(actual_mib.saturating_sub(BALLOON_STEP_MIB));
+    }
+    None
+}
+
+/// Reclaims guest memory while the shared host budget is tight, and returns it
+/// once the pressure is gone. Ballooning is cooperative; the cgroup remains
+/// the hard host limit.
+pub async fn rebalance(state: &Path, used_mib: u64, limit_mib: u64) -> Result<()> {
     let jails = state.join("jails/firecracker");
     let Ok(mut entries) = tokio::fs::read_dir(jails).await else {
         return Ok(());
@@ -308,15 +340,28 @@ pub async fn reclaim(state: &Path) -> Result<()> {
         let Ok(stats) = response.json::<serde_json::Value>().await else {
             continue;
         };
+        let actual = stats["actual_mib"].as_u64().unwrap_or(0);
         let available = stats["available_memory"].as_u64().unwrap_or(0) / 1_048_576;
-        let extra = available.saturating_sub(256).min(256);
-        if extra == 0 {
+        let Some(target) = balloon_target(used_mib, limit_mib, actual, available) else {
             continue;
+        };
+
+        // Idle retention inflates the balloon before pausing a VM and expects
+        // it to stay inflated; never deflate during or after that.
+        if target < actual {
+            let inflating = stats["target_mib"].as_u64().unwrap_or(0) > actual + 16;
+            let paused = match client.get("http://localhost/").send().await {
+                Ok(response) => response
+                    .json::<serde_json::Value>()
+                    .await
+                    .map_or(true, |vm| vm["state"] != "Running"),
+                Err(_) => true,
+            };
+            if inflating || paused {
+                continue;
+            }
         }
-        let target = stats["actual_mib"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(extra);
+
         let _ = client
             .patch("http://localhost/balloon")
             .json(&serde_json::json!({ "amount_mib": target }))
@@ -418,6 +463,32 @@ mod tests {
         );
         assert!(max - high >= 1024 * 1_048_576);
         assert!(high >= max - max / 8, "guests keep most of the budget");
+    }
+
+    #[test]
+    fn pressure_balloons_leave_a_working_floor_and_deflate_once_pressure_falls() {
+        let limit = 36352;
+        let tight = limit * 90 / 100;
+        let calm = limit * 70 / 100;
+        let between = limit * 80 / 100;
+
+        // Above the reclaim threshold, a guest gives back memory in steps...
+        assert_eq!(balloon_target(tight, limit, 0, 8192), Some(256));
+        // ...but keeps enough to run a compiler instead of thrashing.
+        assert_eq!(balloon_target(tight, limit, 4096, 1100), Some(4096 + 76));
+        assert_eq!(balloon_target(tight, limit, 4096, 1024), None);
+
+        // Production 2026-10-04: a guest stayed squeezed to ~2 GiB of 34 GiB
+        // hours after the peak. Once the node is calm, memory comes back.
+        assert_eq!(
+            balloon_target(calm, limit, 31_000, 2000),
+            Some(31_000 - 256)
+        );
+        assert_eq!(balloon_target(calm, limit, 100, 2000), Some(0));
+        assert_eq!(balloon_target(calm, limit, 0, 2000), None);
+
+        // The band between thresholds holds the current size to avoid oscillation.
+        assert_eq!(balloon_target(between, limit, 4096, 8192), None);
     }
 
     #[test]
