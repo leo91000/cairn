@@ -5,6 +5,94 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 
 #[tokio::test]
+async fn additional_nodes_enroll_directly_and_keep_their_channel_outside_the_relay() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let router = leo_agent_manager::http::router(relay.installation.clone())
+        .await
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let manager_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let response = relay
+        .app
+        .client
+        .post(format!("{}/nodes/enrollments", relay.base))
+        .header("cookie", &relay.cookie)
+        .header("origin", &relay.app.url)
+        .header("x-csrf-token", relay.session["csrf"].as_str().unwrap())
+        .json(&json!({
+            "name": "Direct execution node",
+            "managerUrl": manager_url,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let invitation: Value = response.json().await.unwrap();
+    assert_eq!(invitation["managerUrl"], manager_url);
+
+    let response = relay
+        .app
+        .client
+        .post(format!("{manager_url}/internal/nodes/enroll"))
+        .json(&json!({
+            "code": invitation["code"],
+            "name": "Direct execution node",
+            "protocol": 1,
+            "runtimeId": "fixture",
+            "capabilities": {
+                "os": "linux",
+                "arch": "x86_64",
+                "kvm": true,
+                "cpu": 4,
+                "memoryMiB": 8192,
+                "diskMiB": 32768,
+            },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let identity: Value = response.json().await.unwrap();
+
+    let installation_url = relay.base.trim_end_matches("/api");
+    for route in [
+        "/internal/nodes/heartbeat".to_owned(),
+        format!("/internal/node-restore/{}", "a".repeat(64)),
+    ] {
+        // Even a node bearer credential and owner session cannot relay machine
+        // traffic. Neither the real path nor an API-prefixed lookalike is routed.
+        for prefix in [installation_url, relay.base.as_str()] {
+            let response = relay
+                .app
+                .client
+                .get(format!("{prefix}{route}"))
+                .header("cookie", &relay.cookie)
+                .bearer_auth(identity["token"].as_str().unwrap())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+    }
+
+    relay.stop.cancel();
+    let heartbeat = relay
+        .app
+        .client
+        .post(format!("{manager_url}/internal/nodes/heartbeat"))
+        .bearer_auth(identity["token"].as_str().unwrap())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(heartbeat.status(), StatusCode::OK);
+
+    server.abort();
+    relay.close().await;
+}
+
+#[tokio::test]
 async fn owner_renames_a_relayed_installation_without_changing_its_identity() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     let app = &relay.app;

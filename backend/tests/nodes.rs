@@ -505,6 +505,38 @@ async fn enrollment_uses_a_configurable_direct_manager_origin() {
 }
 
 #[tokio::test]
+async fn enrollment_rejects_insecure_or_non_origin_manager_addresses() {
+    let owner = Owner::new().await;
+    for origin in [
+        "http://192.168.1.20:4310",
+        "http://manager.vpn.example",
+        "https://user:password@manager.vpn.example",
+        "https://manager.vpn.example/path",
+        "https://manager.vpn.example?query=1",
+        "https://manager.vpn.example#fragment",
+        "",
+    ] {
+        let (status, _) = owner
+            .send(
+                "POST",
+                "/api/nodes/enrollments",
+                json!({ "name": "Direct node", "managerUrl": origin }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{origin}");
+    }
+    let (status, invitation) = owner
+        .send(
+            "POST",
+            "/api/nodes/enrollments",
+            json!({ "name": "Local test node", "managerUrl": "http://127.0.0.1:4310" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(invitation["managerUrl"], "http://127.0.0.1:4310");
+}
+
+#[tokio::test]
 async fn node_installer_keeps_the_chosen_direct_manager_address() {
     let owner = Owner::new().await;
     let (listener, address) = common::bind().await;
@@ -555,6 +587,31 @@ async fn node_installer_keeps_the_chosen_direct_manager_address() {
         "installer must keep the chosen address"
     );
     assert!(!script.contains("http://localhost:4310"));
+
+    let fallback = client
+        .get(format!("{base}/internal/nodes/install.sh"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(fallback.status(), StatusCode::OK);
+    assert!(
+        fallback
+            .text()
+            .await
+            .unwrap()
+            .contains("LEO_MASTER='http://localhost:4310/'")
+    );
+
+    for origin in [
+        "http://192.168.1.20:4310",
+        "https://manager.vpn.example/path",
+        "https://user:password@manager.vpn.example",
+    ] {
+        let mut download = url::Url::parse(&format!("{base}/internal/nodes/install.sh")).unwrap();
+        download.query_pairs_mut().append_pair("managerUrl", origin);
+        let response = client.get(download).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{origin}");
+    }
     manager.kill().await.unwrap();
 }
 
@@ -763,6 +820,173 @@ fn mcp_agent_updates_preserve_omitted_node_permissions() {
     assert_eq!(restricted["agent"]["access"]["nodes"], json!([]));
     let created = parse("mcp:save_agent", json!({ "name": "Default" })).unwrap();
     assert_eq!(created["access"]["nodes"], json!([LOCAL_NODE_ID]));
+}
+
+#[tokio::test]
+async fn prepared_node_disks_use_the_enrolled_manager_origin() {
+    let owner = Owner::new().await;
+    let identity = owner
+        .enroll("VPN node", &capabilities(true, 4, 8192, 65536))
+        .await;
+    let node_id = identity["nodeId"].as_str().unwrap();
+    let (run, attempt) = (id(), id());
+    owner.grant_nodes(MAIN_AGENT_ID, json!([node_id])).await;
+    owner
+        .put(
+            "node-attempts",
+            json!({
+                "id": attempt,
+                "runId": run,
+                "nodeId": node_id,
+                "released": false,
+            }),
+        )
+        .await;
+    let mut record = run_record(&run, RunStatus::Running);
+    record["snapshot"] = json!({ "agent": { "id": MAIN_AGENT_ID } });
+    owner.add_run(&record).await;
+    owner
+        .set_checkpoint(&run, json!({ "nodeId": node_id, "runnerId": attempt }))
+        .await;
+    let data = &owner.service.config.data_dir;
+    std::fs::create_dir_all(data.join("runs").join(&run)).unwrap();
+    std::fs::create_dir_all(data.join("runner-plans")).unwrap();
+    let plan_path = data.join("runner-plans").join(format!("{attempt}.json"));
+    std::fs::write(
+        &plan_path,
+        json!({
+            "id": attempt,
+            "runId": run,
+            "chat": { "provider": "codex" },
+            "storage": {
+                "master": owner.service.config.public_url,
+                "grant": "disk-grant-fixture",
+            },
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    // The controller consumes the prepared plan through its existing start
+    // contract; this fixture returns the disk configuration it would mount.
+    let controller = Router::new()
+        .route("/health", axum::routing::get(async || Json(json!({}))))
+        .route(
+            "/runs/{id}/lease",
+            axum::routing::post(async || Json(json!({}))),
+        )
+        .route(
+            "/runs/{id}",
+            axum::routing::post(move || {
+                let plan_path = plan_path.clone();
+                async move {
+                    let plan: Value =
+                        serde_json::from_slice(&tokio::fs::read(plan_path).await.unwrap()).unwrap();
+                    Json(plan["storage"].clone())
+                }
+            }),
+        );
+    let (runner, runner_server) = common::serve_locally(controller).await;
+    let (listener, address) = common::bind().await;
+    let manager_url = format!("http://{address}/");
+    let manager = owner.serve(listener);
+    let node_directory = owner.root().join("node");
+    std::fs::create_dir(&node_directory).unwrap();
+    std::fs::write(
+        node_directory.join("identity.json"),
+        json!({
+            "master": manager_url,
+            "nodeId": node_id,
+            "token": identity["token"],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut connector = tokio::process::Command::new(env!("CARGO_BIN_EXE_leo"))
+        .args(["node-connect", node_directory.to_str().unwrap()])
+        .env("DATA_DIR", data)
+        .env("RUNNER_URL", runner)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let prepared = tokio::time::timeout(
+        Duration::from_secs(10),
+        owner.service.node_transport.request(
+            node_id,
+            "POST",
+            &format!("/prepare/{attempt}"),
+            vec![],
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(prepared.status(), StatusCode::OK);
+    let response = owner
+        .service
+        .node_transport
+        .request(node_id, "POST", &format!("/runs/{attempt}"), b"{}".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+    let storage: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(storage["master"], manager_url);
+    assert_eq!(storage["grant"], "disk-grant-fixture");
+
+    connector.kill().await.unwrap();
+    manager.abort();
+    runner_server.abort();
+}
+
+#[tokio::test]
+async fn remote_disk_restores_use_the_nodes_direct_manager_origin() {
+    let owner = Owner::new().await;
+    let identity = owner
+        .enroll("VPN node", &capabilities(true, 4, 8192, 65536))
+        .await;
+    let (listener, address) = common::bind().await;
+    let manager_url = format!("http://{address}/");
+    let manager = owner.serve(listener);
+    let controller = Router::new().route(
+        "/disks/{id}/restore",
+        axum::routing::post(async |Json(body): Json<Value>| Json(body)),
+    );
+    let (runner, runner_server) = common::serve_locally(controller).await;
+    let stop = CancellationToken::new();
+    let node = tokio::spawn(relay::run(
+        manager_url.parse().unwrap(),
+        identity["token"].as_str().unwrap().into(),
+        runner,
+        "controller-fixture".into(),
+        stop.clone(),
+    ));
+    let response = owner
+        .service
+        .node_transport
+        .request(
+            identity["nodeId"].as_str().unwrap(),
+            "POST",
+            &format!("/disks/{}/restore", id()),
+            serde_json::to_vec(&json!({
+                "master": owner.service.config.public_url,
+                "grant": "disk-grant-fixture",
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+    let restored: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(restored["master"], manager_url);
+    assert_eq!(restored["grant"], "disk-grant-fixture");
+    stop.cancel();
+    node.await.unwrap().unwrap();
+    manager.abort();
+    runner_server.abort();
 }
 
 #[tokio::test]
