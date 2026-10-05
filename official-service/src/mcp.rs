@@ -613,6 +613,10 @@ pub(super) async fn server_metadata(State(service): State<Service>) -> Json<Valu
 }
 
 pub(super) async fn public_security(request: Request, next: axum::middleware::Next) -> Response {
+    let public_file = request
+        .uri()
+        .path()
+        .starts_with("/api/public/installations/");
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     for (name, value) in [
@@ -625,5 +629,11 @@ pub(super) async fn public_security(request: Request, next: axum::middleware::Ne
         headers.insert(name, HeaderValue::from_static(value));
     }
     headers.remove("set-cookie");
+
+    if public_file {
+        headers.insert("access-control-allow-origin", HeaderValue::from_static("*"));
+        headers.remove("access-control-allow-credentials");
+    }
+
     response
 }

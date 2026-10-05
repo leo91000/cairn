@@ -200,6 +200,7 @@ An offline installation returns 503 with an explicit offline message.
 The official service imposes no-store, nosniff, a sandbox CSP, no-referrer and
 noindex headers on public responses, including errors. Headers from an
 installation cannot relax this policy. Downloads and byte ranges use the
+anonymous CORS policy (`Access-Control-Allow-Origin: *`, without credentials) and
 existing credit-controlled relay streams, including files larger than a
 finite relay frame. The service never persists their contents.
 

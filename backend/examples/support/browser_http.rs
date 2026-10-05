@@ -23,6 +23,7 @@ use leo_agent_manager::{
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -199,15 +200,19 @@ pub async fn claimed(service: &Service) -> Result<()> {
     tokio::fs::create_dir_all(&directory).await?;
     let path = directory.join("identity.json");
     if !path.exists() {
-        tokio::fs::write(
-            path,
-            serde_json::to_vec(&json!({
-                "origin": service.config.public_url,
-                "installationId": "00000000-0000-4000-8000-000000000055",
-                "token": "fixture-only",
-            }))?,
-        )
-        .await?;
+        let identity = serde_json::to_vec(&json!({
+            "origin": service.config.public_url,
+            "installationId": "00000000-0000-4000-8000-000000000055",
+            "token": "fixture-only",
+        }))?;
+
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .await?;
+        file.write_all(&identity).await?;
     }
     Ok(())
 }

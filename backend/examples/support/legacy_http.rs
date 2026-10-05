@@ -91,6 +91,7 @@ pub async fn handle(service: &Arc<Service>, request: &mut Request) -> Result<Opt
         let mut identity = InstallationIdentity::trusted(InstallationRole::Member, "");
         identity.public_artifact = Some(token.into());
         request.extensions_mut().insert(identity);
+        request.headers_mut().remove(header::ORIGIN);
         *request.uri_mut() = format!("/api/shared-artifacts/{token}").parse().unwrap();
     }
     Ok(None)

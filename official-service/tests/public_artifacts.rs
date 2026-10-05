@@ -84,6 +84,7 @@ async fn public_file_is_an_official_read_only_link_with_security_headers_revocat
             .unwrap();
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
         for (name, value) in [
+            ("access-control-allow-origin", "*"),
             ("cache-control", "no-store"),
             ("x-content-type-options", "nosniff"),
             ("content-security-policy", "default-src 'none'; sandbox"),
@@ -93,6 +94,11 @@ async fn public_file_is_an_official_read_only_link_with_security_headers_revocat
             assert_eq!(response.headers()[name], value);
         }
         assert!(!response.headers().contains_key("set-cookie"));
+        assert!(
+            !response
+                .headers()
+                .contains_key("access-control-allow-credentials")
+        );
         assert_eq!(response.headers()["content-range"], "bytes 4-9/15");
         assert_eq!(
             response.text().await.unwrap(),
