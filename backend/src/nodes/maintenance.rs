@@ -133,6 +133,7 @@ async fn advertise_runtime(
                     db.set(&old_key, &value, Some(deadline))?;
                 }
             }
+
             db.set(
                 &key,
                 &json!({
