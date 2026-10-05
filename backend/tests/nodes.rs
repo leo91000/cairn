@@ -1,5 +1,7 @@
 mod common;
 
+use common::browser_http::router;
+
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
@@ -11,7 +13,6 @@ use common::Session;
 use leo_agent_manager::{
     auth,
     config::{Config, MAIN_AGENT_ID, id, now},
-    http::router,
     microvm::wire,
     nodes::{
         LOCAL_NODE_ID, alerts, checkpoint, disk_grants, files, moves, placement, publication,

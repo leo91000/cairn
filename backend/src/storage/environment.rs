@@ -11,6 +11,7 @@ use crate::{
 use std::{
     io,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 const POINTER: &str = "environment";
@@ -95,13 +96,33 @@ pub struct OwnerLease {
 /// Bootstrap and VMM boot acquire their own physical lock. Keep this lease
 /// across both operations and through shutdown to fence attribution changes.
 pub async fn ownership(state: &Path, run: &str, busy: &str) -> Result<OwnerLease> {
+    ownership_after_release(state, run, busy, Duration::ZERO).await
+}
+
+/// Like `ownership`, but waits up to `wait` for another holder of the disk,
+/// such as an interrupted attempt whose VMM is still stopping.
+pub async fn ownership_after_release(
+    state: &Path,
+    run: &str,
+    busy: &str,
+    wait: Duration,
+) -> Result<OwnerLease> {
     identity(run)?;
     let logical = state.join("disks").join(run);
     if logical.exists() {
         real_directory(&logical)?;
     }
     private_dir(&logical).await?;
-    let logical_lock = file_lock::exclusive(&logical.join(OWNERSHIP_LOCK), busy)?;
+
+    let deadline = Instant::now() + wait;
+    let logical_lock = loop {
+        match file_lock::exclusive(&logical.join(OWNERSHIP_LOCK), busy) {
+            Err(error) if error.is_conflict() && Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            result => break result?,
+        }
+    };
     let physical = directory(state, run)?;
     Ok(OwnerLease {
         directory: physical,
@@ -279,6 +300,31 @@ mod tests {
         private_dir(&physical).await.unwrap();
         let lock = file_lock::exclusive(&physical.join("lock"), "busy").unwrap();
         (environment, physical, lock)
+    }
+
+    #[tokio::test]
+    async fn a_replacement_attempt_waits_for_the_interrupted_vm_to_release_its_disk() {
+        let state = tempfile::tempdir().unwrap();
+        let run = crate::config::id();
+        let interrupted = ownership(state.path(), &run, "busy").await.unwrap();
+        assert!(
+            ownership_after_release(state.path(), &run, "busy", Duration::from_millis(100))
+                .await
+                .is_err(),
+            "a disk that stays in use is still refused"
+        );
+
+        // Production 2026-10-05: the replacement arrived 3 s after the
+        // interruption, while the old VMM still held the disk.
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            drop(interrupted);
+        });
+        let owner = ownership_after_release(state.path(), &run, "busy", Duration::from_secs(5))
+            .await
+            .expect("the disk is claimed once the old VMM releases it");
+        release.await.unwrap();
+        assert_eq!(owner.directory, state.path().join("disks").join(&run));
     }
 
     #[tokio::test]

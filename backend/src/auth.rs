@@ -30,47 +30,27 @@ pub enum InstallationRole {
     Member,
 }
 
-/// Trusted request context, never an HTTP header or stored authorship. Local
-/// sessions identify the owner; the authenticated relay will supply a role.
+/// Trusted request context from the authenticated relay, never an HTTP header
+/// or stored authorship.
 #[derive(Clone)]
 pub struct InstallationIdentity {
     pub role: InstallationRole,
-    local_session: Option<String>,
     oauth_binding: String,
 }
 
 impl InstallationIdentity {
-    /// Only trusted in-process callers (the future authenticated tunnel) may
+    /// Only trusted in-process callers (the authenticated tunnel) may
     /// attach this context to a request with its verified Leo account identifier.
     /// Ordinary HTTP clients cannot supply it.
     pub fn trusted(role: InstallationRole, account_id: &str) -> Self {
         Self {
             role,
-            local_session: None,
             oauth_binding: format!("leo-account:{account_id}"),
-        }
-    }
-
-    pub(crate) fn local_owner(session: String, csrf: String) -> Self {
-        Self {
-            role: InstallationRole::Owner,
-            local_session: Some(session),
-            oauth_binding: csrf,
         }
     }
 
     pub(crate) fn oauth_binding(&self) -> &str {
         &self.oauth_binding
-    }
-
-    /// Local streams stop when their browser session is revoked or expires.
-    /// Trusted tunnel requests have no local session; their transport owns
-    /// revocation and the lifetime of the relay stream.
-    pub(crate) async fn is_active(&self, auth: &Auth) -> Result<bool> {
-        match &self.local_session {
-            Some(session) => Ok(auth.read(session).await?.is_some()),
-            None => Ok(true),
-        }
     }
 }
 
@@ -92,14 +72,14 @@ pub fn safe_equal(a: &str, b: &str) -> bool {
     bool::from(a.as_bytes().ct_eq(b.as_bytes()))
 }
 
-/// The single administrator password, stored as `admin`.
+/// Legacy administrator record. The installation network router never accepts it.
 #[derive(Serialize, Deserialize)]
 struct Admin {
     salt: String,
     hash: String,
 }
 
-/// Browser session, stored as `session:{digest}`; `value` is only returned once.
+/// Legacy fixture session, stored as `session:{digest}`; never accepted by the installation network router.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Session {

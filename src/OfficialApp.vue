@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {
+  computed,
   onMounted,
   onScopeDispose,
   ref,
@@ -7,6 +8,8 @@ import {
 } from 'vue'
 import { logoutAccount, redirect, state } from './api'
 import App from './App.vue'
+import InstallationSharing from './components/InstallationSharing.vue'
+import PendingInvitations from './components/PendingInvitations.vue'
 import ThemeControl from './components/ThemeControl.vue'
 import UiAlert from './components/UiAlert.vue'
 import UiButton from './components/UiButton.vue'
@@ -18,7 +21,7 @@ interface AccountSession {
   installations: Array<{
     id: string
     name: string
-    role: 'owner'
+    role: 'owner' | 'member'
     online: boolean
   }>
 }
@@ -47,11 +50,37 @@ const challenge = ref('')
 const busy = ref(false)
 const error = ref('')
 const claimCode = ref('')
+const installationCommand = computed(() => {
+  const quote = (value: string) => `'${value.replaceAll('\'', '\'"\'"\'')}'`
+  return `curl -fsSL ${quote(`${window.location.origin}/install.sh`)} | sudo bash -s -- --claim-code ${quote(claimCode.value)}`
+})
+const installationInstructions = 'This code expires in 10 minutes. Run this command on your Linux x86-64 machine. No domain, certificate, incoming port or S3 setup is needed.'
+const showSharing = ref(false)
+const showInvitations = ref(false)
+const confirmLeave = ref(false)
+const invitationsPage = new URLSearchParams(window.location.search).has('invitations')
 const editingName = ref(false)
 const installationName = ref('')
-const installation = ref<{ id: string, name: string, online: boolean } | null>(null)
+const deviceCode = ref('')
+const deviceReview = ref<{
+  code: string
+  name: string
+  fingerprint: string
+  confirmation: string
+} | null>(null)
+const claimStatus = ref('')
+const confirmDetach = ref(false)
+const installation = ref<{
+  id: string
+  name: string
+  online: boolean
+  role: 'owner' | 'member'
+} | null>(null)
 const installationMenu = ref<HTMLDetailsElement>()
-const installationReturnKey = 'leo-installation-return'
+const officialReturnKey = 'leo-installation-return'
+const claimPage = window.location.pathname === '/claim'
+
+watch(deviceCode, () => deviceReview.value = null)
 
 watch(session, (value) => {
   state.csrf = value?.csrf || ''
@@ -67,6 +96,8 @@ watch(session, (value) => {
     return
   }
 
+  state.installationRole = installation.value?.role || 'owner'
+
   if (installation.value) {
     try {
       localStorage.setItem(`leo-current-installation:${value.account?.id}`, installation.value.id)
@@ -74,7 +105,7 @@ watch(session, (value) => {
     catch {}
   }
 
-  if (!requested && value.installations.length) {
+  if (!requested && value.installations.length && !claimPage && !invitationsPage) {
     let remembered = ''
     try {
       remembered = localStorage.getItem(`leo-current-installation:${value.account?.id}`) || ''
@@ -159,6 +190,10 @@ async function signOut() {
     showMethods.value = false
     installation.value = null
     claimCode.value = ''
+    deviceCode.value = ''
+    deviceReview.value = null
+    claimStatus.value = ''
+    confirmDetach.value = false
     state.installationId = ''
     email.value = ''
     code.value = ''
@@ -242,18 +277,106 @@ async function passkey(register: boolean) {
   }
 }
 
+async function installationRequest(route: string, body?: unknown) {
+  const response = await fetch(`/api/installations/${route}`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': session.value?.csrf || '' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  if (response.status === 204)
+    return
+  const value = await response.json()
+  if (!response.ok)
+    throw new Error(value.error || 'Unable to update the installation.')
+  return value
+}
+
+async function leaveInstallation() {
+  if (!installation.value)
+    return
+  busy.value = true
+  error.value = ''
+  try {
+    const response = await fetch(`/api/installations/${encodeURIComponent(installation.value.id)}/sharing/membership`, {
+      method: 'DELETE',
+      headers: { 'X-CSRF-Token': state.csrf },
+    })
+    if (!response.ok) {
+      const value = await response.json()
+      throw new Error(value.error || 'Unable to leave this installation.')
+    }
+
+    redirect('/')
+  }
+  catch (cause) {
+    error.value = cause instanceof Error ? cause.message : 'Unable to leave this installation.'
+  }
+  finally {
+    busy.value = false
+  }
+}
+
+async function reviewDevice() {
+  busy.value = true
+  error.value = ''
+  claimStatus.value = ''
+  deviceReview.value = null
+  try {
+    const value = await installationRequest('device-claim/preview', { code: deviceCode.value })
+    deviceReview.value = { ...value, code: deviceCode.value }
+  }
+  catch (cause) {
+    error.value = cause instanceof Error ? cause.message : 'Unable to review the installation.'
+  }
+  finally {
+    busy.value = false
+  }
+}
+
+async function approveDevice() {
+  if (!deviceReview.value)
+    return
+  busy.value = true
+  error.value = ''
+  claimStatus.value = ''
+  try {
+    await installationRequest('device-claim', { code: deviceReview.value.code, confirmation: deviceReview.value.confirmation })
+    deviceCode.value = ''
+    deviceReview.value = null
+    claimStatus.value = 'Installation approved. Finish leo claim, then restart your manager and refresh installations.'
+  }
+  catch (cause) {
+    error.value = cause instanceof Error ? cause.message : 'Unable to claim the installation.'
+  }
+  finally {
+    busy.value = false
+  }
+}
+
+async function detachInstallation() {
+  if (!installation.value)
+    return
+  busy.value = true
+  error.value = ''
+  try {
+    await installationRequest(`${installation.value.id}/detach`)
+    redirect('/')
+  }
+  catch (cause) {
+    error.value = cause instanceof Error ? cause.message : 'Unable to detach the installation.'
+  }
+  finally {
+    busy.value = false
+  }
+}
+
 async function addInstallation() {
   busy.value = true
   error.value = ''
   claimCode.value = ''
   try {
-    const response = await fetch('/api/installations/claim-code', {
-      method: 'POST',
-      headers: { 'X-CSRF-Token': session.value?.csrf || '' },
-    })
-    const value = await response.json()
-    if (!response.ok)
-      throw new Error(value.error || 'Unable to add an installation.')
+    const value = await installationRequest('claim-code')
     claimCode.value = value.code
   }
   catch (cause) {
@@ -270,9 +393,11 @@ async function oauth(provider: 'google' | 'github') {
   try {
     const start = await accountRequest(`oauth/${provider}/start`, {})
     try {
-      sessionStorage.removeItem(installationReturnKey)
-      if (state.installationId)
-        sessionStorage.setItem(installationReturnKey, `${window.location.pathname}${window.location.search}${window.location.hash}`)
+      sessionStorage.removeItem(officialReturnKey)
+      if (state.installationId || claimPage) {
+        const destination = claimPage ? '/claim' : `${window.location.pathname}${window.location.search}${window.location.hash}`
+        sessionStorage.setItem(officialReturnKey, destination)
+      }
     }
     catch {}
 
@@ -412,12 +537,12 @@ function changeEmail() {
 onMounted(async () => {
   const url = new URL(window.location.href)
   // OAuth callbacks return to the official root. Restore this tab's explicit
-  // installation URL before the session can choose a remembered installation.
+  // account or installation page before the session chooses an installation.
   try {
-    const destination = sessionStorage.getItem(installationReturnKey)
+    const destination = sessionStorage.getItem(officialReturnKey)
     if (url.pathname === '/' && destination) {
-      sessionStorage.removeItem(installationReturnKey)
-      if (/^\/installations\/[\w-]+\//.test(destination)) {
+      sessionStorage.removeItem(officialReturnKey)
+      if (destination === '/claim' || /^\/installations\/[\w-]+\//.test(destination)) {
         const target = new URL(destination, url.origin)
         const signInError = url.searchParams.get('sign_in_error')
         if (signInError)
@@ -462,11 +587,43 @@ onMounted(async () => {
           Installation options
         </summary>
         <div class="absolute right-0 z-50 mt-2 grid w-52 gap-2 rounded-xl border border-line bg-surface p-2 shadow-lg" @click="closeInstallationMenu">
-          <UiButton size="small" :disabled="busy" @click="editingName = !editingName; installationName = installation.name">
+          <UiButton
+            v-if="installation.role === 'owner'"
+            size="small"
+            :disabled="busy"
+            @click="editingName = !editingName; installationName = installation.name"
+          >
             Rename installation
           </UiButton>
           <UiButton size="small" :disabled="busy" @click="addInstallation">
             Add an installation
+          </UiButton>
+          <UiButton
+            v-if="installation.role === 'owner'"
+            size="small"
+            :disabled="busy"
+            @click="confirmDetach = true"
+          >
+            Detach installation
+          </UiButton>
+          <UiButton
+            v-if="installation.role === 'owner'"
+            size="small"
+            :disabled="busy"
+            @click="showSharing = !showSharing"
+          >
+            Share installation
+          </UiButton>
+          <UiButton
+            v-else
+            size="small"
+            :disabled="busy"
+            @click="confirmLeave = true"
+          >
+            Leave installation
+          </UiButton>
+          <UiButton size="small" :disabled="busy" @click="showInvitations = !showInvitations">
+            Invitations
           </UiButton>
           <UiButton size="small" :disabled="busy" @click="openMethods">
             Sign-in methods
@@ -477,6 +634,26 @@ onMounted(async () => {
         </div>
       </details>
     </header>
+    <InstallationSharing v-if="showSharing && installation.role === 'owner'" :installation-id="installation.id" @close="showSharing = false" />
+    <PendingInvitations v-if="showInvitations" class="px-4" @accepted="id => openInstallation({ id, name: '' })" />
+    <div v-if="confirmLeave" class="grid gap-3 border-b border-line px-4 py-3">
+      <p>Leave this shared installation? You will need a new invitation to return.</p>
+      <UiButton :disabled="busy" @click="leaveInstallation">
+        Confirm leaving
+      </UiButton>
+      <UiButton :disabled="busy" @click="confirmLeave = false">
+        Cancel leaving
+      </UiButton>
+    </div>
+    <div v-if="confirmDetach" class="grid gap-3 border-b border-line px-4 py-3">
+      <p>Detach this installation? Access through Leo will stop. Its data stays on the machine, which can be claimed again.</p>
+      <UiButton :disabled="busy" @click="detachInstallation">
+        Confirm detachment
+      </UiButton>
+      <UiButton :disabled="busy" @click="confirmDetach = false">
+        Cancel detachment
+      </UiButton>
+    </div>
     <form v-if="editingName" class="flex flex-wrap items-end gap-3 border-b border-line px-4 py-3" @submit.prevent="renameInstallation">
       <label>Installation name<input
         v-model="installationName"
@@ -492,9 +669,17 @@ onMounted(async () => {
       </UiButton>
     </form>
     <div v-if="claimCode" class="grid gap-3 border-b border-line px-4 py-3">
+      <label>Installation command<textarea
+        :value="installationCommand"
+        readonly
+        autocomplete="off"
+        rows="4"
+        spellcheck="false"
+        class="w-full font-mono text-xs"
+      /></label>
       <label>Installation claim code<input :value="claimCode" readonly autocomplete="off"></label>
       <p class="text-sm text-muted">
-        This code expires in 10 minutes.
+        {{ installationInstructions }}
       </p>
       <UiButton size="small" :disabled="busy" @click="loadSession">
         Refresh installations
@@ -593,10 +778,11 @@ onMounted(async () => {
         <p class="text-muted mb-4">
           You’re signed in as {{ session.account?.email }}.
         </p>
+        <PendingInvitations @accepted="id => openInstallation({ id, name: '' })" />
         <div>
           <p v-if="!session.installations.length" class="text-muted mb-8">
-            Your Leo account is ready. Choose Add an installation to get a claim code,
-            then use it to connect a Leo installation on your machine. The installation
+            Your Leo account is ready. Choose Add an installation to get a command,
+            then run it on your Linux x86-64 machine. The installation
             will appear here; choose Refresh installations once it is connected.
           </p>
           <div class="grid gap-3 mb-6">
@@ -610,10 +796,56 @@ onMounted(async () => {
               Refresh installations
             </UiButton>
           </div>
+          <form class="grid gap-3 mb-6" @submit.prevent="reviewDevice">
+            <label>Device claim code<input
+              v-model="deviceCode"
+              required
+              maxlength="30"
+              autocomplete="off"
+              :disabled="busy"
+            ></label>
+            <p class="text-muted">
+              Only approve a code displayed by a machine you control.
+            </p>
+            <UiButton type="submit" :disabled="busy">
+              Review installation
+            </UiButton>
+            <div
+              v-if="deviceReview"
+              role="dialog"
+              aria-label="Confirm installation claim"
+              class="grid gap-3 rounded-xl border border-line p-4"
+            >
+              <p>Claim {{ deviceReview.name }}?</p>
+              <label>Installation fingerprint<input :value="deviceReview.fingerprint" readonly></label>
+              <p class="text-muted">
+                Compare this fingerprint with leo claim in the terminal on a machine you control.
+                This machine will store your conversations, coding-agent accounts and secrets.
+                Do not approve a code sent by someone else, even if they ask you to sign in.
+              </p>
+              <UiButton :disabled="busy" @click="approveDevice">
+                Claim this installation
+              </UiButton>
+              <UiButton :disabled="busy" @click="deviceReview = null">
+                Cancel claim
+              </UiButton>
+            </div>
+            <p v-if="claimStatus" role="status">
+              {{ claimStatus }}
+            </p>
+          </form>
           <div v-if="claimCode" class="grid gap-3 mb-6">
+            <label>Installation command<textarea
+              :value="installationCommand"
+              readonly
+              autocomplete="off"
+              rows="4"
+              spellcheck="false"
+              class="w-full font-mono text-xs"
+            /></label>
             <label>Installation claim code<input :value="claimCode" readonly autocomplete="off"></label>
             <p class="text-muted">
-              This code expires in 10 minutes.
+              {{ installationInstructions }}
             </p>
           </div>
         </div>

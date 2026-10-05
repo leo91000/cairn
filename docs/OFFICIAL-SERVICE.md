@@ -32,6 +32,7 @@ variables through the operator's secret management:
 | `LEO_OFFICIAL_ORIGIN` | Required browser origin, HTTPS except localhost/loopback development; no path, query, or fragment |
 | `LEO_OFFICIAL_LISTEN` | Bind address, default `127.0.0.1:4311` |
 | `LEO_OFFICIAL_WEB_DIR` | Frontend output directory, default `dist` |
+| `LEO_INSTALLATION_IMAGE` | Tested immutable `ghcr.io/leo91000/leo-agent-manager@sha256:<64 lowercase hex>` approved for new installations; unset returns 503 from `/install/release` |
 | `LEO_OFFICIAL_EMAIL_FROM` | Required sender address on a verified email domain |
 | `LEO_OFFICIAL_EMAIL_KEY` | Required email provider bearer key; never logged |
 | `LEO_OFFICIAL_EMAIL_ENDPOINT` | Default `https://api.resend.com/emails`; override only for the loopback development setup |
@@ -147,3 +148,41 @@ sign-in/removal with Chromium's virtual authenticator. API tests use HTTP OAuth
 providers and a software WebAuthn authenticator (a client adapter supplies its
 locally retained credential and user handle for discovery), including unverified emails,
 replay, explicit re-linking and concurrent removal of the final methods. The installation remains untouched by this slice.
+
+## Installation sharing
+
+An owner opens **Installation options → Share installation** to see members and
+pending invitations, invite a verified email address, cancel an invitation or
+remove a member. The invitation screen warns that members use the owner's
+coding-agent accounts and secrets. Invitations are sent through the existing
+email adapter, expire after seven days, and cannot duplicate a pending invitation
+or an account that already has access. Delivery failure removes the invitation
+so the owner can retry.
+
+The email links to `/?invitations=1`, where a recipient can sign in or create a
+Leo account and accept invitations addressed to that verified email. Invitations
+are also available from the installation options menu, including for people who
+already have an installation. A member can choose **Leave installation** and
+confirm; returning requires a new invitation.
+
+The official HTTP routes are:
+
+- `GET /api/account/invitations` and `POST /api/account/invitations/{id}/accept`.
+- `GET /api/installations/{id}/sharing` for the owner's member/invitation list.
+- `POST /api/installations/{id}/sharing/invitations` with `{ "email": "…" }`.
+- `DELETE /api/installations/{id}/sharing/invitations/{invitation}` to cancel.
+- `DELETE /api/installations/{id}/sharing/members/{account}` to remove a member.
+- `DELETE /api/installations/{id}/sharing/membership` to leave.
+
+Mutations require the official session, origin and CSRF token. Accepting an
+invitation and changing membership serialize on the installation record.
+Removal and departure call the existing relay revocation mechanism after commit:
+open chat/run streams close immediately, the next request is denied, and the
+installation's runs and other accounts remain unaffected. The installation
+receives the official account and role through its existing trusted identity.
+
+Members can read agents, projects and skills, and create conversations and work
+with agents. The installation refuses management of agents, projects, skills,
+nodes, coding-agent accounts, connections, secrets and settings. The web hides
+these actions and owner-only pages, skips owner-only requests in shared views,
+and offers skills for reading only.

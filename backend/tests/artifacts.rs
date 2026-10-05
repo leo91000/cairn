@@ -1,5 +1,7 @@
 mod common;
 
+use common::browser_http::router;
+
 use axum::{
     Json, Router,
     body::{Body, Bytes, to_bytes},
@@ -11,7 +13,6 @@ use common::{Credentials, Session, eventually, request, send};
 use leo_agent_manager::{
     artifacts::{self, file, sharing},
     config::{Config, MAIN_AGENT_ID, id},
-    http::router,
     project_workspaces,
     run_status::RunStatus,
     service::Service,
@@ -87,7 +88,6 @@ impl Fixture {
         common::managed_codex_home(&root.path().join("home"));
         let (url, server) = common::serve_locally(guest_exports()).await;
         let s = Service::new(Config {
-            setup_token: "test-setup".into(),
             runner_url: url,
             ..common::config(root.path())
         })

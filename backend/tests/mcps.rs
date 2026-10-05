@@ -1,10 +1,11 @@
 mod common;
 
+use common::browser_http::router;
+
 use axum::{body::Body, http::StatusCode};
 use leo_agent_manager::{
     auth::{InstallationIdentity, InstallationRole},
     config::{Config, MAIN_AGENT_ID},
-    http::router,
     mcp_client::Client,
     network,
     run_status::RunStatus,
@@ -23,7 +24,6 @@ const TRANSPORT_LIMIT: usize = 8 * 1024 * 1024;
 
 fn config(root: &TempDir) -> Config {
     Config {
-        setup_token: String::new(),
         ..common::config(root.path())
     }
 }

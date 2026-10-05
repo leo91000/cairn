@@ -4,7 +4,7 @@ import { createServer } from 'node:http'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
 
-test('Google and GitHub reuse a verified Leo account and manage its sign-in methods', async ({ page }) => {
+test('Google and GitHub reuse an account, manage sign-in methods and preserve claim navigation', async ({ page }) => {
   let denyNextAuthorization = false
   const githubId = Date.now()
   const email = `oauth-browser-${Date.now()}@example.test`
@@ -119,6 +119,36 @@ test('Google and GitHub reuse a verified Leo account and manage its sign-in meth
     await expect(page.getByRole('heading', { name: 'No installations yet' })).toBeVisible()
     const signedIn = await page.evaluate(() => fetch('/api/account/session').then(response => response.json()))
     expect(signedIn.account).toEqual(first.account)
+
+    await page.getByRole('button', { name: 'Add an installation', exact: true }).click()
+    const otherCode = await page.getByLabel('Installation claim code').inputValue()
+    const other = await page.request.post(`${url}/api/relay/claim`, {
+      data: { code: otherCode, name: 'Existing OAuth machine', protocol: 1 },
+    })
+    expect(other.status()).toBe(201)
+
+    const started = await page.request.post(`${url}/api/relay/device-claim/start`, {
+      data: { name: 'OAuth claim machine', protocol: 1 },
+    })
+    expect(started.status()).toBe(201)
+    const device = await started.json()
+    await page.getByRole('button', { name: 'Sign out', exact: true }).click()
+    await expect(page.getByLabel('Email address')).toBeVisible()
+    await expect(page).toHaveURL(`${url}/`)
+    await page.goto(device.verificationUri)
+    await page.getByRole('button', { name: 'Continue with GitHub' }).click()
+    await expect(page.getByLabel('Device claim code')).toBeVisible()
+    await expect(page).toHaveURL(device.verificationUri)
+    await page.getByLabel('Device claim code').fill(device.userCode)
+    await page.getByRole('button', { name: 'Review installation', exact: true }).click()
+    await expect(page.getByRole('dialog', { name: 'Confirm installation claim' })).toContainText('OAuth claim machine')
+    await expect(page.getByLabel('Installation fingerprint')).toHaveValue(device.fingerprint)
+    await page.getByRole('button', { name: 'Claim this installation', exact: true }).click()
+    await expect(page.getByRole('status')).toContainText('Installation approved')
+    const claimed = await page.request.post(`${url}/api/relay/device-claim/poll`, {
+      data: { deviceCode: device.deviceCode },
+    })
+    expect(claimed.status()).toBe(200)
   }
   finally {
     child.kill('SIGTERM')

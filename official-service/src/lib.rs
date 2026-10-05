@@ -1,8 +1,10 @@
 mod installations;
+pub mod installer;
 mod methods;
 mod oauth;
 mod passkeys;
 mod relay;
+mod sharing;
 
 pub use oauth::{OAuthProvider, OAuthProviders};
 pub use relay::Relay;
@@ -34,6 +36,13 @@ use subtle::ConstantTimeEq;
 pub trait EmailSender: Send + Sync {
     /// Deliver the code without retaining or logging it.
     async fn send_code(&self, email: &str, code: &str) -> Result<(), String>;
+
+    async fn send_invitation(
+        &self,
+        email: &str,
+        installation: &str,
+        url: &str,
+    ) -> Result<(), String>;
 }
 
 #[derive(Clone)]
@@ -122,11 +131,47 @@ pub async fn router_with_relay(
                 include_str!("../migrations/202610030152_removed_methods.sql").into(),
                 false,
             ),
+            Migration::new(
+                202610030250,
+                "reclaim installations".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/202610030250_reclaim.sql").into(),
+                false,
+            ),
+            Migration::new(
+                202610030350,
+                "device claims".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/202610030350_device_claims.sql").into(),
+                false,
+            ),
+            Migration::new(
+                202610040050,
+                "claim identity recovery".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/202610040050_claim_recovery.sql").into(),
+                false,
+            ),
+            Migration::new(
+                202610041950,
+                "device claim review".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/202610041950_device_review.sql").into(),
+                false,
+            ),
+            Migration::new(
+                202610040053,
+                "installation sharing".into(),
+                MigrationType::Simple,
+                include_str!("../migrations/202610040053_installation_sharing.sql").into(),
+                false,
+            ),
         ]),
         ..Migrator::DEFAULT
     };
     migrations.run(&pool).await?;
 
+    let installer = installer::router(origin.clone());
     let service = Service {
         pool,
         sender,
@@ -161,6 +206,31 @@ pub async fn router_with_relay(
             "/api/account/oauth/{provider}/callback",
             get(oauth::callback),
         )
+        .route("/api/account/invitations", get(sharing::pending))
+        .route(
+            "/api/account/invitations/{invitation}/accept",
+            post(sharing::accept),
+        )
+        .route(
+            "/api/installations/{installation}/sharing",
+            get(sharing::list),
+        )
+        .route(
+            "/api/installations/{installation}/sharing/invitations",
+            post(sharing::invite),
+        )
+        .route(
+            "/api/installations/{installation}/sharing/invitations/{invitation}",
+            axum::routing::delete(sharing::cancel),
+        )
+        .route(
+            "/api/installations/{installation}/sharing/members/{member}",
+            axum::routing::delete(sharing::remove),
+        )
+        .route(
+            "/api/installations/{installation}/sharing/membership",
+            axum::routing::delete(sharing::leave),
+        )
         .route("/api/account/methods", get(methods::list))
         .route("/api/account/methods/remove", post(methods::remove))
         .route("/api/installations", get(installations::status))
@@ -173,6 +243,18 @@ pub async fn router_with_relay(
             axum::routing::patch(installations::rename),
         )
         .route(
+            "/api/installations/device-claim/preview",
+            post(installations::preview_device),
+        )
+        .route(
+            "/api/installations/device-claim",
+            post(installations::approve_device),
+        )
+        .route(
+            "/api/installations/{installation}/detach",
+            post(installations::detach),
+        )
+        .route(
             "/api/installations/{installation}/api/{*path}",
             any(relay::forward),
         )
@@ -183,9 +265,18 @@ pub async fn router_with_relay(
         .merge(
             Router::new()
                 .route("/api/relay/claim", post(installations::claim))
+                .route(
+                    "/api/relay/device-claim/start",
+                    post(installations::start_device),
+                )
+                .route(
+                    "/api/relay/device-claim/poll",
+                    post(installations::poll_device),
+                )
                 .route("/api/relay/{installation}/connect", get(relay::upgrade)),
         )
-        .with_state(service))
+        .with_state(service)
+        .merge(installer))
 }
 
 fn random_token() -> String {

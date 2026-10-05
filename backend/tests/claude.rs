@@ -22,7 +22,6 @@ const RESUMED_SESSION: &str = "70f5e7a1-8d65-4f5f-a545-af6ee8c0e1ab";
 /// A service whose Claude Code binary is the repository fixture, without Codex.
 fn config(root: &TempDir) -> Config {
     Config {
-        setup_token: "test".into(),
         codex_bin: "/nonexistent-codex".into(),
         claude_bin: common::fixture("claude.mjs"),
         ..common::config(root.path())

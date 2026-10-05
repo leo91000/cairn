@@ -1,13 +1,10 @@
 mod common;
 
+use common::browser_http::router;
+
 use axum::{Router, body::Body, http::StatusCode};
 use common::Session;
-use leo_agent_manager::{
-    config::{Config, id},
-    http::router,
-    run_status::RunStatus,
-    service::Service,
-};
+use leo_agent_manager::{config::id, run_status::RunStatus, service::Service};
 use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc};
 use tempfile::TempDir;
@@ -24,12 +21,7 @@ struct App {
 impl App {
     async fn new() -> Self {
         let root = TempDir::new().unwrap();
-        let service = Service::new(Config {
-            setup_token: "test-setup".into(),
-            ..common::config(root.path())
-        })
-        .await
-        .unwrap();
+        let service = Service::new(common::config(root.path())).await.unwrap();
         let router = router(service.clone()).await.unwrap();
         let session = Session::new(&service.auth.session().await.unwrap());
         Self {

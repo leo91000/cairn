@@ -153,6 +153,13 @@ const commands = computed<Command[]>(() => {
       run: () => emit('shortcuts'),
     },
   ]
+  if (state.installationRole === 'member') {
+    for (let index = items.length - 1; index >= 0; index--) {
+      if (['connections', 'settings'].includes(items[index]!.id))
+        items.splice(index, 1)
+    }
+  }
+
   const fil = filOf(chatList.value, state.tasks, runs.value)
   for (const item of fil.forYou) {
     items.push({

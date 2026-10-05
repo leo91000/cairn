@@ -1,10 +1,11 @@
 mod common;
 
+use common::browser_http::router;
+
 use axum::http::StatusCode;
 use leo_agent_manager::{
     config::{Config, MAIN_AGENT_ID, id},
     error::Error,
-    http::router,
     run_status::RunStatus,
     service::Service,
     validation::text,
@@ -31,7 +32,6 @@ impl Fixture {
         let root = TempDir::new().unwrap();
         common::managed_codex_home(&root.path().join("home"));
         let config = Config {
-            setup_token: "test".into(),
             ..common::config(root.path())
         };
         let service = Service::new(config).await.unwrap();
@@ -310,7 +310,7 @@ async fn server_restart_replays_committed_history_and_continues_live() {
 }
 
 #[tokio::test]
-async fn metadata_auth_revocation_and_invalid_requests() {
+async fn metadata_shutdown_and_invalid_requests() {
     let f = Fixture::new().await;
     let mut stream = f.open(0).await;
     stream.batch().await;
@@ -324,7 +324,7 @@ async fn metadata_auth_revocation_and_invalid_requests() {
         .unwrap();
     let (_, batch) = stream.batch().await;
     assert_eq!(batch["state"]["run"]["result"], "Done");
-    f.service.auth.logout(&f.token).await.unwrap();
+    f.service.shutdown.cancel();
     let ended = tokio::time::timeout(Duration::from_secs(2), stream.response.chunk())
         .await
         .unwrap();

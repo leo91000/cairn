@@ -405,6 +405,14 @@ async fn settings_routes(
 ) -> Result<Option<Value>> {
     let result = match route {
         ("GET", ["settings"]) => settings(s),
+        ("GET", ["settings", "storage"]) => crate::object_storage::settings(s)?,
+        ("PUT", ["settings", "storage"]) => {
+            crate::object_storage::save_settings(s, &input.body).await?
+        }
+        ("POST", ["settings", "storage", "check"]) => {
+            crate::object_storage::Storage::configured(s)?.probe().await?;
+            json!({ "ok": true })
+        }
         ("GET", ["audit"]) => {
             s.store
                 .read(|db| {

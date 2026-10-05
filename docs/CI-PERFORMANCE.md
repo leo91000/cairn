@@ -138,8 +138,9 @@ took **8m53s** (528 aggregate runner seconds), without deployment.
   deliberate waits for one shared rate limiter without weakening that limiter.
 - In CI, use separate runners for two journey shards, Chromium layouts, and two
   WebKit shards, with at most two workers per runner. A dedicated build job shares
-  the frontend and Rust backend through artifacts, so browser tests do not wait
-  for the quality checks. Retry a failed browser test once and retain evidence.
+  the frontend and Rust backend through artifacts, so neither the browser tests
+  nor the image job, whose smoke test uses the official binary, wait for the
+  quality checks. Retry a failed browser test once and retain evidence.
 - Run browser jobs in the official Playwright Noble image, pinned by version and
   digest to the installed `@playwright/test`. Check their versions before tests.
   This removes repeated browser and OS-library installation: Ubuntu package

@@ -14,12 +14,28 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 #[derive(Default)]
-pub struct Mailbox(pub Mutex<Vec<(String, String)>>);
+pub struct Mailbox(
+    pub Mutex<Vec<(String, String)>>,
+    pub Mutex<Vec<(String, String, String)>>,
+);
 
 #[async_trait]
 impl EmailSender for Mailbox {
     async fn send_code(&self, email: &str, code: &str) -> Result<(), String> {
         self.0.lock().unwrap().push((email.into(), code.into()));
+        Ok(())
+    }
+
+    async fn send_invitation(
+        &self,
+        email: &str,
+        installation: &str,
+        url: &str,
+    ) -> Result<(), String> {
+        self.1
+            .lock()
+            .unwrap()
+            .push((email.into(), installation.into(), url.into()));
         Ok(())
     }
 }
@@ -158,6 +174,10 @@ pub struct RelayedInstallation {
 
 impl RelayedInstallation {
     pub async fn new(extra_routes: axum::Router) -> Self {
+        Self::with_runner_url(extra_routes, String::new()).await
+    }
+
+    pub async fn with_runner_url(extra_routes: axum::Router, runner_url: String) -> Self {
         use leo_agent_manager::{config::Config, service::Service};
         use serde_json::json;
         use std::time::Duration;
@@ -186,14 +206,13 @@ impl RelayedInstallation {
             "publicUrl": "http://localhost:4310",
             "host": "127.0.0.1",
             "port": 0,
-            "setupToken": "fixture",
             "codexBin": "codex",
             "claudeBin": "claude",
             "ghBin": "gh",
             "concurrency": 1,
             "logger": false,
             "workerEnabled": false,
-            "runnerUrl": "",
+            "runnerUrl": runner_url,
         }))
         .unwrap();
         std::fs::create_dir_all(root.path().join("home/.codex")).unwrap();
