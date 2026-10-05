@@ -143,6 +143,7 @@ test('owner shares an installation and member works without management controls'
     await page.getByText('Installation options', { exact: true }).click()
     await page.getByRole('button', { name: 'Share installation', exact: true }).click()
     await page.getByRole('button', { name: `Remove ${memberEmail}`, exact: true }).click()
+    await expect(page.getByRole('region', { name: 'Installation sharing' }).getByText(memberEmail, { exact: true })).toHaveCount(0)
     await member.reload()
     await expect(member.getByRole('alert')).toContainText('no longer accessible')
     await page.getByLabel('Invite by email', { exact: true }).fill(memberEmail)
