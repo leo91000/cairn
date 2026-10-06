@@ -18,6 +18,10 @@ _Avoid_ : node, set de nodes, instance, serveur
 **Revendication d’une installation** :
 Le rattachement d’une installation à un compte Leo, qui en devient le propriétaire. Une installation non revendiquée n’est accessible à personne.
 
+**Révocation définitive d’une installation** (« Revoke and forget installation ») :
+La suppression de son rattachement et de son identité auprès de Leo, décidée par son propriétaire, qui met fin à ses accès et à son partage tout en conservant ses données sur la machine. Revenir exige une nouvelle revendication, sous une nouvelle identité d’installation.
+_Avoid_ : détachement (qui conserve l’identité de l’installation)
+
 **Propriétaire d’une installation** :
 Le compte Leo auquel l’installation est rattachée. Il est le seul à gérer ses nodes, ses comptes d’agent de code, ses secrets et son partage.
 Sans propriétaire, une installation redevient non revendiquée ; la propriété ne se transfère pas.
@@ -91,3 +95,6 @@ Le nombre maximal d’exécutions simultanées sur un compte. Le réduire laisse
 
 **Réinitialisation en réserve** :
 Une remise à zéro de fenêtre d’usage offerte par Codex, utilisée automatiquement quand la capacité restante d’un compte actif tombe à 2 %. Elle n’existe pas pour Claude Code.
+
+**Auteur d’une tâche** :
+Le compte Leo qui a créé une tâche. Le retrait de cet auteur met fin aux déclenchements planifiés de ses tâches ; leur travail reste partagé avec toute l’installation.

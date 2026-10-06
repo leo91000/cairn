@@ -49,8 +49,8 @@ test('selects installations, remembers the last one and honours deep workspace U
   const mailPort = (mail.address() as { port: number }).port
   const url = 'http://localhost:4396'
 
-  function start(binary: string, env: NodeJS.ProcessEnv) {
-    const child = spawn(binary, [], { env: { ...process.env, ...env }, stdio: ['ignore', 'ignore', 'pipe'] })
+  function start(binary: string, env: NodeJS.ProcessEnv, args: string[] = []) {
+    const child = spawn(binary, args, { env: { ...process.env, ...env }, stdio: ['ignore', 'ignore', 'pipe'] })
     child.stderr?.on('data', chunk => installationLog += chunk)
     children.push(child)
     return child
@@ -132,7 +132,7 @@ test('selects installations, remembers the last one and honours deep workspace U
     const secondCode = await page.getByLabel('Installation claim code').inputValue()
     await expect(page.getByLabel('Installation command', { exact: true })).toHaveValue(`curl -fsSL '${url}/install.sh' | sudo bash -s -- --claim-code '${secondCode}'`)
     await Promise.all([mkdir(join(root, 'office-data')), mkdir(join(root, 'office-home'))])
-    start('target/debug/leo', {
+    const officeEnvironment = {
       DATA_DIR: join(root, 'office-data'),
       AGENT_HOME: join(root, 'office-home'),
       WORKSPACE_ROOTS: root,
@@ -142,7 +142,8 @@ test('selects installations, remembers the last one and honours deep workspace U
       LEO_OFFICIAL_ORIGIN: url,
       LEO_INSTALLATION_CLAIM_CODE: secondCode,
       LEO_INSTALLATION_NAME: 'Office',
-    })
+    }
+    const office = start('target/debug/leo', officeEnvironment)
     await expect.poll(async () => {
       const session = await (await page.request.get(`${url}/api/account/session`)).json()
       return session.installations.length
@@ -332,6 +333,27 @@ test('selects installations, remembers the last one and honours deep workspace U
     await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toHaveCount(0)
     await page.goto(firstUrl)
     await expect(selector.locator('option:checked')).toHaveText('My home · Online')
+    await selector.selectOption({ label: 'Office · Online' })
+    const rotation = start('target/debug/leo', officeEnvironment, ['rotate-token'])
+    const [rotationStatus] = await once(rotation, 'exit')
+    expect(rotationStatus, installationLog).toBe(0)
+    const officeStopped = once(office, 'exit')
+    office.kill('SIGTERM')
+    await officeStopped
+    start('target/debug/leo', officeEnvironment)
+    await expect.poll(async () => (await (await page.request.get(`${url}/api/installations`)).json())
+      .find((entry: { name: string }) => entry.name === 'Office')
+      ?.online).toBe(true)
+    await page.getByText('Installation options', { exact: true }).click()
+    await page.getByRole('button', { name: 'Revoke and forget installation', exact: true }).click()
+    await expect(page.getByText('Its data stays on the machine.')).toBeVisible()
+    await page.getByRole('button', { name: 'Confirm revocation', exact: true }).click()
+    await expect(page).toHaveURL(firstUrl.replace(/agents$/, ''))
+    const remaining = await (await page.request.get(`${url}/api/installations`)).json()
+    expect(remaining.map((entry: { name: string }) => entry.name)).toEqual(['My home'])
+    await page.goto(conversationUrl)
+    await expect(page.getByRole('heading', { name: 'A conversation at home', exact: true })).toBeVisible()
+
     const installationExit = once(children[1]!, 'exit')
     children[1]!.kill('SIGTERM')
     await installationExit

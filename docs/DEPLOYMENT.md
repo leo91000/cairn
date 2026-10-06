@@ -25,7 +25,12 @@ with its own Postgres database, email delivery, HTTPS origin and web bundle
 together before running the new `leo claim`: earlier official binaries do not
 provide the device-review confirmation step. Sign in there. The installation
 and official service must use compatible relay protocols. Keep one relay process,
-and route both installation API requests and relay WebSockets to it.
+and route account/access mutations, installation API requests and relay
+WebSockets to it. Revocation notifications are process-local; multiple official
+replicas are unsupported even with sticky installation routing. See
+[official process limits](OFFICIAL-SERVICE.md#configuration) and
+[ADR-0032](adr/0032-single-official-relay-process.md) for this explicit restriction
+of spec #43 and the tolerance of persisted revocation checks.
 
 For an existing installation, preserve all volumes, add `LEO_OFFICIAL_ORIGIN`
 to the manager environment, upgrade the image, then run:
@@ -84,13 +89,20 @@ installation record remains recoverable; that proof never reconnects a tunnel.
 A still-owned installation must be detached before any recovery attempt.
 
 If the identity file is missing/corrupt (or an initial claim response was lost
-before any identity was saved), detach the inaccessible installation in the app,
-stop the manager, back up any private identity file outside the deployment
-volumes, and remove that file before running `leo claim` again. This creates a
-new official installation ID while preserving existing data volumes. If you
-cannot detach an inaccessible installation yourself, contact the official
-service operator or reinstall; do not delete its official record as a workaround.
-Retain backups until access has been verified.
+before any identity was saved), choose **Revoke and forget installation** in the
+official app. This also works when it is offline and permanently invalidates old
+credentials and recovery proofs. Stop the manager, back up the entire private
+`installation-relay` directory outside the deployment volumes, remove that
+directory, and run `leo claim` with `LEO_OFFICIAL_ORIGIN`. This creates a new
+official installation ID while preserving existing data volumes.
+Retain backups until access has been verified. Use this **Revoke and forget**
+path after machine-token theft too: the thief may rotate first, making the old
+local token unusable for `leo rotate-token`.
+
+To renew a credential while retaining the installation ID and its sharing,
+run `leo rotate-token` with the deployment's usual `DATA_DIR`, then restart the
+manager. Retry the same command if its response is lost; retain `rotation.json`
+until the command succeeds. See [credential renewal](INSTALLATION-RELAY.md#renewing-a-machine-credential).
 
 ### Roll back this access migration
 

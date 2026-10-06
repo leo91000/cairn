@@ -31,6 +31,7 @@ variables through the operator's secret management:
 | `LEO_OFFICIAL_DATABASE_URL` | Required Postgres URL, separate from installation SQLite |
 | `LEO_OFFICIAL_ORIGIN` | Required browser origin, HTTPS except localhost/loopback development; no path, query, or fragment |
 | `LEO_OFFICIAL_LISTEN` | Bind address, default `127.0.0.1:4311` |
+| `LEO_OFFICIAL_TRUSTED_PROXIES` | Comma-separated proxy IPs/CIDRs; empty by default |
 | `LEO_OFFICIAL_WEB_DIR` | Frontend output directory, default `dist` |
 | `LEO_INSTALLATION_IMAGE` | Tested immutable `ghcr.io/leo91000/leo-agent-manager@sha256:<64 lowercase hex>` approved for new installations; unset returns 503 from `/install/release` |
 | `LEO_OFFICIAL_EMAIL_FROM` | Required sender address on a verified email domain |
@@ -43,19 +44,68 @@ The production adapter uses [Resend's send-email contract](https://resend.com/do
 (`from`, `to`, `subject`, `text` over HTTP). `EmailSender` is the replaceable
 interface for integration tests and other delivery implementations. Delivery
 errors are generic, never provider bodies. No code is returned to the client.
-Automatic database migrations run at startup; the database role needs migration
-permissions. Multiple processes share the same database and rate limits.
+Automatic, checksum-checked database migrations run at startup; the database role
+needs migration permissions. All filenames use `YYYYMMDDHHmm` versions. The
+upstream SQLx migration macro is imported directly from `sqlx-macros`: the full
+`sqlx` facade resolves a conflicting SQLite dependency even in Postgres-only
+builds. A build script tracks the directory so adding a migration recompiles it.
+This pre-public-deployment renumbering changes versions 1–3 to 202610030001–3.
+An old development database must be backed up and its three ledger versions
+updated to those timestamps before startup (SQL contents/checksums are unchanged),
+or replaced with an empty disposable development database. Do not run the old
+binary against the updated ledger. Rate limits are shared through Postgres.
+
+Only **one official relay process** is supported for deployment. Route all browser
+account/access mutations, installation API requests and relay WebSockets to that
+process. Logout, detachment, member removal, token rotation and **Revoke and forget**
+notify only its in-memory relay registry; there is no inter-process revocation
+notification. Sticky routing per installation alone does not provide immediate
+session revocation across installations. Persisted checks eventually detect
+machine revocation in another process, but do not make that deployment supported.
+Do not add official replicas until shared connection routing and revocation
+notifications are implemented. [ADR-0032](adr/0032-single-official-relay-process.md)
+records this restriction of spec #43 and the persisted-check tolerance trade-off.
 Terminate TLS at the public origin with a reverse proxy. The service checks the
-configured origin on every account mutation and ignores forwarded IP headers;
-IP limits use the TCP peer (with a proxy this is a shared limit). Do not expose
+configured origin on every account mutation. IP limits use the TCP peer unless
+it matches `LEO_OFFICIAL_TRUSTED_PROXIES`. In that case they use the rightmost
+`X-Forwarded-For` address outside the trusted proxy ranges, across all account
+and machine endpoints. Each trusted proxy must append its actual peer address.
+Trust only your controlled proxy hops; headers from other peers are ignored.
+Missing or malformed trusted suffixes fall back to the TCP peer. Do not expose
 Postgres or the development mailbox publicly.
 
-Codes expire after 10 minutes and allow five verification attempts. Requesting
-another code invalidates the previous code for that address. Requests are limited
-to one per minute per normalized email and ten per minute per TCP peer;
-verification is limited to thirty per minute per TCP peer. Limits are atomic in
-Postgres and survive process restarts. Expired challenges and rate buckets are
-removed during code requests. Email addresses are trimmed and lowercased.
+The official SPA denies embedding with `frame-ancestors 'none'` and
+`X-Frame-Options: DENY`, including deep links, to protect account and claim actions
+from clickjacking. HTTPS official origins also send `Strict-Transport-Security:
+max-age=31536000` through the TLS-terminating proxy; loopback HTTP development
+does not set HSTS. Relayed responses keep their existing sandbox policies.
+
+Codes expire after 10 minutes and allow five failed verification attempts per
+challenge, with a shared ceiling of fifty failures per mailed code. An exhausted
+challenge is refused without spending other challenges' attempts. Requesting
+another code while an unexpired code still has a global budget returns a fresh
+challenge for the same mailed code, without sending another email or resetting
+its original expiration or global failures. Consuming the code invalidates every
+challenge. This lets the mailbox owner sign in if a third party requested the
+code first or exhausted their own challenge, including during the delivery
+cooldown or after the address's delivery budget is exhausted.
+At fifty failures, the code is unusable for every challenge; the next request must
+send a new code within the same per-address delivery budgets. During the cooldown
+or after those budgets are exhausted it returns 429, never a challenge for a dead
+code. A distributed attacker can still exhaust global codes and the address's
+delivery budgets to deny email sign-in temporarily; passkeys and OAuth remain
+available. Already issued challenges preserve their consumed attempts during the
+per-challenge migration, and code failures count toward the new global ceiling.
+Existing codes retain their original challenges when the migration is applied.
+Code requests are limited to ten per minute per resolved client. New email deliveries
+are limited to one per minute per normalized email;
+verification is limited to thirty per minute per resolved client. Each address
+can receive at most six codes per hour and twenty per day. These delivery budgets
+are committed together under an address lock, so concurrent processes cannot
+replace a pending proof or exceed either budget. Limits are atomic in
+Postgres and survive process restarts. Expired challenges, sessions, invitations and rate buckets are
+removed by an hourly maintenance task, also run once at startup. Expiration is
+enforced on reads without waiting for cleanup. Email addresses are trimmed and lowercased.
 
 Sessions expire after seven days. Only their SHA-256 digest is stored. Cookies
 are HttpOnly, SameSite=Lax, host-only, Path=/ and Secure on HTTPS. Account
@@ -126,7 +176,7 @@ OAuth identities remain recorded so an unauthenticated sign-in cannot silently
 re-enable them. Re-enable email by confirming a code while signed in; re-link
 Google/GitHub while signed in. Removing a method leaves active sessions intact;
 session management belongs to its separate ticket. OAuth/passkey requests have
-persisted rate limits, using the TCP peer rather than forwarded headers.
+persisted rate limits, using the same trusted-proxy resolution as email sign-in.
 
 ## Validation
 

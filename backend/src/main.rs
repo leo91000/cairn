@@ -111,6 +111,14 @@ where
     let stop = CancellationToken::new();
     tokio::spawn(shutdown(stop.clone()));
     match mode {
+        "rotate-token" => {
+            let config = Config::load()?;
+            leo_agent_manager::relay::rotate_token(&config.data_dir.join("installation-relay"))
+                .await?;
+            println!(
+                "Installation credential rotated. Restart the manager to load its new identity."
+            );
+        }
         "claim" => {
             let config = Config::load()?;
             let official = std::env::var("LEO_OFFICIAL_ORIGIN").ok();
@@ -185,7 +193,7 @@ where
         "serve" => serve(stop, router).await?,
         _ => {
             return Err(Error::bad(
-                "Unknown command. Use serve, claim, runner-broker, runner-entry, runner-client, chat, or --version.",
+                "Unknown command. Use serve, claim, rotate-token, runner-broker, runner-entry, runner-client, chat, or --version.",
             ));
         }
     }
@@ -321,8 +329,9 @@ where
             leo_agent_manager::relay::claim(&origin, &relay_directory, &code, &name).await
         }
         .await;
-        if claimed.is_err() {
+        if let Err(error) = claimed {
             tracing::warn!(
+                error = %error,
                 "Installation claim failed; continuing without a relay. Check the official origin and obtain a new claim code before restarting"
             );
         }

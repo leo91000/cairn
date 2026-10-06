@@ -222,7 +222,7 @@ async fn logout_requires_origin_and_csrf_and_revokes_the_server_session() {
 }
 
 #[tokio::test]
-async fn five_failed_attempts_invalidate_a_code_and_success_is_single_use() {
+async fn five_failed_attempts_invalidate_a_challenge_and_success_is_single_use() {
     let app = Fixture::new().await;
     let (challenge, code) = app.code("attempts@example.test").await;
     for _ in 0..5 {
@@ -245,7 +245,7 @@ async fn five_failed_attempts_invalidate_a_code_and_success_is_single_use() {
 }
 
 #[tokio::test]
-async fn email_delivery_is_limited_across_processes_and_replaced_codes_stop_working() {
+async fn email_delivery_is_limited_across_processes_and_pending_codes_keep_working() {
     let app = Fixture::new().await;
     let (challenge, code) = app.code("rate@example.test").await;
     let response = app
@@ -254,13 +254,8 @@ async fn email_delivery_is_limited_across_processes_and_replaced_codes_stop_work
             json!({ "email": " RATE@EXAMPLE.TEST " }),
         )
         .await;
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
     assert_eq!(app.mail.0.lock().unwrap().len(), 1);
-    // Advance the persisted limiter's time; observe behavior only through HTTP.
-    query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second'")
-        .execute(&app.pool)
-        .await
-        .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let second_url = format!("http://{}", listener.local_addr().unwrap());
     let second_router = router(app.pool.clone(), app.mail.clone(), second_url.clone())
@@ -283,6 +278,15 @@ async fn email_delivery_is_limited_across_processes_and_replaced_codes_stop_work
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let second_challenge: Value = response.json().await.unwrap();
+    assert_ne!(second_challenge["challenge"], challenge);
+    assert_eq!(app.mail.0.lock().unwrap().len(), 1);
+    assert_eq!(
+        app.verify(&second_challenge["challenge"], &code)
+            .await
+            .status(),
+        StatusCode::OK
+    );
     assert_eq!(
         app.verify(&challenge, &code).await.status(),
         StatusCode::UNAUTHORIZED

@@ -64,6 +64,19 @@ impl Fixture {
         oauth: leo_official_service::OAuthProviders,
         connections: u32,
     ) -> Self {
+        Self::with_network(
+            oauth,
+            connections,
+            leo_official_service::TrustedProxies::default(),
+        )
+        .await
+    }
+
+    pub async fn with_network(
+        oauth: leo_official_service::OAuthProviders,
+        connections: u32,
+        proxies: leo_official_service::TrustedProxies,
+    ) -> Self {
         let database = std::env::var("LEO_OFFICIAL_TEST_DATABASE_URL")
             .expect("Set LEO_OFFICIAL_TEST_DATABASE_URL to a disposable Postgres database");
         let admin = PgPool::connect(&database).await.unwrap();
@@ -85,12 +98,13 @@ impl Fixture {
         let url = format!("http://localhost:{}", listener.local_addr().unwrap().port());
         let mail = Arc::new(Mailbox::default());
         let relay = leo_official_service::Relay::default();
-        let app = leo_official_service::router_with_relay(
+        let app = leo_official_service::router_with_network(
             pool.clone(),
             mail.clone(),
             url.clone(),
             oauth,
             relay.clone(),
+            proxies,
         )
         .await
         .unwrap();
@@ -178,12 +192,22 @@ impl RelayedInstallation {
     }
 
     pub async fn with_runner_url(extra_routes: axum::Router, runner_url: String) -> Self {
+        Self::with_app(extra_routes, runner_url, Fixture::new().await).await
+    }
+
+    pub async fn with_pool_size(extra_routes: axum::Router, connections: u32) -> Self {
+        let app =
+            Fixture::with_pool_size(leo_official_service::OAuthProviders::default(), connections)
+                .await;
+        Self::with_app(extra_routes, String::new(), app).await
+    }
+
+    async fn with_app(extra_routes: axum::Router, runner_url: String, app: Fixture) -> Self {
         use leo_agent_manager::{config::Config, service::Service};
         use serde_json::json;
         use std::time::Duration;
         use tokio_util::sync::CancellationToken;
 
-        let app = Fixture::new().await;
         let (cookie, session) = login(&app, "relay-owner@example.test").await;
         let claim: Value = app
             .client

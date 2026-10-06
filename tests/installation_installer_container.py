@@ -340,10 +340,9 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
         assert checked == {'ok': True}
         # Public relayed settings plus the existing disk publication seam exercise
         # an old disk against real Garage after changing the default to HTTPS S3.
-        candidates = [file for file in Path('/repo/target/debug/deps').glob('storage_continuity-*')
-                      if file.is_file() and os.access(file, os.X_OK)]
-        assert len(candidates) == 1, 'Build the storage_continuity integration test before running this fixture'
-        subprocess.run([str(candidates[0]), '--ignored', '--exact',
+        storage_test = Path('/fixture/storage-continuity')
+        assert storage_test.is_file() and os.access(storage_test, os.X_OK), 'Mount the executable identified by Cargo'
+        subprocess.run([str(storage_test), '--ignored', '--exact',
                         'existing_disks_keep_publishing_reading_and_purging_on_their_original_storage',
                         '--nocapture'], check=True, env={
                             **os.environ,

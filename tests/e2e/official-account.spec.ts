@@ -4,7 +4,56 @@ import { createServer } from 'node:http'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
 
-test('email sign-in opens the empty installation screen, persists and signs out', async ({ page, context }) => {
+test('official pages deny framing and enable HSTS only for an HTTPS official origin', async ({ page, request }) => {
+  const url = 'http://localhost:4398'
+  for (const origin of [url, 'https://localhost:4398']) {
+    const child = spawn('target/debug/leo-official', [], {
+      env: {
+        ...process.env,
+        LEO_OFFICIAL_DATABASE_URL: process.env.LEO_OFFICIAL_TEST_DATABASE_URL,
+        LEO_OFFICIAL_ORIGIN: origin,
+        LEO_OFFICIAL_LISTEN: '127.0.0.1:4398',
+        LEO_OFFICIAL_EMAIL_KEY: 'fixture-only',
+        LEO_OFFICIAL_EMAIL_FROM: 'Leo <leo@example.test>',
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    })
+    const exited = once(child, 'exit')
+    let log = ''
+    child.stderr.on('data', chunk => log += chunk)
+    try {
+      await expect.poll(async () => {
+        if (child.exitCode !== null)
+          throw new Error(`Official service exited: ${log}`)
+        return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
+      }).toBe(true)
+
+      // The transport is loopback HTTP, as behind a TLS-terminating proxy.
+      for (const route of ['/', '/index.html', '/installations/unavailable/agents']) {
+        const response = await request.get(`${url}${route}`)
+        expect(response.status()).toBe(200)
+        expect(response.headers()['content-security-policy']).toContain('frame-ancestors \'none\'')
+        expect(response.headers()['x-frame-options']).toBe('DENY')
+        expect(response.headers()['strict-transport-security']).toBe(origin.startsWith('https:') ? 'max-age=31536000' : undefined)
+      }
+
+      await page.goto(url)
+      await expect(page.getByLabel('Email address')).toBeVisible()
+      const framingBlocked = page.waitForEvent('console', {
+        predicate: message => /frame-ancestors|X-Frame-Options/i.test(message.text()),
+      })
+      await page.setContent(`<iframe src="${url}/"></iframe>`)
+      await framingBlocked
+      await expect(page.frameLocator('iframe').getByLabel('Email address')).toHaveCount(0)
+    }
+    finally {
+      child.kill('SIGTERM')
+      await exited
+    }
+  }
+})
+
+test('email sign-in works after a third party exhausts their challenge, persists and signs out', async ({ page, context, request }) => {
   const messages: Array<{ to: string[], text: string }> = []
   const mail = createServer(async (request, response) => {
     let body = ''
@@ -50,8 +99,26 @@ test('email sign-in opens the empty installation screen, persists and signs out'
         automaticPresenceSimulation: true,
       },
     })
+    const email = `browser-${Date.now()}@example.test`
+    // A third party knows the address and gets a challenge, but cannot read its inbox.
+    const unsolicited = await request.post(`${url}/api/account/email-code`, {
+      headers: { origin: url },
+      data: { email },
+    })
+    expect(unsolicited.status()).toBe(202)
+    const attacker = await unsolicited.json()
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const rejected = await request.post(`${url}/api/account/verify`, {
+        headers: { origin: url },
+        data: { challenge: attacker.challenge, code: 'wrong' },
+      })
+      expect(rejected.status()).toBe(401)
+    }
+
+    await expect.poll(() => messages.length).toBe(1)
+
     await page.goto(url)
-    await page.getByLabel('Email address').fill(`browser-${Date.now()}@example.test`)
+    await page.getByLabel('Email address').fill(email)
     await page.getByRole('button', { name: 'Send code', exact: true }).click()
     await expect(page.getByLabel('Email code')).toBeVisible()
     await expect.poll(() => messages.length).toBe(1)
@@ -87,8 +154,26 @@ test('email sign-in opens the empty installation screen, persists and signs out'
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     }
 
+    const sibling = await context.newPage()
+    await sibling.clock.install()
+    let expiredChecks = 0
+    sibling.on('response', (response) => {
+      if (new URL(response.url()).pathname === '/api/installations' && response.status() === 401)
+        expiredChecks++
+    })
+    await sibling.goto(url)
+    await expect(sibling.getByRole('heading', { name: 'No installations yet' })).toBeVisible()
+    await page.bringToFront()
     await page.getByRole('button', { name: 'Sign out' }).click()
     await expect(page.getByLabel('Email address')).toBeVisible()
+    await sibling.bringToFront()
+    await expect(sibling.getByLabel('Email address')).toBeVisible()
+    const checksAfterRedirect = expiredChecks
+    expect(checksAfterRedirect).toBeGreaterThan(0)
+    await sibling.clock.runFor(7000)
+    expect(expiredChecks).toBe(checksAfterRedirect)
+    await sibling.close()
+    await page.bringToFront()
     await page.reload()
     await expect(page.getByLabel('Email address')).toBeVisible()
   }

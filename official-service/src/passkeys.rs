@@ -34,10 +34,6 @@ async fn store_challenge<T: serde::Serialize>(
     session: Option<&str>,
     state: &T,
 ) -> Result<String, ApiError> {
-    query("DELETE FROM sign_in_challenges WHERE expires_at <= now()")
-        .execute(&service.pool)
-        .await?;
-
     let id = random_token();
     query("INSERT INTO sign_in_challenges (id, kind, browser_digest, account_id, session_digest, state) VALUES ($1, $2, $3, $4, $5, $6)")
         .bind(&id).bind(kind).bind(digest(browser)).bind(account_id).bind(session.map(digest))

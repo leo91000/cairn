@@ -22,10 +22,41 @@ The installation stores its identity in
 `DATA_DIR/installation-relay/identity.json` (directory mode 0700, file mode 0600).
 The file contains the official origin, installation ID and bearer credential.
 Do not copy it into logs or source control. Later starts use that file and need
-no new claim code. Startup never overwrites an existing identity; only an
-approved `leo claim` can replace it after detachment.
+no new claim code. Startup never overwrites an existing identity; an approved
+`leo claim` can replace it after detachment, and `leo rotate-token` can renew its
+credential while keeping its ownership.
 Postgres stores only a hash of the credential and claim code. Consuming a claim
 code and attaching the installation to its owner form one transaction.
+
+## Renewing a machine credential
+
+Run `leo rotate-token` on the machine with its usual `DATA_DIR`. The command uses
+the origin in its private identity. It closes the previous tunnel and invalidates
+both the previous credential and any old recovery proof, preserving the installation
+ID, sharing and all data. Restart the manager after success to use the new identity.
+
+The command saves a private `rotation.json` before contacting the official service
+and replaces `identity.json` atomically only after acknowledgement. If connectivity
+fails or the response is lost, run the same command again: it reuses the saved
+replacement. Do not delete `rotation.json` to retry. Claim and rotation share an
+exclusive machine lock. A pending rotation from a different identity generation
+is refused; back it up before recovering that installation.
+
+The owner can instead choose **Revoke and forget installation** in the official
+app, including for an offline or orphaned installation. Confirmation permanently
+invalidates the machine credential and recovery proofs, removes sharing and the
+official record, and closes active tunnels. Data stays on the machine. To return,
+stop the manager, back up its entire private identity directory outside its data
+volume, remove that directory, then run `leo claim` with the official origin.
+The new claim creates a new installation ID with the same existing local data.
+Detachment below remains the option for recovering the same installation ID.
+
+If a machine credential is stolen, its holder can win the race to rotate it and
+prevent `leo rotate-token` from authenticating. Rotation alone is therefore not
+a recovery guarantee after theft. Use **Revoke and forget installation** from
+the owner's official session to revoke that record independently of the machine
+credential, then reclaim the trusted machine as above. Investigate the compromise
+and renew any secrets that may have passed through the stolen tunnel.
 
 ## Fallback claim and detachment
 
@@ -54,8 +85,7 @@ and a temporary confirmation proof bound to this claim and account. Explicit
 confirmation through `/api/installations/device-claim` requires that proof;
 `/api/relay/device-claim/poll` then attaches the owner and rotates the token in one
 transaction. A fresh start keeps only an expiring challenge, reserving no permanent
-installation row until approval is collected. Starting a subsequent claim deletes
-expired challenges. Recovery always preserves the existing installation row. Codes and polling secrets are stored only
+installation row until approval is collected. Expired challenges are removed by the official service’s hourly maintenance. Recovery always preserves the existing installation row. Codes and polling secrets are stored only
 as digests, expire after ten minutes and are single-use. Start, approval and
 poll operations use persisted per-peer/account rate limits. Starting another
 claim for the same installation invalidates its previous pending challenge.
@@ -63,8 +93,16 @@ claim for the same installation invalidates its previous pending challenge.
 Choose **Detach installation** inside the installation and confirm explicitly.
 The owner is cleared and the active relay is cut; local data and the official
 installation row remain. Deleting its owning Leo account also clears ownership
-rather than cascading deletion of the installation. Active relays recheck the
-identity every second, covering account deletion and the upgrade/detach race.
+rather than cascading deletion of the installation. Active relays recheck the persisted machine identity every 30 seconds, covering
+account deletion outside this process. A confirmed revocation closes the tunnel
+on that check. Local detachment still closes it immediately. Upgrade and
+post-registration authentication fail closed; an established tunnel tolerates
+temporary database errors and five-second check timeouts until three consecutive
+checks fail (about 95 seconds from the last successful check if each check times out).
+A successful check resets that budget. [ADR-0032](adr/0032-single-official-relay-process.md)
+records the single-process deployment restriction and this tolerance trade-off.
+Checks run separately from the socket loop,
+so database latency cannot delay session expiry or cancellation.
 The digest of the private proof used to start recovery is retained separately
 from the current tunnel credential. If its successful response is lost before the
 file is saved, detach in the app and retry with that file to recover the same ID.
@@ -101,6 +139,8 @@ checks the official session and installation role; mutations also require the of
 origin and CSRF token. A foreign or unknown installation returns 404. Local
 browser authentication routes are excluded from the tunnel. Offline requests
 return 503; lost connections fail pending requests, without replaying writes.
+An expired or revoked browser session redirects to sign-in at the current URL
+and stops availability polling, including in other tabs after logout.
 The connector retries with exponential backoff from 250 ms to 15 seconds;
 WebSocket ping/pong detects dead peers. A revoked identity (HTTP 401) stops
 reconnection; run `leo claim`, approve it, and restart the manager. Existing agent execution is independent
@@ -113,9 +153,13 @@ responds, even when the browser has abandoned its request. A timeout cancels the
 installation request and releases its slot through the response. Oversized
 responses return 413, handler/body failures return 502, and saturation returns
 503 for that request alone, preserving the tunnel and other requests. Contents
-are held only in bounded memory, never in Postgres. This ticket uses one relay
-process; a deployment must route the installation's API requests and WebSocket
-to that process. Distributed connection routing is not implemented here.
+are held only in bounded memory, never in Postgres. Only one official relay
+process is supported: route all account/access mutations, installation API
+requests and relay WebSockets to it. Revocation notifications for logout,
+detachment, member removal, rotation and forget reach only that process's
+in-memory registry. No inter-process notification or distributed connection
+routing is implemented; sticky routing per installation is insufficient for
+immediate session revocation across installations.
 
 Version 2 adds SSE response headers, binary chunks, completion, credit and
 cancellation frames using the same request IDs. Hello offers `[2, 1]`; Welcome
@@ -131,8 +175,9 @@ pauses until credit arrives, chunks are limited to 64 KiB, and each official HTT
 body has a one-chunk queue. Streams can use 24 of the 32 request slots;
 eight slots remain available to finite API requests.
 A slow reader, failed stream or failed handler affects only its own request.
-Closing the browser response cancels the remote subscription and releases its
-slot. The official service disables reverse-proxy SSE buffering and still imposes
+Closing the browser response records cancellation and wakes the socket loop,
+which cancels the remote subscription and releases its slot. Cancellation is
+kept outside the bounded credit queue, so a full queue cannot lose it. The official service disables reverse-proxy SSE buffering and still imposes
 its own security headers. Configure proxies to permit long-lived responses.
 
 A lost tunnel ends open browser streams. The existing browser SSE client retries
@@ -156,6 +201,12 @@ revocation preserves the tunnel and other accounts' streams. Access generations
 prevent an upload authorized before revocation from dispatching any request
 afterward, including an ordinary queued request. Work admitted before revocation
 is preserved; revocation does not cancel the installation's agent executions.
+Logging out revokes streams of that browser session, including its other tabs,
+while preserving other devices. A stream’s session is rechecked after uploading
+its request and registering its revocation watch. Its expiry is scheduled locally
+from the persisted session deadline; an idle or backpressured body cannot keep
+an expired session alive. These changes do not stop agent executions.
+
 The detachment, member removal and departure endpoints commit their access
 change before revoking the real official HTTP bodies. Detachment also forgets
 all memberships and invitations; reclaiming never restores previous sharing.

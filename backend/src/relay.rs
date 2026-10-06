@@ -140,9 +140,8 @@ struct DeviceStarted {
     name: String,
 }
 
-async fn read_identity(directory: &Path) -> Result<Option<Identity>> {
-    let path = directory.join("identity.json");
-    let metadata = match tokio::fs::symlink_metadata(&path).await {
+async fn read_private<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+    let metadata = match tokio::fs::symlink_metadata(path).await {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
@@ -152,11 +151,126 @@ async fn read_identity(directory: &Path) -> Result<Option<Identity>> {
             "Installation identity must be a private regular file.",
         ));
     }
-    let identity =
-        serde_json::from_str(&crate::skills::small_file(&path).await?).map_err(|_| {
-            Error::bad("Invalid private installation identity. Back up the file before recovery.")
-        })?;
+    let identity = serde_json::from_str(&crate::skills::small_file(path).await?).map_err(|_| {
+        Error::bad("Invalid private installation identity. Back up the file before recovery.")
+    })?;
     Ok(Some(identity))
+}
+
+async fn read_identity(directory: &Path) -> Result<Option<Identity>> {
+    read_private(&directory.join("identity.json")).await
+}
+
+fn identity_lock(directory: &Path) -> Result<std::fs::File> {
+    use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
+
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(directory.join("claim.lock"))?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(Error::conflict(
+            "Another installation identity operation is already running.",
+        ));
+    }
+    Ok(lock)
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Rotation {
+    previous_digest: String,
+    identity: Identity,
+}
+
+/// Persist the replacement before sending it, and reuse it after an interrupted response.
+pub async fn rotate_token(directory: &Path) -> Result<()> {
+    private_dir(directory).await?;
+    let _lock = identity_lock(directory)?;
+    let current = read_identity(directory)
+        .await?
+        .ok_or_else(|| Error::bad("Claim this installation before rotating its credential."))?;
+    let official = origin(&current.origin)?;
+    uuid::Uuid::parse_str(&current.installation_id)
+        .map_err(|_| Error::bad("Invalid installation identity."))?;
+    let path = directory.join("rotation.json");
+    let pending: Rotation = match read_private(&path).await? {
+        Some(pending) => pending,
+        None => {
+            let pending = Rotation {
+                previous_digest: crate::auth::hex_digest(&current.token),
+                identity: Identity {
+                    origin: current.origin.clone(),
+                    installation_id: current.installation_id.clone(),
+                    token: crate::auth::hex_digest(&crate::auth::token()),
+                },
+            };
+            crate::skills::atomic_write(&path, &serde_json::to_vec(&pending)?).await?;
+            pending
+        }
+    };
+
+    let already_saved = crate::auth::safe_equal(&current.token, &pending.identity.token);
+    let same_installation = pending.identity.origin == current.origin
+        && pending.identity.installation_id == current.installation_id;
+    let valid_replacement = pending.identity.token.len() == 64
+        && pending
+            .identity
+            .token
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit());
+    let matches_previous_generation = already_saved
+        || crate::auth::safe_equal(
+            &pending.previous_digest,
+            &crate::auth::hex_digest(&current.token),
+        );
+
+    if !same_installation || !valid_replacement || !matches_previous_generation {
+        return Err(Error::conflict(
+            "Pending rotation belongs to a different installation identity. Back up rotation.json before retrying.",
+        ));
+    }
+
+    if !already_saved {
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(15))
+            .build()
+            .map_err(Error::internal)?;
+        let response = client
+            .post(
+                official
+                    .join(&format!(
+                        "api/relay/{}/rotate-token",
+                        current.installation_id,
+                    ))
+                    .map_err(Error::internal)?,
+            )
+            .bearer_auth(&current.token)
+            .json(&serde_json::json!({
+                "token": pending.identity.token,
+            }))
+            .send()
+            .await
+            .map_err(|_| {
+                Error::unavailable("Cannot reach the official service. Retry leo rotate-token.")
+            })?;
+        if response.status() != reqwest::StatusCode::NO_CONTENT {
+            return Err(Error::unavailable(
+                "Installation rotation was not acknowledged. Retry leo rotate-token after checking connectivity and ownership.",
+            ));
+        }
+        crate::skills::atomic_write(
+            &directory.join("identity.json"),
+            &serde_json::to_vec(&pending.identity)?,
+        )
+        .await?;
+    }
+    tokio::fs::remove_file(path).await?;
+    Ok(())
 }
 
 /// Approve through the official app before atomically replacing a private identity.
@@ -168,20 +282,8 @@ pub async fn device_claim(
     stop: CancellationToken,
     display: impl FnOnce(&str, &str, &str, &str),
 ) -> Result<()> {
-    use std::os::fd::AsRawFd;
-    use std::os::unix::fs::OpenOptionsExt;
-
     private_dir(directory).await?;
-    let lock = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(directory.join("claim.lock"))?;
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err(Error::conflict("Another leo claim is already running."));
-    }
+    let _lock = identity_lock(directory)?;
     let previous = read_identity(directory).await?;
     let official = origin(
         official

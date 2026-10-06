@@ -2,14 +2,19 @@ use std::{env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use axum::{
-    http::StatusCode,
+    http::{HeaderValue, StatusCode, header},
     routing::{any, get},
 };
-use leo_official_service::{EmailSender, OAuthProvider, OAuthProviders, Relay, router_with_relay};
+use leo_official_service::{
+    EmailSender, OAuthProvider, OAuthProviders, Relay, TrustedProxies, router_with_network,
+};
 use reqwest::Client;
 use serde_json::json;
 use sqlx_postgres::PgPoolOptions;
-use tower_http::services::{ServeDir, ServeFile};
+use tower_http::{
+    services::{ServeDir, ServeFile},
+    set_header::SetResponseHeaderLayer,
+};
 use url::Url;
 
 struct HttpEmailSender {
@@ -197,25 +202,63 @@ async fn run() -> Result<(), String> {
         google: configured_oauth("GOOGLE", loopback)?,
         github: configured_oauth("GITHUB", loopback)?,
     };
+    let proxies: TrustedProxies = env::var("LEO_OFFICIAL_TRUSTED_PROXIES")
+        .unwrap_or_default()
+        .parse()
+        .map_err(str::to_owned)?;
     let relay = Relay::default();
-    let app = router_with_relay(pool, Arc::new(sender), origin, oauth, relay.clone())
-        .await
-        .map_err(|_| "Official database migration failed")?
-        .merge(leo_official_service::installer::release_router(
-            env::var("LEO_INSTALLATION_IMAGE").ok(),
-        )?)
-        .route("/health", get(|| async { StatusCode::OK }))
-        .route("/api/{*path}", any(|| async { StatusCode::NOT_FOUND }))
-        .route_service("/", ServeFile::new(web.join("official.html")))
-        .route_service("/index.html", ServeFile::new(web.join("official.html")))
-        .fallback_service(ServeDir::new(&web).fallback(ServeFile::new(web.join("official.html"))));
+    let mut app = router_with_network(
+        pool.clone(),
+        Arc::new(sender),
+        origin,
+        oauth,
+        relay.clone(),
+        proxies,
+    )
+    .await
+    .map_err(|_| "Official database migration failed")?
+    .merge(leo_official_service::installer::release_router(
+        env::var("LEO_INSTALLATION_IMAGE").ok(),
+    )?)
+    .route("/health", get(|| async { StatusCode::OK }))
+    .route("/api/{*path}", any(|| async { StatusCode::NOT_FOUND }))
+    .route_service("/", ServeFile::new(web.join("official.html")))
+    .route_service("/index.html", ServeFile::new(web.join("official.html")))
+    .fallback_service(ServeDir::new(&web).fallback(ServeFile::new(web.join("official.html"))))
+    .layer(SetResponseHeaderLayer::if_not_present(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("frame-ancestors 'none'"),
+    ))
+    .layer(SetResponseHeaderLayer::if_not_present(
+        header::X_FRAME_OPTIONS,
+        HeaderValue::from_static("DENY"),
+    ));
+
+    // TLS terminates at the configured official origin's trusted proxy.
+    if origin_url.scheme() == "https" {
+        app = app.layer(SetResponseHeaderLayer::overriding(
+            header::STRICT_TRANSPORT_SECURITY,
+            HeaderValue::from_static("max-age=31536000"),
+        ));
+    }
 
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .map_err(|_| "Could not bind LEO_OFFICIAL_LISTEN")?;
 
+    let maintenance = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(3600));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if leo_official_service::cleanup_expired(&pool).await.is_err() {
+                tracing::warn!("Official expiration cleanup failed; will retry next hour");
+            }
+        }
+    });
+
     tracing::info!("Official service listening");
-    axum::serve(
+    let result = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
@@ -230,7 +273,9 @@ async fn run() -> Result<(), String> {
         relay.shutdown();
     })
     .await
-    .map_err(|_| "Official HTTP server stopped unexpectedly".to_owned())
+    .map_err(|_| "Official HTTP server stopped unexpectedly".to_owned());
+    maintenance.abort();
+    result
 }
 
 #[tokio::main]

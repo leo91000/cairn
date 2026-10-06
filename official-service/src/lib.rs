@@ -1,12 +1,18 @@
+// The upstream migration macro expands through ::sqlx. Keep the Postgres-only
+// crates: the full facade also resolves SQLite and conflicts with rusqlite.
+extern crate sqlx_core as sqlx;
+
 mod installations;
 pub mod installer;
 mod mcp;
 mod methods;
+mod network;
 mod oauth;
 mod passkeys;
 mod relay;
 mod sharing;
 
+pub use network::TrustedProxies;
 pub use oauth::{OAuthProvider, OAuthProviders};
 pub use relay::Relay;
 
@@ -24,13 +30,9 @@ use rand::{Rng, RngCore};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx_core::{
-    migrate::{Migration, MigrationType, Migrator},
-    query::query,
-    query_as::query_as,
-};
+use sqlx_core::{query::query, query_as::query_as};
 use sqlx_postgres::PgPool;
-use std::{borrow::Cow, net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 use subtle::ConstantTimeEq;
 
 #[async_trait]
@@ -95,96 +97,27 @@ pub async fn router_with_relay(
     oauth: OAuthProviders,
     relay: Relay,
 ) -> Result<Router, sqlx_core::migrate::MigrateError> {
-    let migrations = Migrator {
-        migrations: Cow::Owned(vec![
-            Migration::new(
-                1,
-                "leo accounts".into(),
-                MigrationType::Simple,
-                include_str!("../migrations/0001_leo_accounts.sql").into(),
-                false,
-            ),
-            Migration::new(
-                2,
-                "account rate limits".into(),
-                MigrationType::Simple,
-                include_str!("../migrations/0002_account_rate_limits.sql").into(),
-                false,
-            ),
-            Migration::new(
-                3,
-                "installation claims".into(),
-                MigrationType::Simple,
-                include_str!("../migrations/0003_installations.sql").into(),
-                false,
-            ),
-            Migration::new(
-                202610030052,
-                "sign in methods".into(),
-                MigrationType::Simple,
-                include_str!("../migrations/202610030052_sign_in_methods.sql").into(),
-                false,
-            ),
-            Migration::new(
-                202610030152,
-                "removed sign in methods".into(),
-                MigrationType::Simple,
-                include_str!("../migrations/202610030152_removed_methods.sql").into(),
-                false,
-            ),
-            Migration::new(
-                202610030250,
-                "reclaim installations".into(),
-                MigrationType::Simple,
-                include_str!("../migrations/202610030250_reclaim.sql").into(),
-                false,
-            ),
-            Migration::new(
-                202610030350,
-                "device claims".into(),
-                MigrationType::Simple,
-                include_str!("../migrations/202610030350_device_claims.sql").into(),
-                false,
-            ),
-            Migration::new(
-                202610040050,
-                "claim identity recovery".into(),
-                MigrationType::Simple,
-                include_str!("../migrations/202610040050_claim_recovery.sql").into(),
-                false,
-            ),
-            Migration::new(
-                202610041950,
-                "device claim review".into(),
-                MigrationType::Simple,
-                include_str!("../migrations/202610041950_device_review.sql").into(),
-                false,
-            ),
-            Migration::new(
-                202610040053,
-                "installation sharing".into(),
-                MigrationType::Simple,
-                include_str!("../migrations/202610040053_installation_sharing.sql").into(),
-                false,
-            ),
-            Migration::new(
-                202610050055,
-                "official MCP grants".into(),
-                MigrationType::Simple,
-                include_str!("../migrations/202610050055_mcp.sql").into(),
-                false,
-            ),
-            Migration::new(
-                202610050155,
-                "authorization code replay".into(),
-                MigrationType::Simple,
-                include_str!("../migrations/202610050155_code_replay.sql").into(),
-                false,
-            ),
-        ]),
-        ..Migrator::DEFAULT
-    };
-    migrations.run(&pool).await?;
+    router_with_network(
+        pool,
+        sender,
+        origin,
+        oauth,
+        relay,
+        TrustedProxies::default(),
+    )
+    .await
+}
+
+/// Configure proxy trust explicitly; library/test callers default to no trusted peers.
+pub async fn router_with_network(
+    pool: PgPool,
+    sender: Arc<dyn EmailSender>,
+    origin: String,
+    oauth: OAuthProviders,
+    relay: Relay,
+    trusted_proxies: TrustedProxies,
+) -> Result<Router, sqlx_core::migrate::MigrateError> {
+    sqlx_macros::migrate!("./migrations").run(&pool).await?;
 
     let installer = installer::router(origin.clone());
     let service = Service {
@@ -255,7 +188,7 @@ pub async fn router_with_relay(
         )
         .route(
             "/api/installations/{installation}",
-            axum::routing::patch(installations::rename),
+            axum::routing::patch(installations::rename).delete(installations::forget),
         )
         .route(
             "/api/installations/device-claim/preview",
@@ -316,6 +249,10 @@ pub async fn router_with_relay(
                 )
                 .route("/api/relay/claim", post(installations::claim))
                 .route(
+                    "/api/relay/{installation}/rotate-token",
+                    post(installations::rotate_token),
+                )
+                .route(
                     "/api/relay/device-claim/start",
                     post(installations::start_device),
                 )
@@ -326,8 +263,15 @@ pub async fn router_with_relay(
                 .route("/api/relay/{installation}/connect", get(relay::upgrade)),
         )
         .with_state(service)
-        .merge(installer))
+        .merge(installer)
+        .layer(middleware::from_fn_with_state(
+            trusted_proxies,
+            network::client_peer,
+        )))
 }
+
+const EMAIL_CHALLENGE_ATTEMPT_LIMIT: i32 = 5;
+const EMAIL_CODE_ATTEMPT_LIMIT: i32 = 50;
 
 fn random_token() -> String {
     let mut bytes = [0; 32];
@@ -375,29 +319,73 @@ async fn request_code(
 
     let email = normalized_email(&input.email)?;
 
-    consume_limit(&service.pool, &format!("email:{}", digest(&email)), 1).await?;
-
-    query("DELETE FROM email_codes WHERE expires_at <= now()")
-        .execute(&service.pool)
-        .await?;
-    query("DELETE FROM web_sessions WHERE expires_at <= now()")
-        .execute(&service.pool)
-        .await?;
-    query("DELETE FROM account_rate_limits WHERE resets_at < now() - interval '1 day'")
-        .execute(&service.pool)
-        .await?;
-
     let challenge = random_token();
     let code = format!("{:08}", rand::rng().random_range(0..100_000_000_u32));
     let code_digest = digest(&format!("{challenge}:{code}"));
 
     let mut transaction = service.pool.begin().await?;
+    // Serialize delivery for an address across all official processes. A later
+    // request must not invalidate the proof already in the recipient's mailbox.
+    query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&email)
+        .execute(&mut *transaction)
+        .await?;
+    let pending: Option<(String,)> = query_as(
+        "SELECT challenge FROM email_codes WHERE email = $1 AND expires_at > now() AND attempts < $2 LIMIT 1 FOR UPDATE",
+    )
+    .bind(&email)
+    .bind(EMAIL_CODE_ATTEMPT_LIMIT)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    if let Some((code_challenge,)) = pending {
+        // Give the mailbox owner a usable proof even if a third party requested
+        // the code first. Each challenge gets its own attempts and keeps the
+        // original deadline.
+        query("INSERT INTO email_code_challenges (challenge, code_challenge) VALUES ($1, $2)")
+            .bind(&challenge)
+            .bind(&code_challenge)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(json!({ "challenge": challenge })),
+        )
+            .into_response());
+    }
+
+    consume_limit_on(
+        &mut transaction,
+        &format!("email:{}", digest(&email)),
+        1,
+        60,
+    )
+    .await?;
+    consume_limit_on(
+        &mut transaction,
+        &format!("email-hour:{}", digest(&email)),
+        6,
+        3600,
+    )
+    .await?;
+    consume_limit_on(
+        &mut transaction,
+        &format!("email-day:{}", digest(&email)),
+        20,
+        86400,
+    )
+    .await?;
+
     query("DELETE FROM email_codes WHERE email = $1")
         .bind(&email)
         .execute(&mut *transaction)
         .await?;
     query("INSERT INTO email_codes (challenge, email, code_digest, expires_at) VALUES ($1, $2, $3, now() + interval '10 minutes')")
         .bind(&challenge).bind(&email).bind(code_digest).execute(&mut *transaction).await?;
+    query("INSERT INTO email_code_challenges (challenge, code_challenge) VALUES ($1, $1)")
+        .bind(&challenge)
+        .execute(&mut *transaction)
+        .await?;
     transaction.commit().await?;
 
     if service.sender.send_code(&email, &code).await.is_err() {
@@ -433,18 +421,32 @@ async fn verify_code(
     consume_limit(&service.pool, &format!("verification:{}", peer.ip()), 30).await?;
 
     let mut transaction = service.pool.begin().await?;
-    let row: Option<(String, String, bool, i32)> = query_as("SELECT email, code_digest, expires_at > now(), attempts FROM email_codes WHERE challenge = $1 FOR UPDATE")
+    let row: Option<(String, String, String, bool, i32, i32)> = query_as("SELECT e.challenge, e.email, e.code_digest, e.expires_at > now(), e.attempts, c.attempts FROM email_codes e JOIN email_code_challenges c ON c.code_challenge = e.challenge WHERE c.challenge = $1 FOR UPDATE OF e, c")
         .bind(&input.challenge).fetch_optional(&mut *transaction).await?;
 
     let invalid = || ApiError(StatusCode::UNAUTHORIZED, "Invalid or expired code");
-    let Some((email, expected, unexpired, attempts)) = row else {
+    let Some((code_challenge, email, expected, unexpired, code_attempts, challenge_attempts)) = row
+    else {
         return Err(invalid());
     };
 
-    let supplied = digest(&format!("{}:{}", input.challenge, input.code));
-    if !unexpired || attempts >= 5 || !bool::from(expected.as_bytes().ct_eq(supplied.as_bytes())) {
-        query("UPDATE email_codes SET attempts = attempts + 1 WHERE challenge = $1")
+    if !unexpired
+        || challenge_attempts >= EMAIL_CHALLENGE_ATTEMPT_LIMIT
+        || code_attempts >= EMAIL_CODE_ATTEMPT_LIMIT
+    {
+        return Err(invalid());
+    }
+
+    let supplied = digest(&format!("{code_challenge}:{}", input.code));
+    if !bool::from(expected.as_bytes().ct_eq(supplied.as_bytes())) {
+        // Locked code and challenge rows bound guesses across concurrent clients.
+        // An already exhausted challenge never burns someone else's budget.
+        query("UPDATE email_code_challenges SET attempts = attempts + 1 WHERE challenge = $1")
             .bind(&input.challenge)
+            .execute(&mut *transaction)
+            .await?;
+        query("UPDATE email_codes SET attempts = attempts + 1 WHERE challenge = $1")
+            .bind(&code_challenge)
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
@@ -452,7 +454,7 @@ async fn verify_code(
     }
 
     query("DELETE FROM email_codes WHERE challenge = $1")
-        .bind(&input.challenge)
+        .bind(&code_challenge)
         .execute(&mut *transaction)
         .await?;
 
@@ -603,6 +605,7 @@ async fn logout(State(service): State<Service>, headers: HeaderMap) -> Result<Re
         .execute(&mut *transaction)
         .await?;
     transaction.commit().await?;
+    service.relay.revoke_session(&digest(token));
 
     let secure = if service.origin.starts_with("https://") {
         "; Secure"
@@ -620,14 +623,41 @@ async fn logout(State(service): State<Service>, headers: HeaderMap) -> Result<Re
 }
 
 async fn consume_limit(pool: &PgPool, key: &str, maximum: i32) -> Result<(), ApiError> {
-    let (requests,): (i32,) = query_as("INSERT INTO account_rate_limits (key, requests, resets_at) VALUES ($1, 1, now() + interval '1 minute') ON CONFLICT (key) DO UPDATE SET requests = CASE WHEN account_rate_limits.resets_at <= now() THEN 1 ELSE LEAST(account_rate_limits.requests + 1, $2 + 1) END, resets_at = CASE WHEN account_rate_limits.resets_at <= now() THEN now() + interval '1 minute' ELSE account_rate_limits.resets_at END RETURNING requests")
-        .bind(key).bind(maximum).fetch_one(pool).await?;
+    let mut connection = pool.acquire().await?;
+    consume_limit_on(&mut connection, key, maximum, 60).await
+}
+
+async fn consume_limit_on(
+    connection: &mut sqlx_postgres::PgConnection,
+    key: &str,
+    maximum: i32,
+    seconds: i32,
+) -> Result<(), ApiError> {
+    let (requests,): (i32,) = query_as("INSERT INTO account_rate_limits (key, requests, resets_at) VALUES ($1, 1, now() + $3::integer * interval '1 second') ON CONFLICT (key) DO UPDATE SET requests = CASE WHEN account_rate_limits.resets_at <= now() THEN 1 ELSE LEAST(account_rate_limits.requests + 1, $2 + 1) END, resets_at = CASE WHEN account_rate_limits.resets_at <= now() THEN now() + $3::integer * interval '1 second' ELSE account_rate_limits.resets_at END RETURNING requests")
+        .bind(key).bind(maximum).bind(seconds).fetch_one(connection).await?;
     if requests > maximum {
         return Err(ApiError(
             StatusCode::TOO_MANY_REQUESTS,
-            "Too many attempts. Please wait a minute.",
+            "Too many attempts. Please wait for the delivery or request limit to reset.",
         ));
     }
 
     Ok(())
+}
+
+/// Expiration is enforced by every read; reclamation happens outside public requests.
+pub async fn cleanup_expired(pool: &PgPool) -> Result<(), sqlx_core::error::Error> {
+    let mut transaction = pool.begin().await?;
+    for statement in [
+        "DELETE FROM email_codes WHERE expires_at <= now()",
+        "DELETE FROM web_sessions WHERE expires_at <= now()",
+        "DELETE FROM account_rate_limits WHERE resets_at < now() - interval '1 day'",
+        "DELETE FROM sign_in_challenges WHERE expires_at <= now()",
+        "DELETE FROM installation_claim_codes WHERE expires_at <= now()",
+        "DELETE FROM installation_device_claims WHERE expires_at <= now()",
+        "DELETE FROM installation_invitations WHERE expires_at <= now()",
+    ] {
+        query(statement).execute(&mut *transaction).await?;
+    }
+    transaction.commit().await
 }

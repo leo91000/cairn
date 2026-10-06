@@ -88,10 +88,24 @@ struct Access {
 
 struct StreamAccess {
     account: String,
+    session: Option<String>,
+    expires_at: Option<tokio::time::Instant>,
     revoked: watch::Sender<bool>,
 }
 
 impl Relay {
+    /// Close only this browser session; other devices keep their access.
+    pub(super) fn revoke_session(&self, session: &str) {
+        for tunnel in self.connections.lock().unwrap().values() {
+            for stream in tunnel.access.lock().unwrap().streams.values() {
+                if stream.session.as_deref() == Some(session) {
+                    stream.revoked.send_replace(true);
+                }
+            }
+            tunnel.access_changed.notify_one();
+        }
+    }
+
     /// End live bodies before the official HTTP server drains on shutdown.
     pub fn shutdown(&self) {
         let mut tunnels = self.connections.lock().unwrap();
@@ -240,17 +254,83 @@ async fn serve_socket(
         let _ = tunnel.stop.send(true);
     }
 
-    let mut revocation = tokio::time::interval(Duration::from_secs(1));
-    revocation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // A database check must not block expiry or cancellation in the socket loop.
+    let check_service = service.clone();
+    let check_installation = installation.clone();
+    let check_token = token_digest.clone();
+    let check_tunnel = tunnel.clone();
+    let mut check_stopped = tunnel.stop.subscribe();
+    let mut revocation = tokio::spawn(async move {
+        let interval = Duration::from_secs(30);
+        let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut failures = 0;
+        while !*check_stopped.borrow() {
+            tokio::select! {
+                biased;
+
+                _ = check_stopped.changed() => break,
+                _ = ticks.tick() => {
+                    let current = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        identity_is_current(&check_service, &check_installation, &check_token),
+                    ).await;
+
+                    let end_connection = match current {
+                        Ok(Ok(true)) => {
+                            failures = 0;
+                            false
+                        }
+                        Ok(Ok(false)) => true,
+                        _ => {
+                            failures += 1;
+                            tracing::warn!(failures, "Relay identity check unavailable");
+                            failures >= 3
+                        }
+                    };
+                    if end_connection {
+                        check_tunnel.stop.send_replace(true);
+                        break;
+                    }
+                }
+            }
+        }
+    });
     let mut pending = HashMap::<String, Pending>::new();
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut public_expiry = tokio::time::interval(Duration::from_secs(1));
+    public_expiry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut received = tokio::time::Instant::now();
     'connection: loop {
+        let expiry = tunnel
+            .access
+            .lock()
+            .unwrap()
+            .streams
+            .values()
+            .filter(|stream| !*stream.revoked.borrow())
+            .filter_map(|stream| stream.expires_at)
+            .min();
+
         tokio::select! {
             biased;
 
             _ = stopped.changed() => break,
+            _ = async {
+                match expiry {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => futures_util::future::pending::<()>().await,
+                }
+            } => {
+                let now = tokio::time::Instant::now();
+                for stream in tunnel.access.lock().unwrap().streams.values() {
+                    if stream.expires_at.is_some_and(|deadline| deadline <= now) {
+                        stream.revoked.send_replace(true);
+                    }
+                }
+                tunnel.access_changed.notify_one();
+            }
             _ = tunnel.access_changed.notified() => {
                 let revoked = {
                     let mut access = tunnel.access.lock().unwrap();
@@ -275,7 +355,7 @@ async fn serve_socket(
                     }
                 }
             }
-            _ = revocation.tick() => {
+            _ = public_expiry.tick() => {
                 // Expire public bodies independently of downstream polling,
                 // including readers that stopped granting stream credit.
                 let expired: Vec<_> = pending.iter()
@@ -294,15 +374,12 @@ async fn serve_socket(
                         break 'connection;
                     }
                 }
-                // Owner deletion can originate in account management (#59),
-                // another process, or an operator's transaction. The database
-                // remains authoritative even for an already open connection.
-                if !matches!(
-                    identity_is_current(&service, &installation, &token_digest).await,
-                    Ok(true)
-                ) {
-                    break;
+            }
+            result = &mut revocation => {
+                if result.is_err() {
+                    tracing::warn!("Relay identity monitor stopped");
                 }
+                break;
             }
             _ = heartbeat.tick() => {
                 if received.elapsed() > Duration::from_secs(45) {
@@ -439,6 +516,7 @@ async fn serve_socket(
         }
     }
     let _ = tunnel.stop.send(true);
+    revocation.abort();
     // An old connection must never remove the replacement's registry entry.
     let mut connections = relay.connections.lock().unwrap();
     if connections
@@ -646,6 +724,8 @@ async fn send(
 ) -> Result<Response, ApiError> {
     let streaming = leo_relay_protocol::stream_path(target);
     let public_file = matches!(capability, Capability::PublicArtifact(_));
+    let browser_session = matches!(capability, Capability::Account(_))
+        .then(|| digest(super::session_token(request.headers())));
 
     // Browser uploads reserve capacity before reading. MCP bodies have already
     // been bounded and reauthorized before they can reserve installation slots.
@@ -767,19 +847,47 @@ async fn send(
                 "Installation access revoked",
             ));
         }
-        access
-            .streams
-            .insert(id.clone(), StreamAccess { account, revoked });
+        access.streams.insert(
+            id.clone(),
+            StreamAccess {
+                account,
+                session: browser_session.clone(),
+                expires_at: None,
+                revoked,
+            },
+        );
         Some(BrowserStream {
             receiver,
             tunnel: tunnel.clone(),
             stopped: tunnel.stop.subscribe(),
             revoked: revocation,
-            id,
+            id: id.clone(),
         })
     } else {
         None
     };
+    // Register before checking again: logout during an upload either sees the
+    // registered stream or removes the persisted session before this check.
+    if let Some(session) = browser_session {
+        let checked_at = tokio::time::Instant::now();
+        let current: Option<(i64,)> = query_as(
+            "SELECT (extract(epoch FROM (expires_at - clock_timestamp())) * 1000)::bigint FROM web_sessions WHERE digest = $1 AND expires_at > clock_timestamp()",
+        )
+        .bind(&session)
+        .fetch_optional(&service.pool)
+        .await?;
+        let Some((remaining,)) = current.filter(|(remaining,)| *remaining > 0) else {
+            return Err(ApiError(
+                StatusCode::UNAUTHORIZED,
+                "Session expired. Please sign in again.",
+            ));
+        };
+        if let Some(stream) = tunnel.access.lock().unwrap().streams.get_mut(&id) {
+            stream.expires_at = Some(checked_at + Duration::from_millis(remaining as u64));
+            tunnel.access_changed.notify_one();
+        }
+    }
+
     let pending_account = api_request.account_id.clone();
     tunnel
         .commands
@@ -873,8 +981,8 @@ async fn send(
     Ok(output)
 }
 
-// Dropping an HTTP body cancels only this remote subscription. Control messages
-// use their own bounded queue so a stalled stream cannot stall the tunnel.
+// Dropping an HTTP body records cancellation before waking the socket loop.
+// Cancellation cannot be lost when the bounded credit queue is full.
 struct BrowserStream {
     receiver: mpsc::Receiver<Result<Vec<u8>, std::io::Error>>,
     tunnel: Arc<Tunnel>,
@@ -885,9 +993,9 @@ struct BrowserStream {
 
 impl Drop for BrowserStream {
     fn drop(&mut self) {
-        self.tunnel.access.lock().unwrap().streams.remove(&self.id);
-        let _ = self.tunnel.control.try_send(Frame::Cancel {
-            id: self.id.clone(),
-        });
+        if let Some(stream) = self.tunnel.access.lock().unwrap().streams.get(&self.id) {
+            stream.revoked.send_replace(true);
+        }
+        self.tunnel.access_changed.notify_one();
     }
 }

@@ -279,3 +279,38 @@ async fn revocation_cancels_a_backpressured_subscription_without_waiting_for_the
     drop(stalled);
     relay.close().await;
 }
+
+#[tokio::test]
+async fn repeated_browser_cancellations_release_all_stream_capacity() {
+    let relay = RelayedInstallation::new(Router::new()).await;
+    for _ in 0..10 {
+        let mut streams = Vec::new();
+        for _ in 0..24 {
+            let response = relay.get("/chats/stream").send().await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "cancelled subscriptions must release their slots"
+            );
+            streams.push(response);
+        }
+        assert_eq!(
+            relay.get("/chats/stream").send().await.unwrap().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        drop(streams);
+        // A finite round trip lets cancellation reach the real installation,
+        // while proving that a burst of stream closures preserves API traffic.
+        assert_eq!(
+            relay
+                .get("/chats")
+                .timeout(Duration::from_secs(2))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+    relay.close().await;
+}

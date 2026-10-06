@@ -58,9 +58,6 @@ pub(super) async fn claim_code(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let account = account(&service, &headers, &Method::POST).await?;
     consume_limit(&service.pool, &format!("claim-code:{account}"), 10).await?;
-    query("DELETE FROM installation_claim_codes WHERE expires_at <= now()")
-        .execute(&service.pool)
-        .await?;
 
     let code = random_token();
     query("INSERT INTO installation_claim_codes (digest, account_id, expires_at) VALUES ($1, $2, now() + interval '10 minutes')")
@@ -162,6 +159,33 @@ pub(super) async fn claim(
     ))
 }
 
+/// Forget permanently revokes machine proofs and removes only the official record.
+pub(super) async fn forget(
+    State(service): State<Service>,
+    Path(installation): Path<String>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let owner = account(&service, &headers, &Method::DELETE).await?;
+    consume_limit(&service.pool, &format!("installation-forget:{owner}"), 10).await?;
+    let mut transaction = service.pool.begin().await?;
+    let forgotten = query("DELETE FROM installations WHERE id = $1 AND owner_id = $2")
+        .bind(&installation)
+        .bind(owner)
+        .execute(&mut *transaction)
+        .await?;
+    if forgotten.rows_affected() == 0 {
+        return Err(ApiError(StatusCode::NOT_FOUND, "Installation not found"));
+    }
+    // Device claims deliberately have no FK: fresh requests do not reserve an installation row.
+    query("DELETE FROM installation_device_claims WHERE installation_id = $1")
+        .bind(&installation)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    service.relay.revoke_access(&installation, None);
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Detach revokes access without removing either installation data or its record.
 pub(super) async fn detach(
     State(service): State<Service>,
@@ -209,6 +233,72 @@ fn claim_name(name: &str, protocol: u16) -> Result<&str, ApiError> {
 pub(super) struct MachineIdentity {
     installation_id: String,
     token: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct TokenRotation {
+    token: String,
+}
+
+/// The machine persists its replacement before calling, so lost responses can be retried.
+pub(super) async fn rotate_token(
+    State(service): State<Service>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path(installation): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<TokenRotation>,
+) -> Result<StatusCode, ApiError> {
+    consume_limit(&service.pool, &format!("token-rotation:{}", peer.ip()), 30).await?;
+    let previous = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or("");
+    if input.token.len() != 64
+        || !input.token.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || previous == input.token
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "Supply a new installation credential",
+        ));
+    }
+
+    let replacement = digest(&input.token);
+    let mut transaction = service.pool.begin().await?;
+    let current: Option<(String,)> = query_as(
+        "SELECT token_digest FROM installations WHERE id = $1 AND owner_id IS NOT NULL AND (token_digest = $2 OR token_digest = $3) FOR UPDATE",
+    ).bind(&installation).bind(digest(previous)).bind(&replacement)
+        .fetch_optional(&mut *transaction).await?;
+
+    let Some((current,)) = current else {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "Invalid installation identity",
+        ));
+    };
+
+    let changed = current != replacement;
+    if changed {
+        query("UPDATE installations SET token_digest = $1, recovery_digest = NULL WHERE id = $2")
+            .bind(&replacement)
+            .bind(&installation)
+            .execute(&mut *transaction)
+            .await?;
+        query("DELETE FROM installation_device_claims WHERE installation_id = $1")
+            .bind(&installation)
+            .execute(&mut *transaction)
+            .await?;
+    }
+
+    transaction.commit().await?;
+
+    if changed {
+        service.relay.revoke_access(&installation, None);
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
@@ -261,12 +351,10 @@ pub(super) async fn start_device(
         (uuid::Uuid::new_v4().to_string(), requested_name.to_owned())
     };
 
-    query(
-        "DELETE FROM installation_device_claims WHERE installation_id = $1 OR expires_at <= now()",
-    )
-    .bind(&installation)
-    .execute(&mut *transaction)
-    .await?;
+    query("DELETE FROM installation_device_claims WHERE installation_id = $1")
+        .bind(&installation)
+        .execute(&mut *transaction)
+        .await?;
     let device = random_token();
     let code = random_token()[..12].to_uppercase();
     query("INSERT INTO installation_device_claims (device_digest, user_digest, installation_id, installation_name, recovering, expires_at) VALUES ($1, $2, $3, $4, $5, now() + interval '10 minutes')")
