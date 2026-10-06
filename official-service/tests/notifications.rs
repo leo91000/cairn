@@ -3,6 +3,7 @@ mod common;
 use common::{Fixture, login};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
+use std::time::Duration;
 
 fn request(
     app: &Fixture,
@@ -1036,7 +1037,7 @@ async fn failed_push_tasks_release_the_relay_window_for_new_events() {
     .await;
     let (_, run) = chat_run(&relay).await;
     pause(&mut relay).await;
-    for id in ['a', 'b', 'c', 'd', 'f'] {
+    for id in ['a', 'b', 'c', 'd'] {
         question(&relay, &run, &id.to_string().repeat(64)).await;
     }
     let router = leo_agent_manager::http::router(relay.installation.clone())
@@ -1044,10 +1045,46 @@ async fn failed_push_tasks_release_the_relay_window_for_new_events() {
         .unwrap();
     resume(&mut relay, router);
 
-    wait_pushes(&mail, 1).await;
-    assert_eq!(
-        mail.messages.lock().unwrap()[0].1["questionId"],
-        "f".repeat(64)
-    );
+    // Concurrent sends may reach the provider in any order. Fill the window
+    // with failing sends before adding the event that must get a new slot.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while mail
+            .panics_remaining
+            .load(std::sync::atomic::Ordering::SeqCst)
+            != 0
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("all four admitted push tasks should panic");
+
+    let new_question = "f".repeat(64);
+    question(&relay, &run, &new_question).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let delivered = mail
+                .messages
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, payload)| payload["questionId"] == new_question);
+            if delivered {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("a new event should be delivered after the failed tasks release the window");
+
+    let deliveries = mail
+        .messages
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, payload)| payload["questionId"] == new_question)
+        .count();
+    assert_eq!(deliveries, 1);
     relay.close().await;
 }
