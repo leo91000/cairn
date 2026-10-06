@@ -37,7 +37,18 @@ _Avoid_ : invité, collaborateur
 L’installation dans laquelle on travaille dans l’interface ; on n’en voit qu’une à la fois et on passe de l’une à l’autre.
 
 **Relais** :
-Le passage par le service officiel de tous les échanges entre l’interface et une installation, ouvert par l’installation elle-même. Le relais transporte le travail des agents sans le conserver.
+Le passage par le service officiel des échanges entre l’interface et une installation, sur la connexion sortante ouverte par l’installation. C’est la voie de secours quand la connexion directe est impossible ou interrompue ; il transporte le travail des agents sans le conserver.
+_Avoid_ : tunnel (qui désigne la connexion technique de l’installation)
+
+**Connexion directe** :
+L’échange entre l’interface et une installation sans passer par le service officiel, établi quand le réseau le permet et autorisé par l’installation pour un compte Leo, une session et un rôle. Elle transporte les mêmes échanges que le relais et bascule sur lui si elle tombe.
+_Avoid_ : accès local, P2P
+
+**Signalisation** :
+La mise en relation par le service officiel d’une interface et d’une installation pour établir une connexion directe. Elle transporte l’autorisation et les paramètres de connexion, jamais le contenu des conversations.
+
+**Autorisation de connexion directe** :
+La permission signée par le service officiel, limitée à une installation, un compte, une session et quelques minutes, sans laquelle l’installation refuse une connexion directe. Sa révocation ou son échéance ferme la connexion.
 
 **Node d’exécution** :
 Machine rattachée à une installation pour y effectuer le travail d’un agent, selon ses capacités et les autorisations accordées. Une node peut être disponible de manière intermittente.
