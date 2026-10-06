@@ -26,6 +26,7 @@ test('registers, configures and revokes a node through the owner interface', asy
         cpu: 8,
         memoryMiB: 16384,
         diskMiB: 65536,
+        diskTotalMiB: 131072,
       },
     },
   })
@@ -54,6 +55,8 @@ test('registers, configures and revokes a node through the owner interface', asy
   await node.getByRole('button', { name: 'Configure' }).click()
   const dialog = page.getByRole('dialog')
   await dialog.getByLabel('Shared CPU budget').fill('4')
+  await expect(dialog.getByLabel('Shared disk budget (GiB)')).toHaveAttribute('max', '128')
+  await dialog.getByLabel('Shared disk budget (GiB)').fill('96')
   await dialog.getByLabel('Execution slots').fill('12')
   await dialog.getByLabel('Tags, separated by commas').fill('fast, linux')
   await dialog.getByRole('button', { name: 'Save', exact: true }).click()
@@ -61,6 +64,8 @@ test('registers, configures and revokes a node through the owner interface', asy
   await expect(node).toContainText('4 cores')
   await expect(node).toContainText('fast · linux')
   await expect(node).toContainText('12 of 12')
+  const configured = (await workspace.api('/api/nodes')).find((value: { name: string }) => value.name === 'Browser Linux')
+  expect(configured.limits.diskMiB).toBe(98304)
   await page.getByText('Advanced: S3 synchronization and timeouts').click()
   await page.getByRole('button', { name: 'Configure synchronization' }).click()
   await dialog.getByLabel('Synchronization target (seconds)').fill('45')

@@ -6,7 +6,7 @@ import {
   onMounted,
   ref,
 } from 'vue'
-import { formatMiB, nodeDiagnostics } from '../../shared/nodes'
+import { diskCapacity, formatMiB, nodeDiagnostics } from '../../shared/nodes'
 import {
   api,
   notify,
@@ -513,12 +513,12 @@ function statusLabel(node: ExecutionNode) {
               type="number"
               min="0.125"
               step="any"
-              :max="editing.capabilities.diskMiB / 1024"
+              :max="diskCapacity(editing) / 1024"
               required
             ></label>
           </div>
         </fieldset><p class="text-sm text-muted">
-          Detected on this machine: {{ editing.capabilities.cpu }} CPU · {{ formatMiB(editing.capabilities.memoryMiB) }} RAM · {{ formatMiB(editing.capabilities.diskMiB) }} disk.
+          Detected on this machine: {{ editing.capabilities.cpu }} CPU · {{ formatMiB(editing.capabilities.memoryMiB) }} RAM · {{ formatMiB(diskCapacity(editing)) }} disk ({{ formatMiB(editing.capabilities.diskMiB) }} free).
         </p>
         <label class="flex gap-2"><input v-model="editing.accepting" type="checkbox">Accept new work</label>
         <UiButton type="submit" :disabled="busy">
