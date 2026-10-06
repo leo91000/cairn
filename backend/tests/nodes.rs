@@ -496,6 +496,32 @@ async fn node_configuration_validates_capacity_and_never_grants_agent_access() {
 }
 
 #[tokio::test]
+async fn disk_budget_uses_total_capacity_while_free_space_is_already_allocated() {
+    let owner = Owner::new().await;
+    let invitation = owner.invite("Allocated disk").await;
+    let mut detected = capabilities(true, 8, 8192, 8192);
+    detected["diskTotalMiB"] = 65536.into();
+    let input = enrollment(&invitation, "ignored", &detected);
+    let (_, identity) = owner.call("POST", ENROLL, input, None).await;
+    let path = format!("/api/nodes/{}", identity["nodeId"].as_str().unwrap());
+    let mut config = json!({
+        "name": "Allocated disk",
+        "tags": [],
+        "accepting": true,
+        "limits": limits(4, 4096, 32768),
+    });
+    let (status, saved) = owner.send("PUT", &path, config.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["limits"]["diskMiB"], 32768);
+
+    config["limits"]["diskMiB"] = 65537.into();
+    assert_eq!(
+        owner.send("PUT", &path, config).await.0,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
 async fn main_node_policy_survives_an_update_from_an_older_client() {
     let owner = Owner::new().await;
     let path = format!("/api/agents/{MAIN_AGENT_ID}");

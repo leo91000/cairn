@@ -586,7 +586,15 @@ async fn configure_node(s: &Service, node: &str, body: Value) -> Result<Value> {
             }
             // A capacity the node never reported counts as exceeded.
             let exceeds_capacity = ResourceKind::ALL.iter().any(|kind| {
-                Some(request.limits.amount(*kind)) > record["capabilities"][kind.key()].as_u64()
+                let capabilities = &record["capabilities"];
+                let capacity = match kind {
+                    ResourceKind::Disk => capabilities["diskTotalMiB"]
+                        .as_u64()
+                        .filter(|total| *total > 0)
+                        .or_else(|| capabilities["diskMiB"].as_u64()),
+                    _ => capabilities[kind.key()].as_u64(),
+                };
+                Some(request.limits.amount(*kind)) > capacity
             });
             if exceeds_capacity {
                 return Err(Error::bad("Limits exceed the node's detected capacity."));
