@@ -21,6 +21,15 @@ class MemoryVault : SessionVault {
 
 class LeoApiTest {
     @Test
+    fun `anonymous official session accepts null account and csrf`() {
+        val session =
+            wireJson.decodeFromString<Session>(
+                """{"authenticated":false,"csrf":null,"account":null,"installations":[]}"""
+            )
+        assertFalse(session.authenticated)
+    }
+
+    @Test
     fun `selected installation scopes reads writes files and streams but not account calls`() =
         runTest {
             MockWebServer().use { server ->
