@@ -7,6 +7,50 @@ use sqlx_core::query::query;
 use std::time::Duration;
 
 #[tokio::test]
+async fn invitations_require_recent_proof_before_sending_mail_or_granting_access() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let app = &relay.app;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    query("UPDATE web_sessions SET last_proof_at = NULL")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+
+    let rejected = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            &format!("/api/installations/{id}/sharing/invitations"),
+        )
+        .json(&json!({ "email": "unconfirmed-invite@example.test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    assert!(app.mail.1.lock().unwrap().is_empty());
+    let sharing: Value = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::GET,
+            &format!("/api/installations/{id}/sharing"),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(sharing["invitations"], json!([]));
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    relay.close().await;
+}
+
+#[tokio::test]
 async fn detachment_and_forgetting_require_recent_proof_without_disrupting_live_access() {
     for (method, suffix) in [(Method::POST, "/detach"), (Method::DELETE, "")] {
         let relay = RelayedInstallation::new(axum::Router::new()).await;

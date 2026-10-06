@@ -338,8 +338,9 @@ The proof grants a **reusable five-minute window**, not a one-use authorization:
 several sensitive actions can use it in that session until it expires. The email
 code or WebAuthn challenge itself is still consumed once. `web_sessions.last_proof_at`
 records the last independent email/passkey proof, not an OAuth login or session
-activity. A new additive rename migration preserves existing proof timestamps,
+activity. A new rename migration preserves existing proof timestamps,
 CSRF, cookie digests and deadlines, leaving historical SQLx checksums intact.
+The rename is a forward-only schema change, not an additive compatibility change.
 Update the official binary with this migration; older binaries still using the
 previous column name cannot serve that database. Upgrade its web bundle too.
 
