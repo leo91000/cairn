@@ -57,6 +57,17 @@ async function toggle() {
 
     const { publicKey } = await accountApi<{ publicKey: string }>('/notifications')
     const key = Uint8Array.from(atob(publicKey.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0))
+    const currentKey = subscription?.options.applicationServerKey
+    const currentKeyBytes = currentKey ? new Uint8Array(currentKey) : undefined
+    const usesOfficialKey = !!currentKeyBytes
+      && currentKeyBytes.length === key.length
+      && currentKeyBytes.every((byte, index) => byte === key[index])
+
+    if (subscription && !usesOfficialKey) {
+      await subscription.unsubscribe()
+      subscription = null
+    }
+
     subscription ??= await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key })
     const { id } = await accountApi<{ id: string }>('/notifications/subscriptions', { method: 'POST', body: JSON.stringify(subscription.toJSON()) })
     localStorage.setItem(deviceKey, id)

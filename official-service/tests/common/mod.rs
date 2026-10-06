@@ -339,6 +339,7 @@ impl RelayedInstallation {
         let connector = tokio::spawn(leo_agent_manager::relay::connect(
             identity_dir,
             router,
+            installation.clone(),
             stop.clone(),
         ));
         let base = format!("{}/api/installations/{id}/api", app.url);

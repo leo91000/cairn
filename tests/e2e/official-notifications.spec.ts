@@ -90,6 +90,10 @@ test('a browser registers once for all Leo installations and can disable account
       if (!key || typeof key === 'string')
         throw new Error('A browser push key is required')
       const bytes = key instanceof ArrayBuffer ? new Uint8Array(key) : new Uint8Array(key.buffer, key.byteOffset, key.byteLength)
+      const existingKey = localStorage.getItem('fixture-push-key')
+      if (localStorage.getItem('fixture-push') && existingKey !== JSON.stringify(Array.from(bytes)))
+        throw new DOMException('Unsubscribe before changing the application server key', 'InvalidStateError')
+
       localStorage.setItem('fixture-push-key', JSON.stringify(Array.from(bytes)))
       localStorage.setItem('fixture-push', '1')
       return (await this.getSubscription())!

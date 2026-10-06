@@ -488,3 +488,8 @@ ownership of the browser: someone holding the complete subscription can
 explicitly register it on another account and move its endpoint. Avoid logging
 or sharing subscription values. Endpoint transfer supports explicit account
 switching; it is not performed on sign-in or session changes.
+
+When explicitly enabling notifications, the web app replaces any browser subscription
+whose application server key differs from the official public key (including old
+installation VAPID subscriptions). Re-enrollment after an operator key rotation uses
+the same flow.

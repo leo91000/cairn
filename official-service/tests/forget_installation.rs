@@ -190,6 +190,7 @@ async fn only_the_owner_can_forget_an_installation_and_its_machine_keeps_its_dat
         leo_agent_manager::http::router(relay.installation.clone())
             .await
             .unwrap(),
+        relay.installation.clone(),
         stop.clone(),
     ));
     let url = format!(
