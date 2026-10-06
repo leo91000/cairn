@@ -198,9 +198,9 @@ The same list and account session expose `updateRequired`. An incompatible Hello
 persists this state even after the refused socket closes or the official process
 restarts; a compatible authenticated Hello clears it. The web displays
 **Mise à jour nécessaire** and replaces the inaccessible workspace with that
-explanation. The selector and account actions remain available. Protocols 2 and 1
-are the current and previous supported versions; v1 keeps the finite snapshot
-path while the live stream remains unavailable during deployment.
+explanation. The selector and account actions remain available. Protocols 3 and 2
+are the current and previous supported versions. Version 1 remains compatible
+with the finite snapshot path; live streams and push events require newer versions.
 
 Access management uses the same `Relay` handle supplied to `router_with_relay`.
 After committing a detachment, call `revoke_access(installation, None)`; after
