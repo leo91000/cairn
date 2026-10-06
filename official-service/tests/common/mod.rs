@@ -251,6 +251,19 @@ impl RelayedInstallation {
         .await
     }
 
+    pub async fn with_push_and_pool_size(
+        push: Arc<dyn leo_official_service::PushSender>,
+        connections: u32,
+    ) -> Self {
+        let app = Fixture::with_options(
+            leo_official_service::OAuthProviders::default(),
+            connections,
+            Some(push),
+        )
+        .await;
+        Self::with_app(axum::Router::new(), String::new(), app).await
+    }
+
     pub async fn with_pool_size(extra_routes: axum::Router, connections: u32) -> Self {
         let app =
             Fixture::with_pool_size(leo_official_service::OAuthProviders::default(), connections)

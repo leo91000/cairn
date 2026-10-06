@@ -8,6 +8,81 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx_core::{query::query, query_as::query_as};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+
+const MAX_DELIVERY_RECEIPTS: usize = 20_000;
+const RECEIPT_TTL: Duration = Duration::from_secs(3600);
+
+#[derive(Default)]
+pub(super) struct DeliveryReceipts(Mutex<HashMap<String, DeviceReceipt>>);
+
+struct DeviceReceipt {
+    created: Instant,
+    delivered: bool,
+}
+
+enum ReceiptAdmission {
+    Delivered,
+    Full,
+    Reserved(ReceiptReservation),
+}
+
+struct ReceiptReservation {
+    receipts: Arc<DeliveryReceipts>,
+    key: String,
+    delivered: bool,
+}
+
+impl DeliveryReceipts {
+    fn reserve(self: &Arc<Self>, key: String) -> ReceiptAdmission {
+        let mut receipts = self.0.lock().unwrap();
+        receipts.retain(|_, receipt| receipt.created.elapsed() < RECEIPT_TTL);
+        if let Some(receipt) = receipts.get(&key) {
+            return if receipt.delivered {
+                ReceiptAdmission::Delivered
+            } else {
+                ReceiptAdmission::Full
+            };
+        }
+        if receipts.len() >= MAX_DELIVERY_RECEIPTS {
+            return ReceiptAdmission::Full;
+        }
+
+        receipts.insert(
+            key.clone(),
+            DeviceReceipt {
+                created: Instant::now(),
+                delivered: false,
+            },
+        );
+        ReceiptAdmission::Reserved(ReceiptReservation {
+            receipts: self.clone(),
+            key,
+            delivered: false,
+        })
+    }
+}
+
+impl ReceiptReservation {
+    fn complete(mut self) {
+        if let Some(receipt) = self.receipts.0.lock().unwrap().get_mut(&self.key) {
+            receipt.delivered = true;
+        }
+        self.delivered = true;
+    }
+}
+
+impl Drop for ReceiptReservation {
+    fn drop(&mut self) {
+        if !self.delivered {
+            self.receipts.0.lock().unwrap().remove(&self.key);
+        }
+    }
+}
 
 const MAX_DEVICES: i64 = 50;
 
@@ -15,6 +90,26 @@ const MAX_DEVICES: i64 = 50;
 pub enum PushError {
     Gone,
     Unavailable,
+}
+
+impl From<web_push::WebPushError> for PushError {
+    fn from(error: web_push::WebPushError) -> Self {
+        use web_push::WebPushError;
+        match error {
+            WebPushError::EndpointNotValid(_)
+            | WebPushError::EndpointNotFound(_)
+            | WebPushError::Unauthorized(_)
+            | WebPushError::BadRequest(_)
+            | WebPushError::PayloadTooLarge
+            | WebPushError::InvalidCryptoKeys
+            | WebPushError::MissingCryptoKeys
+            | WebPushError::InvalidUri => Self::Gone,
+            WebPushError::Other(info) if (400..500).contains(&info.code) && info.code != 429 => {
+                Self::Gone
+            }
+            _ => Self::Unavailable,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -206,26 +301,49 @@ pub(super) async fn deliver(
     };
 
     let devices: Vec<(String,)> = query_as("SELECT d.id FROM notification_devices d WHERE EXISTS(SELECT 1 FROM installations i LEFT JOIN installation_members m ON m.installation_id = i.id AND m.account_id = d.account_id WHERE i.id = $1 AND i.token_digest = $2 AND i.owner_id IS NOT NULL AND (i.owner_id = d.account_id OR m.account_id = d.account_id)) ORDER BY d.id")
-        .bind(installation).bind(token_digest).fetch_all(&service.pool).await?;
+        .bind(installation).bind(token_digest).fetch_all(&service.push_pool).await?;
 
     let mut complete = true;
     for (id,) in devices {
-        let mut transaction = service.pool.begin().await?;
+        let mut transaction = service.push_pool.begin().await?;
         let current: Option<(String,)> = query_as("SELECT id FROM installations WHERE id = $1 AND token_digest = $2 AND owner_id IS NOT NULL FOR SHARE")
             .bind(installation).bind(token_digest).fetch_optional(&mut *transaction).await?;
         if current.is_none() {
             return Ok(true);
         }
 
-        let device: Option<(String, String, String)> = query_as("SELECT d.endpoint, d.p256dh, d.auth FROM notification_devices d WHERE d.id = $1 AND EXISTS(SELECT 1 FROM installations i LEFT JOIN installation_members m ON m.installation_id = i.id AND m.account_id = d.account_id WHERE i.id = $2 AND (i.owner_id = d.account_id OR m.account_id = d.account_id)) FOR UPDATE OF d")
+        let device: Option<(String, String, String, String)> = query_as("SELECT d.account_id, d.endpoint, d.p256dh, d.auth FROM notification_devices d WHERE d.id = $1 AND EXISTS(SELECT 1 FROM installations i LEFT JOIN installation_members m ON m.installation_id = i.id AND m.account_id = d.account_id WHERE i.id = $2 AND (i.owner_id = d.account_id OR m.account_id = d.account_id)) FOR UPDATE OF d")
             .bind(&id).bind(installation).fetch_optional(&mut *transaction).await?;
-        let Some((endpoint, p256dh, auth)) = device else {
+        let Some((account, endpoint, p256dh, auth)) = device else {
             continue;
         };
 
         let subscription = PushSubscription {
             endpoint,
             keys: PushKeys { p256dh, auth },
+        };
+
+        // Include the current account and keys: explicit re-enrollment or endpoint
+        // transfer must not inherit another registration's delivery receipt.
+        let receipt_key = digest(
+            &json!([
+                installation,
+                token_digest,
+                event.id,
+                id,
+                account,
+                subscription.keys.p256dh,
+                subscription.keys.auth,
+            ])
+            .to_string(),
+        );
+        let receipt = match service.push_receipts.reserve(receipt_key) {
+            ReceiptAdmission::Delivered => continue,
+            ReceiptAdmission::Full => {
+                complete = false;
+                continue;
+            }
+            ReceiptAdmission::Reserved(receipt) => receipt,
         };
 
         let result = if valid_subscription(&subscription) {
@@ -239,7 +357,7 @@ pub(super) async fn deliver(
         };
 
         match result {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => receipt.complete(),
             Ok(Err(PushError::Gone)) => {
                 query("DELETE FROM notification_devices WHERE id = $1")
                     .bind(&id)
@@ -316,7 +434,7 @@ impl PushSender for WebPushSender {
     ) -> Result<(), PushError> {
         use web_push::{
             ContentEncoding, HyperWebPushClient, SubscriptionInfo, Urgency, VapidSignatureBuilder,
-            WebPushClient, WebPushError, WebPushMessageBuilder,
+            WebPushClient, WebPushMessageBuilder,
         };
         let send = async {
             let info = SubscriptionInfo::new(
@@ -334,12 +452,6 @@ impl PushSender for WebPushSender {
             message.set_payload(ContentEncoding::Aes128Gcm, payload.as_bytes());
             HyperWebPushClient::new().send(message.build()?).await
         };
-        match send.await {
-            Ok(()) => Ok(()),
-            Err(WebPushError::EndpointNotValid(_) | WebPushError::EndpointNotFound(_)) => {
-                Err(PushError::Gone)
-            }
-            Err(_) => Err(PushError::Unavailable),
-        }
+        send.await.map_err(PushError::from)
     }
 }

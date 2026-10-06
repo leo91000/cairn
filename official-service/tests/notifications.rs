@@ -91,6 +91,7 @@ async fn web_push_devices_belong_to_the_signed_in_leo_account() {
 struct PushMailbox {
     messages: std::sync::Mutex<Vec<(String, Value)>>,
     failures_remaining: std::sync::atomic::AtomicUsize,
+    unavailable_attempts: std::sync::atomic::AtomicUsize,
     send_delay: std::time::Duration,
 }
 
@@ -109,10 +110,25 @@ impl leo_official_service::PushSender for PushMailbox {
             tokio::time::sleep(self.send_delay).await;
         }
 
+        if let Some(status) = subscription
+            .endpoint
+            .rsplit('/')
+            .next()
+            .and_then(|path| path.strip_prefix("status-"))
+        {
+            let code: u16 = status.parse().unwrap();
+            let error =
+                web_push::request_builder::parse_response(code.try_into().unwrap(), b"{}".to_vec())
+                    .unwrap_err();
+            return Err(error.into());
+        }
+
         if subscription.endpoint.ends_with("/expired") {
             return Err(leo_official_service::PushError::Gone);
         }
         if subscription.endpoint.ends_with("/unavailable") {
+            self.unavailable_attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             return Err(leo_official_service::PushError::Unavailable);
         }
         if self
@@ -453,7 +469,11 @@ async fn pause(relay: &mut common::RelayedInstallation) {
 fn resume(relay: &mut common::RelayedInstallation, router: axum::Router) {
     relay.stop = tokio_util::sync::CancellationToken::new();
     relay.connector = tokio::spawn(leo_agent_manager::relay::connect(
-        relay.root.path().join("relay"),
+        relay
+            .installation
+            .config
+            .data_dir
+            .join("installation-relay"),
         router,
         relay.installation.clone(),
         relay.stop.clone(),
@@ -679,10 +699,309 @@ async fn a_failing_device_does_not_starve_newer_events_on_healthy_devices() {
         }
     })
     .await
-    .expect("a newer question must reach a healthy device even when older events cannot be acknowledged");
+    .unwrap_or_else(|_| panic!("a newer question must reach a healthy device even when older events cannot be acknowledged: delivered={}, unavailable_attempts={}", mail.messages.lock().unwrap().len(), mail.unavailable_attempts.load(std::sync::atomic::Ordering::SeqCst)));
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while mail
+            .unavailable_attempts
+            .load(std::sync::atomic::Ordering::SeqCst)
+            < 410
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the unavailable device must be retried");
+
+    {
+        let messages = mail.messages.lock().unwrap();
+        assert_eq!(
+            messages.len(),
+            401,
+            "each question must reach the healthy device exactly once despite retries"
+        );
+        let unique_questions: std::collections::HashSet<_> = messages
+            .iter()
+            .map(|(_, payload)| payload["questionId"].as_str().unwrap())
+            .collect();
+        assert_eq!(unique_questions.len(), 401);
+    }
+
     assert_eq!(
         relay.get("/chats").send().await.unwrap().status(),
         StatusCode::OK
     );
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn healthy_devices_are_not_redelivered_after_a_partial_failure_and_tunnel_reconnect() {
+    let mail = std::sync::Arc::new(PushMailbox::default());
+    let mut relay = common::RelayedInstallation::with_push(mail.clone()).await;
+    for endpoint in [
+        "https://fcm.googleapis.com/unavailable",
+        "https://fcm.googleapis.com/healthy",
+    ] {
+        register(&relay.app, &relay.cookie, &relay.session, endpoint).await;
+    }
+    let (_, run) = chat_run(&relay).await;
+    question(&relay, &run, &"a".repeat(64)).await;
+    wait_pushes(&mail, 1).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while mail
+            .unavailable_attempts
+            .load(std::sync::atomic::Ordering::SeqCst)
+            < 1
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    for attempt in 2..=3 {
+        pause(&mut relay).await;
+        let router = leo_agent_manager::http::router(relay.installation.clone())
+            .await
+            .unwrap();
+        resume(&mut relay, router);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while mail
+                .unavailable_attempts
+                .load(std::sync::atomic::Ordering::SeqCst)
+                < attempt
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("only the unavailable device should be retried after reconnection");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    assert_eq!(
+        mail.messages.lock().unwrap().len(),
+        1,
+        "a healthy device must not receive an already delivered event again"
+    );
+    relay.close().await;
+}
+
+struct SuspendedPush {
+    blocked_endpoint: Option<String>,
+    entered: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
+    mailbox: PushMailbox,
+}
+
+impl Default for SuspendedPush {
+    fn default() -> Self {
+        Self {
+            blocked_endpoint: None,
+            entered: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+            mailbox: PushMailbox::default(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl leo_official_service::PushSender for SuspendedPush {
+    fn public_key(&self) -> &str {
+        "fixture-public-key"
+    }
+
+    async fn send(
+        &self,
+        subscription: &leo_official_service::PushSubscription,
+        payload: &Value,
+    ) -> Result<(), leo_official_service::PushError> {
+        if self
+            .blocked_endpoint
+            .as_ref()
+            .is_none_or(|endpoint| *endpoint == subscription.endpoint)
+        {
+            self.entered.add_permits(1);
+            self.release.acquire().await.unwrap().forget();
+        }
+        leo_official_service::PushSender::send(&self.mailbox, subscription, payload).await
+    }
+}
+
+#[tokio::test]
+async fn a_suspended_push_provider_does_not_occupy_the_account_api_pool() {
+    let push = std::sync::Arc::new(SuspendedPush::default());
+    let relay = common::RelayedInstallation::with_push_and_pool_size(push.clone(), 1).await;
+    register(
+        &relay.app,
+        &relay.cookie,
+        &relay.session,
+        "https://fcm.googleapis.com/healthy",
+    )
+    .await;
+    let (_, run) = chat_run(&relay).await;
+    question(&relay, &run, &"b".repeat(64)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), push.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        request(
+            &relay.app,
+            &relay.cookie,
+            &relay.session,
+            Method::GET,
+            "/api/account/session",
+        )
+        .send(),
+    )
+    .await
+    .expect("account sessions must stay available while the provider is suspended")
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    push.release.add_permits(1);
+    wait_pushes(&push.mailbox, 1).await;
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn permanent_provider_rejections_remove_devices_but_429_and_5xx_remain_retryable() {
+    let mail = std::sync::Arc::new(PushMailbox::default());
+    let relay = common::RelayedInstallation::with_push(mail.clone()).await;
+    let statuses = [400_u16, 401, 403, 404, 410, 413, 422, 429, 500];
+    let mut devices = Vec::new();
+    for status in statuses {
+        let id = register(
+            &relay.app,
+            &relay.cookie,
+            &relay.session,
+            &format!("https://fcm.googleapis.com/status-{status}"),
+        )
+        .await;
+        devices.push((status, id));
+    }
+    register(
+        &relay.app,
+        &relay.cookie,
+        &relay.session,
+        "https://fcm.googleapis.com/healthy",
+    )
+    .await;
+    let (_, run) = chat_run(&relay).await;
+    question(&relay, &run, &"c".repeat(64)).await;
+    wait_pushes(&mail, 1).await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let mut correct = true;
+            for (status, id) in &devices {
+                let registered: Value = request(
+                    &relay.app,
+                    &relay.cookie,
+                    &relay.session,
+                    Method::GET,
+                    &format!("/api/account/notifications/subscriptions/{id}"),
+                )
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+                correct &= registered["registered"] == (*status == 429 || *status >= 500);
+            }
+            if correct {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("all 4xx except 429 must remove the device, including stale VAPID credentials");
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn removing_a_member_waits_for_an_admitted_send_and_prevents_the_next_send() {
+    let endpoint = "https://fcm.googleapis.com/member";
+    let push = std::sync::Arc::new(SuspendedPush {
+        blocked_endpoint: Some(endpoint.into()),
+        ..SuspendedPush::default()
+    });
+    let relay = common::RelayedInstallation::with_push(push.clone()).await;
+    let (member_cookie, member_session) = invite(&relay, "member@example.test").await;
+    register(&relay.app, &member_cookie, &member_session, endpoint).await;
+    register(
+        &relay.app,
+        &relay.cookie,
+        &relay.session,
+        "https://fcm.googleapis.com/owner",
+    )
+    .await;
+    let (_, run) = chat_run(&relay).await;
+    question(&relay, &run, &"d".repeat(64)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), push.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+
+    let installation = relay.session["installations"][0]["id"].as_str().unwrap();
+    let member = member_session["account"]["id"].as_str().unwrap();
+    let removal = request(
+        &relay.app,
+        &relay.cookie,
+        &relay.session,
+        Method::DELETE,
+        &format!("/api/installations/{installation}/sharing/members/{member}"),
+    )
+    .send();
+    tokio::pin!(removal);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut removal)
+            .await
+            .is_err(),
+        "revocation must serialize with the already admitted send"
+    );
+    question(&relay, &run, &"e".repeat(64)).await;
+
+    push.release.add_permits(1);
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), &mut removal)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    question(&relay, &run, &"f".repeat(64)).await;
+    wait_pushes(&push.mailbox, 4).await;
+
+    assert_eq!(
+        push.entered.available_permits(),
+        0,
+        "no new send may be admitted for the removed member"
+    );
+    assert_eq!(
+        push.mailbox
+            .messages
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(recipient, _)| recipient == endpoint)
+            .count(),
+        1
+    );
+    let response = request(
+        &relay.app,
+        &member_cookie,
+        &member_session,
+        Method::GET,
+        &format!("/api/installations/{installation}/api/chats"),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     relay.close().await;
 }

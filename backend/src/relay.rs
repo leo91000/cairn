@@ -12,9 +12,9 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use leo_relay_protocol::{
-    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_PUBLIC_IN_FLIGHT, MAX_NOTIFICATION_IN_FLIGHT,
-    MAX_STREAM_CHUNK, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, REQUEST_TIMEOUT, Role,
-    SUPPORTED_VERSIONS,
+    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_NOTIFICATION_IN_FLIGHT,
+    MAX_PUBLIC_IN_FLIGHT, MAX_STREAM_CHUNK, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    REQUEST_TIMEOUT, Role, SUPPORTED_VERSIONS,
 };
 use serde::{Deserialize, Serialize};
 use std::{

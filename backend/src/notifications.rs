@@ -13,6 +13,17 @@ use std::collections::HashSet;
 
 const DELIVERY_TTL_MS: i64 = 3_600_000;
 
+/// Local registrations and their encrypted keys cannot authorize official account push.
+pub fn remove_local_registrations(db: &mut Db<'_>) -> Result<()> {
+    for prefix in ["push-device:", "mcp-secret:push-device:"] {
+        for (key, _) in db.keys(prefix)? {
+            db.delete(&key)?;
+        }
+    }
+
+    db.delete("mcp-secret:push-vapid")
+}
+
 fn enqueue_event(db: &Db<'_>, event: &NotificationEvent) -> Result<()> {
     let key = format!("push-outbox:{}", event.id);
     if db.kv(&key)?.is_none() {

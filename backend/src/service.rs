@@ -97,6 +97,10 @@ impl Service {
         });
         service.migrate_agents().await?;
         service.store.transaction(crate::accounts::migrate).await?;
+        service
+            .store
+            .transaction(crate::notifications::remove_local_registrations)
+            .await?;
         service.avatars.recover(&service).await?;
         tokio::spawn(crate::artifacts::preview::recover(service.clone()));
         Ok(service)

@@ -60,6 +60,8 @@ struct Service {
     oauth: OAuthProviders,
     relay: relay::Relay,
     push: Option<Arc<dyn PushSender>>,
+    push_receipts: Arc<notifications::DeliveryReceipts>,
+    push_pool: PgPool,
 }
 
 enum ApiError {
@@ -177,6 +179,11 @@ pub async fn router_with_network_and_push(
 ) -> Result<Router, sqlx_core::migrate::MigrateError> {
     sqlx_macros::migrate!("./migrations").run(&pool).await?;
 
+    // Provider waits retain sharing locks but never borrow the account/API pool.
+    let push_pool = sqlx_postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .acquire_timeout(std::time::Duration::from_secs(1))
+        .connect_lazy_with((*pool.connect_options()).clone());
     let installer = installer::router(origin.clone());
     let service = Service {
         pool,
@@ -185,6 +192,8 @@ pub async fn router_with_network_and_push(
         oauth,
         relay,
         push,
+        push_receipts: Arc::default(),
+        push_pool,
     };
     Ok(Router::new()
         .route("/api/account/email-code", post(request_code))
