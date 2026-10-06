@@ -97,6 +97,14 @@ pub(super) async fn invite(
         ));
     }
 
+    super::consume_limit_on(
+        &mut transaction,
+        &format!("invitation-day:{account}"),
+        20,
+        86_400,
+    )
+    .await?;
+
     let (name,): (String,) = query_as("SELECT name FROM installations WHERE id = $1")
         .bind(&installation)
         .fetch_one(&mut *transaction)
@@ -111,10 +119,29 @@ pub(super) async fn invite(
     .await?;
     transaction.commit().await?;
 
+    // Mail clients can linkify plain text. Keep the useful name while removing
+    // URL/email punctuation supplied by the owner from Leo's outbound email.
+    let email_name: String = name
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() || matches!(character, ' ' | '-' | '_') {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    let email_name = email_name.split_whitespace().collect::<Vec<_>>().join(" ");
+    let email_name = if email_name.is_empty() {
+        "Shared installation"
+    } else {
+        &email_name
+    };
+
     let url = format!("{}/?invitations=1", service.origin);
     if service
         .sender
-        .send_invitation(&email, &name, &url)
+        .send_invitation(&email, email_name, &url)
         .await
         .is_err()
     {

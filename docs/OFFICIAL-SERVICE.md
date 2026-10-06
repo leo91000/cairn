@@ -324,7 +324,7 @@ Deleting a member preserves other people's installations and sessions.
 caller or their installations during their ownership period. Members see only
 their own actions. It requires a current official session and uses no-store.
 Audit entries accompany successful claims (including device recovery),
-detachments, definitive revocations, invitations/acceptances/cancellations,
+detachments, definitive revocations, invitations/acceptances/cancellations/delivery failures,
 member removals/departures, session revocations and account deletions in the same
 Postgres transaction. Failed authorization or rolled-back changes add no event.
 The service stores only action, time and opaque actor/installation/target IDs;
@@ -346,3 +346,22 @@ ORDER BY id DESC;
 Restrict database access and exports to operators. The account endpoint's bound
 is a recent-activity view, not an exhaustive export. The single-relay-process
 restriction in ADR-0032 still applies to immediate session/account revocation.
+
+The invitation email keeps the installation name as plain text with only letters,
+numbers, spaces, hyphens and underscores; URL/email punctuation is replaced by
+spaces. The real name remains visible in the authenticated app. Alongside the
+10/minute attempt limit, an account can attempt at most 20 invitation deliveries
+per 24-hour window across its installations. Cancellation/reinvitation cannot
+reset that budget; failed delivery still consumes it. Rejected ownership checks
+and duplicate invitations do not consume the daily delivery allowance. Installation
+GitHub repository discovery is reserved to its owner, like its coding accounts.
+Members can read the agent list and avatars, while individual agent management
+routes remain owner-only.
+
+Browser streams have eight simultaneous slots per Leo account in the official
+process, across installations and sessions. This complements the existing
+24-stream/32-request limits per installation; cancellation, expiry and revocation
+release the allowance together with the remote subscription. Extra streams return
+503 and use the client's existing retry behavior. MCP grants and public downloads
+retain their independent allowances. Filling one member's eight streams leaves
+installation slots for the owner's live views and ordinary requests.

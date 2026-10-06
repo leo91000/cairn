@@ -335,7 +335,7 @@ fn owner_operation(method: &str, path: &str) -> bool {
         // MCP connection flows and per-agent GitHub tokens below.
         [
             "nodes" | "accounts" | "onepassword" | "mcps" | "connections" | "settings" | "audit"
-            | "agent-avatars",
+            | "github" | "agent-avatars",
             ..,
         ] => true,
         ["agents"] | ["agents", _, "avatar"] => !read,

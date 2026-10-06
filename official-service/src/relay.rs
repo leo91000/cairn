@@ -27,6 +27,7 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch}
 // Keep ordinary API capacity available even when browsers hold idle SSE bodies.
 const RESERVED_API_SLOTS: usize = 8;
 const MAX_MCP_PER_GRANT: usize = 4;
+const MAX_STREAMS_PER_ACCOUNT: usize = 8;
 const MCP_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Pending {
@@ -37,6 +38,7 @@ struct Pending {
     // Browser cancellation does not release a slot for work still running remotely.
     _permit: OwnedSemaphorePermit,
     _stream_permit: Option<OwnedSemaphorePermit>,
+    _account_stream_permit: Option<OwnedSemaphorePermit>,
     _mcp_permit: Option<OwnedSemaphorePermit>,
     public_activity: Option<tokio::time::Instant>,
 }
@@ -78,6 +80,7 @@ pub struct Relay {
     connections: Arc<Mutex<HashMap<String, Arc<Tunnel>>>>,
     closing: Arc<AtomicBool>,
     mcp_slots: Arc<Mutex<HashMap<String, Weak<Semaphore>>>>,
+    account_stream_slots: Arc<Mutex<HashMap<String, Weak<Semaphore>>>>,
 }
 
 #[derive(Default)]
@@ -153,6 +156,21 @@ impl Relay {
             .get(installation)
             .is_some_and(|tunnel| !*tunnel.stop.borrow() && !tunnel.commands.is_closed())
     }
+}
+
+fn active_slots(
+    registry: &Mutex<HashMap<String, Weak<Semaphore>>>,
+    key: &str,
+    maximum: usize,
+) -> Arc<Semaphore> {
+    let mut active = registry.lock().unwrap();
+    active.retain(|_, slots| slots.strong_count() > 0);
+    let slots = active
+        .get(key)
+        .and_then(Weak::upgrade)
+        .unwrap_or_else(|| Arc::new(Semaphore::new(maximum)));
+    active.insert(key.to_owned(), Arc::downgrade(&slots));
+    slots
 }
 
 pub(super) async fn upgrade(
@@ -589,16 +607,7 @@ pub(super) async fn mcp(
 ) -> Result<Response, ApiError> {
     // Uploads and remote work share the grant's small allowance, including
     // access tokens from refresh rotation. Idle grants retain no semaphore.
-    let slots = {
-        let mut grants = service.relay.mcp_slots.lock().unwrap();
-        grants.retain(|_, slots| slots.strong_count() > 0);
-        let slots = grants
-            .get(&grant.id)
-            .and_then(Weak::upgrade)
-            .unwrap_or_else(|| Arc::new(Semaphore::new(MAX_MCP_PER_GRANT)));
-        grants.insert(grant.id, Arc::downgrade(&slots));
-        slots
-    };
+    let slots = active_slots(&service.relay.mcp_slots, &grant.id, MAX_MCP_PER_GRANT);
     let permit = slots
         .try_acquire_owned()
         .map_err(|_| ApiError(StatusCode::TOO_MANY_REQUESTS, "MCP authorization is busy"))?;
@@ -772,6 +781,25 @@ async fn send(
         None
     };
 
+    let account_stream_permit = if streaming && browser_session.is_some() {
+        Some(
+            active_slots(
+                &service.relay.account_stream_slots,
+                &account,
+                MAX_STREAMS_PER_ACCOUNT,
+            )
+            .try_acquire_owned()
+            .map_err(|_| {
+                ApiError(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Account stream capacity reached",
+                )
+            })?,
+        )
+    } else {
+        None
+    };
+
     let headers = request
         .headers()
         .iter()
@@ -900,6 +928,7 @@ async fn send(
                 stream: streaming.then_some(chunks),
                 _permit: permit,
                 _stream_permit: stream_permit,
+                _account_stream_permit: account_stream_permit,
                 _mcp_permit: mcp_permit,
                 public_activity: public_file.then(tokio::time::Instant::now),
             },

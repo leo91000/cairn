@@ -327,3 +327,46 @@ impl RelayedInstallation {
         self.app.close().await;
     }
 }
+
+/// Three independent accounts can fill all 24 installation stream slots while
+/// respecting the eight-stream allowance per account. Reuse across cancellation
+/// cycles so the tests still exercise the full tunnel capacity, not only one quota.
+pub async fn stream_accounts(relay: &RelayedInstallation) -> Vec<String> {
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let mut cookies = vec![relay.cookie.clone()];
+    for number in 0..2 {
+        let email = format!("stream-member-{number}@example.test");
+        let (cookie, session) = login(&relay.app, &email).await;
+        let response = relay
+            .app
+            .authenticated(
+                &relay.cookie,
+                &relay.session,
+                reqwest::Method::POST,
+                &format!("/api/installations/{id}/sharing/invitations"),
+            )
+            .json(&json!({ "email": email }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+        let invitation: Value = response.json().await.unwrap();
+        let accepted = relay
+            .app
+            .authenticated(
+                &cookie,
+                &session,
+                reqwest::Method::POST,
+                &format!(
+                    "/api/account/invitations/{}/accept",
+                    invitation["id"].as_str().unwrap()
+                ),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), reqwest::StatusCode::NO_CONTENT);
+        cookies.push(cookie);
+    }
+    cookies
+}

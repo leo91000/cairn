@@ -261,9 +261,17 @@ async fn revocation_cancels_a_backpressured_subscription_without_waiting_for_the
 
     // Keep the revoked browser response alive. The full stream capacity must
     // already be reusable, with eight slots reserved for ordinary requests.
+    let cookies = common::stream_accounts(&relay).await;
     let mut healthy = Vec::new();
-    for _ in 0..24 {
-        let response = relay.get("/chats/stream").send().await.unwrap();
+    for index in 0..24 {
+        let response = relay
+            .app
+            .client
+            .get(format!("{}/chats/stream", relay.base))
+            .header("cookie", &cookies[index / 8])
+            .send()
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         healthy.push(response);
     }
@@ -283,10 +291,18 @@ async fn revocation_cancels_a_backpressured_subscription_without_waiting_for_the
 #[tokio::test]
 async fn repeated_browser_cancellations_release_all_stream_capacity() {
     let relay = RelayedInstallation::new(Router::new()).await;
+    let cookies = common::stream_accounts(&relay).await;
     for _ in 0..10 {
         let mut streams = Vec::new();
-        for _ in 0..24 {
-            let response = relay.get("/chats/stream").send().await.unwrap();
+        for index in 0..24 {
+            let response = relay
+                .app
+                .client
+                .get(format!("{}/chats/stream", relay.base))
+                .header("cookie", &cookies[index / 8])
+                .send()
+                .await
+                .unwrap();
             assert_eq!(
                 response.status(),
                 StatusCode::OK,
