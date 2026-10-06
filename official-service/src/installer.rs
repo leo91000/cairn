@@ -16,6 +16,10 @@ pub fn router(origin: String) -> Router {
             &hex::encode(Sha256::digest(include_bytes!(
                 "../../deploy/installations/host.py"
             ))),
+        )
+        .replace(
+            "__LEO_NODE_HOST_SHA256__",
+            &hex::encode(Sha256::digest(include_bytes!("../../deploy/nodes/host.py"))),
         );
     Router::new()
         .route(
@@ -27,6 +31,18 @@ pub fn router(origin: String) -> Router {
                         (header::CACHE_CONTROL, "no-store"),
                     ],
                     script,
+                )
+            }),
+        )
+        .route(
+            "/install/node-host.py",
+            get(|| async {
+                (
+                    [
+                        (header::CONTENT_TYPE, "text/x-python; charset=utf-8"),
+                        (header::CACHE_CONTROL, "no-store"),
+                    ],
+                    include_str!("../../deploy/nodes/host.py"),
                 )
             }),
         )

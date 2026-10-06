@@ -28,19 +28,20 @@ pub(super) async fn list<'e>(
     account: &str,
     relay: &super::relay::Relay,
 ) -> Result<Vec<Value>, ApiError> {
-    let rows: Vec<(String, String, bool)> =
-        query_as("SELECT i.id, i.name, i.owner_id = $1 FROM installations i LEFT JOIN installation_members m ON m.installation_id = i.id AND m.account_id = $1 WHERE i.owner_id IS NOT NULL AND (i.owner_id = $1 OR m.account_id = $1) ORDER BY i.created_at, i.id")
+    let rows: Vec<(String, String, bool, bool)> =
+        query_as("SELECT i.id, i.name, i.owner_id = $1, i.update_required FROM installations i LEFT JOIN installation_members m ON m.installation_id = i.id AND m.account_id = $1 WHERE i.owner_id IS NOT NULL AND (i.owner_id = $1 OR m.account_id = $1) ORDER BY i.created_at, i.id")
             .bind(account)
             .fetch_all(executor)
             .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, name, owner)| {
+        .map(|(id, name, owner, update_required)| {
             json!({
                 "id": id,
                 "name": name,
                 "role": if owner { "owner" } else { "member" },
                 "online": relay.online(&id),
+                "updateRequired": update_required,
             })
         })
         .collect())

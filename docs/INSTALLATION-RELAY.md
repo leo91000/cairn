@@ -123,7 +123,7 @@ for TLS and network setup.
 The installation initiates a TLS WebSocket at
 `/api/relay/{installation}/connect` with its bearer credential. `Hello` offers
 protocol versions; `Welcome` chooses a supported version before API traffic.
-An incompatible peer is disconnected. The shared `leo-relay-protocol` crate
+An incompatible peer is disconnected before API traffic; its authenticated installation is marked `updateRequired` in the official database. The shared `leo-relay-protocol` crate
 owns the frames, limits and transport header rules. Version 1 multiplexes finite
 API requests and responses by request ID, carrying method, encoded path/query,
 selected headers and binary bodies. Account identity and owner/member role come from the official
@@ -194,6 +194,13 @@ from the local relay registry. Availability changes after successful negotiation
 and on disconnect; dead peers are detected by the existing heartbeat. The web
 shows each installation's status and refreshes only this small account-level
 list while visible, with backoff when the official service is unavailable.
+The same list and account session expose `updateRequired`. An incompatible Hello
+persists this state even after the refused socket closes or the official process
+restarts; a compatible authenticated Hello clears it. The web displays
+**Mise à jour nécessaire** and replaces the inaccessible workspace with that
+explanation. The selector and account actions remain available. Protocols 2 and 1
+are the current and previous supported versions; v1 keeps the finite snapshot
+path while the live stream remains unavailable during deployment.
 
 Access management uses the same `Relay` handle supplied to `router_with_relay`.
 After committing a detachment, call `revoke_access(installation, None)`; after

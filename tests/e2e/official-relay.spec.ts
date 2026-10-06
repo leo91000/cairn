@@ -65,7 +65,7 @@ test('claims an installation and sends after relay restarts and official session
     })
   }
 
-  const service = official()
+  let service = official()
   try {
     await expect.poll(() => fetch(`${url}/health`).then(response => response.ok).catch(() => false)).toBe(true)
     await page.goto(url)
@@ -106,7 +106,7 @@ test('claims an installation and sends after relay restarts and official session
     // A process restart really closes every relay socket, unlike stopping a listener.
     const resumedStream = page.waitForResponse(response => response.url().includes('/api/installations/') && /\/stream\?/.test(response.url()) && response.status() === 200, { timeout: 20000 })
     await stop(service)
-    official()
+    service = official()
     await expect.poll(() => fetch(`${url}/health`).then(response => response.ok).catch(() => false)).toBe(true)
     await resumedStream
     await expect(page.getByRole('alert')).toHaveCount(0)
@@ -203,9 +203,9 @@ test('claims an installation and sends after relay restarts and official session
     await expect(page).toHaveURL(conversationUrl)
     await expect(page.locator('.activity-message').filter({ hasText: 'The relayed agent reply remains readable.' })).toBeVisible()
 
+    const session = await (await page.request.get(`${url}/api/account/session`)).json()
     // A separately claimed peer can send hostile protocol frames. The real
     // connector is covered above and by the HTTP duplicate-header regression.
-    const session = await (await page.request.get(`${url}/api/account/session`)).json()
     const claim = await (await page.request.post(`${url}/api/installations/claim-code`, {
       headers: { 'origin': url, 'x-csrf-token': session.csrf },
       data: {},
@@ -213,6 +213,28 @@ test('claims an installation and sends after relay restarts and official session
     const identity = await (await page.request.post(`${url}/api/relay/claim`, {
       data: { code: claim.code, name: 'Hostile fixture', protocol: 1 },
     })).json()
+    const incompatible = Reflect.construct(WebSocket, [
+      `${url.replace('http:', 'ws:')}/api/relay/${identity.installationId}/connect`,
+      { headers: { authorization: `Bearer ${identity.token}` } },
+    ]) as WebSocket
+    await once(incompatible, 'open')
+    const refused = once(incompatible, 'close')
+    incompatible.send(JSON.stringify({ type: 'hello', versions: [99] }))
+    await refused
+    await stop(service)
+    service = official()
+    await expect.poll(() => fetch(`${url}/health`).then(response => response.ok).catch(() => false)).toBe(true)
+    await page.goto(`${url}/installations/${identity.installationId}/`)
+    await expect(page.getByRole('status', { name: 'Installation availability' })).toHaveText('Mise à jour nécessaire')
+    await expect(page.getByRole('alert')).toContainText('Mise à jour nécessaire')
+    await expect(page.getByRole('navigation', { name: 'Workspace navigation', exact: true })).toHaveCount(0)
+    for (const width of [1440, 390, 320]) {
+      await page.setViewportSize({ width, height: 900 })
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    }
+
+    await page.setViewportSize({ width: 1440, height: 900 })
+
     // Node's WebSocket supports request headers in its init object; DOM
     // constructor types only expose the browser's protocol argument.
     hostilePeer = Reflect.construct(WebSocket, [
@@ -246,6 +268,7 @@ test('claims an installation and sends after relay restarts and official session
     await once(peer, 'open')
     peer.send(JSON.stringify({ type: 'hello', versions: [1] }))
     await welcomed
+    await expect(page.getByRole('status', { name: 'Installation availability' })).toHaveText('Online')
 
     const navigation = await page.goto(`${url}/api/installations/${identity.installationId}/api/hostile`)
     expect(navigation?.status()).toBe(200)

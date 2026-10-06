@@ -9,7 +9,7 @@ single-use. The downloaded script executes only when complete, requires HTTPS,
 and verifies the embedded SHA-256 of `host.py` before installing it. No local password, domain, certificate, incoming port or S3 account
 is needed. The installation connects out using the existing claim and relay.
 
-Install Docker Engine with its Compose plugin, Python 3 and curl first. Enable
+Use a host with systemd. Install Docker Engine with its Compose plugin, Python 3 and curl first. Enable
 hardware virtualization, `/dev/kvm`, `/dev/net/tun` and `/dev/fuse` (install
 `fuse3` and load the kernel modules). The script checks each requirement before
 downloading or starting services, including a working Docker daemon and 16 GiB
@@ -76,8 +76,58 @@ Nonempty `STORAGE_S3_*` or legacy `ARCHIVE_S3_*` overrides remain authoritative;
 remove them before editing the default in the app. For an environment-managed R2
 endpoint, set `STORAGE_S3_PRIVATE_BUCKET_CONFIRMED=true` only after checking in the
 Cloudflare dashboard that public domains and bucket locks are disabled. This
-explicit server confirmation replaces the form confirmation; `false` refuses R2. Automatic image updates
-belong to ticket #54.
+explicit server confirmation replaces the form confirmation; `false` refuses R2.
+
+## Automatic approved updates
+
+The installer enables `leo-installation-update.timer` on the host. It checks the
+saved official origin's `/install/release` every five minutes, with up to thirty
+seconds of jitter, and two minutes after boot. The operator selects the tested
+immutable image using `LEO_INSTALLATION_IMAGE`; no mutable tag is accepted.
+Downloads are verified against Docker's repository digest before any restart.
+If the official service or registry is unavailable, the current image keeps running.
+The update channel is independent of the relay, so an incompatible installation
+can still update.
+
+The supervisor reuses the node supervisor's pull/prepare/launch/rollback cycle.
+It takes the existing persisted deployment lease to pause new work, stops the
+manager gracefully to checkpoint active conversations, then stops the local runner.
+It replaces both images together, preserving Compose settings, Garage, identity,
+agent credentials, workspaces and runner state. Compose checks both containers;
+the manager's health must report the downloaded image's runtime identity.
+Failed health restores and verifies the previous approved image before releasing
+the lease. Each replacement has a 550-second maximum, including Docker inspection,
+graceful stops, runner readiness and HTTP runtime verification; candidate and
+rollback, including checks for a failed candidate container, together remain within
+the twenty-minute lease. A journal written before replacement lets the next timer
+restore the last committed image after interruption. A refused lease or interrupted
+supervisor leaves the same approved digest eligible for the next check. Only a
+candidate confirmed unhealthy by its runtime probe or by Docker container health
+is retained in
+`installation.json` and is not retried automatically until the approved digest
+changes. After diagnosing and fixing a host problem, the operator may remove
+`failedImage` from that private file to retry the same approved digest.
+
+Only approve releases whose installation database remains readable by the previous
+release; this ticket adds no installation database migration. An image update
+cannot undo a destructive database migration. Keep the stopped-installation backups
+required above before approving a release with a new data format.
+
+```sh
+sudo systemctl status leo-installation-update.timer
+sudo systemctl start leo-installation-update.service
+sudo journalctl -u leo-installation-update.service
+```
+
+The timer and installer share the same nonblocking host lock. Containers receive
+no Docker socket. Rerun the current official installation command to refresh the
+checksum-verified host supervisors on an existing one-command installation. Recovery
+renews the recorded deployment lease before stopping a running manager, because
+a durable acknowledgement may outlive the lease. If the interrupted replacement
+already removed/stopped it, or the exact recorded candidate has never started, is
+crash-looping or is running without a healthy HTTP endpoint, the host lock and recorded acknowledgement permit restoring only the previously
+committed approved image. An unrelated or functioning manager still requires
+lease acquisition.
 
 ## Operation and validation
 
@@ -97,8 +147,17 @@ is independently parsed by real `docker compose config`, including healthchecks,
 claim substitution, dependencies and uid 1000. Loopback HTTP download transport
 is adapted only in the fixture; the production script requires HTTPS. Inert
 devices and command adapters exercise prerequisite and checksum failures.
-Claim, relay and S3 write/read/delete checks are real. A disk published to Garage
+Claim, relay, deployment leases, runtime health and S3 write/read/delete checks are real. The fixture also verifies an approved update and rollback from a wrong-runtime candidate, preserving relay identity and S3 configuration. A disk published to Garage
 continues publishing, reading remotely and purging there after relayed settings
 select external HTTPS S3. No VM boots; this is not runtime/KVM coverage. Containers, network and data are cleaned up on exit.
+`LEO_OFFICIAL_TEST_DATABASE_URL=… python3 tests/installation_update_containers.py`
+also replaces real manager and readiness-runner containers using locally built
+fixture images, including interrupted recovery with `restart: unless-stopped`.
+Only the registry is adapted; Compose, persistent mounts, runtime
+metadata, deployment leases, recovery from a running candidate with a dead HTTP
+endpoint, relay reconnection and conversation reads are real.
+It checks successful replacement and an exited-candidate rollback, including
+identity, synthetic credentials, workspaces and runner state. The readiness runner
+boots no VM; active VM checkpointing remains covered by the existing node tests.
 `python3 tests/installation_installer_test.py` checks failure cleanup and
 idempotent configuration separately.

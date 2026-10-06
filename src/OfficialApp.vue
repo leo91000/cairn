@@ -25,6 +25,7 @@ interface AccountSession {
     name: string
     role: 'owner' | 'member'
     online: boolean
+    updateRequired: boolean
   }>
 }
 
@@ -80,6 +81,7 @@ const installation = ref<{
   id: string
   name: string
   online: boolean
+  updateRequired: boolean
   role: 'owner' | 'member'
 } | null>(null)
 const installationMenu = ref<HTMLDetailsElement>()
@@ -529,8 +531,12 @@ async function refreshAvailability() {
     const statuses = await response.json() as AccountSession['installations']
     if (session.value !== current || availabilityStopped)
       return
-    for (const item of current.installations)
-      item.online = statuses.find(status => status.id === item.id)?.online ?? false
+    for (const item of current.installations) {
+      const status = statuses.find(status => status.id === item.id)
+      item.online = status?.online ?? false
+      item.updateRequired = status?.updateRequired ?? false
+    }
+
     availabilityFailures = 0
   }
   catch {
@@ -560,6 +566,12 @@ onScopeDispose(() => {
   clearTimeout(availabilityTimer)
   document.removeEventListener('visibilitychange', visibleAvailability)
 })
+
+function installationStatus(value: { online: boolean, updateRequired: boolean }) {
+  if (value.updateRequired)
+    return 'Mise à jour nécessaire'
+  return value.online ? 'Online' : 'Offline'
+}
 
 function selectInstallation(event: Event) {
   const id = (event.target as HTMLSelectElement).value
@@ -617,13 +629,13 @@ onMounted(async () => {
             :key="item.id"
             :value="item.id"
           >
-            {{ item.name }} · {{ item.online ? 'Online' : 'Offline' }}
+            {{ item.name }} · {{ installationStatus(item) }}
           </option>
         </select>
       </label>
       <span v-else class="min-w-0 truncate font-semibold" :title="installation.name">{{ installation.name }}</span>
-      <span role="status" aria-label="Installation availability" class="shrink-0 text-xs text-muted">
-        {{ installation.online ? 'Online' : 'Offline' }}
+      <span role="status" aria-label="Installation availability" class="text-xs text-muted">
+        {{ installationStatus(installation) }}
       </span>
       <details ref="installationMenu" class="relative ml-auto shrink-0">
         <summary class="cursor-pointer list-none rounded-lg border border-line px-3 py-2">
@@ -761,7 +773,10 @@ onMounted(async () => {
     <UiAlert v-if="error" class="mx-4 my-2">
       {{ error }}
     </UiAlert>
-    <App />
+    <UiAlert v-if="installation.updateRequired" class="mx-4 my-2">
+      Mise à jour nécessaire. This installation must finish updating before it can be used here.
+    </UiAlert>
+    <App v-else />
   </div>
   <main v-else class="min-h-dvh bg-canvas text-ink px-6 py-10 grid place-items-center">
     <div class="absolute top-5 right-5">
@@ -878,7 +893,7 @@ onMounted(async () => {
           </p>
           <div class="grid gap-3 mb-6">
             <UiButton v-for="item in session.installations" :key="item.id" @click="openInstallation(item)">
-              {{ item.name }} · {{ item.online ? 'Online' : 'Offline' }}
+              {{ item.name }} · {{ installationStatus(item) }}
             </UiButton>
             <UiButton :disabled="busy" @click="addInstallation">
               Add an installation

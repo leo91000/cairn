@@ -2,6 +2,7 @@
 """One-machine installation. The manager owns claiming; containers have no Docker socket."""
 import argparse
 import fcntl
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -113,6 +114,10 @@ def compose(image, origin):
                 },
                 'volumes': ['./data:/data', './home:/home/node', './workspaces:/workspaces'],
                 'mem_limit': '4g', 'logging': logs,
+                'healthcheck': {
+                    'test': ['CMD', 'node', '-e', "fetch('http://127.0.0.1:4310/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"],
+                    'start_period': '120s', 'interval': '5s', 'timeout': '5s', 'retries': 24,
+                },
             },
             'runner': {
                 'image': image, 'user': '0:0', 'restart': 'unless-stopped',
@@ -264,10 +269,202 @@ exec docker compose --project-directory ROOT -f COMPOSE exec -T manager /usr/loc
         print('Leo installed but unclaimed. Copy a fresh command from Add an installation and rerun it.')
 
 
+def docker_output(args):
+    result = subprocess.run(['docker', *args], stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, timeout=10, check=False)
+    if result.returncode:
+        raise RuntimeError('Docker inspection failed; current image and data are retained.')
+    # Compose emits no JSON records when a service has no container yet.
+    return json.loads(result.stdout.strip() or '[]')
+
+
+def update(origin):
+    origin = official_origin(origin)
+    config_file = ROOT / 'installation.json'
+    config = json.loads(config_file.read_text())
+    if config['origin'] != origin or not IMAGE.fullmatch(config['image']):
+        raise RuntimeError('Invalid saved installation configuration.')
+    docker = ['docker', 'compose', '--project-directory', str(ROOT), '-f', str(ROOT / 'compose.json')]
+
+    def lease(owner, release=False):
+        # Read the credential inside the manager, never in argv or diagnostics.
+        method = json.dumps('DELETE' if release else 'POST')
+        lease_owner = json.dumps(owner)
+        script = f"""
+const fs = require('fs');
+const token = fs.readFileSync('/data/maintenance-token', 'utf8').trim();
+fetch('http://127.0.0.1:4310/internal/deployment-lease', {{
+    method: {method},
+    headers: {{ 'Content-Type': 'application/json', Authorization: 'Bearer ' + token }},
+    body: JSON.stringify({{ owner: {lease_owner} }}),
+}}).then(response => {{
+    if (!response.ok) process.exit(1);
+}}).catch(() => process.exit(1));
+"""
+        run(docker + ['exec', '-T', 'manager', 'node', '-e', script], timeout=10)
+
+    def inspect(image):
+        metadata = docker_output(['image', 'inspect', image])[0]
+        if image not in metadata.get('RepoDigests', []):
+            raise RuntimeError('Downloaded image digest does not match the approved release.')
+        runtime = next((value.removeprefix('APP_RUNTIME_ID=') for value in metadata['Config'].get('Env', [])
+                        if value.startswith('APP_RUNTIME_ID=')), '')
+        if not runtime:
+            raise RuntimeError('Approved image lacks runtime identity.')
+        return runtime
+
+    def manager_health(runtime=None):
+        expected_runtime = json.dumps(runtime)
+        script = f"""
+fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).then(response => {{
+    if (!response.ok) throw Error();
+    return response.json();
+}}).then(value => {{
+    const expected = {expected_runtime};
+    console.log(JSON.stringify({{ healthy: value.status === 'ok' && (expected === null || value.runtimeId === expected) }}));
+}}).catch(() => console.log(JSON.stringify({{ healthy: false }})));
+"""
+        result = docker_output(docker[1:] + ['exec', '-T', 'manager', 'node', '-e', script])
+        if not isinstance(result, dict) or not isinstance(result.get('healthy'), bool):
+            raise RuntimeError('Manager health probe did not return a verdict.')
+        return result['healthy']
+
+    def failed_candidate_container(image):
+        # A Docker command error alone does not prove an image unhealthy. Only
+        # inspect the exact candidate's containers, including the dependency that
+        # can keep the manager from starting at all.
+        for service in ('manager', 'runner'):
+            try:
+                containers = docker_output(docker[1:] + ['ps', '--all', '--format', 'json', service])
+                container = containers[0] if isinstance(containers, list) and containers else containers
+                if container and container.get('Image') == image:
+                    if container.get('State') in ('exited', 'dead', 'restarting') or container.get('Health') == 'unhealthy':
+                        return True
+            except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+                continue
+        return False
+
+    health_failed = False
+
+    def launch(image):
+        nonlocal health_failed
+        # Inspection + stop + startup + HTTP verification total at most 550s.
+        # Candidate and rollback, including failure inspection, fit in the lease.
+        runtime = inspect(image)
+        deployment = json.loads((ROOT / 'compose.json').read_text())
+        deployment['services']['manager']['image'] = image
+        deployment['services']['manager']['environment']['LEO_NODE_IMAGE'] = image
+        deployment['services']['runner']['image'] = image
+
+        # The manager saves checkpoints before the runner is stopped. Persistent
+        # volumes and Garage are never recreated or removed by this supervisor.
+        run(docker + ['stop', '--timeout', '300', 'manager'], timeout=310)
+        run(docker + ['stop', '--timeout', '60', 'runner'], timeout=70)
+        atomic(ROOT / 'compose.json', json.dumps(deployment, indent=2))
+        try:
+            run(docker + ['up', '-d', '--wait', '--wait-timeout', '120', '--pull', 'never', '--no-deps', 'runner', 'manager'], timeout=150)
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+            if image == config.get('pendingImage'):
+                health_failed = failed_candidate_container(image)
+            raise
+
+        # A JSON verdict proves the probe ran. Docker exec failures before the
+        # probe starts remain transient, rather than blacklisting an untested image.
+        if not manager_health(runtime):
+            if image == config.get('pendingImage'):
+                health_failed = True
+            raise RuntimeError('Installation runtime health check failed.')
+
+    def finish(updated):
+        pending = config.pop('pendingImage')
+        config.pop('leaseAcquired', None)
+        if updated:
+            config.update(previousImage=config['image'], image=pending, failedImage=None)
+        elif updated is False:
+            config['failedImage'] = pending
+        # Keep the lease acknowledgement durable, including a lost DELETE reply.
+        atomic(config_file, json.dumps(config))
+
+    if config.get('pendingImage'):
+        # A stopped supervisor never guesses whether the candidate was healthy.
+        # Recover the last committed approved image before accepting another.
+        managers = docker_output(docker[1:] + ['ps', '--all', '--format', 'json', 'manager'])
+        manager = managers[0] if isinstance(managers, list) and managers else managers
+        manager_state = manager.get('State') if manager else None
+        pending_unavailable = False
+        if manager and manager.get('Image') == config['pendingImage']:
+            pending_unavailable = manager_state in ('created', 'restarting')
+            if manager_state == 'running' and config.get('leaseAcquired'):
+                # Docker's running state does not imply HTTP readiness after a
+                # reboot. Probe only our journaled candidate, never a foreign image.
+                try:
+                    pending_unavailable = not manager_health()
+                except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+                    # No verdict: the candidate may be healthy and another
+                    # deployment may hold the lease. Its lease still wins.
+                    pending_unavailable = False
+        manager_active = manager_state not in (None, 'exited', 'dead') and not pending_unavailable
+        if not config.get('leaseAcquired') or manager_active:
+            # A persisted acknowledgement may outlive the twenty-minute lease.
+            # Reacquire before stopping a running manager; another owner wins.
+            # If our replacement removed/stopped it or its exact candidate is
+            # not started or unhealthy, the acknowledgement and host lock permit restoring
+            # only the last committed approved image without its HTTP endpoint.
+            lease(config['leaseOwner'])
+        launch(config['image'])
+        finish(None)
+
+    if config.get('leaseOwner'):
+        lease(config['leaseOwner'], release=True)
+        config.pop('leaseOwner')
+        atomic(config_file, json.dumps(config))
+        return
+
+    image = release(origin)
+    if image in (config['image'], config.get('failedImage')):
+        return
+
+    def pull(image):
+        run(['docker', 'pull', image], timeout=1200)
+        inspect(image)
+
+    def prepare():
+        owner = str(uuid.uuid4())
+        # Record before requesting the lease: its response can be lost.
+        config.update(pendingImage=image, leaseOwner=owner)
+        atomic(config_file, json.dumps(config))
+
+        lease(owner)
+
+        config['leaseAcquired'] = True
+        atomic(config_file, json.dumps(config))
+        return True
+
+    module_path = Path(__file__).with_name('node-host.py')
+    if not module_path.exists():
+        module_path = Path(__file__).parent.parent / 'nodes/host.py'
+    spec = importlib.util.spec_from_file_location('node_supervisor', module_path)
+    supervisor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(supervisor)
+
+    updated = supervisor.update_image(config['image'], image, pull, prepare, launch)
+    # Restoring the previous image alone does not prove the candidate failed.
+    # None preserves eligibility after a transient Docker failure.
+    if updated is False and not health_failed:
+        updated = None
+
+    finish(updated)
+
+    lease(config['leaseOwner'], release=True)
+    config.pop('leaseOwner')
+    atomic(config_file, json.dumps(config))
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('origin')
     parser.add_argument('--claim-code', default=os.environ.pop('LEO_INSTALLATION_CLAIM_CODE', ''))
+    parser.add_argument('--update', action='store_true')
     args = parser.parse_args()
     try:
         ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -276,7 +473,10 @@ if __name__ == '__main__':
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise RuntimeError('Another Leo installer is running. Wait for it to finish and retry.') from None
-            install(args.origin, args.claim_code)
+            if args.update:
+                update(args.origin)
+            else:
+                install(args.origin, args.claim_code)
     except RuntimeError as error:
         print(str(error), file=sys.stderr)
         sys.exit(1)

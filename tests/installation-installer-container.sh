@@ -32,7 +32,9 @@ docker run -d --name "$name-postgres" --network "$name" --network-alias postgres
   postgres:17-alpine >/dev/null
 args=(--rm --network "$name" -v "$PWD:/repo:ro" -v "$fixture:/fixture" \
   -v "$storage_test:/fixture/storage-continuity:ro" \
+  -v "$(node -p process.execPath):/usr/local/bin/node:ro" \
   -e LEO_OFFICIAL_TEST_DATABASE_URL=postgres://leo:test-only@postgres/leo_official_test)
+docker run "${args[@]}" leo-installer-fixture python tests/installation_updates_test.py
 docker run "${args[@]}" leo-installer-fixture python tests/installation_installer_container.py prepare
 # Parse the actual generated Compose with the controller's installed plugin.
 # The parser runs as root to read private fixture files; it receives no Docker socket.

@@ -228,7 +228,27 @@ async fn serve_socket(
     let Ok(Frame::Hello { versions }) = serde_json::from_str::<Frame>(&hello) else {
         return;
     };
-    let Some(version) = leo_relay_protocol::negotiate(&versions) else {
+    let version = leo_relay_protocol::negotiate(&versions);
+    if version.is_none() && relay.online(&installation) {
+        // A refused second peer does not make a working compatible tunnel unusable.
+        let _ = socket.close().await;
+        return;
+    }
+
+    let updated_installation: Result<Option<(String,)>, _> = query_as(
+        "UPDATE installations SET update_required = $3 WHERE id = $1 AND token_digest = $2 AND owner_id IS NOT NULL RETURNING id",
+    )
+    .bind(&installation)
+    .bind(&token_digest)
+    .bind(version.is_none())
+    .fetch_optional(&service.pool)
+    .await;
+    if !matches!(updated_installation, Ok(Some(_))) {
+        let _ = socket.close().await;
+        return;
+    }
+
+    let Some(version) = version else {
         let _ = socket.close().await;
         return;
     };

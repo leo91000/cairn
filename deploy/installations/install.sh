@@ -30,13 +30,14 @@ main() {
   set -euo pipefail
   LEO_OFFICIAL_ORIGIN=__LEO_OFFICIAL_ORIGIN__
   LEO_HOST_SHA256=__LEO_HOST_SHA256__
+  LEO_NODE_HOST_SHA256=__LEO_NODE_HOST_SHA256__
   fail() { echo "Leo installer: $*" >&2; exit 1; }
 
   [[ $(id -u) == 0 ]] || fail 'Run the command with sudo bash.'
   [[ $(uname -s) == Linux ]] || fail 'Linux is required.'
   [[ $(uname -m) == x86_64 ]] || fail 'An x86-64 machine is required.'
 
-  for command in docker python3 curl; do
+  for command in docker python3 curl systemctl; do
     command -v "$command" >/dev/null || fail "Install $command before installing Leo."
   done
 
@@ -58,21 +59,58 @@ main() {
   LEO_INSTALL_TEMP=$(mktemp "$LEO_INSTALLATION_ROOT/install.XXXXXX")
   trap 'rm -f "$LEO_INSTALL_TEMP"' EXIT
 
-  curl --fail --silent --show-error --proto '=https' --max-time 30 "${LEO_OFFICIAL_ORIGIN}/install/host.py" > "$LEO_INSTALL_TEMP" || fail 'Cannot download the installer. Check outbound HTTPS connectivity.'
-  python3 - "$LEO_INSTALL_TEMP" "$LEO_HOST_SHA256" <<'PYTHON' || fail 'Installer checksum mismatch. Download a fresh command from the official app and retry.'
+  download_supervisor() {
+    local asset=$1 checksum=$2 destination=$3
+    curl --fail --silent --show-error --proto '=https' --max-time 30 "${LEO_OFFICIAL_ORIGIN}/install/${asset}" > "$LEO_INSTALL_TEMP" || fail 'Cannot download the supervisor. Check outbound HTTPS connectivity.'
+    python3 - "$LEO_INSTALL_TEMP" "$checksum" <<'PYTHON' || fail 'Supervisor checksum mismatch. Download a fresh command from the official app and retry.'
 import hashlib
 from pathlib import Path
 import sys
 sys.exit(0 if hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest() == sys.argv[2] else 1)
 PYTHON
-  python3 -m py_compile "$LEO_INSTALL_TEMP"
-  install -m 0700 "$LEO_INSTALL_TEMP" "$LEO_INSTALLATION_ROOT/host.py"
+    python3 -m py_compile "$LEO_INSTALL_TEMP"
+    install -m 0700 "$LEO_INSTALL_TEMP" "$LEO_INSTALLATION_ROOT/$destination"
+  }
+
+  download_supervisor host.py "$LEO_HOST_SHA256" host.py
+  download_supervisor node-host.py "$LEO_NODE_HOST_SHA256" node-host.py
   if [[ $# == 2 && $1 == --claim-code ]]; then
     export LEO_INSTALLATION_CLAIM_CODE=$2
   elif [[ $# != 0 ]]; then
     fail 'Copy the complete command from Add an installation.'
   fi
   python3 "$LEO_INSTALLATION_ROOT/host.py" "$LEO_OFFICIAL_ORIGIN"
+  python3 - "$LEO_INSTALLATION_ROOT" "$LEO_OFFICIAL_ORIGIN" <<'PYTHON'
+from pathlib import Path
+import shlex
+import sys
+root, origin = sys.argv[1:]
+# A timer survives reboots and shares the installer's nonblocking lock. The
+# supervisor runs only on the host; containers never receive the Docker socket.
+command = ' '.join(shlex.quote(value).replace('%', '%%') for value in ['/usr/bin/python3', str(Path(root) / 'host.py'), origin, '--update'])
+Path('/etc/systemd/system/leo-installation-update.service').write_text(f'''[Unit]
+Description=Leo approved installation update
+Requires=docker.service
+After=network-online.target docker.service
+Wants=network-online.target
+[Service]
+Type=oneshot
+Environment="LEO_INSTALLATION_ROOT={root.replace('%', '%%')}"
+ExecStart={command}
+TimeoutStartSec=3000
+''')
+Path('/etc/systemd/system/leo-installation-update.timer').write_text('''[Unit]
+Description=Check the official approved Leo installation release
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30
+[Install]
+WantedBy=timers.target
+''')
+PYTHON
+  systemctl daemon-reload
+  systemctl enable --now leo-installation-update.timer
 }
 
 main "$@"
