@@ -123,15 +123,16 @@ abstract class LeoAccountCases {
             compose.onNodeWithText("Connexions").assertDoesNotExist()
             compose.onNodeWithText("Nodes et ressources").assertDoesNotExist()
             compose.onNodeWithText("Serveurs MCP").assertDoesNotExist()
-            compose.onNodeWithText("Paramètres").performClick()
-            compose.onNodeWithText("Apparence").assertIsDisplayed()
+            compose.onNodeWithText("Paramètres").performScrollTo().performClick()
+            compose.waitUntil(30000) { compose.onNodeWithText("Apparence").isDisplayed() }
+            compose.onNodeWithText("Apparence").performScrollTo().assertIsDisplayed()
             compose.onNodeWithText("Mises à jour").performScrollTo().assertIsDisplayed()
             compose.onNodeWithText("Notifications").performScrollTo().assertIsDisplayed()
             compose.onNodeWithText("Vérifier en arrière-plan").assertExists()
             compose.onNodeWithText("Connecter un assistant").assertDoesNotExist()
             compose.onNodeWithText("Clients et jetons d’accès").assertDoesNotExist()
             compose.onNodeWithText("Journal d’audit").assertDoesNotExist()
-            compose.onNodeWithContentDescription("Atelier").performClick()
+            compose.onNodeWithContentDescription("Retour").performClick()
             compose.onNodeWithText("Autoriser un assistant").assertDoesNotExist()
             compose.onNodeWithText("Agents").performClick()
             compose.onNodeWithText("Agent selection-work").performScrollTo().assertIsDisplayed()
@@ -342,7 +343,15 @@ abstract class LeoAccountCases {
             compose.onNodeWithText("Code reçu par e-mail").performTextReplacement("12345678")
             compose.onNodeWithText("Se connecter").performClick()
             compose.waitUntil(30000) {
-                compose.onAllNodesWithText("Maison · En ligne").fetchSemanticsNodes().isNotEmpty()
+                compose
+                    .onAllNodesWithText("Maison · En ligne")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty() &&
+                    !vm.state.value.busy &&
+                    compose
+                        .onAllNodesWithContentDescription("Atelier")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
             }
             compose.onNodeWithContentDescription("Choisir une installation").assertDoesNotExist()
             assertTrue(vault.read(server.url("/").toString()).orEmpty().contains("account-fixture"))
