@@ -44,6 +44,7 @@ pub mod relay;
 pub mod rpc;
 mod run_limits;
 pub mod run_output;
+pub mod run_retry;
 pub mod run_status;
 pub mod runner;
 pub mod service;

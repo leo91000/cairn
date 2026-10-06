@@ -45,6 +45,8 @@ pub struct RunCheckpoint {
     pub completed: Option<bool>,
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
     pub last_error: Nullable<String>,
+    #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
+    pub retry_cause: Nullable<crate::run_retry::Cause>,
     #[serde(default, with = "lenient", skip_serializing_if = "Option::is_none")]
     pub last_message: Option<String>,
     #[serde(default, with = "lenient", skip_serializing_if = "Option::is_none")]
@@ -91,6 +93,9 @@ impl Settled {
         let mut patch = serde_json::to_value(self)?;
         patch["accountWaitReason"] = Value::Null;
         patch["recoveryPending"] = false.into();
+        if self.status == RunStatus::Cancelled {
+            patch["retry"] = Value::Null;
+        }
         Ok(patch)
     }
 }

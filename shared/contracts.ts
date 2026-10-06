@@ -93,6 +93,12 @@ export interface TaskOutcome {
   messageId?: string | null
 }
 export interface Run {
+  retry?: {
+    attempt: number
+    limit: number
+    nextAttemptAt: number | null
+    cause: { kind: 'connection' | 'timeout' | 'rate-limit' | 'server', message: string }
+  } | null
   nodeId?: string | null
   storage?: {
     mode: string

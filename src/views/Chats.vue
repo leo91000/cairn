@@ -57,6 +57,7 @@ import {
   X,
   Zap,
 } from '../icons'
+import { useRetryNotice } from '../run-retry'
 import { chatSkills } from '../skill-mentions'
 import { iconButton } from '../ui'
 import { useLiveRun } from '../use-live-run'
@@ -186,7 +187,10 @@ function pasteFiles(event: ClipboardEvent) {
 }
 
 const active = computed(() => !!detail.value?.run && ['queued', 'running'].includes(detail.value.run.status))
-const waitNotice = computed(() => chatWaitNotice(detail.value?.run))
+const retryNotice = useRetryNotice(() => detail.value?.run)
+const waitNotice = computed(() => retryNotice.value
+  ? { account: null, message: retryNotice.value }
+  : chatWaitNotice(detail.value?.run))
 const chatStatus = computed(() => detail.value?.paused ? 'Paused' : active.value ? detail.value?.run?.status === 'queued' ? 'Waiting' : 'Working' : detail.value?.run?.status === 'failed' ? 'Failed' : detail.value?.run?.status === 'interrupted' ? 'Interrupted' : 'Ready')
 const outgoing = ref<ChatMessage | null>(null)
 const delivery = computed(() => chatDelivery(detail.value, events.value, outgoing.value))

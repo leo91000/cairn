@@ -151,6 +151,27 @@ export function chatFixture() {
       }
 
       const text = params.input[0].text
+      const failures = text.match(/fixture:agent-failures:(.+)$/m)
+      if (failures && !thread.fixtureFailures)
+        thread.fixtureFailures = JSON.parse(failures[1])
+      if (thread.fixtureFailures) {
+        const marker = path.join(process.cwd(), 'fixture-retry-work.json')
+        const previous = existsSync(marker) ? JSON.parse(readFileSync(marker, 'utf8')) : null
+        if (previous && previous.generation !== thread.fixtureGeneration)
+          throw new Error('Retry replaced the saved conversation')
+        thread.fixtureAttempts = (thread.fixtureAttempts || 0) + 1
+        writeFileSync(marker, JSON.stringify({ generation: thread.fixtureGeneration, attempts: thread.fixtureAttempts, cwd: process.cwd() }))
+        const failure = thread.fixtureFailures[thread.fixtureAttempts - 1]
+        if (failure) {
+          active.status = 'failed'
+          active.error = failure
+          save()
+          notify('turn/completed', { threadId: thread.id, turn: active })
+          active = null
+          return true
+        }
+      }
+
       if (text.includes('fixture:verbose-tools')) {
         for (let index = 0; index < 60; index++) {
           notify('item/completed', {

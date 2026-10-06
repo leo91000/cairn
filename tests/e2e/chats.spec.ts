@@ -7,6 +7,30 @@ import {
   test,
 } from './fixtures'
 
+test('a transient agent error shows a retry countdown and resumes without user input', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+    id: randomUUID(),
+    text: 'fixture:agent-failures:[{"message":"workspace routing discovery timed out"}]',
+  })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.retry?.attempt).toBe(1)
+  const waiting = (await workspace.api(`/api/chats/${chat.id}`)).run
+  expect(waiting.status).toBe('queued')
+  await page.goto(`/chats/${chat.id}`)
+  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  const notice = page.getByRole('status').filter({ hasText: /Temporary agent error\. Retrying in \d+ seconds \(attempt 1\/3\)\./ })
+  await expect(notice).toBeVisible()
+  const before = await notice.textContent()
+  await expect.poll(() => notice.textContent()).not.toBe(before)
+  await page.screenshot({ path: test.info().outputPath('agent-retry-countdown.png') })
+  expect((await workspace.api(`/api/chats/${chat.id}`)).paused).toBe(false)
+  workspace.service.store.updateRun(waiting.id, { retry: { ...waiting.retry, nextAttemptAt: Date.now() } })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
+  await expect(page.getByText('Ready for the next step.', { exact: false }).last()).toBeVisible()
+  await expect(notice).toHaveCount(0)
+})
+
 test('queued Claude conversation explains the missing account and continues after sign-in', async ({ page, workspace }) => {
   test.setTimeout(90000)
   const chat = await workspace.api('/api/chats', 'POST', {})

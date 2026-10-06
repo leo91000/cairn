@@ -90,6 +90,9 @@ async fn record_failure(
     sensitive: &[String],
 ) -> Result<()> {
     let run_id = checkpoint.id.as_str();
+    if super::retry::schedule(s, checkpoint, cancel, error).await? {
+        return Ok(());
+    }
     // Another conversation took the last room after the scheduler checked:
     // wait again instead of failing.
     if !cancel.is_cancelled() && crate::nodes::placement::is_no_capacity(error) {
