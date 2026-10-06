@@ -74,10 +74,12 @@ fun LeoApp(
     }
     if (state.installation == null) {
         Poll(state.session.account?.id, 30_000) {
-            try {
-                vm.refreshInstallations()
-            } catch (e: Exception) {
-                vm.report(e)
+            if (!state.busy) {
+                try {
+                    vm.refreshInstallations()
+                } catch (e: Exception) {
+                    vm.report(e)
+                }
             }
         }
         Page {
@@ -95,10 +97,12 @@ fun LeoApp(
     }
     val installation = checkNotNull(state.installation)
     Poll(state.session.account?.id, 30_000) {
-        try {
-            vm.refreshInstallations()
-        } catch (e: Exception) {
-            vm.report(e)
+        if (!state.busy) {
+            try {
+                vm.refreshInstallations()
+            } catch (e: Exception) {
+                vm.report(e)
+            }
         }
     }
     Column(Modifier.fillMaxSize()) {

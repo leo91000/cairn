@@ -67,7 +67,12 @@ export async function resolveAndroidRelease(config, {
 if (import.meta.main) {
   let result = null
   if (process.env.GITHUB_REF_TYPE === 'tag') {
-    const config = { repository: process.env.GITHUB_REPOSITORY, commit: process.env.GITHUB_SHA, tag: process.env.GITHUB_REF_NAME }
+    const config = {
+      repository: process.env.GITHUB_REPOSITORY,
+      commit: process.env.GITHUB_SHA,
+      tag: process.env.GITHUB_REF_NAME,
+      officialOrigin: process.env.LEO_OFFICIAL_ORIGIN,
+    }
     androidVersion(config.tag)
     try {
       result = await resolveAndroidRelease(config, {

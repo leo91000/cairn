@@ -9,6 +9,7 @@ import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.test.core.app.ApplicationProvider
 import dev.leo.manager.data.*
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.mockwebserver.*
@@ -138,6 +139,8 @@ abstract class LeoAccountCases {
                             )
                 }
             )
+            val previouslyNotified = setOf("existing-question")
+            runBlocking { model.value.notifications.setSeen(previouslyNotified) }
             compose.runOnIdle {
                 model.value = LeoViewModel(application, vault, officialOrigin = "")
             }
@@ -148,6 +151,7 @@ abstract class LeoAccountCases {
                     .isNotEmpty() && !model.value.state.value.busy
             }
             assertEquals("selection-work", model.value.state.value.installation?.id)
+            assertEquals(previouslyNotified, runBlocking { model.value.notifications.seen() })
         }
     }
 

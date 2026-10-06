@@ -15,6 +15,7 @@ import androidx.core.net.toUri
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.work.*
 import dev.leo.manager.BuildConfig
@@ -30,6 +31,7 @@ const val EXECUTION_CHANNEL = "leo-execution"
 private const val QUESTION_WORK = "leo-question-check"
 private val enabledKey = booleanPreferencesKey("notifications")
 private val seenKey = stringSetPreferencesKey("notified_questions")
+private val scopeKey = stringPreferencesKey("notification_installation_scope")
 private val alertsKey = longPreferencesKey("notified_node_alerts_until")
 
 class NotificationPreferences(private val context: Context) {
@@ -40,11 +42,17 @@ class NotificationPreferences(private val context: Context) {
         schedule(context, value)
     }
 
-    suspend fun resetSelection() {
+    suspend fun selectScope(scope: String): Boolean {
+        var changed = false
         context.dataStore.edit {
-            it.remove(seenKey)
-            it.remove(alertsKey)
+            if (it[scopeKey] != scope) {
+                it[scopeKey] = scope
+                it.remove(seenKey)
+                it.remove(alertsKey)
+                changed = true
+            }
         }
+        return changed
     }
 
     suspend fun seen() = context.dataStore.data.first()[seenKey].orEmpty()

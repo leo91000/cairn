@@ -230,9 +230,10 @@ constructor(
         connection?.closeStreams()
         clearDrafts()
         historyCache.clear()
-        schedule(getApplication(), false)
-        notifications.resetSelection()
-        preferences.selectInstallation(current.origin, checkNotNull(current.session.account).id, id)
+        val accountId = checkNotNull(current.session.account).id
+        val scope = "${current.origin}:$accountId:$id:${installation.role}"
+        if (notifications.selectScope(scope)) schedule(getApplication(), false)
+        preferences.selectInstallation(current.origin, accountId, id)
         val next =
             withContext(Dispatchers.IO) {
                 LeoApi(account.origin, vault, installationId = id).also { it.csrf = account.csrf }
@@ -254,8 +255,16 @@ constructor(
     suspend fun refreshInstallations() {
         val account = accountConnection ?: return
         if (!state.value.session.authenticated) return
+        val currentConnection = connection
+        val wasBusy = state.value.busy
         val installations = account.get<List<Installation>>("/installations")
-        if (accountConnection !== account || !state.value.session.authenticated) return
+        if (
+            accountConnection !== account ||
+                connection !== currentConnection ||
+                state.value.busy != wasBusy ||
+                !state.value.session.authenticated
+        )
+            return
         val previous = state.value.installation
         val selected = installations.find { it.id == previous?.id }
         mutable.update { it.copy(session = it.session.copy(installations = installations)) }
