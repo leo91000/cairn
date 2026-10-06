@@ -119,10 +119,9 @@ constructor(
             val preferences = Preferences(context)
             val saved = preferences.lastInstallation(origin, session.account.id)
             val installation =
-                session.installations.find { it.id == saved }
-                    ?: session.installations.firstOrNull()
-                    ?: return Result.success()
-            if (!installation.online) return Result.success()
+                if (saved != null) session.installations.find { it.id == saved }
+                else session.installations.firstOrNull()
+            if (installation == null || !installation.online) return Result.success()
             val api = LeoApi(account.origin, vault, installationId = installation.id)
             api.csrf = session.csrf.orEmpty()
             val chats = api.get<List<Chat>>("/chats").filter { it.pendingQuestions > 0 }

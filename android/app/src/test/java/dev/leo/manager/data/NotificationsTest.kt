@@ -86,6 +86,15 @@ class NotificationsTest {
                 pending = false
                 assertEquals(ListenableWorker.Result.success(), worker.doWork())
                 assertTrue(prefs.seen().isEmpty())
+                pending = true
+                Preferences(context)
+                    .selectInstallation(origin, "fixture-account", "removed-installation")
+                prefs.selectScope("$origin:fixture-account:removed-installation:member")
+                prefs.setSeen(setOf("removed-question"))
+                assertEquals(ListenableWorker.Result.success(), worker.doWork())
+                assertTrue(manager.activeNotifications.isEmpty())
+                assertEquals(setOf("removed-question"), prefs.seen())
+
                 prefs.setEnabled(false)
                 val requests = server.requestCount
                 assertEquals(ListenableWorker.Result.success(), worker.doWork())
