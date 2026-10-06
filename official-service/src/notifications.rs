@@ -186,7 +186,7 @@ pub(super) async fn subscribe(
     let account = installations::account(&service, &headers, &Method::POST).await?;
 
     if !valid_subscription(&input) {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::BAD_REQUEST,
             "Invalid or unsupported browser push subscription",
         ));
@@ -208,7 +208,7 @@ pub(super) async fn subscribe(
             .await?;
 
     if count >= MAX_DEVICES {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::CONFLICT,
             "Too many notification devices are registered",
         ));
@@ -431,7 +431,7 @@ pub(super) async fn configuration(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     installations::account(&service, &headers, &Method::GET).await?;
-    let sender = service.push.as_ref().ok_or(ApiError(
+    let sender = service.push.as_ref().ok_or(ApiError::Http(
         StatusCode::SERVICE_UNAVAILABLE,
         "Push notifications are not configured on the official service",
     ))?;
