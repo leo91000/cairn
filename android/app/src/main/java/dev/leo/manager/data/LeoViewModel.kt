@@ -145,8 +145,33 @@ constructor(
                     error = "Session expirée. Reconnectez-vous.",
                 )
             }
-        } else
+        } else {
             mutable.update { it.copy(error = error.message ?: "Connexion impossible. Réessayez.") }
+            val source = connection
+            if (error is ApiException && error.status in setOf(403, 404) && source != null) {
+                viewModelScope.launch {
+                    state.first { !it.busy }
+                    if (connection !== source || !state.value.session.authenticated) return@launch
+                    val previous = state.value.installation
+                    try {
+                        refreshInstallations()
+                        val current = state.value.installation
+                        if (current?.id != previous?.id || current?.role != previous?.role) {
+                            mutable.update {
+                                it.copy(
+                                    error = null,
+                                    notice = "Votre accès à cette installation a changé.",
+                                )
+                            }
+                        }
+                    } catch (refreshError: Exception) {
+                        if (refreshError is CancellationException) throw refreshError
+                        if (refreshError is ApiException && refreshError.status == 401)
+                            report(refreshError)
+                    }
+                }
+            }
+        }
     }
 
     fun perform(block: suspend LeoViewModel.() -> Unit) {

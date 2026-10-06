@@ -105,8 +105,13 @@ fun rememberLive(
                                         expectedGeneration = cacheGeneration,
                                     )
                                 }
-                                if (it.httpStatus == 401)
-                                    vm.report(ApiException(401, "Session expirée"))
+                                if (it.httpStatus in listOf(401, 403, 404))
+                                    vm.report(
+                                        ApiException(
+                                            checkNotNull(it.httpStatus),
+                                            it.error ?: "Accès indisponible",
+                                        )
+                                    )
                             }
                     } finally {
                         withContext(NonCancellable) { vm.historyCache.flush(key) }
@@ -169,7 +174,7 @@ fun rememberLive(
                         // A cache failure cannot undo an already applied server page.
                         if (!pageApplied) {
                             olderError = e.message ?: "Historique indisponible. Réessayez."
-                            if (e is ApiException && e.status == 401) vm.report(e)
+                            if (e is ApiException && e.status in setOf(401, 403, 404)) vm.report(e)
                         }
                     } finally {
                         // A later request may have started while this page was being cached.

@@ -41,8 +41,16 @@ abstract class LeoAccountCases {
                                 "/api/installations" -> accessibleInstallations.get()
                                 else -> {
                                     val installation = path.split('/').getOrNull(3)
-                                    if (installation !in listOf("selection-home", "selection-work"))
-                                        return MockResponse().setResponseCode(404)
+                                    if (
+                                        installation !in
+                                            listOf("selection-home", "selection-work") ||
+                                            !accessibleInstallations
+                                                .get()
+                                                .contains("\"id\":\"$installation\"")
+                                    )
+                                        return MockResponse()
+                                            .setResponseCode(404)
+                                            .setBody("""{"error":"Installation not found"}""")
                                     val resource =
                                         path.substringAfter("/api/installations/$installation/api")
                                     if (
@@ -181,8 +189,8 @@ abstract class LeoAccountCases {
             accessibleInstallations.set(
                 """[{"id":"selection-home","name":"Maison","role":"owner","online":true}]"""
             )
-            compose.runOnIdle { model.value.perform { refreshInstallations() } }
-            compose.waitUntil(30000) {
+            compose.runOnIdle { model.value.perform { refresh() } }
+            compose.waitUntil(10000) {
                 compose
                     .onAllNodesWithText("Maison · En ligne")
                     .fetchSemanticsNodes()
