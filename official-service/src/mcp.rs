@@ -177,16 +177,18 @@ pub(super) async fn revoke(
     Ok(Json(json!({ "revoked": true })))
 }
 
-struct McpAccess {
-    account: String,
-    installation: String,
-    scopes: Vec<String>,
+pub(super) struct McpAccess {
+    pub id: String,
+    pub account: String,
+    pub installation: String,
+    pub scopes: Vec<String>,
 }
 
 async fn access(service: &Service, credential_digest: &str) -> Result<Option<McpAccess>, ApiError> {
-    let grant: Option<(String, String, Vec<String>)> = query_as("SELECT g.account_id, g.installation_id, t.scopes FROM mcp_tokens t JOIN mcp_grants g ON g.id = t.grant_id JOIN installations i ON i.id = g.installation_id AND i.owner_id = g.account_id WHERE t.digest = $1 AND t.kind = 'access' AND NOT t.used AND t.expires_at > now() AND g.expires_at > now()")
+    let grant: Option<(String, String, String, Vec<String>)> = query_as("SELECT g.id, g.account_id, g.installation_id, t.scopes FROM mcp_tokens t JOIN mcp_grants g ON g.id = t.grant_id JOIN installations i ON i.id = g.installation_id AND i.owner_id = g.account_id WHERE t.digest = $1 AND t.kind = 'access' AND NOT t.used AND t.expires_at > now() AND g.expires_at > now()")
         .bind(credential_digest).fetch_optional(&service.pool).await?;
-    Ok(grant.map(|(account, installation, scopes)| McpAccess {
+    Ok(grant.map(|(id, account, installation, scopes)| McpAccess {
+        id,
         account,
         installation,
         scopes,
@@ -236,15 +238,8 @@ pub(super) async fn handle(
         return Ok(unauthorized(&service));
     };
 
-    relay::mcp(
-        &service,
-        &grant.installation,
-        grant.account,
-        grant.scopes,
-        credential_digest,
-        request,
-    )
-    .await
+    super::consume_limit(&service.pool, &format!("mcp:{}", grant.id), 120).await?;
+    relay::mcp(&service, grant, credential_digest, request).await
 }
 
 #[derive(Deserialize)]
@@ -667,6 +662,10 @@ pub(super) async fn public_security(request: Request, next: axum::middleware::Ne
         .path()
         .starts_with("/api/public/installations/");
     let mut response = next.run(request).await;
+    let official_offline_page = response
+        .extensions()
+        .get::<relay::PublicOfflinePage>()
+        .is_some();
     let headers = response.headers_mut();
     for (name, value) in [
         ("cache-control", "no-store"),
@@ -690,7 +689,7 @@ pub(super) async fn public_security(request: Request, next: axum::middleware::Ne
                 media_type.trim().eq_ignore_ascii_case("text/html")
                     || media_type.trim().eq_ignore_ascii_case("image/svg+xml")
             });
-        if active_content {
+        if active_content && !official_offline_page {
             headers.insert(
                 "content-disposition",
                 HeaderValue::from_static("attachment"),

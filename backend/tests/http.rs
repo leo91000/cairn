@@ -164,8 +164,6 @@ async fn member_identity_cannot_manage_installation_resources() {
         ("GET", "/api/onepassword".to_owned()),
         ("GET", "/api/mcps".to_owned()),
         ("GET", "/api/connections/login".to_owned()),
-        ("GET", "/api/tokens".to_owned()),
-        ("POST", "/api/oauth/consent".to_owned()),
         ("GET", "/api/settings".to_owned()),
         ("GET", "/api/audit".to_owned()),
         ("GET", "/api/nodes/settings".to_owned()),
@@ -194,6 +192,21 @@ async fn member_identity_cannot_manage_installation_resources() {
             StatusCode::FORBIDDEN,
             "{method} {path}",
         );
+    }
+
+    // Official MCP grants have no installation-local management routes.
+    for role in [InstallationRole::Owner, InstallationRole::Member] {
+        for (method, path) in [("GET", "/api/tokens"), ("POST", "/api/oauth/consent")] {
+            let request = json_request(method, path)
+                .extension(InstallationIdentity::trusted(role, "official-account"))
+                .body(Body::from("{}"))
+                .unwrap();
+            assert_eq!(
+                send(&app, request).await.status(),
+                StatusCode::NOT_FOUND,
+                "{method} {path}"
+            );
+        }
     }
 
     // Choosing an agent for a conversation is available to every member.

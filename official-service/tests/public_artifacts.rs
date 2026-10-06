@@ -185,9 +185,20 @@ async fn public_file_is_an_official_read_only_link_with_security_headers_revocat
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response.headers()["content-type"],
+        "text/html; charset=utf-8"
+    );
+    assert!(!response.headers().contains_key("content-disposition"));
+    assert_eq!(
+        response.headers()["content-security-policy"],
+        "default-src 'none'; sandbox"
+    );
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert!(!response.headers().contains_key("set-cookie"));
     let body = response.text().await.unwrap();
     assert!(
-        body.contains("offline"),
+        body.contains("<h1>Installation offline</h1>"),
         "A recipient must understand why the file is unavailable"
     );
     assert!(!body.contains("relay-owner") && !body.contains("accountId"));

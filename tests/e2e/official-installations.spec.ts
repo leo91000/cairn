@@ -241,6 +241,9 @@ test('selects installations, remembers the last one and honours deep workspace U
     const notesResponse = await page.request.get(new URL((await notesDownload.getAttribute('href'))!, url).href)
     expect(notesResponse.status()).toBe(200)
     expect(await notesResponse.text()).toBe('# Notes from my machine')
+    await page.getByRole('button', { name: 'Share file', exact: true }).click()
+    await page.getByRole('button', { name: 'Enable public link', exact: true }).click()
+    const publicArtifactUrl = await page.getByRole('textbox', { name: 'Public link', exact: true }).inputValue()
     await page.getByRole('button', { name: 'Close viewer', exact: true }).click()
     await page.getByRole('link', { name: 'Atelier', exact: true }).first().click()
     await page.getByRole('link', { name: 'Agents', exact: true }).click()
@@ -329,6 +332,24 @@ test('selects installations, remembers the last one and honours deep workspace U
     await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toHaveCount(0)
     await page.goto(firstUrl)
     await expect(selector.locator('option:checked')).toHaveText('My home · Online')
+    const installationExit = once(children[1]!, 'exit')
+    children[1]!.kill('SIGTERM')
+    await installationExit
+    await expect.poll(async () => {
+      const installations = await (await page.request.get(`${url}/api/installations`)).json()
+      return installations.find((item: any) => item.id === firstUrl.split('/')[4]).online
+    }).toBe(false)
+    const recipient = await page.context().browser()!.newContext()
+    try {
+      const publicPage = await recipient.newPage()
+      const response = await publicPage.goto(publicArtifactUrl)
+      expect(response!.status()).toBe(503)
+      await expect(publicPage.getByRole('heading', { name: 'Installation offline', exact: true })).toBeVisible()
+      await expect(publicPage.getByText('The public file will be available when it reconnects.', { exact: true })).toBeVisible()
+      expect(await publicPage.locator('body').textContent()).not.toContain('relay-owner')
+    }
+    finally { await recipient.close() }
+
     await page.getByRole('navigation', { name: 'Workspace navigation', exact: true }).getByRole('button', { name: 'Sign out', exact: true }).click()
     await expect(page).toHaveURL(`${url}/`)
     await expect(page.getByLabel('Email address')).toBeVisible()

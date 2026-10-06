@@ -6,7 +6,7 @@ use axum::{
         ws::{Message, WebSocket},
     },
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
-    response::{IntoResponse, Response},
+    response::{Html, IntoResponse, Response},
 };
 use futures_util::{SinkExt, StreamExt};
 use leo_relay_protocol::{
@@ -17,7 +17,7 @@ use sqlx_core::query_as::query_as;
 use std::{
     collections::HashMap,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -26,6 +26,8 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch}
 
 // Keep ordinary API capacity available even when browsers hold idle SSE bodies.
 const RESERVED_API_SLOTS: usize = 8;
+const MAX_MCP_PER_GRANT: usize = 4;
+const MCP_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Pending {
     account: String,
@@ -35,6 +37,7 @@ struct Pending {
     // Browser cancellation does not release a slot for work still running remotely.
     _permit: OwnedSemaphorePermit,
     _stream_permit: Option<OwnedSemaphorePermit>,
+    _mcp_permit: Option<OwnedSemaphorePermit>,
     public_activity: Option<tokio::time::Instant>,
 }
 
@@ -74,6 +77,7 @@ impl Tunnel {
 pub struct Relay {
     connections: Arc<Mutex<HashMap<String, Arc<Tunnel>>>>,
     closing: Arc<AtomicBool>,
+    mcp_slots: Arc<Mutex<HashMap<String, Weak<Semaphore>>>>,
 }
 
 #[derive(Default)]
@@ -501,27 +505,53 @@ pub(super) async fn forward(
 
 pub(super) async fn mcp(
     service: &Service,
-    installation: &str,
-    account: String,
-    scopes: Vec<String>,
+    grant: super::mcp::McpAccess,
     credential_digest: String,
     request: Request,
 ) -> Result<Response, ApiError> {
+    // Uploads and remote work share the grant's small allowance, including
+    // access tokens from refresh rotation. Idle grants retain no semaphore.
+    let slots = {
+        let mut grants = service.relay.mcp_slots.lock().unwrap();
+        grants.retain(|_, slots| slots.strong_count() > 0);
+        let slots = grants
+            .get(&grant.id)
+            .and_then(Weak::upgrade)
+            .unwrap_or_else(|| Arc::new(Semaphore::new(MAX_MCP_PER_GRANT)));
+        grants.insert(grant.id, Arc::downgrade(&slots));
+        slots
+    };
+    let permit = slots
+        .try_acquire_owned()
+        .map_err(|_| ApiError(StatusCode::TOO_MANY_REQUESTS, "MCP authorization is busy"))?;
+
+    // Read a bounded body before reserving any installation capacity. The total
+    // deadline also ends clients that keep trickling bytes without completing.
+    let (parts, body) = request.into_parts();
+    let body = tokio::time::timeout(MCP_BODY_TIMEOUT, to_bytes(body, MAX_BODY))
+        .await
+        .map_err(|_| ApiError(StatusCode::REQUEST_TIMEOUT, "MCP request body timed out"))?
+        .map_err(|_| ApiError(StatusCode::PAYLOAD_TOO_LARGE, "MCP request is too large"))?;
+    if !super::mcp::still_authorized(service, &credential_digest).await? {
+        return Ok(super::mcp::unauthorized(service));
+    }
+    let request = Request::from_parts(parts, Body::from(body));
     let tunnel = service
         .relay
         .connections
         .lock()
         .unwrap()
-        .get(installation)
+        .get(&grant.installation)
         .cloned();
     send(
         service,
         tunnel,
         0,
-        account,
+        grant.account,
         Capability::Mcp {
-            scopes,
+            scopes: grant.scopes,
             credential_digest,
+            permit,
         },
         "/api/mcp",
         request,
@@ -534,9 +564,15 @@ enum Capability {
     Mcp {
         scopes: Vec<String>,
         credential_digest: String,
+        permit: OwnedSemaphorePermit,
     },
     PublicArtifact(String),
 }
+
+// Only an official availability page may render inline; relayed HTML stays
+// an attachment even when an installation sends an error status.
+#[derive(Clone)]
+pub(super) struct PublicOfflinePage;
 
 pub(super) async fn public_artifact(
     State(service): State<Service>,
@@ -564,10 +600,23 @@ pub(super) async fn public_artifact(
         .get(&installation)
         .cloned();
     if tunnel.is_none() || tunnel.as_ref().is_some_and(|tunnel| *tunnel.stop.borrow()) {
-        return Err(ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "This installation is offline. The public file will be available when it reconnects.",
-        ));
+        let page = Html(
+            r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Installation offline</title>
+</head>
+<body>
+<h1>Installation offline</h1>
+<p>The public file will be available when it reconnects.</p>
+</body>
+</html>"#,
+        );
+        let mut response = (StatusCode::SERVICE_UNAVAILABLE, page).into_response();
+        response.extensions_mut().insert(PublicOfflinePage);
+        return Ok(response);
     }
     let mut target = format!("/api/shared-artifacts/{token}");
     if let Some(query) = request.uri().query() {
@@ -598,7 +647,8 @@ async fn send(
     let streaming = leo_relay_protocol::stream_path(target);
     let public_file = matches!(capability, Capability::PublicArtifact(_));
 
-    // Reserve capacity before reading the body, including requests not yet sent.
+    // Browser uploads reserve capacity before reading. MCP bodies have already
+    // been bounded and reauthorized before they can reserve installation slots.
     let tunnel = tunnel.ok_or(ApiError(
         StatusCode::SERVICE_UNAVAILABLE,
         "Installation unavailable",
@@ -653,13 +703,20 @@ async fn send(
                 .map(|value| (name.to_string(), value.to_owned()))
         })
         .collect();
-    let (role, mcp_scopes, public_artifact, mcp_credential) = match capability {
-        Capability::Account(role) => (role, None, None, None),
+    let (role, mcp_scopes, public_artifact, mcp_credential, mcp_permit) = match capability {
+        Capability::Account(role) => (role, None, None, None, None),
         Capability::Mcp {
             scopes,
             credential_digest,
-        } => (Role::Owner, Some(scopes), None, Some(credential_digest)),
-        Capability::PublicArtifact(token) => (Role::Member, None, Some(token), None),
+            permit,
+        } => (
+            Role::Owner,
+            Some(scopes),
+            None,
+            Some(credential_digest),
+            Some(permit),
+        ),
+        Capability::PublicArtifact(token) => (Role::Member, None, Some(token), None, None),
     };
     let api_request = ApiRequest {
         id: uuid::Uuid::new_v4().to_string(),
@@ -735,6 +792,7 @@ async fn send(
                 stream: streaming.then_some(chunks),
                 _permit: permit,
                 _stream_permit: stream_permit,
+                _mcp_permit: mcp_permit,
                 public_activity: public_file.then(tokio::time::Instant::now),
             },
         })

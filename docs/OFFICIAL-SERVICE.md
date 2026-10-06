@@ -232,3 +232,13 @@ Authenticated account routes use their own quotas.
 Used authorization code digests remain linked to the issued grant. A replay
 with the matching client, redirect and PKCE proof revokes the whole token family,
 including rotated refresh tokens. Revocation removes the consumed code too.
+
+MCP calls are limited to 120 requests per minute per grant using persisted rate
+buckets. Each grant admits at most four simultaneous uploads or remote requests
+in the relay process; refresh rotation shares the same allowance. Excess calls
+return 429 before reading their bodies. Bodies are limited to 8 MB and ten
+seconds total, and are read before reserving installation capacity. The service
+rechecks the credential after upload completion and again before dispatch, so
+revocation cannot leave slow uploads occupying the owner's relay slots. An
+upload timeout returns 408 and releases admission. Admitted remote work retains
+its grant permit until the installation responds, even if the caller disconnects.

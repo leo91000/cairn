@@ -231,3 +231,11 @@ relay cancels a public download after 30 seconds without delivered file chunks,
 even if the recipient no longer polls the HTTP body. Public GET/HEAD payloads
 are ignored so a slow anonymous upload cannot hold an untracked slot. The
 version-2 frame format is unchanged.
+
+MCP upload admission is separate from installation request capacity: one grant
+(including its rotated access tokens) may hold four uploads or remote calls in
+this relay process. The service reads at most 8 MB within ten seconds and checks
+revocation before reserving a tunnel slot. A slow MCP upload cannot consume the
+32 private request slots; an excess upload receives 429. Once dispatched, its
+grant permit follows the pending installation request until completion, like
+its tunnel permit. The per-grant HTTP rate limit is persisted in Postgres.
