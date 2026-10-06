@@ -24,7 +24,10 @@ async fn owner_transaction<'a>(
             .fetch_optional(&mut *transaction)
             .await?;
     if owner.is_none() {
-        return Err(ApiError(StatusCode::NOT_FOUND, "Installation not found"));
+        return Err(ApiError::Http(
+            StatusCode::NOT_FOUND,
+            "Installation not found",
+        ));
     }
 
     Ok(transaction)
@@ -74,7 +77,7 @@ pub(super) async fn invite(
     let existing: Option<(String,)> = query_as("SELECT a.id FROM leo_accounts a WHERE a.email = $1 AND (a.id = $2 OR EXISTS (SELECT 1 FROM installation_members WHERE installation_id = $3 AND account_id = a.id))")
         .bind(&email).bind(&account).bind(&installation).fetch_optional(&mut *transaction).await?;
     if existing.is_some() {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::CONFLICT,
             "This account already has access",
         ));
@@ -91,7 +94,7 @@ pub(super) async fn invite(
     let inserted = query("INSERT INTO installation_invitations (id, installation_id, email) VALUES ($1, $2, $3) ON CONFLICT (installation_id, email) DO NOTHING")
         .bind(&id).bind(&installation).bind(&email).execute(&mut *transaction).await?;
     if inserted.rows_affected() == 0 {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::CONFLICT,
             "An invitation is already pending",
         ));
@@ -159,7 +162,7 @@ pub(super) async fn invite(
         )
         .await?;
         transaction.commit().await?;
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::SERVICE_UNAVAILABLE,
             "Invitation email delivery unavailable. Please try again.",
         ));
@@ -208,7 +211,7 @@ pub(super) async fn accept(
     .fetch_optional(&mut *transaction)
     .await?;
     let Some((installation,)) = target else {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::NOT_FOUND,
             "Invitation not found or expired",
         ));
@@ -220,7 +223,10 @@ pub(super) async fn accept(
             .fetch_optional(&mut *transaction)
             .await?;
     if exists.is_none() {
-        return Err(ApiError(StatusCode::NOT_FOUND, "Installation not found"));
+        return Err(ApiError::Http(
+            StatusCode::NOT_FOUND,
+            "Installation not found",
+        ));
     }
     let consumed = query(
         "DELETE FROM installation_invitations WHERE id = $1 AND email = $2 AND expires_at > now()",
@@ -230,7 +236,7 @@ pub(super) async fn accept(
     .execute(&mut *transaction)
     .await?;
     if consumed.rows_affected() == 0 {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::NOT_FOUND,
             "Invitation not found or expired",
         ));
@@ -262,7 +268,7 @@ async fn remove_membership(
             .execute(&mut *transaction)
             .await?;
     if removed.rows_affected() == 0 {
-        return Err(ApiError(StatusCode::NOT_FOUND, "Member not found"));
+        return Err(ApiError::Http(StatusCode::NOT_FOUND, "Member not found"));
     }
 
     transaction.commit().await?;
@@ -303,7 +309,10 @@ pub(super) async fn leave(
             .fetch_optional(&mut *transaction)
             .await?;
     if exists.is_none() {
-        return Err(ApiError(StatusCode::NOT_FOUND, "Installation not found"));
+        return Err(ApiError::Http(
+            StatusCode::NOT_FOUND,
+            "Installation not found",
+        ));
     }
 
     super::audit::record(
@@ -332,7 +341,10 @@ pub(super) async fn cancel(
             .execute(&mut *transaction)
             .await?;
     if cancelled.rows_affected() == 0 {
-        return Err(ApiError(StatusCode::NOT_FOUND, "Invitation not found"));
+        return Err(ApiError::Http(
+            StatusCode::NOT_FOUND,
+            "Invitation not found",
+        ));
     }
 
     super::audit::record(

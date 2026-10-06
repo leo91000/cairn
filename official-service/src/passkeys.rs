@@ -3,7 +3,7 @@ use webauthn_rs::prelude::*;
 use webauthn_rs_proto::ResidentKeyRequirement;
 
 fn rejected() -> ApiError {
-    ApiError(
+    ApiError::Http(
         StatusCode::UNAUTHORIZED,
         "Unable to verify this passkey. Please try again.",
     )
@@ -11,7 +11,7 @@ fn rejected() -> ApiError {
 
 fn webauthn(service: &Service) -> Result<Webauthn, ApiError> {
     let origin = Url::parse(&service.origin).map_err(|_| rejected())?;
-    let host = origin.domain().ok_or(ApiError(
+    let host = origin.domain().ok_or(ApiError::Http(
         StatusCode::BAD_REQUEST,
         "Passkeys require a hostname or localhost",
     ))?;
@@ -75,7 +75,7 @@ pub(super) async fn register_start(
 
     let passkeys = account_passkeys(&service, &account_id).await?;
     if passkeys.len() >= 20 {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::CONFLICT,
             "Remove a passkey before adding another",
         ));
@@ -137,7 +137,7 @@ pub(super) async fn register_finish(
 
     let label = input.label.trim();
     if label.is_empty() || label.len() > 80 || label.chars().any(char::is_control) {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::BAD_REQUEST,
             "Enter a passkey name (1–80 characters)",
         ));
@@ -157,7 +157,7 @@ pub(super) async fn register_finish(
     let (count,): (i64,) = query_as("SELECT count(*) FROM sign_in_methods WHERE account_id = $1 AND kind = 'passkey' AND NOT removed")
         .bind(&account_id).fetch_one(&mut *transaction).await?;
     if count >= 20 {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::CONFLICT,
             "Remove a passkey before adding another",
         ));
@@ -167,7 +167,10 @@ pub(super) async fn register_finish(
         .bind(uuid::Uuid::new_v4().to_string()).bind(account_id).bind(subject).bind(label)
         .bind(serde_json::to_string(&passkey).map_err(|_| rejected())?).execute(&mut *transaction).await?;
     if result.rows_affected() != 1 {
-        return Err(ApiError(StatusCode::CONFLICT, "Passkey already registered"));
+        return Err(ApiError::Http(
+            StatusCode::CONFLICT,
+            "Passkey already registered",
+        ));
     }
 
     transaction.commit().await?;
@@ -217,7 +220,10 @@ pub(super) async fn login_finish(
 ) -> Response {
     let result = match input {
         Ok(Json(input)) => complete_login(&service, peer, &headers, input).await,
-        Err(_) => Err(ApiError(StatusCode::BAD_REQUEST, "Invalid passkey proof")),
+        Err(_) => Err(ApiError::Http(
+            StatusCode::BAD_REQUEST,
+            "Invalid passkey proof",
+        )),
     };
     let mut response = match result {
         Ok(response) => response,

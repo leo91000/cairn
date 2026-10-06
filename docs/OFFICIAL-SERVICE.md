@@ -319,6 +319,10 @@ No request deletes installation data or stops admitted work. Owned installations
 remain unclaimed under their existing IDs; run `leo claim` on each machine and
 restart its manager to recover access. Members never inherit ownership.
 Deleting a member preserves other people's installations and sessions.
+Deletion shares the address lock with code delivery/verification, rechecks the
+session against the current clock after waiting, and retries a rolled-back
+Postgres deadlock at most twice. Persistent contention returns the existing
+storage-error response; no relay access is revoked before a successful commit.
 
 `GET /api/account/audit` returns at most the latest 100 events belonging to the
 caller or their installations during their ownership period. Members see only
@@ -331,6 +335,9 @@ The service stores only action, time and opaque actor/installation/target IDs;
 never emails, names, credentials, request bodies or conversation content.
 Pseudonymous incident metadata survives account/installation deletion for 90
 days. Deleted-account entries are no longer available through its account API.
+Audit audiences are opaque IDs without account foreign keys, so recording a
+member departure never locks another owner's account. Deletion clears its own
+audience IDs in the same transaction and retains only pseudonymous incident data.
 Reads enforce retention immediately; hourly maintenance removes expired rows.
 
 Operators investigate the full retained history using their protected Postgres

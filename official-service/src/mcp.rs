@@ -69,7 +69,10 @@ async fn owner(service: &Service, installation: &str, account: &str) -> Result<(
             .fetch_optional(&service.pool)
             .await?;
     if owned.is_none() {
-        return Err(ApiError(StatusCode::NOT_FOUND, "Installation not found"));
+        return Err(ApiError::Http(
+            StatusCode::NOT_FOUND,
+            "Installation not found",
+        ));
     }
 
     Ok(())
@@ -77,7 +80,10 @@ async fn owner(service: &Service, installation: &str, account: &str) -> Result<(
 
 fn valid_scopes(scopes: &[String]) -> Result<(), ApiError> {
     if scopes.is_empty() || scopes.iter().any(|scope| !SCOPES.contains(&scope.as_str())) {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "Choose valid MCP scopes"));
+        return Err(ApiError::Http(
+            StatusCode::BAD_REQUEST,
+            "Choose valid MCP scopes",
+        ));
     }
 
     Ok(())
@@ -100,7 +106,7 @@ pub(super) async fn personal(
 
     let label = input.label.trim();
     if label.is_empty() || label.chars().count() > 100 || label.chars().any(char::is_control) {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::BAD_REQUEST,
             "Choose a token name (1–100 characters)",
         ));
@@ -116,7 +122,10 @@ pub(super) async fn personal(
             .fetch_optional(&mut *transaction)
             .await?;
     if owned.is_none() {
-        return Err(ApiError(StatusCode::NOT_FOUND, "Installation not found"));
+        return Err(ApiError::Http(
+            StatusCode::NOT_FOUND,
+            "Installation not found",
+        ));
     }
 
     query("INSERT INTO mcp_grants (id, account_id, installation_id, label, scopes, expires_at) VALUES ($1, $2, $3, $4, $5, now() + interval '30 days')")
@@ -294,7 +303,7 @@ pub(super) async fn register(
         || input.client_name.chars().any(char::is_control);
 
     if !valid_redirects || unsupported_client_metadata {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::BAD_REQUEST,
             "Register a public code-flow client with valid redirect URIs",
         ));
@@ -363,7 +372,7 @@ async fn authorization(service: &Service, params: &Value) -> Result<Authorizatio
             .fetch_optional(&service.pool)
             .await?;
     let Some((name, redirects)) = client else {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::BAD_REQUEST,
             "Unknown client or redirect URI",
         ));
@@ -386,7 +395,7 @@ async fn authorization(service: &Service, params: &Value) -> Result<Authorizatio
         || !valid_resource
         || text(params, "state").len() > 2048
     {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::BAD_REQUEST,
             "Authorization requires a registered redirect, MCP resource and S256 PKCE",
         ));
@@ -476,7 +485,10 @@ pub(super) async fn consent(
                 .fetch_optional(&mut *transaction)
                 .await?;
         if owned.is_none() {
-            return Err(ApiError(StatusCode::NOT_FOUND, "Installation not found"));
+            return Err(ApiError::Http(
+                StatusCode::NOT_FOUND,
+                "Installation not found",
+            ));
         }
         query("DELETE FROM mcp_codes WHERE grant_id IS NULL AND expires_at <= now()")
             .execute(&mut *transaction)

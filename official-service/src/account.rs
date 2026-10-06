@@ -50,6 +50,7 @@ async fn revoke(
 ) -> Result<Response, ApiError> {
     let (account, _) = methods::authenticated(service, headers, true).await?;
     consume_limit(&service.pool, &format!("session-revoke:{account}"), 30).await?;
+
     let mut transaction = service.pool.begin().await?;
     // Serialize competing session revocations, then revalidate the caller.
     query("SELECT id FROM leo_accounts WHERE id = $1 FOR UPDATE")
@@ -57,22 +58,25 @@ async fn revoke(
         .execute(&mut *transaction)
         .await?;
     methods::authenticated_on(&mut transaction, headers, true).await?;
+
     let current = digest(session_token(headers));
     let removed: Vec<(String,)> = query_as(
         "DELETE FROM web_sessions WHERE account_id = $1 AND (id = $2 OR ($2 IS NULL AND digest <> $3)) RETURNING digest",
     ).bind(&account).bind(target).bind(&current).fetch_all(&mut *transaction).await?;
     if target.is_some() && removed.is_empty() {
-        return Err(ApiError(StatusCode::NOT_FOUND, "Session not found"));
+        return Err(ApiError::Http(StatusCode::NOT_FOUND, "Session not found"));
     }
     if !removed.is_empty() {
         audit::record(&mut transaction, &account, None, "session.revoked", target).await?;
     }
     transaction.commit().await?;
+
     let mut revoked_current = false;
     for (revoked,) in removed {
         service.relay.revoke_session(&revoked);
         revoked_current |= revoked == current;
     }
+
     if revoked_current {
         Ok(clear_session_cookie(service))
     } else {
@@ -93,65 +97,105 @@ pub(super) async fn delete(
 ) -> Result<Response, ApiError> {
     let (account, email) = methods::authenticated(&service, &headers, true).await?;
     consume_limit(&service.pool, &format!("account-delete:{account}"), 5).await?;
+
     if input.email.trim() != email {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::BAD_REQUEST,
             "Enter your account email to confirm deletion",
         ));
     }
+
+    let mut attempt = 0;
+    let deleted = loop {
+        attempt += 1;
+        match delete_access(&service, &headers, &account, &email).await {
+            Err(error) if error.is_deadlock() && attempt < 3 => continue,
+            result => break result?,
+        }
+    };
+
+    for (installation, owner) in deleted.installations {
+        service
+            .relay
+            .revoke_access(&installation, if owner { None } else { Some(&account) });
+    }
+    for (session,) in deleted.sessions {
+        service.relay.revoke_session(&session);
+    }
+
+    Ok(clear_session_cookie(&service))
+}
+
+struct DeletedAccess {
+    installations: Vec<(String, bool)>,
+    sessions: Vec<(String,)>,
+}
+
+// Retry only the whole transaction, after rollback. Recheck the caller on every
+// attempt; notify the relay only once the successful transaction commits.
+async fn delete_access(
+    service: &Service,
+    headers: &HeaderMap,
+    account: &str,
+    email: &str,
+) -> Result<DeletedAccess, ApiError> {
     let mut transaction = service.pool.begin().await?;
     // Block new account credentials while collecting every affected access.
+    // Email operations take the address lock before either code or account rows.
+    lock_email(&mut transaction, email).await?;
     query("SELECT id FROM leo_accounts WHERE id = $1 FOR UPDATE")
-        .bind(&account)
+        .bind(account)
         .execute(&mut *transaction)
         .await?;
-    methods::authenticated_on(&mut transaction, &headers, true).await?;
+    methods::authenticated_on(&mut transaction, headers, true).await?;
+
     let access: Vec<(String, bool)> = query_as(
         "SELECT i.id, COALESCE(i.owner_id = $1, false) FROM installations i WHERE i.owner_id = $1 OR EXISTS (SELECT 1 FROM installation_members m WHERE m.installation_id = i.id AND m.account_id = $1) ORDER BY i.id FOR UPDATE",
-    ).bind(&account).fetch_all(&mut *transaction).await?;
+    ).bind(account).fetch_all(&mut *transaction).await?;
     for (installation, owner) in &access {
         if *owner {
-            installations::detach_on(&mut transaction, installation, &account).await?;
+            installations::detach_on(&mut transaction, installation, account).await?;
         } else {
             audit::record(
                 &mut transaction,
-                &account,
+                account,
                 Some(installation),
                 "member.left",
-                Some(&account),
+                Some(account),
             )
             .await?;
         }
     }
     let sessions: Vec<(String,)> =
         query_as("SELECT digest FROM web_sessions WHERE account_id = $1")
-            .bind(&account)
+            .bind(account)
             .fetch_all(&mut *transaction)
             .await?;
+
     // Remove pending email proofs too: a code issued before deletion cannot
     // silently recreate the deleted identity in another browser.
     query("DELETE FROM email_codes WHERE email = $1")
-        .bind(&email)
+        .bind(email)
         .execute(&mut *transaction)
         .await?;
     query("DELETE FROM installation_invitations WHERE email = $1")
-        .bind(&email)
+        .bind(email)
         .execute(&mut *transaction)
         .await?;
-    audit::record(&mut transaction, &account, None, "account.deleted", None).await?;
+    audit::record(&mut transaction, account, None, "account.deleted", None).await?;
+    query("UPDATE account_audit SET account_id = NULL WHERE account_id = $1")
+        .bind(account)
+        .execute(&mut *transaction)
+        .await?;
+
     query("DELETE FROM leo_accounts WHERE id = $1")
-        .bind(&account)
+        .bind(account)
         .execute(&mut *transaction)
         .await?;
     transaction.commit().await?;
 
-    for (installation, owner) in access {
-        service
-            .relay
-            .revoke_access(&installation, if owner { None } else { Some(&account) });
-    }
-    for (session,) in sessions {
-        service.relay.revoke_session(&session);
-    }
-    Ok(clear_session_cookie(&service))
+    Ok(DeletedAccess {
+        installations: access,
+        sessions,
+    })
 }

@@ -59,18 +59,39 @@ struct Service {
     relay: relay::Relay,
 }
 
-struct ApiError(StatusCode, &'static str);
+enum ApiError {
+    Http(StatusCode, &'static str),
+    Database(sqlx_core::error::Error),
+}
+
+impl ApiError {
+    fn is_deadlock(&self) -> bool {
+        match self {
+            Self::Database(error) => error
+                .as_database_error()
+                .is_some_and(|database| database.code().as_deref() == Some("40P01")),
+            Self::Http(..) => false,
+        }
+    }
+}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({ "error": self.1 }))).into_response()
+        let (status, message) = match self {
+            Self::Http(status, message) => (status, message),
+            Self::Database(_) => {
+                // Keep database details and bound parameters out of responses/logs.
+                tracing::error!("Official database operation failed");
+                (StatusCode::INTERNAL_SERVER_ERROR, "Service unavailable")
+            }
+        };
+        (status, Json(json!({ "error": message }))).into_response()
     }
 }
 
 impl From<sqlx_core::error::Error> for ApiError {
-    fn from(_: sqlx_core::error::Error) -> Self {
-        tracing::error!("Official database operation failed");
-        Self(StatusCode::INTERNAL_SERVER_ERROR, "Service unavailable")
+    fn from(error: sqlx_core::error::Error) -> Self {
+        Self::Database(error)
     }
 }
 
@@ -314,7 +335,7 @@ fn normalized_email(input: &str) -> Result<String, ApiError> {
         )
         .is_err()
     {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::BAD_REQUEST,
             "Enter a valid email address",
         ));
@@ -339,12 +360,9 @@ async fn request_code(
     let mut transaction = service.pool.begin().await?;
     // Serialize delivery for an address across all official processes. A later
     // request must not invalidate the proof already in the recipient's mailbox.
-    query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(&email)
-        .execute(&mut *transaction)
-        .await?;
+    lock_email(&mut transaction, &email).await?;
     let pending: Option<(String,)> = query_as(
-        "SELECT challenge FROM email_codes WHERE email = $1 AND expires_at > now() AND attempts < $2 LIMIT 1 FOR UPDATE",
+        "SELECT challenge FROM email_codes WHERE email = $1 AND expires_at > clock_timestamp() AND attempts < $2 LIMIT 1 FOR UPDATE",
     )
     .bind(&email)
     .bind(EMAIL_CODE_ATTEMPT_LIMIT)
@@ -406,7 +424,7 @@ async fn request_code(
             .bind(&challenge)
             .execute(&service.pool)
             .await?;
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::SERVICE_UNAVAILABLE,
             "Email delivery unavailable. Please try again later.",
         ));
@@ -425,6 +443,20 @@ struct Verification {
     code: String,
 }
 
+/// Serialize proof delivery, verification and deletion before locking codes or
+/// accounts. The address is normalized by delivery; verification reads it from
+/// the stored challenge, then re-reads the proof after acquiring this lock.
+async fn lock_email(
+    connection: &mut sqlx_postgres::PgConnection,
+    email: &str,
+) -> Result<(), ApiError> {
+    query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(email)
+        .execute(connection)
+        .await?;
+    Ok(())
+}
+
 async fn verify_code(
     State(service): State<Service>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -433,11 +465,18 @@ async fn verify_code(
 ) -> Result<Response, ApiError> {
     consume_limit(&service.pool, &format!("verification:{}", peer.ip()), 30).await?;
 
+    let invalid = || ApiError::Http(StatusCode::UNAUTHORIZED, "Invalid or expired code");
     let mut transaction = service.pool.begin().await?;
-    let row: Option<(String, String, String, bool, i32, i32)> = query_as("SELECT e.challenge, e.email, e.code_digest, e.expires_at > now(), e.attempts, c.attempts FROM email_codes e JOIN email_code_challenges c ON c.code_challenge = e.challenge WHERE c.challenge = $1 FOR UPDATE OF e, c")
+    let address: Option<(String,)> = query_as("SELECT e.email FROM email_codes e JOIN email_code_challenges c ON c.code_challenge = e.challenge WHERE c.challenge = $1")
+        .bind(&input.challenge).fetch_optional(&mut *transaction).await?;
+    let Some((address,)) = address else {
+        return Err(invalid());
+    };
+    lock_email(&mut transaction, &address).await?;
+
+    let row: Option<(String, String, String, bool, i32, i32)> = query_as("SELECT e.challenge, e.email, e.code_digest, e.expires_at > clock_timestamp(), e.attempts, c.attempts FROM email_codes e JOIN email_code_challenges c ON c.code_challenge = e.challenge WHERE c.challenge = $1 FOR UPDATE OF e, c")
         .bind(&input.challenge).fetch_optional(&mut *transaction).await?;
 
-    let invalid = || ApiError(StatusCode::UNAUTHORIZED, "Invalid or expired code");
     let Some((code_challenge, email, expected, unexpired, code_attempts, challenge_attempts)) = row
     else {
         return Err(invalid());
@@ -482,7 +521,7 @@ async fn verify_code(
     if removed == Some((true,)) {
         let linked = methods::authenticated_on(&mut transaction, &headers, true).await?;
         if linked.0 != account_id {
-            return Err(ApiError(
+            return Err(ApiError::Http(
                 StatusCode::UNAUTHORIZED,
                 "Sign in with another method to re-enable email",
             ));
@@ -571,7 +610,7 @@ async fn browser_security(
         .and_then(|value| value.to_str().ok())
         == Some(service.origin.as_str());
     let mut response = if request.method() != Method::GET && !allowed_origin {
-        ApiError(StatusCode::FORBIDDEN, "Invalid origin").into_response()
+        ApiError::Http(StatusCode::FORBIDDEN, "Invalid origin").into_response()
     } else {
         next.run(request).await
     };
@@ -613,14 +652,14 @@ async fn logout(State(service): State<Service>, headers: HeaderMap) -> Result<Re
     .await?;
 
     let Some((csrf,)) = row else {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::UNAUTHORIZED,
             "Session expired. Please sign in again.",
         ));
     };
 
     if !bool::from(csrf.as_bytes().ct_eq(supplied.as_bytes())) {
-        return Err(ApiError(StatusCode::FORBIDDEN, "Invalid CSRF token"));
+        return Err(ApiError::Http(StatusCode::FORBIDDEN, "Invalid CSRF token"));
     }
 
     query("DELETE FROM web_sessions WHERE digest = $1")
@@ -663,7 +702,7 @@ async fn consume_limit_on(
     let (requests,): (i32,) = query_as("INSERT INTO account_rate_limits (key, requests, resets_at) VALUES ($1, 1, now() + $3::integer * interval '1 second') ON CONFLICT (key) DO UPDATE SET requests = CASE WHEN account_rate_limits.resets_at <= now() THEN 1 ELSE LEAST(account_rate_limits.requests + 1, $2 + 1) END, resets_at = CASE WHEN account_rate_limits.resets_at <= now() THEN now() + $3::integer * interval '1 second' ELSE account_rate_limits.resets_at END RETURNING requests")
         .bind(key).bind(maximum).bind(seconds).fetch_one(connection).await?;
     if requests > maximum {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::TOO_MANY_REQUESTS,
             "Too many attempts. Please wait for the delivery or request limit to reset.",
         ));

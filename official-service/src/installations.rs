@@ -84,7 +84,7 @@ pub(super) struct Rename {
 fn installation_name(name: &str) -> Result<&str, ApiError> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control) {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::BAD_REQUEST,
             "Choose an installation name (1–100 characters)",
         ));
@@ -111,7 +111,10 @@ pub(super) async fn rename(
     .fetch_optional(&service.pool)
     .await?;
     let Some((id, name)) = updated else {
-        return Err(ApiError(StatusCode::NOT_FOUND, "Installation not found"));
+        return Err(ApiError::Http(
+            StatusCode::NOT_FOUND,
+            "Installation not found",
+        ));
     };
 
     Ok(Json(json!({
@@ -133,7 +136,7 @@ pub(super) async fn claim(
     let owner: Option<(String,)> = query_as("DELETE FROM installation_claim_codes WHERE digest = $1 AND expires_at > now() RETURNING account_id")
         .bind(digest(&input.code)).fetch_optional(&mut *transaction).await?;
     let Some((owner,)) = owner else {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::UNAUTHORIZED,
             "Invalid or expired claim code",
         ));
@@ -182,7 +185,10 @@ pub(super) async fn forget(
         .execute(&mut *transaction)
         .await?;
     if forgotten.rows_affected() == 0 {
-        return Err(ApiError(StatusCode::NOT_FOUND, "Installation not found"));
+        return Err(ApiError::Http(
+            StatusCode::NOT_FOUND,
+            "Installation not found",
+        ));
     }
     // Device claims deliberately have no FK: fresh requests do not reserve an installation row.
     query("DELETE FROM installation_device_claims WHERE installation_id = $1")
@@ -229,7 +235,10 @@ pub(super) async fn detach_on(
             .execute(&mut *connection)
             .await?;
     if detached.rows_affected() == 0 {
-        return Err(ApiError(StatusCode::NOT_FOUND, "Installation not found"));
+        return Err(ApiError::Http(
+            StatusCode::NOT_FOUND,
+            "Installation not found",
+        ));
     }
 
     super::sharing::clear(connection, installation).await?;
@@ -259,7 +268,10 @@ pub(super) async fn detach_on(
 
 fn claim_name(name: &str, protocol: u16) -> Result<&str, ApiError> {
     if !leo_relay_protocol::SUPPORTED_VERSIONS.contains(&protocol) {
-        return Err(ApiError(StatusCode::CONFLICT, "Unsupported relay protocol"));
+        return Err(ApiError::Http(
+            StatusCode::CONFLICT,
+            "Unsupported relay protocol",
+        ));
     }
 
     installation_name(name)
@@ -296,7 +308,7 @@ pub(super) async fn rotate_token(
         || !input.token.bytes().all(|byte| byte.is_ascii_hexdigit())
         || previous == input.token
     {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::BAD_REQUEST,
             "Supply a new installation credential",
         ));
@@ -310,7 +322,7 @@ pub(super) async fn rotate_token(
         .fetch_optional(&mut *transaction).await?;
 
     let Some((current,)) = current else {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::UNAUTHORIZED,
             "Invalid installation identity",
         ));
@@ -365,13 +377,13 @@ pub(super) async fn start_device(
         .fetch_optional(&mut *transaction)
         .await?;
         let Some((owner, name)) = row else {
-            return Err(ApiError(
+            return Err(ApiError::Http(
                 StatusCode::UNAUTHORIZED,
                 "Invalid installation identity",
             ));
         };
         if owner.is_some() {
-            return Err(ApiError(
+            return Err(ApiError::Http(
                 StatusCode::CONFLICT,
                 "Detach the installation before claiming it again",
             ));
@@ -442,7 +454,7 @@ pub(super) async fn preview_device(
     .fetch_optional(&service.pool)
     .await?;
     let Some((installation, name)) = reviewed else {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::NOT_FOUND,
             "Invalid, expired or already approved claim code",
         ));
@@ -470,14 +482,14 @@ pub(super) async fn approve_device(
     )
     .await?;
     let code = input.code.trim().replace('-', "").to_uppercase();
-    let confirmation = input.confirmation.ok_or(ApiError(
+    let confirmation = input.confirmation.ok_or(ApiError::Http(
         StatusCode::BAD_REQUEST,
         "Review the installation before confirming its claim",
     ))?;
     let approved: Option<(String,)> = query_as("UPDATE installation_device_claims SET approved_by = $1 WHERE user_digest = $2 AND reviewed_by = $1 AND confirmation_digest = $3 AND approved_by IS NULL AND expires_at > now() RETURNING installation_id")
         .bind(account).bind(digest(&code)).bind(digest(&confirmation)).fetch_optional(&service.pool).await?;
     let Some((installation,)) = approved else {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::NOT_FOUND,
             "Invalid, expired or already approved claim code",
         ));
@@ -501,7 +513,7 @@ pub(super) async fn poll_device(
     let mut transaction = service.pool.begin().await?;
     let row: Option<(String, bool)> = query_as("SELECT installation_id, recovering FROM installation_device_claims WHERE device_digest = $1 AND expires_at > now()")
         .bind(&device_digest).fetch_optional(&mut *transaction).await?;
-    let invalid = || ApiError(StatusCode::UNAUTHORIZED, "Invalid or expired device claim");
+    let invalid = || ApiError::Http(StatusCode::UNAUTHORIZED, "Invalid or expired device claim");
     let Some((installation, recovering)) = row else {
         return Err(invalid());
     };
@@ -577,6 +589,9 @@ pub(super) async fn role(
     match access {
         Some((true,)) => Ok(leo_relay_protocol::Role::Owner),
         Some((false,)) => Ok(leo_relay_protocol::Role::Member),
-        None => Err(ApiError(StatusCode::NOT_FOUND, "Installation not found")),
+        None => Err(ApiError::Http(
+            StatusCode::NOT_FOUND,
+            "Installation not found",
+        )),
     }
 }
