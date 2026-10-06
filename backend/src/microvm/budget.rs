@@ -214,7 +214,10 @@ pub fn disk_bytes(state: &Path) -> io::Result<u64> {
         return Ok(value.bytes);
     }
     let mut bytes = 0_u64;
-    for root in crate::storage::environment::ROOTS {
+    for root in crate::storage::environment::ROOTS
+        .into_iter()
+        .chain(["images"])
+    {
         bytes = bytes.saturating_add(allocated(&state.join(root))?);
     }
     usage.insert(
@@ -374,6 +377,16 @@ pub async fn rebalance(state: &Path, used_mib: u64, limit_mib: u64) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disk_budget_counts_runtime_images() {
+        let root = tempfile::tempdir().unwrap();
+        let image = root.path().join("images/current");
+        std::fs::create_dir_all(&image).unwrap();
+        std::fs::write(image.join("root.ext4"), vec![7; 8192]).unwrap();
+
+        assert_eq!(disk_bytes(root.path()).unwrap(), 8192);
+    }
 
     #[test]
     fn guest_memory_leaves_controller_headroom_without_dividing_by_slots() {
