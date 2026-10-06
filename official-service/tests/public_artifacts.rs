@@ -125,6 +125,7 @@ async fn public_file_is_an_official_read_only_link_with_security_headers_revocat
             }
         );
     }
+
     assert_eq!(
         relay
             .app
@@ -136,6 +137,7 @@ async fn public_file_is_an_official_read_only_link_with_security_headers_revocat
             .status(),
         StatusCode::UNAUTHORIZED
     );
+
     assert_eq!(
         relay
             .app
@@ -148,13 +150,16 @@ async fn public_file_is_an_official_read_only_link_with_security_headers_revocat
             .status(),
         StatusCode::METHOD_NOT_ALLOWED
     );
+
     visibility(&relay, &run, &artifact, "private").await;
     assert_eq!(
         relay.app.client.get(public).send().await.unwrap().status(),
         StatusCode::NOT_FOUND
     );
+
     let next = visibility(&relay, &run, &artifact, "public").await;
     assert_ne!(next["publicUrl"], shared["publicUrl"]);
+
     relay.stop.cancel();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -196,6 +201,7 @@ async fn public_file_is_an_official_read_only_link_with_security_headers_revocat
     );
     assert_eq!(response.headers()["cache-control"], "no-store");
     assert!(!response.headers().contains_key("set-cookie"));
+
     let body = response.text().await.unwrap();
     assert!(
         body.contains("<h1>Installation offline</h1>"),
@@ -245,6 +251,7 @@ async fn public_svg_is_downloaded_as_an_attachment() {
 #[tokio::test]
 async fn stalled_public_downloads_cannot_exhaust_live_streams_and_expire_without_another_read() {
     use std::time::Duration;
+
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     let (run, artifact) =
         seeded_artifact(&relay, &vec![b'x'; 12_000_000], "application/octet-stream").await;
@@ -256,11 +263,13 @@ async fn stalled_public_downloads_cannot_exhaust_live_streams_and_expire_without
         assert_eq!(response.status(), StatusCode::OK);
         downloads.push(response);
     }
+
     assert_eq!(
         relay.app.client.get(public).send().await.unwrap().status(),
         StatusCode::SERVICE_UNAVAILABLE,
         "Public downloads must have their own small capacity pool"
     );
+
     let mut live = Vec::new();
     for _ in 0..24 {
         let response = relay.get("/chats/stream").send().await.unwrap();
@@ -271,6 +280,7 @@ async fn stalled_public_downloads_cannot_exhaust_live_streams_and_expire_without
         );
         live.push(response);
     }
+
     assert_eq!(
         relay.get("/chats").send().await.unwrap().status(),
         StatusCode::OK
@@ -278,6 +288,7 @@ async fn stalled_public_downloads_cannot_exhaust_live_streams_and_expire_without
     // Keep the stalled responses alive and never poll their bodies. Expiry must
     // be driven by the tunnel, not by a downstream HTTP body read.
     tokio::time::sleep(Duration::from_secs(30)).await;
+
     let replacement = tokio::time::timeout(Duration::from_secs(25), async {
         loop {
             let response = relay.app.client.get(public).send().await.unwrap();

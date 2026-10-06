@@ -24,6 +24,7 @@ async fn personal_mcp_token_enforces_scopes_and_revocation() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
+
     let created: Value = response.json().await.unwrap();
     let token = created["token"].as_str().unwrap();
     let call = |name: &str, args: Value| {
@@ -40,13 +41,16 @@ async fn personal_mcp_token_enforces_scopes_and_revocation() {
                 },
             }))
     };
+
     let response = call("list_agents", json!({})).send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+
     let result: Value = response.json().await.unwrap();
     assert!(
         result["result"]["structuredContent"]["result"].is_array(),
         "{result}"
     );
+
     let denied: Value = call(
         "save_project",
         json!({
@@ -61,6 +65,7 @@ async fn personal_mcp_token_enforces_scopes_and_revocation() {
     .await
     .unwrap();
     assert_eq!(denied["result"]["isError"], true);
+
     let response = app
         .client
         .delete(format!("{tokens}/{}", created["id"].as_str().unwrap()))
@@ -71,6 +76,7 @@ async fn personal_mcp_token_enforces_scopes_and_revocation() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+
     assert_eq!(
         call("list_agents", json!({}))
             .send()
@@ -97,6 +103,7 @@ fn owner_post(relay: &RelayedInstallation, path: &str, value: Value) -> reqwest:
 async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_installation() {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use sha2::{Digest, Sha256};
+
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     let app = &relay.app;
     let metadata: Value = app
@@ -112,6 +119,7 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
         .await
         .unwrap();
     assert_eq!(metadata["resource"], format!("{}/mcp", app.url));
+
     let response = app
         .client
         .post(format!("{}/oauth/register", app.url))
@@ -124,6 +132,7 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
+
     let client: Value = response.json().await.unwrap();
     let verifier = "a".repeat(43);
     let parameters = json!({
@@ -151,6 +160,7 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
         preview["installations"][0]["id"],
         relay.session["installations"][0]["id"]
     );
+
     let consent: Value = owner_post(
         &relay,
         "/api/mcp/oauth/consent",
@@ -169,6 +179,7 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
     let redirect = url::Url::parse(consent["redirect"].as_str().unwrap()).unwrap();
     let pairs: std::collections::HashMap<_, _> = redirect.query_pairs().collect();
     assert_eq!(pairs["state"], "client-state");
+
     let exchange = json!({
         "grant_type": "authorization_code",
         "client_id": client["client_id"],
@@ -188,10 +199,13 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
         exchange_request(&wrong).send().await.unwrap().status(),
         StatusCode::BAD_REQUEST
     );
+
     let response = exchange_request(&exchange).send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+
     let tokens: Value = response.json().await.unwrap();
     assert_eq!(tokens["scope"], "read run");
+
     let mut wrong_client = exchange.clone();
     wrong_client["client_id"] = "another-client".into();
     assert_eq!(
@@ -202,6 +216,7 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
             .status(),
         StatusCode::BAD_REQUEST
     );
+
     let refresh = json!({
         "grant_type": "refresh_token",
         "client_id": client["client_id"],
@@ -214,6 +229,7 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
         exchange_request(&escalation).send().await.unwrap().status(),
         StatusCode::BAD_REQUEST
     );
+
     let rotated: Value = exchange_request(&refresh)
         .send()
         .await
@@ -222,6 +238,7 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
         .await
         .unwrap();
     assert_eq!(rotated["scope"], "read");
+
     let call = |token: &Value| {
         app.client
             .post(format!("{}/mcp", app.url))
@@ -256,6 +273,7 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
 #[tokio::test]
 async fn an_external_mcp_connection_returns_through_the_official_installation_and_account() {
     use tokio::io::{AsyncBufReadExt, BufReader};
+
     let provider_script = "import { mcpProvider } from './tests/mcp-provider.ts'; const p = await mcpProvider(); console.log(p.origin); await new Promise(() => {});";
     let mut provider = tokio::process::Command::new("node")
         .args([
@@ -314,6 +332,7 @@ async fn an_external_mcp_connection_returns_through_the_official_installation_an
             relay.app.url
         )
     );
+
     let id = saved["id"].as_str().unwrap();
     let consent: Value = mutate(&format!("/mcps/{id}/connect"), json!({}))
         .send()
@@ -345,11 +364,13 @@ async fn an_external_mcp_connection_returns_through_the_official_installation_an
         completed.json::<Value>().await.unwrap()["result"],
         "connected"
     );
+
     let replay = mutate("/mcps/oauth/callback", json!(parameters))
         .send()
         .await
         .unwrap();
     assert_eq!(replay.status(), StatusCode::NOT_FOUND);
+
     let tested = mutate(&format!("/mcps/{id}/test"), json!({}))
         .send()
         .await
@@ -408,6 +429,7 @@ async fn detaching_and_reclaiming_an_installation_permanently_revokes_its_mcp_gr
         )
         .await;
     assert_eq!(start.status(), StatusCode::CREATED);
+
     let device: Value = start.json().await.unwrap();
     let preview: Value = owner_post(
         &relay,
@@ -431,6 +453,7 @@ async fn detaching_and_reclaiming_an_installation_permanently_revokes_its_mcp_gr
     .await
     .unwrap();
     assert_eq!(approved.status(), StatusCode::OK);
+
     let reclaimed = relay
         .app
         .post(
@@ -454,6 +477,7 @@ async fn detaching_and_reclaiming_an_installation_permanently_revokes_its_mcp_gr
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
     let grants: Value = relay
         .app
         .client
@@ -560,6 +584,7 @@ async fn slow_mcp_uploads_have_a_body_deadline_and_release_their_admission() {
         relay.get("/projects").send().await.unwrap().status(),
         StatusCode::OK
     );
+
     let response = relay
         .app
         .client
@@ -613,6 +638,7 @@ async fn slow_mcp_uploads_cannot_block_owner_access_even_after_revocation() {
         relay.get("/projects").send().await.unwrap().status(),
         StatusCode::OK
     );
+
     let revoked = relay
         .app
         .client
@@ -646,6 +672,7 @@ async fn slow_mcp_uploads_cannot_block_owner_access_even_after_revocation() {
         relay.get("/projects").send().await.unwrap().status(),
         StatusCode::OK
     );
+
     let mut revoked_uploads = 0;
     for (sender, response) in uploads {
         // Excess uploads can already have returned 429 and closed their bodies.
@@ -661,6 +688,7 @@ async fn slow_mcp_uploads_cannot_block_owner_access_even_after_revocation() {
         revoked_uploads > 0,
         "admitted uploads must be rejected after revocation"
     );
+
     let projects: Value = relay
         .get("/projects")
         .send()
@@ -676,6 +704,7 @@ async fn slow_mcp_uploads_cannot_block_owner_access_even_after_revocation() {
 async fn oauth_parameters(relay: &RelayedInstallation, redirect: &str) -> Value {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use sha2::{Digest, Sha256};
+
     let response = relay
         .app
         .client
@@ -688,6 +717,7 @@ async fn oauth_parameters(relay: &RelayedInstallation, redirect: &str) -> Value 
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
+
     let client: Value = response.json().await.unwrap();
     json!({
         "client_id": client["client_id"],
@@ -713,6 +743,7 @@ async fn approved_code_request(relay: &RelayedInstallation, parameters: &Value) 
     .await
     .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+
     let consent: Value = response.json().await.unwrap();
     let redirect = url::Url::parse(consent["redirect"].as_str().unwrap()).unwrap();
     let code = redirect
@@ -855,6 +886,7 @@ async fn replaying_an_authorization_code_revokes_its_access_and_rotated_refresh_
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+
     let original: Value = response.json().await.unwrap();
     let response = relay
         .app
@@ -869,6 +901,7 @@ async fn replaying_an_authorization_code_revokes_its_access_and_rotated_refresh_
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+
     let rotated: Value = response.json().await.unwrap();
     // Expired code tombstones must still detect a replay while their grant is
     // alive. This changes test time at its storage seam, not the verdict.
@@ -911,6 +944,7 @@ async fn replaying_an_authorization_code_revokes_its_access_and_rotated_refresh_
             "Code replay must revoke every token it issued"
         );
     }
+
     let refresh = relay
         .app
         .client
@@ -949,6 +983,7 @@ async fn an_expired_unused_authorization_code_cannot_issue_tokens() {
         response.json::<Value>().await.unwrap()["error"],
         "invalid_grant"
     );
+
     let id = relay.session["installations"][0]["id"].as_str().unwrap();
     let grants: Value = relay
         .app
@@ -980,6 +1015,7 @@ async fn a_member_cannot_consent_to_mcp_or_create_a_personal_token_for_the_share
     .await
     .unwrap();
     assert_eq!(invitation.status(), StatusCode::CREATED);
+
     let invitation: Value = invitation.json().await.unwrap();
     let (cookie, session) = common::login(&relay.app, "mcp-member@example.test").await;
     let member_post = |path: &str, value: Value| {
@@ -1003,6 +1039,7 @@ async fn a_member_cannot_consent_to_mcp_or_create_a_personal_token_for_the_share
     .await
     .unwrap();
     assert_eq!(accepted.status(), StatusCode::NO_CONTENT);
+
     let parameters = oauth_parameters(&relay, "https://client.example/callback").await;
     let preview = member_post("/api/mcp/oauth/preview", parameters.clone())
         .send()
@@ -1013,6 +1050,7 @@ async fn a_member_cannot_consent_to_mcp_or_create_a_personal_token_for_the_share
         preview.json::<Value>().await.unwrap()["installations"],
         json!([])
     );
+
     let forced = member_post(
         "/api/mcp/oauth/consent",
         json!({
@@ -1025,6 +1063,7 @@ async fn a_member_cannot_consent_to_mcp_or_create_a_personal_token_for_the_share
     .await
     .unwrap();
     assert_eq!(forced.status(), StatusCode::NOT_FOUND);
+
     let token = member_post(
         &format!("/api/installations/{id}/tokens"),
         json!({
@@ -1036,6 +1075,7 @@ async fn a_member_cannot_consent_to_mcp_or_create_a_personal_token_for_the_share
     .await
     .unwrap();
     assert_eq!(token.status(), StatusCode::NOT_FOUND);
+
     let grants: Value = relay
         .app
         .client
