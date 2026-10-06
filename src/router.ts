@@ -9,6 +9,7 @@ export function workspaceRouter(base = '/') {
       { path: '/atelier', component: () => import('./views/Atelier.vue') },
       { path: '/chats/:id?', component: () => import('./views/Chats.vue') },
       { path: '/mcps', component: () => import('./views/Mcps.vue') },
+      { path: '/mcps/callback', component: () => import('./views/McpCallback.vue') },
       { path: '/tasks', component: () => import('./views/Tasks.vue') },
       { path: '/runs', component: () => import('./views/Runs.vue') },
       { path: '/runs/:id', component: () => import('./views/RunDetail.vue') },

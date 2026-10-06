@@ -206,8 +206,7 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
     let root = TempDir::new().unwrap();
     std::fs::create_dir(root.path().join("home")).unwrap();
     let (s, origin, server) = served(&root).await;
-    let token = s
-        .auth
+    let token = common::browser_http::auth(&s)
         .personal("History reader", vec!["read"])
         .await
         .unwrap();
@@ -410,8 +409,7 @@ async fn agents_manage_connections_through_the_self_gateway_without_deadlocks_or
     let root = TempDir::new().unwrap();
     std::fs::create_dir(root.path().join("home")).unwrap();
     let (s, origin, server) = served(&root).await;
-    let owner = s
-        .auth
+    let owner = common::browser_http::auth(&s)
         .personal("Self access", vec!["read", "manage", "run"])
         .await
         .unwrap();
@@ -504,7 +502,10 @@ process.stdout.write('ok');
 async fn official_clients_negotiate_modern_and_legacy_protocols_and_enforce_scopes() {
     let root = TempDir::new().unwrap();
     let (s, url, server) = served(&root).await;
-    let token = s.auth.personal("Test client", vec!["read"]).await.unwrap()["token"]
+    let token = common::browser_http::auth(&s)
+        .personal("Test client", vec!["read"])
+        .await
+        .unwrap()["token"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -590,6 +591,7 @@ async fn oauth_consent_pkce_callback_replay_and_refresh_use_the_existing_provide
     let origin = output.next_line().await.unwrap().unwrap();
     let root = TempDir::new().unwrap();
     let s = Service::new(config(&root)).await.unwrap();
+    common::browser_http::claimed(&s).await.unwrap();
     let connection = json!({
         "name": "OAuth fixture",
         "url": format!("{origin}/mcp"),

@@ -222,7 +222,7 @@ impl RelayedInstallation {
             .await
             .unwrap()
             .merge(extra_routes);
-        let identity_dir = root.path().join("relay");
+        let identity_dir = installation.config.data_dir.join("installation-relay");
         leo_agent_manager::relay::claim(
             &app.url,
             &identity_dir,

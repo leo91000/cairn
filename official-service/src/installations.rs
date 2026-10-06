@@ -181,7 +181,17 @@ pub(super) async fn detach(
     }
 
     super::sharing::clear(&mut transaction, &installation).await?;
+
+    query("DELETE FROM mcp_grants WHERE installation_id = $1")
+        .bind(&installation)
+        .execute(&mut *transaction)
+        .await?;
+    query("DELETE FROM mcp_codes WHERE installation_id = $1")
+        .bind(&installation)
+        .execute(&mut *transaction)
+        .await?;
     transaction.commit().await?;
+
     service.relay.revoke_access(&installation, None);
     Ok(StatusCode::NO_CONTENT)
 }

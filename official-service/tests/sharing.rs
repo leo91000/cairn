@@ -671,9 +671,15 @@ async fn detachment_forgets_members_and_pending_invitations() {
     assert_eq!(pending, json!([]));
 
     let identity: Value = serde_json::from_slice(
-        &tokio::fs::read(relay.root.path().join("relay/identity.json"))
-            .await
-            .unwrap(),
+        &tokio::fs::read(
+            relay
+                .installation
+                .config
+                .data_dir
+                .join("installation-relay/identity.json"),
+        )
+        .await
+        .unwrap(),
     )
     .unwrap();
     let started = relay

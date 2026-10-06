@@ -6,18 +6,18 @@ use axum::{
         ws::{Message, WebSocket},
     },
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
-    response::{IntoResponse, Response},
+    response::{Html, IntoResponse, Response},
 };
 use futures_util::{SinkExt, StreamExt};
 use leo_relay_protocol::{
-    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_STREAM_CHUNK,
-    REQUEST_TIMEOUT,
+    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_PUBLIC_IN_FLIGHT,
+    MAX_STREAM_CHUNK, REQUEST_TIMEOUT, Role,
 };
 use sqlx_core::query_as::query_as;
 use std::{
     collections::HashMap,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -26,6 +26,8 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch}
 
 // Keep ordinary API capacity available even when browsers hold idle SSE bodies.
 const RESERVED_API_SLOTS: usize = 8;
+const MAX_MCP_PER_GRANT: usize = 4;
+const MCP_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Pending {
     account: String,
@@ -35,6 +37,8 @@ struct Pending {
     // Browser cancellation does not release a slot for work still running remotely.
     _permit: OwnedSemaphorePermit,
     _stream_permit: Option<OwnedSemaphorePermit>,
+    _mcp_permit: Option<OwnedSemaphorePermit>,
+    public_activity: Option<tokio::time::Instant>,
 }
 
 struct Command {
@@ -50,6 +54,7 @@ struct Tunnel {
     access_changed: Notify,
     slots: Arc<Semaphore>,
     stream_slots: Arc<Semaphore>,
+    public_slots: Arc<Semaphore>,
     // Replacing a connection closes the old generation and its pending replies.
     stop: watch::Sender<bool>,
 }
@@ -72,6 +77,7 @@ impl Tunnel {
 pub struct Relay {
     connections: Arc<Mutex<HashMap<String, Arc<Tunnel>>>>,
     closing: Arc<AtomicBool>,
+    mcp_slots: Arc<Mutex<HashMap<String, Weak<Semaphore>>>>,
 }
 
 #[derive(Default)]
@@ -199,9 +205,10 @@ async fn serve_socket(
         return;
     }
 
-    let (commands, mut receiver) = mpsc::channel::<Command>(MAX_IN_FLIGHT);
+    let (commands, mut receiver) = mpsc::channel::<Command>(MAX_IN_FLIGHT + MAX_PUBLIC_IN_FLIGHT);
     let (stop, mut stopped) = watch::channel(false);
-    let (control, mut controls) = mpsc::channel::<Frame>(MAX_IN_FLIGHT * 2);
+    let (control, mut controls) =
+        mpsc::channel::<Frame>((MAX_IN_FLIGHT + MAX_PUBLIC_IN_FLIGHT) * 2);
     let tunnel = Arc::new(Tunnel {
         commands,
         control,
@@ -210,6 +217,7 @@ async fn serve_socket(
         access_changed: Notify::new(),
         slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
         stream_slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT - RESERVED_API_SLOTS)),
+        public_slots: Arc::new(Semaphore::new(MAX_PUBLIC_IN_FLIGHT)),
         stop,
     });
     {
@@ -268,6 +276,24 @@ async fn serve_socket(
                 }
             }
             _ = revocation.tick() => {
+                // Expire public bodies independently of downstream polling,
+                // including readers that stopped granting stream credit.
+                let expired: Vec<_> = pending.iter()
+                    .filter(|(_, request)| {
+                        request.public_activity.is_some_and(|activity| activity.elapsed() >= REQUEST_TIMEOUT)
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in expired {
+                    pending.remove(&id);
+                    if let Some(stream) = tunnel.access.lock().unwrap().streams.remove(&id) {
+                        stream.revoked.send_replace(true);
+                    }
+                    let message = serde_json::to_string(&Frame::Cancel { id }).unwrap();
+                    if socket.send(Message::Text(message.into())).await.is_err() {
+                        break 'connection;
+                    }
+                }
                 // Owner deletion can originate in account management (#59),
                 // another process, or an operator's transaction. The database
                 // remains authoritative even for an already open connection.
@@ -353,6 +379,9 @@ async fn serve_socket(
                             Frame::StreamStart(response) if version >= 2 => {
                                 let id = response.id.clone();
                                 if let Some(request) = pending.get_mut(&id) {
+                                    if request.public_activity.is_some() {
+                                        request.public_activity = Some(tokio::time::Instant::now());
+                                    }
                                     let valid_stream = request.stream.is_some() && response.body.is_empty();
                                     if valid_stream && let Some(reply) = request.reply.take() {
                                         if reply.send(response).is_ok() {
@@ -369,7 +398,10 @@ async fn serve_socket(
                             }
                             Frame::StreamChunk { id, body } if version >= 2 => {
                                 let delivered = body.len() <= MAX_STREAM_CHUNK
-                                    && pending.get(&id).is_some_and(|request| {
+                                    && pending.get_mut(&id).is_some_and(|request| {
+                                        if request.public_activity.is_some() {
+                                            request.public_activity = Some(tokio::time::Instant::now());
+                                        }
                                         request.reply.is_none()
                                             && request.stream.as_ref().is_some_and(|stream| {
                                                 stream.try_send(Ok(body)).is_ok()
@@ -458,9 +490,165 @@ pub(super) async fn forward(
             "Installation API route not found",
         ));
     }
-    let streaming = leo_relay_protocol::stream_path(target);
+    let target = target.to_owned();
+    send(
+        &service,
+        tunnel,
+        access_generation,
+        account,
+        Capability::Account(role),
+        &target,
+        request,
+    )
+    .await
+}
 
-    // Reserve capacity before reading the body, including requests not yet sent.
+pub(super) async fn mcp(
+    service: &Service,
+    grant: super::mcp::McpAccess,
+    credential_digest: String,
+    request: Request,
+) -> Result<Response, ApiError> {
+    // Uploads and remote work share the grant's small allowance, including
+    // access tokens from refresh rotation. Idle grants retain no semaphore.
+    let slots = {
+        let mut grants = service.relay.mcp_slots.lock().unwrap();
+        grants.retain(|_, slots| slots.strong_count() > 0);
+        let slots = grants
+            .get(&grant.id)
+            .and_then(Weak::upgrade)
+            .unwrap_or_else(|| Arc::new(Semaphore::new(MAX_MCP_PER_GRANT)));
+        grants.insert(grant.id, Arc::downgrade(&slots));
+        slots
+    };
+    let permit = slots
+        .try_acquire_owned()
+        .map_err(|_| ApiError(StatusCode::TOO_MANY_REQUESTS, "MCP authorization is busy"))?;
+
+    // Read a bounded body before reserving any installation capacity. The total
+    // deadline also ends clients that keep trickling bytes without completing.
+    let (parts, body) = request.into_parts();
+    let body = tokio::time::timeout(MCP_BODY_TIMEOUT, to_bytes(body, MAX_BODY))
+        .await
+        .map_err(|_| ApiError(StatusCode::REQUEST_TIMEOUT, "MCP request body timed out"))?
+        .map_err(|_| ApiError(StatusCode::PAYLOAD_TOO_LARGE, "MCP request is too large"))?;
+    if !super::mcp::still_authorized(service, &credential_digest).await? {
+        return Ok(super::mcp::unauthorized(service));
+    }
+    let request = Request::from_parts(parts, Body::from(body));
+    let tunnel = service
+        .relay
+        .connections
+        .lock()
+        .unwrap()
+        .get(&grant.installation)
+        .cloned();
+    send(
+        service,
+        tunnel,
+        0,
+        grant.account,
+        Capability::Mcp {
+            scopes: grant.scopes,
+            credential_digest,
+            permit,
+        },
+        "/api/mcp",
+        request,
+    )
+    .await
+}
+
+enum Capability {
+    Account(Role),
+    Mcp {
+        scopes: Vec<String>,
+        credential_digest: String,
+        permit: OwnedSemaphorePermit,
+    },
+    PublicArtifact(String),
+}
+
+// Only an official availability page may render inline; relayed HTML stays
+// an attachment even when an installation sends an error status.
+#[derive(Clone)]
+pub(super) struct PublicOfflinePage;
+
+pub(super) async fn public_artifact(
+    State(service): State<Service>,
+    Path((installation, token)): Path<(String, String)>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    super::consume_limit(&service.pool, &format!("public-file:{}", peer.ip()), 30).await?;
+    if uuid::Uuid::parse_str(&installation).is_err() || uuid::Uuid::parse_str(&token).is_err() {
+        return Err(ApiError(StatusCode::NOT_FOUND, "Public file not found"));
+    }
+    let claimed: Option<(String,)> =
+        query_as("SELECT id FROM installations WHERE id = $1 AND owner_id IS NOT NULL")
+            .bind(&installation)
+            .fetch_optional(&service.pool)
+            .await?;
+    if claimed.is_none() {
+        return Err(ApiError(StatusCode::NOT_FOUND, "Public file not found"));
+    }
+    let tunnel = service
+        .relay
+        .connections
+        .lock()
+        .unwrap()
+        .get(&installation)
+        .cloned();
+    if tunnel.is_none() || tunnel.as_ref().is_some_and(|tunnel| *tunnel.stop.borrow()) {
+        let page = Html(
+            r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Installation offline</title>
+</head>
+<body>
+<h1>Installation offline</h1>
+<p>The public file will be available when it reconnects.</p>
+</body>
+</html>"#,
+        );
+        let mut response = (StatusCode::SERVICE_UNAVAILABLE, page).into_response();
+        response.extensions_mut().insert(PublicOfflinePage);
+        return Ok(response);
+    }
+    let mut target = format!("/api/shared-artifacts/{token}");
+    if let Some(query) = request.uri().query() {
+        target.push('?');
+        target.push_str(query);
+    }
+    send(
+        &service,
+        tunnel,
+        0,
+        String::new(),
+        Capability::PublicArtifact(token),
+        &target,
+        request,
+    )
+    .await
+}
+
+async fn send(
+    service: &Service,
+    tunnel: Option<Arc<Tunnel>>,
+    access_generation: u64,
+    account: String,
+    capability: Capability,
+    target: &str,
+    request: Request,
+) -> Result<Response, ApiError> {
+    let streaming = leo_relay_protocol::stream_path(target);
+    let public_file = matches!(capability, Capability::PublicArtifact(_));
+
+    // Browser uploads reserve capacity before reading. MCP bodies have already
+    // been bounded and reauthorized before they can reserve installation slots.
     let tunnel = tunnel.ok_or(ApiError(
         StatusCode::SERVICE_UNAVAILABLE,
         "Installation unavailable",
@@ -477,13 +665,17 @@ pub(super) async fn forward(
             "Streaming requires relay protocol 2",
         ));
     }
-    let permit = tunnel
-        .slots
+    let slots = if public_file {
+        &tunnel.public_slots
+    } else {
+        &tunnel.slots
+    };
+    let permit = slots
         .clone()
         .try_acquire_owned()
         .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "Installation busy"))?;
 
-    let stream_permit = if streaming {
+    let stream_permit = if streaming && !public_file {
         Some(
             tunnel
                 .stream_slots
@@ -511,18 +703,49 @@ pub(super) async fn forward(
                 .map(|value| (name.to_string(), value.to_owned()))
         })
         .collect();
+    let (role, mcp_scopes, public_artifact, mcp_credential, mcp_permit) = match capability {
+        Capability::Account(role) => (role, None, None, None, None),
+        Capability::Mcp {
+            scopes,
+            credential_digest,
+            permit,
+        } => (
+            Role::Owner,
+            Some(scopes),
+            None,
+            Some(credential_digest),
+            Some(permit),
+        ),
+        Capability::PublicArtifact(token) => (Role::Member, None, Some(token), None, None),
+    };
     let api_request = ApiRequest {
         id: uuid::Uuid::new_v4().to_string(),
         account_id: account.clone(),
         role,
+        mcp_scopes,
+        public_artifact,
         method: request.method().to_string(),
         path: target.to_owned(),
         headers,
-        body: to_bytes(request.into_body(), MAX_BODY)
-            .await
-            .map_err(|_| ApiError(StatusCode::PAYLOAD_TOO_LARGE, "API request is too large"))?
-            .to_vec(),
+        // GET/HEAD public capabilities have no request payload. Do not let an
+        // anonymous slow upload hold a slot before it enters the deadline loop.
+        body: if public_file {
+            Vec::new()
+        } else {
+            to_bytes(request.into_body(), MAX_BODY)
+                .await
+                .map_err(|_| ApiError(StatusCode::PAYLOAD_TOO_LARGE, "API request is too large"))?
+                .to_vec()
+        },
     };
+    // Revoke before dispatch even when the caller suspended its upload after
+    // the initial bearer check. Reuse the same current grant/ownership rules.
+    if let Some(credential) = mcp_credential
+        && !super::mcp::still_authorized(service, &credential).await?
+    {
+        return Ok(super::mcp::unauthorized(service));
+    }
+
     if tunnel.access_revoked(&account, access_generation) {
         return Err(ApiError(
             StatusCode::NOT_FOUND,
@@ -569,6 +792,8 @@ pub(super) async fn forward(
                 stream: streaming.then_some(chunks),
                 _permit: permit,
                 _stream_permit: stream_permit,
+                _mcp_permit: mcp_permit,
+                public_activity: public_file.then(tokio::time::Instant::now),
             },
         })
         .map_err(|_| {
@@ -588,10 +813,7 @@ pub(super) async fn forward(
         .map_err(|_| ApiError(StatusCode::BAD_GATEWAY, "Installation connection lost"))?;
     let status = StatusCode::from_u16(response.status)
         .map_err(|_| ApiError(StatusCode::BAD_GATEWAY, "Invalid installation response"))?;
-    let is_stream = response
-        .headers
-        .iter()
-        .any(|(name, value)| name == "content-type" && value.starts_with("text/event-stream"));
+    let is_stream = streaming && response.body.is_empty();
     let body = if is_stream && let Some(browser) = browser {
         let stream = futures_util::stream::unfold(browser, |mut browser| async move {
             if *browser.stopped.borrow() || *browser.revoked.borrow() {

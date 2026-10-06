@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { twMerge } from 'tailwind-merge'
 import { onMounted, ref } from 'vue'
-import { api, date, notify } from '../api'
+import {
+  api,
+  date,
+  notify,
+  officialEntry,
+} from '../api'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
 import NotificationSettings from '../components/NotificationSettings.vue'
@@ -33,6 +38,8 @@ async function load() {
       api('/tokens'),
       api('/audit'),
     ])
+    if (officialEntry)
+      settings.value.mcpUrl = `${location.origin}/mcp`
   }
   catch (e) {
     error.value = (e as Error).message

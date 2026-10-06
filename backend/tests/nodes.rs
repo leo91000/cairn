@@ -88,7 +88,12 @@ impl Owner {
             )
             .unwrap();
         }
-        let session = Session::new(&service.auth.session().await.unwrap());
+        let session = Session::new(
+            &common::browser_http::auth(&service)
+                .session()
+                .await
+                .unwrap(),
+        );
         Self {
             app: router(service.clone()).await.unwrap(),
             service,

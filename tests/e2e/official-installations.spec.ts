@@ -33,6 +33,11 @@ test('selects installations, remembers the last one and honours deep workspace U
     logger: false,
   }))
   const mail = createServer(async (request, response) => {
+    if (new URL(request.url!, 'http://localhost').pathname === '/test-callback') {
+      response.writeHead(200, { 'content-type': 'text/html' }).end('<!doctype html><title>MCP client</title><p>Authorization received</p>')
+      return
+    }
+
     let body = ''
     for await (const chunk of request)
       body += chunk
@@ -236,6 +241,9 @@ test('selects installations, remembers the last one and honours deep workspace U
     const notesResponse = await page.request.get(new URL((await notesDownload.getAttribute('href'))!, url).href)
     expect(notesResponse.status()).toBe(200)
     expect(await notesResponse.text()).toBe('# Notes from my machine')
+    await page.getByRole('button', { name: 'Share file', exact: true }).click()
+    await page.getByRole('button', { name: 'Enable public link', exact: true }).click()
+    const publicArtifactUrl = await page.getByRole('textbox', { name: 'Public link', exact: true }).inputValue()
     await page.getByRole('button', { name: 'Close viewer', exact: true }).click()
     await page.getByRole('link', { name: 'Atelier', exact: true }).first().click()
     await page.getByRole('link', { name: 'Agents', exact: true }).click()
@@ -249,6 +257,60 @@ test('selects installations, remembers the last one and honours deep workspace U
     await expect(page).toHaveURL(/\/installations\/[^/]+\/settings$/)
     await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible()
     await expect(page.getByRole('heading', { name: 'Conversation storage', exact: true })).toBeVisible()
+    await expect(page.getByLabel('MCP server URL', { exact: true })).toHaveValue(`${url}/mcp`)
+    await page.getByRole('button', { name: 'New token', exact: true }).click()
+    await page.getByRole('dialog').getByLabel('Name', { exact: true }).fill('Browser MCP client')
+    await page.getByRole('button', { name: 'Create token', exact: true }).click()
+    await expect(page.getByText('Browser MCP client', { exact: true })).toBeVisible()
+
+    const tokenDialog = page.getByRole('dialog')
+    await expect(tokenDialog).toContainText('This token is shown once')
+    await tokenDialog.getByRole('button', { name: 'Close dialog', exact: true }).click()
+    await page.getByText('Browser MCP client', { exact: true }).locator('..').locator('..').getByRole('button', { name: 'Revoke', exact: true }).click()
+    await expect(page.getByText('Browser MCP client', { exact: true })).toHaveCount(0)
+
+    const callbackUrl = `http://127.0.0.1:${mailPort}/test-callback`
+    const client = await (await page.request.post(`${url}/oauth/register`, {
+      data: {
+        client_name: 'Browser OAuth client',
+        redirect_uris: [callbackUrl],
+      },
+    })).json()
+    const { createHash } = await import('node:crypto')
+    const verifier = 'a'.repeat(43)
+    const parameters = new URLSearchParams({
+      client_id: client.client_id,
+      redirect_uri: callbackUrl,
+      response_type: 'code',
+      code_challenge_method: 'S256',
+      code_challenge: createHash('sha256').update(verifier).digest('base64url'),
+      scope: 'read',
+      state: 'browser-state',
+      resource: `${url}/mcp`,
+    })
+    await page.goto(`${url}/oauth/authorize?${parameters}`)
+    await expect(page.getByRole('heading', { name: 'Connect an assistant', exact: true })).toBeVisible()
+    await page.getByLabel('Installation', { exact: true }).selectOption(firstUrl.split('/')[4]!)
+    await page.getByRole('button', { name: 'Allow access', exact: true }).click()
+    await expect(page).toHaveURL(/test-callback\?state=browser-state&code=/)
+    expect(new URL(page.url()).origin).toBe(new URL(callbackUrl).origin)
+    const authorizationCode = new URL(page.url()).searchParams.get('code')!
+    const exchange = await page.request.post(`${url}/oauth/token`, {
+      form: {
+        grant_type: 'authorization_code',
+        client_id: client.client_id,
+        redirect_uri: callbackUrl,
+        code: authorizationCode,
+        code_verifier: verifier,
+        resource: `${url}/mcp`,
+      },
+    })
+    expect(exchange.status()).toBe(200)
+    const oauthToken = (await exchange.json()).access_token
+    await page.goto(firstUrl.replace(/agents$/, 'settings'))
+    await expect(page.getByText('Browser OAuth client', { exact: true })).toBeVisible()
+    await page.getByText('Browser OAuth client', { exact: true }).locator('..').locator('..').getByRole('button', { name: 'Revoke', exact: true }).click()
+    expect((await page.request.post(`${url}/mcp`, { headers: { authorization: `Bearer ${oauthToken}` }, data: { jsonrpc: '2.0', id: 1, method: 'tools/list' } })).status()).toBe(401)
     await page.getByRole('button', { name: 'Configure external S3', exact: true }).click()
     await expect(page.getByLabel('S3 endpoint', { exact: true })).toBeVisible()
     await page.getByLabel('S3 endpoint', { exact: true }).fill('https://11111111111111111111111111111111.r2.cloudflarestorage.com')
@@ -270,6 +332,24 @@ test('selects installations, remembers the last one and honours deep workspace U
     await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toHaveCount(0)
     await page.goto(firstUrl)
     await expect(selector.locator('option:checked')).toHaveText('My home · Online')
+    const installationExit = once(children[1]!, 'exit')
+    children[1]!.kill('SIGTERM')
+    await installationExit
+    await expect.poll(async () => {
+      const installations = await (await page.request.get(`${url}/api/installations`)).json()
+      return installations.find((item: any) => item.id === firstUrl.split('/')[4]).online
+    }).toBe(false)
+    const recipient = await page.context().browser()!.newContext()
+    try {
+      const publicPage = await recipient.newPage()
+      const response = await publicPage.goto(publicArtifactUrl)
+      expect(response!.status()).toBe(503)
+      await expect(publicPage.getByRole('heading', { name: 'Installation offline', exact: true })).toBeVisible()
+      await expect(publicPage.getByText('The public file will be available when it reconnects.', { exact: true })).toBeVisible()
+      expect(await publicPage.locator('body').textContent()).not.toContain('relay-owner')
+    }
+    finally { await recipient.close() }
+
     await page.getByRole('navigation', { name: 'Workspace navigation', exact: true }).getByRole('button', { name: 'Sign out', exact: true }).click()
     await expect(page).toHaveURL(`${url}/`)
     await expect(page.getByLabel('Email address')).toBeVisible()

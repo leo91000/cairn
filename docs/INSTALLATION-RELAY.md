@@ -205,3 +205,37 @@ available to ordinary API requests, so idle member streams cannot exhaust the
 capacity needed to send messages. At the stream limit the next stream receives
 503 and uses the existing client retry behavior; streams are not evicted.
 Cancelling or revoking a stream releases both its stream permit and tunnel slot.
+
+
+## Public files and scoped MCP requests
+
+The official service authorizes `/mcp` with an installation-scoped grant and
+relays it to `/api/mcp`. The relay context carries `mcp_scopes`; the installation
+applies read/run/manage checks using its existing management tools. Browser
+sessions and token secrets never travel to the installation.
+
+Public URLs at `/api/public/installations/{id}/artifacts/{token}` use a separate
+read capability. The context carries `public_artifact`, no account identity, and
+permits only GET/HEAD of `/api/shared-artifacts/{token}`. Share-token validation
+and revocation stay on the installation. Public files use the existing credited
+streams; the official service overwrites security headers and removes cookies.
+An offline installation returns an explicit public-file availability message.
+
+Detachment removes MCP grants and outstanding authorization codes in the same
+transaction as ownership. Grant creation holds the installation ownership lock,
+so reclaiming the same machine never restores its previous MCP credentials.
+
+Public files have a separate pool of four requests at both tunnel ends. They do
+not consume the 32 authenticated API slots or the 24 live-stream slots. The
+relay cancels a public download after 30 seconds without delivered file chunks,
+even if the recipient no longer polls the HTTP body. Public GET/HEAD payloads
+are ignored so a slow anonymous upload cannot hold an untracked slot. The
+version-2 frame format is unchanged.
+
+MCP upload admission is separate from installation request capacity: one grant
+(including its rotated access tokens) may hold four uploads or remote calls in
+this relay process. The service reads at most 8 MB within ten seconds and checks
+revocation before reserving a tunnel slot. A slow MCP upload cannot consume the
+32 private request slots; an excess upload receives 429. Once dispatched, its
+grant permit follows the pending installation request until completion, like
+its tunnel permit. The per-grant HTTP rate limit is persisted in Postgres.

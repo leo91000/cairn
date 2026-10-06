@@ -22,6 +22,9 @@ Le rattachement d’une installation à un compte Leo, qui en devient le propri�
 Le compte Leo auquel l’installation est rattachée. Il est le seul à gérer ses nodes, ses comptes d’agent de code, ses secrets et son partage.
 Sans propriétaire, une installation redevient non revendiquée ; la propriété ne se transfère pas.
 
+**Autorisation MCP d’une installation** :
+L’accès qu’un propriétaire accorde à un client externe pour une seule installation et des droits précis. Les membres font travailler les agents depuis l’app, sans pouvoir accorder ni utiliser cet accès externe.
+
 **Membre d’une installation** :
 Un compte Leo invité par le propriétaire. Il voit toutes les conversations de l’installation et fait travailler ses agents, donc avec les comptes d’agent de code et les secrets du propriétaire, sans pouvoir les gérer.
 _Avoid_ : invité, collaborateur

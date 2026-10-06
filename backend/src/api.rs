@@ -425,40 +425,6 @@ async fn settings_routes(
                 })
                 .await?
         }
-        ("GET", ["tokens"]) => s
-            .store
-            .keys("grant:")
-            .await?
-            .into_iter()
-            .map(|(_, mut value)| {
-                value["id"] = value["family"].clone();
-                value
-            })
-            .collect::<Vec<_>>()
-            .into(),
-        ("POST", ["tokens"]) => {
-            let label = input.string("label", 100)?;
-            let scopes = input.body["scopes"]
-                .as_array()
-                .ok_or_else(|| Error::bad("Choose token scopes."))?
-                .iter()
-                .map(|v| v.as_str().ok_or_else(|| Error::bad("Invalid scope.")))
-                .collect::<Result<Vec<_>>>()?;
-            s.auth.personal(label, scopes).await?
-        }
-        ("DELETE", ["tokens", id]) => {
-            s.auth.revoke(id).await?;
-            json!({ "revoked": true })
-        }
-        ("POST", ["oauth", "preview"]) => s.auth.authorization(&input.body).await?,
-        ("POST", ["oauth", "consent"]) => {
-            let approved = input.boolean("approved")?;
-            let redirect = s
-                .auth
-                .consent(input.body["parameters"].clone(), approved)
-                .await?;
-            json!({ "redirect": redirect })
-        }
         _ => return Ok(None),
     };
     Ok(Some(result))

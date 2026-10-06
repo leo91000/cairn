@@ -1,4 +1,4 @@
-//! Revocable, per-version public links. Only this read-only route bypasses login.
+//! Revocable per-version links, read only through the authenticated relay.
 use super::*;
 use crate::store::Db;
 use serde::Deserialize;
@@ -57,7 +57,7 @@ pub(super) fn apply(db: &Db<'_>, record: &mut Value, visibility: &str, origin: &
             None,
         )?;
         let origin = origin.trim_end_matches('/');
-        record["publicUrl"] = format!("{origin}/api/public/artifacts/{token}").into();
+        record["publicUrl"] = format!("{origin}/artifacts/{token}").into();
         record["publicToken"] = token.into();
     } else {
         if let Some(token) = record["publicToken"].as_str() {
@@ -83,7 +83,11 @@ pub async fn set(
     let artifact = artifact.to_owned();
     let value = checked(Some(value))?.to_owned();
     let bearer = bearer.map(str::to_owned);
-    let origin = s.config.public_url.clone();
+    let origin = if value == "public" {
+        public_origin(s).await?
+    } else {
+        String::new()
+    };
     s.store
         .transaction(move |db| {
             if let Some(token) = bearer {
@@ -117,7 +121,7 @@ pub async fn for_agent(s: &Service, bearer: &str, args: &Value) -> Result<Value>
 pub fn public_read(path: &str, method: &str) -> bool {
     matches!(method, "GET" | "HEAD")
         && matches!(path.split('/').collect::<Vec<_>>().as_slice(),
-        ["", "api", "public", "artifacts", token] if uuid(token).is_ok())
+        ["", "api", "shared-artifacts", token] if uuid(token).is_ok())
 }
 
 pub async fn http(s: &Service, token: &str, request: Request) -> Result<Response> {
@@ -151,4 +155,13 @@ pub async fn http(s: &Service, token: &str, request: Request) -> Result<Response
         HeaderValue::from_static("noindex, nofollow"),
     );
     Ok(response)
+}
+
+pub(super) async fn public_origin(s: &Service) -> Result<String> {
+    let (origin, installation) = crate::relay::official_address(&s.config.data_dir)
+        .await?
+        .ok_or_else(|| {
+            Error::unavailable("Claim this installation before sharing public files.")
+        })?;
+    Ok(format!("{origin}/api/public/installations/{installation}"))
 }

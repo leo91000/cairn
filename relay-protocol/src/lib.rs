@@ -10,6 +10,8 @@ pub const MAX_BODY: usize = 8_000_000;
 // Base64 expands by four bytes per three body bytes, plus envelope metadata.
 pub const MAX_FRAME: usize = MAX_BODY.div_ceil(3) * 4 + 65_536;
 pub const MAX_IN_FLIGHT: usize = 32;
+// Public files never borrow authenticated API or live-stream capacity.
+pub const MAX_PUBLIC_IN_FLIGHT: usize = 4;
 pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -24,6 +26,10 @@ pub struct ApiRequest {
     pub id: String,
     pub account_id: String,
     pub role: Role,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_scopes: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_artifact: Option<String>,
     pub method: String,
     pub path: String,
     pub headers: Vec<(String, String)>,
@@ -102,7 +108,8 @@ pub fn negotiate(versions: &[u16]) -> Option<u16> {
 }
 
 pub fn stream_path(path: &str) -> bool {
-    path.split('?').next().unwrap_or("").ends_with("/stream")
+    let route = path.split('?').next().unwrap_or("");
+    route.ends_with("/stream") || route.starts_with("/api/shared-artifacts/")
 }
 
 pub fn request_header(name: &str) -> bool {
@@ -114,6 +121,8 @@ pub fn request_header(name: &str) -> bool {
             | "if-none-match"
             | "if-modified-since"
             | "last-event-id"
+            | "mcp-protocol-version"
+            | "mcp-method"
     )
 }
 
@@ -121,12 +130,15 @@ pub fn response_header(name: &str) -> bool {
     matches!(
         name,
         "content-type"
+            | "content-length"
             | "content-disposition"
             | "etag"
             | "last-modified"
             | "accept-ranges"
             | "content-range"
             | "retry-after"
+            | "mcp-protocol-version"
+            | "www-authenticate"
     )
 }
 

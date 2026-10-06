@@ -1140,7 +1140,7 @@ async fn unlimited_runs_can_be_cancelled_and_finite_checkpoints_still_expire() {
         fixture.checkpoint(id).await.get("remainingMs"),
         Some(&Value::Null)
     );
-    let session = s.auth.session().await.unwrap();
+    let session = common::browser_http::auth(&s).session().await.unwrap();
     let client = reqwest::Client::new();
     let command = |action: &str| {
         client

@@ -186,3 +186,59 @@ with agents. The installation refuses management of agents, projects, skills,
 nodes, coding-agent accounts, connections, secrets and settings. The web hides
 these actions and owner-only pages, skips owner-only requests in shared views,
 and offers skills for reading only.
+
+## Public deliverables and MCP access
+
+Public deliverable URLs are `/api/public/installations/{id}/artifacts/{token}`
+on the official origin. The installation retains file bytes, share-token
+verification and revocation. The public request carries no account identity,
+cookie or bearer credential through the relay, and permits only GET/HEAD of
+that file. Recipients need no session. Revoking visibility or moving a
+conversation to trash invalidates the link; republication creates a new link.
+An offline installation returns 503 with an explicit offline message.
+
+The official service imposes no-store, nosniff, a sandbox CSP, no-referrer and
+noindex headers on public responses, including errors. Headers from an
+installation cannot relax this policy. Downloads and byte ranges use the
+anonymous CORS policy (`Access-Control-Allow-Origin: *`, without credentials) and
+existing credit-controlled relay streams, including files larger than a
+finite relay frame. The service never persists their contents.
+
+External MCP clients use the official `/mcp` URL. Discovery is at
+`/.well-known/oauth-protected-resource/mcp` and
+`/.well-known/oauth-authorization-server`; `/oauth/register` registers public
+clients. Authorization uses the Leo account session, an explicit installation
+choice and S256 PKCE. Codes expire after five minutes; access tokens after an
+hour. Refresh tokens rotate, expire after 30 days and revoke their entire
+authorization when a used token is replayed. A resource parameter, when supplied,
+must match the official MCP URL. Only credential digests are retained.
+
+Create, list and revoke grants at `/api/installations/{id}/tokens` (DELETE
+`/{grant}`), using the official session, origin and CSRF rules. Personal tokens
+last 30 days and are returned once. Every credential is pinned to that
+installation and its read/run/manage scopes; it stops working after revocation,
+detachment or account deletion. Installation management permissions remain
+reserved for its owner. Use Settings in the current installation to manage them.
+
+Public file downloads have four dedicated relay slots per installation, separate
+from authenticated API and live streams. Idle downloads are cancelled after 30
+seconds without file progress, independently of downstream reads. HTML and SVG
+are always served as attachments, and Content-Length is preserved for downloads,
+byte ranges and HEAD responses.
+The public file route also allows at most 30 requests per minute per TCP peer
+across installations, using the existing persisted rate-limit module. Forwarded
+IP headers supplied by clients are ignored; a reverse proxy shares this limit.
+Authenticated account routes use their own quotas.
+Used authorization code digests remain linked to the issued grant. A replay
+with the matching client, redirect and PKCE proof revokes the whole token family,
+including rotated refresh tokens. Revocation removes the consumed code too.
+
+MCP calls are limited to 120 requests per minute per grant using persisted rate
+buckets. Each grant admits at most four simultaneous uploads or remote requests
+in the relay process; refresh rotation shares the same allowance. Excess calls
+return 429 before reading their bodies. Bodies are limited to 8 MB and ten
+seconds total, and are read before reserving installation capacity. The service
+rechecks the credential after upload completion and again before dispatch, so
+revocation cannot leave slow uploads occupying the owner's relay slots. An
+upload timeout returns 408 and releases admission. Admitted remote work retains
+its grant permit until the installation responds, even if the caller disconnects.

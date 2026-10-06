@@ -24,8 +24,9 @@ retain their values. The main agent always receives every enabled connection.
 
 For OAuth, creation returns a `managementUrl`. Open it in a signed-in browser
 and choose **Connect** on the saved connection. Consent stays bound to that
-browser session; MCP clients cannot bypass it. Refreshes are automatic after
-authorization. Bearer tokens, client secrets and command environment values
+Leo account; MCP clients cannot bypass it. Refreshes are automatic after
+authorization. The callback page sends its parameters through the authenticated
+installation API and removes them from browser history. Bearer tokens, client secrets and command environment values
 are write-only and use the same encrypted vault as UI-created connections.
 
 `update_mcp` requires the complete non-secret configuration. Omit secret fields
@@ -46,11 +47,11 @@ select no authentication, a bearer token, or OAuth. Save, then use **Test** to
 discover tools or **Connect** to sign in. OAuth returns to the manager in the
 same browser, including on a phone; no terminal callback or laptop is needed.
 
-Set `PUBLIC_URL` to the manager’s public HTTPS origin. Register the callback
-shown under **OAuth settings** when your provider requires a pre-created client:
+The callback uses the official service and the current installation. Register
+the URL shown under **OAuth settings** when your provider requires a pre-created client:
 
 ```text
-https://your-manager.example/oauth/mcp/callback
+https://leo.example/installations/INSTALLATION_ID/mcps/callback
 ```
 
 Providers with dynamic client registration need no manual client ID. For other
@@ -59,8 +60,7 @@ Public clients and `client_secret_post` confidential clients are supported.
 Providers requiring another client authentication method need an adapter or
 additional implementation. Legacy HTTP+SSE endpoints are not supported.
 
-OAuth uses PKCE, a ten-minute, single-use state bound to the signed-in browser
-session, issuer validation, and refresh tokens when supplied by the provider.
+OAuth uses PKCE, a ten-minute, single-use state bound to the signed-in Leo account, issuer validation, and refresh tokens when supplied by the provider.
 Concurrent calls share serialized refresh handling. Reconnect starts fresh
 consent; cancelling it leaves the connection requiring sign-in.
 

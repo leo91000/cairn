@@ -1,4 +1,6 @@
 mod common;
+#[path = "../../backend/examples/support/legacy_auth.rs"]
+mod legacy_auth;
 
 use common::RelayedInstallation;
 use reqwest::StatusCode;
@@ -7,17 +9,14 @@ use serde_json::json;
 #[tokio::test]
 async fn installation_browser_routes_refuse_local_credentials_and_forged_identity_headers() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let legacy = legacy_auth::Auth::new(
+        relay.installation.store.clone(),
+        relay.installation.config.public_url.clone(),
+    );
     // Simulate credentials left by an installation upgraded from local access.
-    relay
-        .installation
-        .auth
-        .setup("legacy-password-long-enough")
-        .await
-        .unwrap();
-    let session = relay.installation.auth.session().await.unwrap();
-    let personal = relay
-        .installation
-        .auth
+    legacy.setup("legacy-password-long-enough").await.unwrap();
+    let session = legacy.session().await.unwrap();
+    let personal = legacy
         .personal("Legacy", vec!["read", "manage"])
         .await
         .unwrap();

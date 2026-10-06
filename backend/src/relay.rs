@@ -12,8 +12,9 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use leo_relay_protocol::{
-    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_STREAM_CHUNK,
-    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, REQUEST_TIMEOUT, Role, SUPPORTED_VERSIONS,
+    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_PUBLIC_IN_FLIGHT,
+    MAX_STREAM_CHUNK, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, REQUEST_TIMEOUT, Role,
+    SUPPORTED_VERSIONS,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -406,7 +407,9 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
     let mut requests = JoinSet::new();
     let mut request_ids = HashMap::new();
     let mut active = HashMap::<String, (AbortHandle, std::sync::Arc<Semaphore>)>::new();
-    let (output, mut frames) = mpsc::channel::<Frame>(MAX_IN_FLIGHT);
+    let slots = std::sync::Arc::new(Semaphore::new(MAX_IN_FLIGHT));
+    let public_slots = std::sync::Arc::new(Semaphore::new(MAX_PUBLIC_IN_FLIGHT));
+    let (output, mut frames) = mpsc::channel::<Frame>(MAX_IN_FLIGHT + MAX_PUBLIC_IN_FLIGHT);
     loop {
         tokio::select! {
             result = requests.join_next_with_id(), if !requests.is_empty() => {
@@ -460,7 +463,12 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
                             }
                             _ => return Err(Error::bad("Unexpected relay frame.")),
                         };
-                        if requests.len() >= MAX_IN_FLIGHT {
+                        let capacity = if request.public_artifact.is_some() {
+                            &public_slots
+                        } else {
+                            &slots
+                        };
+                        let Ok(permit) = capacity.clone().try_acquire_owned() else {
                             let response = request_failure(request.id, 503, "Installation busy.");
                             let frame = serde_json::to_string(&Frame::Response(response))?;
                             socket
@@ -468,7 +476,7 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
                                 .await
                                 .map_err(Error::internal)?;
                             continue;
-                        }
+                        };
 
                         let request_id = request.id.clone();
                         let router = router.clone();
@@ -481,7 +489,10 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
                         } else {
                             None
                         };
-                        let task = requests.spawn(dispatch(router, request, streaming));
+                        let task = requests.spawn(async move {
+                            let _permit = permit;
+                            dispatch(router, request, streaming).await
+                        });
                         active.insert(request_id.clone(), (task.clone(), credit));
                         request_ids.insert(task.id(), request_id);
                     }
@@ -547,9 +558,10 @@ async fn dispatch(
     request
         .extensions_mut()
         .insert(ConnectInfo("127.0.0.1:0".parse::<SocketAddr>().unwrap()));
-    request
-        .extensions_mut()
-        .insert(InstallationIdentity::trusted(role, &input.account_id));
+    let mut identity = InstallationIdentity::trusted(role, &input.account_id);
+    identity.mcp_scopes = input.mcp_scopes;
+    identity.public_artifact = input.public_artifact;
+    request.extensions_mut().insert(identity);
 
     let deadline = tokio::time::Instant::now() + REQUEST_TIMEOUT;
     let response = tokio::time::timeout_at(deadline, router.oneshot(request))
@@ -568,10 +580,7 @@ async fn dispatch(
                 .map(|value| (name.to_string(), value.to_owned()))
         })
         .collect();
-    let is_stream = response
-        .headers()
-        .get("content-type")
-        .is_some_and(|value| value.as_bytes().starts_with(b"text/event-stream"));
+    let is_stream = leo_relay_protocol::stream_path(&input.path);
     if is_stream && let Some(output) = streaming {
         let id = input.id;
         output
@@ -656,4 +665,17 @@ async fn dispatch(
         headers,
         body,
     }))
+}
+
+/// Public addressing comes from the claimed identity, never from PUBLIC_URL.
+pub async fn official_address(data_dir: &Path) -> Result<Option<(String, String)>> {
+    let Some(identity) = read_identity(&data_dir.join("installation-relay")).await? else {
+        return Ok(None);
+    };
+    let official = origin(&identity.origin)?;
+    crate::validation::uuid(&identity.installation_id)?;
+    Ok(Some((
+        official.origin().ascii_serialization(),
+        identity.installation_id,
+    )))
 }
