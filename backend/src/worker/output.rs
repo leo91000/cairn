@@ -172,8 +172,15 @@ async fn apply_event(
         && checkpoint.read(|c| c.last_error().is_empty()).await
     {
         let failure = truncate(&run_output::redact(failure, secrets), ERROR_LIMIT);
+        let mut error = run_output::payload(&event["error"], secrets);
+        error["message"] = failure.clone().into();
+        let cause = crate::run_retry::Cause::classify(&error);
         checkpoint
-            .update(|c| c.last_error = Some(Some(failure)))
+            .update(|c| {
+                c.last_error = Some(Some(failure));
+                c.retry_cause = Some(cause);
+                c.completed = Some(false);
+            })
             .await?;
     }
     if event["type"] == "thread.started" && event["thread_id"].is_string() {

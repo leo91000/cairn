@@ -114,6 +114,12 @@ impl Worker {
         if recovering && !recover_or_wait(s, &run).await? {
             return Ok(());
         }
+        let current = s.store.run(&run_id).await?;
+        if current["status"] != RunStatus::Queued
+            || crate::run_retry::Retry::waiting(&current, now())
+        {
+            return Ok(());
+        }
         // Serialize only the preparation window, until placement has reserved
         // the node slot. Running VMs use node slots without a global ceiling.
         let preparation = if execution::uses_vm(&run, &s.config) {
@@ -296,6 +302,7 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
             "finishedAt": now(),
             "accountWaitReason": null,
             "recoveryPending": false,
+            "retry": null,
         });
         s.store.patch_run(run_id, patch).await?;
         return Ok(false);

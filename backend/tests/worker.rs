@@ -222,6 +222,194 @@ fn message(text: &str) -> Value {
     json!({ "id": id(), "text": text })
 }
 
+#[tokio::test]
+async fn transient_agent_failure_resumes_same_session_and_workspace_after_restart() {
+    let mut fixture = Fixture::new().await;
+    let prompt = "fixture:agent-failures:[{\"message\":\"workspace routing discovery timed out\"}]";
+    let chat_id = fixture.start_chat(message(prompt)).await;
+    let run_id = fixture.chat_run(&chat_id).await;
+    let waiting = fixture
+        .until(&run_id, |run| run["retry"].is_object() || finished(run))
+        .await;
+    assert_eq!(waiting["status"], RunStatus::Queued, "{waiting}");
+    assert_eq!(waiting["retry"]["attempt"], 1);
+    assert_eq!(waiting["retry"]["limit"], 3);
+    assert!(waiting["retry"]["nextAttemptAt"].as_i64().unwrap() > now());
+    assert_eq!(waiting["sessionId"], "fixture-chat");
+    fixture.stop(false).await;
+    fixture.start().await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let retained = fixture.service.store.run(&run_id).await.unwrap();
+    assert_eq!(retained["status"], RunStatus::Queued);
+    assert_eq!(retained["retry"], waiting["retry"]);
+    let mut retry = retained["retry"].clone();
+    retry["nextAttemptAt"] = now().into();
+    fixture
+        .service
+        .store
+        .patch_run(&run_id, json!({ "retry": retry }))
+        .await
+        .unwrap();
+    let completed = fixture.until_finished(&run_id).await;
+    assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
+    assert_eq!(completed["sessionId"], waiting["sessionId"]);
+    assert_eq!(completed["workspace"], waiting["workspace"]);
+    let bytes =
+        tokio::fs::read(Path::new(text(&completed, "workspace")).join("fixture-retry-work.json"))
+            .await
+            .unwrap();
+    let marker: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(marker["attempts"], 2);
+    assert_eq!(marker["cwd"], completed["workspace"]);
+    let chat = fixture.service.chat_detail(&chat_id).await.unwrap();
+    assert_eq!(chat["paused"], false);
+    fixture.stop(false).await;
+}
+
+#[tokio::test]
+async fn agent_retries_stop_after_three_attempts_or_when_the_error_becomes_terminal() {
+    for terminal in [false, true] {
+        let mut fixture = Fixture::new().await;
+        let transient = json!({ "code": "server_error", "message": "Temporary upstream error" });
+        let failures = if terminal {
+            vec![
+                transient,
+                json!({ "code": "authentication_error", "message": "Reconnect account" }),
+            ]
+        } else {
+            vec![transient; 4]
+        };
+        let prompt = format!("fixture:agent-failures:{}", json!(failures));
+        let chat = fixture.start_chat(message(&prompt)).await;
+        let run_id = fixture.chat_run(&chat).await;
+        let attempts = if terminal { 1 } else { 3 };
+        for attempt in 1..=attempts {
+            let waiting = fixture
+                .until(&run_id, |run| {
+                    (run["status"] == RunStatus::Queued && run["retry"]["attempt"] == attempt)
+                        || finished(run)
+                })
+                .await;
+            assert_eq!(waiting["status"], RunStatus::Queued, "{waiting}");
+            assert_eq!(waiting["retry"]["attempt"], attempt);
+            let mut retry = waiting["retry"].clone();
+            retry["nextAttemptAt"] = now().into();
+            fixture
+                .service
+                .store
+                .patch_run(&run_id, json!({ "retry": retry }))
+                .await
+                .unwrap();
+        }
+        let failed = fixture.until_finished(&run_id).await;
+        assert_eq!(failed["status"], RunStatus::Failed);
+        assert_eq!(failed["retry"]["attempt"], attempts);
+        let expected = if terminal {
+            "Reconnect account"
+        } else {
+            "Temporary upstream error"
+        };
+        assert_eq!(failed["summary"], expected);
+        let marker: Value = serde_json::from_slice(
+            &tokio::fs::read(Path::new(text(&failed, "workspace")).join("fixture-retry-work.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(marker["attempts"], attempts + 1);
+        fixture.stop(false).await;
+    }
+}
+
+#[tokio::test]
+async fn cancellation_during_retry_wait_does_not_launch_another_agent() {
+    let mut fixture = Fixture::new().await;
+    let chat = fixture.start_chat(message("fixture:agent-failures:[{\"code\":\"request_timeout\",\"message\":\"Request timed out\"}]")).await;
+    let run_id = fixture.chat_run(&chat).await;
+    let waiting = fixture
+        .until(&run_id, |run| run["retry"].is_object() || finished(run))
+        .await;
+    assert_eq!(waiting["status"], RunStatus::Queued, "{waiting}");
+    fixture
+        .service
+        .worker
+        .cancel(&fixture.service, &run_id)
+        .await
+        .unwrap();
+    fixture
+        .until(&run_id, |run| run["status"] == RunStatus::Cancelled)
+        .await;
+    let marker: Value = serde_json::from_slice(
+        &tokio::fs::read(Path::new(text(&waiting, "workspace")).join("fixture-retry-work.json"))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(marker["attempts"], 1);
+    fixture.stop(false).await;
+}
+
+#[tokio::test]
+async fn managed_task_retry_releases_its_account_during_backoff() {
+    let mut fixture = Fixture::new().await;
+    fixture.stop(false).await;
+    let s = fixture.service.clone();
+    let mut account = s
+        .accounts
+        .create(&s, Provider::Codex, "Retry fixture")
+        .await
+        .unwrap();
+    account["state"] = "ready".into();
+    account["maxConcurrentRuns"] = 1.into();
+    s.store.put(KIND, account.clone()).await.unwrap();
+    let account_id = text(&account, "id");
+    codex_credentials(
+        &s,
+        account_id,
+        json!({
+            "access_token": "synthetic",
+            "refresh_token": "synthetic-refresh",
+            "account_id": "retry-fixture",
+        }),
+    )
+    .await;
+    fixture.start().await;
+    let run = fixture
+        .enqueue("fixture:agent-failures:[{\"message\":\"workspace routing discovery timed out\"}]")
+        .await;
+    let run_id = text(&run, "id");
+    let waiting = fixture
+        .until(run_id, |run| run["retry"].is_object() || finished(run))
+        .await;
+    assert_eq!(waiting["status"], RunStatus::Queued, "{waiting}");
+    let mut retry = waiting["retry"].clone();
+    retry["nextAttemptAt"] = (now() + 120_000).into();
+    s.store
+        .patch_run(run_id, json!({ "retry": retry }))
+        .await
+        .unwrap();
+    let other = fixture
+        .enqueue("Inspect another workspace during backoff")
+        .await;
+    let completed = fixture.until_finished(text(&other, "id")).await;
+    assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
+    assert_eq!(completed["accountId"], account_id);
+    assert_eq!(
+        s.store.run(run_id).await.unwrap()["status"],
+        RunStatus::Queued
+    );
+    retry["nextAttemptAt"] = now().into();
+    s.store
+        .patch_run(run_id, json!({ "retry": retry }))
+        .await
+        .unwrap();
+    let completed = fixture.until_finished(run_id).await;
+    assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
+    assert_eq!(completed["sessionId"], waiting["sessionId"]);
+    assert_eq!(completed["workspace"], waiting["workspace"]);
+    fixture.stop(false).await;
+}
+
 /// A signed-in Claude Code account whose CLI home holds fixture credentials.
 async fn claude_account(s: &Service, parallel_runs: u64) -> String {
     let mut account = s

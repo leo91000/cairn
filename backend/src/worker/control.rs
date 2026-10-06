@@ -106,6 +106,7 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
             "status": RunStatus::Cancelled,
             "finishedAt": now(),
             "summary": "Cancelled before execution.",
+            "retry": null,
         });
         db.patch_run(id, &patch)?;
     }
@@ -149,6 +150,7 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
             checkpoint.completed = Some(false);
         }
         checkpoint.settled = None;
+        checkpoint.retry_cause = Some(None);
         checkpoint.store_in(db, id)?;
     }
     let wait_reason = (!before_launch).then_some("Resuming saved conversation.");
@@ -160,6 +162,7 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
         "cancelRequestedAt": null,
         "finishedAt": null,
         "accountWaitReason": wait_reason,
+        "retry": null,
     });
     let result = db.patch_run(id, &patch)?;
     db.event(id, "status", "Resume requested", None)?;

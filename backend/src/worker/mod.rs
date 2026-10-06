@@ -3,6 +3,7 @@ mod control;
 mod execution;
 mod launch;
 mod output;
+mod retry;
 mod schedule;
 
 pub use control::routes;

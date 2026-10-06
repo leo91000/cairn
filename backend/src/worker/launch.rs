@@ -196,7 +196,7 @@ impl Execution<'_> {
             Some(account) => s.accounts.get(s, &account.account_id).await?["name"].clone(),
             None => Value::Null,
         };
-        let patch = json!({
+        let mut patch = json!({
             "status": RunStatus::Running,
             "startedAt": self.run["startedAt"].as_i64().unwrap_or_else(now),
             "finishedAt": null,
@@ -205,6 +205,11 @@ impl Execution<'_> {
             "accountId": self.account.as_ref().map(|account| &account.account_id),
             "accountName": account_name,
         });
+        if self.run["retry"].is_object() {
+            let mut retry = self.run["retry"].clone();
+            retry["nextAttemptAt"] = Value::Null;
+            patch["retry"] = retry;
+        }
         s.store.patch_run(&self.id, patch).await?;
         if let Some(name) = account_name.as_str() {
             let message = format!("Using {} account: {name}", self.provider.label());
@@ -748,6 +753,7 @@ impl Execution<'_> {
                 c.launched = Some(true);
                 c.completed = Some(false);
                 c.last_error = Some(None);
+                c.retry_cause = Some(None);
             })
             .await?;
         if self.stopping() {
@@ -946,6 +952,16 @@ impl Execution<'_> {
         } else {
             RunStatus::Failed
         };
+        if status == RunStatus::Failed
+            && !exit.timed_out
+            && !self.stopping()
+            && has_session
+            && let Some(cause) = saved.retry_cause.as_ref().and_then(Option::as_ref)
+        {
+            // The provider confirmed this turn failed. Recovery is scheduled by
+            // the worker after the previous execution is fenced, not replayed here.
+            return Err(Error::conflict(cause.message.clone()));
+        }
         let error = self.failure_message(status, exit, saved);
         let summary = if status != RunStatus::Succeeded {
             &error
@@ -962,13 +978,16 @@ impl Execution<'_> {
             || self.run["chatExecution"].is_object())
             && has_session;
         let error = (!error.is_empty()).then(|| run_output::redact(&error, self.sensitive));
-        let patch = json!({
+        let mut patch = json!({
             "status": status,
             "finishedAt": now(),
             "resumeAvailable": resume_available,
             "summary": summary,
             "error": error,
         });
+        if status == RunStatus::Succeeded {
+            patch["retry"] = Value::Null;
+        }
         s.store.patch_run(&self.id, patch).await?;
         s.store
             .event(&self.id, "status", status.as_str(), None)

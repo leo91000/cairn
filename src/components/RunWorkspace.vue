@@ -11,6 +11,7 @@ import {
   Square,
   Terminal,
 } from '../icons'
+import { useRetryNotice } from '../run-retry'
 import { useLiveRun } from '../use-live-run'
 import ActivityFeed from './ActivityFeed.vue'
 import ArtifactGallery from './ArtifactGallery.vue'
@@ -30,6 +31,8 @@ const router = useRouter()
 const live = useLiveRun(() => `/runs/${props.runId}/stream`)
 const { events, connectionNotice, catchingUp: loading } = live
 const run = computed(() => live.snapshot.value?.run ?? undefined)
+const retryNotice = useRetryNotice(() => run.value)
+const waitNotice = computed(() => retryNotice.value ?? run.value?.accountWaitReason)
 const deliverables = computed(() => live.snapshot.value?.artifacts ?? [])
 const artifactViewer = ref<string | null>(null)
 const error = ref('')
@@ -143,8 +146,8 @@ async function copy() {
           </div>
         </div>
       </div>
-      <p v-if="run.accountWaitReason" role="status" class="mb-3 shrink-0 text-sm text-warning">
-        {{ run.accountWaitReason }}
+      <p v-if="waitNotice" role="status" class="mb-3 shrink-0 text-sm text-warning">
+        {{ waitNotice }}
       </p>
       <section class="panel run-panel flex flex-1 min-h-0 flex-col overflow-hidden">
         <header class="run-panel-head flex shrink-0 items-center justify-between border-b border-line p-[7px] phone:p-[5px]">
