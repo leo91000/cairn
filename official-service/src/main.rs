@@ -2,7 +2,7 @@ use std::{env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use axum::{
-    http::StatusCode,
+    http::{HeaderValue, StatusCode, header},
     routing::{any, get},
 };
 use leo_official_service::{
@@ -11,7 +11,10 @@ use leo_official_service::{
 use reqwest::Client;
 use serde_json::json;
 use sqlx_postgres::PgPoolOptions;
-use tower_http::services::{ServeDir, ServeFile};
+use tower_http::{
+    services::{ServeDir, ServeFile},
+    set_header::SetResponseHeaderLayer,
+};
 use url::Url;
 
 struct HttpEmailSender {
@@ -204,7 +207,7 @@ async fn run() -> Result<(), String> {
         .parse()
         .map_err(str::to_owned)?;
     let relay = Relay::default();
-    let app = router_with_network(
+    let mut app = router_with_network(
         pool.clone(),
         Arc::new(sender),
         origin,
@@ -221,7 +224,23 @@ async fn run() -> Result<(), String> {
     .route("/api/{*path}", any(|| async { StatusCode::NOT_FOUND }))
     .route_service("/", ServeFile::new(web.join("official.html")))
     .route_service("/index.html", ServeFile::new(web.join("official.html")))
-    .fallback_service(ServeDir::new(&web).fallback(ServeFile::new(web.join("official.html"))));
+    .fallback_service(ServeDir::new(&web).fallback(ServeFile::new(web.join("official.html"))))
+    .layer(SetResponseHeaderLayer::if_not_present(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("frame-ancestors 'none'"),
+    ))
+    .layer(SetResponseHeaderLayer::if_not_present(
+        header::X_FRAME_OPTIONS,
+        HeaderValue::from_static("DENY"),
+    ));
+
+    // TLS terminates at the configured official origin's trusted proxy.
+    if origin_url.scheme() == "https" {
+        app = app.layer(SetResponseHeaderLayer::overriding(
+            header::STRICT_TRANSPORT_SECURITY,
+            HeaderValue::from_static("max-age=31536000"),
+        ));
+    }
 
     let listener = tokio::net::TcpListener::bind(address)
         .await

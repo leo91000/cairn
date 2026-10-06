@@ -39,7 +39,11 @@ test('official pages deny framing and enable HSTS only for an HTTPS official ori
 
       await page.goto(url)
       await expect(page.getByLabel('Email address')).toBeVisible()
+      const framingBlocked = page.waitForEvent('console', {
+        predicate: message => /frame-ancestors|X-Frame-Options/i.test(message.text()),
+      })
       await page.setContent(`<iframe src="${url}/"></iframe>`)
+      await framingBlocked
       await expect(page.frameLocator('iframe').getByLabel('Email address')).toHaveCount(0)
     }
     finally {

@@ -74,6 +74,12 @@ Trust only your controlled proxy hops; headers from other peers are ignored.
 Missing or malformed trusted suffixes fall back to the TCP peer. Do not expose
 Postgres or the development mailbox publicly.
 
+The official SPA denies embedding with `frame-ancestors 'none'` and
+`X-Frame-Options: DENY`, including deep links, to protect account and claim actions
+from clickjacking. HTTPS official origins also send `Strict-Transport-Security:
+max-age=31536000` through the TLS-terminating proxy; loopback HTTP development
+does not set HSTS. Relayed responses keep their existing sandbox policies.
+
 Codes expire after 10 minutes and allow five failed verification attempts per
 challenge, with a shared ceiling of fifty failures per mailed code. An exhausted
 challenge is refused without spending other challenges' attempts. Requesting

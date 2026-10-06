@@ -28,7 +28,9 @@ and official service must use compatible relay protocols. Keep one relay process
 and route account/access mutations, installation API requests and relay
 WebSockets to it. Revocation notifications are process-local; multiple official
 replicas are unsupported even with sticky installation routing. See
-[official process limits](OFFICIAL-SERVICE.md#configuration).
+[official process limits](OFFICIAL-SERVICE.md#configuration) and
+[ADR-0032](adr/0032-single-official-relay-process.md) for this explicit restriction
+of spec #43 and the tolerance of persisted revocation checks.
 
 For an existing installation, preserve all volumes, add `LEO_OFFICIAL_ORIGIN`
 to the manager environment, upgrade the image, then run:
