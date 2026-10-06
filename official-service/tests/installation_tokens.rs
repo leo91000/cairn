@@ -8,7 +8,11 @@ use std::time::Duration;
 #[tokio::test]
 async fn rotating_a_machine_token_closes_old_streams_and_can_retry_a_lost_response() {
     let mut relay = RelayedInstallation::new(axum::Router::new()).await;
-    let dir = relay.root.path().join("relay");
+    let dir = relay
+        .installation
+        .config
+        .data_dir
+        .join("installation-relay");
     let path = dir.join("identity.json");
     let mut identity: Value =
         serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
@@ -131,7 +135,11 @@ async fn the_machine_resumes_rotation_after_the_official_response_is_lost() {
     }
 
     let mut relay = RelayedInstallation::new(axum::Router::new()).await;
-    let dir = relay.root.path().join("relay");
+    let dir = relay
+        .installation
+        .config
+        .data_dir
+        .join("installation-relay");
     let path = dir.join("identity.json");
     let mut identity: Value =
         serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();

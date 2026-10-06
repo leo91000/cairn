@@ -8,7 +8,11 @@ use std::time::Duration;
 #[tokio::test]
 async fn only_the_owner_can_forget_an_installation_and_its_machine_keeps_its_data() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
-    let path = relay.root.path().join("relay/identity.json");
+    let path = relay
+        .installation
+        .config
+        .data_dir
+        .join("installation-relay/identity.json");
     let identity: Value = serde_json::from_slice(&tokio::fs::read(path).await.unwrap()).unwrap();
     let id = identity["installationId"].as_str().unwrap();
     let request = |method: Method, route: &str, cookie: &str, csrf: &str| {
