@@ -89,7 +89,7 @@ test('email sign-in works after a third party exhausts their challenge, persists
     }).toBe(true)
     const cdp = await context.newCDPSession(page)
     await cdp.send('WebAuthn.enable')
-    await cdp.send('WebAuthn.addVirtualAuthenticator', {
+    const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', {
       options: {
         protocol: 'ctap2',
         transport: 'internal',
@@ -139,6 +139,55 @@ test('email sign-in works after a third party exhausts their challenge, persists
     await page.getByRole('button', { name: 'Add passkey', exact: true }).click()
     await expect(page.getByText('Laptop', { exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Back to installations' }).click()
+    const secondDevice = await context.browser()!.newContext({ userAgent: 'Lost phone browser' })
+    try {
+      const otherPage = await secondDevice.newPage()
+      const otherCdp = await secondDevice.newCDPSession(otherPage)
+      await otherCdp.send('WebAuthn.enable')
+      const otherAuthenticator = await otherCdp.send('WebAuthn.addVirtualAuthenticator', {
+        options: {
+          protocol: 'ctap2',
+          transport: 'internal',
+          hasResidentKey: true,
+          hasUserVerification: true,
+          isUserVerified: true,
+          automaticPresenceSimulation: true,
+        },
+      })
+      const credentials = await cdp.send('WebAuthn.getCredentials', { authenticatorId })
+      for (const credential of credentials.credentials)
+        await otherCdp.send('WebAuthn.addCredential', { authenticatorId: otherAuthenticator.authenticatorId, credential })
+      await otherPage.goto(url)
+      await otherPage.getByRole('button', { name: 'Sign in with a passkey', exact: true }).click()
+      await expect(otherPage.getByRole('heading', { name: 'No installations yet' })).toBeVisible()
+      // These two virtual authenticators model a synced passkey. Carry forward
+      // its updated counter rather than replaying the old cloned credential.
+      const updated = await otherCdp.send('WebAuthn.getCredentials', { authenticatorId: otherAuthenticator.authenticatorId })
+      for (const credential of updated.credentials) {
+        await cdp.send('WebAuthn.removeCredential', { authenticatorId, credentialId: credential.credentialId })
+        await cdp.send('WebAuthn.addCredential', { authenticatorId, credential })
+      }
+
+      await page.getByRole('button', { name: 'Account security', exact: true }).click()
+      await expect(page.getByRole('heading', { name: 'Active sessions' })).toBeVisible()
+      await expect(page.getByText('This device', { exact: true })).toBeVisible()
+      await expect(page.getByText('Lost phone browser', { exact: true })).toBeVisible()
+      for (const width of [1440, 390, 320]) {
+        await page.setViewportSize({ width, height: 844 })
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+      }
+
+      await page.getByRole('button', { name: 'Revoke other devices', exact: true }).click()
+      await expect(page.getByText('Lost phone browser', { exact: true })).toHaveCount(0)
+      await otherPage.reload()
+      await expect(otherPage.getByLabel('Email address')).toBeVisible()
+      await page.getByRole('button', { name: 'Back to installations', exact: true }).click()
+      await expect(page.getByRole('heading', { name: 'No installations yet' })).toBeVisible()
+    }
+    finally {
+      await secondDevice.close()
+    }
+
     await page.getByRole('button', { name: 'Sign out' }).click()
     await expect(page.getByRole('button', { name: 'Sign in with a passkey' })).toBeEnabled()
     await page.getByRole('button', { name: 'Sign in with a passkey' }).click()

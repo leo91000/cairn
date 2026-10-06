@@ -143,11 +143,19 @@ pub(super) async fn claim(
     let token = random_token();
     query("INSERT INTO installations (id, owner_id, name, token_digest) VALUES ($1, $2, $3, $4)")
         .bind(&installation)
-        .bind(owner)
+        .bind(&owner)
         .bind(name)
         .bind(digest(&token))
         .execute(&mut *transaction)
         .await?;
+    super::audit::record(
+        &mut transaction,
+        &owner,
+        Some(&installation),
+        "installation.claimed",
+        None,
+    )
+    .await?;
     transaction.commit().await?;
 
     Ok((
@@ -170,7 +178,7 @@ pub(super) async fn forget(
     let mut transaction = service.pool.begin().await?;
     let forgotten = query("DELETE FROM installations WHERE id = $1 AND owner_id = $2")
         .bind(&installation)
-        .bind(owner)
+        .bind(&owner)
         .execute(&mut *transaction)
         .await?;
     if forgotten.rows_affected() == 0 {
@@ -181,6 +189,14 @@ pub(super) async fn forget(
         .bind(&installation)
         .execute(&mut *transaction)
         .await?;
+    super::audit::record(
+        &mut transaction,
+        &owner,
+        Some(&installation),
+        "installation.forgotten",
+        None,
+    )
+    .await?;
     transaction.commit().await?;
     service.relay.revoke_access(&installation, None);
     Ok(StatusCode::NO_CONTENT)
@@ -194,30 +210,51 @@ pub(super) async fn detach(
 ) -> Result<StatusCode, ApiError> {
     let owner = account(&service, &headers, &Method::POST).await?;
     let mut transaction = service.pool.begin().await?;
+    detach_on(&mut transaction, &installation, &owner).await?;
+    transaction.commit().await?;
+
+    service.relay.revoke_access(&installation, None);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(super) async fn detach_on(
+    connection: &mut sqlx_postgres::PgConnection,
+    installation: &str,
+    owner: &str,
+) -> Result<(), ApiError> {
     let detached =
         query("UPDATE installations SET owner_id = NULL WHERE id = $1 AND owner_id = $2")
-            .bind(&installation)
+            .bind(installation)
             .bind(owner)
-            .execute(&mut *transaction)
+            .execute(&mut *connection)
             .await?;
     if detached.rows_affected() == 0 {
         return Err(ApiError(StatusCode::NOT_FOUND, "Installation not found"));
     }
 
-    super::sharing::clear(&mut transaction, &installation).await?;
+    super::sharing::clear(connection, installation).await?;
 
     query("DELETE FROM mcp_grants WHERE installation_id = $1")
-        .bind(&installation)
-        .execute(&mut *transaction)
+        .bind(installation)
+        .execute(&mut *connection)
         .await?;
     query("DELETE FROM mcp_codes WHERE installation_id = $1")
-        .bind(&installation)
-        .execute(&mut *transaction)
+        .bind(installation)
+        .execute(&mut *connection)
         .await?;
-    transaction.commit().await?;
-
-    service.relay.revoke_access(&installation, None);
-    Ok(StatusCode::NO_CONTENT)
+    query("DELETE FROM installation_device_claims WHERE installation_id = $1")
+        .bind(installation)
+        .execute(&mut *connection)
+        .await?;
+    super::audit::record(
+        connection,
+        owner,
+        Some(installation),
+        "installation.detached",
+        None,
+    )
+    .await?;
+    Ok(())
 }
 
 fn claim_name(name: &str, protocol: u16) -> Result<&str, ApiError> {
@@ -492,7 +529,7 @@ pub(super) async fn poll_device(
     if recovering {
         super::sharing::clear(&mut transaction, &installation).await?;
         query("UPDATE installations SET owner_id = $1, token_digest = $2 WHERE id = $3")
-            .bind(owner)
+            .bind(&owner)
             .bind(digest(&token))
             .bind(&installation)
             .execute(&mut *transaction)
@@ -502,7 +539,7 @@ pub(super) async fn poll_device(
             "INSERT INTO installations (id, owner_id, name, token_digest) VALUES ($1, $2, $3, $4)",
         )
         .bind(&installation)
-        .bind(owner)
+        .bind(&owner)
         .bind(name)
         .bind(digest(&token))
         .execute(&mut *transaction)
@@ -512,6 +549,14 @@ pub(super) async fn poll_device(
         .bind(device_digest)
         .execute(&mut *transaction)
         .await?;
+    super::audit::record(
+        &mut transaction,
+        &owner,
+        Some(&installation),
+        "installation.claimed",
+        None,
+    )
+    .await?;
     transaction.commit().await?;
     Ok((
         StatusCode::OK,

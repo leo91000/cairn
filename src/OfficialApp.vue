@@ -8,6 +8,7 @@ import {
 } from 'vue'
 import { logoutAccount, redirect, state } from './api'
 import App from './App.vue'
+import AccountSecurity from './components/AccountSecurity.vue'
 import InstallationSharing from './components/InstallationSharing.vue'
 import PendingInvitations from './components/PendingInvitations.vue'
 import ThemeControl from './components/ThemeControl.vue'
@@ -37,6 +38,7 @@ const session = ref<AccountSession | null>(null)
 const options = ref({ google: false, github: false, passkeys: false })
 const methods = ref<SignInMethod[]>([])
 const showMethods = ref(false)
+const showSecurity = ref(false)
 const passkeyName = ref('My passkey')
 const methodNames = {
   email: 'Email',
@@ -124,6 +126,7 @@ watch(() => state.authenticated, (authenticated) => {
     session.value = null
     installation.value = null
     showMethods.value = false
+    showSecurity.value = false
   }
 })
 
@@ -191,6 +194,7 @@ async function signOut() {
     await logoutAccount()
     session.value = null
     showMethods.value = false
+    showSecurity.value = false
     installation.value = null
     claimCode.value = ''
     deviceCode.value = ''
@@ -594,7 +598,7 @@ onMounted(async () => {
   <main v-if="session?.authenticated && authorizePage" class="min-h-dvh bg-canvas text-ink px-6 py-10">
     <Authorize />
   </main>
-  <div v-else-if="session?.authenticated && installation && !showMethods" class="flex h-dvh min-h-0 flex-col bg-canvas text-ink">
+  <div v-else-if="session?.authenticated && installation && !showMethods && !showSecurity" class="flex h-dvh min-h-0 flex-col bg-canvas text-ink">
     <header class="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2 text-sm" aria-label="Current installation">
       <label v-if="session.installations.length > 1" class="min-w-0 max-w-full">
         <span class="sr-only">Current installation</span>
@@ -665,6 +669,9 @@ onMounted(async () => {
           </UiButton>
           <UiButton size="small" :disabled="busy" @click="openMethods">
             Sign-in methods
+          </UiButton>
+          <UiButton size="small" :disabled="busy" @click="showSecurity = true">
+            Account security
           </UiButton>
           <UiButton size="small" :disabled="busy" @click="signOut">
             Sign out
@@ -760,6 +767,12 @@ onMounted(async () => {
           Try again
         </UiButton>
       </template>
+      <AccountSecurity
+        v-else-if="session?.authenticated && showSecurity"
+        :email="session.account?.email || ''"
+        @close="showSecurity = false"
+        @signed-out="redirect('/')"
+      />
       <template v-else-if="session?.authenticated && showMethods">
         <h1 class="font-heading text-2xl mb-4">
           Sign-in methods
@@ -902,6 +915,9 @@ onMounted(async () => {
         </UiAlert>
         <UiButton class="mb-3" :disabled="busy" @click="openMethods">
           Sign-in methods
+        </UiButton>
+        <UiButton class="mb-3" :disabled="busy" @click="showSecurity = true">
+          Account security
         </UiButton>
         <UiButton :disabled="busy" @click="signOut">
           Sign out

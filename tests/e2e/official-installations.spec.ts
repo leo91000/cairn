@@ -67,7 +67,8 @@ test('selects installations, remembers the last one and honours deep workspace U
   try {
     await expect.poll(() => fetch(`${url}/health`).then(response => response.ok).catch(() => false)).toBe(true)
     await page.goto(url)
-    await page.getByLabel('Email address').fill(`selector-${Date.now()}@example.test`)
+    const email = `selector-${Date.now()}@example.test`
+    await page.getByLabel('Email address').fill(email)
     await page.getByRole('button', { name: 'Send code', exact: true }).click()
     await expect.poll(() => messages.length).toBe(1)
     await page.getByLabel('Email code').fill(messages[0]!.match(/\b\d{8}\b/)![0])
@@ -372,7 +373,18 @@ test('selects installations, remembers the last one and honours deep workspace U
     }
     finally { await recipient.close() }
 
-    await page.getByRole('navigation', { name: 'Workspace navigation', exact: true }).getByRole('button', { name: 'Sign out', exact: true }).click()
+    await page.getByText('Installation options', { exact: true }).click()
+    await page.getByRole('button', { name: 'Account security', exact: true }).click()
+    await page.getByRole('button', { name: 'Delete account', exact: true }).click()
+    await expect(page.getByText('Your installations become unclaimed. Their data stays on their machines; all members lose access.')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Confirm account deletion', exact: true })).toBeDisabled()
+    await page.getByLabel('Account email to confirm deletion', { exact: true }).fill('wrong@example.test')
+    await expect(page.getByRole('button', { name: 'Confirm account deletion', exact: true })).toBeDisabled()
+    await page.getByRole('button', { name: 'Cancel deletion', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'Active sessions' })).toBeVisible()
+    await page.getByRole('button', { name: 'Delete account', exact: true }).click()
+    await page.getByLabel('Account email to confirm deletion', { exact: true }).fill(email)
+    await page.getByRole('button', { name: 'Confirm account deletion', exact: true }).click()
     await expect(page).toHaveURL(`${url}/`)
     await expect(page.getByLabel('Email address')).toBeVisible()
     await page.reload()

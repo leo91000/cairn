@@ -282,7 +282,7 @@ async fn complete_login(
         .execute(&mut *transaction)
         .await?;
 
-    let response = create_session(service, &mut transaction, &account_id, &email).await?;
+    let response = create_session(service, &mut transaction, &account_id, &email, headers).await?;
 
     transaction.commit().await?;
 

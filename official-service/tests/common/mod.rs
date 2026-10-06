@@ -138,6 +138,20 @@ impl Fixture {
             .unwrap()
     }
 
+    pub fn authenticated(
+        &self,
+        cookie: &str,
+        session: &Value,
+        method: reqwest::Method,
+        route: &str,
+    ) -> reqwest::RequestBuilder {
+        self.client
+            .request(method, format!("{}{route}", self.url))
+            .header("origin", &self.url)
+            .header("cookie", cookie)
+            .header("x-csrf-token", session["csrf"].as_str().unwrap())
+    }
+
     pub async fn close(self) {
         self.server.abort();
         self.pool.close().await;

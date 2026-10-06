@@ -101,6 +101,14 @@ pub(super) async fn invite(
         .bind(&installation)
         .fetch_one(&mut *transaction)
         .await?;
+    super::audit::record(
+        &mut transaction,
+        &account,
+        Some(&installation),
+        "invitation.created",
+        Some(&id),
+    )
+    .await?;
     transaction.commit().await?;
 
     let url = format!("{}/?invitations=1", service.origin);
@@ -110,10 +118,20 @@ pub(super) async fn invite(
         .await
         .is_err()
     {
+        let mut transaction = service.pool.begin().await?;
         query("DELETE FROM installation_invitations WHERE id = $1")
             .bind(&id)
-            .execute(&service.pool)
+            .execute(&mut *transaction)
             .await?;
+        super::audit::record(
+            &mut transaction,
+            &account,
+            Some(&installation),
+            "invitation.delivery_failed",
+            Some(&id),
+        )
+        .await?;
+        transaction.commit().await?;
         return Err(ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
             "Invitation email delivery unavailable. Please try again.",
@@ -191,7 +209,15 @@ pub(super) async fn accept(
         ));
     }
     query("INSERT INTO installation_members (installation_id, account_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
-        .bind(installation).bind(account).execute(&mut *transaction).await?;
+        .bind(&installation).bind(&account).execute(&mut *transaction).await?;
+    super::audit::record(
+        &mut transaction,
+        &account,
+        Some(&installation),
+        "invitation.accepted",
+        Some(&invitation),
+    )
+    .await?;
     transaction.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -224,7 +250,15 @@ pub(super) async fn remove(
 ) -> Result<StatusCode, ApiError> {
     let account = installations::account(&service, &headers, &Method::DELETE).await?;
     consume_limit(&service.pool, &format!("sharing:{account}"), 30).await?;
-    let transaction = owner_transaction(&service, &installation, &account).await?;
+    let mut transaction = owner_transaction(&service, &installation, &account).await?;
+    super::audit::record(
+        &mut transaction,
+        &account,
+        Some(&installation),
+        "member.removed",
+        Some(&member),
+    )
+    .await?;
     remove_membership(&service, transaction, &installation, &member).await
 }
 
@@ -245,6 +279,14 @@ pub(super) async fn leave(
         return Err(ApiError(StatusCode::NOT_FOUND, "Installation not found"));
     }
 
+    super::audit::record(
+        &mut transaction,
+        &account,
+        Some(&installation),
+        "member.left",
+        Some(&account),
+    )
+    .await?;
     remove_membership(&service, transaction, &installation, &account).await
 }
 
@@ -258,14 +300,22 @@ pub(super) async fn cancel(
     let mut transaction = owner_transaction(&service, &installation, &account).await?;
     let cancelled =
         query("DELETE FROM installation_invitations WHERE installation_id = $1 AND id = $2")
-            .bind(installation)
-            .bind(invitation)
+            .bind(&installation)
+            .bind(&invitation)
             .execute(&mut *transaction)
             .await?;
     if cancelled.rows_affected() == 0 {
         return Err(ApiError(StatusCode::NOT_FOUND, "Invitation not found"));
     }
 
+    super::audit::record(
+        &mut transaction,
+        &account,
+        Some(&installation),
+        "invitation.cancelled",
+        Some(&invitation),
+    )
+    .await?;
     transaction.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }

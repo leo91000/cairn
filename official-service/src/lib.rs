@@ -3,6 +3,7 @@
 extern crate sqlx_core as sqlx;
 
 mod account;
+mod audit;
 mod installations;
 pub mod installer;
 mod mcp;
@@ -134,6 +135,12 @@ pub async fn router_with_network(
         .route("/api/account/session", get(session))
         .route("/api/account/logout", post(logout))
         .route("/api/account/sessions", get(account::sessions))
+        .route("/api/account/delete", post(account::delete))
+        .route("/api/account/audit", get(audit::list))
+        .route(
+            "/api/account/sessions/revoke-others",
+            post(account::revoke_others),
+        )
         .route(
             "/api/account/sessions/{session}",
             axum::routing::delete(account::revoke_session),
@@ -485,7 +492,8 @@ async fn verify_code(
     query("INSERT INTO sign_in_methods (id, account_id, kind, subject, label) VALUES ($1, $2, 'email', $3, $3) ON CONFLICT (kind, subject) DO UPDATE SET removed = false")
         .bind(uuid::Uuid::new_v4().to_string()).bind(&account_id).bind(&email).execute(&mut *transaction).await?;
 
-    let response = create_session(&service, &mut transaction, &account_id, &email).await?;
+    let response =
+        create_session(&service, &mut transaction, &account_id, &email, &headers).await?;
     transaction.commit().await?;
     Ok(response)
 }
@@ -495,11 +503,20 @@ async fn create_session(
     connection: &mut sqlx_postgres::PgConnection,
     account_id: &str,
     email: &str,
+    headers: &HeaderMap,
 ) -> Result<Response, ApiError> {
     let token = random_token();
     let csrf = random_token();
-    query("INSERT INTO web_sessions (digest, account_id, csrf, expires_at) VALUES ($1, $2, $3, now() + interval '7 days')")
-        .bind(digest(&token)).bind(account_id).bind(&csrf).execute(&mut *connection).await?;
+    let device: String = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("Unknown device")
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(256)
+        .collect();
+    query("INSERT INTO web_sessions (digest, account_id, csrf, expires_at, device) VALUES ($1, $2, $3, now() + interval '7 days', $4)")
+        .bind(digest(&token)).bind(account_id).bind(&csrf).bind(device).execute(&mut *connection).await?;
 
     let secure = if service.origin.starts_with("https://") {
         "; Secure"
@@ -659,6 +676,7 @@ async fn consume_limit_on(
 pub async fn cleanup_expired(pool: &PgPool) -> Result<(), sqlx_core::error::Error> {
     let mut transaction = pool.begin().await?;
     for statement in [
+        "DELETE FROM account_audit WHERE created_at <= now() - interval '90 days'",
         "DELETE FROM email_codes WHERE expires_at <= now()",
         "DELETE FROM web_sessions WHERE expires_at <= now()",
         "DELETE FROM account_rate_limits WHERE resets_at < now() - interval '1 day'",
