@@ -1179,6 +1179,7 @@ async fn node_responses_keep_their_length_when_a_proxy_asks_for_compression() {
         leo_agent_manager::execution::secret(&owner.root().join("data"), "runner-secret")
             .await
             .unwrap();
+
     let request = owner
         .request(
             "POST",
@@ -1191,16 +1192,21 @@ async fn node_responses_keep_their_length_when_a_proxy_asks_for_compression() {
         .header("authorization", bearer(&credential))
         .header("accept-encoding", "gzip, br")
         .body(Body::from(
-            json!({ "runId": id(), "path": "/tmp/shot.png" }).to_string(),
+            json!({ "runId": id(), "path": "/tmp/report.md" }).to_string(),
         ))
         .unwrap();
     let app = owner.app.clone();
     let waiting = tokio::spawn(async move { common::send(&app, request).await });
+
     let token = identity["token"].as_str().unwrap();
     let (status, command) = owner
         .call("POST", "/internal/nodes/poll", json!({}), Some(token))
         .await;
     assert_eq!(status, StatusCode::OK, "{command}");
+    assert!(command["path"].as_str().unwrap().ends_with("/artifact"));
+
+    // Like the runner's export, the reply declares no content type: an image type would skip
+    // compression and hide the bug. 100 bytes exceed the 32-byte compression minimum.
     let file = vec![b'x'; 100];
     let reply = json!({
         "id": command["id"],
