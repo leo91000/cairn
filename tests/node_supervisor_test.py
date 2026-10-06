@@ -155,7 +155,7 @@ class Supervisor(unittest.TestCase):
                 result = subprocess.run(['node', '-e', shim + probe[-1], json.dumps(value)], capture_output=True)
                 self.assertEqual(result.returncode, expected, result.stderr.decode())
 
-    def scenario(self, fail, lost_completion=False, retained=False):
+    def scenario(self, fail, lost_completion=False, retained=False, cache=True):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / 'data/node').mkdir(parents=True)
@@ -165,6 +165,7 @@ class Supervisor(unittest.TestCase):
             (root / 'docker.json').write_text(json.dumps({'Config': {'Image': OLD, 'Labels': {'dev.leo.node.owner': 'fixture-node'}}, 'State': {'Running': True}}))
             completed = queue.Queue()
             completion_attempts = []
+            runtime_requests = []
 
             class Master(http.server.BaseHTTPRequestHandler):
                 def log_message(self, *_):
@@ -181,6 +182,8 @@ class Supervisor(unittest.TestCase):
                         self.end_headers()
                         return
                     value = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                    if value['action'] == 'runtimes':
+                        runtime_requests.append(value)
                     if value['action'] == 'complete' and (value['image'] == NEW or value.get('error')):
                         completion_attempts.append(value)
                         if lost_completion and len(completion_attempts) == 1:
@@ -195,12 +198,12 @@ class Supervisor(unittest.TestCase):
             server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Master)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
-            (root / 'config.json').write_text(json.dumps({'image': OLD, 'master': f'http://127.0.0.1:{server.server_port}'}))
+            (root / 'config.json').write_text(json.dumps({'image': OLD, 'master': f'http://127.0.0.1:{server.server_port}', 'cacheApprovedRuntimes': cache}))
             env = {**os.environ, 'PATH': str(root) + os.pathsep + os.environ['PATH'], 'LEO_NODE_ROOT': str(root), 'FAIL_CANDIDATE': str(int(fail)), 'FIXTURE_SUPERVISOR': str(SOURCE)}
             process = subprocess.Popen([sys.executable, str(SOURCE), 'run'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
                 value = completed.get(timeout=40)
-                if retained:
+                if retained and cache:
                     deadline = time.monotonic() + 10
                     while not (root / 'state/images/retained-runtime/root.ext4').exists():
                         self.assertLess(time.monotonic(), deadline)
@@ -218,6 +221,9 @@ class Supervisor(unittest.TestCase):
                 self.assertEqual(launches, [NEW, OLD] if fail else [NEW])
                 self.assertTrue(any(cmd[0] == 'stop' for cmd in commands))
                 self.assertFalse(any('fixture-token' in ' '.join(cmd) for cmd in commands))
+                if not cache:
+                    self.assertEqual(runtime_requests, [])
+                    self.assertFalse(any('--network=none' in cmd for cmd in commands))
             finally:
                 if process.poll() is None:
                     process.kill()
@@ -228,6 +234,9 @@ class Supervisor(unittest.TestCase):
 
     def test_fetches_retained_runtime_from_its_approved_digest(self):
         self.scenario(False, retained=True)
+
+    def test_disabled_runtime_preloading_keeps_the_healthy_node_without_downloading_old_images(self):
+        self.scenario(False, retained=True, cache=False)
 
     def test_success_commits_new_digest_and_stops_cleanly(self):
         self.scenario(False)
