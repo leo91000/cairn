@@ -144,7 +144,7 @@ if 'up' in args or not target.exists():
         if service == 'manager' and ref == list(registry)[2]:
             config['services'][service]['entrypoint'] = ['/bin/sh', '-c', 'exit 1']
         if service == 'manager' and ref == list(registry)[3]:
-            config['services'][service]['entrypoint'] = ['python3', '-c', 'import time; time.sleep(600)']
+            config['services'][service]['entrypoint'] = ['python3', '-c', 'import signal, sys, time; signal.signal(signal.SIGTERM, lambda *_: sys.exit(0)); time.sleep(600)']
     target.write_text(json.dumps(config))
 args[args.index('-f') + 1] = str(target)
 if 'ps' in args:
