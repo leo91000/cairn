@@ -51,7 +51,7 @@ abstract class ChatProviderCases {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
-                        if (path == "/api/chats/chat/stream") {
+                        if (path == "/api/installations/fixture/api/chats/chat/stream") {
                             val frame =
                                 "event: batch\nid: 0\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), LiveState(chat = chat, run = run), true, false))}\n\n"
                             return MockResponse()
@@ -65,10 +65,13 @@ abstract class ChatProviderCases {
                         }
                         val body =
                             when (path) {
-                                "/api/session" -> """{"authenticated":true,"csrf":"fixture"}"""
-                                "/api/agents" -> wireJson.encodeToString(listOf(agent))
-                                "/api/claude/models" -> """{"models":[]}"""
-                                "/api/overview" -> "{}"
+                                "/api/installations" -> officialInstallationsFixture()
+                                "/api/account/session" -> officialAccountFixture("fixture")
+                                "/api/installations/fixture/api/agents" ->
+                                    wireJson.encodeToString(listOf(agent))
+                                "/api/installations/fixture/api/claude/models" ->
+                                    """{"models":[]}"""
+                                "/api/installations/fixture/api/overview" -> "{}"
                                 else -> "[]"
                             }
                         return MockResponse().setBody(body)
@@ -80,6 +83,7 @@ abstract class ChatProviderCases {
                 LeoViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     ProviderVault(),
+                    officialOrigin = "",
                 )
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()
@@ -137,7 +141,7 @@ abstract class ChatProviderCases {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
-                        if (path == "/api/chats/chat/stream") {
+                        if (path == "/api/installations/fixture/api/chats/chat/stream") {
                             val frame =
                                 "event: batch\nid: 0\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), LiveState(chat = chat, run = run), true, false))}\n\n"
                             return MockResponse()
@@ -151,20 +155,22 @@ abstract class ChatProviderCases {
                         }
                         val body =
                             when (path) {
-                                "/api/session" -> """{"authenticated":true,"csrf":"fixture"}"""
-                                "/api/agents" -> wireJson.encodeToString(listOf(agent))
-                                "/api/chats/chat/messages" -> {
+                                "/api/installations" -> officialInstallationsFixture()
+                                "/api/account/session" -> officialAccountFixture("fixture")
+                                "/api/installations/fixture/api/agents" ->
+                                    wireJson.encodeToString(listOf(agent))
+                                "/api/installations/fixture/api/chats/chat/messages" -> {
                                     sent +=
                                         wireJson
                                             .parseToJsonElement(request.body.readUtf8())
                                             .jsonObject
                                     "{}"
                                 }
-                                "/api/codex/models" ->
+                                "/api/installations/fixture/api/codex/models" ->
                                     """{"models":[{"model":"fixture-deep","displayName":"Deep thinker","supportedReasoningEfforts":[{"reasoningEffort":"ultra"}]}]}"""
-                                "/api/claude/models" ->
+                                "/api/installations/fixture/api/claude/models" ->
                                     """{"models":[{"model":"opus[1m]","displayName":"Opus 1M","isDefault":true,"supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}"""
-                                "/api/overview" -> "{}"
+                                "/api/installations/fixture/api/overview" -> "{}"
                                 else -> "[]"
                             }
                         return MockResponse().setBody(body)
@@ -175,6 +181,7 @@ abstract class ChatProviderCases {
                 LeoViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     ProviderVault(),
+                    officialOrigin = "",
                 )
             val restoration = StateRestorationTester(compose)
             restoration.setContent {

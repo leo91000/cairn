@@ -22,10 +22,12 @@ import org.robolectric.annotation.GraphicsMode
 class NativeUiTest {
     @get:Rule val compose = createComposeRule()
 
-    private fun model() = LeoViewModel(ApplicationProvider.getApplicationContext<Application>())
+    private fun model() =
+        LeoViewModel(ApplicationProvider.getApplicationContext<Application>(), officialOrigin = "")
 
     private val workspace =
         Workspace(
+            installation = Installation("fixture", "Installation de test", "owner", true),
             ready = true,
             agents = listOf(Agent(id = "agent", name = "Reviewer")),
             projects = listOf(Project(id = "project", name = "Leo Agent Manager")),

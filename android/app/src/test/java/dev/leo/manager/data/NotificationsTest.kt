@@ -38,11 +38,12 @@ class NotificationsTest {
                             return MockResponse()
                                 .setBody(
                                     when (request.path) {
-                                        "/api/session" -> """{"authenticated":true}"""
-                                        "/api/chats" ->
+                                        "/api/installations" -> officialInstallationsFixture()
+                                        "/api/account/session" -> officialAccountFixture("fixture")
+                                        "/api/installations/fixture/api/chats" ->
                                             if (pending) """[{"id":"chat","pendingQuestions":1}]"""
                                             else "[]"
-                                        "/api/chats/chat" ->
+                                        "/api/installations/fixture/api/chats/chat" ->
                                             """{"id":"chat","questions":[{"id":"q","chatId":"chat","fields":[{"id":"private","title":"Do not show in notifications","secret":true}]}]}"""
                                         else -> "{}"
                                     }
@@ -51,7 +52,7 @@ class NotificationsTest {
                     }
                 server.start()
                 val origin = server.url("/").toString()
-                Preferences(context).setOrigin(origin)
+
                 val prefs = NotificationPreferences(context)
                 prefs.setEnabled(true)
                 val vault =
@@ -67,7 +68,7 @@ class NotificationsTest {
                                     workerClassName: String,
                                     workerParameters: WorkerParameters,
                                 ): ListenableWorker =
-                                    QuestionWorker(appContext, workerParameters, vault)
+                                    QuestionWorker(appContext, workerParameters, vault, origin)
                             }
                         )
                         .build()
@@ -76,7 +77,7 @@ class NotificationsTest {
                 val notification = manager.activeNotifications.single().notification
                 val intent = shadowOf(notification.contentIntent).savedIntent
                 assertEquals("chat", intent.getStringExtra("chat"))
-                assertEquals(origin, intent.getStringExtra("origin"))
+                assertEquals(origin + "fixture", intent.getStringExtra("origin"))
                 assertFalse(notification.extras.toString().contains("Do not show"))
                 assertEquals(setOf("q"), prefs.seen())
                 manager.cancelAll()
@@ -110,15 +111,16 @@ class NotificationsTest {
                         MockResponse()
                             .setBody(
                                 when (request.path) {
-                                    "/api/session" -> """{"authenticated":true}"""
-                                    "/api/nodes/alerts" -> alerts
+                                    "/api/installations" -> officialInstallationsFixture()
+                                    "/api/account/session" -> officialAccountFixture("fixture")
+                                    "/api/installations/fixture/api/nodes/alerts" -> alerts
                                     else -> "[]"
                                 }
                             )
                 }
             server.start()
             val origin = server.url("/").toString()
-            Preferences(context).setOrigin(origin)
+
             NotificationPreferences(context).setEnabled(true)
             val vault =
                 MemoryVault().apply { write(origin, "leo_session=fixture; Path=/; Max-Age=3600") }
@@ -131,7 +133,7 @@ class NotificationsTest {
                                 workerClassName: String,
                                 workerParameters: WorkerParameters,
                             ): ListenableWorker =
-                                QuestionWorker(appContext, workerParameters, vault)
+                                QuestionWorker(appContext, workerParameters, vault, origin)
                         }
                     )
                     .build()

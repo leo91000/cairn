@@ -1,6 +1,7 @@
 package dev.leo.manager.ui
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -22,14 +23,15 @@ fun SkillsScreen(vm: LeoViewModel, state: Workspace) {
         }
     Page {
         Heading("Skills")
-        Button(
-            onClick = {
-                vm.clearMessage()
-                editing = ""
+        if (state.isOwner)
+            Button(
+                onClick = {
+                    vm.clearMessage()
+                    editing = ""
+                }
+            ) {
+                Text("Créer un skill")
             }
-        ) {
-            Text("Créer un skill")
-        }
         SearchField("Rechercher", query, { query = it })
         Choice(
             "Portée",
@@ -59,21 +61,35 @@ fun SkillsScreen(vm: LeoViewModel, state: Workspace) {
                             editing = "${skill.scope}/${skill.name}"
                         },
                     )
-                    ActionIcon(
-                        "Supprimer",
-                        Icons.Default.Delete,
-                        onClick = {
-                            vm.clearMessage()
-                            deleting = "${skill.scope}/${skill.name}"
-                        },
-                    )
+                    if (state.isOwner)
+                        ActionIcon(
+                            "Supprimer",
+                            Icons.Default.Delete,
+                            onClick = {
+                                vm.clearMessage()
+                                deleting = "${skill.scope}/${skill.name}"
+                            },
+                        )
                 }
             }
         }
     }
     editing?.let { key ->
         val original = state.skills.find { "${it.scope}/${it.name}" == key }
-        SkillEditor(vm, state, original) { editing = null }
+        if (state.isOwner) SkillEditor(vm, state, original) { editing = null }
+        else if (original != null)
+            AlertDialog(
+                onDismissRequest = { editing = null },
+                title = { Text(original.name) },
+                text = {
+                    androidx.compose.foundation.layout.Column(
+                        Modifier.verticalScroll(androidx.compose.foundation.rememberScrollState())
+                    ) {
+                        Markdown(original.content)
+                    }
+                },
+                confirmButton = { TextButton(onClick = { editing = null }) { Text("Fermer") } },
+            )
     }
     deleting?.let { key ->
         Confirm(

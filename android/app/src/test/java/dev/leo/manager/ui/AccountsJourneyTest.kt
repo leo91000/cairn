@@ -62,22 +62,23 @@ class AccountsJourneyTest {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
                         val payload = request.body.readUtf8()
-                        if (path.startsWith("/api/accounts"))
+                        if (path.startsWith("/api/installations/fixture/api/accounts"))
                             server.requests += "${request.method} $path" to payload
                         val result =
                             respond(request, payload)
                                 ?: when (path) {
-                                    "/api/session" -> """{"authenticated":true,"csrf":"fixture"}"""
-                                    "/api/accounts" ->
+                                    "/api/installations" -> officialInstallationsFixture()
+                                    "/api/account/session" -> officialAccountFixture("fixture")
+                                    "/api/installations/fixture/api/accounts" ->
                                         """{"accounts":[${server.accounts.joinToString(",")}],"signIn":${server.signIn}}"""
-                                    "/api/connections" ->
+                                    "/api/installations/fixture/api/connections" ->
                                         """[{"provider":"github","installed":true,"connected":true,"account":"leo-coletta"}]"""
-                                    "/api/connections/login" -> "null"
-                                    "/api/runs" ->
+                                    "/api/installations/fixture/api/connections/login" -> "null"
+                                    "/api/installations/fixture/api/runs" ->
                                         """[{"id":"run","status":"running","taskName":"Revue des dépendances"}]"""
-                                    "/api/overview",
-                                    "/api/codex/models",
-                                    "/api/claude/models" -> "{}"
+                                    "/api/installations/fixture/api/overview",
+                                    "/api/installations/fixture/api/codex/models",
+                                    "/api/installations/fixture/api/claude/models" -> "{}"
                                     else -> "[]"
                                 }
                         return MockResponse().setBody(result)
@@ -88,6 +89,7 @@ class AccountsJourneyTest {
                 LeoViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     MemoryVault(),
+                    officialOrigin = "",
                 )
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()
@@ -128,7 +130,7 @@ class AccountsJourneyTest {
             server,
             { request, payload ->
                 when ("${request.method} ${request.path}") {
-                    "POST /api/accounts" -> {
+                    "POST /api/installations/fixture/api/accounts" -> {
                         assertEquals("fixture", request.getHeader("X-CSRF-Token"))
                         server.signIn =
                             """{"accountId":"studio","provider":"claude","state":"pending","phase":"authorizing","url":"https://claude.com/oauth/authorize?fixture=1","acceptsCode":true}"""
@@ -136,7 +138,7 @@ class AccountsJourneyTest {
                             """{"id":"studio","provider":"claude","name":"Studio","state":"pending","status":"signIn"}"""
                         server.signIn
                     }
-                    "POST /api/accounts/sign-in/code" -> {
+                    "POST /api/installations/fixture/api/accounts/sign-in/code" -> {
                         server.signIn =
                             """{"accountId":"studio","provider":"claude","state":"complete","phase":"verifying"}"""
                         server.accounts[1] =
@@ -161,19 +163,27 @@ class AccountsJourneyTest {
             compose.onNodeWithText("Code d’autorisation Claude").performTextInput("fixture-code")
             compose.onNodeWithText("Terminer la connexion").performScrollTo().performClick()
             compose.waitUntil(15000) {
-                server.requests.any { it.first == "POST /api/accounts/sign-in/code" }
+                server.requests.any {
+                    it.first == "POST /api/installations/fixture/api/accounts/sign-in/code"
+                }
             }
             val added =
                 wireJson
                     .parseToJsonElement(
-                        server.requests.first { it.first == "POST /api/accounts" }.second
+                        server.requests
+                            .first { it.first == "POST /api/installations/fixture/api/accounts" }
+                            .second
                     )
                     .jsonObject
             assertEquals("claude", added["provider"]?.jsonPrimitive?.content)
             assertEquals("Studio", added["name"]?.jsonPrimitive?.content)
             assertEquals(
                 """{"code":"fixture-code"}""",
-                server.requests.first { it.first == "POST /api/accounts/sign-in/code" }.second,
+                server.requests
+                    .first {
+                        it.first == "POST /api/installations/fixture/api/accounts/sign-in/code"
+                    }
+                    .second,
             )
             compose.waitUntil(15000) {
                 compose
@@ -193,7 +203,7 @@ class AccountsJourneyTest {
             server,
             { request, payload ->
                 if (request.method == "PATCH") {
-                    assertEquals("/api/accounts/work", request.path)
+                    assertEquals("/api/installations/fixture/api/accounts/work", request.path)
                     val update = wireJson.parseToJsonElement(payload).jsonObject
                     update["maxConcurrentRuns"]?.let {
                         server.accounts[0] =
@@ -227,11 +237,15 @@ class AccountsJourneyTest {
                 .performScrollTo()
                 .performClick()
             compose.waitUntil(10000) {
-                server.requests.any { it.first == "PATCH /api/accounts/work" }
+                server.requests.any {
+                    it.first == "PATCH /api/installations/fixture/api/accounts/work"
+                }
             }
             assertEquals(
                 """{"maxConcurrentRuns":5}""",
-                server.requests.first { it.first == "PATCH /api/accounts/work" }.second,
+                server.requests
+                    .first { it.first == "PATCH /api/installations/fixture/api/accounts/work" }
+                    .second,
             )
             waitText("EN COURS · 1 SUR 5")
             compose
@@ -239,11 +253,15 @@ class AccountsJourneyTest {
                 .performScrollTo()
                 .performClick()
             compose.waitUntil(10000) {
-                server.requests.count { it.first == "PATCH /api/accounts/work" } == 2
+                server.requests.count {
+                    it.first == "PATCH /api/installations/fixture/api/accounts/work"
+                } == 2
             }
             assertEquals(
                 """{"enabled":false}""",
-                server.requests.last { it.first == "PATCH /api/accounts/work" }.second,
+                server.requests
+                    .last { it.first == "PATCH /api/installations/fixture/api/accounts/work" }
+                    .second,
             )
             waitText("En pause")
         }
@@ -268,7 +286,10 @@ class AccountsJourneyTest {
         journey(
             server,
             { request, _ ->
-                if (request.method == "DELETE" && request.path == "/api/accounts/sign-in") {
+                if (
+                    request.method == "DELETE" &&
+                        request.path == "/api/installations/fixture/api/accounts/sign-in"
+                ) {
                     server.signIn = "null"
                     """{"cancelled":true}"""
                 } else null
@@ -280,7 +301,9 @@ class AccountsJourneyTest {
             capture("codex-sign-in-light")
             compose.onNodeWithText("Annuler la connexion").performScrollTo().performClick()
             compose.waitUntil(10000) {
-                server.requests.any { it.first == "DELETE /api/accounts/sign-in" }
+                server.requests.any {
+                    it.first == "DELETE /api/installations/fixture/api/accounts/sign-in"
+                }
             }
             compose.waitUntil(10000) {
                 compose

@@ -133,9 +133,9 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                 override fun dispatch(request: RecordedRequest): MockResponse {
                     val path = request.path!!.substringBefore('?')
                     if (
-                        path.startsWith("/api/chats/") &&
+                        path.startsWith("/api/installations/fixture/api/chats/") &&
                             path.endsWith("/stream") &&
-                            path != "/api/chats/stream"
+                            path != "/api/installations/fixture/api/chats/stream"
                     )
                         return stream(
                             LiveState(
@@ -144,27 +144,33 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                             )
                         )
                     when (path) {
-                        "/api/chats/stream" -> return stream(LiveState(chats = chats))
-                        "/api/runs/run/stream" -> return stream(LiveState(run = run))
+                        "/api/installations/fixture/api/chats/stream" ->
+                            return stream(LiveState(chats = chats))
+                        "/api/installations/fixture/api/runs/run/stream" ->
+                            return stream(LiveState(run = run))
                     }
                     val body =
                         when (path) {
-                            "/api/session" -> "{\"authenticated\":true,\"csrf\":\"fixture\"}"
-                            "/api/agents" ->
+                            "/api/installations" -> officialInstallationsFixture()
+                            "/api/account/session" -> officialAccountFixture("fixture")
+                            "/api/installations/fixture/api/agents" ->
                                 wireJson.encodeToString(
                                     listOf(Agent(MAIN_AGENT_ID, "Agent principal"))
                                 )
-                            "/api/tasks" -> wireJson.encodeToString(listOf(task))
-                            "/api/tasks/activity" -> wireJson.encodeToString(listOf(run))
-                            "/api/runs" -> wireJson.encodeToString(listOf(run))
-                            "/api/schedule/preview" ->
+                            "/api/installations/fixture/api/tasks" ->
+                                wireJson.encodeToString(listOf(task))
+                            "/api/installations/fixture/api/tasks/activity" ->
+                                wireJson.encodeToString(listOf(run))
+                            "/api/installations/fixture/api/runs" ->
+                                wireJson.encodeToString(listOf(run))
+                            "/api/installations/fixture/api/schedule/preview" ->
                                 "{\"occurrences\":[${timestamp + 86400000},${timestamp + 8 * 86400000}]}"
-                            "/api/projects" ->
+                            "/api/installations/fixture/api/projects" ->
                                 wireJson.encodeToString(
                                     listOf(Project("project", "Leo Agent Manager"))
                                 )
-                            "/api/skills",
-                            "/api/mcps" -> "[]"
+                            "/api/installations/fixture/api/skills",
+                            "/api/installations/fixture/api/mcps" -> "[]"
                             else -> "{}"
                         }
                     return MockResponse()
@@ -173,11 +179,10 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                 }
             }
         val application = ApplicationProvider.getApplicationContext<Application>()
-        runBlocking { Preferences(application).setOrigin("") }
-        return LeoViewModel(application).also { vm ->
+
+        return LeoViewModel(application, officialOrigin = "").also { vm ->
             runBlocking {
                 vm.state.first { it.ready }
-                vm.forget()
                 vm.connect(server.url("/").toString())
             }
         }

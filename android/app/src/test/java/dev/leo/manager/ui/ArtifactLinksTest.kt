@@ -56,52 +56,58 @@ class ArtifactLinksTest {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!
-                        if (path.startsWith("/api/runs/")) {
+                        if (path.startsWith("/api/installations/fixture/api/runs/")) {
                             paths.add(path)
                             if (request.getHeader("Cookie") != "leo_session=fixture")
                                 return MockResponse()
                                     .setResponseCode(401)
                                     .setBody("{\"error\":\"Missing session\"}")
                         }
-                        if (path == "/api/runs/older/artifacts/file/visibility") {
+                        if (
+                            path ==
+                                "/api/installations/fixture/api/runs/older/artifacts/file/visibility"
+                        ) {
                             assertEquals("PUT", request.method)
                             assertEquals("fixture", request.getHeader("X-CSRF-Token"))
                             public.set(request.body.readUtf8().contains("public"))
                         }
                         val body =
                             when (path) {
-                                "/api/runs/older/artifacts/file?metadata=1",
-                                "/api/runs/older/artifacts/file/visibility" ->
+                                "/api/installations/fixture/api/runs/older/artifacts/file?metadata=1",
+                                "/api/installations/fixture/api/runs/older/artifacts/file/visibility" ->
                                     wireJson.encodeToString(
                                         file.copy(
                                             visibility = if (public.get()) "public" else "private",
                                             publicUrl =
                                                 if (public.get())
                                                     server
-                                                        .url("/api/public/artifacts/public-fixture")
+                                                        .url(
+                                                            "/api/installations/fixture/api/public/artifacts/public-fixture"
+                                                        )
                                                         .toString()
                                                 else null,
                                         )
                                     )
-                                "/api/session" ->
+                                "/api/installations" -> officialInstallationsFixture()
+                                "/api/account/session" ->
                                     return MockResponse()
                                         .setHeader(
                                             "Set-Cookie",
                                             "leo_session=fixture; Path=/; HttpOnly",
                                         )
-                                        .setBody("{\"authenticated\":true,\"csrf\":\"fixture\"}")
-                                "/api/runs/older/artifacts" ->
+                                        .setBody(officialAccountFixture("fixture"))
+                                "/api/installations/fixture/api/runs/older/artifacts" ->
                                     wireJson.encodeToString(listOf(file, sibling))
-                                "/api/runs/older/artifacts/file?download=1" ->
+                                "/api/installations/fixture/api/runs/older/artifacts/file?download=1" ->
                                     "Document conservé depuis un ancien run."
-                                "/api/runs/older/artifacts/sibling?download=1" ->
+                                "/api/installations/fixture/api/runs/older/artifacts/sibling?download=1" ->
                                     "Annexe du même run."
-                                "/api/agents" ->
+                                "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
                                         listOf(Agent(id = MAIN_AGENT_ID, name = "Leo"))
                                     )
-                                "/api/overview",
-                                "/api/codex/models" -> "{}"
+                                "/api/installations/fixture/api/overview",
+                                "/api/installations/fixture/api/codex/models" -> "{}"
                                 else -> "[]"
                             }
                         return MockResponse().setBody(body).apply {
@@ -115,6 +121,7 @@ class ArtifactLinksTest {
                 LeoViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     MemoryVault(),
+                    officialOrigin = "",
                 )
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()
@@ -128,7 +135,11 @@ class ArtifactLinksTest {
                             val open = LocalArtifactLinks.current
                             TextButton(
                                 onClick = {
-                                    assertTrue(open("/api/runs/older/artifacts/file?download=1"))
+                                    assertTrue(
+                                        open(
+                                            "/api/installations/fixture/api/runs/older/artifacts/file?download=1"
+                                        )
+                                    )
                                 }
                             ) {
                                 Text("Ouvrir le document")
@@ -145,7 +156,9 @@ class ArtifactLinksTest {
             }
             // Receiving the request precedes loading the document and enabling save.
             compose.waitUntil(15000) {
-                paths.contains("/api/runs/older/artifacts/file?download=1") &&
+                paths.contains(
+                    "/api/installations/fixture/api/runs/older/artifacts/file?download=1"
+                ) &&
                     compose
                         .onAllNodes(hasContentDescription("Enregistrer") and isEnabled())
                         .fetchSemanticsNodes()
@@ -168,7 +181,9 @@ class ArtifactLinksTest {
                 ApplicationProvider.getApplicationContext<Application>()
                     .getSystemService(ClipboardManager::class.java)
             assertEquals(
-                server.url("/api/public/artifacts/public-fixture").toString(),
+                server
+                    .url("/api/installations/fixture/api/public/artifacts/public-fixture")
+                    .toString(),
                 clipboard.primaryClip!!.getItemAt(0).text.toString(),
             )
             compose.onNodeWithText("Partager le lien").assertIsEnabled()
@@ -179,13 +194,18 @@ class ArtifactLinksTest {
             compose.onNodeWithText("Fermer", useUnmergedTree = true).performClick()
             compose.onNodeWithTag("artifact-pager").performTouchInput { swipeLeft() }
             compose.waitUntil(10000) {
-                paths.contains("/api/runs/older/artifacts/sibling?download=1")
+                paths.contains(
+                    "/api/installations/fixture/api/runs/older/artifacts/sibling?download=1"
+                )
             }
             compose.onNodeWithText("appendix.md").assertExists()
             compose.onNodeWithText("2 / 2").assertExists()
             compose.onNodeWithContentDescription("Fermer le fichier").performClick()
             assertEquals(
-                listOf("/api/runs/older/artifacts", "/api/runs/older/artifacts/file?download=1"),
+                listOf(
+                    "/api/installations/fixture/api/runs/older/artifacts",
+                    "/api/installations/fixture/api/runs/older/artifacts/file?download=1",
+                ),
                 paths.take(2),
             )
         }

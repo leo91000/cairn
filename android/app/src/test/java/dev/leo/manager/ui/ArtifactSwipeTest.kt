@@ -317,19 +317,24 @@ class ArtifactSwipeTest {
                     return MockResponse()
                         .setBody(
                             when (path) {
-                                "/api/session" -> """{"authenticated":true,"csrf":"fixture"}"""
-                                "/api/agents" ->
+                                "/api/installations" -> officialInstallationsFixture()
+                                "/api/account/session" -> officialAccountFixture("fixture")
+                                "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(listOf(Agent(MAIN_AGENT_ID, "Leo")))
-                                "/api/overview",
-                                "/api/codex/models",
-                                "/api/claude/models" -> "{}"
+                                "/api/installations/fixture/api/overview",
+                                "/api/installations/fixture/api/codex/models",
+                                "/api/installations/fixture/api/claude/models" -> "{}"
                                 else -> "[]"
                             }
                         )
                 }
             }
         val vm =
-            LeoViewModel(ApplicationProvider.getApplicationContext<Application>(), MemoryVault())
+            LeoViewModel(
+                ApplicationProvider.getApplicationContext<Application>(),
+                MemoryVault(),
+                officialOrigin = "",
+            )
         restoration.setContent {
             val state by vm.state.collectAsStateWithLifecycle()
             // Restoration recomposes this effect; reconnecting would reset the workspace and

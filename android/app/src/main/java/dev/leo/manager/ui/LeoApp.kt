@@ -19,7 +19,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -71,14 +72,125 @@ fun LeoApp(
         LoginScreen(vm, state)
         return
     }
+    if (state.installation == null) {
+        Poll(state.session.account?.id, 30_000) {
+            try {
+                vm.refreshInstallations()
+            } catch (e: Exception) {
+                vm.report(e)
+            }
+        }
+        Page {
+            Heading(
+                "Aucune installation",
+                "Ajoutez ou revendiquez une installation depuis le service officiel.",
+            )
+            Text(state.session.account?.email.orEmpty())
+            Text("Les installations de votre compte Leo apparaîtront ici.")
+            TextButton(onClick = { vm.perform { refreshInstallations() } }) { Text("Actualiser") }
+            TextButton(onClick = { vm.perform { logout() } }) { Text("Se déconnecter") }
+            state.error?.let { ErrorNotice(it, vm::clearMessage) }
+        }
+        return
+    }
+    val installation = checkNotNull(state.installation)
+    Poll(state.session.account?.id, 30_000) {
+        try {
+            vm.refreshInstallations()
+        } catch (e: Exception) {
+            vm.report(e)
+        }
+    }
+    Column(Modifier.fillMaxSize()) {
+        var choosing by remember { mutableStateOf(false) }
+        Box(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 12.dp)) {
+            if (state.session.installations.size > 1)
+                TextButton(
+                    onClick = { choosing = true },
+                    enabled = state.session.installations.size > 1 && !state.busy,
+                    modifier =
+                        Modifier.semantics { contentDescription = "Choisir une installation" },
+                ) {
+                    Text(
+                        "${installation.name} · ${if (installation.online) "En ligne" else "Hors ligne"}"
+                    )
+                }
+            else
+                Text(
+                    "${installation.name} · ${if (installation.online) "En ligne" else "Hors ligne"}",
+                    Modifier.padding(horizontal = 8.dp, vertical = 12.dp),
+                )
+            DropdownMenu(expanded = choosing, onDismissRequest = { choosing = false }) {
+                state.session.installations.forEach { choice ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                "${choice.name} · ${if (choice.online) "En ligne" else "Hors ligne"}"
+                            )
+                        },
+                        onClick = {
+                            choosing = false
+                            vm.perform { selectInstallation(choice.id) }
+                        },
+                    )
+                }
+            }
+        }
+        key(installation.id, installation.role, state.session.csrf) {
+            Box(Modifier.weight(1f)) {
+                if (!installation.online)
+                    Page {
+                        Heading(
+                            "Installation hors ligne",
+                            "Les exécutions continuent sur votre installation. Réessayez lorsqu’elle sera connectée.",
+                        )
+                        TextButton(onClick = { vm.perform { refreshInstallations() } }) {
+                            Text("Actualiser")
+                        }
+                        TextButton(onClick = { vm.perform { logout() } }) { Text("Se déconnecter") }
+                        state.error?.let { ErrorNotice(it, vm::clearMessage) }
+                    }
+                else
+                    WorkspaceApp(
+                        vm,
+                        state,
+                        snackbar,
+                        sharedUrl,
+                        consumedShare,
+                        targetChat,
+                        targetOrigin,
+                        consumedTarget,
+                    )
+            }
+        }
+    }
+}
+
+@Composable
+private fun WorkspaceApp(
+    vm: LeoViewModel,
+    state: Workspace,
+    snackbar: SnackbarHostState,
+    sharedUrl: String,
+    consumedShare: () -> Unit,
+    targetChat: String,
+    targetOrigin: String,
+    consumedTarget: () -> Unit,
+) {
     val nav = rememberNavController()
     val backStack by nav.currentBackStackEntryAsState()
     val route = backStack?.destination?.route ?: "fil"
     LaunchedEffect(sharedUrl) {
-        if (sharedUrl.isNotBlank()) nav.navigate("authorize") { launchSingleTop = true }
+        if (sharedUrl.isNotBlank()) {
+            if (state.isOwner) nav.navigate("authorize") { launchSingleTop = true }
+            else {
+                vm.notify("Cette action est réservée au propriétaire de l’installation.")
+                consumedShare()
+            }
+        }
     }
-    LaunchedEffect(targetChat, state.origin) {
-        if (targetChat.isNotBlank() && targetOrigin == state.origin) {
+    LaunchedEffect(targetChat, vm.api.cacheScope) {
+        if (targetChat.isNotBlank() && targetOrigin == vm.api.cacheScope) {
             nav.navigate("chat/${segment(targetChat)}") {
                 // A pager may now display a different chat from its route's starting id.
                 if (nav.currentDestination?.route == "chat/{id}") {
@@ -199,7 +311,13 @@ fun LeoApp(
                                     state,
                                     openChat = { nav.navigate("chat/$it") },
                                     openRun = { nav.navigate("run/$it") },
-                                    openConnections = { nav.navigate("connections") },
+                                    openConnections = {
+                                        if (state.isOwner) nav.navigate("connections")
+                                        else
+                                            vm.notify(
+                                                "Demandez au propriétaire de reconnecter le compte."
+                                            )
+                                    },
                                     search = { nav.navigate("search") },
                                 )
                             }
@@ -228,7 +346,13 @@ fun LeoApp(
                                     openRun = { nav.navigate("run/$it") },
                                     back = { nav.popBackStack() },
                                     create = { nav.navigate("new-chat") },
-                                    openConnections = { nav.navigate("connections") },
+                                    openConnections = {
+                                        if (state.isOwner) nav.navigate("connections")
+                                        else
+                                            vm.notify(
+                                                "Demandez au propriétaire de reconnecter le compte."
+                                            )
+                                    },
                                 )
                             }
                             composable("new-chat?agent={agent}&project={project}") { entry ->
@@ -245,7 +369,13 @@ fun LeoApp(
                                     openRun = { nav.navigate("run/$it") },
                                     back = { nav.popBackStack() },
                                     create = { nav.navigate("new-chat") },
-                                    openConnections = { nav.navigate("connections") },
+                                    openConnections = {
+                                        if (state.isOwner) nav.navigate("connections")
+                                        else
+                                            vm.notify(
+                                                "Demandez au propriétaire de reconnecter le compte."
+                                            )
+                                    },
                                 )
                             }
                             composable("missions") {
@@ -278,16 +408,18 @@ fun LeoApp(
                                     nav.navigate("new-chat?agent=$agent&project=$project")
                                 }
                             }
-                            composable("mcps") { McpsScreen(vm, state) }
+                            if (state.isOwner) composable("mcps") { McpsScreen(vm, state) }
                             composable("skills") { SkillsScreen(vm, state) }
-                            composable("connections") {
-                                ConnectionsScreen(vm, state) { nav.navigate("run/$it") }
-                            }
-                            composable("nodes") { NodesScreen(vm, state) }
-                            composable("settings") { SettingsScreen(vm, state) }
-                            composable("authorize") {
-                                AuthorizeScreen(vm, state, sharedUrl, consumedShare)
-                            }
+                            if (state.isOwner)
+                                composable("connections") {
+                                    ConnectionsScreen(vm, state) { nav.navigate("run/$it") }
+                                }
+                            if (state.isOwner) composable("nodes") { NodesScreen(vm, state) }
+                            if (state.isOwner) composable("settings") { SettingsScreen(vm, state) }
+                            if (state.isOwner)
+                                composable("authorize") {
+                                    AuthorizeScreen(vm, state, sharedUrl, consumedShare)
+                                }
                         }
                     }
                 }
@@ -298,10 +430,9 @@ fun LeoApp(
 
 @Composable
 private fun LoginScreen(vm: LeoViewModel, state: Workspace) {
-    var origin by rememberSaveable(state.origin) { mutableStateOf(state.origin) }
-    // Passwords and bootstrap tokens deliberately never enter saved instance state.
-    var password by remember { mutableStateOf("") }
-    var setupToken by remember { mutableStateOf("") }
+    var email by rememberSaveable(state.origin) { mutableStateOf("") }
+    // Verification codes never enter saved instance state.
+    var code by remember(state.emailForCode) { mutableStateOf("") }
     Scaffold { padding ->
         Box(
             Modifier.padding(padding).imePadding().fillMaxSize(),
@@ -310,97 +441,73 @@ private fun LoginScreen(vm: LeoViewModel, state: Workspace) {
             Column(Modifier.widthIn(max = 520.dp)) {
                 Page {
                     Wordmark()
-                    Heading("Bienvenue dans Leo", "Votre espace de travail, dans votre poche.")
+                    Heading("Bienvenue dans Leo", "Connectez-vous à votre compte Leo.")
                     Panel {
-                        Text(
-                            "Connexion à votre serveur",
-                            style = MaterialTheme.typography.titleLarge,
-                        )
                         if (state.origin.isBlank()) {
+                            Text(
+                                "Le service officiel n’est pas configuré dans cette version de l’application."
+                            )
+                        } else if (state.emailForCode == null) {
                             OutlinedTextField(
-                                origin,
-                                { origin = it },
+                                email,
+                                { email = it },
                                 Modifier.fillMaxWidth(),
-                                label = { Text("Adresse du serveur") },
-                                placeholder = { Text("https://leo.exemple.fr") },
+                                label = { Text("Adresse e-mail") },
                                 singleLine = true,
-                                keyboardOptions = InputKeyboards.Uri,
+                                keyboardOptions =
+                                    androidx.compose.foundation.text.KeyboardOptions(
+                                        keyboardType =
+                                            androidx.compose.ui.text.input.KeyboardType.Email
+                                    ),
                             )
                             Button(
-                                onClick = { vm.perform { connect(origin) } },
-                                enabled = origin.isNotBlank() && !state.busy,
+                                onClick = { vm.perform { requestEmailCode(email) } },
+                                enabled = email.isNotBlank() && !state.busy,
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
-                                Text("Continuer")
+                                Text("Recevoir un code")
                             }
                         } else {
-                            Text(state.origin, color = MaterialTheme.colorScheme.primary)
-                            if (state.session.setupRequired) {
-                                Text(
-                                    "Créez le compte propriétaire avec le jeton d’installation du serveur."
-                                )
-                                OutlinedTextField(
-                                    setupToken,
-                                    { setupToken = it },
-                                    Modifier.fillMaxWidth(),
-                                    label = { Text("Jeton d’installation") },
-                                    keyboardOptions = InputKeyboards.Password,
-                                    visualTransformation = PasswordVisualTransformation(),
-                                    singleLine = true,
-                                )
-                            }
+                            Text("Un code a été envoyé à ${state.emailForCode}.")
                             OutlinedTextField(
-                                password,
-                                { password = it },
+                                code,
+                                { code = it },
                                 Modifier.fillMaxWidth(),
-                                label = {
-                                    Text(
-                                        if (state.session.setupRequired)
-                                            "Mot de passe · 12 caractères minimum"
-                                        else "Mot de passe"
-                                    )
-                                },
-                                visualTransformation = PasswordVisualTransformation(),
+                                label = { Text("Code reçu par e-mail") },
                                 singleLine = true,
-                                keyboardOptions = InputKeyboards.Password,
+                                keyboardOptions =
+                                    androidx.compose.foundation.text.KeyboardOptions(
+                                        keyboardType =
+                                            androidx.compose.ui.text.input.KeyboardType.Number
+                                    ),
                             )
                             Button(
                                 onClick = {
                                     vm.perform {
-                                        login(password, setupToken)
-                                        password = ""
-                                        setupToken = ""
+                                        verifyEmailCode(code)
+                                        code = ""
                                     }
                                 },
-                                enabled =
-                                    !state.busy &&
-                                        password.isNotBlank() &&
-                                        (!state.session.setupRequired ||
-                                            (password.length >= 12 && setupToken.isNotBlank())),
+                                enabled = code.isNotBlank() && !state.busy,
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
-                                Text(
-                                    if (state.session.setupRequired) "Créer mon compte"
-                                    else "Se connecter"
-                                )
+                                Text("Se connecter")
                             }
                             TextButton(
-                                onClick = {
-                                    vm.perform { forget() }
-                                    password = ""
-                                    setupToken = ""
-                                },
+                                onClick = { vm.perform { requestEmailCode(state.emailForCode) } },
                                 enabled = !state.busy,
                             ) {
-                                Text("Changer de serveur")
+                                Text("Renvoyer un code")
+                            }
+                            TextButton(onClick = vm::changeEmail, enabled = !state.busy) {
+                                Text("Changer d’adresse e-mail")
                             }
                         }
                         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                         state.error?.let { ErrorNotice(it, vm::clearMessage) }
                     }
                     Text(
-                        "Retrouvez vos agents, vos tâches et leurs résultats. Les exécutions continuent sur votre serveur.",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        "Les exécutions continuent sur vos installations lorsque l’application est fermée."
                     )
                 }
             }

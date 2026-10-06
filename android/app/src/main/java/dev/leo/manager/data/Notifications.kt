@@ -40,6 +40,13 @@ class NotificationPreferences(private val context: Context) {
         schedule(context, value)
     }
 
+    suspend fun resetSelection() {
+        context.dataStore.edit {
+            it.remove(seenKey)
+            it.remove(alertsKey)
+        }
+    }
+
     suspend fun seen() = context.dataStore.data.first()[seenKey].orEmpty()
 
     suspend fun setSeen(ids: Set<String>) {
@@ -88,18 +95,28 @@ constructor(
     context: Context,
     params: WorkerParameters,
     private val vault: SessionVault = KeystoreSessionVault(context),
+    private val officialOrigin: String = BuildConfig.OFFICIAL_SERVICE_ORIGIN,
 ) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
         val context = applicationContext
         val prefs = NotificationPreferences(context)
         if (!prefs.enabled.first() || !notificationsAllowed(context)) return Result.success()
-        val origin = Preferences(context).origin.first()
-        if (origin.isBlank()) return Result.success()
+        if (officialOrigin.isBlank()) return Result.success()
+        val origin = serverOrigin(officialOrigin, BuildConfig.DEBUG).toString()
         val originalCookie = vault.read(origin) ?: return Result.success()
         try {
-            val api = LeoApi(serverOrigin(origin, BuildConfig.DEBUG), vault)
-            val session = api.get<Session>("/session")
-            if (!session.authenticated) return Result.success()
+            val account = LeoApi(serverOrigin(origin, BuildConfig.DEBUG), vault)
+            val session = account.get<Session>("/account/session")
+            if (!session.authenticated || session.account == null) return Result.success()
+            val preferences = Preferences(context)
+            val saved = preferences.lastInstallation(origin, session.account.id)
+            val installation =
+                session.installations.find { it.id == saved }
+                    ?: session.installations.firstOrNull()
+                    ?: return Result.success()
+            if (!installation.online) return Result.success()
+            val api = LeoApi(account.origin, vault, installationId = installation.id)
+            api.csrf = session.csrf.orEmpty()
             val chats = api.get<List<Chat>>("/chats").filter { it.pendingQuestions > 0 }
             val pending = mutableMapOf<String, Set<String>>()
             for (chat in chats) {
@@ -107,10 +124,10 @@ constructor(
                 pending[chat.id] =
                     detail.questions.filter { it.status == "pending" }.map { it.id }.toSet()
             }
-            // Logout, server changes and disabling notifications win over an in-flight check.
+            // Logout, installation changes and disabling notifications win over an in-flight check.
             if (
                 !prefs.enabled.first() ||
-                    Preferences(context).origin.first() != origin ||
+                    preferences.lastInstallation(origin, session.account.id) != saved ||
                     vault.read(origin) != originalCookie
             )
                 return Result.success()
@@ -133,10 +150,11 @@ constructor(
                     Intent(context, MainActivity::class.java)
                         .setAction("dev.leo.manager.OPEN_CHAT")
                         .setData(
-                            "leo-manager://chat/${segment(chat)}?origin=${segment(origin)}".toUri()
+                            "leo-manager://chat/${segment(chat)}?origin=${segment(api.cacheScope)}"
+                                .toUri()
                         )
                         .putExtra("chat", chat)
-                        .putExtra("origin", origin)
+                        .putExtra("origin", api.cacheScope)
                         .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 val action =
                     PendingIntent.getActivity(
@@ -163,14 +181,16 @@ constructor(
             prefs.setSeen(all)
             // A master without node alerts must not delay question notifications.
             val alerts =
-                try {
-                    api.get<List<NodeAlert>>("/nodes/alerts")
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                    null
-                }
-            alerts?.let { notifyAlerts(context, manager, prefs, it, origin) }
+                if (installation.role != "owner") null
+                else
+                    try {
+                        api.get<List<NodeAlert>>("/nodes/alerts")
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        null
+                    }
+            alerts?.let { notifyAlerts(context, manager, prefs, it, api.cacheScope) }
             return Result.success()
         } catch (e: CancellationException) {
             throw e

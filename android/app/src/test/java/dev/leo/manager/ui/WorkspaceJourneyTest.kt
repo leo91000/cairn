@@ -66,7 +66,10 @@ class WorkspaceJourneyTest {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path.orEmpty().substringBefore('?')
-                        if (request.method == "POST" && path != "/api/login") {
+                        if (
+                            request.method == "POST" &&
+                                path !in setOf("/api/account/verify", "/api/account/email-code")
+                        ) {
                             if (
                                 request.getHeader("Cookie") != "leo_session=test-cookie" ||
                                     request.getHeader("X-CSRF-Token") != "test-csrf"
@@ -77,42 +80,49 @@ class WorkspaceJourneyTest {
                             }
                             mutations += path to request.body.readUtf8()
                         }
-                        if (request.method == "POST" && path == "/api/tasks/task/run")
+                        if (
+                            request.method == "POST" &&
+                                path == "/api/installations/fixture/api/tasks/task/run"
+                        )
                             launched = true
                         val data =
                             when (path) {
-                                "/api/session" ->
-                                    """{"authenticated":false,"setupRequired":false}"""
-                                "/api/login" ->
+                                "/api/installations" -> officialInstallationsFixture()
+                                "/api/account/session" ->
+                                    """{"authenticated":false,"csrf":null,"account":null,"installations":[]}"""
+                                "/api/account/email-code" ->
+                                    """{"challenge":"task-fixture-challenge"}"""
+                                "/api/account/verify" ->
                                     return MockResponse()
                                         .addHeader(
                                             "Set-Cookie",
                                             "leo_session=test-cookie; Path=/; Max-Age=3600; HttpOnly",
                                         )
-                                        .setBody("""{"authenticated":true,"csrf":"test-csrf"}""")
-                                "/api/agents" -> """[{"id":"agent","name":"Reviewer"}]"""
-                                "/api/projects" ->
+                                        .setBody(officialAccountFixture("test-csrf"))
+                                "/api/installations/fixture/api/agents" ->
+                                    """[{"id":"agent","name":"Reviewer"}]"""
+                                "/api/installations/fixture/api/projects" ->
                                     """[{"id":"project","name":"Leo Agent Manager","path":"/fixtures/leo"}]"""
-                                "/api/mcps",
-                                "/api/skills",
-                                "/api/tokens",
-                                "/api/audit" -> "[]"
-                                "/api/tasks/activity" ->
+                                "/api/installations/fixture/api/mcps",
+                                "/api/installations/fixture/api/skills",
+                                "/api/installations/fixture/api/tokens",
+                                "/api/installations/fixture/api/audit" -> "[]"
+                                "/api/installations/fixture/api/tasks/activity" ->
                                     if (launched)
                                         "[{\"id\":\"run\",\"taskId\":\"task\",\"status\":\"running\"}]"
                                     else "[]"
-                                "/api/runs" ->
+                                "/api/installations/fixture/api/runs" ->
                                     if (launched)
                                         "[{\"id\":\"run\",\"taskId\":\"task\",\"status\":\"running\"}]"
                                     else "[]"
-                                "/api/codex/models" -> "{\"models\":[]}"
-                                "/api/chats/stream" ->
+                                "/api/installations/fixture/api/codex/models" -> "{\"models\":[]}"
+                                "/api/installations/fixture/api/chats/stream" ->
                                     return MockResponse()
                                         .setHeader("Content-Type", "text/event-stream")
                                         .setBody(
                                             "event: batch\nid: 0\ndata: {\"events\":[],\"state\":{\"chats\":[],\"artifacts\":[]},\"reset\":false,\"more\":false}\n\n"
                                         )
-                                "/api/runs/run/stream" ->
+                                "/api/installations/fixture/api/runs/run/stream" ->
                                     return MockResponse()
                                         .setHeader("Content-Type", "text/event-stream")
                                         .setBody(
@@ -197,20 +207,20 @@ class WorkspaceJourneyTest {
                                                 ) +
                                                 "\n\n"
                                         )
-                                "/api/settings" ->
+                                "/api/installations/fixture/api/settings" ->
                                     """{"publicUrl":"https://leo.example.com","mcpUrl":"https://leo.example.com/mcp","protocol":"2026-07-28","version":"0.19.0"}"""
-                                "/api/overview" ->
+                                "/api/installations/fixture/api/overview" ->
                                     """{"counts":{},"agents":1,"projects":1,"tasks":[],"runs":[]}"""
-                                "/api/tasks" ->
+                                "/api/installations/fixture/api/tasks" ->
                                     if (request.method == "POST") {
                                         created = true
                                         task
                                     } else if (created) "[$existingTask,$task]"
                                     else "[$existingTask]"
-                                "/api/tasks/task/run",
-                                "/api/runs/run" ->
+                                "/api/installations/fixture/api/tasks/task/run",
+                                "/api/installations/fixture/api/runs/run" ->
                                     """{"id":"run","taskId":"task","status":"running","snapshot":{"task":$task,"agent":{"name":"Reviewer"},"project":null,"projects":[{"name":"Leo Agent Manager"}]}}"""
-                                "/api/runs/run/events" ->
+                                "/api/installations/fixture/api/runs/run/events" ->
                                     """[{"id":1,"createdAt":1789315200000,"type":"run.started","text":"Le worker démarre la mission"}]"""
                                 else ->
                                     return MockResponse()
@@ -227,22 +237,27 @@ class WorkspaceJourneyTest {
                 LeoViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     MemoryVault(),
+                    officialOrigin = "",
                 )
             compose.setContent {
                 val theme by vm.theme.collectAsStateWithLifecycle(initialValue = "system")
                 LeoTheme(theme) { LeoApp(vm = vm) }
             }
+            compose.waitUntil(10000) { vm.state.value.ready }
+            compose.runOnIdle { vm.perform { connect(server.url("/").toString()) } }
             compose.waitUntil(10000) {
-                compose.onAllNodesWithText("Adresse du serveur").fetchSemanticsNodes().isNotEmpty()
+                compose.onAllNodesWithText("Adresse e-mail").fetchSemanticsNodes().isNotEmpty() &&
+                    !vm.state.value.busy
             }
-            compose
-                .onNodeWithText("Adresse du serveur")
-                .performTextInput(server.url("/").toString())
-            compose.onNodeWithText("Continuer").performClick()
+            compose.onNodeWithText("Adresse e-mail").performTextInput("owner@example.test")
+            compose.onNodeWithText("Recevoir un code").performClick()
             compose.waitUntil(10000) {
-                compose.onAllNodesWithText("Mot de passe").fetchSemanticsNodes().isNotEmpty()
+                compose
+                    .onAllNodesWithText("Code reçu par e-mail")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
             }
-            compose.onNodeWithText("Mot de passe").performTextInput("test-only-password")
+            compose.onNodeWithText("Code reçu par e-mail").performTextInput("12345678")
             compose.onNodeWithText("Se connecter").performClick()
             compose.waitUntil(10000) {
                 compose
@@ -275,7 +290,11 @@ class WorkspaceJourneyTest {
             }
             val saved =
                 wireJson
-                    .parseToJsonElement(mutations.first { it.first == "/api/tasks" }.second)
+                    .parseToJsonElement(
+                        mutations
+                            .first { it.first == "/api/installations/fixture/api/tasks" }
+                            .second
+                    )
                     .jsonObject
             assertEquals("Nouvelle mission", saved["name"]?.jsonPrimitive?.content)
             assertTrue(
@@ -307,7 +326,9 @@ class WorkspaceJourneyTest {
                 compose.onAllNodesWithTag("agent-step-sheet").fetchSemanticsNodes().isEmpty()
             }
             compose.onNodeWithTag("agent-actions").performClick()
-            assertTrue(mutations.any { it.first == "/api/tasks/task/run" })
+            assertTrue(
+                mutations.any { it.first == "/api/installations/fixture/api/tasks/task/run" }
+            )
             screenshot("run")
             compose.onNodeWithContentDescription("Retour").performClick()
             compose.waitUntil(10000) {

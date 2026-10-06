@@ -216,8 +216,13 @@ class ChatSwipeTest {
         fun open() =
             vm.api.streamCalls
                 .map { it.request().url.encodedPath }
-                .filter { it.startsWith("/api/chats/") && it != "/api/chats/stream" }
-                .map { it.removePrefix("/api/chats/").removeSuffix("/stream") }
+                .filter {
+                    it.startsWith("/api/installations/fixture/api/chats/") &&
+                        it != "/api/installations/fixture/api/chats/stream"
+                }
+                .map {
+                    it.removePrefix("/api/installations/fixture/api/chats/").removeSuffix("/stream")
+                }
                 .sorted()
         compose.waitUntil(10000) { open() == expected.sorted() }
         // Stay settled: no preview reconnects behind the selected chat.
@@ -300,7 +305,9 @@ class ChatSwipeTest {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path.orEmpty().substringBefore('?')
                         if (path.endsWith("/stream")) {
-                            val chat = chats.find { path == "/api/chats/${it.id}/stream" }
+                            val chat = chats.find {
+                                path == "/api/installations/fixture/api/chats/${it.id}/stream"
+                            }
                             val events =
                                 if (chat == null) emptyList()
                                 else
@@ -341,11 +348,14 @@ class ChatSwipeTest {
                         }
                         val body =
                             when (path) {
-                                "/api/session" -> """{"authenticated":true,"csrf":"fixture"}"""
-                                "/api/agents" -> wireJson.encodeToString(listOf(agent))
-                                "/api/codex/models",
-                                "/api/claude/models" -> """{"models":[]}"""
-                                "/api/overview" -> "{}"
+                                "/api/installations" -> officialInstallationsFixture()
+                                "/api/account/session" -> officialAccountFixture("fixture")
+                                "/api/installations/fixture/api/agents" ->
+                                    wireJson.encodeToString(listOf(agent))
+                                "/api/installations/fixture/api/codex/models",
+                                "/api/installations/fixture/api/claude/models" ->
+                                    """{"models":[]}"""
+                                "/api/installations/fixture/api/overview" -> "{}"
                                 else -> "[]"
                             }
                         return MockResponse().setBody(body)
@@ -358,7 +368,12 @@ class ChatSwipeTest {
 
                     override fun write(origin: String, cookie: String?) = Unit
                 }
-            val vm = LeoViewModel(ApplicationProvider.getApplicationContext<Application>(), vault)
+            val vm =
+                LeoViewModel(
+                    ApplicationProvider.getApplicationContext<Application>(),
+                    vault,
+                    officialOrigin = "",
+                )
             this.vm = vm
             restoration.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()

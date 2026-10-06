@@ -29,4 +29,8 @@ class LeoAccountJourneyTest : LeoAccountCases() {
     @Test
     fun emailCodeOpensInstallationAndLogsOut() =
         emailCodeOpensTheOnlyInstallationAndLogoutRevokesTheAccount()
+
+    @Test
+    fun installationSelectionAndMemberRole() =
+        switchingToASharedInstallationHidesManagementAndRestoresTheSelection()
 }

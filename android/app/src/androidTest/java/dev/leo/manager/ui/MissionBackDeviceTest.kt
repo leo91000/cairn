@@ -11,7 +11,6 @@ import dev.leo.manager.data.*
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.*
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -87,27 +86,34 @@ class MissionBackDeviceTest {
                                 .setBody(body)
                         }
                         return when {
-                            path == "/api/session" ->
-                                json("{\"authenticated\":true,\"csrf\":\"fixture\"}")
-                            path == "/api/agents" -> json(wireJson.encodeToString(listOf(main)))
-                            path == "/api/tasks" -> json(wireJson.encodeToString(listOf(daily)))
-                            path == "/api/tasks/activity" ->
+                            path == "/api/installations" -> json(officialInstallationsFixture())
+                            path == "/api/account/session" ->
+                                json(officialAccountFixture("fixture"))
+                            path == "/api/installations/fixture/api/agents" ->
+                                json(wireJson.encodeToString(listOf(main)))
+                            path == "/api/installations/fixture/api/tasks" ->
+                                json(wireJson.encodeToString(listOf(daily)))
+                            path == "/api/installations/fixture/api/tasks/activity" ->
                                 json(wireJson.encodeToString(listOf(done)))
-                            path == "/api/runs" -> json(wireJson.encodeToString(listOf(done)))
-                            path == "/api/schedule/preview" -> json("{\"occurrences\":[]}")
-                            path == "/api/chats/stream" -> stream(LiveState(chats = emptyList()))
-                            path == "/api/runs/done-run/stream" -> stream(LiveState(run = done))
-                            path == "/api/overview" ||
+                            path == "/api/installations/fixture/api/runs" ->
+                                json(wireJson.encodeToString(listOf(done)))
+                            path == "/api/installations/fixture/api/schedule/preview" ->
+                                json("{\"occurrences\":[]}")
+                            path == "/api/installations/fixture/api/chats/stream" ->
+                                stream(LiveState(chats = emptyList()))
+                            path == "/api/installations/fixture/api/runs/done-run/stream" ->
+                                stream(LiveState(run = done))
+                            path == "/api/installations/fixture/api/overview" ||
                                 path.endsWith("/models") ||
-                                path == "/api/accounts" -> json("{}")
+                                path == "/api/installations/fixture/api/accounts" -> json("{}")
                             else -> json("[]")
                         }
                     }
                 }
             val origin = server.url("/").toString()
             val app = ApplicationProvider.getApplicationContext<Application>()
-            runBlocking { Preferences(app).setOrigin("") }
-            val vm = LeoViewModel(app, MissionBackVault())
+
+            val vm = LeoViewModel(app, MissionBackVault(), officialOrigin = "")
             compose.setContent {
                 LaunchedEffect(Unit) {
                     vm.state.first { it.ready }

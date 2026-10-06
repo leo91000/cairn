@@ -95,7 +95,7 @@ class LeoApiTest {
             api.send<Session>(
                 "POST",
                 "/account/verify",
-                body("email" to "member@example.test", "code" to "123456"),
+                body("challenge" to "fixture-challenge", "code" to "12345678"),
             )
             server.takeRequest()
             assertTrue(
@@ -126,7 +126,7 @@ class LeoApiTest {
                 )
                 server.start()
                 val api = LeoApi(server.url("/"), MemoryVault())
-                api.csrf = api.send<Session>("POST", "/login").csrf
+                api.csrf = api.send<Session>("POST", "/account/verify").csrf.orEmpty()
                 server.takeRequest()
                 assertArrayEquals(
                     "portrait-bytes".toByteArray(),
@@ -218,19 +218,23 @@ class LeoApiTest {
             val vault = MemoryVault()
             val api = LeoApi(server.url("/"), vault)
             val session =
-                api.send<Session>("POST", "/login", body("password" to "test-only-password"))
-            api.csrf = session.csrf
+                api.send<Session>(
+                    "POST",
+                    "/account/verify",
+                    body("challenge" to "fixture-challenge", "code" to "12345678"),
+                )
+            api.csrf = session.csrf.orEmpty()
             api.send<Agent>(
                 "POST",
                 "/agents",
                 wireJson.encodeToJsonElement(Agent(name = "Reviewer")),
             )
-            assertEquals("/api/login", server.takeRequest().path)
+            assertEquals("/api/account/verify", server.takeRequest().path)
             val mutation = server.takeRequest()
             assertEquals("leo_session=test-session", mutation.getHeader("Cookie"))
             assertEquals("test-csrf", mutation.getHeader("X-CSRF-Token"))
             assertTrue(mutation.body.readUtf8().contains("Reviewer"))
-            api.request("POST", "/logout")
+            api.request("POST", "/account/logout")
             assertTrue(vault.values.isEmpty())
         }
     }
@@ -246,7 +250,7 @@ class LeoApiTest {
                 )
                 val api = LeoApi(server.url("/"), MemoryVault())
                 try {
-                    api.request("GET", "/session")
+                    api.request("GET", "/account/session")
                     fail("Expected an API error")
                 } catch (e: ApiException) {
                     assertEquals(302, e.status)

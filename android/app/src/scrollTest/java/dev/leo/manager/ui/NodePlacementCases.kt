@@ -30,18 +30,19 @@ abstract class NodePlacementCases {
                         val path = request.path!!.substringBefore('?')
                         val body =
                             when {
-                                path == "/api/nodes/placement/run" && request.method == "PUT" -> {
+                                path == "/api/installations/fixture/api/nodes/placement/run" &&
+                                    request.method == "PUT" -> {
                                     saved +=
                                         wireJson
                                             .parseToJsonElement(request.body.readUtf8())
                                             .jsonObject
                                     "{}"
                                 }
-                                path == "/api/nodes/placement/run" ->
+                                path == "/api/installations/fixture/api/nodes/placement/run" ->
                                     """{"nodes":[{"id":"node","name":"Mon serveur","status":"online"},{"id":"other","name":"Autre serveur","status":"online"}],"pinnedNodeId":null,"preferredNodeId":null}"""
-                                path == "/api/session" ->
-                                    """{"authenticated":true,"csrf":"fixture"}"""
-                                path == "/api/overview" -> "{}"
+                                path == "/api/installations" -> officialInstallationsFixture()
+                                path == "/api/account/session" -> officialAccountFixture("fixture")
+                                path == "/api/installations/fixture/api/overview" -> "{}"
                                 else -> "[]"
                             }
                         return MockResponse().setBody(body)
@@ -58,7 +59,12 @@ abstract class NodePlacementCases {
                         if (cookie == null) values.remove(origin) else values[origin] = cookie
                     }
                 }
-            val vm = LeoViewModel(ApplicationProvider.getApplicationContext<Application>(), vault)
+            val vm =
+                LeoViewModel(
+                    ApplicationProvider.getApplicationContext<Application>(),
+                    vault,
+                    officialOrigin = "",
+                )
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()
                 LaunchedEffect(Unit) {
@@ -149,47 +155,53 @@ abstract class NodePlacementCases {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
                         if (
-                            request.method in listOf("POST", "PUT") && path.startsWith("/api/nodes")
+                            request.method in listOf("POST", "PUT") &&
+                                path.startsWith("/api/installations/fixture/api/nodes")
                         ) {
                             val body = request.body.readUtf8().ifBlank { "{}" }
                             writes += path to wireJson.parseToJsonElement(body).jsonObject
                         }
                         val body =
                             when {
-                                path == "/api/nodes/enrollments" ->
+                                path == "/api/installations/fixture/api/nodes/enrollments" ->
                                     """{"code":"fixture-enrollment","expiresAt":4102444800000,"installCommand":"curl https://fixture.invalid/install | bash"}"""
-                                path == "/api/nodes/node/revoke" -> {
+                                path == "/api/installations/fixture/api/nodes/node/revoke" -> {
                                     revoked = true
                                     "{}"
                                 }
-                                path == "/api/nodes/node" -> {
+                                path == "/api/installations/fixture/api/nodes/node" -> {
                                     configured = true
                                     "{}"
                                 }
-                                path == "/api/nodes/settings" -> "{}"
-                                path == "/api/nodes/node/agents" -> {
+                                path == "/api/installations/fixture/api/nodes/settings" -> "{}"
+                                path == "/api/installations/fixture/api/nodes/node/agents" -> {
                                     granted = true
                                     "{}"
                                 }
-                                path == "/api/nodes/node/stale-disks/delete" -> {
+                                path ==
+                                    "/api/installations/fixture/api/nodes/node/stale-disks/delete" -> {
                                     cleaned = true
                                     """{"freedMiB":2048,"failed":0}"""
                                 }
-                                path == "/api/nodes" ->
+                                path == "/api/installations/fixture/api/nodes" ->
                                     """[{"id":"node","name":"Serveur test","status":"${if (revoked) "revoked" else "online"}","revoked":$revoked,"accepting":true,"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536},"agents":${if (granted) """[{"id":"agent","name":"Agent test"}]""" else "[]"},"staleDisks":{"count":${if (cleaned) 0 else 1},"diskMiB":2048}}]"""
-                                path == "/api/agents" -> """[{"id":"agent","name":"Agent test"}]"""
-                                path == "/api/session" ->
-                                    """{"authenticated":true,"csrf":"fixture"}"""
-                                path == "/api/overview" -> "{}"
+                                path == "/api/installations/fixture/api/agents" ->
+                                    """[{"id":"agent","name":"Agent test"}]"""
+                                path == "/api/installations" -> officialInstallationsFixture()
+                                path == "/api/account/session" -> officialAccountFixture("fixture")
+                                path == "/api/installations/fixture/api/overview" -> "{}"
                                 else -> "[]"
                             }
                         return MockResponse().setBody(body).apply {
                             // Keep the save busy while the subsequent node refresh is in flight.
-                            if (path == "/api/nodes" && configured)
+                            if (path == "/api/installations/fixture/api/nodes" && configured)
                                 setBodyDelay(1, java.util.concurrent.TimeUnit.SECONDS)
                             else if (
-                                path == "/api/nodes" &&
-                                    writes.any { it.first == "/api/nodes/node/storage" }
+                                path == "/api/installations/fixture/api/nodes" &&
+                                    writes.any {
+                                        it.first ==
+                                            "/api/installations/fixture/api/nodes/node/storage"
+                                    }
                             )
                                 setBodyDelay(200, java.util.concurrent.TimeUnit.MILLISECONDS)
                         }
@@ -206,7 +218,12 @@ abstract class NodePlacementCases {
                         if (cookie == null) values.remove(origin) else values[origin] = cookie
                     }
                 }
-            val vm = LeoViewModel(ApplicationProvider.getApplicationContext<Application>(), vault)
+            val vm =
+                LeoViewModel(
+                    ApplicationProvider.getApplicationContext<Application>(),
+                    vault,
+                    officialOrigin = "",
+                )
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()
                 LaunchedEffect(Unit) {
@@ -233,7 +250,7 @@ abstract class NodePlacementCases {
             capture("storage")
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(10000) {
-                writes.any { it.first == "/api/nodes/node/storage" } &&
+                writes.any { it.first == "/api/installations/fixture/api/nodes/node/storage" } &&
                     compose
                         .onAllNodesWithText("Stockage · Serveur test")
                         .fetchSemanticsNodes()
@@ -242,7 +259,7 @@ abstract class NodePlacementCases {
             assertEquals(
                 51200,
                 writes
-                    .first { it.first == "/api/nodes/node/storage" }
+                    .first { it.first == "/api/installations/fixture/api/nodes/node/storage" }
                     .second["cacheMiB"]!!
                     .jsonPrimitive
                     .int,
@@ -262,7 +279,7 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Enregistrer").assertIsEnabled()
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(10000) {
-                writes.any { it.first == "/api/nodes/node/agents" } &&
+                writes.any { it.first == "/api/installations/fixture/api/nodes/node/agents" } &&
                     compose
                         .onAllNodesWithText("Utilisée par Agent test")
                         .fetchSemanticsNodes()
@@ -271,7 +288,7 @@ abstract class NodePlacementCases {
             assertEquals(
                 "agent",
                 writes
-                    .first { it.first == "/api/nodes/node/agents" }
+                    .first { it.first == "/api/installations/fixture/api/nodes/node/agents" }
                     .second["agentIds"]!!
                     .jsonArray
                     .single()
@@ -288,7 +305,9 @@ abstract class NodePlacementCases {
             }
             compose.onNodeWithText("Confirmer").performClick()
             compose.waitUntil(10000) {
-                writes.any { it.first == "/api/nodes/node/stale-disks/delete" } &&
+                writes.any {
+                    it.first == "/api/installations/fixture/api/nodes/node/stale-disks/delete"
+                } &&
                     compose
                         .onAllNodesWithText("Anciens disques", substring = true)
                         .fetchSemanticsNodes()
@@ -303,7 +322,7 @@ abstract class NodePlacementCases {
             assertEquals(
                 "Nouvelle node",
                 writes
-                    .first { it.first == "/api/nodes/enrollments" }
+                    .first { it.first == "/api/installations/fixture/api/nodes/enrollments" }
                     .second["name"]
                     ?.jsonPrimitive
                     ?.content,
@@ -323,13 +342,13 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Intervalle (secondes)").performTextReplacement("30")
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(10000) {
-                writes.any { it.first == "/api/nodes/settings" } &&
+                writes.any { it.first == "/api/installations/fixture/api/nodes/settings" } &&
                     compose.onAllNodesWithText("Synchronisation S3").fetchSemanticsNodes().isEmpty()
             }
             assertEquals(
                 30,
                 writes
-                    .first { it.first == "/api/nodes/settings" }
+                    .first { it.first == "/api/installations/fixture/api/nodes/settings" }
                     .second["intervalSeconds"]!!
                     .jsonPrimitive
                     .int,
@@ -338,11 +357,13 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Budget CPU partagé").performTextReplacement("3")
             compose.onNodeWithText("Slots d’exécution").performTextReplacement("12")
             compose.onNodeWithText("Enregistrer").performClick()
-            compose.waitUntil(10000) { writes.any { it.first == "/api/nodes/node" } }
+            compose.waitUntil(10000) {
+                writes.any { it.first == "/api/installations/fixture/api/nodes/node" }
+            }
             assertEquals(
                 3,
                 writes
-                    .first { it.first == "/api/nodes/node" }
+                    .first { it.first == "/api/installations/fixture/api/nodes/node" }
                     .second["limits"]!!
                     .jsonObject["cpu"]!!
                     .jsonPrimitive
@@ -369,7 +390,9 @@ abstract class NodePlacementCases {
             compose.waitUntil(10000) {
                 compose.onAllNodesWithText("Révoquée").fetchSemanticsNodes().isNotEmpty()
             }
-            assertTrue(writes.any { it.first == "/api/nodes/node/revoke" })
+            assertTrue(
+                writes.any { it.first == "/api/installations/fixture/api/nodes/node/revoke" }
+            )
         }
     }
 }

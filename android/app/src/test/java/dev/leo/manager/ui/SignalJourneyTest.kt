@@ -11,7 +11,6 @@ import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
 import org.junit.Assert.assertEquals
@@ -92,7 +91,7 @@ class SignalJourneyTest {
     @org.junit.Before
     fun prepare() {
         val app = ApplicationProvider.getApplicationContext<Application>()
-        runBlocking { Preferences(app).setOrigin("") }
+
         androidx.work.testing.WorkManagerTestInitHelper.initializeTestWorkManager(
             app,
             androidx.work.Configuration.Builder()
@@ -124,19 +123,22 @@ class SignalJourneyTest {
                         val path = request.path!!.substringBefore('?')
                         calls += Triple(request.method!!, request.path!!, request.body.readUtf8())
                         return when {
-                            path == "/api/session" ->
-                                json("{\"authenticated\":true,\"csrf\":\"fixture\"}")
-                            path == "/api/agents" ->
+                            path == "/api/installations" -> json(officialInstallationsFixture())
+                            path == "/api/account/session" ->
+                                json(officialAccountFixture("fixture"))
+                            path == "/api/installations/fixture/api/agents" ->
                                 json(wireJson.encodeToString(listOf(main, designer)))
-                            path == "/api/projects" ->
+                            path == "/api/installations/fixture/api/projects" ->
                                 json(wireJson.encodeToString(listOf(manager, site)))
-                            path == "/api/tasks" && request.method == "GET" ->
+                            path == "/api/installations/fixture/api/tasks" &&
+                                request.method == "GET" ->
                                 json(wireJson.encodeToString(listOf(daily)))
-                            path == "/api/tasks/daily" && request.method == "PUT" ->
+                            path == "/api/installations/fixture/api/tasks/daily" &&
+                                request.method == "PUT" ->
                                 json(wireJson.encodeToString(daily.copy(enabled = false)))
-                            path == "/api/tasks/activity" ->
+                            path == "/api/installations/fixture/api/tasks/activity" ->
                                 json(wireJson.encodeToString(listOf(failed)))
-                            path == "/api/tasks/daily/run" ->
+                            path == "/api/installations/fixture/api/tasks/daily/run" ->
                                 json(
                                     wireJson.encodeToString(
                                         Run(
@@ -147,7 +149,7 @@ class SignalJourneyTest {
                                         )
                                     )
                                 )
-                            path == "/api/runs" ->
+                            path == "/api/installations/fixture/api/runs" ->
                                 json(
                                     wireJson.encodeToString(
                                         listOf(
@@ -156,20 +158,26 @@ class SignalJourneyTest {
                                         )
                                     )
                                 )
-                            path == "/api/schedule/preview" ->
+                            path == "/api/installations/fixture/api/schedule/preview" ->
                                 json("{\"occurrences\":[${now + 3_600_000},${now + 90_000_000}]}")
-                            path == "/api/skills" ->
+                            path == "/api/installations/fixture/api/skills" ->
                                 json(
                                     wireJson.encodeToString(
                                         listOf(Skill("revue", "Guide de revue"))
                                     )
                                 )
-                            path == "/api/mcps" -> json("[]")
-                            path == "/api/chats/stream" -> stream(LiveState(chats = chats))
-                            path == "/api/chats" && request.method == "POST" ->
+                            path == "/api/installations/fixture/api/mcps" -> json("[]")
+                            path == "/api/installations/fixture/api/chats/stream" ->
+                                stream(LiveState(chats = chats))
+                            path == "/api/installations/fixture/api/chats" &&
+                                request.method == "POST" ->
                                 json(wireJson.encodeToString(Chat("created", agentId = "designer")))
-                            path.startsWith("/api/chats/") && path.endsWith("/stream") -> {
-                                val id = path.removePrefix("/api/chats/").removeSuffix("/stream")
+                            path.startsWith("/api/installations/fixture/api/chats/") &&
+                                path.endsWith("/stream") -> {
+                                val id =
+                                    path
+                                        .removePrefix("/api/installations/fixture/api/chats/")
+                                        .removeSuffix("/stream")
                                 stream(
                                     LiveState(
                                         chat =
@@ -178,22 +186,25 @@ class SignalJourneyTest {
                                     )
                                 )
                             }
-                            path.startsWith("/api/chats/") && path.endsWith("/messages") ->
-                                json("{}")
-                            path.startsWith("/api/runs/") && path.endsWith("/stream") ->
+                            path.startsWith("/api/installations/fixture/api/chats/") &&
+                                path.endsWith("/messages") -> json("{}")
+                            path.startsWith("/api/installations/fixture/api/runs/") &&
+                                path.endsWith("/stream") ->
                                 stream(
                                     LiveState(
                                         run =
                                             Run(
                                                 path
-                                                    .removePrefix("/api/runs/")
+                                                    .removePrefix(
+                                                        "/api/installations/fixture/api/runs/"
+                                                    )
                                                     .removeSuffix("/stream"),
                                                 status = "running",
                                                 snapshot = Snapshot(task = daily, agent = main),
                                             )
                                     )
                                 )
-                            path == "/api/accounts" ->
+                            path == "/api/installations/fixture/api/accounts" ->
                                 json(
                                     "{\"accounts\":[{\"id\":\"a\",\"provider\":\"codex\",\"name\":\"Pro\",\"state\":\"ready\",\"remainingPercent\":64.0,\"stale\":false}" +
                                         (if (claudeConnected)
@@ -203,7 +214,7 @@ class SignalJourneyTest {
                                         (if (claudeConnected) "" else "\"claude\"") +
                                         "]}"
                                 )
-                            path == "/api/onepassword" -> json("[]")
+                            path == "/api/installations/fixture/api/onepassword" -> json("[]")
                             else -> json("{}")
                         }
                     }
@@ -212,6 +223,7 @@ class SignalJourneyTest {
                 LeoViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     MemoryVault(),
+                    officialOrigin = "",
                 )
             compose.setContent {
                 LaunchedEffect(Unit) {
@@ -292,7 +304,7 @@ class SignalJourneyTest {
         capture("fil-light")
         // A failed mission is retried in place and its new run opens.
         compose.onNodeWithContentDescription("Relancer Revue quotidienne").performClick()
-        waitCall("POST", "/api/tasks/daily/run")
+        waitCall("POST", "/api/installations/fixture/api/tasks/daily/run")
         waitDescription("Retour")
         compose.onNodeWithContentDescription("Retour").performClick()
         // A running conversation shows the live working indicator.
@@ -324,7 +336,7 @@ class SignalJourneyTest {
         compose.onNodeWithText("Lancer « Revue quotidienne »").assertDoesNotExist()
         compose.onNodeWithTag("search-field").performTextReplacement("revue")
         compose.onNodeWithText("Lancer « Revue quotidienne »").performClick()
-        waitCall("POST", "/api/tasks/daily/run")
+        waitCall("POST", "/api/installations/fixture/api/tasks/daily/run")
     }
 
     @Test
@@ -342,20 +354,29 @@ class SignalJourneyTest {
         compose.onNode(hasSetTextAction()).performTextInput("Préparer la nouvelle page d’accueil")
         capture("new-conversation-light")
         compose.onNodeWithContentDescription("Envoyer").performClick()
-        waitCall("POST", "/api/chats")
+        waitCall("POST", "/api/installations/fixture/api/chats")
         val created =
             wireJson
                 .parseToJsonElement(
-                    calls.first { it.first == "POST" && it.second == "/api/chats" }.third
+                    calls
+                        .first {
+                            it.first == "POST" &&
+                                it.second == "/api/installations/fixture/api/chats"
+                        }
+                        .third
                 )
                 .jsonObject
         assertEquals("designer", created["agentId"]?.jsonPrimitive?.content)
         assertEquals("site", created["projectId"]?.jsonPrimitive?.content)
-        waitCall("POST", "/api/chats/created/messages")
+        waitCall("POST", "/api/installations/fixture/api/chats/created/messages")
         val message =
             wireJson
                 .parseToJsonElement(
-                    calls.first { it.second == "/api/chats/created/messages" }.third
+                    calls
+                        .first {
+                            it.second == "/api/installations/fixture/api/chats/created/messages"
+                        }
+                        .third
                 )
                 .jsonObject
         assertEquals("Préparer la nouvelle page d’accueil", message["text"]?.jsonPrimitive?.content)
@@ -377,11 +398,16 @@ class SignalJourneyTest {
         compose.onAllNodesWithText("Échec").assertCountEquals(2)
         capture("mission-sheet-light")
         compose.onNodeWithContentDescription("Mettre en pause").performScrollTo().performClick()
-        waitCall("PUT", "/api/tasks/daily")
+        waitCall("PUT", "/api/installations/fixture/api/tasks/daily")
         val saved =
             wireJson
                 .parseToJsonElement(
-                    calls.first { it.first == "PUT" && it.second == "/api/tasks/daily" }.third
+                    calls
+                        .first {
+                            it.first == "PUT" &&
+                                it.second == "/api/installations/fixture/api/tasks/daily"
+                        }
+                        .third
                 )
                 .jsonObject
         assertEquals("false", saved["enabled"]?.jsonPrimitive?.content)
@@ -393,7 +419,7 @@ class SignalJourneyTest {
                 .isNotEmpty() && !vm.state.value.busy
         }
         compose.onNodeWithText("Lancer maintenant").performScrollTo().performClick()
-        waitCall("POST", "/api/tasks/daily/run")
+        waitCall("POST", "/api/installations/fixture/api/tasks/daily/run")
         waitDescription("Retour")
     }
 
@@ -414,6 +440,6 @@ class SignalJourneyTest {
             capture("atelier-light")
             compose.onNodeWithText("Journal des exécutions").performScrollTo().performClick()
             waitText("Journal")
-            waitCall("GET", "/api/runs?limit=30")
+            waitCall("GET", "/api/installations/fixture/api/runs?limit=30")
         }
 }

@@ -36,7 +36,7 @@ abstract class ImagePasteCases {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
-                        if (path == "/api/chats/chat/stream") {
+                        if (path == "/api/installations/fixture/api/chats/chat/stream") {
                             val frame =
                                 "event: batch\nid: 1\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), LiveState(chat = chat, run = run), true, false))}\n\n"
                             return MockResponse()
@@ -50,7 +50,9 @@ abstract class ImagePasteCases {
                         }
                         if (
                             request.method == "PUT" &&
-                                path.startsWith("/api/chats/chat/attachments/")
+                                path.startsWith(
+                                    "/api/installations/fixture/api/chats/chat/attachments/"
+                                )
                         ) {
                             val id = path.substringAfterLast('/')
                             val name = request.requestUrl!!.queryParameter("name")!!
@@ -71,17 +73,19 @@ abstract class ImagePasteCases {
                         }
                         val body =
                             when (path) {
-                                "/api/session" -> """{"authenticated":true,"csrf":"fixture"}"""
-                                "/api/agents" -> wireJson.encodeToString(listOf(agent))
-                                "/api/chats/chat/messages" -> {
+                                "/api/installations" -> officialInstallationsFixture()
+                                "/api/account/session" -> officialAccountFixture("fixture")
+                                "/api/installations/fixture/api/agents" ->
+                                    wireJson.encodeToString(listOf(agent))
+                                "/api/installations/fixture/api/chats/chat/messages" -> {
                                     sent +=
                                         wireJson
                                             .parseToJsonElement(request.body.readUtf8())
                                             .jsonObject
                                     "{}"
                                 }
-                                "/api/codex/models" -> """{"models":[]}"""
-                                "/api/overview" -> "{}"
+                                "/api/installations/fixture/api/codex/models" -> """{"models":[]}"""
+                                "/api/installations/fixture/api/overview" -> "{}"
                                 else -> "[]"
                             }
                         return MockResponse().setBody(body)
@@ -94,7 +98,7 @@ abstract class ImagePasteCases {
                     writeBytes(ByteArray(2048) { it.toByte() })
                 }
             val uri = FileProvider.getUriForFile(app, "${app.packageName}.files", image)
-            val vm = LeoViewModel(app, PasteVault())
+            val vm = LeoViewModel(app, PasteVault(), officialOrigin = "")
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()
                 LaunchedEffect(Unit) {

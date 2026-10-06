@@ -26,14 +26,15 @@ fun ResourcesScreen(
             if (agents) "Une équipe qui connaît votre façon de travailler."
             else "Les dépôts sur lesquels vos agents travaillent.",
         )
-        Button(
-            onClick = {
-                vm.clearMessage()
-                editing = ""
+        if (state.isOwner)
+            Button(
+                onClick = {
+                    vm.clearMessage()
+                    editing = ""
+                }
+            ) {
+                Text(if (agents) "Créer un agent" else "Ajouter un projet")
             }
-        ) {
-            Text(if (agents) "Créer un agent" else "Ajouter un projet")
-        }
         SearchField("Rechercher", query, { query = it })
         if ((if (agents) state.agents.size else state.projects.size) == 0) Empty()
         if (agents)
@@ -53,23 +54,25 @@ fun ResourcesScreen(
                                 LeoIcons.Chat,
                                 onClick = { chat(agent.id, "") },
                             )
-                            ActionIcon(
-                                "Modifier",
-                                Icons.Default.Edit,
-                                onClick = {
-                                    vm.clearMessage()
-                                    editing = agent.id
-                                },
-                            )
-                            ActionIcon(
-                                "Supprimer",
-                                Icons.Default.Delete,
-                                enabled = agent.id != MAIN_AGENT_ID,
-                                onClick = {
-                                    vm.clearMessage()
-                                    deleting = agent.id
-                                },
-                            )
+                            if (state.isOwner) {
+                                ActionIcon(
+                                    "Modifier",
+                                    Icons.Default.Edit,
+                                    onClick = {
+                                        vm.clearMessage()
+                                        editing = agent.id
+                                    },
+                                )
+                                ActionIcon(
+                                    "Supprimer",
+                                    Icons.Default.Delete,
+                                    enabled = agent.id != MAIN_AGENT_ID,
+                                    onClick = {
+                                        vm.clearMessage()
+                                        deleting = agent.id
+                                    },
+                                )
+                            }
                         }
                     }
                 }
@@ -91,22 +94,24 @@ fun ResourcesScreen(
                                 LeoIcons.Chat,
                                 onClick = { chat(MAIN_AGENT_ID, project.id) },
                             )
-                            ActionIcon(
-                                "Modifier",
-                                Icons.Default.Edit,
-                                onClick = {
-                                    vm.clearMessage()
-                                    editing = project.id
-                                },
-                            )
-                            ActionIcon(
-                                "Supprimer",
-                                Icons.Default.Delete,
-                                onClick = {
-                                    vm.clearMessage()
-                                    deleting = project.id
-                                },
-                            )
+                            if (state.isOwner) {
+                                ActionIcon(
+                                    "Modifier",
+                                    Icons.Default.Edit,
+                                    onClick = {
+                                        vm.clearMessage()
+                                        editing = project.id
+                                    },
+                                )
+                                ActionIcon(
+                                    "Supprimer",
+                                    Icons.Default.Delete,
+                                    onClick = {
+                                        vm.clearMessage()
+                                        deleting = project.id
+                                    },
+                                )
+                            }
                         }
                     }
                 }

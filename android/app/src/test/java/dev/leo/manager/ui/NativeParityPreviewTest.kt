@@ -18,7 +18,6 @@ import androidx.test.core.app.ApplicationProvider
 import dev.leo.manager.data.*
 import java.io.File
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
 import org.junit.Rule
@@ -38,7 +37,7 @@ class NativeParityPreviewTest {
     @org.junit.Before
     fun prepare() {
         val app = ApplicationProvider.getApplicationContext<Application>()
-        runBlocking { Preferences(app).setOrigin("") }
+
         androidx.work.testing.WorkManagerTestInitHelper.initializeTestWorkManager(
             app,
             androidx.work.Configuration.Builder()
@@ -194,19 +193,25 @@ class NativeParityPreviewTest {
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
-                        if (request.path!!.startsWith("/api/runs/run/artifacts/"))
+                        if (
+                            request.path!!.startsWith(
+                                "/api/installations/fixture/api/runs/run/artifacts/"
+                            )
+                        )
                             return MockResponse()
                                 .setHeader("Content-Type", "text/markdown")
                                 .setBody("# Compte rendu\n\nLa revue est terminée.")
                         val body =
                             when (request.path!!.substringBefore('?')) {
-                                "/api/session" -> "{\"authenticated\":true,\"csrf\":\"fixture\"}"
-                                "/api/agents" ->
+                                "/api/installations" -> officialInstallationsFixture()
+                                "/api/account/session" -> officialAccountFixture("fixture")
+                                "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
                                         listOf(Agent("custom", "Agent spécialisé"), agent)
                                     )
-                                "/api/projects" -> wireJson.encodeToString(listOf(project))
-                                "/api/tasks" ->
+                                "/api/installations/fixture/api/projects" ->
+                                    wireJson.encodeToString(listOf(project))
+                                "/api/installations/fixture/api/tasks" ->
                                     wireJson.encodeToString(
                                         listOf(
                                             task,
@@ -218,17 +223,20 @@ class NativeParityPreviewTest {
                                             ),
                                         )
                                     )
-                                "/api/tasks/activity" -> wireJson.encodeToString(listOf(run))
-                                "/api/runs" -> wireJson.encodeToString(listOf(run))
-                                "/api/schedule/preview" ->
+                                "/api/installations/fixture/api/tasks/activity" ->
+                                    wireJson.encodeToString(listOf(run))
+                                "/api/installations/fixture/api/runs" ->
+                                    wireJson.encodeToString(listOf(run))
+                                "/api/installations/fixture/api/schedule/preview" ->
                                     """{"occurrences":[${now + 86400000},${now + 8 * 86400000}]}"""
-                                "/api/chats/stream" ->
+                                "/api/installations/fixture/api/chats/stream" ->
                                     return stream(LiveState(chats = listOf(chat)))
-                                "/api/chats/chat/stream" ->
+                                "/api/installations/fixture/api/chats/chat/stream" ->
                                     return stream(LiveState(chat = chat, run = chat.run))
-                                "/api/runs/run/stream" -> return stream(LiveState(run = run))
-                                "/api/skills",
-                                "/api/mcps" -> "[]"
+                                "/api/installations/fixture/api/runs/run/stream" ->
+                                    return stream(LiveState(run = run))
+                                "/api/installations/fixture/api/skills",
+                                "/api/installations/fixture/api/mcps" -> "[]"
                                 else -> "{}"
                             }
                         return MockResponse()
@@ -240,6 +248,7 @@ class NativeParityPreviewTest {
                 LeoViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     MemoryVault(),
+                    officialOrigin = "",
                 )
             lateinit var activity: ComponentActivity
             compose.setContent {

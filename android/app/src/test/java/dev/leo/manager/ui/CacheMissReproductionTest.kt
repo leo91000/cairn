@@ -104,7 +104,10 @@ class CacheMissReproductionTest {
                 server.dispatcher =
                     object : Dispatcher() {
                         override fun dispatch(request: RecordedRequest): MockResponse {
-                            if (request.requestUrl?.encodedPath == "/api/chats/stream") {
+                            if (
+                                request.requestUrl?.encodedPath ==
+                                    "/api/installations/fixture/api/chats/stream"
+                            ) {
                                 // Navigation subscribes to the list independently of this history
                                 // stream.
                                 return MockResponse()
@@ -112,7 +115,10 @@ class CacheMissReproductionTest {
                                     .setBody(": keepalive\n\n".repeat(10000))
                                     .throttleBody(13, 1, TimeUnit.SECONDS)
                             }
-                            if (request.requestUrl?.encodedPath == "/api/chats/diagnostic/stream") {
+                            if (
+                                request.requestUrl?.encodedPath ==
+                                    "/api/installations/fixture/api/chats/diagnostic/stream"
+                            ) {
                                 requests.add(request.path!!)
                                 // Hold the reconnect indefinitely: visible content must come from
                                 // cache.
@@ -166,13 +172,13 @@ class CacheMissReproductionTest {
                             }
                             val body =
                                 when (request.path?.substringBefore('?')) {
-                                    "/api/session" ->
-                                        "{\"authenticated\":true,\"csrf\":\"fixture\"}"
-                                    "/api/agents",
-                                    "/api/projects",
-                                    "/api/tasks",
-                                    "/api/skills",
-                                    "/api/mcps" -> "[]"
+                                    "/api/installations" -> officialInstallationsFixture()
+                                    "/api/account/session" -> officialAccountFixture("fixture")
+                                    "/api/installations/fixture/api/agents",
+                                    "/api/installations/fixture/api/projects",
+                                    "/api/installations/fixture/api/tasks",
+                                    "/api/installations/fixture/api/skills",
+                                    "/api/installations/fixture/api/mcps" -> "[]"
                                     else -> "{}"
                                 }
                             return MockResponse()
@@ -181,7 +187,7 @@ class CacheMissReproductionTest {
                         }
                     }
                 server.start()
-                val vm = LeoViewModel(app, MemoryVault())
+                val vm = LeoViewModel(app, MemoryVault(), officialOrigin = "")
                 var opened by mutableStateOf(true)
                 compose.setContent {
                     val workspace by vm.state.collectAsStateWithLifecycle()
@@ -211,7 +217,7 @@ class CacheMissReproductionTest {
                     compose.waitUntil(5000) { vm.api.streamCalls.isEmpty() }
                     val key =
                         vm.historyCache.key(
-                            vm.state.value.origin,
+                            vm.api.cacheScope,
                             vm.api.csrf,
                             "/chats/diagnostic/stream",
                         )
@@ -228,7 +234,7 @@ class CacheMissReproductionTest {
                     }
                     compose.waitForIdle()
                     assertEquals(
-                        "/api/chats/diagnostic/stream?after=$accepted&history=v1%3Afixture%3A1&window=1",
+                        "/api/installations/fixture/api/chats/diagnostic/stream?after=$accepted&history=v1%3Afixture%3A1&window=1",
                         requests[1],
                     )
                     compose.onNodeWithText("Diagnostic cache").assertIsDisplayed()

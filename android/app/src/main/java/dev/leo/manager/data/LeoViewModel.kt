@@ -28,6 +28,8 @@ data class Workspace(
     val ready: Boolean = false,
     val origin: String = "",
     val session: Session = Session(),
+    val installation: Installation? = null,
+    val emailForCode: String? = null,
     val busy: Boolean = false,
     val signingOut: Boolean = false,
     val mcps: List<Mcp> = emptyList(),
@@ -40,23 +42,25 @@ data class Workspace(
     val tasks: List<Task> = emptyList(),
     val skills: List<Skill> = emptyList(),
     val overview: Overview = Overview(),
-)
+) {
+    val isOwner: Boolean
+        get() = installation?.role == "owner"
+}
 
 class LeoViewModel
 @JvmOverloads
 constructor(
     application: Application,
     private val vault: SessionVault = KeystoreSessionVault(application),
+    private val officialOrigin: String = BuildConfig.OFFICIAL_SERVICE_ORIGIN,
 ) : AndroidViewModel(application) {
     val historyCache = HistoryCache.encrypted(application)
     private val retentionPreferences = application.getSharedPreferences("conversation-cache", 0)
 
     suspend fun acceptCacheRevision(revision: String?) {
-        if (
-            revision != null && retentionPreferences.getString(state.value.origin, null) != revision
-        ) {
+        if (revision != null && retentionPreferences.getString(api.cacheScope, null) != revision) {
             historyCache.clear()
-            retentionPreferences.edit().putString(state.value.origin, revision).apply()
+            retentionPreferences.edit().putString(api.cacheScope, revision).apply()
         }
     }
 
@@ -72,6 +76,7 @@ constructor(
 
     override fun onCleared() {
         connection?.closeStreams()
+        accountConnection?.closeStreams()
     }
 
     private val preferences = Preferences(application)
@@ -90,13 +95,19 @@ constructor(
     private val mutable = MutableStateFlow(Workspace())
     val state = mutable.asStateFlow()
     private var connection: LeoApi? = null
+    private var accountConnection: LeoApi? = null
+    private var emailChallenge: String? = null
     val api: LeoApi
-        get() = checkNotNull(connection) { "Connectez-vous à votre serveur." }
+        get() = checkNotNull(connection) { "Choisissez une installation." }
 
     init {
         perform {
-            val origin = preferences.origin.first()
+            val origin = officialOrigin
             if (origin.isNotBlank()) connect(origin)
+            else
+                notify(
+                    "Le service officiel n’est pas configuré dans cette version de l’application."
+                )
         }
     }
 
@@ -114,10 +125,13 @@ constructor(
 
     fun report(error: Throwable) {
         if (error is CancellationException) throw error
-        if (error is ApiException && error.status == 401) {
+        if (error is ApiException && error.status == 401 && state.value.session.authenticated) {
             clearDrafts()
             viewModelScope.launch { historyCache.clear() }
+            connection?.closeStreams()
             connection?.clearSession()
+            accountConnection?.clearSession()
+            connection = null
             schedule(getApplication(), false)
             mutable.update {
                 Workspace(
@@ -144,77 +158,162 @@ constructor(
         }
     }
 
-    suspend fun connect(input: String) {
+    // The shipped app supplies only BuildConfig.OFFICIAL_SERVICE_ORIGIN. Tests inject an HTTP
+    // fixture.
+    internal suspend fun connect(input: String) {
         val origin = serverOrigin(input, BuildConfig.DEBUG)
         val next = withContext(Dispatchers.IO) { LeoApi(origin, vault) }
-        val session = next.get<Session>("/session")
-        next.csrf = session.csrf
         connection?.closeStreams()
-        if (
-            !session.authenticated ||
-                (connection != null &&
-                    (connection?.origin != next.origin || connection?.csrf != next.csrf))
-        )
-            historyCache.clear()
-        connection = next
-        preferences.setOrigin(origin.toString())
+        accountConnection?.closeStreams()
+        historyCache.clear()
+        clearDrafts()
+        accountConnection = next
+        emailChallenge = null
+        connection = null
+        mutable.update { Workspace(ready = true, busy = it.busy, origin = origin.toString()) }
+        val session = next.get<Session>("/account/session")
+        next.csrf = session.csrf.orEmpty()
         mutable.update {
             Workspace(ready = true, busy = it.busy, origin = origin.toString(), session = session)
         }
-        if (session.authenticated) {
-            schedule(getApplication(), notifications.enabled.first())
-            refresh()
-        }
+        if (session.authenticated) openAccount(session)
     }
 
-    suspend fun login(password: String, setupToken: String) {
-        val session =
-            api.send<Session>(
+    suspend fun requestEmailCode(email: String) {
+        val target = checkNotNull(accountConnection) { "Le service officiel n’est pas configuré." }
+        val normalizedEmail = email.trim().lowercase(java.util.Locale.ROOT)
+        val request =
+            target.send<EmailChallenge>(
                 "POST",
-                if (state.value.session.setupRequired) "/setup" else "/login",
-                body("password" to password, "setupToken" to setupToken),
+                "/account/email-code",
+                body("email" to normalizedEmail),
             )
-        api.csrf = session.csrf
-        mutable.update { it.copy(session = session) }
+        emailChallenge = request.challenge
+        mutable.update { it.copy(emailForCode = normalizedEmail) }
+    }
+
+    fun changeEmail() {
+        emailChallenge = null
+        mutable.update { it.copy(emailForCode = null, error = null) }
+    }
+
+    suspend fun verifyEmailCode(code: String) {
+        val target = checkNotNull(accountConnection)
+        val challenge = checkNotNull(emailChallenge) { "Demandez un nouveau code par e-mail." }
+        val session =
+            target.send<Session>(
+                "POST",
+                "/account/verify",
+                body("challenge" to challenge, "code" to code.trim()),
+            )
+        openAccount(session)
+    }
+
+    private suspend fun openAccount(session: Session) {
+        require(session.authenticated && session.account != null && !session.csrf.isNullOrBlank()) {
+            "La session du compte Leo est invalide. Reconnectez-vous."
+        }
+        val account = checkNotNull(accountConnection)
+        account.csrf = session.csrf.orEmpty()
+        emailChallenge = null
+        mutable.update { it.copy(session = session, emailForCode = null) }
+        val saved = preferences.lastInstallation(state.value.origin, session.account.id)
+        val installation =
+            session.installations.find { it.id == saved } ?: session.installations.firstOrNull()
+        if (installation != null) selectInstallation(installation.id)
+    }
+
+    suspend fun selectInstallation(id: String) {
+        val current = state.value
+        val installation = current.session.installations.first { it.id == id }
+        val account = checkNotNull(accountConnection)
+        connection?.closeStreams()
+        clearDrafts()
+        historyCache.clear()
+        schedule(getApplication(), false)
+        notifications.resetSelection()
+        preferences.selectInstallation(current.origin, checkNotNull(current.session.account).id, id)
+        val next =
+            withContext(Dispatchers.IO) {
+                LeoApi(account.origin, vault, installationId = id).also { it.csrf = account.csrf }
+            }
+        connection = next
+        mutable.update {
+            Workspace(
+                ready = true,
+                origin = current.origin,
+                session = current.session,
+                installation = installation,
+                busy = it.busy,
+            )
+        }
+        if (installation.online) refresh()
         schedule(getApplication(), notifications.enabled.first())
-        refresh()
+    }
+
+    suspend fun refreshInstallations() {
+        val account = accountConnection ?: return
+        if (!state.value.session.authenticated) return
+        val installations = account.get<List<Installation>>("/installations")
+        if (accountConnection !== account || !state.value.session.authenticated) return
+        val previous = state.value.installation
+        val selected = installations.find { it.id == previous?.id }
+        mutable.update { it.copy(session = it.session.copy(installations = installations)) }
+        when {
+            selected == null || selected.role != previous?.role -> {
+                connection?.closeStreams()
+                connection = null
+                clearDrafts()
+                historyCache.clear()
+                mutable.update {
+                    Workspace(
+                        ready = true,
+                        origin = it.origin,
+                        session = it.session,
+                        busy = it.busy,
+                    )
+                }
+                val next = selected ?: installations.firstOrNull()
+                if (next != null) selectInstallation(next.id) else schedule(getApplication(), false)
+            }
+            else -> {
+                mutable.update { it.copy(installation = selected) }
+                if (selected.online && previous?.online != true) refresh()
+                if (!selected.online) connection?.closeStreams()
+            }
+        }
     }
 
     suspend fun logout() {
         clearDrafts()
+        emailChallenge = null
         mutable.update { it.copy(signingOut = true) }
         historyCache.clear()
+        connection?.closeStreams()
+        schedule(getApplication(), false)
         try {
-            api.closeStreams()
-            schedule(getApplication(), false)
-            api.request("POST", "/logout")
-            withContext(Dispatchers.IO) { api.clearSession() }
-            mutable.update { Workspace(ready = true, origin = it.origin) }
+            checkNotNull(accountConnection).request("POST", "/account/logout")
         } finally {
-            mutable.update { it.copy(signingOut = false) }
+            withContext(Dispatchers.IO) {
+                connection?.clearSession()
+                accountConnection?.clearSession()
+            }
+            connection = null
+            mutable.update { Workspace(ready = true, origin = it.origin, busy = it.busy) }
         }
     }
 
-    suspend fun forget() {
-        clearDrafts()
-        historyCache.clear()
-        withContext(Dispatchers.IO) { connection?.clearSession() }
-        connection = null
-        schedule(getApplication(), false)
-        notifications.setSeen(emptySet())
-        preferences.setOrigin("")
-        mutable.value = Workspace(ready = true)
-    }
-
     suspend fun refresh() = coroutineScope {
-        val agents = async { api.get<List<Agent>>("/agents") }
-        val projects = async { api.get<List<Project>>("/projects") }
-        val tasks = async { api.get<List<Task>>("/tasks") }
-        val skills = async { api.get<List<Skill>>("/skills") }
-        val mcps = async { api.get<List<Mcp>>("/mcps") }
+        val target = api
+        val owner = state.value.isOwner
+        val agents = async { target.get<List<Agent>>("/agents") }
+        val projects = async { target.get<List<Project>>("/projects") }
+        val tasks = async { target.get<List<Task>>("/tasks") }
+        val skills = async { target.get<List<Skill>>("/skills") }
+        val mcps = async { if (owner) target.get<List<Mcp>>("/mcps") else emptyList() }
         val models = async {
             try {
-                api.get<ModelCatalog>("/codex/models")
+                target.get<ModelCatalog>("/codex/models")
             } catch (e: Exception) {
                 if (e is CancellationException || (e is ApiException && e.status == 401)) throw e
                 state.value.models.copy(
@@ -225,7 +324,7 @@ constructor(
         }
         val claudeModels = async {
             try {
-                api.get<ModelCatalog>("/claude/models")
+                target.get<ModelCatalog>("/claude/models")
             } catch (e: Exception) {
                 if (e is CancellationException || (e is ApiException && e.status == 401)) throw e
                 state.value.claudeModels.copy(
@@ -234,7 +333,7 @@ constructor(
                 )
             }
         }
-        val overview = async { api.get<Overview>("/overview") }
+        val overview = async { target.get<Overview>("/overview") }
         val updated =
             Workspace(
                 agents = agents.await(),
@@ -246,18 +345,19 @@ constructor(
                 models = models.await(),
                 claudeModels = claudeModels.await(),
             )
-        mutable.update {
-            it.copy(
-                agents = updated.agents,
-                projects = updated.projects,
-                tasks = updated.tasks,
-                skills = updated.skills,
-                overview = updated.overview,
-                mcps = updated.mcps,
-                models = updated.models,
-                claudeModels = updated.claudeModels,
-            )
-        }
+        if (connection === target && state.value.session.authenticated)
+            mutable.update {
+                it.copy(
+                    agents = updated.agents,
+                    projects = updated.projects,
+                    tasks = updated.tasks,
+                    skills = updated.skills,
+                    overview = updated.overview,
+                    mcps = updated.mcps,
+                    models = updated.models,
+                    claudeModels = updated.claudeModels,
+                )
+            }
     }
 
     suspend fun refreshAgentPortraits() {

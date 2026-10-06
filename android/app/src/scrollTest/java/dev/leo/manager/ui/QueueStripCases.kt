@@ -105,19 +105,21 @@ abstract class QueueStripCases {
                         }
                         val body =
                             when (path) {
-                                "/api/chats/stream" ->
+                                "/api/installations/fixture/api/chats/stream" ->
                                     return stream(LiveState(chats = listOf(chat, neighbour)))
-                                "/api/chats/neighbour/stream" ->
+                                "/api/installations/fixture/api/chats/neighbour/stream" ->
                                     return stream(LiveState(chat = neighbour))
-                                "/api/chats/chat/stream" ->
+                                "/api/installations/fixture/api/chats/chat/stream" ->
                                     return stream(LiveState(chat = chat, run = chat.run), events)
-                                "/api/session" -> """{"authenticated":true,"csrf":"fixture"}"""
-                                "/api/agents" ->
+                                "/api/installations" -> officialInstallationsFixture()
+                                "/api/account/session" -> officialAccountFixture("fixture")
+                                "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
                                         listOf(Agent(MAIN_AGENT_ID, "Agent principal"))
                                     )
-                                "/api/overview" -> "{}"
-                                "/api/chats/chat" -> wireJson.encodeToString(chat)
+                                "/api/installations/fixture/api/overview" -> "{}"
+                                "/api/installations/fixture/api/chats/chat" ->
+                                    wireJson.encodeToString(chat)
                                 else ->
                                     if (path.endsWith("/models")) """{"models":[]}"""
                                     else if (request.method == "GET") "[]" else "{}"
@@ -129,7 +131,11 @@ abstract class QueueStripCases {
                 }
             server.start()
             val vm =
-                LeoViewModel(ApplicationProvider.getApplicationContext<Application>(), QueueVault())
+                LeoViewModel(
+                    ApplicationProvider.getApplicationContext<Application>(),
+                    QueueVault(),
+                    officialOrigin = "",
+                )
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()
                 LaunchedEffect(Unit) {
@@ -185,7 +191,10 @@ abstract class QueueStripCases {
 
             compose.onNodeWithText("Maintenant").performClick()
             compose.waitUntil(10000) {
-                calls.any { it.first == "PUT" && it.second == "/api/chats/chat/messages/first" }
+                calls.any {
+                    it.first == "PUT" &&
+                        it.second == "/api/installations/fixture/api/chats/chat/messages/first"
+                }
             }
             val steer =
                 wireJson.parseToJsonElement(calls.first { it.first == "PUT" }.third).jsonObject
@@ -208,7 +217,9 @@ abstract class QueueStripCases {
             compose.waitForIdle()
             capture("queue-sheet")
             compose.onNodeWithText("Mettre la file en pause").performClick()
-            compose.waitUntil(10000) { calls.any { it.second == "/api/chats/chat/pause" } }
+            compose.waitUntil(10000) {
+                calls.any { it.second == "/api/installations/fixture/api/chats/chat/pause" }
+            }
             assertTrue(
                 wireJson
                     .parseToJsonElement(calls.first { it.second.endsWith("/pause") }.third)
@@ -243,7 +254,10 @@ abstract class QueueStripCases {
             compose.onNodeWithText("Retirer", substring = false).performClick()
             compose.onNodeWithText("Confirmer").performClick()
             compose.waitUntil(10000) {
-                calls.any { it.first == "DELETE" && it.second == "/api/chats/chat/messages/first" }
+                calls.any {
+                    it.first == "DELETE" &&
+                        it.second == "/api/installations/fixture/api/chats/chat/messages/first"
+                }
             }
             vm.api.closeStreams()
         }

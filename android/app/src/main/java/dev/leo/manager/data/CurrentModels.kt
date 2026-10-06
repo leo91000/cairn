@@ -205,13 +205,18 @@ fun artifactForLink(
     link: String,
     origin: okhttp3.HttpUrl,
     artifacts: List<Deliverable>,
+    installationId: String? = null,
 ): Deliverable? {
-    val path = artifactPathForLink(link, origin) ?: return null
+    val path = artifactPathForLink(link, origin, installationId) ?: return null
     return artifacts.find { path == it.path().substringBefore('?') }
 }
 
 /** Only canonical artifact endpoints on our authenticated server may use the session. */
-fun artifactPathForLink(link: String, origin: okhttp3.HttpUrl): String? {
+fun artifactPathForLink(
+    link: String,
+    origin: okhttp3.HttpUrl,
+    installationId: String? = null,
+): String? {
     val url = origin.resolve(link) ?: return null
     if (
         url.scheme != origin.scheme ||
@@ -221,7 +226,15 @@ fun artifactPathForLink(link: String, origin: okhttp3.HttpUrl): String? {
             url.password.isNotEmpty()
     )
         return null
-    return url.encodedPath
-        .takeIf { Regex("/api/runs/[A-Za-z0-9_-]+/artifacts/[A-Za-z0-9_-]+").matches(it) }
-        ?.removePrefix("/api")
+    val prefix =
+        if (installationId == null) "/api" else "/api/installations/${segment(installationId)}/api"
+    val path =
+        when {
+            url.encodedPath.startsWith("$prefix/") -> url.encodedPath.removePrefix(prefix)
+            // Agent messages may carry an installation-relative link.
+            installationId != null && url.encodedPath.startsWith("/api/runs/") ->
+                url.encodedPath.removePrefix("/api")
+            else -> return null
+        }
+    return path.takeIf { Regex("/runs/[A-Za-z0-9_-]+/artifacts/[A-Za-z0-9_-]+").matches(it) }
 }

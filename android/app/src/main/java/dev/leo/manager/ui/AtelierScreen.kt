@@ -63,6 +63,30 @@ private suspend fun <T> optional(vm: LeoViewModel, load: suspend () -> T): T? =
 /** Atelier: what the agents can use, with health first and one tap to each resource. */
 @Composable
 fun AtelierScreen(vm: LeoViewModel, state: Workspace, navigate: (String) -> Unit) {
+    if (!state.isOwner) {
+        Page {
+            Heading("Atelier", "Les ressources de cette installation partagée.")
+            listOf(
+                    "agents" to "Agents",
+                    "projects" to "Projets",
+                    "skills" to "Skills",
+                    "runs" to "Journal des exécutions",
+                )
+                .forEach { (route, label) ->
+                    androidx.compose.material3.TextButton(onClick = { navigate(route) }) {
+                        Text(label)
+                    }
+                }
+            Text(state.session.account?.email.orEmpty())
+            androidx.compose.material3.TextButton(
+                onClick = { vm.perform { logout() } },
+                enabled = !state.busy,
+            ) {
+                Text("Se déconnecter")
+            }
+        }
+        return
+    }
     var accounts by remember { mutableStateOf<AccountsView?>(null) }
     var onePassword by remember { mutableStateOf<List<OnePasswordAccount>?>(null) }
     var loaded by remember { mutableStateOf(false) }
