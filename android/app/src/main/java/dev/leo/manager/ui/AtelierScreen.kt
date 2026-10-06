@@ -71,6 +71,7 @@ fun AtelierScreen(vm: LeoViewModel, state: Workspace, navigate: (String) -> Unit
                     "projects" to "Projets",
                     "skills" to "Skills",
                     "runs" to "Journal des exécutions",
+                    "settings" to "Paramètres",
                 )
                 .forEach { (route, label) ->
                     androidx.compose.material3.TextButton(onClick = { navigate(route) }) {

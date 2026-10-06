@@ -411,7 +411,7 @@ private fun WorkspaceApp(
                                     ConnectionsScreen(vm, state) { nav.navigate("run/$it") }
                                 }
                             if (state.isOwner) composable("nodes") { NodesScreen(vm, state) }
-                            if (state.isOwner) composable("settings") { SettingsScreen(vm, state) }
+                            composable("settings") { SettingsScreen(vm, state) }
                             if (state.isOwner)
                                 composable("authorize") {
                                     AuthorizeScreen(vm, state, sharedUrl, consumedShare)

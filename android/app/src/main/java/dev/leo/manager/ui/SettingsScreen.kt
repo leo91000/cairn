@@ -28,13 +28,14 @@ fun SettingsScreen(vm: LeoViewModel, state: Workspace) {
         grants = vm.api.get("/tokens")
         audit = vm.api.get("/audit")
     }
-    Poll("settings", 30000) {
-        try {
-            load()
-        } catch (e: Exception) {
-            vm.report(e)
+    if (state.isOwner)
+        Poll("settings", 30000) {
+            try {
+                load()
+            } catch (e: Exception) {
+                vm.report(e)
+            }
         }
-    }
     Page {
         Heading("Paramètres", "Votre espace, vos règles.")
         Panel {
@@ -48,97 +49,101 @@ fun SettingsScreen(vm: LeoViewModel, state: Workspace) {
         }
         AppUpdateSettings()
         NotificationSettings(vm)
-        settings?.let { info ->
-            Panel {
-                Text("Connecter un assistant", style = MaterialTheme.typography.titleLarge)
-                Text(
-                    "Ajoutez cette adresse comme serveur MCP dans votre assistant, puis choisissez l’authentification OAuth."
-                )
-                Code(info.mcpUrl)
-                CopyButton("Copier l’adresse MCP", info.mcpUrl)
-                Text("Protocole : ${info.protocol}")
-            }
-            Panel {
-                Text("Clients et jetons d’accès", style = MaterialTheme.typography.titleLarge)
-                Button(
-                    onClick = {
-                        vm.clearMessage()
-                        creating = true
-                    }
-                ) {
-                    Text("Créer un jeton")
-                }
-                if (grants.isEmpty()) Text("Aucun accès accordé.")
-                grants.forEach { grant ->
-                    Text(grant.label, style = MaterialTheme.typography.titleMedium)
+        if (state.isOwner) {
+            settings?.let { info ->
+                Panel {
+                    Text("Connecter un assistant", style = MaterialTheme.typography.titleLarge)
                     Text(
-                        grant.scopes.joinToString(" · ") +
-                            if (grant.clientId == "personal") " · Personnel" else " · OAuth"
+                        "Ajoutez cette adresse comme serveur MCP dans votre assistant, puis choisissez l’authentification OAuth."
                     )
+                    Code(info.mcpUrl)
+                    CopyButton("Copier l’adresse MCP", info.mcpUrl)
+                    Text("Protocole : ${info.protocol}")
+                }
+                Panel {
+                    Text("Clients et jetons d’accès", style = MaterialTheme.typography.titleLarge)
+                    Button(
+                        onClick = {
+                            vm.clearMessage()
+                            creating = true
+                        }
+                    ) {
+                        Text("Créer un jeton")
+                    }
+                    if (grants.isEmpty()) Text("Aucun accès accordé.")
+                    grants.forEach { grant ->
+                        Text(grant.label, style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            grant.scopes.joinToString(" · ") +
+                                if (grant.clientId == "personal") " · Personnel" else " · OAuth"
+                        )
+                        TextButton(
+                            onClick = {
+                                vm.clearMessage()
+                                revoke = grant.id
+                            },
+                            enabled = !state.busy,
+                        ) {
+                            Text("Révoquer")
+                        }
+                        HorizontalDivider()
+                    }
+                }
+                Panel {
+                    Text("Serveur", style = MaterialTheme.typography.titleLarge)
+                    Code(info.publicUrl)
+                    Text(
+                        "Version ${info.version} · concurrence hôte (développement) : ${info.concurrency}"
+                    )
+                    Code("Commit : ${info.commit}")
+                    Text("Répertoire du worker")
+                    Code(info.home)
+                    Text("Racines des projets")
+                    info.workspaceRoots.forEach { Code(it) }
+                    Text("Application Android ${dev.leo.manager.BuildConfig.VERSION_NAME}")
                     TextButton(
                         onClick = {
                             vm.clearMessage()
-                            revoke = grant.id
+                            logout = true
                         },
                         enabled = !state.busy,
                     ) {
-                        Text("Révoquer")
+                        Text("Se déconnecter")
                     }
-                    HorizontalDivider()
                 }
+            } ?: LinearProgressIndicator(Modifier.fillMaxWidth())
+            Text("Journal d’audit", style = MaterialTheme.typography.titleLarge)
+            OutlinedButton(onClick = { vm.perform { load() } }, enabled = !state.busy) {
+                Text("Actualiser")
             }
-            Panel {
-                Text("Serveur", style = MaterialTheme.typography.titleLarge)
-                Code(info.publicUrl)
-                Text(
-                    "Version ${info.version} · concurrence hôte (développement) : ${info.concurrency}"
-                )
-                Code("Commit : ${info.commit}")
-                Text("Répertoire du worker")
-                Code(info.home)
-                Text("Racines des projets")
-                info.workspaceRoots.forEach { Code(it) }
-                Text("Application Android ${dev.leo.manager.BuildConfig.VERSION_NAME}")
-                TextButton(
-                    onClick = {
-                        vm.clearMessage()
-                        logout = true
-                    },
-                    enabled = !state.busy,
-                ) {
-                    Text("Se déconnecter")
+            if (audit.isEmpty()) Text("Aucun événement.")
+            audit.forEach { entry ->
+                Panel {
+                    Text(entry.action, style = MaterialTheme.typography.titleMedium)
+                    Text(date(entry.at), style = MaterialTheme.typography.labelMedium)
+                    Code(entry.detail)
                 }
-            }
-        } ?: LinearProgressIndicator(Modifier.fillMaxWidth())
-        Text("Journal d’audit", style = MaterialTheme.typography.titleLarge)
-        OutlinedButton(onClick = { vm.perform { load() } }, enabled = !state.busy) {
-            Text("Actualiser")
-        }
-        if (audit.isEmpty()) Text("Aucun événement.")
-        audit.forEach { entry ->
-            Panel {
-                Text(entry.action, style = MaterialTheme.typography.titleMedium)
-                Text(date(entry.at), style = MaterialTheme.typography.labelMedium)
-                Code(entry.detail)
             }
         }
     }
-    if (creating) TokenEditor(vm, state, close = { creating = false }) { load() }
-    revoke?.let { id ->
-        Confirm(
-            "Révoquer cet accès ?",
-            "Ce client ne pourra plus utiliser ce jeton pour accéder à votre espace.",
-            state.busy,
-            state.error,
-            { revoke = null },
-        ) {
-            vm.perform {
-                api.request("DELETE", "/tokens/${segment(id)}")
-                load()
-                revoke = null
+    if (state.isOwner && creating) TokenEditor(vm, state, close = { creating = false }) { load() }
+    revoke
+        ?.takeIf { state.isOwner }
+        ?.let { id ->
+            Confirm(
+                "Révoquer cet accès ?",
+                "Ce client ne pourra plus utiliser ce jeton pour accéder à votre espace.",
+                state.busy,
+                state.error,
+                { revoke = null },
+            ) {
+                vm.perform {
+                    api.request("DELETE", "/tokens/${segment(id)}")
+                    load()
+                    revoke = null
+                }
             }
         }
-    }
     if (logout)
         Confirm(
             "Se déconnecter ?",
