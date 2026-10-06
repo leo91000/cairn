@@ -136,13 +136,16 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                         path.startsWith("/api/installations/fixture/api/chats/") &&
                             path.endsWith("/stream") &&
                             path != "/api/installations/fixture/api/chats/stream"
-                    )
+                    ) {
+                        val chatId = path.substringBeforeLast('/').substringAfterLast('/')
+
                         return stream(
                             LiveState(
-                                chat = chats.single { it.id == path.split('/')[3] },
+                                chat = chats.single { it.id == chatId },
                                 run = chat.run,
                             )
                         )
+                    }
                     when (path) {
                         "/api/installations/fixture/api/chats/stream" ->
                             return stream(LiveState(chats = chats))
