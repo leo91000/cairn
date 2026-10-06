@@ -5,7 +5,7 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 
 #[tokio::test]
-async fn personal_mcp_token_is_scoped_to_one_installation_and_revocable() {
+async fn personal_mcp_token_enforces_scopes_and_revocation() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     let app = &relay.app;
     let id = relay.session["installations"][0]["id"].as_str().unwrap();
@@ -502,10 +502,80 @@ async fn dynamic_registration_has_no_permanent_global_client_ceiling() {
     relay.close().await;
 }
 
+fn stalled_mcp_upload(
+    relay: &RelayedInstallation,
+    token: &str,
+) -> (
+    tokio::sync::mpsc::Sender<String>,
+    tokio::task::JoinHandle<reqwest::Response>,
+) {
+    let (sender, receiver) = tokio::sync::mpsc::channel::<String>(2);
+    let body = reqwest::Body::wrap_stream(futures_util::stream::unfold(
+        receiver,
+        |mut receiver| async move {
+            receiver
+                .recv()
+                .await
+                .map(|chunk| (Ok::<_, std::io::Error>(chunk), receiver))
+        },
+    ));
+    sender.try_send("{".into()).unwrap();
+    let request = relay
+        .app
+        .client
+        .post(format!("{}/mcp", relay.app.url))
+        .bearer_auth(token)
+        .header("content-type", "application/json")
+        .body(body);
+    (
+        sender,
+        tokio::spawn(async move { request.send().await.unwrap() }),
+    )
+}
+
 #[tokio::test]
-async fn a_revoked_mcp_token_cannot_finish_a_previously_authorized_upload() {
+async fn slow_mcp_uploads_have_a_body_deadline_and_release_their_admission() {
     use std::time::Duration;
-    use tokio::sync::mpsc;
+
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let minted: Value = owner_post(
+        &relay,
+        &format!("/api/installations/{id}/tokens"),
+        json!({ "label": "Stalled client", "scopes": ["read"] }),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let (_sender, response) = stalled_mcp_upload(&relay, minted["token"].as_str().unwrap());
+    let response = tokio::time::timeout(Duration::from_secs(15), response)
+        .await
+        .expect("a slow MCP body must expire")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    assert_eq!(
+        relay.get("/projects").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    let response = relay
+        .app
+        .client
+        .post(format!("{}/mcp", relay.app.url))
+        .bearer_auth(minted["token"].as_str().unwrap())
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn slow_mcp_uploads_cannot_block_owner_access_even_after_revocation() {
+    use std::time::Duration;
 
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     let id = relay.session["installations"][0]["id"].as_str().unwrap();
@@ -521,56 +591,28 @@ async fn a_revoked_mcp_token_cannot_finish_a_previously_authorized_upload() {
     .json()
     .await
     .unwrap();
-    let start_upload = || {
-        let (sender, receiver) = mpsc::channel::<String>(2);
-        let body = reqwest::Body::wrap_stream(futures_util::stream::unfold(
-            receiver,
-            |mut receiver| async move {
-                receiver
-                    .recv()
-                    .await
-                    .map(|chunk| (Ok::<_, std::io::Error>(chunk), receiver))
-            },
-        ));
-        sender.try_send("{".into()).unwrap();
-        let request = relay
-            .app
-            .client
-            .post(format!("{}/mcp", relay.app.url))
-            .bearer_auth(minted["token"].as_str().unwrap())
-            .header("content-type", "application/json")
-            .body(body);
-        (
-            sender,
-            tokio::spawn(async move { request.send().await.unwrap() }),
-        )
-    };
-    // Capacity is an observable HTTP signal that authentication finished and
-    // body reading began. No sleep or internal state is used as admission proof.
-    let mut uploads: Vec<_> = (0..leo_relay_protocol::MAX_IN_FLIGHT)
+    let start_upload = || stalled_mcp_upload(&relay, minted["token"].as_str().unwrap());
+    // A rejected upload proves that the authenticated uploads reached admission.
+    // Keep 32 stalled bodies open without allowing them to consume owner capacity.
+    let mut uploads: Vec<_> = (0..=leo_relay_protocol::MAX_IN_FLIGHT)
         .map(|_| start_upload())
         .collect();
-    tokio::time::timeout(Duration::from_secs(15), async {
+    let rejected = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            let status = relay.get("/projects").send().await.unwrap().status();
-            if status == StatusCode::SERVICE_UNAVAILABLE {
-                break;
-            }
-            assert_eq!(status, StatusCode::OK);
-            for upload in &mut uploads {
-                if upload.1.is_finished() {
-                    let (_, rejected) = std::mem::replace(upload, start_upload());
-                    assert_eq!(
-                        rejected.await.unwrap().status(),
-                        StatusCode::SERVICE_UNAVAILABLE
-                    );
-                }
+            if let Some(index) = uploads.iter().position(|upload| upload.1.is_finished()) {
+                let (_, response) = uploads.swap_remove(index);
+                break response.await.unwrap();
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("uploads must occupy the installation request capacity");
+    .expect("excess MCP uploads must be rejected without waiting for their bodies");
+    assert_eq!(rejected.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        relay.get("/projects").send().await.unwrap().status(),
+        StatusCode::OK
+    );
     let revoked = relay
         .app
         .client
@@ -600,11 +642,25 @@ async fn a_revoked_mcp_token_cannot_finish_a_previously_authorized_upload() {
         },
     })
     .to_string();
+    assert_eq!(
+        relay.get("/projects").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    let mut revoked_uploads = 0;
     for (sender, response) in uploads {
-        sender.send(payload[1..].into()).await.unwrap();
+        // Excess uploads can already have returned 429 and closed their bodies.
+        let _ = sender.send(payload[1..].into()).await;
         drop(sender);
-        assert_eq!(response.await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        match response.await.unwrap().status() {
+            StatusCode::UNAUTHORIZED => revoked_uploads += 1,
+            StatusCode::TOO_MANY_REQUESTS => {}
+            status => panic!("unexpected upload response: {status}"),
+        }
     }
+    assert!(
+        revoked_uploads > 0,
+        "admitted uploads must be rejected after revocation"
+    );
     let projects: Value = relay
         .get("/projects")
         .send()

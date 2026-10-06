@@ -332,10 +332,10 @@ fn owner_operation(method: &str, path: &str) -> bool {
     let read = matches!(method, "GET" | "HEAD");
     match segments.as_slice() {
         // Storage configuration lives under nodes; credentials also include
-        // MCP grants, connection flows and per-agent GitHub tokens below.
+        // MCP connection flows and per-agent GitHub tokens below.
         [
-            "nodes" | "accounts" | "onepassword" | "mcps" | "tokens" | "oauth" | "connections"
-            | "settings" | "audit" | "agent-avatars",
+            "nodes" | "accounts" | "onepassword" | "mcps" | "connections" | "settings" | "audit"
+            | "agent-avatars",
             ..,
         ] => true,
         ["agents"] | ["agents", _, "avatar"] => !read,
