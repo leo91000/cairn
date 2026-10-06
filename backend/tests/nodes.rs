@@ -1168,6 +1168,71 @@ async fn outbound_transport_streams_only_to_the_authenticated_node() {
 }
 
 #[tokio::test]
+async fn node_responses_keep_their_length_when_a_proxy_asks_for_compression() {
+    // Remote artifact exports reach the manager through its public origin, where a proxy may add
+    // Accept-Encoding. Publication requires the declared length, so it must survive.
+    let owner = Owner::new().await;
+    let identity = owner
+        .enroll("Worker", &capabilities(true, 4, 8192, 65536))
+        .await;
+    let credential =
+        leo_agent_manager::execution::secret(&owner.root().join("data"), "runner-secret")
+            .await
+            .unwrap();
+    let request = owner
+        .request(
+            "POST",
+            &format!(
+                "/internal/execution/{}/runs/{}/artifact",
+                identity["nodeId"].as_str().unwrap(),
+                id()
+            ),
+        )
+        .header("authorization", bearer(&credential))
+        .header("accept-encoding", "gzip, br")
+        .body(Body::from(
+            json!({ "runId": id(), "path": "/tmp/shot.png" }).to_string(),
+        ))
+        .unwrap();
+    let app = owner.app.clone();
+    let waiting = tokio::spawn(async move { common::send(&app, request).await });
+    let token = identity["token"].as_str().unwrap();
+    let (status, command) = owner
+        .call("POST", "/internal/nodes/poll", json!({}), Some(token))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{command}");
+    let file = vec![b'x'; 100];
+    let reply = json!({
+        "id": command["id"],
+        "status": 200,
+        "length": file.len(),
+        "data": STANDARD.encode(&file),
+        "done": true
+    });
+    assert_eq!(
+        owner.call("POST", REPLY, reply, Some(token)).await.0,
+        StatusCode::OK
+    );
+
+    let response = waiting.await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers().get("content-encoding"), None);
+    assert_eq!(response.headers()["content-length"], "100");
+    assert_eq!(to_bytes(response.into_body(), 1024).await.unwrap(), file);
+
+    // Browser API responses stay compressed.
+    let api = owner
+        .session
+        .authorize(owner.request("GET", "/api/agents"))
+        .header("accept-encoding", "gzip, br")
+        .body(Body::empty())
+        .unwrap();
+    let response = common::send(&owner.app, api).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().contains_key("content-encoding"));
+}
+
+#[tokio::test]
 async fn workspace_transfer_preserves_files_and_links_without_following_them() {
     let root = TempDir::new().unwrap();
     let source = root.path().join("source");
