@@ -2,6 +2,7 @@
 // crates: the full facade also resolves SQLite and conflicts with rusqlite.
 extern crate sqlx_core as sqlx;
 
+mod account;
 mod installations;
 pub mod installer;
 mod mcp;
@@ -132,6 +133,11 @@ pub async fn router_with_network(
         .route("/api/account/verify", post(verify_code))
         .route("/api/account/session", get(session))
         .route("/api/account/logout", post(logout))
+        .route("/api/account/sessions", get(account::sessions))
+        .route(
+            "/api/account/sessions/{session}",
+            axum::routing::delete(account::revoke_session),
+        )
         .route(
             "/api/account/passkeys/register/start",
             post(passkeys::register_start),
@@ -607,19 +613,23 @@ async fn logout(State(service): State<Service>, headers: HeaderMap) -> Result<Re
     transaction.commit().await?;
     service.relay.revoke_session(&digest(token));
 
+    Ok(clear_session_cookie(&service))
+}
+
+fn clear_session_cookie(service: &Service) -> Response {
     let secure = if service.origin.starts_with("https://") {
         "; Secure"
     } else {
         ""
     };
-    Ok((
+    (
         StatusCode::NO_CONTENT,
         [(
             header::SET_COOKIE,
             format!("leo_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}"),
         )],
     )
-        .into_response())
+        .into_response()
 }
 
 async fn consume_limit(pool: &PgPool, key: &str, maximum: i32) -> Result<(), ApiError> {
