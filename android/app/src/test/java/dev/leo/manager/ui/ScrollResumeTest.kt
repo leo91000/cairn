@@ -89,7 +89,10 @@ class ScrollResumeTest {
                 server.dispatcher =
                     object : Dispatcher() {
                         override fun dispatch(request: RecordedRequest): MockResponse {
-                            if (request.requestUrl?.encodedPath == "/api/chats/stream") {
+                            if (
+                                request.requestUrl?.encodedPath ==
+                                    "/api/installations/fixture/api/chats/stream"
+                            ) {
                                 // Navigation subscribes to the list independently of this history
                                 // stream.
                                 return MockResponse()
@@ -97,7 +100,10 @@ class ScrollResumeTest {
                                     .setBody(": keepalive\n\n".repeat(10000))
                                     .throttleBody(13, 1, TimeUnit.SECONDS)
                             }
-                            if (request.requestUrl?.encodedPath == "/api/chats/diagnostic/stream") {
+                            if (
+                                request.requestUrl?.encodedPath ==
+                                    "/api/installations/fixture/api/chats/diagnostic/stream"
+                            ) {
                                 requests.add(request.path!!)
                                 val history =
                                     if (request.requestUrl?.queryParameter("after") == "60")
@@ -110,13 +116,13 @@ class ScrollResumeTest {
                             }
                             val result =
                                 when (request.path?.substringBefore('?')) {
-                                    "/api/session" ->
-                                        "{\"authenticated\":true,\"csrf\":\"fixture\"}"
-                                    "/api/agents",
-                                    "/api/projects",
-                                    "/api/tasks",
-                                    "/api/skills",
-                                    "/api/mcps" -> "[]"
+                                    "/api/installations" -> officialInstallationsFixture()
+                                    "/api/account/session" -> officialAccountFixture("fixture")
+                                    "/api/installations/fixture/api/agents",
+                                    "/api/installations/fixture/api/projects",
+                                    "/api/installations/fixture/api/tasks",
+                                    "/api/installations/fixture/api/skills",
+                                    "/api/installations/fixture/api/mcps" -> "[]"
                                     else -> "{}"
                                 }
                             return MockResponse()
@@ -125,7 +131,7 @@ class ScrollResumeTest {
                         }
                     }
                 server.start()
-                val vm = LeoViewModel(app, MemoryVault())
+                val vm = LeoViewModel(app, MemoryVault(), officialOrigin = "")
                 lateinit var owner: Owner
                 var opened by mutableStateOf(true)
                 compose.setContent {
@@ -187,7 +193,7 @@ class ScrollResumeTest {
                 compose.waitForIdle()
                 assertTrue(visible(60))
                 assertEquals(
-                    "/api/chats/diagnostic/stream?after=60&history=v1%3Afixture%3A1&window=1",
+                    "/api/installations/fixture/api/chats/diagnostic/stream?after=60&history=v1%3Afixture%3A1&window=1",
                     requests[1],
                 )
                 // A reader who scrolled upward must stay at the same offset on resume.
@@ -246,7 +252,7 @@ class ScrollResumeTest {
                 compose.waitForIdle()
                 assertEquals(before, position(), 0.01f)
                 assertEquals(
-                    "/api/chats/diagnostic/stream?after=60&history=v1%3Afixture%3A1&window=1",
+                    "/api/installations/fixture/api/chats/diagnostic/stream?after=60&history=v1%3Afixture%3A1&window=1",
                     requests[2],
                 )
                 compose.runOnIdle { opened = false }
@@ -262,7 +268,7 @@ class ScrollResumeTest {
                 compose.waitForIdle()
                 assertEquals(before, position(), 0.01f)
                 assertEquals(
-                    "/api/chats/diagnostic/stream?after=60&history=v1%3Afixture%3A1&window=1",
+                    "/api/installations/fixture/api/chats/diagnostic/stream?after=60&history=v1%3Afixture%3A1&window=1",
                     requests[3],
                 )
                 // Keep a real drag active long enough for the fade-out to finish.

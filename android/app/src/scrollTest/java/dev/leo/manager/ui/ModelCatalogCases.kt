@@ -37,8 +37,9 @@ abstract class ModelCatalogCases {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val response =
                             when (request.path) {
-                                "/api/session" -> """{"authenticated":true,"csrf":"fixture"}"""
-                                "/api/$provider/models" -> {
+                                "/api/installations" -> officialInstallationsFixture()
+                                "/api/account/session" -> officialAccountFixture("fixture")
+                                "/api/installations/fixture/api/$provider/models" -> {
                                     requests.incrementAndGet()
                                     if (unavailable.get())
                                         return MockResponse()
@@ -49,12 +50,12 @@ abstract class ModelCatalogCases {
                                             if (upgraded.get()) additions else emptyList()
                                     """{"models":[${names.joinToString(",") { """{"model":"$it","displayName":"$it","defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}""" }}],"checkedAt":1}"""
                                 }
-                                "/api/codex/models",
-                                "/api/claude/models" -> {
+                                "/api/installations/fixture/api/codex/models",
+                                "/api/installations/fixture/api/claude/models" -> {
                                     otherRequests.incrementAndGet()
                                     "{}"
                                 }
-                                "/api/overview" -> "{}"
+                                "/api/installations/fixture/api/overview" -> "{}"
                                 else -> "[]"
                             }
                         return MockResponse().setBody(response)
@@ -65,6 +66,7 @@ abstract class ModelCatalogCases {
                 LeoViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     CatalogVault(),
+                    officialOrigin = "",
                 )
             var selection = original to "high"
             compose.setContent {

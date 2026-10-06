@@ -1,13 +1,33 @@
 package dev.leo.manager.data
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 
 @Serializable
 data class Session(
     val authenticated: Boolean = false,
-    val csrf: String = "",
-    val setupRequired: Boolean = false,
+    val csrf: String? = null,
+    val account: LeoAccount? = null,
+    val installations: List<Installation> = emptyList(),
+)
+
+@Serializable data class EmailChallenge(val challenge: String)
+
+@Serializable data class LeoAccount(val id: String, val email: String)
+
+@Serializable
+enum class InstallationRole(val value: String, val label: String) {
+    @SerialName("owner") Owner("owner", "Propriétaire"),
+    @SerialName("member") Member("member", "Membre"),
+}
+
+@Serializable
+data class Installation(
+    val id: String,
+    val name: String,
+    val role: InstallationRole = InstallationRole.Member,
+    val online: Boolean = false,
 )
 
 const val MAIN_AGENT_ID = "00000000-0000-4000-8000-000000000001"

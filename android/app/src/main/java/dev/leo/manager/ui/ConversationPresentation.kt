@@ -41,7 +41,11 @@ internal fun chatWaitNotice(run: Run?): ChatWaitNotice? {
 }
 
 @Composable
-internal fun ChatWaitingNotice(notice: ChatWaitNotice, openConnections: () -> Unit) {
+internal fun ChatWaitingNotice(
+    notice: ChatWaitNotice,
+    openConnections: () -> Unit,
+    canManage: Boolean = true,
+) {
     Surface(
         modifier =
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).semantics {
@@ -55,8 +59,13 @@ internal fun ChatWaitingNotice(notice: ChatWaitNotice, openConnections: () -> Un
                 notice.account?.let { "Compte $it requis" } ?: "Conversation en attente",
                 style = MaterialTheme.typography.titleSmall,
             )
-            Text(notice.message, style = MaterialTheme.typography.bodyMedium)
-            if (notice.account != null)
+            Text(
+                if (notice.account != null && !canManage)
+                    "Demandez au propriétaire de reconnecter le compte. Votre message est conservé."
+                else notice.message,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            if (notice.account != null && canManage)
                 TextButton(onClick = openConnections) { Text("Ouvrir les connexions") }
         }
     }

@@ -13,12 +13,12 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 internal val Context.dataStore by preferencesDataStore("leo_preferences")
 
 class Preferences(private val context: Context) {
-    private val originKey = stringPreferencesKey("origin")
     private val themeKey = stringPreferencesKey("theme")
     val theme = context.dataStore.data.map { it[themeKey] ?: "system" }
 
@@ -27,10 +27,14 @@ class Preferences(private val context: Context) {
         context.dataStore.edit { it[themeKey] = value }
     }
 
-    val origin = context.dataStore.data.map { it[originKey].orEmpty() }
+    private fun installationKey(origin: String, account: String) =
+        stringPreferencesKey("installation:$origin:$account")
 
-    suspend fun setOrigin(value: String) {
-        context.dataStore.edit { it[originKey] = value }
+    suspend fun lastInstallation(origin: String, account: String): String? =
+        context.dataStore.data.first()[installationKey(origin, account)]
+
+    suspend fun selectInstallation(origin: String, account: String, id: String) {
+        context.dataStore.edit { it[installationKey(origin, account)] = id }
     }
 }
 

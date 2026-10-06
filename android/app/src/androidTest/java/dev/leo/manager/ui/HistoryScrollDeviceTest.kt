@@ -126,7 +126,7 @@ class HistoryScrollDeviceTest {
                                 )
                         }
                         // A reconnect resumes after the cursor: nothing new to send.
-                        if (path == "/api/chats/long/stream")
+                        if (path == "/api/installations/fixture/api/chats/long/stream")
                             return MockResponse()
                                 .setHeader("Content-Type", "text/event-stream")
                                 .setBody(
@@ -142,19 +142,20 @@ class HistoryScrollDeviceTest {
                                     1,
                                     TimeUnit.SECONDS,
                                 )
-                        if (path == "/api/chats/stream")
+                        if (path == "/api/installations/fixture/api/chats/stream")
                             return MockResponse()
                                 .setHeader("Content-Type", "text/event-stream")
                                 .setBody(": keepalive\n\n".repeat(10000))
                                 .throttleBody(13, 1, TimeUnit.SECONDS)
                         val body =
                             when (path) {
-                                "/api/session" -> "{\"authenticated\":true,\"csrf\":\"fixture\"}"
-                                "/api/agents",
-                                "/api/projects",
-                                "/api/tasks",
-                                "/api/skills",
-                                "/api/mcps" -> "[]"
+                                "/api/installations" -> officialInstallationsFixture()
+                                "/api/account/session" -> officialAccountFixture("fixture")
+                                "/api/installations/fixture/api/agents",
+                                "/api/installations/fixture/api/projects",
+                                "/api/installations/fixture/api/tasks",
+                                "/api/installations/fixture/api/skills",
+                                "/api/installations/fixture/api/mcps" -> "[]"
                                 else -> "{}"
                             }
                         return MockResponse()
@@ -163,11 +164,10 @@ class HistoryScrollDeviceTest {
                     }
                 }
             val application = ApplicationProvider.getApplicationContext<Application>()
-            runBlocking { Preferences(application).setOrigin("") }
-            val vm = LeoViewModel(application)
+
+            val vm = LeoViewModel(application, officialOrigin = "")
             runBlocking {
                 vm.state.first { it.ready }
-                vm.forget()
                 vm.connect(server.url("/").toString())
             }
             try {

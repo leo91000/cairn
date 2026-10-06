@@ -813,7 +813,7 @@ internal fun ChatPage(
                             "${live.state?.artifacts?.size ?: 0} fichiers · ${questions.size} questions en attente"
                         )
                         chat?.run?.let {
-                            NodePlacement(vm, it)
+                            if (state.isOwner) NodePlacement(vm, it)
                             Text(
                                 "Dernière activité : ${date(it.finishedAt ?: it.startedAt ?: it.createdAt)}"
                             )
@@ -826,7 +826,9 @@ internal fun ChatPage(
                         color = MaterialTheme.colorScheme.error,
                     )
                 }
-                chatWaitNotice(chat?.run)?.let { ChatWaitingNotice(it, openConnections) }
+                chatWaitNotice(chat?.run)?.let {
+                    ChatWaitingNotice(it, openConnections, state.isOwner)
+                }
                 if (gallery) {
                     ModalBottomSheet(
                         onDismissRequest = { gallery = false },

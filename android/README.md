@@ -76,13 +76,26 @@ Minimum Android version: Android 8 (API 26). Compile/target API: 37.
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Enter your server's HTTPS origin (for example `https://leo.example.com`) and the
-same owner password used by the web application. First-time server setup also
-supports the bootstrap token and creation of the owner password. No production
-address or credentials are embedded in the app.
+The app connects only to the official service. Sign in with a code received by
+email, then choose an installation belonging to or shared with your Leo account.
+It reopens the last installation used by that account. Members can read agents,
+projects and skills and work in conversations; owner management is hidden.
+Appearance, app updates and notification permissions remain available to members.
+The selector shows each installation’s role and availability. With no installation,
+the app links to the official claim page to add or associate one.
+If the official service is temporarily unreachable, the app preserves the stored
+session and offers a retry; an explicit rejection returns to email sign-in.
+There is no server-address, owner-password or bootstrap-token form.
+
+Set `LEO_OFFICIAL_ORIGIN` to the fixed official HTTPS origin when building the
+app. The repository does not choose a production hostname; without this build
+setting the app reports that the official service is not configured. Signed
+distribution requires this setting and HTTPS. The Android workflow reads the
+repository variable of the same name. This value is an origin, not a credential.
 
 For local development, use `adb reverse tcp:4310 tcp:4310` and
-`http://127.0.0.1:4310` in a **debug** build. HTTP is limited to localhost,
+`LEO_OFFICIAL_ORIGIN=http://127.0.0.1:4310` when building a **debug** app. Run the
+official service on that port. HTTP is limited to localhost,
 127.0.0.1 and the emulator host alias 10.0.2.2; the server still validates Host
 against PUBLIC_URL. Prefer adb reverse so the existing localhost server config
 works unchanged. Release builds require HTTPS and normal certificate validation.
@@ -105,12 +118,12 @@ are configured; tag CI uses a persistent release key. Never commit a signing key
   controls and touch targets retain Android behavior. UI text is French. Conversations use native sheets, focus modes and typography.
 - An AndroidViewModel exposes immutable workspace state through StateFlow;
   Compose observes it with lifecycle awareness. Forms save drafts through
-  recreation. Passwords, setup tokens and newly issued access tokens are never
+  recreation. Email verification codes and newly issued access tokens are never
   placed in saved instance state.
 - Kotlin serialization models mirror `shared/contracts.ts` and the API response
   shapes. OkHttp requests support cancellation, enforce a 30-second timeout,
   refuse redirects, and send the existing cookie plus CSRF token.
-- The server origin and appearance preference are stored in DataStore. The session cookie is encrypted
+- Appearance and the last installation per Leo account are stored in DataStore. The official origin is fixed at build time. The session cookie is encrypted
   with an AES-GCM Android Keystore key, bound to the origin with authenticated
   associated data, and written atomically outside Android backups. Cookies are
   checked against scheme, host, port, path and expiry. No password is persisted.
@@ -146,7 +159,7 @@ See [validation](VALIDATION.md).
 
 | Web section | Android coverage |
 | --- | --- |
-| Setup / login | Server selection, bootstrap setup, password login, encrypted session restore, expiry handling, logout |
+| Account / installations | Email code login, encrypted session restore, expiry handling, logout, installation selection and restoration, relayed requests and streams, member role masking |
 | Overview (under Plus) | Running/completed/queued counts, agent and schedule counts, recent activity, upcoming tasks |
 | Tasks | Create/edit/delete, name and tag search, scheduled/paused/one-off/archived filters, latest execution and status, run now, pause/resume, archive/restore, duplicate disabled |
 | Task editor | Agent selection, optional project focus (all authorized projects), instructions, isolated worktree, tags, all authorized or individually selected skills, once/daily/weekly/custom cron, timezone, server schedule preview |
@@ -228,7 +241,7 @@ SSE stream. The snapshot includes the accepted cursor, decoded messages, tool
 activity, artifact metadata and reading position. Files are loaded on demand.
 Android encrypts disk records with an Android Keystore AES-GCM key, excludes them
 from backups, and scopes them to the server and authenticated session. Signing
-out or forgetting the server clears the cache. Storage failure falls back to the
+out, switching installations or losing access clears the cache and downloaded files. Storage failure falls back to the
 normal stream. Limits: 12 histories, 4 MiB per history, 20 MiB total, seven days.
 The cache retains up to 200 recent decoded events within a 3 MiB payload budget,
 instead of discarding the whole conversation when it grows. The backwards cursor

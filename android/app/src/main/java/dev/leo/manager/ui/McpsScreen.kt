@@ -142,7 +142,9 @@ fun McpsScreen(vm: LeoViewModel, state: Workspace) {
                                             context,
                                             api.origin
                                                 .newBuilder()
-                                                .encodedPath("/mcps")
+                                                .encodedPath(
+                                                    "/installations/${segment(checkNotNull(api.installationId))}/mcps"
+                                                )
                                                 .build()
                                                 .toString(),
                                         )

@@ -85,8 +85,18 @@ class SessionCookies(private val origin: HttpUrl, private val vault: SessionVaul
     }
 }
 
-class LeoApi(val origin: HttpUrl, vault: SessionVault, client: OkHttpClient = OkHttpClient()) {
+class LeoApi(
+    val origin: HttpUrl,
+    vault: SessionVault,
+    client: OkHttpClient = OkHttpClient(),
+    val installationId: String? = null,
+) {
+    val cacheScope = origin.toString() + installationId.orEmpty()
+
     private val cookies = SessionCookies(origin, vault)
+    val hasSession: Boolean
+        get() = cookies.loadForRequest(origin).isNotEmpty()
+
     internal val http =
         client
             .newBuilder()
@@ -135,15 +145,31 @@ class LeoApi(val origin: HttpUrl, vault: SessionVault, client: OkHttpClient = Ok
 
     internal fun url(path: String): HttpUrl {
         require(path.startsWith("/") && !path.startsWith("//"))
+        val route = path.substringBefore('?')
+        val accountPath =
+            route.startsWith("/account/") ||
+                route == "/installations" ||
+                route.startsWith("/installations/") ||
+                route.startsWith("/mcp/oauth/")
+        val prefix =
+            when {
+                installationId == null || accountPath -> "/api"
+                route == "/tokens" || route.startsWith("/tokens/") ->
+                    "/api/installations/${segment(installationId)}"
+                else -> "/api/installations/${segment(installationId)}/api"
+            }
         return origin
             .newBuilder()
-            .encodedPath("/api" + path.substringBefore('?'))
+            .encodedPath(prefix + route)
             .encodedQuery(path.substringAfter('?', "").ifEmpty { null })
             .build()
     }
 
     internal fun builder(path: String) =
-        Request.Builder().url(url(path)).header("X-CSRF-Token", csrf)
+        Request.Builder()
+            .url(url(path))
+            .header("Origin", origin.toString().removeSuffix("/"))
+            .header("X-CSRF-Token", csrf)
 
     suspend inline fun <reified T> get(path: String): T =
         wireJson.decodeFromString(request("GET", path))

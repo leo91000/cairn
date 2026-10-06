@@ -56,20 +56,22 @@ class McpJourneyTest {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val result =
                             when (request.path) {
-                                "/api/session" -> """{"authenticated":true,"csrf":"fixture-csrf"}"""
-                                "/api/agents" ->
+                                "/api/installations" -> officialInstallationsFixture()
+                                "/api/account/session" -> officialAccountFixture("fixture-csrf")
+                                "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
                                         listOf(Agent(id = MAIN_AGENT_ID, name = "Leo"))
                                     )
-                                "/api/mcps" -> wireJson.encodeToString(listOf(initial))
-                                "/api/mcps/mcp" -> {
+                                "/api/installations/fixture/api/mcps" ->
+                                    wireJson.encodeToString(listOf(initial))
+                                "/api/installations/fixture/api/mcps/mcp" -> {
                                     if (request.getHeader("X-CSRF-Token") != "fixture-csrf")
                                         return MockResponse().setResponseCode(403)
                                     saved += request.body.readUtf8()
                                     wireJson.encodeToString(initial)
                                 }
-                                "/api/overview",
-                                "/api/codex/models" -> "{}"
+                                "/api/installations/fixture/api/overview",
+                                "/api/installations/fixture/api/codex/models" -> "{}"
                                 else -> "[]"
                             }
                         return MockResponse().setBody(result)
@@ -80,6 +82,7 @@ class McpJourneyTest {
                 LeoViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     MemoryVault(),
+                    officialOrigin = "",
                 )
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()

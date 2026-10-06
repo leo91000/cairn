@@ -795,8 +795,8 @@ internal fun ArtifactLinkHost(
     CompositionLocalProvider(
         LocalArtifactLinks provides
             { link ->
-                val item = artifactForLink(link, vm.api.origin, artifacts)
-                val path = artifactPathForLink(link, vm.api.origin)
+                val item = artifactForLink(link, vm.api.origin, artifacts, vm.api.installationId)
+                val path = artifactPathForLink(link, vm.api.origin, vm.api.installationId)
                 if (path == null) false
                 else {
                     failure = null

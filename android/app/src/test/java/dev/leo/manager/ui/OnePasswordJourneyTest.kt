@@ -56,20 +56,21 @@ class OnePasswordJourneyTest {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val result =
                             when (request.path) {
-                                "/api/session" -> """{"authenticated":true,"csrf":"fixture-csrf"}"""
-                                "/api/agents" ->
+                                "/api/installations" -> officialInstallationsFixture()
+                                "/api/account/session" -> officialAccountFixture("fixture-csrf")
+                                "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
                                         listOf(Agent(id = MAIN_AGENT_ID, name = "Leo"))
                                     )
-                                "/api/onepassword",
-                                "/api/onepassword/account" -> {
+                                "/api/installations/fixture/api/onepassword",
+                                "/api/installations/fixture/api/onepassword/account" -> {
                                     if (request.getHeader("X-CSRF-Token") != "fixture-csrf")
                                         return MockResponse().setResponseCode(403)
                                     saved += request.body.readUtf8()
                                     "{}"
                                 }
-                                "/api/overview",
-                                "/api/codex/models" -> "{}"
+                                "/api/installations/fixture/api/overview",
+                                "/api/installations/fixture/api/codex/models" -> "{}"
                                 else -> "[]"
                             }
                         return MockResponse().setBody(result)
@@ -80,6 +81,7 @@ class OnePasswordJourneyTest {
                 LeoViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     MemoryVault(),
+                    officialOrigin = "",
                 )
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()

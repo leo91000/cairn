@@ -46,7 +46,7 @@ abstract class ConversationLifecycleCases {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
-                        if (path == "/api/chats/stream") {
+                        if (path == "/api/installations/fixture/api/chats/stream") {
                             val chats = if (deleted.get()) emptyList() else listOf(chat)
                             val frame =
                                 "event: batch\nid: 0\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), LiveState(chats = chats), true, false))}\n\n"
@@ -54,7 +54,7 @@ abstract class ConversationLifecycleCases {
                                 .setHeader("Content-Type", "text/event-stream")
                                 .setBody(frame)
                         }
-                        if (path == "/api/chats/chat/stream") {
+                        if (path == "/api/installations/fixture/api/chats/chat/stream") {
                             val current =
                                 chat.copy(
                                     lifecycle = if (deleted.get()) "trash" else "active",
@@ -70,12 +70,14 @@ abstract class ConversationLifecycleCases {
                         }
                         val body =
                             when {
-                                path == "/api/chats/chat/restore" && request.method == "POST" -> {
+                                path == "/api/installations/fixture/api/chats/chat/restore" &&
+                                    request.method == "POST" -> {
                                     restores += request.body.readUtf8()
                                     deleted.set(false)
                                     wireJson.encodeToString(chat)
                                 }
-                                path == "/api/chats/chat" && request.method == "DELETE" -> {
+                                path == "/api/installations/fixture/api/chats/chat" &&
+                                    request.method == "DELETE" -> {
                                     val payload = request.body.readUtf8()
                                     deletes += payload
                                     if (
@@ -93,19 +95,20 @@ abstract class ConversationLifecycleCases {
                                     deleted.set(true)
                                     "{}"
                                 }
-                                path == "/api/chats" && request.path!!.contains("view=trash") -> {
+                                path == "/api/installations/fixture/api/chats" &&
+                                    request.path!!.contains("view=trash") -> {
                                     val trashed =
                                         wireJson.encodeToJsonElement(chat).jsonObject.toMutableMap()
                                     trashed["lifecycle"] = JsonPrimitive("trash")
                                     JsonArray(listOf(JsonObject(trashed))).toString()
                                 }
-                                path == "/api/session" ->
-                                    """{"authenticated":true,"csrf":"fixture"}"""
-                                path == "/api/agents" ->
+                                path == "/api/installations" -> officialInstallationsFixture()
+                                path == "/api/account/session" -> officialAccountFixture("fixture")
+                                path == "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
                                         listOf(Agent(MAIN_AGENT_ID, "Agent principal"))
                                     )
-                                path == "/api/overview" -> "{}"
+                                path == "/api/installations/fixture/api/overview" -> "{}"
                                 path.endsWith("/models") -> """{"models":[]}"""
                                 else -> "[]"
                             }
@@ -117,6 +120,7 @@ abstract class ConversationLifecycleCases {
                 LeoViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     LifecycleVault(),
+                    officialOrigin = "",
                 )
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()

@@ -140,7 +140,7 @@ class ChatJourneyTest {
                                 put("type", "agent_message")
                                 put(
                                     "text",
-                                    "J’ai terminé la **revue du projet**. Les changements sont cohérents et les vérifications passent.\n\nLes points essentiels :\n- Une conversation plus lisible\n- Les fichiers regroupés au même endroit\n\n[Ouvrir le compte rendu](/api/runs/run/artifacts/report-v2).",
+                                    "J’ai terminé la **revue du projet**. Les changements sont cohérents et les vérifications passent.\n\nLes points essentiels :\n- Une conversation plus lisible\n- Les fichiers regroupés au même endroit\n\n[Ouvrir le compte rendu](/api/installations/fixture/api/runs/run/artifacts/report-v2).",
                                 )
                             }
                     ),
@@ -194,19 +194,19 @@ class ChatJourneyTest {
                             )
                         val value =
                             when (path) {
-                                "/api/session" ->
-                                    "{\"authenticated\":true,\"csrf\":\"csrf-fixture\"}"
-                                "/api/agents" ->
+                                "/api/installations" -> officialInstallationsFixture()
+                                "/api/account/session" -> officialAccountFixture("csrf-fixture")
+                                "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
                                         listOf(Agent(id = MAIN_AGENT_ID, name = "Leo"))
                                     )
-                                "/api/projects",
-                                "/api/tasks",
-                                "/api/tasks/activity",
-                                "/api/skills",
-                                "/api/mcps" -> "[]"
-                                "/api/overview" -> "{}"
-                                "/api/codex/models" ->
+                                "/api/installations/fixture/api/projects",
+                                "/api/installations/fixture/api/tasks",
+                                "/api/installations/fixture/api/tasks/activity",
+                                "/api/installations/fixture/api/skills",
+                                "/api/installations/fixture/api/mcps" -> "[]"
+                                "/api/installations/fixture/api/overview" -> "{}"
+                                "/api/installations/fixture/api/codex/models" ->
                                     wireJson.encodeToString(
                                         ModelCatalog(
                                             models =
@@ -225,10 +225,11 @@ class ChatJourneyTest {
                                                 )
                                         )
                                     )
-                                "/api/chats/stream" ->
+                                "/api/installations/fixture/api/chats/stream" ->
                                     return stream(LiveState(chats = listOf(chat)))
-                                "/api/chats" -> wireJson.encodeToString(chat)
-                                "/api/chats/$chatId/stream" ->
+                                "/api/installations/fixture/api/chats" ->
+                                    wireJson.encodeToString(chat)
+                                "/api/installations/fixture/api/chats/$chatId/stream" ->
                                     return stream(
                                         LiveState(
                                             chat = chat,
@@ -285,20 +286,20 @@ class ChatJourneyTest {
                                             event.copy(id = 13),
                                         ),
                                     )
-                                "/api/chats/$chatId/messages" -> "{}"
-                                "/api/chats/$chatId/questions/question/answer" -> {
+                                "/api/installations/fixture/api/chats/$chatId/messages" -> "{}"
+                                "/api/installations/fixture/api/chats/$chatId/questions/question/answer" -> {
                                     answered = true
                                     "{}"
                                 }
-                                "/api/chats/$chatId/messages/queued" -> {
+                                "/api/installations/fixture/api/chats/$chatId/messages/queued" -> {
                                     edited = true
                                     "{}"
                                 }
-                                "/api/runs/run/artifacts/image" ->
+                                "/api/installations/fixture/api/runs/run/artifacts/image" ->
                                     return MockResponse()
                                         .setHeader("Content-Type", "image/png")
                                         .setBody(okio.Buffer().write(pictureBytes))
-                                "/api/runs/run/artifacts/report-v2" ->
+                                "/api/installations/fixture/api/runs/run/artifacts/report-v2" ->
                                     return MockResponse()
                                         .setHeader("Content-Type", "text/markdown")
                                         .setBody(
@@ -319,7 +320,12 @@ class ChatJourneyTest {
                 MemoryVault().apply {
                     write(server.url("/").toString(), "leo_session=fixture; Path=/; Max-Age=3600")
                 }
-            val vm = LeoViewModel(ApplicationProvider.getApplicationContext<Application>(), vault)
+            val vm =
+                LeoViewModel(
+                    ApplicationProvider.getApplicationContext<Application>(),
+                    vault,
+                    officialOrigin = "",
+                )
             var compact by mutableStateOf(false)
             compose.setContent {
                 val theme by vm.theme.collectAsStateWithLifecycle("system")
@@ -357,7 +363,11 @@ class ChatJourneyTest {
             compose.onNodeWithText("Terminé").performClick()
             compose.onNodeWithContentDescription("Envoyer").performClick()
             waitText("1 question · Répondre")
-            assertTrue(calls.any { it.first == "POST" && it.second == "/api/chats" })
+            assertTrue(
+                calls.any {
+                    it.first == "POST" && it.second == "/api/installations/fixture/api/chats"
+                }
+            )
             val sent =
                 wireJson
                     .parseToJsonElement(calls.first { it.second.endsWith("/messages") }.third)

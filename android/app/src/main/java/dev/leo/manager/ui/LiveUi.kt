@@ -58,7 +58,7 @@ fun rememberLive(
     LaunchedEffect(path, api, owner, streaming) {
         if (enabled && api != null) {
             var cacheGeneration = vm.historyCache.generation
-            val key = vm.historyCache.key(workspace.origin, api.csrf, path)
+            val key = vm.historyCache.key(api.cacheScope, api.csrf, path)
             // A resumed session is already at least as recent as its cache.
             if (session.path != path)
                 vm.historyCache.read(key)?.let {
@@ -105,8 +105,13 @@ fun rememberLive(
                                         expectedGeneration = cacheGeneration,
                                     )
                                 }
-                                if (it.httpStatus == 401)
-                                    vm.report(ApiException(401, "Session expirée"))
+                                if (it.httpStatus in listOf(401, 403, 404))
+                                    vm.report(
+                                        ApiException(
+                                            checkNotNull(it.httpStatus),
+                                            it.error ?: "Accès indisponible",
+                                        )
+                                    )
                             }
                     } finally {
                         withContext(NonCancellable) { vm.historyCache.flush(key) }
@@ -150,7 +155,7 @@ fun rememberLive(
                             loadingOlder = false
                             value.state?.let { detail ->
                                 vm.historyCache.save(
-                                    vm.historyCache.key(workspace.origin, api.csrf, path),
+                                    vm.historyCache.key(api.cacheScope, api.csrf, path),
                                     CachedHistory(
                                         value.cursor,
                                         history,
@@ -169,7 +174,7 @@ fun rememberLive(
                         // A cache failure cannot undo an already applied server page.
                         if (!pageApplied) {
                             olderError = e.message ?: "Historique indisponible. Réessayez."
-                            if (e is ApiException && e.status == 401) vm.report(e)
+                            if (e is ApiException && e.status in setOf(401, 403, 404)) vm.report(e)
                         }
                     } finally {
                         // A later request may have started while this page was being cached.
@@ -389,7 +394,7 @@ internal fun rememberHistoryPosition(
     val currentFollow by rememberUpdatedState(follow)
     val firstEvent by rememberUpdatedState(live.events.firstOrNull()?.id)
     val api = vm.api
-    val key = remember(path, api) { vm.historyCache.key(workspace.origin, api.csrf, path) }
+    val key = remember(path, api) { vm.historyCache.key(api.cacheScope, api.csrf, path) }
     LaunchedEffect(path, live.catchingUp, visible) {
         if (!ready && !live.catchingUp && visible) {
             val saved = live.position

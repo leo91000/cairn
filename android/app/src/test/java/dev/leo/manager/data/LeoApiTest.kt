@@ -21,6 +21,109 @@ class MemoryVault : SessionVault {
 
 class LeoApiTest {
     @Test
+    fun `official MCP grants and consent stay on the official service`() = runTest {
+        MockWebServer().use { server ->
+            repeat(2) { server.enqueue(MockResponse().setBody("{}")) }
+            server.start()
+            val api = LeoApi(server.url("/"), MemoryVault(), installationId = "shared")
+            api.csrf = "account-csrf"
+
+            api.request("GET", "/tokens")
+            assertEquals("/api/installations/shared/tokens", server.takeRequest().path)
+
+            api.request("POST", "/mcp/oauth/preview", body("client_id" to "assistant"))
+            val preview = server.takeRequest()
+            assertEquals("/api/mcp/oauth/preview", preview.path)
+            assertEquals("account-csrf", preview.getHeader("X-CSRF-Token"))
+        }
+    }
+
+    @Test
+    fun `anonymous official session accepts null account and csrf`() {
+        val session =
+            wireJson.decodeFromString<Session>(
+                """{"authenticated":false,"csrf":null,"account":null,"installations":[]}"""
+            )
+        assertFalse(session.authenticated)
+    }
+
+    @Test
+    fun `selected installation scopes reads writes files and streams but not account calls`() =
+        runTest {
+            MockWebServer().use { server ->
+                repeat(4) { server.enqueue(MockResponse().setBody("{}")) }
+                server.start()
+                val api = LeoApi(server.url("/"), MemoryVault(), installationId = "shared")
+                api.csrf = "account-csrf"
+                api.request("GET", "/chats?before=4")
+                assertEquals(
+                    "/api/installations/shared/api/chats?before=4",
+                    server.takeRequest().path,
+                )
+                api.request("POST", "/chats", body("prompt" to "Hello"))
+                val write = server.takeRequest()
+                assertEquals("/api/installations/shared/api/chats", write.path)
+                assertEquals("account-csrf", write.getHeader("X-CSRF-Token"))
+                api.request("GET", "/account/session")
+                assertEquals("/api/account/session", server.takeRequest().path)
+                assertEquals(
+                    "/api/installations/shared/api/chats/chat/stream?after=12",
+                    api.url("/chats/chat/stream?after=12").encodedPath +
+                        "?" +
+                        api.url("/chats/chat/stream?after=12").encodedQuery,
+                )
+                val file = java.io.File.createTempFile("leo-fixture", ".txt")
+                try {
+                    api.download("/runs/run/artifacts/file", file)
+                    assertEquals(
+                        "/api/installations/shared/api/runs/run/artifacts/file",
+                        server.takeRequest().path,
+                    )
+                } finally {
+                    file.delete()
+                }
+            }
+        }
+
+    @Test
+    fun `email code uses the official origin and restores the account cookie`() = runTest {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{}"))
+            server.enqueue(
+                MockResponse()
+                    .setBody("""{"authenticated":true,"csrf":"account-csrf"}""")
+                    .addHeader(
+                        "Set-Cookie",
+                        "leo_session=account-fixture; Path=/; HttpOnly; Max-Age=3600",
+                    )
+            )
+            server.enqueue(
+                MockResponse().setBody("""{"authenticated":true,"csrf":"account-csrf"}""")
+            )
+            server.start()
+            val vault = MemoryVault()
+            val api = LeoApi(server.url("/"), vault)
+            api.request("POST", "/account/email-code", body("email" to "member@example.test"))
+            val codeRequest = server.takeRequest()
+            assertEquals("/api/account/email-code", codeRequest.path)
+            assertEquals(
+                server.url("/").toString().removeSuffix("/"),
+                codeRequest.getHeader("Origin"),
+            )
+            api.send<Session>(
+                "POST",
+                "/account/verify",
+                body("challenge" to "fixture-challenge", "code" to "12345678"),
+            )
+            server.takeRequest()
+            assertTrue(
+                LeoApi(server.url("/"), vault).get<Session>("/account/session").authenticated
+            )
+            assertEquals("leo_session=account-fixture", server.takeRequest().getHeader("Cookie"))
+        }
+    }
+
+    @Test
     fun `portraits use authenticated bounded transfers and preserve old agent compatibility`() =
         runTest {
             MockWebServer().use { server ->
@@ -41,7 +144,7 @@ class LeoApiTest {
                 )
                 server.start()
                 val api = LeoApi(server.url("/"), MemoryVault())
-                api.csrf = api.send<Session>("POST", "/login").csrf
+                api.csrf = api.send<Session>("POST", "/account/verify").csrf.orEmpty()
                 server.takeRequest()
                 assertArrayEquals(
                     "portrait-bytes".toByteArray(),
@@ -133,19 +236,23 @@ class LeoApiTest {
             val vault = MemoryVault()
             val api = LeoApi(server.url("/"), vault)
             val session =
-                api.send<Session>("POST", "/login", body("password" to "test-only-password"))
-            api.csrf = session.csrf
+                api.send<Session>(
+                    "POST",
+                    "/account/verify",
+                    body("challenge" to "fixture-challenge", "code" to "12345678"),
+                )
+            api.csrf = session.csrf.orEmpty()
             api.send<Agent>(
                 "POST",
                 "/agents",
                 wireJson.encodeToJsonElement(Agent(name = "Reviewer")),
             )
-            assertEquals("/api/login", server.takeRequest().path)
+            assertEquals("/api/account/verify", server.takeRequest().path)
             val mutation = server.takeRequest()
             assertEquals("leo_session=test-session", mutation.getHeader("Cookie"))
             assertEquals("test-csrf", mutation.getHeader("X-CSRF-Token"))
             assertTrue(mutation.body.readUtf8().contains("Reviewer"))
-            api.request("POST", "/logout")
+            api.request("POST", "/account/logout")
             assertTrue(vault.values.isEmpty())
         }
     }
@@ -161,7 +268,7 @@ class LeoApiTest {
                 )
                 val api = LeoApi(server.url("/"), MemoryVault())
                 try {
-                    api.request("GET", "/session")
+                    api.request("GET", "/account/session")
                     fail("Expected an API error")
                 } catch (e: ApiException) {
                     assertEquals(302, e.status)

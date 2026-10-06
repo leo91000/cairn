@@ -15,6 +15,7 @@ import androidx.core.net.toUri
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.work.*
 import dev.leo.manager.BuildConfig
@@ -30,6 +31,7 @@ const val EXECUTION_CHANNEL = "leo-execution"
 private const val QUESTION_WORK = "leo-question-check"
 private val enabledKey = booleanPreferencesKey("notifications")
 private val seenKey = stringSetPreferencesKey("notified_questions")
+private val scopeKey = stringPreferencesKey("notification_installation_scope")
 private val alertsKey = longPreferencesKey("notified_node_alerts_until")
 
 class NotificationPreferences(private val context: Context) {
@@ -38,6 +40,19 @@ class NotificationPreferences(private val context: Context) {
     suspend fun setEnabled(value: Boolean) {
         context.dataStore.edit { it[enabledKey] = value }
         schedule(context, value)
+    }
+
+    suspend fun selectScope(scope: String): Boolean {
+        var changed = false
+        context.dataStore.edit {
+            if (it[scopeKey] != scope) {
+                it[scopeKey] = scope
+                it.remove(seenKey)
+                it.remove(alertsKey)
+                changed = true
+            }
+        }
+        return changed
     }
 
     suspend fun seen() = context.dataStore.data.first()[seenKey].orEmpty()
@@ -88,18 +103,27 @@ constructor(
     context: Context,
     params: WorkerParameters,
     private val vault: SessionVault = KeystoreSessionVault(context),
+    private val officialOrigin: String = BuildConfig.OFFICIAL_SERVICE_ORIGIN,
 ) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
         val context = applicationContext
         val prefs = NotificationPreferences(context)
         if (!prefs.enabled.first() || !notificationsAllowed(context)) return Result.success()
-        val origin = Preferences(context).origin.first()
-        if (origin.isBlank()) return Result.success()
+        if (officialOrigin.isBlank()) return Result.success()
+        val origin = serverOrigin(officialOrigin, BuildConfig.DEBUG).toString()
         val originalCookie = vault.read(origin) ?: return Result.success()
         try {
-            val api = LeoApi(serverOrigin(origin, BuildConfig.DEBUG), vault)
-            val session = api.get<Session>("/session")
-            if (!session.authenticated) return Result.success()
+            val account = LeoApi(serverOrigin(origin, BuildConfig.DEBUG), vault)
+            val session = account.get<Session>("/account/session")
+            if (!session.authenticated || session.account == null) return Result.success()
+            val preferences = Preferences(context)
+            val saved = preferences.lastInstallation(origin, session.account.id)
+            val installation =
+                if (saved != null) session.installations.find { it.id == saved }
+                else session.installations.firstOrNull()
+            if (installation == null || !installation.online) return Result.success()
+            val api = LeoApi(account.origin, vault, installationId = installation.id)
+            api.csrf = session.csrf.orEmpty()
             val chats = api.get<List<Chat>>("/chats").filter { it.pendingQuestions > 0 }
             val pending = mutableMapOf<String, Set<String>>()
             for (chat in chats) {
@@ -107,10 +131,10 @@ constructor(
                 pending[chat.id] =
                     detail.questions.filter { it.status == "pending" }.map { it.id }.toSet()
             }
-            // Logout, server changes and disabling notifications win over an in-flight check.
+            // Logout, installation changes and disabling notifications win over an in-flight check.
             if (
                 !prefs.enabled.first() ||
-                    Preferences(context).origin.first() != origin ||
+                    preferences.lastInstallation(origin, session.account.id) != saved ||
                     vault.read(origin) != originalCookie
             )
                 return Result.success()
@@ -133,10 +157,11 @@ constructor(
                     Intent(context, MainActivity::class.java)
                         .setAction("dev.leo.manager.OPEN_CHAT")
                         .setData(
-                            "leo-manager://chat/${segment(chat)}?origin=${segment(origin)}".toUri()
+                            "leo-manager://chat/${segment(chat)}?origin=${segment(api.cacheScope)}"
+                                .toUri()
                         )
                         .putExtra("chat", chat)
-                        .putExtra("origin", origin)
+                        .putExtra("origin", api.cacheScope)
                         .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 val action =
                     PendingIntent.getActivity(
@@ -163,14 +188,16 @@ constructor(
             prefs.setSeen(all)
             // A master without node alerts must not delay question notifications.
             val alerts =
-                try {
-                    api.get<List<NodeAlert>>("/nodes/alerts")
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                    null
-                }
-            alerts?.let { notifyAlerts(context, manager, prefs, it, origin) }
+                if (installation.role != InstallationRole.Owner) null
+                else
+                    try {
+                        api.get<List<NodeAlert>>("/nodes/alerts")
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        null
+                    }
+            alerts?.let { notifyAlerts(context, manager, prefs, it, api.cacheScope) }
             return Result.success()
         } catch (e: CancellationException) {
             throw e
@@ -191,7 +218,7 @@ private suspend fun notifyAlerts(
     manager: NotificationManager,
     prefs: NotificationPreferences,
     alerts: List<NodeAlert>,
-    origin: String,
+    cacheScope: String,
 ) {
     val newest = alerts.maxOfOrNull { it.createdAt } ?: return
     val until = prefs.alertsUntil()
@@ -209,10 +236,11 @@ private suspend fun notifyAlerts(
             Intent(context, MainActivity::class.java)
                 .setAction("dev.leo.manager.OPEN_CHAT")
                 .setData(
-                    "leo-manager://chat/${segment(alert.chatId)}?origin=${segment(origin)}".toUri()
+                    "leo-manager://chat/${segment(alert.chatId)}?origin=${segment(cacheScope)}"
+                        .toUri()
                 )
                 .putExtra("chat", alert.chatId)
-                .putExtra("origin", origin)
+                .putExtra("origin", cacheScope)
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val notification =
             NotificationCompat.Builder(context, EXECUTION_CHANNEL)

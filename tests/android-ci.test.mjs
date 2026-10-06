@@ -21,6 +21,7 @@ const config = {
   commit: 'a'.repeat(40),
   tag: 'v0.31.0',
   runId: 123,
+  officialOrigin: 'https://leo.example',
 }
 const run = {
   id: config.runId,
@@ -60,6 +61,12 @@ describe('validated Android build reuse', () => {
     expect(await verifyBuild(directory, config)).toMatchObject({ commit: config.commit, runId: 123, versionName: '0.31.0' })
     for (const change of [{ repository: 'other/repo' }, { commit: 'b'.repeat(40) }, { runId: 124 }, { tag: 'v0.32.0' }])
       await expect(verifyBuild(directory, { ...config, ...change })).rejects.toThrow()
+  })
+
+  it('refuses an APK compiled for another official service or without a production HTTPS origin', async () => {
+    const directory = await temporaryBuild()
+    for (const officialOrigin of ['https://other.example', '', 'http://localhost:4310'])
+      await expect(verifyBuild(directory, { ...config, officialOrigin })).rejects.toThrow()
   })
 
   it('refuses altered APK bytes, metadata or evidence before signing', async () => {

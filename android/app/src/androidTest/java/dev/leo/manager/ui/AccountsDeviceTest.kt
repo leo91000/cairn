@@ -32,17 +32,18 @@ class AccountsDeviceTest {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val result =
                             when ("${request.method} ${request.path?.substringBefore('?')}") {
-                                "GET /api/session" -> """{"authenticated":true,"csrf":"fixture"}"""
-                                "GET /api/accounts" ->
+                                "GET /api/installations" -> officialInstallationsFixture()
+                                "GET /api/account/session" -> officialAccountFixture("fixture")
+                                "GET /api/installations/fixture/api/accounts" ->
                                     """{"accounts":[${accounts.get()}],"signIn":${signIn.get()}}"""
-                                "POST /api/accounts" -> {
+                                "POST /api/installations/fixture/api/accounts" -> {
                                     assertEquals("fixture", request.getHeader("X-CSRF-Token"))
                                     signIn.set(
                                         """{"accountId":"studio","provider":"claude","state":"pending","phase":"authorizing","url":"https://claude.ai/oauth/authorize?fixture=1","acceptsCode":true}"""
                                     )
                                     signIn.get()
                                 }
-                                "POST /api/accounts/sign-in/code" -> {
+                                "POST /api/installations/fixture/api/accounts/sign-in/code" -> {
                                     codes += request.body.readUtf8()
                                     signIn.set(
                                         """{"accountId":"studio","provider":"claude","state":"complete"}"""
@@ -52,9 +53,9 @@ class AccountsDeviceTest {
                                     )
                                     "{}"
                                 }
-                                "GET /api/overview",
-                                "GET /api/codex/models",
-                                "GET /api/claude/models" -> "{}"
+                                "GET /api/installations/fixture/api/overview",
+                                "GET /api/installations/fixture/api/codex/models",
+                                "GET /api/installations/fixture/api/claude/models" -> "{}"
                                 else -> "[]"
                             }
                         return MockResponse().setBody(result)
@@ -65,6 +66,7 @@ class AccountsDeviceTest {
                 LeoViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     DeviceAccountsVault(),
+                    officialOrigin = "",
                 )
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()

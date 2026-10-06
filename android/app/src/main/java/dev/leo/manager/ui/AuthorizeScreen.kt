@@ -47,7 +47,11 @@ fun AuthorizeScreen(vm: LeoViewModel, state: Workspace, sharedUrl: String, consu
                 vm.perform {
                     parameters = authorizationParameters(url, api.origin)
                     preview =
-                        api.send("POST", "/oauth/preview", wireJson.encodeToJsonElement(parameters))
+                        api.send(
+                            "POST",
+                            "/mcp/oauth/preview",
+                            wireJson.encodeToJsonElement(parameters),
+                        )
                 }
             },
             enabled = url.isNotBlank() && !state.busy && redirect.isEmpty(),
@@ -79,7 +83,7 @@ fun AuthorizeScreen(vm: LeoViewModel, state: Workspace, sharedUrl: String, consu
                                         redirect =
                                             api.send<ConsentResult>(
                                                     "POST",
-                                                    "/oauth/consent",
+                                                    "/mcp/oauth/consent",
                                                     buildJsonObject {
                                                         put(
                                                             "parameters",
@@ -88,6 +92,10 @@ fun AuthorizeScreen(vm: LeoViewModel, state: Workspace, sharedUrl: String, consu
                                                             ),
                                                         )
                                                         put("approved", approved)
+                                                        put(
+                                                            "installationId",
+                                                            checkNotNull(state.installation).id,
+                                                        )
                                                     },
                                                 )
                                                 .redirect
