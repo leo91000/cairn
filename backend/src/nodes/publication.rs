@@ -1418,6 +1418,7 @@ pub async fn maintain(s: Arc<Service>) {
     let mut scheduler = Scheduler {
         s,
         last: HashMap::new(),
+        failures: HashMap::new(),
         last_cleanup: 0,
         tasks: JoinSet::new(),
         active: HashMap::new(),
@@ -1441,6 +1442,8 @@ pub async fn maintain(s: Arc<Service>) {
 struct Scheduler {
     s: Arc<Service>,
     last: HashMap<String, i64>,
+    /// Consecutive failed synchronizations per conversation, for back-off.
+    failures: HashMap<String, u32>,
     last_cleanup: i64,
     tasks: JoinSet<()>,
     active: HashMap<String, AbortHandle>,
@@ -1489,7 +1492,16 @@ impl Scheduler {
             }
             let id = text(&run, "id");
             let since = now() - self.last.get(id).copied().unwrap_or(0);
-            if self.active.contains_key(id) || !publication_due(&run, since, interval) {
+            let failures = if run["backup"]["status"] == BackupStatus::Error.as_str() {
+                self.failures
+                    .get(id)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(1)
+            } else {
+                0
+            };
+            if self.active.contains_key(id) || !publication_due(&run, since, interval, failures) {
                 continue;
             }
             let run_id = id.to_owned();
@@ -1508,6 +1520,11 @@ impl Scheduler {
 
             let run_id = id.to_owned();
             self.last.insert(run_id.clone(), now());
+            if failures == 0 {
+                self.failures.remove(&run_id);
+            } else {
+                self.failures.insert(run_id.clone(), failures);
+            }
             self.cleanup.remove(&run_id);
             let s = self.s.clone();
             let task = self.tasks.spawn(async move {
@@ -1547,8 +1564,26 @@ impl Scheduler {
     }
 }
 
+/// Longest wait between synchronization attempts that keep failing.
+const MAX_RETRY_DELAY_MS: i64 = 30 * 60 * 1000;
+
+/// Minimum wait after `failures` consecutive failed synchronizations.
+fn retry_delay_ms(failures: u32) -> i64 {
+    if failures == 0 {
+        return 0;
+    }
+    60_000_i64
+        .saturating_mul(1 << (failures - 1).min(16))
+        .min(MAX_RETRY_DELAY_MS)
+}
+
 /// An isolated conversation publishes periodically while it has something new.
-fn publication_due(run: &Value, since_last_ms: i64, default_interval_ms: i64) -> bool {
+fn publication_due(
+    run: &Value,
+    since_last_ms: i64,
+    default_interval_ms: i64,
+    failures: u32,
+) -> bool {
     let on_demand = run["storage"]["mode"] == super::ON_DEMAND;
     let synchronized = on_demand
         && run["storage"]["dirtyBytes"] == 0
@@ -1568,6 +1603,7 @@ fn publication_due(run: &Value, since_last_ms: i64, default_interval_ms: i64) ->
             } else {
                 interval
             }
+            .max(retry_delay_ms(failures))
 }
 
 pub(crate) fn storage_for(s: &Service, backup: &Value) -> Result<Storage> {
@@ -1688,5 +1724,25 @@ mod capture_policy_tests {
         run["moveRequest"] = json!({ "idle": false });
         assert_eq!(snapshot_request(&run, false)["consistency"], "filesystem");
         assert_eq!(snapshot_request(&run, false)["baseline"], "previous");
+    }
+
+    #[test]
+    fn failing_synchronizations_back_off_instead_of_retrying_every_few_seconds() {
+        let run = json!({
+            "isolated": true,
+            "sessionId": "session",
+            "storage": { "mode": "on-demand", "dirtyBytes": 1, "backupUrgent": true },
+            "backup": { "status": "error" },
+        });
+        assert!(publication_due(&run, 5_000, 60_000, 0));
+
+        // Production 2026-10-05: a node whose uploads always failed was
+        // retried every 90 s for 11 hours, re-reading gigabytes each time.
+        assert!(!publication_due(&run, 5_000, 60_000, 1));
+        assert!(publication_due(&run, retry_delay_ms(1), 60_000, 1));
+        assert!(retry_delay_ms(2) > retry_delay_ms(1));
+        assert_eq!(retry_delay_ms(30), MAX_RETRY_DELAY_MS);
+        assert!(!publication_due(&run, MAX_RETRY_DELAY_MS - 1, 60_000, 30));
+        assert!(publication_due(&run, MAX_RETRY_DELAY_MS, 60_000, 30));
     }
 }
