@@ -31,6 +31,12 @@ ARG UPDATE_ID
 ENV APP_BASE_IMAGE=$BASE_IMAGE APP_RUNTIME_ID=$UPDATE_ID APP_CODEX_VERSION=$CODEX_VERSION APP_GH_VERSION=$GH_VERSION
 USER node
 RUN codex --version && gh --version
+# Toolkit installs and CLI probes can leave state inherited from the base image.
+# Both the application and embedded guest must start without a Codex account/home.
+USER root
+RUN rm -rf /home/node/.codex \
+    && install -d -o node -g node -m 0700 /home/node/.codex
+USER node
 
 # CLI updates also refresh the immutable guest root, rather than only updating
 # the manager container while agents continue using an older embedded Codex.
