@@ -63,7 +63,8 @@ notification. Sticky routing per installation alone does not provide immediate
 session revocation across installations. Persisted checks eventually detect
 machine revocation in another process, but do not make that deployment supported.
 Do not add official replicas until shared connection routing and revocation
-notifications are implemented.
+notifications are implemented. [ADR-0032](adr/0032-single-official-relay-process.md)
+records this restriction of spec #43 and the persisted-check tolerance trade-off.
 Terminate TLS at the public origin with a reverse proxy. The service checks the
 configured origin on every account mutation. IP limits use the TCP peer unless
 it matches `LEO_OFFICIAL_TRUSTED_PROXIES`. In that case they use the rightmost

@@ -98,7 +98,10 @@ account deletion outside this process. A confirmed revocation closes the tunnel
 on that check. Local detachment still closes it immediately. Upgrade and
 post-registration authentication fail closed; an established tunnel tolerates
 temporary database errors and five-second check timeouts until three consecutive
-checks fail (about 90 seconds). A successful check resets that budget. Checks run separately from the socket loop,
+checks fail (about 95 seconds from the last successful check if each check times out).
+A successful check resets that budget. [ADR-0032](adr/0032-single-official-relay-process.md)
+records the single-process deployment restriction and this tolerance trade-off.
+Checks run separately from the socket loop,
 so database latency cannot delay session expiry or cancellation.
 The digest of the private proof used to start recovery is retained separately
 from the current tunnel credential. If its successful response is lost before the

@@ -36,8 +36,8 @@ impl TrustedProxies {
             return peer.to_canonical();
         }
 
-        // Traverse only the trusted suffix. Untrusted left-hand text cannot
-        // force fallback to the shared proxy quota or select a different client.
+        // Traverse the trusted suffix until the first untrusted address. Invalid
+        // entries encountered there (or non-ASCII header bytes) fall back to the peer.
         for value in headers.get_all("x-forwarded-for").iter().rev() {
             let Ok(value) = value.to_str() else {
                 return peer.to_canonical();

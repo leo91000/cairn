@@ -88,7 +88,7 @@ struct Access {
 
 struct StreamAccess {
     account: String,
-    session: String,
+    session: Option<String>,
     expires_at: Option<tokio::time::Instant>,
     revoked: watch::Sender<bool>,
 }
@@ -98,7 +98,7 @@ impl Relay {
     pub(super) fn revoke_session(&self, session: &str) {
         for tunnel in self.connections.lock().unwrap().values() {
             for stream in tunnel.access.lock().unwrap().streams.values() {
-                if stream.session == session {
+                if stream.session.as_deref() == Some(session) {
                     stream.revoked.send_replace(true);
                 }
             }
@@ -533,7 +533,6 @@ pub(super) async fn forward(
     request: Request,
 ) -> Result<Response, ApiError> {
     let account = installations::account(&service, request.headers(), request.method()).await?;
-    let session = digest(super::session_token(request.headers()));
     // Snapshot the access generation before checking ownership. Revocation
     // racing a slow upload must also prevent that stream from opening later.
     let tunnel = service
@@ -725,6 +724,8 @@ async fn send(
 ) -> Result<Response, ApiError> {
     let streaming = leo_relay_protocol::stream_path(target);
     let public_file = matches!(capability, Capability::PublicArtifact(_));
+    let browser_session = matches!(capability, Capability::Account(_))
+        .then(|| digest(super::session_token(request.headers())));
 
     // Browser uploads reserve capacity before reading. MCP bodies have already
     // been bounded and reauthorized before they can reserve installation slots.
@@ -850,7 +851,7 @@ async fn send(
             id.clone(),
             StreamAccess {
                 account,
-                session: session.clone(),
+                session: browser_session.clone(),
                 expires_at: None,
                 revoked,
             },
@@ -867,22 +868,24 @@ async fn send(
     };
     // Register before checking again: logout during an upload either sees the
     // registered stream or removes the persisted session before this check.
-    let checked_at = tokio::time::Instant::now();
-    let current: Option<(i64,)> = query_as(
-        "SELECT (extract(epoch FROM (expires_at - clock_timestamp())) * 1000)::bigint FROM web_sessions WHERE digest = $1 AND expires_at > clock_timestamp()",
-    )
-    .bind(&session)
-    .fetch_optional(&service.pool)
-    .await?;
-    let Some((remaining,)) = current.filter(|(remaining,)| *remaining > 0) else {
-        return Err(ApiError(
-            StatusCode::UNAUTHORIZED,
-            "Session expired. Please sign in again.",
-        ));
-    };
-    if let Some(stream) = tunnel.access.lock().unwrap().streams.get_mut(&id) {
-        stream.expires_at = Some(checked_at + Duration::from_millis(remaining as u64));
-        tunnel.access_changed.notify_one();
+    if let Some(session) = browser_session {
+        let checked_at = tokio::time::Instant::now();
+        let current: Option<(i64,)> = query_as(
+            "SELECT (extract(epoch FROM (expires_at - clock_timestamp())) * 1000)::bigint FROM web_sessions WHERE digest = $1 AND expires_at > clock_timestamp()",
+        )
+        .bind(&session)
+        .fetch_optional(&service.pool)
+        .await?;
+        let Some((remaining,)) = current.filter(|(remaining,)| *remaining > 0) else {
+            return Err(ApiError(
+                StatusCode::UNAUTHORIZED,
+                "Session expired. Please sign in again.",
+            ));
+        };
+        if let Some(stream) = tunnel.access.lock().unwrap().streams.get_mut(&id) {
+            stream.expires_at = Some(checked_at + Duration::from_millis(remaining as u64));
+            tunnel.access_changed.notify_one();
+        }
     }
 
     let pending_account = api_request.account_id.clone();
