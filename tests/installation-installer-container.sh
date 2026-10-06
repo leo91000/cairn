@@ -11,12 +11,27 @@ cleanup() {
   rm -rf "$fixture"
 }
 trap cleanup EXIT
+# Cargo identifies the current executable even when a restored cache contains
+# integration-test binaries from several feature sets or older builds.
+storage_test=$(node scripts/test-backend.mjs -p leo-official-service \
+  --test storage_continuity --no-run --message-format=json | python3 -c '
+import json, sys
+artifacts = [json.loads(line) for line in sys.stdin]
+executables = [artifact["executable"] for artifact in artifacts
+               if artifact.get("reason") == "compiler-artifact"
+               and artifact["target"]["name"] == "storage_continuity"
+               and artifact["target"]["kind"] == ["test"]
+               and artifact.get("executable")]
+assert len(executables) == 1, "Cargo must identify the storage continuity executable"
+print(executables[0])
+')
 docker build -t leo-installer-fixture -f tests/Dockerfile.installation-installer .
 docker network create "$name" >/dev/null
 docker run -d --name "$name-postgres" --network "$name" --network-alias postgres \
   -e POSTGRES_USER=leo -e POSTGRES_PASSWORD=test-only -e POSTGRES_DB=leo_official_test \
   postgres:17-alpine >/dev/null
 args=(--rm --network "$name" -v "$PWD:/repo:ro" -v "$fixture:/fixture" \
+  -v "$storage_test:/fixture/storage-continuity:ro" \
   -e LEO_OFFICIAL_TEST_DATABASE_URL=postgres://leo:test-only@postgres/leo_official_test)
 docker run "${args[@]}" leo-installer-fixture python tests/installation_installer_container.py prepare
 # Parse the actual generated Compose with the controller's installed plugin.
