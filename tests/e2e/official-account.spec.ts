@@ -4,6 +4,51 @@ import { createServer } from 'node:http'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
 
+test('official pages deny framing and enable HSTS only for an HTTPS official origin', async ({ page, request }) => {
+  const url = 'http://localhost:4398'
+  for (const origin of [url, 'https://localhost:4398']) {
+    const child = spawn('target/debug/leo-official', [], {
+      env: {
+        ...process.env,
+        LEO_OFFICIAL_DATABASE_URL: process.env.LEO_OFFICIAL_TEST_DATABASE_URL,
+        LEO_OFFICIAL_ORIGIN: origin,
+        LEO_OFFICIAL_LISTEN: '127.0.0.1:4398',
+        LEO_OFFICIAL_EMAIL_KEY: 'fixture-only',
+        LEO_OFFICIAL_EMAIL_FROM: 'Leo <leo@example.test>',
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    })
+    const exited = once(child, 'exit')
+    let log = ''
+    child.stderr.on('data', chunk => log += chunk)
+    try {
+      await expect.poll(async () => {
+        if (child.exitCode !== null)
+          throw new Error(`Official service exited: ${log}`)
+        return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
+      }).toBe(true)
+
+      // The transport is loopback HTTP, as behind a TLS-terminating proxy.
+      for (const route of ['/', '/index.html', '/installations/unavailable/agents']) {
+        const response = await request.get(`${url}${route}`)
+        expect(response.status()).toBe(200)
+        expect(response.headers()['content-security-policy']).toContain('frame-ancestors \'none\'')
+        expect(response.headers()['x-frame-options']).toBe('DENY')
+        expect(response.headers()['strict-transport-security']).toBe(origin.startsWith('https:') ? 'max-age=31536000' : undefined)
+      }
+
+      await page.goto(url)
+      await expect(page.getByLabel('Email address')).toBeVisible()
+      await page.setContent(`<iframe src="${url}/"></iframe>`)
+      await expect(page.frameLocator('iframe').getByLabel('Email address')).toHaveCount(0)
+    }
+    finally {
+      child.kill('SIGTERM')
+      await exited
+    }
+  }
+})
+
 test('email sign-in works after a third party exhausts their challenge, persists and signs out', async ({ page, context, request }) => {
   const messages: Array<{ to: string[], text: string }> = []
   const mail = createServer(async (request, response) => {
