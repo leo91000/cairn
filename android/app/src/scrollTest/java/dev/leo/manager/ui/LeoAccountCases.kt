@@ -25,6 +25,7 @@ abstract class LeoAccountCases {
         MockWebServer().use { server ->
             val installations =
                 """[{"id":"selection-home","name":"Maison","role":"owner","online":true},{"id":"selection-work","name":"Bureau","role":"member","online":true}]"""
+            val accessibleInstallations = java.util.concurrent.atomic.AtomicReference(installations)
             val session =
                 """{"authenticated":true,"csrf":"selection-csrf","account":{"id":"selection-person","email":"member@example.test"},"installations":$installations}"""
             val paths = java.util.concurrent.CopyOnWriteArrayList<String>()
@@ -36,7 +37,7 @@ abstract class LeoAccountCases {
                         val response =
                             when (path) {
                                 "/api/account/session" -> session
-                                "/api/installations" -> installations
+                                "/api/installations" -> accessibleInstallations.get()
                                 else -> {
                                     val installation = path.split('/').getOrNull(3)
                                     if (installation !in listOf("selection-home", "selection-work"))
@@ -116,8 +117,10 @@ abstract class LeoAccountCases {
             compose.onNodeWithText("Agent selection-home").assertDoesNotExist()
             compose.onNodeWithContentDescription("Atelier").performClick()
             compose.onNodeWithText("Connexions").assertDoesNotExist()
-            compose.onNodeWithText("Nodes et stockage").assertDoesNotExist()
-            compose.onNodeWithText("MCP").assertDoesNotExist()
+            compose.onNodeWithText("Nodes et ressources").assertDoesNotExist()
+            compose.onNodeWithText("Serveurs MCP").assertDoesNotExist()
+            compose.onNodeWithText("Paramètres et accès").assertDoesNotExist()
+            compose.onNodeWithText("Autoriser un assistant").assertDoesNotExist()
             compose.onNodeWithText("Agents").performClick()
             compose.onNodeWithText("Agent selection-work").performScrollTo().assertIsDisplayed()
             compose.onNodeWithText("Créer un agent").assertDoesNotExist()
@@ -152,6 +155,51 @@ abstract class LeoAccountCases {
             }
             assertEquals("selection-work", model.value.state.value.installation?.id)
             assertEquals(previouslyNotified, runBlocking { model.value.notifications.seen() })
+
+            accessibleInstallations.set(
+                """[{"id":"selection-home","name":"Maison","role":"owner","online":true}]"""
+            )
+            compose.runOnIdle { model.value.perform { refreshInstallations() } }
+            compose.waitUntil(30000) {
+                compose
+                    .onAllNodesWithText("Maison · En ligne")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty() &&
+                    model.value.state.value.installation?.id == "selection-home" &&
+                    !model.value.state.value.busy
+            }
+            compose.onNodeWithText("Maison · En ligne").assertIsDisplayed()
+            compose.onNodeWithText("Agent selection-work").assertDoesNotExist()
+            compose.onNodeWithContentDescription("Atelier").performClick()
+            compose.onNodeWithContentDescription("Paramètres").assertExists()
+
+            accessibleInstallations.set(
+                """[{"id":"selection-home","name":"Maison","role":"member","online":true}]"""
+            )
+            compose.runOnIdle { model.value.perform { refreshInstallations() } }
+            compose.waitUntil(30000) {
+                compose
+                    .onAllNodesWithText("Maison · En ligne")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty() &&
+                    model.value.state.value.installation?.role == "member" &&
+                    !model.value.state.value.busy
+            }
+            compose.onNodeWithContentDescription("Atelier").performClick()
+            compose.onNodeWithContentDescription("Paramètres").assertDoesNotExist()
+            compose.onNodeWithText("Connexions").assertDoesNotExist()
+            compose.onNodeWithText("Nodes et ressources").assertDoesNotExist()
+
+            accessibleInstallations.set("[]")
+            compose.runOnIdle { model.value.perform { refreshInstallations() } }
+            compose.waitUntil(30000) {
+                compose
+                    .onAllNodesWithText("Aucune installation")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty() && !model.value.state.value.busy
+            }
+            compose.onNodeWithContentDescription("Atelier").assertDoesNotExist()
+            assertTrue(model.value.state.value.session.authenticated)
         }
     }
 

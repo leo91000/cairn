@@ -72,16 +72,17 @@ fun LeoApp(
         LoginScreen(vm, state)
         return
     }
-    if (state.installation == null) {
-        Poll(state.session.account?.id, 30_000) {
-            if (!state.busy) {
-                try {
-                    vm.refreshInstallations()
-                } catch (e: Exception) {
-                    vm.report(e)
-                }
+    Poll(state.session.account?.id, 30_000) {
+        if (!state.busy) {
+            try {
+                vm.refreshInstallations()
+            } catch (e: Exception) {
+                vm.report(e)
             }
         }
+    }
+
+    if (state.installation == null) {
         Page {
             Heading(
                 "Aucune installation",
@@ -96,15 +97,6 @@ fun LeoApp(
         return
     }
     val installation = checkNotNull(state.installation)
-    Poll(state.session.account?.id, 30_000) {
-        if (!state.busy) {
-            try {
-                vm.refreshInstallations()
-            } catch (e: Exception) {
-                vm.report(e)
-            }
-        }
-    }
     Column(Modifier.fillMaxSize()) {
         var choosing by remember { mutableStateOf(false) }
         Box(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 12.dp)) {

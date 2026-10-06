@@ -112,7 +112,8 @@ abstract class ImagePasteCases {
                 }
             }
             compose.waitUntil(20000) {
-                compose.onAllNodesWithText("Votre message…").fetchSemanticsNodes().isNotEmpty()
+                compose.onAllNodesWithText("Votre message…").fetchSemanticsNodes().isNotEmpty() &&
+                    !vm.state.value.busy
             }
             val field = compose.onNode(hasSetTextAction())
             field.performTextInput("Regarde cette capture")

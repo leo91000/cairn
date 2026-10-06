@@ -169,7 +169,13 @@ constructor(
         clearDrafts()
         accountConnection = next
         emailChallenge = null
-        mutable.update { Workspace(busy = true, origin = origin.toString()) }
+
+        mutable.update {
+            if (connection != null && it.origin == origin.toString() && it.session.authenticated)
+                it.copy(busy = true)
+            else Workspace(busy = true, origin = origin.toString())
+        }
+
         try {
             val session = next.get<Session>("/account/session")
             next.csrf = session.csrf.orEmpty()
@@ -231,12 +237,16 @@ constructor(
         if (installation != null) openInstallation(session, installation)
         else {
             connection?.closeStreams()
-            historyCache.clear()
-            connection = null
+            clearDrafts()
             schedule(getApplication(), false)
+
+            connection = null
             mutable.update {
                 Workspace(ready = true, busy = it.busy, origin = it.origin, session = session)
             }
+
+            historyCache.clear()
+            notifications.selectScope("")
         }
     }
 
@@ -252,9 +262,11 @@ constructor(
         val previous = connection
         val account = checkNotNull(accountConnection)
         mutable.update { it.copy(busy = true) }
+
         try {
             previous?.closeStreams()
             clearDrafts()
+
             val accountId = checkNotNull(session.account).id
             val scope = "${current.origin}:$accountId:${installation.id}:${installation.role}"
             val scopeChanged = notifications.selectScope(scope)
@@ -263,6 +275,7 @@ constructor(
                 historyCache.clear()
                 schedule(getApplication(), false)
             }
+
             preferences.selectInstallation(current.origin, accountId, installation.id)
             val next =
                 withContext(Dispatchers.IO) {
@@ -280,6 +293,7 @@ constructor(
                     busy = true,
                 )
             }
+
             if (installation.online) refresh()
             schedule(getApplication(), notifications.enabled.first())
         } finally {
@@ -303,26 +317,12 @@ constructor(
         val previous = state.value.installation
         val selected = installations.find { it.id == previous?.id }
         mutable.update { it.copy(session = it.session.copy(installations = installations)) }
+
         when {
-            selected == null || selected.role != previous?.role -> {
-                connection?.closeStreams()
-                connection = null
-                clearDrafts()
-                historyCache.clear()
-                mutable.update {
-                    Workspace(
-                        ready = true,
-                        origin = it.origin,
-                        session = it.session,
-                        busy = it.busy,
-                    )
-                }
-                val next = selected ?: installations.firstOrNull()
-                if (next != null) selectInstallation(next.id) else schedule(getApplication(), false)
-            }
+            selected == null || selected.role != previous?.role -> openAccount(state.value.session)
             else -> {
                 mutable.update { it.copy(installation = selected) }
-                if (selected.online && previous?.online != true) refresh()
+                if (selected.online && !previous.online) refresh()
                 if (!selected.online) connection?.closeStreams()
             }
         }

@@ -86,7 +86,7 @@ class Files(private val context: Context) {
         withContext(Dispatchers.IO) {
             val hash =
                 MessageDigest.getInstance("SHA-256")
-                    .digest((api.origin.toString() + path).toByteArray())
+                    .digest("${api.cacheScope}:${api.csrf}:$path".toByteArray())
                     .joinToString("") { "%02x".format(it) }
             val safeName =
                 name.replace(Regex("[^\\p{L}\\p{N}._ -]"), "_").takeLast(100).ifEmpty { "fichier" }
