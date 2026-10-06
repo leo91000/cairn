@@ -32,6 +32,8 @@ struct Slots {
     preparing: Option<Preparing>,
     retry_after: Option<Instant>,
     warm_disabled: bool,
+    warm_failures: u32,
+    warm_circuit_open: bool,
 }
 
 struct Preparing {
@@ -40,7 +42,47 @@ struct Preparing {
     done: watch::Receiver<bool>,
 }
 
+const WARM_FAILURE_LIMIT: u32 = 6;
+const WARM_RETRY_MAX: Duration = Duration::from_secs(160);
+const WARM_CIRCUIT_COOLDOWN: Duration = Duration::from_secs(3600);
+
 impl Slots {
+    fn warming_allowed(&mut self, now: Instant) -> bool {
+        if self.warm_disabled || self.retry_after.is_some_and(|at| now < at) {
+            return false;
+        }
+
+        if self.warm_circuit_open {
+            self.warm_failures = 0;
+            self.warm_circuit_open = false;
+            tracing::info!(target: "leo_performance", operation = "vm_pool", event = "circuit_rearmed");
+        }
+
+        self.retry_after = None;
+        true
+    }
+
+    fn warm_failure(&mut self, now: Instant) {
+        self.warm_failures = self.warm_failures.saturating_add(1).min(WARM_FAILURE_LIMIT);
+        self.warm_circuit_open = self.warm_failures >= WARM_FAILURE_LIMIT;
+
+        let delay = if self.warm_circuit_open {
+            WARM_CIRCUIT_COOLDOWN
+        } else {
+            Duration::from_secs(10 * (1 << (self.warm_failures - 1))).min(WARM_RETRY_MAX)
+        };
+        self.retry_after = Some(now + delay);
+
+        tracing::warn!(
+            target: "leo_performance",
+            operation = "vm_pool",
+            event = if self.warm_circuit_open { "circuit_open" } else { "retry" },
+            consecutive_errors = self.warm_failures,
+            retry_seconds = delay.as_secs(),
+            "Anonymous VM preparation suspended"
+        );
+    }
+
     fn ready_bytes(&self) -> Option<u64> {
         self.ready.iter().try_fold(0u64, |bytes, reservation| {
             bytes.checked_add(reservation.vm.as_ref()?.resident_bytes()?)
@@ -147,6 +189,9 @@ impl Pool {
             tokio::fs::remove_dir_all(&prepared).await?;
         }
         crate::storage::environment::recover(&state).await?;
+        if let Err(error) = super::images::collect(&state, &image).await {
+            tracing::warn!(message = %error.message, "Runtime image collection skipped");
+        }
         // Retain the guest OS and toolchains, but never pin the chat adapter to
         // an obsolete image. Copy once per controller, then import into tmpfs.
         let entrypoint = state.join("entrypoint");
@@ -281,6 +326,7 @@ impl Pool {
     }
 
     pub async fn monitor(self: Arc<Self>) {
+        let mut next_image_gc = Instant::now() + Duration::from_secs(600);
         loop {
             tokio::select! {
                 () = self.stop.cancelled() => {
@@ -289,10 +335,18 @@ impl Pool {
                 },
                 () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
             }
+
+            if Instant::now() >= next_image_gc {
+                next_image_gc = Instant::now() + Duration::from_secs(600);
+                if let Err(error) = super::images::collect(&self.state, &self.image).await {
+                    tracing::warn!(message = %error.message, "Runtime image collection skipped");
+                }
+            }
+
             if let Err(error) = self.maintain_retained().await {
                 tracing::warn!(message = %error.message, "Could not maintain idle conversation VMs");
             }
-            if let Err(error) = self.maintain_ready().await {
+            if let Err(error) = self.maintain_ready(Instant::now()).await {
                 tracing::warn!(message = %error.message, "Could not maintain prepared VM");
             }
             if let Ok((usage, _)) = self.usage().await
@@ -621,7 +675,7 @@ impl Pool {
         }
     }
 
-    async fn maintain_ready(self: &Arc<Self>) -> Result<()> {
+    async fn maintain_ready(self: &Arc<Self>, now: Instant) -> Result<()> {
         let _admission = self.admission.lock().await;
         if self.stop.is_cancelled() || !self.warm_enabled {
             return Ok(());
@@ -679,8 +733,7 @@ impl Pool {
         if self.stop.is_cancelled()
             || slots.ready.len() >= self.warm_capacity
             || slots.preparing.is_some()
-            || slots.warm_disabled
-            || slots.retry_after.is_some_and(|at| Instant::now() < at)
+            || !slots.warming_allowed(now)
         {
             return Ok(());
         }
@@ -766,6 +819,9 @@ impl Reservation {
         {
             let mut slots = pool.slots.lock().await;
             if matches!(operation, Ok(true)) && !stop.is_cancelled() && !pool.stop.is_cancelled() {
+                slots.warm_failures = 0;
+                slots.warm_circuit_open = false;
+                slots.retry_after = None;
                 self.prepared = Some(ready::Prepared { budget });
                 let completion = self.completion.take().unwrap();
                 slots.preparing = None;
@@ -774,10 +830,13 @@ impl Reservation {
                 tracing::info!(target: "leo_performance", operation = "vm_pool", event = "ready");
                 return;
             }
-            if matches!(operation, Ok(false)) {
-                slots.warm_disabled = true;
+            if !stop.is_cancelled() && !pool.stop.is_cancelled() {
+                if matches!(operation, Ok(false)) {
+                    slots.warm_disabled = true;
+                } else if operation.is_err() {
+                    slots.warm_failure(Instant::now());
+                }
             }
-            slots.retry_after = Some(Instant::now() + Duration::from_secs(10));
         }
         if let Err(error) = operation
             && !stop.is_cancelled()
@@ -1145,6 +1204,115 @@ mod tests {
 
     fn cold_plan(run: &str) -> Plan {
         Plan::new(serde_json::json!({ "runId": run }))
+    }
+
+    #[tokio::test]
+    async fn repeated_preparation_errors_back_off_then_open_the_circuit() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        let cgroup = root.path().join("cgroup");
+        std::fs::create_dir(&state).unwrap();
+        std::fs::create_dir(&cgroup).unwrap();
+        std::fs::write(root.path().join("memory.current"), "0").unwrap();
+        std::fs::write(root.path().join("memory.stat"), "inactive_file 0\n").unwrap();
+        std::fs::write(cgroup.join("memory.current"), "0").unwrap();
+        std::fs::write(cgroup.join("memory.max"), "max").unwrap();
+        std::fs::write(cgroup.join("cpu.max"), "max 100000").unwrap();
+        let budget = Budget {
+            slots: 1,
+            limits: crate::nodes::Resources {
+                cpu: 1,
+                memory_mi_b: 2048,
+                disk_mi_b: 32768,
+            },
+        };
+        std::fs::write(
+            state.join(budget::FILE),
+            serde_json::to_vec(&budget).unwrap(),
+        )
+        .unwrap();
+        // Invalid storage limits make each real background preparation fail
+        // deterministically before formatting a disk or starting a guest.
+        std::fs::write(state.join("storage-policy.json"), br#"{"reserveMiB":0}"#).unwrap();
+
+        let pool = Pool::new(state, root.path().into(), CancellationToken::new(), 1)
+            .await
+            .unwrap();
+        pool.initialize(cgroup).await.unwrap();
+        let mut now = Instant::now();
+        for seconds in [10, 20, 40, 80, 160, 3600] {
+            pool.maintain_ready(now).await.unwrap();
+            let mut done = pool
+                .slots
+                .lock()
+                .await
+                .preparing
+                .as_ref()
+                .expect("retry must start preparation")
+                .done
+                .clone();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !*done.borrow() {
+                    done.changed().await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+
+            let retry_after = pool.slots.lock().await.retry_after.unwrap();
+            let remaining = retry_after.saturating_duration_since(Instant::now());
+            assert!(
+                remaining >= Duration::from_secs(seconds - 1),
+                "expected {seconds}s, got {remaining:?}"
+            );
+            assert_eq!(pool.health().await.occupied, 0);
+            pool.maintain_ready(retry_after - Duration::from_nanos(1))
+                .await
+                .unwrap();
+            assert!(
+                !pool.health().await.preparing,
+                "no anonymous start before {seconds}s deadline"
+            );
+            assert_eq!(pool.health().await.occupied, 0);
+            now = retry_after;
+        }
+
+        // Foreground admission remains available while the circuit is open.
+        assert!(pool.slots.lock().await.warm_circuit_open);
+        let mut live = pool.reserve(&cold_plan("live")).await.unwrap();
+        live.finish().await;
+        assert!(pool.slots.lock().await.warm_circuit_open);
+
+        // Re-enter through the production gate at the cooldown deadline.
+        pool.maintain_ready(now).await.unwrap();
+        let mut done = pool
+            .slots
+            .lock()
+            .await
+            .preparing
+            .as_ref()
+            .unwrap()
+            .done
+            .clone();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !*done.borrow() {
+                done.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let slots = pool.slots.lock().await;
+        assert_eq!(slots.warm_failures, 1);
+        assert!(!slots.warm_circuit_open);
+        assert!(
+            slots
+                .retry_after
+                .unwrap()
+                .saturating_duration_since(Instant::now())
+                >= Duration::from_secs(9)
+        );
+        drop(slots);
+        pool.drain().await;
     }
 
     #[tokio::test]

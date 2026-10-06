@@ -18,6 +18,10 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
 pub const BLOCK: u64 = 4 * 1024 * 1024;
 pub const READ_BATCH: usize = 8;
+/// Blocks per publication response. A remote node uploads each response as one
+/// request through the master's reverse proxy, which may cut requests after
+/// 60 s; 32 MiB finishes within that limit from a 5 Mbit/s uplink.
+pub const PUBLICATION_BATCH: usize = 8;
 pub const MAX_PUBLICATION_BLOCKS: usize = (1024_u64 * 1024 * 1024 * 1024 / BLOCK) as usize;
 const TRANSFER_IDLE: std::time::Duration = std::time::Duration::from_secs(120);
 const MANIFEST_VERSION: u64 = 1;
@@ -441,7 +445,7 @@ impl Fetch {
             .ok_or_else(|| Error::bad("Unexpected snapshot block."))?;
         while self.stream.is_none() && !self.legacy {
             let count = if self.publication {
-                self.pending.len()
+                PUBLICATION_BATCH
             } else {
                 READ_BATCH
             };
@@ -541,31 +545,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_publication_stream_keeps_one_response_beyond_batch_limit() {
-        let requests = Arc::new(Mutex::new(0));
-        let count = requests.clone();
+    async fn fetch_publication_splits_large_backlogs_into_bounded_responses() {
+        // Production 2026-10-05: a node uploading 1.8 GB in one response was cut
+        // after 60 s by the master's reverse proxy on every attempt. Each bounded
+        // response must stay short enough to finish within that limit.
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let sizes = requests.clone();
         let app = Router::new().fallback(any(move |request: Request| {
-            let count = count.clone();
+            let sizes = sizes.clone();
             async move {
                 if request.uri().path() != "/publication" {
                     return axum::http::StatusCode::NOT_FOUND.into_response();
                 }
                 assert_eq!(request.method(), "POST");
                 assert_eq!(request.headers()["authorization"], "Bearer fixture");
-                let bytes = axum::body::to_bytes(request.into_body(), 4096)
+                let bytes = axum::body::to_bytes(request.into_body(), 1 << 20)
                     .await
                     .unwrap();
                 let body: Value = serde_json::from_slice(&bytes).unwrap();
-                assert_eq!(body["hashes"].as_array().unwrap().len(), READ_BATCH + 1);
-                *count.lock().unwrap() += 1;
-                let bytes: Vec<_> = (0..READ_BATCH + 1)
-                    .flat_map(|index| vec![index as u8; index + 1])
+                let hashes: Vec<_> = body["hashes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|hash| hash.as_str().unwrap().to_owned())
+                    .collect();
+                sizes.lock().unwrap().push(hashes.len());
+                let bytes: Vec<_> = hashes
+                    .iter()
+                    .flat_map(|hash| {
+                        let index = usize::from_str_radix(&hash[60..], 16).unwrap();
+                        vec![index as u8; index + 1]
+                    })
                     .collect();
                 bytes.into_response()
             }
         }));
         let (url, server) = peer(app).await;
-        let blocks: Vec<_> = (0..READ_BATCH + 1)
+        let count = 2 * PUBLICATION_BATCH + 1;
+        let blocks: Vec<_> = (0..count)
             .map(|index| (format!("{index:064x}"), index as u64 + 1))
             .collect();
         let mut fetch = Fetch::new(
@@ -580,7 +597,11 @@ mod tests {
                 vec![index as u8; *size as usize]
             );
         }
-        assert_eq!(*requests.lock().unwrap(), 1);
+        assert_eq!(
+            *requests.lock().unwrap(),
+            vec![PUBLICATION_BATCH, PUBLICATION_BATCH, 1]
+        );
+        assert!(PUBLICATION_BATCH as u64 * BLOCK <= 32 * 1024 * 1024);
         server.abort();
     }
 

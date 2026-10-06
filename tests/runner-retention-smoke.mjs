@@ -309,7 +309,7 @@ async function main() {
       const health = await (await api('/health')).json()
       let retained
       if (retention > 0) {
-        assert.equal(health.pool.retained, 1)
+        assert.equal(health.pool.retained, 1, `Turn ${lease} did not retain its VM: ${JSON.stringify({ health, active })}`)
         assert.equal(state(vmId), 'Paused')
         retained = physical(vmId)
         assert.ok(Math.abs(health.pool.retained_memory_mi_b * 1048576 - retained.conservativeVmBytes) < 32 * 1048576, `Admission agrees with independently sampled backing inodes: ${JSON.stringify({ costMiB: health.pool.retained_memory_mi_b, retained })}`)
@@ -466,6 +466,8 @@ async function main() {
   catch (error) {
     try {
       const logs = runnerLogs('100')
+      const retentionDiagnostics = stripVTControlCharacters(logs).split('\n').filter(line => /vm_retention|balloon|reclaim|failed|Could not/.test(line))
+      console.error(retentionDiagnostics.join('\n'))
       if (process.env.LEO_RETENTION_EVIDENCE) {
         await writeFile(`${process.env.LEO_RETENTION_EVIDENCE}.failure.log`, logs)
         const files = JSON.parse(docker('exec', name, 'node', '-e', `const fs=require('node:fs');console.log(JSON.stringify(fs.readdirSync('/runner-state').filter(p=>p.endsWith('.log')||p.includes('exit')).map(p=>({file:p,data:fs.readFileSync('/runner-state/'+p,'utf8')}))));`))
