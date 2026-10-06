@@ -1,6 +1,7 @@
 package dev.leo.manager.ui
 
 import android.app.Application
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -86,6 +87,7 @@ abstract class LeoAccountCases {
             val vault = sessionVault(application)
             vault.write(origin, "leo_session=selection-fixture; Path=/; Max-Age=3600; HttpOnly")
             val model = mutableStateOf(LeoViewModel(application, vault, officialOrigin = ""))
+            val updates = dev.leo.manager.update.UpdateViewModel(application)
             compose.setContent {
                 val vm = model.value
                 key(vm) {
@@ -93,7 +95,9 @@ abstract class LeoAccountCases {
                         vm.state.first { it.ready }
                         vm.perform { connect(origin) }
                     }
-                    LeoTheme { LeoApp(vm = vm) }
+                    CompositionLocalProvider(LocalAppUpdates provides updates) {
+                        LeoTheme { LeoApp(vm = vm) }
+                    }
                 }
             }
             compose.waitUntil(30000) {
@@ -119,7 +123,15 @@ abstract class LeoAccountCases {
             compose.onNodeWithText("Connexions").assertDoesNotExist()
             compose.onNodeWithText("Nodes et ressources").assertDoesNotExist()
             compose.onNodeWithText("Serveurs MCP").assertDoesNotExist()
-            compose.onNodeWithText("Paramètres et accès").assertDoesNotExist()
+            compose.onNodeWithText("Paramètres").performClick()
+            compose.onNodeWithText("Apparence").assertIsDisplayed()
+            compose.onNodeWithText("Mises à jour").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("Notifications").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("Vérifier en arrière-plan").assertExists()
+            compose.onNodeWithText("Connecter un assistant").assertDoesNotExist()
+            compose.onNodeWithText("Clients et jetons d’accès").assertDoesNotExist()
+            compose.onNodeWithText("Journal d’audit").assertDoesNotExist()
+            compose.onNodeWithContentDescription("Atelier").performClick()
             compose.onNodeWithText("Autoriser un assistant").assertDoesNotExist()
             compose.onNodeWithText("Agents").performClick()
             compose.onNodeWithText("Agent selection-work").performScrollTo().assertIsDisplayed()
@@ -186,7 +198,7 @@ abstract class LeoAccountCases {
                     !model.value.state.value.busy
             }
             compose.onNodeWithContentDescription("Atelier").performClick()
-            compose.onNodeWithContentDescription("Paramètres").assertDoesNotExist()
+            compose.onNodeWithText("Paramètres").assertExists()
             compose.onNodeWithText("Connexions").assertDoesNotExist()
             compose.onNodeWithText("Nodes et ressources").assertDoesNotExist()
 
