@@ -102,3 +102,8 @@ copie de l’historique.
   tout passe par le relais. Un réglage permet de désactiver le direct.
 - L’ADR-0032 (un seul processus officiel) reste nécessaire pour la signalisation
   et la notification immédiate des révocations.
+- Sur le DataChannel, les trames sont fragmentées en messages de 16 Kio au
+  plus, pour l’interopérabilité et pour qu’un gros message ne bloque pas les
+  autres requêtes du canal ordonné.
+
+Sources : [DIRECT-TRANSPORT-RESEARCH.md](../DIRECT-TRANSPORT-RESEARCH.md).

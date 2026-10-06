@@ -89,6 +89,9 @@ official service's memory and logs; it is not end-to-end encryption against it.
   as a relay disconnection does today.
 - Limits are identical on both routes: 32 requests in flight, 24 streams,
   8 MB bodies, 64 KiB stream chunks with credits, 30-second response deadline.
+- On the DataChannel, frames are fragmented into messages of at most 16 KiB:
+  larger messages are not interoperable without SCTP interleaving, and a large
+  message would block every other request on the ordered channel.
 
 ## Limits
 
@@ -98,6 +101,18 @@ official service's memory and logs; it is not end-to-end encryption against it.
 - Older installations or clients without the new protocol version stay on the
   relay.
 - A single official process remains required (ADR-0032).
+- Signaling relays the DTLS fingerprints, so the official service could
+  impersonate an installation (RFC 8827). This matches the existing trust model:
+  it also serves the web application code. Android could later pin an
+  installation key obtained at claim time; the web cannot.
+- Chrome's Local Network Access may eventually prompt before same-LAN
+  connections; the relay remains usable if the prompt is refused.
+- No reliable published figure gives the share of sessions that can connect
+  directly (studies report roughly 70–82 %). Qualification (#105) measures it.
+- TURN would add an end-to-end encrypted relay between direct and the
+  application relay; it is deferred (ADR-0033).
+
+Sources and library options: [DIRECT-TRANSPORT-RESEARCH.md](DIRECT-TRANSPORT-RESEARCH.md).
 
 ## Validation plan
 
