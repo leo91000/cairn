@@ -25,7 +25,13 @@ BASE = 'python:3.13-slim-trixie@sha256:3dd7cc108ec1493442514f5c2a871af6af0ec31d7
 
 
 def command(args, timeout=180, **kwargs):
-    return subprocess.check_output(args, stderr=subprocess.PIPE, timeout=timeout, **kwargs)
+    try:
+        return subprocess.check_output(args, stderr=subprocess.PIPE, timeout=timeout, **kwargs)
+    except subprocess.CalledProcessError as error:
+        # Fixture commands contain only synthetic credentials; expose the
+        # supervisor's safe error instead of hiding the reason in CI.
+        details = error.stderr.decode(errors='replace')
+        raise RuntimeError(f'Container fixture command failed:\n{details}') from error
 
 
 def port():
