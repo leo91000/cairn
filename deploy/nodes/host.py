@@ -163,6 +163,8 @@ def block_device_arguments(transport):
 
 
 def vm_arguments(config):
+    if not isinstance(config.get('cacheApprovedRuntimes', True), bool):
+        raise ValueError('cacheApprovedRuntimes must be a boolean')
     pool_size = config.get('readyVmPoolSize')
     if pool_size is not None and (type(pool_size) is not int or not 1 <= pool_size <= 4):
         raise ValueError('readyVmPoolSize must be an integer between 1 and 4')
@@ -326,7 +328,7 @@ def run():
                     atomic(ROOT / 'config.json', config)
                 if release['image'] not in (config['image'], config.get('failedImage')):
                     update(config, release)
-                if not STOP:
+                if not STOP and config.get('cacheApprovedRuntimes', True):
                     cache_runtimes(config['master'])
             except (OSError, ValueError, RuntimeError):
                 print('Node update check failed; retaining current image and data', flush=True)

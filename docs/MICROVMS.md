@@ -24,6 +24,10 @@ slots and shared budgets. The manager can update both through authenticated
 the default is `true`. Guests without the readiness capability keep booting cold.
 `LEO_READY_VM_POOL_SIZE=1..4` controls the target size (default one). The node
 supervisor preserves the equivalent `readyVmPoolSize` in its `config.json`.
+Setting `cacheApprovedRuntimes` to `false` in that file disables background
+downloads of historical runtime packages. The current image and locally pinned
+environments remain available; moving an older environment to this node can
+require re-enabling preloading. The default remains `true`.
 Additional spares need measured resident RAM plus 2 GiB of startup headroom
 within one quarter of the node's RAM budget, bounded between 2 and 8 GiB.
 Actual RAM is checked again after preparation; an oversized pool shrinks oldest
