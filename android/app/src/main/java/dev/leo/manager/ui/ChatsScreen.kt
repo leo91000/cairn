@@ -410,6 +410,13 @@ internal fun ChatPage(
         }
     val loadOlder = rememberHistoryPaging(live, listState, positionReady && !gallery)
     val active = chat?.run?.active == true
+    val running = chat?.run?.status == "running"
+    val waitingTasks =
+        remember(live.events, running) {
+            if (running) backgroundWait(live.events) else null
+        }
+    val error = conversationError(chat)
+    var errorDismissed by remember(error, chat?.id, chat?.run?.finishedAt) { mutableStateOf(false) }
     val selectedAgent = state.agents.find { it.id == (chat?.agentId ?: agent) }
     val currentProvider = chat?.run?.snapshot?.agent?.provider ?: selectedAgent?.provider ?: "codex"
     val chosenProvider = provider.ifBlank { currentProvider }
@@ -612,6 +619,7 @@ internal fun ChatPage(
                 if (!fullscreen) {
                     val agentName =
                         chat?.agentName?.ifBlank { null } ?: selectedAgent?.name ?: "Agent"
+                    val conversation = conversationState(chat, agentName, waitingTasks)
                     ConversationHeader(
                         title =
                             chat?.title
@@ -619,20 +627,15 @@ internal fun ChatPage(
                                 ?: if (id == null) "Nouvelle conversation" else "Conversation",
                         agent = agentName,
                         agentKey = chat?.agentId ?: agent,
-                        status =
-                            when {
-                                chat == null -> ""
-                                chat.paused -> "En pause"
-                                chat.run?.status == "queued" -> "En attente"
-                                else ->
-                                    listOfNotNull(agentName, chat.projectName).joinToString(" · ")
-                            },
+                        status = conversation.status,
                         live =
-                            if (chat?.run?.status == "running")
-                                listOf("$agentName travaille", elapsed(chat.run.startedAt))
-                                    .filter { it.isNotBlank() }
+                            conversation.live?.let {
+                                // A background wait is timed from when it began.
+                                val since = waitingTasks?.since ?: chat?.run?.startedAt
+                                listOf(it, elapsed(since))
+                                    .filter { part -> part.isNotBlank() }
                                     .joinToString(" · ")
-                            else null,
+                            },
                         back = {
                             persistDraft()
                             back()
@@ -807,7 +810,11 @@ internal fun ChatPage(
                         Text(
                             if (chat?.paused == true) "En pause"
                             else if (chat?.run?.status == "queued") "En attente"
-                            else if (active) "L’agent travaille…" else "Prêt"
+                            else if (waitingTasks != null) waitingStep(waitingTasks).title
+                            else if (active) "L’agent travaille…"
+                            else if (chat?.run?.status in listOf("failed", "interrupted"))
+                                statusLabel(chat?.run?.status.orEmpty())
+                            else "Prêt"
                         )
                         Text(
                             "${live.state?.artifacts?.size ?: 0} fichiers · ${questions.size} questions en attente"
@@ -819,13 +826,18 @@ internal fun ChatPage(
                             )
                         }
                     }
-                chat?.error?.let {
-                    Text(
-                        it,
-                        Modifier.padding(horizontal = 20.dp),
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
+                if (error != null && !errorDismissed)
+                    Row(
+                        Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            error,
+                            Modifier.weight(1f),
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        ActionIcon("Masquer l’erreur", LeoIcons.Close) { errorDismissed = true }
+                    }
                 chatWaitNotice(chat?.run)?.let {
                     ChatWaitingNotice(it, openConnections, state.isOwner)
                 }
@@ -1021,14 +1033,16 @@ internal fun ChatPage(
                                             WorkingIndicator(
                                                 remember(
                                                     live.events,
+                                                    waitingTasks,
                                                     chat.agentName,
                                                     chat.run.startedAt,
                                                 ) {
-                                                    workingStep(
-                                                        live.events,
-                                                        chat.agentName,
-                                                        chat.run.startedAt,
-                                                    )
+                                                    waitingTasks?.let(::waitingStep)
+                                                        ?: workingStep(
+                                                            live.events,
+                                                            chat.agentName,
+                                                            chat.run.startedAt,
+                                                        )
                                                 }
                                             )
                                         }

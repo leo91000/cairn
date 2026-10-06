@@ -40,6 +40,49 @@ internal fun chatWaitNotice(run: Run?): ChatWaitNotice? {
     )
 }
 
+/**
+ * What the conversation header says: [live] while the agent runs (working, or only waiting for
+ * background tasks), otherwise its [status], which names a failed or interrupted response.
+ */
+internal data class ConversationState(val status: String, val live: String?)
+
+internal fun conversationState(
+    chat: Chat?,
+    agentName: String,
+    wait: BackgroundWait?,
+): ConversationState {
+    if (chat == null) return ConversationState("", null)
+
+    val run = chat.run?.status.orEmpty()
+    val identity = listOfNotNull(agentName, chat.projectName).joinToString(" · ")
+    val status =
+        when {
+            chat.paused -> "En pause"
+            run == "queued" -> "En attente"
+            run in listOf("failed", "interrupted") -> "${statusLabel(run)} · $identity"
+            else -> identity
+        }
+    val tasks = wait?.tasks?.size ?: 0
+    val live =
+        when {
+            run != "running" -> null
+            tasks == 1 -> "Tâche en arrière-plan"
+            tasks > 1 -> "$tasks tâches en arrière-plan"
+            else -> "$agentName travaille"
+        }
+    return ConversationState(status, live)
+}
+
+/** The error shown above the conversation, including a response that stopped before finishing. */
+internal fun conversationError(chat: Chat?): String? {
+    val own = chat?.error?.takeIf { it.isNotBlank() }
+    if (own != null) return own
+
+    val run = chat?.run?.takeIf { it.status == "failed" } ?: return null
+    return run.error?.trim()?.ifEmpty { null }
+        ?: "La réponse s’est arrêtée avant la fin. Reprenez la conversation pour continuer."
+}
+
 @Composable
 internal fun ChatWaitingNotice(
     notice: ChatWaitNotice,

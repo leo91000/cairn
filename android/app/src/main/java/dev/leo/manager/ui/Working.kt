@@ -9,6 +9,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Icon
@@ -24,9 +25,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.PathMeasure
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -40,8 +43,54 @@ import androidx.compose.ui.unit.dp
 import dev.leo.manager.data.RunEvent
 import kotlinx.coroutines.delay
 
-/** What the working indicator says: the step in progress, or the last one reached. */
-internal data class WorkingStep(val title: String, val detail: String, val since: Long?)
+/**
+ * What the working indicator says: the step in progress, or the last one reached. [waiting] lists
+ * the background tasks an idle agent waits for; [since] is then when it began waiting.
+ */
+internal data class WorkingStep(
+    val title: String,
+    val detail: String,
+    val since: Long?,
+    val waiting: List<String>? = null,
+)
+
+/** The background tasks an idle agent waits for, and when it announced them. */
+internal data class BackgroundWait(val tasks: List<String>, val since: Long)
+
+/** Events that show the agent active again after it announced a background wait. */
+private fun RunEvent.resumesWork() =
+    type == "chat.user" ||
+        type == "thread.started" ||
+        type.startsWith("turn.") ||
+        type.startsWith("item.")
+
+/**
+ * The background tasks the agent waits for, when its latest announcement still holds: the agent
+ * finished responding and its run stays open until those tasks notify it.
+ */
+internal fun backgroundWait(events: List<RunEvent>): BackgroundWait? {
+    val index = events.indexOfLast { it.type == "turn.waiting" }
+    if (index < 0 || (index + 1 until events.size).any { events[it].resumesWork() }) return null
+
+    val announcement = events[index]
+    val tasks =
+        announcement.activityData()?.get("tasks").asArray().orEmpty().map {
+            it.asObject()?.get("description").plain().trim().ifEmpty { "Tâche en arrière-plan" }
+        }
+    return if (tasks.isEmpty()) null else BackgroundWait(tasks, announcement.createdAt)
+}
+
+/** The indicator for an agent that only waits for its background tasks. */
+internal fun waitingStep(wait: BackgroundWait): WorkingStep {
+    val count = wait.tasks.size
+    return WorkingStep(
+        if (count == 1) "En attente d’une tâche en arrière-plan"
+        else "En attente de $count tâches en arrière-plan",
+        wait.tasks.joinToString(" · "),
+        wait.since,
+        waiting = wait.tasks,
+    )
+}
 
 /**
  * The agent's current step since the latest user message: an in-progress action is named with its
@@ -78,19 +127,31 @@ internal fun liveElapsed(start: Long?, now: Long = System.currentTimeMillis()): 
     }
 }
 
-/**
- * "Souffle": a breathing halo, a light sweep across the current step and the elapsed time.
- * Animations follow the system animation scale, so they stop when motion is turned off.
- */
+/** The current time, refreshed every second for elapsed-time labels. */
 @Composable
-internal fun WorkingIndicator(step: WorkingStep, modifier: Modifier = Modifier) {
+private fun rememberNow(key: Any?): Long {
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(step.since) {
+    LaunchedEffect(key) {
         while (true) {
             now = System.currentTimeMillis()
             delay(1000)
         }
     }
+    return now
+}
+
+/**
+ * "Souffle": a breathing halo, a light sweep across the current step and the elapsed time.
+ * Animations follow the system animation scale, so they stop when motion is turned off. "Veille"
+ * replaces it while the agent only waits for its background tasks.
+ */
+@Composable
+internal fun WorkingIndicator(step: WorkingStep, modifier: Modifier = Modifier) {
+    if (step.waiting != null) {
+        WaitingIndicator(step, step.waiting, modifier)
+        return
+    }
+    val now = rememberNow(step.since)
     val primary = MaterialTheme.colorScheme.primary
     val transition = rememberInfiniteTransition(label = "working")
     val ring by
@@ -183,6 +244,146 @@ internal fun WorkingIndicator(step: WorkingStep, modifier: Modifier = Modifier) 
             )
         }
     }
+}
+
+private const val SHOWN_TASKS = 3
+
+/**
+ * "Veille": the agent finished responding and only waits for its background tasks. A slow dashed
+ * ring and a calm dot replace the breath, so a long wait reads as a process running rather than an
+ * agent thinking for hours. The time counts from the start of the wait.
+ */
+@Composable
+private fun WaitingIndicator(step: WorkingStep, tasks: List<String>, modifier: Modifier) {
+    val now = rememberNow(step.since)
+    val transition = rememberInfiniteTransition(label = "waiting")
+    val turn by
+        transition.animateFloat(
+            0f,
+            360f,
+            infiniteRepeatable(tween(9000, easing = LinearEasing)),
+            label = "turn",
+        )
+    val glow by
+        transition.animateFloat(
+            0.35f,
+            1f,
+            infiniteRepeatable(tween(1200, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+            label = "glow",
+        )
+    val ring = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f)
+    val accent = MaterialTheme.colorScheme.primary
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val resumes =
+        if (tasks.size == 1) "L’agent reprend quand elle se termine."
+        else "L’agent reprend quand elles se terminent."
+    val elapsed = liveElapsed(step.since, now)
+    Row(
+        modifier.fillMaxWidth().testTag("agent-waiting").clearAndSetSemantics {
+            contentDescription = "${step.title} : ${step.detail}. $resumes"
+            liveRegion = LiveRegionMode.Polite
+        },
+        verticalAlignment = Alignment.Top,
+    ) {
+        Box(Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+            // The ring turns in the draw phase, so the slow rotation never recomposes the row.
+            Canvas(Modifier.fillMaxSize().graphicsLayer { rotationZ = turn }) {
+                val stroke = 1.5.dp.toPx()
+                drawCircle(
+                    ring,
+                    size.minDimension / 2 - 2.dp.toPx() - stroke / 2,
+                    style =
+                        Stroke(
+                            stroke,
+                            pathEffect =
+                                PathEffect.dashPathEffect(floatArrayOf(3.dp.toPx(), 3.dp.toPx())),
+                        ),
+                )
+            }
+            Box(
+                Modifier.size(20.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    LeoIcons.Terminal,
+                    null,
+                    Modifier.size(11.dp),
+                    tint = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+        }
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f).padding(top = 2.dp)) {
+            Text(
+                step.title,
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            FlowRow(
+                Modifier.padding(top = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                tasks.take(SHOWN_TASKS).forEach { task ->
+                    WaitingTask {
+                        Box(
+                            Modifier.size(6.dp)
+                                .clip(CircleShape)
+                                .background(accent.copy(alpha = glow))
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            task,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                if (tasks.size > SHOWN_TASKS)
+                    WaitingTask {
+                        Text(
+                            "+${tasks.size - SHOWN_TASKS}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+            }
+            Text(
+                resumes,
+                Modifier.padding(top = 6.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = muted,
+            )
+        }
+        if (elapsed.isNotBlank()) {
+            Spacer(Modifier.width(8.dp))
+            Text(
+                elapsed,
+                Modifier.padding(top = 2.dp),
+                style = MaterialTheme.typography.labelMedium,
+                color = muted,
+            )
+        }
+    }
+}
+
+/** A background task pill of the "Veille" indicator. */
+@Composable
+private fun WaitingTask(content: @Composable RowScope.() -> Unit) {
+    Row(
+        Modifier.clip(CircleShape)
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        content = content,
+    )
 }
 
 /**
