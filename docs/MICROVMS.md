@@ -24,6 +24,7 @@ slots and shared budgets. The manager can update both through authenticated
 the default is `true`. Guests without the readiness capability keep booting cold.
 `LEO_READY_VM_POOL_SIZE=1..4` controls the target size (default one). The node
 supervisor preserves the equivalent `readyVmPoolSize` in its `config.json`.
+The same file accepts `readyVmPool: false` to disable preparation entirely.
 Setting `cacheApprovedRuntimes` to `false` in that file disables background
 downloads of historical runtime packages. The current image and locally pinned
 environments remain available; moving an older environment to this node can
