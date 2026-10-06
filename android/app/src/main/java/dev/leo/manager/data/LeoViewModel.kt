@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.leo.manager.BuildConfig
+import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -32,6 +33,7 @@ data class Workspace(
     val emailForCode: String? = null,
     val busy: Boolean = false,
     val signingOut: Boolean = false,
+    val restoringSession: Boolean = false,
     val mcps: List<Mcp> = emptyList(),
     val models: ModelCatalog = ModelCatalog(),
     val claudeModels: ModelCatalog = ModelCatalog(),
@@ -180,7 +182,24 @@ constructor(
         }
 
         try {
-            val session = next.get<Session>("/account/session")
+            val session =
+                try {
+                    next.get<Session>("/account/session")
+                } catch (error: IOException) {
+                    if (error is ApiException && error.status == 401) {
+                        next.clearSession()
+                        Session()
+                    } else if (next.hasSession && (error !is ApiException || error.status >= 500)) {
+                        mutable.update {
+                            it.copy(
+                                restoringSession = true,
+                                error =
+                                    "Le service officiel est injoignable. Réessayez lorsque le réseau est disponible.",
+                            )
+                        }
+                        return
+                    } else throw error
+                }
             next.csrf = session.csrf.orEmpty()
             if (session.authenticated) openAccount(session)
             else {
@@ -196,6 +215,10 @@ constructor(
         } finally {
             mutable.update { it.copy(ready = true, busy = wasBusy) }
         }
+    }
+
+    suspend fun retrySession() {
+        connect(state.value.origin)
     }
 
     suspend fun requestEmailCode(email: String) {

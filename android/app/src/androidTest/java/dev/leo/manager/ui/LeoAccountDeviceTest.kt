@@ -19,4 +19,8 @@ class LeoAccountDeviceTest : LeoAccountCases() {
     @Test
     fun installationSelectionAndMemberRole() =
         switchingToASharedInstallationHidesManagementAndRestoresTheSelection()
+
+    @Test
+    fun storedSessionSurvivesNetworkFailure() =
+        unavailableOfficialServiceRetriesTheStoredSessionAndOnlyRejectionSignsOut()
 }

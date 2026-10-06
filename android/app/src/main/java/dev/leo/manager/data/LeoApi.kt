@@ -94,6 +94,9 @@ class LeoApi(
     val cacheScope = origin.toString() + installationId.orEmpty()
 
     private val cookies = SessionCookies(origin, vault)
+    val hasSession: Boolean
+        get() = cookies.loadForRequest(origin).isNotEmpty()
+
     internal val http =
         client
             .newBuilder()

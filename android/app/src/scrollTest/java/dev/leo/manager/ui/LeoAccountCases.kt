@@ -382,6 +382,67 @@ abstract class LeoAccountCases {
             assertTrue(paths.contains("/api/account/logout"))
         }
     }
+
+    fun unavailableOfficialServiceRetriesTheStoredSessionAndOnlyRejectionSignsOut() {
+        MockWebServer().use { server ->
+            val rejected = java.util.concurrent.atomic.AtomicBoolean(false)
+            val installations =
+                """[{"id":"retry-home","name":"Reprise","role":"member","online":false}]"""
+            val session =
+                """{"authenticated":true,"csrf":"retry-csrf","account":{"id":"retry-person","email":"reader@example.test"},"installations":$installations}"""
+            server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START))
+            server.start()
+            val application = ApplicationProvider.getApplicationContext<Application>()
+            val origin = server.url("/").toString()
+            val vault = sessionVault(application)
+            vault.write(origin, "leo_session=retry-fixture; Path=/; Max-Age=3600; HttpOnly")
+            val vm = LeoViewModel(application, vault, officialOrigin = "")
+            compose.setContent {
+                LaunchedEffect(Unit) {
+                    vm.state.first { it.ready }
+                    vm.perform { connect(origin) }
+                }
+                LeoTheme { LeoApp(vm = vm) }
+            }
+            compose.waitUntil(30000) {
+                compose.onAllNodes(isRoot()).fetchSemanticsNodes()
+                vm.state.value.origin == origin && vm.state.value.ready && !vm.state.value.busy
+            }
+            compose.onNodeWithText("Adresse e-mail").assertDoesNotExist()
+            compose.onNodeWithText("Réessayer").assertIsDisplayed()
+            assertNotNull(vault.read(origin))
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        if (rejected.get())
+                            return MockResponse()
+                                .setResponseCode(401)
+                                .setBody("""{"error":"Session expired"}""")
+                        return MockResponse()
+                            .setBody(
+                                if (request.path == "/api/installations") installations else session
+                            )
+                    }
+                }
+            compose.onNodeWithText("Réessayer").performClick()
+            compose.waitUntil(30000) {
+                compose
+                    .onAllNodesWithText("Reprise · Hors ligne")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty() && !vm.state.value.busy
+            }
+            compose.onNodeWithText("Reprise · Hors ligne").assertIsDisplayed()
+            assertNotNull(vault.read(origin))
+            rejected.set(true)
+            compose.runOnIdle { vm.perform { connect(origin) } }
+            compose.waitUntil(30000) {
+                compose.onAllNodesWithText("Adresse e-mail").fetchSemanticsNodes().isNotEmpty() &&
+                    !vm.state.value.busy
+            }
+            compose.onNodeWithText("Adresse e-mail").assertIsDisplayed()
+            assertNull(vault.read(origin))
+        }
+    }
 }
 
 private class AccountFixtureVault : SessionVault {

@@ -68,6 +68,20 @@ fun LeoApp(
         }
         return
     }
+    if (state.restoringSession) {
+        Page {
+            Heading(
+                "Connexion au service officiel",
+                "Votre session est conservée sur cet appareil.",
+            )
+            Text(state.error.orEmpty())
+            Button(onClick = { vm.perform { retrySession() } }, enabled = !state.busy) {
+                Text("Réessayer")
+            }
+            if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+        }
+        return
+    }
     if (!state.session.authenticated) {
         LoginScreen(vm, state)
         return
