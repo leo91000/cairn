@@ -127,7 +127,10 @@ constructor(
         if (error is CancellationException) throw error
         if (error is ApiException && error.status == 401 && state.value.session.authenticated) {
             clearDrafts()
-            viewModelScope.launch { historyCache.clear() }
+            viewModelScope.launch {
+                historyCache.clear()
+                files.clear()
+            }
             connection?.closeStreams()
             connection?.clearSession()
             accountConnection?.clearSession()
@@ -182,6 +185,7 @@ constructor(
             if (session.authenticated) openAccount(session)
             else {
                 historyCache.clear()
+                files.clear()
                 next.clearSession()
                 connection = null
                 schedule(getApplication(), false)
@@ -246,6 +250,7 @@ constructor(
             }
 
             historyCache.clear()
+            files.clear()
             notifications.selectScope("")
         }
     }
@@ -273,6 +278,7 @@ constructor(
             val sessionChanged = previous != null && previous.csrf != session.csrf
             if (scopeChanged || sessionChanged) {
                 historyCache.clear()
+                files.clear()
                 schedule(getApplication(), false)
             }
 
@@ -333,6 +339,7 @@ constructor(
         emailChallenge = null
         mutable.update { it.copy(signingOut = true) }
         historyCache.clear()
+        files.clear()
         connection?.closeStreams()
         schedule(getApplication(), false)
         try {

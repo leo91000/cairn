@@ -6,6 +6,7 @@ import android.provider.OpenableColumns
 import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -14,12 +15,24 @@ import kotlinx.serialization.Serializable
 data class DraftAttachment(val attachment: ChatAttachment, val localPath: String? = null)
 
 class Files(private val context: Context) {
+    private val cacheLock = Any()
+    private var generation = 0L
+
+    suspend fun clear() =
+        withContext(Dispatchers.IO) {
+            synchronized(cacheLock) {
+                generation++
+                File(context.cacheDir, "leo-files").deleteRecursively()
+            }
+        }
+
     private val root
         get() = File(context.cacheDir, "leo-files").apply { mkdirs() }
 
     // `mediaType` covers pasted content whose provider does not report a type.
     suspend fun stage(uri: Uri, mediaType: String? = null): DraftAttachment =
         withContext(Dispatchers.IO) {
+            val expectedGeneration = synchronized(cacheLock) { generation }
             val mime =
                 context.contentResolver.getType(uri) ?: mediaType ?: "application/octet-stream"
             var name =
@@ -52,6 +65,12 @@ class Files(private val context: Context) {
                             }
                         }
                     }
+                synchronized(cacheLock) {
+                    if (generation != expectedGeneration) {
+                        file.delete()
+                        throw CancellationException("Le contexte de l’installation a changé.")
+                    }
+                }
                 DraftAttachment(
                     ChatAttachment(
                         id,
@@ -84,6 +103,7 @@ class Files(private val context: Context) {
         maxBytes: Long = 512L * 1024 * 1024,
     ): File =
         withContext(Dispatchers.IO) {
+            val expectedGeneration = synchronized(cacheLock) { generation }
             val hash =
                 MessageDigest.getInstance("SHA-256")
                     .digest("${api.cacheScope}:${api.csrf}:$path".toByteArray())
@@ -95,9 +115,14 @@ class Files(private val context: Context) {
             val partial = File(root, "${UUID.randomUUID()}.part")
             try {
                 api.download(path, partial, maxBytes)
-                if (!partial.renameTo(file)) {
-                    check(file.exists()) { "Impossible de conserver le fichier." }
-                    partial.delete()
+                synchronized(cacheLock) {
+                    if (generation != expectedGeneration) {
+                        throw CancellationException("Le contexte de l’installation a changé.")
+                    }
+                    if (!partial.renameTo(file)) {
+                        check(file.exists()) { "Impossible de conserver le fichier." }
+                        partial.delete()
+                    }
                 }
                 file
             } catch (e: Exception) {

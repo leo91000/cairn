@@ -110,6 +110,10 @@ abstract class LeoAccountCases {
             compose.onNodeWithText("Agents").performClick()
             compose.onNodeWithText("Agent selection-home").performScrollTo().assertIsDisplayed()
             compose.onNodeWithText("Créer un agent").performScrollTo().assertIsDisplayed()
+            val homeFile = runBlocking {
+                model.value.files.fetch(model.value.api, "/runs/run/artifacts/file", "note.txt")
+            }
+            assertTrue(homeFile.exists())
             compose.onNodeWithContentDescription("Choisir une installation").performClick()
             compose.onNodeWithText("Bureau · En ligne").performClick()
             compose.waitUntil(30000) {
@@ -118,6 +122,7 @@ abstract class LeoAccountCases {
                     .fetchSemanticsNodes()
                     .isNotEmpty() && !model.value.state.value.busy
             }
+            assertFalse(homeFile.exists())
             compose.onNodeWithText("Agent selection-home").assertDoesNotExist()
             compose.onNodeWithContentDescription("Atelier").performClick()
             compose.onNodeWithText("Connexions").assertDoesNotExist()
@@ -155,6 +160,10 @@ abstract class LeoAccountCases {
                             )
                 }
             )
+            val workFile = runBlocking {
+                model.value.files.fetch(model.value.api, "/runs/run/artifacts/file", "note.txt")
+            }
+            assertTrue(workFile.exists())
             val previouslyNotified = setOf("existing-question")
             runBlocking { model.value.notifications.setSeen(previouslyNotified) }
             compose.runOnIdle {
@@ -181,6 +190,7 @@ abstract class LeoAccountCases {
                     model.value.state.value.installation?.id == "selection-home" &&
                     !model.value.state.value.busy
             }
+            assertFalse(workFile.exists())
             compose.onNodeWithText("Maison · En ligne").assertIsDisplayed()
             compose.onNodeWithText("Agent selection-work").assertDoesNotExist()
             compose.onNodeWithContentDescription("Atelier").performClick()
@@ -353,6 +363,10 @@ abstract class LeoAccountCases {
                         .fetchSemanticsNodes()
                         .isNotEmpty()
             }
+            val downloaded = runBlocking {
+                vm.files.fetch(vm.api, "/runs/run/artifacts/file", "note.txt")
+            }
+            assertTrue(downloaded.exists())
             compose.onNodeWithContentDescription("Choisir une installation").assertDoesNotExist()
             assertTrue(vault.read(server.url("/").toString()).orEmpty().contains("account-fixture"))
             assertTrue(paths.contains("/api/installations/home/api/agents"))
@@ -363,6 +377,7 @@ abstract class LeoAccountCases {
             compose.waitUntil(30000) {
                 compose.onAllNodesWithText("Adresse e-mail").fetchSemanticsNodes().isNotEmpty()
             }
+            assertFalse(downloaded.exists())
             assertNull(vault.read(server.url("/").toString()))
             assertTrue(paths.contains("/api/account/logout"))
         }
