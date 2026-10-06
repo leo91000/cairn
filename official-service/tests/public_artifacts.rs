@@ -270,9 +270,17 @@ async fn stalled_public_downloads_cannot_exhaust_live_streams_and_expire_without
         "Public downloads must have their own small capacity pool"
     );
 
+    let cookies = common::stream_accounts(&relay).await;
     let mut live = Vec::new();
-    for _ in 0..24 {
-        let response = relay.get("/chats/stream").send().await.unwrap();
+    for index in 0..24 {
+        let response = relay
+            .app
+            .client
+            .get(format!("{}/chats/stream", relay.base))
+            .header("cookie", &cookies[index / 8])
+            .send()
+            .await
+            .unwrap();
         assert_eq!(
             response.status(),
             StatusCode::OK,

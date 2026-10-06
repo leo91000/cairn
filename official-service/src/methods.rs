@@ -14,10 +14,10 @@ pub(super) async fn authenticated_on(
     headers: &HeaderMap,
     mutation: bool,
 ) -> Result<(String, String), ApiError> {
-    let row: Option<(String, String, String)> = query_as("SELECT a.id, a.email, s.csrf FROM web_sessions s JOIN leo_accounts a ON a.id = s.account_id WHERE s.digest = $1 AND s.expires_at > now()")
+    let row: Option<(String, String, String)> = query_as("SELECT a.id, a.email, s.csrf FROM web_sessions s JOIN leo_accounts a ON a.id = s.account_id WHERE s.digest = $1 AND s.expires_at > clock_timestamp()")
         .bind(digest(session_token(headers))).fetch_optional(connection).await?;
     let Some((id, email, csrf)) = row else {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::UNAUTHORIZED,
             "Session expired. Please sign in again.",
         ));
@@ -28,7 +28,7 @@ pub(super) async fn authenticated_on(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
     if mutation && !bool::from(csrf.as_bytes().ct_eq(supplied.as_bytes())) {
-        return Err(ApiError(StatusCode::FORBIDDEN, "Invalid CSRF token"));
+        return Err(ApiError::Http(StatusCode::FORBIDDEN, "Invalid CSRF token"));
     }
 
     Ok((id, email))
@@ -86,10 +86,13 @@ pub(super) async fn remove(
             .fetch_all(&mut *transaction)
             .await?;
     if !rows.iter().any(|(id,)| id == &input.id) {
-        return Err(ApiError(StatusCode::NOT_FOUND, "Sign-in method not found"));
+        return Err(ApiError::Http(
+            StatusCode::NOT_FOUND,
+            "Sign-in method not found",
+        ));
     }
     if rows.len() == 1 {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::CONFLICT,
             "Keep at least one sign-in method",
         ));

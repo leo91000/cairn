@@ -174,6 +174,8 @@ async fn member_cannot_manage_projects_skills_agents_or_installation_settings() 
             "/projects/00000000-0000-0000-0000-000000000000",
         ),
         (Method::POST, "/agents"),
+        (Method::GET, "/github/repositories"),
+        (Method::GET, "/agents/00000000-0000-0000-0000-000000000000"),
         (Method::GET, "/nodes"),
         (Method::GET, "/accounts"),
         (Method::GET, "/onepassword"),
@@ -226,6 +228,19 @@ async fn member_cannot_manage_projects_skills_agents_or_installation_settings() 
             Method::PATCH,
             format!("/api/installations/{id}"),
             json!({ "name": "Member rename" }),
+        ),
+        (
+            Method::DELETE,
+            format!(
+                "/api/installations/{id}/sharing/members/{}",
+                relay.session["account"]["id"].as_str().unwrap()
+            ),
+            json!({}),
+        ),
+        (
+            Method::POST,
+            format!("/api/installations/{id}/detach"),
+            json!({}),
         ),
     ] {
         assert_eq!(
@@ -871,4 +886,220 @@ async fn revoked_members_cannot_finish_previously_authorized_uploads() {
         );
         relay.close().await;
     }
+}
+
+#[tokio::test]
+async fn invitation_emails_neutralize_owner_supplied_urls() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let renamed = request(
+        &relay,
+        &relay.cookie,
+        &relay.session,
+        Method::PATCH,
+        &format!("/api/installations/{id}"),
+    )
+    .json(&json!({ "name": "https://evil.example/login?token=ignored" }))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(renamed.status(), StatusCode::OK);
+    let invited = request(
+        &relay,
+        &relay.cookie,
+        &relay.session,
+        Method::POST,
+        &format!("/api/installations/{id}/sharing/invitations"),
+    )
+    .json(&json!({ "email": "recipient@example.test" }))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(invited.status(), StatusCode::CREATED);
+    let delivery = relay.app.mail.1.lock().unwrap().last().unwrap().clone();
+    assert_eq!(delivery.1, "https evil example login token ignored");
+    assert_eq!(delivery.2, format!("{}/?invitations=1", relay.app.url));
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn cancelling_and_reinviting_cannot_bypass_the_daily_email_budget() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let owner = relay.session["account"]["id"].as_str().unwrap();
+    let path = format!("/api/installations/{id}/sharing/invitations");
+    for attempt in 0..21 {
+        if attempt % 10 == 0 {
+            // Advance only the one-minute bucket at the clock/database seam.
+            sqlx_core::query::query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key = $1")
+                .bind(format!("invitation:{owner}")).execute(&relay.app.pool).await.unwrap();
+        }
+        let response = request(&relay, &relay.cookie, &relay.session, Method::POST, &path)
+            .json(&json!({ "email": "recipient@example.test" }))
+            .send()
+            .await
+            .unwrap();
+        if attempt == 20 {
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            break;
+        }
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let invitation: Value = response.json().await.unwrap();
+        let cancelled = request(
+            &relay,
+            &relay.cookie,
+            &relay.session,
+            Method::DELETE,
+            &format!("{path}/{}", invitation["id"].as_str().unwrap()),
+        )
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(cancelled.status(), StatusCode::NO_CONTENT);
+    }
+    assert_eq!(relay.app.mail.1.lock().unwrap().len(), 20);
+    let sharing: Value = request(
+        &relay,
+        &relay.cookie,
+        &relay.session,
+        Method::GET,
+        &format!("/api/installations/{id}/sharing"),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(sharing["invitations"], json!([]));
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn account_stream_limits_preserve_the_owners_live_views_and_release_on_cancellation() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let (cookie, session) = member(&relay, "member@example.test").await;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let path = format!("/api/installations/{id}/api/chats/stream");
+    let mut streams = Vec::new();
+    for _ in 0..8 {
+        let response = request(&relay, &cookie, &session, Method::GET, &path)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        streams.push(response);
+    }
+    sqlx_core::query::query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key LIKE 'email:%'")
+        .execute(&relay.app.pool).await.unwrap();
+    let (other_cookie, other_session) = login(&relay.app, "member@example.test").await;
+    let other_device = request(&relay, &other_cookie, &other_session, Method::GET, &path)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        other_device.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "another session cannot bypass the account allowance"
+    );
+    let exhausted = request(&relay, &cookie, &session, Method::GET, &path)
+        .header(
+            "x-leo-account-id",
+            relay.session["account"]["id"].as_str().unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(exhausted.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let owner = relay.get("/chats/stream").send().await.unwrap();
+    assert_eq!(owner.status(), StatusCode::OK);
+    drop(streams);
+    let replacement = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let response = request(&relay, &cookie, &session, Method::GET, &path)
+                .send()
+                .await
+                .unwrap();
+            if response.status() == StatusCode::OK {
+                break response;
+            }
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("cancellation must release the account's stream allowance");
+    drop(replacement);
+    drop(owner);
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn expired_invitations_are_hidden_and_cannot_be_accepted() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let (cookie, session) = login(&relay.app, "recipient@example.test").await;
+    let invited: Value = request(
+        &relay,
+        &relay.cookie,
+        &relay.session,
+        Method::POST,
+        &format!("/api/installations/{id}/sharing/invitations"),
+    )
+    .json(&json!({ "email": "recipient@example.test" }))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    sqlx_core::query::query(
+        "UPDATE installation_invitations SET expires_at = now() - interval '1 second'",
+    )
+    .execute(&relay.app.pool)
+    .await
+    .unwrap();
+    let pending: Value = request(
+        &relay,
+        &cookie,
+        &session,
+        Method::GET,
+        "/api/account/invitations",
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(pending, json!([]));
+    let accepted = request(
+        &relay,
+        &cookie,
+        &session,
+        Method::POST,
+        &format!(
+            "/api/account/invitations/{}/accept",
+            invited["id"].as_str().unwrap()
+        ),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(accepted.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        request(
+            &relay,
+            &cookie,
+            &session,
+            Method::GET,
+            &format!("/api/installations/{id}/api/chats")
+        )
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    relay.close().await;
 }

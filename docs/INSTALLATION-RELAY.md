@@ -92,7 +92,9 @@ claim for the same installation invalidates its previous pending challenge.
 
 Choose **Detach installation** inside the installation and confirm explicitly.
 The owner is cleared and the active relay is cut; local data and the official
-installation row remain. Deleting its owning Leo account also clears ownership
+installation row remain. Deleting its owning Leo account through Account security also clears sharing
+and closes its tunnel immediately, preserving the installation record and data.
+Deletion performed directly by an operator in Postgres clears ownership
 rather than cascading deletion of the installation. Active relays recheck the persisted machine identity every 30 seconds, covering
 account deletion outside this process. A confirmed revocation closes the tunnel
 on that check. Local detachment still closes it immediately. Upgrade and
@@ -250,6 +252,11 @@ requests (300 requests per minute per account), while machine traffic retains
 its existing peer-based limits. Browser headers cannot select an identity or
 quota. Installation rename requests are limited separately at the official
 account level.
+
+Each Leo account may hold at most eight browser SSE requests across all of its
+installations and sessions in the official process. Additional requests receive
+503; cancellation and revocation release both allowances. MCP/public capabilities
+retain their independent limits.
 
 At most 24 SSE requests share the tunnel's 32 in-flight slots. Eight slots remain
 available to ordinary API requests, so idle member streams cannot exhaust the

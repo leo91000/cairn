@@ -31,7 +31,7 @@ impl OAuthProviders {
             "github" => &self.github,
             _ => &None,
         };
-        configured.as_ref().ok_or(ApiError(
+        configured.as_ref().ok_or(ApiError::Http(
             StatusCode::NOT_FOUND,
             "Sign-in provider unavailable",
         ))
@@ -123,14 +123,14 @@ pub(super) struct Callback {
 }
 
 fn unavailable() -> ApiError {
-    ApiError(
+    ApiError::Http(
         StatusCode::BAD_GATEWAY,
         "Sign-in provider unavailable. Please try again.",
     )
 }
 
 fn rejected() -> ApiError {
-    ApiError(
+    ApiError::Http(
         StatusCode::UNAUTHORIZED,
         "Unable to verify this sign-in. Please try again.",
     )
@@ -309,7 +309,8 @@ async fn complete_callback(
         return Err(rejected());
     }
 
-    let session_response = create_session(service, &mut transaction, &account_id, &email).await?;
+    let session_response =
+        create_session(service, &mut transaction, &account_id, &email, headers).await?;
     transaction.commit().await?;
 
     // Provider tokens are deliberately discarded: GitHub identification grants no agent access.

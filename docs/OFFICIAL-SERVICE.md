@@ -175,7 +175,7 @@ removals lock the account and preserve at least one method. Removed email and
 OAuth identities remain recorded so an unauthenticated sign-in cannot silently
 re-enable them. Re-enable email by confirming a code while signed in; re-link
 Google/GitHub while signed in. Removing a method leaves active sessions intact;
-session management belongs to its separate ticket. OAuth/passkey requests have
+sessions can be revoked separately from Account security. OAuth/passkey requests have
 persisted rate limits, using the same trusted-proxy resolution as email sign-in.
 
 ## Validation
@@ -292,3 +292,83 @@ rechecks the credential after upload completion and again before dispatch, so
 revocation cannot leave slow uploads occupying the owner's relay slots. An
 upload timeout returns 408 and releases admission. Admitted remote work retains
 its grant permit until the installation responds, even if the caller disconnects.
+
+## Account security and audit (#59)
+
+**Account security** is available on the welcome screen and in Installation
+options. Active sessions show the browser's unverified device description
+(bounded to 256 characters), sign-in date and expiration. Their public IDs are
+independent of bearer digests and CSRF tokens. Expired sessions are hidden.
+`GET /api/account/sessions` returns these records; `DELETE
+/api/account/sessions/{id}` revokes one, and `POST
+/api/account/sessions/revoke-others` preserves the caller while revoking every
+other device. Revoking the current session also clears its cookie. Mutations
+require the exact origin and CSRF, are limited to 30 per minute per account,
+and close that session's relay bodies before returning. Other sessions and
+already admitted agent work continue. Session creation and expiry remain the
+same for email, OAuth and passkeys; migrations preserve existing sessions.
+
+Deletion requires typing the verified account email and confirmation in the
+web. `POST /api/account/delete` accepts `{ "email": "…" }`, uses the caller's
+identity, and requires origin and CSRF (five attempts per minute per account).
+In one transaction it detaches owned installations, clears their sharing,
+MCP grants, authorization codes and device claims, removes the account's other
+memberships, invitations, pending email proofs, sign-in methods and sessions.
+Every affected tunnel or member/session body is closed immediately after commit.
+No request deletes installation data or stops admitted work. Owned installations
+remain unclaimed under their existing IDs; run `leo claim` on each machine and
+restart its manager to recover access. Members never inherit ownership.
+Deleting a member preserves other people's installations and sessions.
+Deletion shares the address lock with code delivery/verification, rechecks the
+session against the current clock after waiting, and retries a rolled-back
+Postgres deadlock at most twice. Persistent contention returns the existing
+storage-error response; no relay access is revoked before a successful commit.
+
+`GET /api/account/audit` returns at most the latest 100 events belonging to the
+caller or their installations during their ownership period. Members see only
+their own actions. It requires a current official session and uses no-store.
+Audit entries accompany successful claims (including device recovery),
+detachments, definitive revocations, invitations/acceptances/cancellations/delivery failures,
+member removals/departures, session revocations and account deletions in the same
+Postgres transaction. Failed authorization or rolled-back changes add no event.
+The service stores only action, time and opaque actor/installation/target IDs;
+never emails, names, credentials, request bodies or conversation content.
+Pseudonymous incident metadata survives account/installation deletion for 90
+days. Deleted-account entries are no longer available through its account API.
+Audit audiences are opaque IDs without account foreign keys, so recording a
+member departure never locks another owner's account. Deletion clears its own
+audience IDs in the same transaction and retains only pseudonymous incident data.
+Reads enforce retention immediately; hourly maintenance removes expired rows.
+
+Operators investigate the full retained history using their protected Postgres
+access, without adding a public operator role or endpoint:
+
+```sql
+SELECT id, created_at, action, actor_id, installation_id, target_id
+FROM account_audit
+WHERE created_at > now() - interval '90 days'
+ORDER BY id DESC;
+```
+
+Restrict database access and exports to operators. The account endpoint's bound
+is a recent-activity view, not an exhaustive export. The single-relay-process
+restriction in ADR-0032 still applies to immediate session/account revocation.
+
+The invitation email keeps the installation name as plain text with only letters,
+numbers, spaces, hyphens and underscores; URL/email punctuation is replaced by
+spaces. The real name remains visible in the authenticated app. Alongside the
+10/minute attempt limit, an account can attempt at most 20 invitation deliveries
+per 24-hour window across its installations. Cancellation/reinvitation cannot
+reset that budget; failed delivery still consumes it. Rejected ownership checks
+and duplicate invitations do not consume the daily delivery allowance. Installation
+GitHub repository discovery is reserved to its owner, like its coding accounts.
+Members can read the agent list and avatars, while individual agent management
+routes remain owner-only.
+
+Browser streams have eight simultaneous slots per Leo account in the official
+process, across installations and sessions. This complements the existing
+24-stream/32-request limits per installation; cancellation, expiry and revocation
+release the allowance together with the remote subscription. Extra streams return
+503 and use the client's existing retry behavior. MCP grants and public downloads
+retain their independent allowances. Filling one member's eight streams leaves
+installation slots for the owner's live views and ordinary requests.

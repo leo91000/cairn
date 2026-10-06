@@ -27,6 +27,7 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch}
 // Keep ordinary API capacity available even when browsers hold idle SSE bodies.
 const RESERVED_API_SLOTS: usize = 8;
 const MAX_MCP_PER_GRANT: usize = 4;
+const MAX_STREAMS_PER_ACCOUNT: usize = 8;
 const MCP_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Pending {
@@ -37,6 +38,7 @@ struct Pending {
     // Browser cancellation does not release a slot for work still running remotely.
     _permit: OwnedSemaphorePermit,
     _stream_permit: Option<OwnedSemaphorePermit>,
+    _account_stream_permit: Option<OwnedSemaphorePermit>,
     _mcp_permit: Option<OwnedSemaphorePermit>,
     public_activity: Option<tokio::time::Instant>,
 }
@@ -78,6 +80,7 @@ pub struct Relay {
     connections: Arc<Mutex<HashMap<String, Arc<Tunnel>>>>,
     closing: Arc<AtomicBool>,
     mcp_slots: Arc<Mutex<HashMap<String, Weak<Semaphore>>>>,
+    account_stream_slots: Arc<Mutex<HashMap<String, Weak<Semaphore>>>>,
 }
 
 #[derive(Default)]
@@ -155,6 +158,21 @@ impl Relay {
     }
 }
 
+fn active_slots(
+    registry: &Mutex<HashMap<String, Weak<Semaphore>>>,
+    key: &str,
+    maximum: usize,
+) -> Arc<Semaphore> {
+    let mut active = registry.lock().unwrap();
+    active.retain(|_, slots| slots.strong_count() > 0);
+    let slots = active
+        .get(key)
+        .and_then(Weak::upgrade)
+        .unwrap_or_else(|| Arc::new(Semaphore::new(maximum)));
+    active.insert(key.to_owned(), Arc::downgrade(&slots));
+    slots
+}
+
 pub(super) async fn upgrade(
     State(service): State<Service>,
     Path(installation): Path<String>,
@@ -168,7 +186,7 @@ pub(super) async fn upgrade(
         .unwrap_or("");
     let token_digest = digest(token);
     if !identity_is_current(&service, &installation, &token_digest).await? {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::UNAUTHORIZED,
             "Invalid installation identity",
         ));
@@ -563,7 +581,7 @@ pub(super) async fn forward(
         .strip_prefix(&prefix)
         .unwrap_or("");
     if !leo_relay_protocol::api_path(target) || path.is_empty() {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::NOT_FOUND,
             "Installation API route not found",
         ));
@@ -589,27 +607,18 @@ pub(super) async fn mcp(
 ) -> Result<Response, ApiError> {
     // Uploads and remote work share the grant's small allowance, including
     // access tokens from refresh rotation. Idle grants retain no semaphore.
-    let slots = {
-        let mut grants = service.relay.mcp_slots.lock().unwrap();
-        grants.retain(|_, slots| slots.strong_count() > 0);
-        let slots = grants
-            .get(&grant.id)
-            .and_then(Weak::upgrade)
-            .unwrap_or_else(|| Arc::new(Semaphore::new(MAX_MCP_PER_GRANT)));
-        grants.insert(grant.id, Arc::downgrade(&slots));
-        slots
-    };
+    let slots = active_slots(&service.relay.mcp_slots, &grant.id, MAX_MCP_PER_GRANT);
     let permit = slots
         .try_acquire_owned()
-        .map_err(|_| ApiError(StatusCode::TOO_MANY_REQUESTS, "MCP authorization is busy"))?;
+        .map_err(|_| ApiError::Http(StatusCode::TOO_MANY_REQUESTS, "MCP authorization is busy"))?;
 
     // Read a bounded body before reserving any installation capacity. The total
     // deadline also ends clients that keep trickling bytes without completing.
     let (parts, body) = request.into_parts();
     let body = tokio::time::timeout(MCP_BODY_TIMEOUT, to_bytes(body, MAX_BODY))
         .await
-        .map_err(|_| ApiError(StatusCode::REQUEST_TIMEOUT, "MCP request body timed out"))?
-        .map_err(|_| ApiError(StatusCode::PAYLOAD_TOO_LARGE, "MCP request is too large"))?;
+        .map_err(|_| ApiError::Http(StatusCode::REQUEST_TIMEOUT, "MCP request body timed out"))?
+        .map_err(|_| ApiError::Http(StatusCode::PAYLOAD_TOO_LARGE, "MCP request is too large"))?;
     if !super::mcp::still_authorized(service, &credential_digest).await? {
         return Ok(super::mcp::unauthorized(service));
     }
@@ -660,7 +669,10 @@ pub(super) async fn public_artifact(
 ) -> Result<Response, ApiError> {
     super::consume_limit(&service.pool, &format!("public-file:{}", peer.ip()), 30).await?;
     if uuid::Uuid::parse_str(&installation).is_err() || uuid::Uuid::parse_str(&token).is_err() {
-        return Err(ApiError(StatusCode::NOT_FOUND, "Public file not found"));
+        return Err(ApiError::Http(
+            StatusCode::NOT_FOUND,
+            "Public file not found",
+        ));
     }
     let claimed: Option<(String,)> =
         query_as("SELECT id FROM installations WHERE id = $1 AND owner_id IS NOT NULL")
@@ -668,7 +680,10 @@ pub(super) async fn public_artifact(
             .fetch_optional(&service.pool)
             .await?;
     if claimed.is_none() {
-        return Err(ApiError(StatusCode::NOT_FOUND, "Public file not found"));
+        return Err(ApiError::Http(
+            StatusCode::NOT_FOUND,
+            "Public file not found",
+        ));
     }
     let tunnel = service
         .relay
@@ -729,18 +744,18 @@ async fn send(
 
     // Browser uploads reserve capacity before reading. MCP bodies have already
     // been bounded and reauthorized before they can reserve installation slots.
-    let tunnel = tunnel.ok_or(ApiError(
+    let tunnel = tunnel.ok_or(ApiError::Http(
         StatusCode::SERVICE_UNAVAILABLE,
         "Installation unavailable",
     ))?;
     if *tunnel.stop.borrow() {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::SERVICE_UNAVAILABLE,
             "Installation unavailable",
         ));
     }
     if streaming && tunnel.version < 2 {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::NOT_IMPLEMENTED,
             "Streaming requires relay protocol 2",
         ));
@@ -753,7 +768,7 @@ async fn send(
     let permit = slots
         .clone()
         .try_acquire_owned()
-        .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "Installation busy"))?;
+        .map_err(|_| ApiError::Http(StatusCode::SERVICE_UNAVAILABLE, "Installation busy"))?;
 
     let stream_permit = if streaming && !public_file {
         Some(
@@ -762,11 +777,30 @@ async fn send(
                 .clone()
                 .try_acquire_owned()
                 .map_err(|_| {
-                    ApiError(
+                    ApiError::Http(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "Installation stream capacity reached",
                     )
                 })?,
+        )
+    } else {
+        None
+    };
+
+    let account_stream_permit = if streaming && browser_session.is_some() {
+        Some(
+            active_slots(
+                &service.relay.account_stream_slots,
+                &account,
+                MAX_STREAMS_PER_ACCOUNT,
+            )
+            .try_acquire_owned()
+            .map_err(|_| {
+                ApiError::Http(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Account stream capacity reached",
+                )
+            })?,
         )
     } else {
         None
@@ -814,7 +848,9 @@ async fn send(
         } else {
             to_bytes(request.into_body(), MAX_BODY)
                 .await
-                .map_err(|_| ApiError(StatusCode::PAYLOAD_TOO_LARGE, "API request is too large"))?
+                .map_err(|_| {
+                    ApiError::Http(StatusCode::PAYLOAD_TOO_LARGE, "API request is too large")
+                })?
                 .to_vec()
         },
     };
@@ -827,7 +863,7 @@ async fn send(
     }
 
     if tunnel.access_revoked(&account, access_generation) {
-        return Err(ApiError(
+        return Err(ApiError::Http(
             StatusCode::NOT_FOUND,
             "Installation access revoked",
         ));
@@ -842,7 +878,7 @@ async fn send(
         if *access.generations.get(&account).unwrap_or(&0) != access_generation
             || *tunnel.stop.borrow()
         {
-            return Err(ApiError(
+            return Err(ApiError::Http(
                 StatusCode::NOT_FOUND,
                 "Installation access revoked",
             ));
@@ -877,7 +913,7 @@ async fn send(
         .fetch_optional(&service.pool)
         .await?;
         let Some((remaining,)) = current.filter(|(remaining,)| *remaining > 0) else {
-            return Err(ApiError(
+            return Err(ApiError::Http(
                 StatusCode::UNAUTHORIZED,
                 "Session expired. Please sign in again.",
             ));
@@ -900,12 +936,13 @@ async fn send(
                 stream: streaming.then_some(chunks),
                 _permit: permit,
                 _stream_permit: stream_permit,
+                _account_stream_permit: account_stream_permit,
                 _mcp_permit: mcp_permit,
                 public_activity: public_file.then(tokio::time::Instant::now),
             },
         })
         .map_err(|_| {
-            ApiError(
+            ApiError::Http(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Installation busy or unavailable",
             )
@@ -913,14 +950,14 @@ async fn send(
     let response = tokio::time::timeout(REQUEST_TIMEOUT, response)
         .await
         .map_err(|_| {
-            ApiError(
+            ApiError::Http(
                 StatusCode::GATEWAY_TIMEOUT,
                 "Installation request timed out",
             )
         })?
-        .map_err(|_| ApiError(StatusCode::BAD_GATEWAY, "Installation connection lost"))?;
+        .map_err(|_| ApiError::Http(StatusCode::BAD_GATEWAY, "Installation connection lost"))?;
     let status = StatusCode::from_u16(response.status)
-        .map_err(|_| ApiError(StatusCode::BAD_GATEWAY, "Invalid installation response"))?;
+        .map_err(|_| ApiError::Http(StatusCode::BAD_GATEWAY, "Invalid installation response"))?;
     let is_stream = streaming && response.body.is_empty();
     let body = if is_stream && let Some(browser) = browser {
         let stream = futures_util::stream::unfold(browser, |mut browser| async move {
