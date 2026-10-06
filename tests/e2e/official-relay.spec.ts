@@ -30,6 +30,7 @@ test('claims an installation and sends after relay restarts and official session
   const url = 'http://localhost:4395'
   const children: ChildProcess[] = []
   let hostilePeer: WebSocket | undefined
+  let previousPeer: WebSocket | undefined
   // As in the native browser fixtures, open the seeding module before the
   // native process applies newer database migrations.
   const seed = new SeedService(new Store(join(root, 'data')), loadConfig({
@@ -203,9 +204,69 @@ test('claims an installation and sends after relay restarts and official session
     await expect(page).toHaveURL(conversationUrl)
     await expect(page.locator('.activity-message').filter({ hasText: 'The relayed agent reply remains readable.' })).toBeVisible()
 
+    const session = await (await page.request.get(`${url}/api/account/session`)).json()
+    // Exercise the current UI against the previous protocol's finite API.
+    // The v1 transport adapter forwards to the real installation above: no
+    // conversation/agent/settings response is mocked, and v1 still refuses SSE.
+    const sourceInstallation = new URL(conversationUrl).pathname.split('/')[2]
+    const previousClaim = await (await page.request.post(`${url}/api/installations/claim-code`, {
+      headers: { 'origin': url, 'x-csrf-token': session.csrf },
+      data: {},
+    })).json()
+    const previousIdentity = await (await page.request.post(`${url}/api/relay/claim`, {
+      data: { code: previousClaim.code, name: 'Previous protocol installation', protocol: 1 },
+    })).json()
+    previousPeer = Reflect.construct(WebSocket, [
+      `${url.replace('http:', 'ws:')}/api/relay/${previousIdentity.installationId}/connect`,
+      { headers: { authorization: `Bearer ${previousIdentity.token}` } },
+    ]) as WebSocket
+    const previous = previousPeer
+    const previousErrors: unknown[] = []
+    const previousWelcome = new Promise<void>((resolve) => {
+      previous.addEventListener('message', (event) => {
+        const frame = JSON.parse(String(event.data))
+        if (frame.type === 'welcome') {
+          expect(frame.version).toBe(1)
+          resolve()
+        }
+        else if (frame.type === 'request') {
+          void (async () => {
+            const response = await page.request.fetch(`${url}/api/installations/${sourceInstallation}${frame.path}`, {
+              method: frame.method,
+              headers: { ...Object.fromEntries(frame.headers), 'origin': url, 'x-csrf-token': session.csrf },
+              ...(frame.body ? { data: Buffer.from(frame.body, 'base64') } : {}),
+            })
+            const body = await response.body()
+            if (previous.readyState === WebSocket.OPEN) {
+              previous.send(JSON.stringify({
+                type: 'response',
+                id: frame.id,
+                status: response.status(),
+                headers: [['content-type', response.headers()['content-type'] ?? 'application/json']],
+                body: body.toString('base64'),
+              }))
+            }
+          })().catch(error => previousErrors.push(error))
+        }
+      })
+    })
+    await once(previous, 'open')
+    previous.send(JSON.stringify({ type: 'hello', versions: [1] }))
+    await previousWelcome
+    await page.goto(conversationUrl.replace(sourceInstallation!, previousIdentity.installationId))
+    await expect(page.getByRole('status', { name: 'Installation availability' })).toHaveText('Online')
+    await expect(page.locator('.activity-message').filter({ hasText: 'The relayed agent reply remains readable.' })).toBeVisible()
+    await page.getByRole('link', { name: 'New conversation', exact: true }).first().click()
+    await page.getByLabel('Message', { exact: true }).fill('A message using the previous protocol')
+    await page.getByRole('button', { name: /^(Send|Queue)$/, exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'A message using the previous protocol', exact: true })).toBeVisible()
+    expect(previousErrors).toEqual([])
+    const previousClosed = once(previous, 'close')
+    previous.close()
+    await previousClosed
+
     // A separately claimed peer can send hostile protocol frames. The real
     // connector is covered above and by the HTTP duplicate-header regression.
-    const session = await (await page.request.get(`${url}/api/account/session`)).json()
     const claim = await (await page.request.post(`${url}/api/installations/claim-code`, {
       headers: { 'origin': url, 'x-csrf-token': session.csrf },
       data: {},
@@ -280,6 +341,7 @@ test('claims an installation and sends after relay restarts and official session
     expect(navigation?.headers()['content-security-policy']).toBe('sandbox')
   }
   finally {
+    previousPeer?.close()
     hostilePeer?.close()
     await Promise.all(children.map(stop))
     await seed.accounts.close()

@@ -96,8 +96,14 @@ It replaces both images together, preserving Compose settings, Garage, identity,
 agent credentials, workspaces and runner state. Compose checks both containers;
 the manager's health must report the downloaded image's runtime identity.
 Failed health restores and verifies the previous approved image before releasing
-the lease. A journal written before replacement lets the next timer restore the
-last committed image after interruption. A failed candidate is retained in
+the lease. Each replacement has a 550-second maximum, including Docker inspection,
+graceful stops, runner readiness and HTTP runtime verification; candidate and
+rollback, including checks for a failed candidate container, together remain within
+the twenty-minute lease. A journal written before replacement lets the next timer
+restore the last committed image after interruption. A refused lease or interrupted
+supervisor leaves the same approved digest eligible for the next check. Only a
+candidate confirmed unhealthy by its runtime probe or by Docker container health
+is retained in
 `installation.json` and is not retried automatically until the approved digest
 changes. After diagnosing and fixing a host problem, the operator may remove
 `failedImage` from that private file to retry the same approved digest.
@@ -118,8 +124,8 @@ no Docker socket. Rerun the current official installation command to refresh the
 checksum-verified host supervisors on an existing one-command installation. Recovery
 renews the recorded deployment lease before stopping a running manager, because
 a durable acknowledgement may outlive the lease. If the interrupted replacement
-already removed/stopped it, or the exact recorded candidate is crash-looping, the
-host lock and recorded acknowledgement permit restoring only the previously
+already removed/stopped it, or the exact recorded candidate has never started, is
+crash-looping or is running without a healthy HTTP endpoint, the host lock and recorded acknowledgement permit restoring only the previously
 committed approved image. An unrelated or functioning manager still requires
 lease acquisition.
 
@@ -148,7 +154,8 @@ select external HTTPS S3. No VM boots; this is not runtime/KVM coverage. Contain
 also replaces real manager and readiness-runner containers using locally built
 fixture images, including interrupted recovery with `restart: unless-stopped`.
 Only the registry is adapted; Compose, persistent mounts, runtime
-metadata, deployment leases, relay reconnection and conversation reads are real.
+metadata, deployment leases, recovery from a running candidate with a dead HTTP
+endpoint, relay reconnection and conversation reads are real.
 It checks successful replacement and an exited-candidate rollback, including
 identity, synthetic credentials, workspaces and runner state. The readiness runner
 boots no VM; active VM checkpointing remains covered by the existing node tests.

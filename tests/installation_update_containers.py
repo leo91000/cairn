@@ -110,7 +110,7 @@ ARG RUNTIME
 ENV APP_RUNTIME_ID=$RUNTIME
 ''')
             registry = {}
-            for runtime in ('previous', 'approved', 'failed'):
+            for runtime in ('previous', 'approved', 'failed', 'failed-http'):
                 tag = f'{name}:{runtime}'
                 command([DOCKER, 'build', '-t', tag, '--build-arg', f'RUNTIME={runtime}', str(build)])
                 images.append(tag)
@@ -119,7 +119,7 @@ ENV APP_RUNTIME_ID=$RUNTIME
                 # still requires the production repository and an immutable digest.
                 reference = 'ghcr.io/leo91000/leo-agent-manager@' + metadata['Id']
                 registry[reference] = metadata['Id']
-            previous, approved, failed = registry
+            previous, approved, failed, failed_http = registry
             (root / 'registry.json').write_text(json.dumps(registry))
             (root / 'bin/docker').write_text('''#!/usr/bin/env python3
 import json, os, pathlib, subprocess, sys
@@ -143,6 +143,8 @@ if 'up' in args or not target.exists():
         config['services'][service]['image'] = registry[ref]
         if service == 'manager' and ref == list(registry)[2]:
             config['services'][service]['entrypoint'] = ['/bin/sh', '-c', 'exit 1']
+        if service == 'manager' and ref == list(registry)[3]:
+            config['services'][service]['entrypoint'] = ['python3', '-c', 'import time; time.sleep(600)']
     target.write_text(json.dumps(config))
 args[args.index('-f') + 1] = str(target)
 if 'ps' in args:
@@ -217,11 +219,11 @@ sys.exit(subprocess.run([os.environ['FIXTURE_DOCKER'], *args]).returncode)
             del config['services']['manager']['environment']['LEO_INSTALLATION_CLAIM_CODE']
             (root / 'compose.json').write_text(json.dumps(config))
 
-            for image, interrupted in ((approved, False), (failed, False), (failed, True)):
-                if image == failed:
+            for image, interrupted in ((approved, False), (failed, False), (failed, True), (failed_http, True)):
+                if image in (failed, failed_http):
                     official.terminate()
                     official.wait(timeout=15)
-                    official = service(failed)
+                    official = service(image)
                     wait(lambda: request('/api/account/options'))
                 before = command(docker + ['ps', '-q', 'manager', 'runner'])
                 if interrupted:
@@ -236,21 +238,24 @@ fetch('http://127.0.0.1:%d/internal/deployment-lease', {
 """ % (manager_port, json.dumps(owner))
                     command(docker + ['exec', '-T', 'manager', 'node', '-e', lease_script])
                     journal = json.loads((root / 'installation.json').read_text())
-                    journal.update(pendingImage=failed, leaseOwner=owner, leaseAcquired=True)
+                    journal.update(pendingImage=image, leaseOwner=owner, leaseAcquired=True)
                     (root / 'installation.json').write_text(json.dumps(journal))
                     deployment = json.loads((root / 'compose.json').read_text())
-                    deployment['services']['manager'].update(image=failed, restart='unless-stopped')
-                    deployment['services']['runner']['image'] = failed
+                    deployment['services']['manager'].update(image=image, restart='unless-stopped')
+                    deployment['services']['runner']['image'] = image
                     (root / 'compose.json').write_text(json.dumps(deployment))
                     command([str(root / 'bin/docker'), 'compose', '-f', str(root / 'compose.json'), 'up', '-d'], env=env)
-                    wait(lambda: json.loads(command(docker + ['ps', '--all', '--format', 'json', 'manager']))['State'] == 'restarting')
+                    expected_state = 'running' if image == failed_http else 'restarting'
+                    wait(lambda: json.loads(command(docker + ['ps', '--all', '--format', 'json', 'manager']))['State'] == expected_state)
                 command(['python3', str(REPO / 'deploy/installations/host.py'), origin, '--update'], env=env, timeout=300)
                 after = command(docker + ['ps', '-q', 'manager', 'runner'])
                 assert before != after, 'Both updates must replace actual containers'
                 current = json.loads((root / 'installation.json').read_text())
                 assert current['image'] == approved and not current.get('leaseOwner')
-                if image == failed:
+                if image in (failed, failed_http):
                     assert current['failedImage'] == failed
+                if image == failed_http:
+                    assert current.get('failedImage') != failed_http, 'Interrupted recovery must leave the approved digest eligible for retry'
                 wait(lambda: request(base + '/chats/' + chat['id']))
                 assert identity == (root / 'data/installation-relay/identity.json').read_bytes()
                 assert (root / 'workspaces/kept').read_text() == 'retained workspace'
@@ -258,7 +263,7 @@ fetch('http://127.0.0.1:%d/internal/deployment-lease', {
                 assert (root / 'runner-state/kept').read_text() == 'retained runner state'
                 health = json.load(urllib.request.urlopen(f'http://127.0.0.1:{manager_port}/health'))
                 assert health['runtimeId'] == 'approved' and not health['maintenance']
-            print('Real containers: approved replacement and exited/restarting-candidate rollback preserve conversations, identity, workspace, credentials and runner state')
+            print('Real containers: approved replacement and exited/restarting/HTTP-dead-candidate rollback preserve conversations, identity, workspace, credentials and runner state')
         finally:
             if compose_file.exists():
                 subprocess.run(docker + ['down', '--timeout', '10'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)

@@ -774,7 +774,7 @@ onMounted(async () => {
       {{ error }}
     </UiAlert>
     <UiAlert v-if="installation.updateRequired" class="mx-4 my-2">
-      Mise à jour nécessaire. Cette installation doit terminer sa mise à jour avant de pouvoir être utilisée ici.
+      Mise à jour nécessaire. This installation must finish updating before it can be used here.
     </UiAlert>
     <App v-else />
   </div>
