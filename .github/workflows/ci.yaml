@@ -150,6 +150,7 @@ jobs:
           python3 tests/guest_projects_test.py
           python3 tests/node_supervisor_test.py
           python3 tests/installation_installer_test.py
+          python3 tests/compressed_swap_test.py
           bash tests/installation-installer-container.sh
           python3 -m venv .node-s3-test
           .node-s3-test/bin/pip install 'moto[server]==5.2.3' awscli

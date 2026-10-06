@@ -195,6 +195,13 @@ async fn stage_plan(session: &Session, data: &Path) -> Result<Value> {
     crate::skills::private_dir(&data.join("runner-plans")).await?;
     // A disconnected connector cannot leave a newly prepared VM runnable forever.
     plan["nodeLeaseRequired"] = true.into();
+
+    // The manager's own origin can be loopback. Disk reads use the address this
+    // node authenticated against, including a private LAN or VPN route.
+    if plan["storage"].is_object() {
+        plan["storage"]["master"] = session.master.as_str().into();
+    }
+
     crate::skills::atomic_write(
         &plan_path(data, &session.attempt),
         &serde_json::to_vec(&plan)?,

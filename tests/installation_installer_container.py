@@ -61,10 +61,14 @@ def run_installer(code=''):
         checksum = hashlib.sha256(Path('deploy/installations/host.py').read_bytes()).hexdigest()
         script = Path('deploy/installations/install.sh').read_text().replace(
             '__LEO_OFFICIAL_ORIGIN__', repr(ORIGIN)).replace('__LEO_HOST_SHA256__', checksum)
+    # Compressed swap is a host setting covered by compressed_swap_test.py.
+    swaps = Path('/fixture/swaps')
+    swaps.write_text('Filename Type Size Used Priority\n/dev/zram0 partition 1024 0 100\n')
     result = subprocess.run(['bash', '-s', '--', '--claim-code', code], input=script,
                             capture_output=True, text=True, timeout=240, env={
                                 **os.environ, 'LEO_INSTALLATION_ROOT': str(ROOT),
                                 'PATH': '/fixture/bin:' + os.environ['PATH'],
+                                'LEO_PROC_SWAPS': str(swaps),
                             })
     assert code == '' or code not in result.stdout + result.stderr, 'Claim leaked in output'
     return result

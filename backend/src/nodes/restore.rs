@@ -40,6 +40,8 @@ pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Resu
     let grant = super::disk_grants::issue(s, run, node, backup).await?;
     let request = RestoreRequest {
         manifest,
+        // The local controller needs the internal origin. For a remote node,
+        // the outbound transport replaces it with its authenticated origin.
         master: &s.config.public_url,
         grant,
         backup_id: &backup["id"],

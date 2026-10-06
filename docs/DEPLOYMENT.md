@@ -111,6 +111,51 @@ older official binary against that database without its matching backup. If a
 later installation release has changed SQLite, follow the image-and-backup
 rollback rule below instead of assuming this procedure is still sufficient.
 
+## Additional execution nodes
+
+In the official app, open the installation’s **Nodes → Add a machine** screen.
+Supply the **Direct manager address** reachable from that machine: a LAN address,
+VPN hostname or optional public HTTPS origin, including its port. The browser
+continues to use the official relay; the additional node connects directly to
+this address. No public domain is required. The manager needs a listener or
+reverse proxy reachable from that LAN/VPN. The one-command installation keeps
+its manager on the private Docker network; expose only the manager’s node
+channel through a TLS proxy on your chosen private interface. For Compose,
+keep its loopback binding behind that proxy rather than exposing plaintext 4310.
+Use a certificate trusted by the node host and its container. Self-signed
+certificates are not silently trusted.
+
+HTTPS remains mandatory outside loopback, even on a private network or VPN.
+HTTP on loopback is the existing development/test exception, which does not
+send credentials across the network. Node identities and enrollment codes
+remain stored as hashes on the manager; enrollment codes expire and can be
+consumed only once. The address is connection configuration, not authorization.
+Disk blocks travel over the authenticated direct node channel or to configured
+S3 storage, never through the official relay.
+
+The chosen address is visible as an argument in the generated command:
+`curl …/internal/nodes/install.sh | sudo bash -s -- 'https://manager.vpn.example'`.
+The installer refuses URL query parameters that could hide a different download
+origin, and validates its argument before downloading the supervisor or changing
+the host. A usable configured manager origin remains the default for older
+commands without an argument; a Docker-only origin requires the explicit address.
+The address is saved in the node’s protected identity and supervisor configuration. The node uses
+this authenticated connection address for disk preparation and restoration,
+even if the manager’s internal origin is loopback. The manager’s optional
+`PUBLIC_URL` remains a fallback for older enrollment clients and
+manager-local calls; it need not be the browser’s origin. Installers require
+`LEO_NODE_IMAGE` to pin the manager’s approved image digest. Without it, use the
+matching `leo node-enroll` binary with the address and temporary code shown in
+the app. Changes of address after installation require updating the node’s
+private identity and supervisor configuration together while its service is
+stopped; no credential is displayed by the app.
+
+The node channel accepts the Host preserved by a private TLS proxy independently
+of `PUBLIC_URL`. Enrollment still needs its single-use code; node traffic and
+disk reads still require their own bearer credentials and grants. Browser Origin
+checks remain active, and other routes retain their Host checks. The proxy must
+serve only the node channel, not an installation browser interface.
+
 ## Docker on a VPS
 
 Install Docker Engine and the Compose plugin. Clone this repository on the server,
@@ -201,6 +246,26 @@ YOLO is the default inside each private Firecracker microVM. All production agen
 including Main, use the VM runner. It requires a Linux x86-64 host with KVM and
 TUN; it does not mount the host Docker socket. See [agent scope](AGENT-ACCESS.md)
 and [microVM deployment](MICROVMS.md) for privileges, storage and network rules.
+
+## Compressed host swap
+
+VMs share one RAM limit. Without swap, a peak above it stalls every VM for minutes
+instead of slowing them down, and their attempts are then interrupted. The node and
+installation installers enable zram on apt-based hosts (zstd, a quarter of RAM,
+priority 100, `vm.swappiness=100`) and leave an existing zram swap unchanged. On
+hosts deployed by hand, such as Docker on a VPS or Coolify, enable it once as root:
+
+```sh
+apt-get install -y zram-tools
+printf 'ALGO=zstd\nPERCENT=25\nPRIORITY=100\n' > /etc/default/zramswap
+echo 'vm.swappiness=100' > /etc/sysctl.d/99-leo-zram.conf
+sysctl -p /etc/sysctl.d/99-leo-zram.conf
+systemctl enable zramswap && systemctl restart zramswap
+swapon --show
+```
+
+`swapon --show` must list `/dev/zram0`. The runner container must allow swap: keep
+the default `memswap_limit` rather than setting it equal to `mem_limit`.
 
 ## Coolify
 

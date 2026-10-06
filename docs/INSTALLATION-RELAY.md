@@ -74,6 +74,11 @@ while unclaimed. Successful reclamation rotates it and keeps the same ID.
 For deployment migration, interrupted claims and recovery after losing the
 private identity file, follow [DEPLOYMENT.md](DEPLOYMENT.md). Execution nodes
 continue to use their authenticated direct manager channel.
+Additional execution nodes use the reachable manager address selected during
+enrollment (LAN, VPN or optional public HTTPS origin), independently of the
+official app’s origin. Their disk traffic never uses the official relay.
+See [additional execution nodes](DEPLOYMENT.md#additional-execution-nodes)
+for TLS and network setup.
 
 The installation initiates a TLS WebSocket at
 `/api/relay/{installation}/connect` with its bearer credential. `Hello` offers

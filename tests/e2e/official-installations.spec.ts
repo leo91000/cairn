@@ -82,6 +82,7 @@ test('selects installations, remembers the last one and honours deep workspace U
       LEO_OFFICIAL_ORIGIN: url,
       LEO_INSTALLATION_CLAIM_CODE: code,
       LEO_INSTALLATION_NAME: 'Home',
+      LEO_NODE_IMAGE: `registry.example/leo@sha256:${'1'.repeat(64)}`,
     })
     await expect.poll(async () => {
       const session = await (await page.request.get(`${url}/api/account/session`)).json()
@@ -99,6 +100,27 @@ test('selects installations, remembers the last one and honours deep workspace U
     await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
     await page.reload()
     await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
+    // Node administration travels through the official relay; the machine itself
+    // needs a separately configured direct manager address, even on a LAN or VPN.
+    await page.getByRole('link', { name: 'Nodes', exact: true }).click()
+    await page.getByRole('button', { name: 'Add a machine', exact: true }).click()
+    const nodeDialog = page.getByRole('dialog', { name: 'Add a machine' })
+    await expect(nodeDialog).toContainText('does not use the relay')
+    await expect(nodeDialog).toContainText('Disk blocks never pass through the relay')
+    await nodeDialog.getByLabel('Machine name').fill('VPN node')
+    await nodeDialog.getByLabel('Direct manager address').fill('https://manager.vpn.example:4310/')
+    await nodeDialog.getByRole('button', { name: 'Create enrollment code' }).click()
+    await expect(nodeDialog.getByLabel('Node installation command')).toHaveText('curl --fail --silent --show-error \'https://manager.vpn.example:4310/internal/nodes/install.sh\' | sudo bash -s -- \'https://manager.vpn.example:4310\'')
+    await expect(nodeDialog.getByLabel('Node installation command')).not.toContainText(url)
+    await expect(nodeDialog.getByLabel('Single-use enrollment code')).toHaveText(/^[\w-]{43}$/)
+    for (const width of [1440, 390, 320]) {
+      await page.setViewportSize({ width, height: 900 })
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    }
+
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.keyboard.press('Escape')
+    await page.getByRole('link', { name: 'Agents', exact: true }).click()
     const firstUrl = page.url()
     await page.getByText('Installation options', { exact: true }).click()
     await page.getByRole('button', { name: 'Add an installation', exact: true }).click()
