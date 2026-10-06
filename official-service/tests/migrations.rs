@@ -104,3 +104,132 @@ async fn startup_migrates_legacy_codes_with_300_failures_without_reopening_their
         .unwrap();
     admin.close().await;
 }
+
+#[tokio::test]
+async fn existing_sessions_keep_their_access_and_deadlines_but_must_confirm_before_deletion() {
+    let database = std::env::var("LEO_OFFICIAL_TEST_DATABASE_URL").unwrap();
+    let admin = PgPool::connect(&database).await.unwrap();
+    let schema = format!("migration_{}", Uuid::new_v4().simple());
+    query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let options = PgConnectOptions::from_str(&database)
+        .unwrap()
+        .options([("search_path", schema.as_str())]);
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let migrations = sqlx_macros::migrate!("./migrations");
+    let legacy = Migrator {
+        migrations: Cow::Owned(
+            migrations
+                .iter()
+                .filter(|migration| migration.version < 202610061550)
+                .cloned()
+                .collect(),
+        ),
+        ..Migrator::DEFAULT
+    };
+    legacy.run(&pool).await.unwrap();
+    let account = Uuid::new_v4().to_string();
+    query("INSERT INTO leo_accounts (id, email) VALUES ($1, 'legacy@example.test')")
+        .bind(&account)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for token in ["legacy-browser", "legacy-phone"] {
+        query("INSERT INTO web_sessions (digest, account_id, csrf, expires_at) VALUES ($1, $2, 'fixture-csrf', '2099-01-01T00:00:00Z')")
+            .bind(hex::encode(Sha256::digest(token))).bind(&account).execute(&pool).await.unwrap();
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://localhost:{}", listener.local_addr().unwrap().port());
+    let app =
+        leo_official_service::router(pool.clone(), Arc::new(Mailbox::default()), origin.clone())
+            .await
+            .unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let client = Client::new();
+    let sessions: serde_json::Value = client
+        .get(format!("{origin}/api/account/sessions"))
+        .header("cookie", "leo_session=legacy-browser")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let records = sessions["sessions"].as_array().unwrap();
+    assert_eq!(records.len(), 2);
+    assert_ne!(records[0]["id"], records[1]["id"]);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record["current"] == true)
+            .count(),
+        1
+    );
+    for record in records {
+        assert_eq!(record["createdAt"], "2098-12-25T00:00:00Z");
+        assert_eq!(record["expiresAt"], "2099-01-01T00:00:00Z");
+        assert_eq!(record["device"], "Unknown device");
+    }
+    let deletion = client
+        .post(format!("{origin}/api/account/delete"))
+        .header("cookie", "leo_session=legacy-browser")
+        .header("origin", &origin)
+        .header("x-csrf-token", "fixture-csrf")
+        .json(&json!({ "email": "legacy@example.test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deletion.status(), StatusCode::FORBIDDEN);
+    let phone = records
+        .iter()
+        .find(|record| record["current"] == false)
+        .unwrap();
+    let revoked = client
+        .delete(format!(
+            "{origin}/api/account/sessions/{}",
+            phone["id"].as_str().unwrap()
+        ))
+        .header("cookie", "leo_session=legacy-browser")
+        .header("origin", &origin)
+        .header("x-csrf-token", "fixture-csrf")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        client
+            .get(format!("{origin}/api/account/sessions"))
+            .header("cookie", "leo_session=legacy-phone")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        client
+            .get(format!("{origin}/api/account/sessions"))
+            .header("cookie", "leo_session=legacy-browser")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    server.abort();
+    pool.close().await;
+    query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+}

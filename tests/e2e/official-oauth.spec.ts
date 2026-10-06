@@ -7,6 +7,7 @@ import { expect, test } from '@playwright/test'
 
 test('Google and GitHub reuse an account, manage sign-in methods and preserve claim navigation', async ({ page }) => {
   test.setTimeout(90000)
+  const messages: string[] = []
   let denyNextAuthorization = false
   const githubId = Date.now()
   const email = `oauth-browser-${Date.now()}@example.test`
@@ -45,6 +46,13 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
     }
     else if (url.pathname === '/github/emails') {
       response.end(JSON.stringify([{ email, verified: true, primary: true }]))
+    }
+    else if (url.pathname === '/email') {
+      let text = ''
+      for await (const chunk of request)
+        text += chunk
+      messages.push(JSON.parse(text).text)
+      response.end('{}')
     }
     else if (url.pathname === '/mcp-test-callback') {
       response.setHeader('content-type', 'text/html')
@@ -100,6 +108,26 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
     await expect(page.getByRole('heading', { name: 'No installations yet' })).toBeVisible()
     await expect(page.getByText(`You’re signed in as ${email}.`)).toBeVisible()
     const first = await page.evaluate(() => fetch('/api/account/session').then(response => response.json()))
+    const unconfirmed = await page.request.post(`${url}/api/account/delete`, {
+      headers: { 'origin': url, 'x-csrf-token': first.csrf },
+      data: { email },
+    })
+    expect(unconfirmed.status()).toBe(403)
+    await page.getByRole('button', { name: 'Account security', exact: true }).click()
+    await page.getByRole('button', { name: 'Delete account', exact: true }).click()
+    await page.getByLabel('Account email to confirm deletion').fill(email)
+    await expect(page.getByRole('button', { name: 'Confirm account deletion', exact: true })).toBeDisabled()
+    await page.getByRole('button', { name: 'Send confirmation code', exact: true }).click()
+    await expect.poll(() => messages.length).toBe(1)
+    await page.getByLabel('Confirmation code', { exact: true }).fill('wrong')
+    await page.getByRole('button', { name: 'Verify confirmation code', exact: true }).click()
+    await expect(page.getByRole('alert')).toContainText('Invalid or expired code')
+    await expect(page.getByRole('heading', { name: 'Account security', exact: true })).toBeVisible()
+    await page.getByLabel('Confirmation code', { exact: true }).fill(messages[0]!.match(/\b\d{8}\b/)![0])
+    await page.getByRole('button', { name: 'Verify confirmation code', exact: true }).click()
+    await expect(page.getByText('Identity confirmed for five minutes.', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Cancel deletion', exact: true }).click()
+    await page.getByRole('button', { name: 'Back to installations', exact: true }).click()
     await page.getByRole('button', { name: 'Sign-in methods', exact: true }).click()
     await expect(page.getByRole('button', { name: `Remove Google ${email}` })).toBeDisabled()
     await page.getByRole('button', { name: 'Add GitHub' }).click()

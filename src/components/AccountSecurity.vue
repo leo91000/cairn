@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, onScopeDispose, ref } from 'vue'
 import { state } from '../api'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
@@ -12,13 +12,18 @@ interface AccountDevice {
   current: boolean
 }
 
-const props = defineProps<{ email: string }>()
+const props = defineProps<{ email: string, passkeys: boolean }>()
 const emit = defineEmits<{ close: [], signedOut: [] }>()
 const confirmDelete = ref(false)
 const confirmation = ref('')
 const sessions = ref<AccountDevice[]>([])
 const busy = ref(false)
 const error = ref('')
+const challenge = ref('')
+const code = ref('')
+const identityConfirmed = ref(false)
+let confirmationTimer: ReturnType<typeof setTimeout> | undefined
+onScopeDispose(() => clearTimeout(confirmationTimer))
 
 async function request(route: string, method = 'GET', body?: unknown) {
   const response = await fetch(`/api/account/${route}`, {
@@ -26,11 +31,27 @@ async function request(route: string, method = 'GET', body?: unknown) {
     headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
-  const value = response.status === 204 ? undefined : await response.json()
-  if (response.status === 401)
-    emit('signedOut')
+  if (response.status === 401) {
+    const confirmingIdentity = route.startsWith('reauth/') || route.startsWith('passkeys/reauth/')
+    if (confirmingIdentity) {
+      // A rejected proof also uses 401; sign out only if the session is gone.
+      const current = await fetch('/api/account/session').then((response) => {
+        return response.headers.get('content-type')?.includes('application/json') ? response.json() : undefined
+      }).catch(() => undefined)
+      if (current?.authenticated === false)
+        emit('signedOut')
+    }
+    else {
+      emit('signedOut')
+    }
+  }
+
+  const hasJson = response.headers.get('content-type')?.includes('application/json')
+  const value = response.status === 204 || !hasJson ? undefined : await response.json().catch(() => undefined)
   if (!response.ok)
     throw new Error(value?.error || 'Unable to update account security.')
+  if (response.status !== 204 && value === undefined)
+    throw new Error('Unable to update account security.')
   return value
 }
 
@@ -55,7 +76,57 @@ async function update(route?: string, current = false) {
   }
 }
 
+function resetDeletion() {
+  confirmDelete.value = false
+  confirmation.value = ''
+  challenge.value = ''
+  code.value = ''
+  identityConfirmed.value = false
+  clearTimeout(confirmationTimer)
+}
+
+async function confirmIdentity(method: 'send-code' | 'email' | 'passkey') {
+  busy.value = true
+  error.value = ''
+  try {
+    if (method === 'send-code') {
+      challenge.value = (await request('email-code', 'POST', { email: props.email })).challenge
+      code.value = ''
+      return
+    }
+
+    if (method === 'email') {
+      await request('reauth/email', 'POST', { challenge: challenge.value, code: code.value })
+    }
+    else {
+      if (!window.PublicKeyCredential?.parseRequestOptionsFromJSON)
+        throw new Error('Passkeys are unavailable in this browser. Use an email code.')
+      const start = await request('passkeys/reauth/start', 'POST', {})
+      const credential = await navigator.credentials.get({ publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(start.options.publicKey) })
+      if (!(credential instanceof PublicKeyCredential))
+        throw new Error('Passkey confirmation cancelled. Please try again.')
+      await request('passkeys/reauth/finish', 'POST', { challenge: start.challenge, credential: credential.toJSON() })
+    }
+
+    challenge.value = ''
+    code.value = ''
+    identityConfirmed.value = true
+    clearTimeout(confirmationTimer)
+    confirmationTimer = setTimeout(() => identityConfirmed.value = false, 5 * 60 * 1000)
+  }
+  catch (cause) {
+    error.value = cause instanceof DOMException
+      ? 'Passkey confirmation cancelled or unavailable. You can use an email code.'
+      : cause instanceof Error ? cause.message : 'Unable to confirm your identity.'
+  }
+  finally {
+    busy.value = false
+  }
+}
+
 async function deleteAccount() {
+  if (!identityConfirmed.value)
+    return
   busy.value = true
   error.value = ''
   try {
@@ -124,10 +195,33 @@ onMounted(() => update())
         <p class="text-muted break-all">
           Enter {{ props.email }} to confirm.
         </p>
-        <UiButton type="submit" :disabled="busy || confirmation.trim() !== props.email">
+        <p v-if="identityConfirmed" role="status">
+          Identity confirmed for five minutes.
+        </p>
+        <template v-else>
+          <p>Confirm your identity with an email code or passkey before deleting your account.</p>
+          <UiButton v-if="props.passkeys" :disabled="busy" @click="confirmIdentity('passkey')">
+            Confirm with a passkey
+          </UiButton>
+          <UiButton :disabled="busy" @click="confirmIdentity('send-code')">
+            {{ challenge ? 'Request another confirmation code' : 'Send confirmation code' }}
+          </UiButton>
+          <template v-if="challenge">
+            <label>Confirmation code<input
+              v-model="code"
+              autocomplete="one-time-code"
+              inputmode="numeric"
+              :disabled="busy"
+            ></label>
+            <UiButton :disabled="busy || !code.trim()" @click="confirmIdentity('email')">
+              Verify confirmation code
+            </UiButton>
+          </template>
+        </template>
+        <UiButton type="submit" :disabled="busy || !identityConfirmed || confirmation.trim() !== props.email">
           Confirm account deletion
         </UiButton>
-        <UiButton :disabled="busy" @click="confirmDelete = false; confirmation = ''">
+        <UiButton :disabled="busy" @click="resetDeletion">
           Cancel deletion
         </UiButton>
       </form>

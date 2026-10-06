@@ -373,6 +373,24 @@ test('selects installations, remembers the last one and honours deep workspace U
     }
     finally { await recipient.close() }
 
+    const cdp = await page.context().newCDPSession(page)
+    await cdp.send('WebAuthn.enable')
+    await cdp.send('WebAuthn.addVirtualAuthenticator', {
+      options: {
+        protocol: 'ctap2',
+        transport: 'internal',
+        hasResidentKey: true,
+        hasUserVerification: true,
+        isUserVerified: true,
+        automaticPresenceSimulation: true,
+      },
+    })
+    await page.getByText('Installation options', { exact: true }).click()
+    await page.getByRole('button', { name: 'Sign-in methods', exact: true }).click()
+    await page.getByLabel('Passkey name').fill('Delete confirmation')
+    await page.getByRole('button', { name: 'Add passkey', exact: true }).click()
+    await expect(page.getByText('Delete confirmation', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Back to installations', exact: true }).click()
     await page.getByText('Installation options', { exact: true }).click()
     await page.getByRole('button', { name: 'Account security', exact: true }).click()
     await page.getByRole('button', { name: 'Delete account', exact: true }).click()
@@ -384,6 +402,9 @@ test('selects installations, remembers the last one and honours deep workspace U
     await expect(page.getByRole('heading', { name: 'Active sessions' })).toBeVisible()
     await page.getByRole('button', { name: 'Delete account', exact: true }).click()
     await page.getByLabel('Account email to confirm deletion', { exact: true }).fill(email)
+    await expect(page.getByRole('button', { name: 'Confirm account deletion', exact: true })).toBeDisabled()
+    await page.getByRole('button', { name: 'Confirm with a passkey', exact: true }).click()
+    await expect(page.getByText('Identity confirmed for five minutes.', { exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Confirm account deletion', exact: true }).click()
     await expect(page).toHaveURL(`${url}/`)
     await expect(page.getByLabel('Email address')).toBeVisible()

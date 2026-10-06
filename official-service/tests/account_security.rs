@@ -221,7 +221,10 @@ async fn sessions_show_a_bounded_device_description_and_hide_expired_devices() {
         .client
         .post(format!("{}/api/account/verify", app.url))
         .header("origin", &app.url)
-        .header("user-agent", "Lost phone browser")
+        .header(
+            "user-agent",
+            "Lost phone \u{202e}browser\u{202c} café\u{2066}\u{2069}",
+        )
         .json(&serde_json::json!({ "challenge": challenge["challenge"], "code": code }))
         .send()
         .await
@@ -243,7 +246,7 @@ async fn sessions_show_a_bounded_device_description_and_hide_expired_devices() {
         .json()
         .await
         .unwrap();
-    assert_eq!(sessions["sessions"][0]["device"], "Lost phone browser");
+    assert_eq!(sessions["sessions"][0]["device"], "Lost phone browser café");
     assert!(
         sessions["sessions"][0]["createdAt"]
             .as_str()

@@ -297,7 +297,7 @@ its grant permit until the installation responds, even if the caller disconnects
 
 **Account security** is available on the welcome screen and in Installation
 options. Active sessions show the browser's unverified device description
-(bounded to 256 characters), sign-in date and expiration. Their public IDs are
+(bounded to 256 characters, with control and Unicode bidi characters removed), sign-in date and expiration. Their public IDs are
 independent of bearer digests and CSRF tokens. Expired sessions are hidden.
 `GET /api/account/sessions` returns these records; `DELETE
 /api/account/sessions/{id}` revokes one, and `POST
@@ -319,6 +319,27 @@ No request deletes installation data or stops admitted work. Owned installations
 remain unclaimed under their existing IDs; run `leo claim` on each machine and
 restart its manager to recover access. Members never inherit ownership.
 Deleting a member preserves other people's installations and sessions.
+Account deletion additionally requires an email-code or user-verified passkey
+proof from the last **five minutes**, in the **calling session**. A fresh email
+or passkey sign-in qualifies; OAuth sign-in alone does not. Sessions issued before
+the additive migration remain usable but have no qualifying proof. The web asks
+for an explicit confirmation before enabling deletion, including after a reload
+or cancelling and reopening the form. Reconfirm if the five-minute window expires.
+
+`POST /api/account/reauth/email` accepts the existing email-code challenge and
+code, using the normal delivery and verification limits. It checks the proof's
+address against the caller's account, consumes the code once, and confirms only
+this session. It neither enables a removed email sign-in method nor issues a new
+session. An OAuth-only account can still prove control of its verified mailbox.
+The same delivery cooldown applies when confirming just after email sign-in.
+`POST /api/account/passkeys/reauth/start` and `/finish` use the existing WebAuthn
+implementation, with a single-use challenge bound to the current account/session.
+A passkey belonging to a different account cannot confirm the caller. Origin,
+CSRF, current session and current credential checks remain mandatory. Confirmation
+preserves the session bearer, CSRF and expiration; other devices are unaffected.
+Deletion returns 403 without a recent proof and rechecks the session and proof
+after waiting for all affected access locks, immediately before mutations.
+
 Deletion shares the address lock with code delivery/verification, rechecks the
 session against the current clock after waiting, and retries a rolled-back
 Postgres deadlock at most twice. Persistent contention returns the existing
@@ -338,6 +359,12 @@ days. Deleted-account entries are no longer available through its account API.
 Audit audiences are opaque IDs without account foreign keys, so recording a
 member departure never locks another owner's account. Deletion clears its own
 audience IDs in the same transaction and retains only pseudonymous incident data.
+The journal is **not append-only at database level**: account deletion updates
+its audience IDs to NULL and maintenance deletes expired records. Application
+mutations use a closed action enum and named event fields; operators with write
+access can still alter the database. Existing migration checksums (including the
+audience FK creation/removal) are preserved; the new actor index and proof column
+use an additive migration rather than rewriting an applied migration history.
 Reads enforce retention immediately; hourly maintenance removes expired rows.
 
 Operators investigate the full retained history using their protected Postgres

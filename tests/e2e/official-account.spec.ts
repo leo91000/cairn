@@ -168,6 +168,11 @@ test('email sign-in works after a third party exhausts their challenge, persists
         await cdp.send('WebAuthn.addCredential', { authenticatorId, credential })
       }
 
+      await page.route('**/api/account/sessions', route => route.fulfill({ status: 502, contentType: 'text/html', body: '<h1>Bad gateway</h1>' }))
+      await page.getByRole('button', { name: 'Account security', exact: true }).click()
+      await expect(page.getByRole('alert')).toHaveText('Unable to update account security.')
+      await page.unroute('**/api/account/sessions')
+      await page.getByRole('button', { name: 'Back to installations', exact: true }).click()
       await page.getByRole('button', { name: 'Account security', exact: true }).click()
       await expect(page.getByRole('heading', { name: 'Active sessions' })).toBeVisible()
       await expect(page.getByText('This device', { exact: true })).toBeVisible()

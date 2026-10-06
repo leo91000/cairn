@@ -10,18 +10,54 @@ type AuditRow = (
     String,
 );
 
+pub(super) enum Action {
+    InstallationClaimed,
+    InstallationForgotten,
+    InstallationDetached,
+    InvitationCreated,
+    InvitationDeliveryFailed,
+    InvitationAccepted,
+    InvitationCancelled,
+    MemberRemoved,
+    MemberLeft,
+    SessionRevoked,
+    AccountDeleted,
+}
+
+impl Action {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::InstallationClaimed => "installation.claimed",
+            Self::InstallationForgotten => "installation.forgotten",
+            Self::InstallationDetached => "installation.detached",
+            Self::InvitationCreated => "invitation.created",
+            Self::InvitationDeliveryFailed => "invitation.delivery_failed",
+            Self::InvitationAccepted => "invitation.accepted",
+            Self::InvitationCancelled => "invitation.cancelled",
+            Self::MemberRemoved => "member.removed",
+            Self::MemberLeft => "member.left",
+            Self::SessionRevoked => "session.revoked",
+            Self::AccountDeleted => "account.deleted",
+        }
+    }
+}
+
+pub(super) struct Event<'a> {
+    pub actor_id: &'a str,
+    pub installation_id: Option<&'a str>,
+    pub action: Action,
+    pub target_id: Option<&'a str>,
+}
+
 /// Record access metadata in the same transaction as the successful mutation.
 /// The current owner sees member activity; actor IDs survive account deletion
 /// for the operator's bounded incident history, without retaining their email.
 pub(super) async fn record(
     connection: &mut PgConnection,
-    actor: &str,
-    installation: Option<&str>,
-    action: &'static str,
-    target: Option<&str>,
+    event: Event<'_>,
 ) -> Result<(), ApiError> {
     query("INSERT INTO account_audit (account_id, actor_id, installation_id, action, target_id) SELECT COALESCE(i.owner_id, a.id), $1, $2, $3, $4 FROM (VALUES (1)) AS event(n) LEFT JOIN installations i ON i.id = $2 LEFT JOIN leo_accounts a ON a.id = $1")
-        .bind(actor).bind(installation).bind(action).bind(target).execute(connection).await?;
+        .bind(event.actor_id).bind(event.installation_id).bind(event.action.as_str()).bind(event.target_id).execute(connection).await?;
     Ok(())
 }
 

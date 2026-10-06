@@ -770,6 +770,7 @@ onMounted(async () => {
       <AccountSecurity
         v-else-if="session?.authenticated && showSecurity"
         :email="session.account?.email || ''"
+        :passkeys="options.passkeys"
         @close="showSecurity = false"
         @signed-out="redirect('/')"
       />

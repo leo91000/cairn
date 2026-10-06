@@ -1468,3 +1468,197 @@ async fn oauth_denials_redirect_to_sign_in_and_clear_the_browser_cookie() {
     provider.server.abort();
     app.close().await;
 }
+
+#[tokio::test]
+async fn a_verified_passkey_confirms_only_its_bound_session_before_account_deletion() {
+    let relay = common::RelayedInstallation::new(axum::Router::new()).await;
+    let app = &relay.app;
+    let mut authenticator = SoftwarePasskey::new(true);
+    let registration: Value = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            reqwest::Method::POST,
+            "/api/account/passkeys/register/start",
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let credential = authenticator
+        .do_registration(
+            url::Url::parse(&app.url).unwrap(),
+            serde_json::from_value(registration["options"].clone()).unwrap(),
+        )
+        .unwrap();
+    let registered = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            reqwest::Method::POST,
+            "/api/account/passkeys/register/finish",
+        )
+        .json(&json!({
+            "challenge": registration["challenge"],
+            "credential": credential,
+            "label": "Confirmation key",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), StatusCode::CREATED);
+    query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key LIKE 'email:%'")
+        .execute(&app.pool).await.unwrap();
+    let (other_cookie, other_session) = common::login(app, "relay-owner@example.test").await;
+    query("UPDATE web_sessions SET authenticated_at = NULL")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+
+    let start = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            reqwest::Method::POST,
+            "/api/account/passkeys/reauth/start",
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(start.status(), StatusCode::OK);
+    let start: Value = start.json().await.unwrap();
+    let credential = authenticator
+        .do_authentication(
+            url::Url::parse(&app.url).unwrap(),
+            serde_json::from_value(start["options"].clone()).unwrap(),
+        )
+        .unwrap();
+    let proof = json!({ "challenge": start["challenge"], "credential": credential });
+    let cross_session = app
+        .authenticated(
+            &other_cookie,
+            &other_session,
+            reqwest::Method::POST,
+            "/api/account/passkeys/reauth/finish",
+        )
+        .json(&proof)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross_session.status(), StatusCode::UNAUTHORIZED);
+    let confirmed = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            reqwest::Method::POST,
+            "/api/account/passkeys/reauth/finish",
+        )
+        .json(&proof)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(confirmed.status(), StatusCode::NO_CONTENT);
+    assert!(!confirmed.headers().contains_key("set-cookie"));
+    let replay = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            reqwest::Method::POST,
+            "/api/account/passkeys/reauth/finish",
+        )
+        .json(&proof)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+    let other_delete = app
+        .authenticated(
+            &other_cookie,
+            &other_session,
+            reqwest::Method::POST,
+            "/api/account/delete",
+        )
+        .json(&json!({ "email": "relay-owner@example.test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(other_delete.status(), StatusCode::FORBIDDEN);
+    let deleted = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            reqwest::Method::POST,
+            "/api/account/delete",
+        )
+        .json(&json!({ "email": "relay-owner@example.test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn oauth_sign_in_requires_an_email_confirmation_before_account_deletion() {
+    let provider = OAuthMock::new().await;
+    let app = Fixture::with_oauth(provider.providers()).await;
+    let response = provider.attempt(&app, "google", None).await;
+    assert_oauth_signed_in(&response);
+    let cookie = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let session: Value = app
+        .client
+        .get(format!("{}/api/account/session", app.url))
+        .header("cookie", cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let rejected = app
+        .authenticated(
+            cookie,
+            &session,
+            reqwest::Method::POST,
+            "/api/account/delete",
+        )
+        .json(&json!({ "email": "alice@example.test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    let (challenge, code) = app.code("alice@example.test").await;
+    let confirmed = app
+        .authenticated(
+            cookie,
+            &session,
+            reqwest::Method::POST,
+            "/api/account/reauth/email",
+        )
+        .json(&json!({ "challenge": challenge, "code": code }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(confirmed.status(), StatusCode::NO_CONTENT);
+    let deleted = app
+        .authenticated(
+            cookie,
+            &session,
+            reqwest::Method::POST,
+            "/api/account/delete",
+        )
+        .json(&json!({ "email": "alice@example.test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    app.close().await;
+    provider.server.abort();
+}

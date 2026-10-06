@@ -153,10 +153,12 @@ pub(super) async fn claim(
         .await?;
     super::audit::record(
         &mut transaction,
-        &owner,
-        Some(&installation),
-        "installation.claimed",
-        None,
+        super::audit::Event {
+            actor_id: &owner,
+            installation_id: Some(&installation),
+            action: super::audit::Action::InstallationClaimed,
+            target_id: None,
+        },
     )
     .await?;
     transaction.commit().await?;
@@ -197,10 +199,12 @@ pub(super) async fn forget(
         .await?;
     super::audit::record(
         &mut transaction,
-        &owner,
-        Some(&installation),
-        "installation.forgotten",
-        None,
+        super::audit::Event {
+            actor_id: &owner,
+            installation_id: Some(&installation),
+            action: super::audit::Action::InstallationForgotten,
+            target_id: None,
+        },
     )
     .await?;
     transaction.commit().await?;
@@ -257,10 +261,12 @@ pub(super) async fn detach_on(
         .await?;
     super::audit::record(
         connection,
-        owner,
-        Some(installation),
-        "installation.detached",
-        None,
+        super::audit::Event {
+            actor_id: owner,
+            installation_id: Some(installation),
+            action: super::audit::Action::InstallationDetached,
+            target_id: None,
+        },
     )
     .await?;
     Ok(())
@@ -563,10 +569,12 @@ pub(super) async fn poll_device(
         .await?;
     super::audit::record(
         &mut transaction,
-        &owner,
-        Some(&installation),
-        "installation.claimed",
-        None,
+        super::audit::Event {
+            actor_id: &owner,
+            installation_id: Some(&installation),
+            action: super::audit::Action::InstallationClaimed,
+            target_id: None,
+        },
     )
     .await?;
     transaction.commit().await?;
