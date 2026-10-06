@@ -117,7 +117,7 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
     await page.getByRole('button', { name: 'Add passkey', exact: true }).click()
     await expect(page.getByRole('alert')).toContainText('Confirm your identity')
     await page.getByRole('button', { name: 'Confirm identity', exact: true }).click()
-    await expect(page.getByRole('heading', { name: 'Confirm identity before adding a passkey', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Confirm identity before changing sign-in methods', exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Confirm account deletion', exact: true })).toHaveCount(0)
     await page.getByRole('button', { name: 'Send confirmation code', exact: true }).click()
     await expect.poll(() => messages.length).toBe(1)
@@ -129,12 +129,34 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
     await page.getByRole('button', { name: 'Verify confirmation code', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'Sign-in methods', exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: `Remove Google ${email}` })).toBeDisabled()
+    const cdp = await page.context().newCDPSession(page)
+    await cdp.send('WebAuthn.enable')
+    await cdp.send('WebAuthn.addVirtualAuthenticator', {
+      options: {
+        protocol: 'ctap2',
+        transport: 'internal',
+        hasResidentKey: true,
+        hasUserVerification: true,
+        isUserVerified: true,
+        automaticPresenceSimulation: true,
+      },
+    })
+    await page.getByLabel('Passkey name').fill('Account key')
+    await page.getByRole('button', { name: 'Add passkey', exact: true }).click()
+    await expect(page.getByText('Account key', { exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Add GitHub' }).click()
     await expect(page.getByRole('heading', { name: 'No installations yet' })).toBeVisible()
     const linked = await page.evaluate(() => fetch('/api/account/session').then(response => response.json()))
     expect(linked.account).toEqual(first.account)
     await page.getByRole('button', { name: 'Sign-in methods', exact: true }).click()
     await page.getByRole('button', { name: `Remove Google ${email}` }).click()
+    await expect(page.getByRole('alert')).toContainText('Confirm your identity')
+    await expect(page.getByRole('button', { name: `Remove Google ${email}` })).toBeVisible()
+    await page.getByRole('button', { name: 'Confirm identity', exact: true }).click()
+    await page.getByRole('button', { name: 'Confirm with a passkey', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'Sign-in methods', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: `Remove Google ${email}` }).click()
+
     await expect(page.getByRole('button', { name: 'Add Google' })).toBeVisible()
     await page.getByRole('button', { name: 'Add Google' }).click()
     await expect(page.getByRole('heading', { name: 'No installations yet' })).toBeVisible()

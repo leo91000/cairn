@@ -1,4 +1,6 @@
-use super::{ApiError, Service, consume_limit, digest, methods, random_token};
+use super::{
+    ApiError, Service, account as account_security, consume_limit, digest, methods, random_token,
+};
 use axum::{
     Json,
     extract::{ConnectInfo, Path, State},
@@ -179,8 +181,13 @@ pub(super) async fn forget(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let owner = account(&service, &headers, &Method::DELETE).await?;
+    {
+        let mut connection = service.pool.acquire().await?;
+        account_security::require_recent_proof(&mut connection, &headers).await?;
+    }
     consume_limit(&service.pool, &format!("installation-forget:{owner}"), 10).await?;
     let mut transaction = service.pool.begin().await?;
+    lock_removal(&mut transaction, &headers, &installation, &owner).await?;
     let forgotten = query("DELETE FROM installations WHERE id = $1 AND owner_id = $2")
         .bind(&installation)
         .bind(&owner)
@@ -219,12 +226,47 @@ pub(super) async fn detach(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let owner = account(&service, &headers, &Method::POST).await?;
+    {
+        let mut connection = service.pool.acquire().await?;
+        account_security::require_recent_proof(&mut connection, &headers).await?;
+    }
     let mut transaction = service.pool.begin().await?;
+    lock_removal(&mut transaction, &headers, &installation, &owner).await?;
     detach_on(&mut transaction, &installation, &owner).await?;
     transaction.commit().await?;
 
     service.relay.revoke_access(&installation, None);
     Ok(StatusCode::NO_CONTENT)
+}
+
+// Match account deletion's lock order. Revalidate after both locks, before any
+// access mutation, since a session or its independent proof can expire waiting.
+async fn lock_removal(
+    connection: &mut sqlx_postgres::PgConnection,
+    headers: &HeaderMap,
+    installation: &str,
+    owner: &str,
+) -> Result<(), ApiError> {
+    query("SELECT id FROM leo_accounts WHERE id = $1 FOR UPDATE")
+        .bind(owner)
+        .execute(&mut *connection)
+        .await?;
+    let owned: Option<(String,)> =
+        query_as("SELECT id FROM installations WHERE id = $1 AND owner_id = $2 FOR UPDATE")
+            .bind(installation)
+            .bind(owner)
+            .fetch_optional(&mut *connection)
+            .await?;
+
+    methods::authenticated_on(connection, headers, true).await?;
+    account_security::require_recent_proof(connection, headers).await?;
+    if owned.is_none() {
+        return Err(ApiError::Http(
+            StatusCode::NOT_FOUND,
+            "Installation not found",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) async fn detach_on(

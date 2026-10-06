@@ -12,7 +12,13 @@ interface AccountDevice {
   current: boolean
 }
 
-const props = defineProps<{ email: string, passkeys: boolean, confirmationOnly?: boolean }>()
+const props = defineProps<{
+  email: string
+  passkeys: boolean
+  confirmationOnly?: boolean
+  confirmationTitle?: string
+  returnLabel?: string
+}>()
 const emit = defineEmits<{ close: [], signedOut: [], confirmed: [] }>()
 const confirmDelete = ref(false)
 const confirmation = ref('')
@@ -185,7 +191,7 @@ onMounted(() => {
     </template>
     <section class="border-t border-line pt-4 grid gap-3">
       <h2 class="font-semibold">
-        {{ props.confirmationOnly ? 'Confirm identity before adding a passkey' : 'Delete account' }}
+        {{ props.confirmationOnly ? (props.confirmationTitle || 'Confirm identity before changing sign-in methods') : 'Delete account' }}
       </h2>
       <UiButton v-if="!confirmDelete && !props.confirmationOnly" :disabled="busy" @click="confirmDelete = true">
         Delete account
@@ -242,7 +248,7 @@ onMounted(() => {
       {{ error }}
     </UiAlert>
     <UiButton :disabled="busy" @click="emit('close')">
-      {{ props.confirmationOnly ? 'Back to sign-in methods' : 'Back to installations' }}
+      {{ props.confirmationOnly ? (props.returnLabel || 'Back to sign-in methods') : 'Back to installations' }}
     </UiButton>
   </div>
 </template>

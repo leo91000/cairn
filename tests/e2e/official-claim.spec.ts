@@ -105,6 +105,23 @@ test('claims, detaches and reclaims the same private installation through the ap
     await expect.poll(() => messages.length).toBe(1)
     await page.getByLabel('Email code').fill(messages[0]!.match(/\b\d{8}\b/)![0])
     await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+    const cdp = await page.context().newCDPSession(page)
+    await cdp.send('WebAuthn.enable')
+    await cdp.send('WebAuthn.addVirtualAuthenticator', {
+      options: {
+        protocol: 'ctap2',
+        transport: 'internal',
+        hasResidentKey: true,
+        hasUserVerification: true,
+        isUserVerified: true,
+        automaticPresenceSimulation: true,
+      },
+    })
+    await page.getByRole('button', { name: 'Sign-in methods', exact: true }).click()
+    await page.getByLabel('Passkey name').fill('Claim key')
+    await page.getByRole('button', { name: 'Add passkey', exact: true }).click()
+    await expect(page.getByText('Claim key', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Back to installations', exact: true }).click()
     // An existing (possibly offline) installation must not steal the claim URL.
     await page.getByRole('button', { name: 'Add an installation', exact: true }).click()
     const otherCode = await page.getByLabel('Installation claim code').inputValue()
@@ -138,6 +155,10 @@ test('claims, detaches and reclaims the same private installation through the ap
     await expect(page.getByRole('heading', { name: 'Data survives detachment', exact: true })).toBeVisible()
     await page.getByText('Installation options', { exact: true }).click()
     await page.getByRole('button', { name: 'Detach installation', exact: true }).click()
+    await page.getByRole('button', { name: 'Confirm identity', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'Confirm identity before detaching this installation', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Confirm with a passkey', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Confirm detachment', exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Confirm detachment', exact: true }).click()
     await expect(page).not.toHaveURL(new RegExp(old.installationId))
     const denied = await page.request.get(`${url}/api/installations/${old.installationId}/api/chats`)
@@ -152,6 +173,18 @@ test('claims, detaches and reclaims the same private installation through the ap
       await page.goto(conversationUrl)
       await expect(page.getByRole('heading', { name: 'Data survives detachment', exact: true })).toBeVisible()
     }).toPass()
+    await page.getByText('Installation options', { exact: true }).click()
+    await page.getByRole('button', { name: 'Revoke and forget installation', exact: true }).click()
+    await page.getByRole('button', { name: 'Confirm identity', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'Confirm identity before revoking this installation', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Back to installation', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Confirm revocation', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Confirm identity', exact: true }).click()
+    await page.getByRole('button', { name: 'Confirm with a passkey', exact: true }).click()
+    await page.getByRole('button', { name: 'Confirm revocation', exact: true }).click()
+    await expect(page).not.toHaveURL(new RegExp(renewed.installationId))
+    const revoked = await page.request.get(`${url}/api/installations/${renewed.installationId}/api/chats`)
+    expect(revoked.status()).toBe(404)
   }
   finally {
     await Promise.all(children.map(stop))

@@ -40,6 +40,7 @@ const methods = ref<SignInMethod[]>([])
 const showMethods = ref(false)
 const showSecurity = ref(false)
 const showIdentityConfirmation = ref(false)
+const confirmationTitle = ref('')
 const passkeyName = ref('My passkey')
 const methodNames = {
   email: 'Email',
@@ -233,6 +234,11 @@ async function openMethods() {
   finally {
     busy.value = false
   }
+}
+
+function openIdentityConfirmation(title: string) {
+  confirmationTitle.value = title
+  showIdentityConfirmation.value = true
 }
 
 async function removeMethod(id: string) {
@@ -601,7 +607,7 @@ onMounted(async () => {
   <main v-if="session?.authenticated && authorizePage" class="min-h-dvh bg-canvas text-ink px-6 py-10">
     <Authorize />
   </main>
-  <div v-else-if="session?.authenticated && installation && !showMethods && !showSecurity" class="flex h-dvh min-h-0 flex-col bg-canvas text-ink">
+  <div v-else-if="session?.authenticated && installation && !showMethods && !showSecurity && !showIdentityConfirmation" class="flex h-dvh min-h-0 flex-col bg-canvas text-ink">
     <header class="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2 text-sm" aria-label="Current installation">
       <label v-if="session.installations.length > 1" class="min-w-0 max-w-full">
         <span class="sr-only">Current installation</span>
@@ -695,6 +701,9 @@ onMounted(async () => {
     </div>
     <div v-if="confirmDetach" class="grid gap-3 border-b border-line px-4 py-3">
       <p>Detach this installation? Access through Leo will stop. Its data stays on the machine, which can be claimed again.</p>
+      <UiButton :disabled="busy" @click="openIdentityConfirmation('Confirm identity before detaching this installation')">
+        Confirm identity
+      </UiButton>
       <UiButton :disabled="busy" @click="detachInstallation">
         Confirm detachment
       </UiButton>
@@ -705,6 +714,9 @@ onMounted(async () => {
     <div v-if="confirmForget" class="grid gap-3 border-b border-line px-4 py-3">
       <p>Revoke this installation permanently? Its credentials and shared access will stop working. Claim the machine again to return.</p>
       <p>Its data stays on the machine.</p>
+      <UiButton :disabled="busy" @click="openIdentityConfirmation('Confirm identity before revoking this installation')">
+        Confirm identity
+      </UiButton>
       <UiButton :disabled="busy" @click="forgetInstallation">
         Confirm revocation
       </UiButton>
@@ -775,6 +787,8 @@ onMounted(async () => {
         :email="session.account?.email || ''"
         :passkeys="options.passkeys"
         :confirmation-only="showIdentityConfirmation"
+        :confirmation-title="confirmationTitle"
+        :return-label="showMethods ? 'Back to sign-in methods' : 'Back to installation'"
         @close="showSecurity = false; showIdentityConfirmation = false"
         @confirmed="showIdentityConfirmation = false; error = ''"
         @signed-out="redirect('/')"
@@ -802,14 +816,13 @@ onMounted(async () => {
             </UiButton>
           </li>
         </ul>
-        <p v-if="options.passkeys" class="text-muted mb-3">
-          Adding a passkey requires an email code or existing passkey confirmed in the last five minutes.
+        <p class="text-muted mb-3">
+          Adding a passkey or removing a sign-in method requires an email code or existing passkey confirmed in the last five minutes.
         </p>
         <UiButton
-          v-if="options.passkeys"
           class="mb-3"
           :disabled="busy"
-          @click="showIdentityConfirmation = true"
+          @click="openIdentityConfirmation('Confirm identity before changing sign-in methods')"
         >
           Confirm identity
         </UiButton>
