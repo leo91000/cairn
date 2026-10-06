@@ -287,7 +287,19 @@ def update(origin):
 
     def lease(owner, release=False):
         # Read the credential inside the manager, never in argv or diagnostics.
-        script = "const fs=require('fs');fetch('http://127.0.0.1:4310/internal/deployment-lease',{method:" + json.dumps('DELETE' if release else 'POST') + ",headers:{'Content-Type':'application/json',Authorization:'Bearer '+fs.readFileSync('/data/maintenance-token','utf8').trim()},body:JSON.stringify({owner:" + json.dumps(owner) + "})}).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        method = json.dumps('DELETE' if release else 'POST')
+        lease_owner = json.dumps(owner)
+        script = f"""
+const fs = require('fs');
+const token = fs.readFileSync('/data/maintenance-token', 'utf8').trim();
+fetch('http://127.0.0.1:4310/internal/deployment-lease', {{
+    method: {method},
+    headers: {{ 'Content-Type': 'application/json', Authorization: 'Bearer ' + token }},
+    body: JSON.stringify({{ owner: {lease_owner} }}),
+}}).then(response => {{
+    if (!response.ok) process.exit(1);
+}}).catch(() => process.exit(1));
+"""
         run(docker + ['exec', '-T', 'manager', 'node', '-e', script], timeout=10)
 
     def inspect(image):
@@ -313,7 +325,15 @@ def update(origin):
         run(docker + ['stop', '--timeout', '60', 'runner'], timeout=90)
         atomic(ROOT / 'compose.json', json.dumps(deployment, indent=2))
         run(docker + ['up', '-d', '--wait', '--wait-timeout', '240', '--pull', 'never', '--no-deps', 'runner', 'manager'], timeout=300)
-        health = "fetch('http://127.0.0.1:4310/health').then(r=>{if(!r.ok)throw Error();return r.json()}).then(v=>{if(v.status!=='ok'||v.runtimeId!==" + json.dumps(runtime) + ")process.exit(1)}).catch(()=>process.exit(1))"
+        expected_runtime = json.dumps(runtime)
+        health = f"""
+fetch('http://127.0.0.1:4310/health').then(response => {{
+    if (!response.ok) throw Error();
+    return response.json();
+}}).then(health => {{
+    if (health.status !== 'ok' || health.runtimeId !== {expected_runtime}) process.exit(1);
+}}).catch(() => process.exit(1));
+"""
         # Reuse Compose's runner health deadline; the manager also checks the
         # runner's runtime. An exited candidate fails immediately.
         run(docker + ['exec', '-T', 'manager', 'node', '-e', health], timeout=10)
@@ -331,9 +351,13 @@ def update(origin):
     if config.get('pendingImage'):
         # A stopped supervisor never guesses whether the candidate was healthy.
         # Recover the last committed approved image before accepting another.
-        if not config.get('leaseAcquired'):
-            # A refused or lost POST must never let recovery bypass another
-            # deployment's lease. Retry the same owner before stopping anything.
+        managers = docker_output(docker[1:] + ['ps', '--all', '--format', 'json', 'manager'])
+        manager = managers[0] if isinstance(managers, list) and managers else managers
+        if not config.get('leaseAcquired') or manager and manager.get('State') == 'running':
+            # A persisted acknowledgement may outlive the twenty-minute lease.
+            # Reacquire before stopping a running manager; another owner wins.
+            # If our interrupted replacement already stopped it, the recorded
+            # acknowledgement and host lock allow restoring the committed image.
             lease(config['leaseOwner'])
         launch(config['image'])
         finish(False)
