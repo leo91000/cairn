@@ -15,7 +15,7 @@ NEW = 'ghcr.io/leo91000/leo-agent-manager@sha256:' + '2' * 64
 
 class Updates(unittest.TestCase):
     def test_approved_update_and_failed_health_restore_previous_image_without_losing_data(self):
-        for failure in ('', 'health', 'digest', 'unapproved', 'interrupted', 'interrupted-stopped', 'lease', 'expired-lease'):
+        for failure in ('', 'health', 'digest', 'unapproved', 'interrupted', 'interrupted-stopped', 'interrupted-missing', 'interrupted-restarting', 'interrupted-foreign-restarting', 'lease', 'expired-lease'):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 class Official(http.server.BaseHTTPRequestHandler):
@@ -31,9 +31,9 @@ class Updates(unittest.TestCase):
                 threading.Thread(target=server.serve_forever, daemon=True).start()
                 origin = f'http://127.0.0.1:{server.server_port}'
                 config = {'image': OLD, 'origin': origin}
-                if failure in ('interrupted', 'interrupted-stopped', 'expired-lease'):
+                if failure in ('interrupted', 'interrupted-stopped', 'interrupted-missing', 'interrupted-restarting', 'interrupted-foreign-restarting', 'expired-lease'):
                     config.update(pendingImage=NEW, leaseOwner='00000000-0000-4000-8000-000000000001')
-                if failure in ('interrupted-stopped', 'expired-lease'):
+                if failure in ('interrupted-stopped', 'interrupted-missing', 'interrupted-restarting', 'interrupted-foreign-restarting', 'expired-lease'):
                     config['leaseAcquired'] = True
                 (root / 'installation.json').write_text(json.dumps(config))
                 (root / 'data').mkdir()
@@ -58,15 +58,22 @@ args = sys.argv[1:]
 with (root / 'events').open('a') as events:
     events.write(json.dumps(args) + '\\n')
 if 'ps' in args:
-    print(json.dumps({'State': 'exited' if os.environ['FAILURE'] == 'interrupted-stopped' else 'running'}))
+    failure = os.environ['FAILURE']
+    if failure != 'interrupted-missing':
+        state = 'restarting' if 'restarting' in failure else 'exited' if failure == 'interrupted-stopped' else 'running'
+        image = 'ghcr.io/leo91000/leo-agent-manager@sha256:' + ('2' if failure == 'interrupted-restarting' else '1') * 64
+        print(json.dumps({'State': state, 'Image': image}))
 if 'inspect' in args:
     if os.environ['FAILURE'] == 'digest':
         print(json.dumps([{'Id': 'sha256:bad', 'RepoDigests': [], 'Config': {'Env': ['APP_RUNTIME_ID=fixture']}}]))
     else:
         print(json.dumps([{'Id': 'sha256:fixture', 'RepoDigests': [args[-1]], 'Config': {'Env': ['APP_RUNTIME_ID=fixture']}}]))
 if 'exec' in args:
-    if 'deployment-lease' in args[-1] and os.environ['FAILURE'] in ('lease', 'expired-lease'):
-        sys.exit(1)
+    if 'deployment-lease' in args[-1]:
+        if os.environ['FAILURE'] in ('lease', 'expired-lease', 'interrupted-foreign-restarting'):
+            sys.exit(1)
+        if os.environ['FAILURE'] == 'interrupted-restarting' and '"POST"' in args[-1]:
+            sys.exit(1)
     if 'health' in args[-1] and os.environ['FAILURE'] == 'health':
         image = json.loads((root / 'compose.json').read_text())['services']['manager']['image']
         if image.endswith('2' * 64):
@@ -84,13 +91,13 @@ if 'exec' in args:
                                                 env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
                                                      'LEO_INSTALLATION_ROOT': directory, 'FAILURE': failure},
                                                 capture_output=True, text=True, timeout=90)
-                    self.assertEqual(result.returncode, 0 if failure in ('', 'health', 'interrupted', 'interrupted-stopped') else 1, result.stderr)
+                    self.assertEqual(result.returncode, 0 if failure in ('', 'health', 'interrupted', 'interrupted-stopped', 'interrupted-missing', 'interrupted-restarting') else 1, result.stderr)
                     updated = json.loads((root / 'installation.json').read_text())
                     self.assertEqual(updated['image'], NEW if not failure else OLD)
                     self.assertEqual((root / 'data/kept').read_text(), 'conversation and storage must survive')
                     self.assertNotIn('fixture-private-token', result.stdout + result.stderr)
                     events = [json.loads(line) for line in (root / 'events').read_text().splitlines()] if (root / 'events').exists() else []
-                    if failure in ('digest', 'unapproved', 'lease', 'expired-lease'):
+                    if failure in ('digest', 'unapproved', 'lease', 'expired-lease', 'interrupted-foreign-restarting'):
                         self.assertFalse(any('stop' in event or 'up' in event for event in events))
                     else:
                         self.assertTrue(any('deployment-lease' in event[-1] for event in events))

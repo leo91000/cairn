@@ -145,6 +145,15 @@ if 'up' in args or not target.exists():
             config['services'][service]['entrypoint'] = ['/bin/sh', '-c', 'exit 1']
     target.write_text(json.dumps(config))
 args[args.index('-f') + 1] = str(target)
+if 'ps' in args:
+    result = subprocess.check_output([os.environ['FIXTURE_DOCKER'], *args]).decode().strip()
+    if result:
+        value = json.loads(result)
+        for reference, image in registry.items():
+            if value['Image'] == image:
+                value['Image'] = reference
+        print(json.dumps(value))
+    sys.exit(0)
 if 'exec' in args:
     args[-1] = args[-1].replace('127.0.0.1:4310', '127.0.0.1:' + os.environ['FIXTURE_MANAGER_PORT'])
 sys.exit(subprocess.run([os.environ['FIXTURE_DOCKER'], *args]).returncode)
@@ -208,13 +217,33 @@ sys.exit(subprocess.run([os.environ['FIXTURE_DOCKER'], *args]).returncode)
             del config['services']['manager']['environment']['LEO_INSTALLATION_CLAIM_CODE']
             (root / 'compose.json').write_text(json.dumps(config))
 
-            for image in (approved, failed):
+            for image, interrupted in ((approved, False), (failed, False), (failed, True)):
                 if image == failed:
                     official.terminate()
                     official.wait(timeout=15)
                     official = service(failed)
                     wait(lambda: request('/api/account/options'))
                 before = command(docker + ['ps', '-q', 'manager', 'runner'])
+                if interrupted:
+                    owner = str(uuid.uuid4())
+                    lease_script = """
+const fs = require('fs');
+fetch('http://127.0.0.1:%d/internal/deployment-lease', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + fs.readFileSync('/data/maintenance-token', 'utf8').trim() },
+    body: JSON.stringify({ owner: %s }),
+}).then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1));
+""" % (manager_port, json.dumps(owner))
+                    command(docker + ['exec', '-T', 'manager', 'node', '-e', lease_script])
+                    journal = json.loads((root / 'installation.json').read_text())
+                    journal.update(pendingImage=failed, leaseOwner=owner, leaseAcquired=True)
+                    (root / 'installation.json').write_text(json.dumps(journal))
+                    deployment = json.loads((root / 'compose.json').read_text())
+                    deployment['services']['manager'].update(image=failed, restart='unless-stopped')
+                    deployment['services']['runner']['image'] = failed
+                    (root / 'compose.json').write_text(json.dumps(deployment))
+                    command([str(root / 'bin/docker'), 'compose', '-f', str(root / 'compose.json'), 'up', '-d'], env=env)
+                    wait(lambda: json.loads(command(docker + ['ps', '--all', '--format', 'json', 'manager']))['State'] == 'restarting')
                 command(['python3', str(REPO / 'deploy/installations/host.py'), origin, '--update'], env=env, timeout=300)
                 after = command(docker + ['ps', '-q', 'manager', 'runner'])
                 assert before != after, 'Both updates must replace actual containers'
@@ -229,7 +258,7 @@ sys.exit(subprocess.run([os.environ['FIXTURE_DOCKER'], *args]).returncode)
                 assert (root / 'runner-state/kept').read_text() == 'retained runner state'
                 health = json.load(urllib.request.urlopen(f'http://127.0.0.1:{manager_port}/health'))
                 assert health['runtimeId'] == 'approved' and not health['maintenance']
-            print('Real containers: approved replacement and exited-candidate rollback preserve conversations, identity, workspace, credentials and runner state')
+            print('Real containers: approved replacement and exited/restarting-candidate rollback preserve conversations, identity, workspace, credentials and runner state')
         finally:
             if compose_file.exists():
                 subprocess.run(docker + ['down', '--timeout', '10'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)

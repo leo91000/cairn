@@ -274,7 +274,8 @@ def docker_output(args):
                             capture_output=True, text=True, timeout=30, check=False)
     if result.returncode:
         raise RuntimeError('Docker inspection failed; current image and data are retained.')
-    return json.loads(result.stdout)
+    # Compose emits no JSON records when a service has no container yet.
+    return json.loads(result.stdout.strip() or '[]')
 
 
 def update(origin):
@@ -353,12 +354,15 @@ fetch('http://127.0.0.1:4310/health').then(response => {{
         # Recover the last committed approved image before accepting another.
         managers = docker_output(docker[1:] + ['ps', '--all', '--format', 'json', 'manager'])
         manager = managers[0] if isinstance(managers, list) and managers else managers
-        manager_active = bool(manager) and manager.get('State') not in ('exited', 'dead')
+        manager_state = manager.get('State') if manager else None
+        pending_restart = manager_state == 'restarting' and manager.get('Image') == config['pendingImage']
+        manager_active = manager_state not in (None, 'exited', 'dead') and not pending_restart
         if not config.get('leaseAcquired') or manager_active:
             # A persisted acknowledgement may outlive the twenty-minute lease.
             # Reacquire before stopping a running manager; another owner wins.
-            # If our interrupted replacement already stopped it, the recorded
-            # acknowledgement and host lock allow restoring the committed image.
+            # If our replacement removed/stopped it or its exact candidate is
+            # crash-looping, the acknowledgement and host lock permit restoring
+            # only the last committed approved image without its HTTP endpoint.
             lease(config['leaseOwner'])
         launch(config['image'])
         finish(False)

@@ -118,7 +118,10 @@ no Docker socket. Rerun the current official installation command to refresh the
 checksum-verified host supervisors on an existing one-command installation. Recovery
 renews the recorded deployment lease before stopping a running manager, because
 a durable acknowledgement may outlive the lease. If the interrupted replacement
-already stopped it, the host lock and recorded acknowledgement permit recovery.
+already removed/stopped it, or the exact recorded candidate is crash-looping, the
+host lock and recorded acknowledgement permit restoring only the previously
+committed approved image. An unrelated or functioning manager still requires
+lease acquisition.
 
 ## Operation and validation
 
@@ -143,7 +146,8 @@ continues publishing, reading remotely and purging there after relayed settings
 select external HTTPS S3. No VM boots; this is not runtime/KVM coverage. Containers, network and data are cleaned up on exit.
 `LEO_OFFICIAL_TEST_DATABASE_URL=… python3 tests/installation_update_containers.py`
 also replaces real manager and readiness-runner containers using locally built
-fixture images. Only the registry is adapted; Compose, persistent mounts, runtime
+fixture images, including interrupted recovery with `restart: unless-stopped`.
+Only the registry is adapted; Compose, persistent mounts, runtime
 metadata, deployment leases, relay reconnection and conversation reads are real.
 It checks successful replacement and an exited-candidate rollback, including
 identity, synthetic credentials, workspaces and runner state. The readiness runner
