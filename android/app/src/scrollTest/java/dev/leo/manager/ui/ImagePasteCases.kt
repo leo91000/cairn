@@ -92,12 +92,6 @@ abstract class ImagePasteCases {
                     }
                 }
             server.start()
-            val image =
-                File(app.cacheDir, "leo-files/capture.png").apply {
-                    parentFile!!.mkdirs()
-                    writeBytes(ByteArray(2048) { it.toByte() })
-                }
-            val uri = FileProvider.getUriForFile(app, "${app.packageName}.files", image)
             val vm = LeoViewModel(app, PasteVault(), officialOrigin = "")
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()
@@ -115,6 +109,13 @@ abstract class ImagePasteCases {
                 compose.onAllNodesWithText("Votre message…").fetchSemanticsNodes().isNotEmpty() &&
                     !vm.state.value.busy
             }
+            // Account restoration purges files from the previous installation context.
+            val image =
+                File(app.cacheDir, "leo-files/capture.png").apply {
+                    parentFile!!.mkdirs()
+                    writeBytes(ByteArray(2048) { it.toByte() })
+                }
+            val uri = FileProvider.getUriForFile(app, "${app.packageName}.files", image)
             val field = compose.onNode(hasSetTextAction())
             field.performTextInput("Regarde cette capture")
             compose.runOnIdle {
