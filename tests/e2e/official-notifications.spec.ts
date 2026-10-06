@@ -63,13 +63,20 @@ test('a browser registers once for all Leo installations and can disable account
   }
   await context.grantPermissions(['notifications'], { origin: url })
   await page.addInitScript((data) => {
+    // An existing browser subscription from the installation or an old operator key.
+    if (!localStorage.getItem('fixture-push-initialized')) {
+      localStorage.setItem('fixture-push-initialized', '1')
+      localStorage.setItem('fixture-push', '1')
+      localStorage.setItem('fixture-push-key', JSON.stringify(Array.from(new Uint8Array(65))))
+    }
+
     Object.defineProperty(Notification, 'permission', { get: () => 'default' })
     Notification.requestPermission = async () => 'granted'
     PushManager.prototype.getSubscription = async () => localStorage.getItem('fixture-push')
       ? {
           endpoint: data.endpoint,
           expirationTime: null,
-          options: { userVisibleOnly: true, applicationServerKey: null },
+          options: { userVisibleOnly: true, applicationServerKey: Uint8Array.from(JSON.parse(localStorage.getItem('fixture-push-key')!)).buffer },
           getKey: () => null,
           toJSON: () => data,
           unsubscribe: async () => {
@@ -78,7 +85,12 @@ test('a browser registers once for all Leo installations and can disable account
           },
         } as PushSubscription
       : null
-    PushManager.prototype.subscribe = async function () {
+    PushManager.prototype.subscribe = async function (options) {
+      const key = options?.applicationServerKey
+      if (!key || typeof key === 'string')
+        throw new Error('A browser push key is required')
+      const bytes = key instanceof ArrayBuffer ? new Uint8Array(key) : new Uint8Array(key.buffer, key.byteOffset, key.byteLength)
+      localStorage.setItem('fixture-push-key', JSON.stringify(Array.from(bytes)))
       localStorage.setItem('fixture-push', '1')
       return (await this.getSubscription())!
     }
@@ -139,6 +151,7 @@ test('a browser registers once for all Leo installations and can disable account
     await page.getByRole('button', { name: 'Enable on this device' }).click()
     await expect(page.getByText('Notifications on', { exact: true })).toBeVisible()
     expect(registrations).toHaveLength(1)
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('fixture-push-key')!))).toEqual(Array.from(curve.getPublicKey()))
     const firstInstallation = page.url()
     await page.getByRole('button', { name: 'Close dialog', exact: true }).click()
     await page.goto(`${firstInstallation}settings`)

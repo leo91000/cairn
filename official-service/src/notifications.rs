@@ -41,6 +41,7 @@ impl DeliveryReceipts {
     fn reserve(self: &Arc<Self>, key: String) -> ReceiptAdmission {
         let mut receipts = self.0.lock().unwrap();
         receipts.retain(|_, receipt| receipt.created.elapsed() < RECEIPT_TTL);
+
         if let Some(receipt) = receipts.get(&key) {
             return if receipt.delivered {
                 ReceiptAdmission::Delivered
@@ -48,6 +49,7 @@ impl DeliveryReceipts {
                 ReceiptAdmission::Full
             };
         }
+
         if receipts.len() >= MAX_DELIVERY_RECEIPTS {
             return ReceiptAdmission::Full;
         }
@@ -72,6 +74,7 @@ impl ReceiptReservation {
         if let Some(receipt) = self.receipts.0.lock().unwrap().get_mut(&self.key) {
             receipt.delivered = true;
         }
+
         self.delivered = true;
     }
 }
@@ -85,6 +88,17 @@ impl Drop for ReceiptReservation {
 }
 
 const MAX_DEVICES: i64 = 50;
+
+// Both candidate discovery and the locked recheck use the same current access rule.
+const CURRENT_DEVICE_ACCESS: &str = "
+    EXISTS (
+        SELECT 1
+        FROM installations i
+        LEFT JOIN installation_members m
+            ON m.installation_id = i.id AND m.account_id = d.account_id
+        WHERE i.id = $1 AND i.token_digest = $2 AND i.owner_id IS NOT NULL
+            AND (i.owner_id = d.account_id OR m.account_id = d.account_id)
+    )";
 
 #[derive(Debug)]
 pub enum PushError {
@@ -201,9 +215,22 @@ pub(super) async fn subscribe(
     }
 
     // A browser endpoint has one current account, even after switching accounts.
-    query("INSERT INTO notification_devices (id, account_id, endpoint, p256dh, auth) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO UPDATE SET account_id = EXCLUDED.account_id, endpoint = EXCLUDED.endpoint, p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth")
-        .bind(&id).bind(account).bind(input.endpoint).bind(input.keys.p256dh).bind(input.keys.auth)
-        .execute(&mut *transaction).await?;
+    query(
+        "INSERT INTO notification_devices (id, account_id, endpoint, p256dh, auth)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (id) DO UPDATE SET
+             account_id = EXCLUDED.account_id,
+             endpoint = EXCLUDED.endpoint,
+             p256dh = EXCLUDED.p256dh,
+             auth = EXCLUDED.auth",
+    )
+    .bind(&id)
+    .bind(account)
+    .bind(input.endpoint)
+    .bind(input.keys.p256dh)
+    .bind(input.keys.auth)
+    .execute(&mut *transaction)
+    .await?;
 
     transaction.commit().await?;
     Ok(Json(json!({ "id": id })))
@@ -300,20 +327,46 @@ pub(super) async fn deliver(
         return Ok(false);
     };
 
-    let devices: Vec<(String,)> = query_as("SELECT d.id FROM notification_devices d WHERE EXISTS(SELECT 1 FROM installations i LEFT JOIN installation_members m ON m.installation_id = i.id AND m.account_id = d.account_id WHERE i.id = $1 AND i.token_digest = $2 AND i.owner_id IS NOT NULL AND (i.owner_id = d.account_id OR m.account_id = d.account_id)) ORDER BY d.id")
-        .bind(installation).bind(token_digest).fetch_all(&service.push_pool).await?;
+    let candidates_query = format!(
+        "SELECT d.id FROM notification_devices d
+         WHERE {CURRENT_DEVICE_ACCESS}
+         ORDER BY d.id"
+    );
+    let devices: Vec<(String,)> = query_as(&candidates_query)
+        .bind(installation)
+        .bind(token_digest)
+        .fetch_all(&service.push_pool)
+        .await?;
+
+    let device_query = format!(
+        "SELECT d.account_id, d.endpoint, d.p256dh, d.auth
+         FROM notification_devices d
+         WHERE d.id = $3 AND {CURRENT_DEVICE_ACCESS}
+         FOR UPDATE OF d"
+    );
 
     let mut complete = true;
     for (id,) in devices {
         let mut transaction = service.push_pool.begin().await?;
-        let current: Option<(String,)> = query_as("SELECT id FROM installations WHERE id = $1 AND token_digest = $2 AND owner_id IS NOT NULL FOR SHARE")
-            .bind(installation).bind(token_digest).fetch_optional(&mut *transaction).await?;
+        let current: Option<(String,)> = query_as(
+            "SELECT id FROM installations
+             WHERE id = $1 AND token_digest = $2 AND owner_id IS NOT NULL
+             FOR SHARE",
+        )
+        .bind(installation)
+        .bind(token_digest)
+        .fetch_optional(&mut *transaction)
+        .await?;
         if current.is_none() {
             return Ok(true);
         }
 
-        let device: Option<(String, String, String, String)> = query_as("SELECT d.account_id, d.endpoint, d.p256dh, d.auth FROM notification_devices d WHERE d.id = $1 AND EXISTS(SELECT 1 FROM installations i LEFT JOIN installation_members m ON m.installation_id = i.id AND m.account_id = d.account_id WHERE i.id = $2 AND (i.owner_id = d.account_id OR m.account_id = d.account_id)) FOR UPDATE OF d")
-            .bind(&id).bind(installation).fetch_optional(&mut *transaction).await?;
+        let device: Option<(String, String, String, String)> = query_as(&device_query)
+            .bind(installation)
+            .bind(token_digest)
+            .bind(&id)
+            .fetch_optional(&mut *transaction)
+            .await?;
         let Some((account, endpoint, p256dh, auth)) = device else {
             continue;
         };

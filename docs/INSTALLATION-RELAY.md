@@ -326,8 +326,17 @@ sends through its operator-configured web push adapter. Push delivery jobs have
 bounded concurrency and run separately from API traffic and heartbeat handling.
 The official service does not persist event payloads or recipient queues.
 
-The connector rotates its cursor after each successful frame send, then applies
+The connector reads only as many pending events as there are free push slots.
+It rotates its cursor after each successful frame send, then applies
 retry cooldowns before selecting a bounded notification batch. Completion refills
 available slots immediately. Even a backlog larger than the cooldown window
 cannot keep newer events behind persistently failing deliveries or overflow the
 official service’s notification concurrency.
+
+Every finished push task acknowledges its event, including a task failure.
+A negative acknowledgement releases the connector's slot without deleting its
+outbox event. Excess or duplicate in-flight notification frames also receive a
+negative acknowledgement instead of leaving the sender's window occupied.
+The existing `delivered` wire field means the event can leave the outbox; an
+invalid event or revoked installation can therefore receive a positive ack
+without calling the provider.

@@ -341,7 +341,7 @@ async fn serve_socket(
     public_expiry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut received = tokio::time::Instant::now();
     let mut notification_jobs = tokio::task::JoinSet::new();
-    let mut notification_ids = std::collections::HashSet::new();
+    let mut notification_ids = HashMap::new();
     'connection: loop {
         let expiry = tunnel
             .access
@@ -371,13 +371,24 @@ async fn serve_socket(
                 }
                 tunnel.access_changed.notify_one();
             }
-            Some(completed) = notification_jobs.join_next(), if !notification_jobs.is_empty() => {
-                if let Ok((id, delivered)) = completed {
-                    notification_ids.remove(&id);
-                    let frame = serde_json::to_string(&Frame::NotificationAck { id, delivered }).unwrap();
-                    if socket.send(Message::Text(frame.into())).await.is_err() {
-                        break;
+            Some(completed) = notification_jobs.join_next_with_id(), if !notification_jobs.is_empty() => {
+                let (task_id, outbox_complete) = match completed {
+                    Ok((task_id, outbox_complete)) => (task_id, outbox_complete),
+                    Err(error) => {
+                        tracing::error!("Push delivery task failed");
+                        (error.id(), false)
                     }
+                };
+                let Some(id) = notification_ids.remove(&task_id) else {
+                    break;
+                };
+                let frame = serde_json::to_string(&Frame::NotificationAck {
+                    id,
+                    delivered: outbox_complete,
+                }).unwrap();
+
+                if socket.send(Message::Text(frame.into())).await.is_err() {
+                    break;
                 }
             }
             _ = tunnel.access_changed.notified() => {
@@ -493,15 +504,26 @@ async fn serve_socket(
                         };
                         let cancel = match frame {
                             Frame::Notification(event) if version >= 3 => {
-                                if notification_jobs.len() < MAX_NOTIFICATION_IN_FLIGHT && notification_ids.insert(event.id.clone()) {
+                                let duplicate = notification_ids.values().any(|id| id == &event.id);
+                                if notification_jobs.len() >= MAX_NOTIFICATION_IN_FLIGHT || duplicate {
+                                    let frame = serde_json::to_string(&Frame::NotificationAck {
+                                        id: event.id,
+                                        delivered: false,
+                                    }).unwrap();
+
+                                    if socket.send(Message::Text(frame.into())).await.is_err() {
+                                        break;
+                                    }
+                                } else {
+                                    let id = event.id.clone();
                                     let service = service.clone();
                                     let installation = installation.clone();
                                     let token_digest = token_digest.clone();
-                                    notification_jobs.spawn(async move {
-                                        let delivered = super::notifications::deliver(&service, &installation, &token_digest, &event)
-                                            .await.unwrap_or(false);
-                                        (event.id, delivered)
+                                    let task = notification_jobs.spawn(async move {
+                                        super::notifications::deliver(&service, &installation, &token_digest, &event)
+                                            .await.unwrap_or(false)
                                     });
+                                    notification_ids.insert(task.id(), id);
                                 }
                                 None
                             }

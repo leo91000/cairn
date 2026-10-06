@@ -129,6 +129,8 @@ pub enum Frame {
     Notification(NotificationEvent),
     NotificationAck {
         id: String,
+        // Wire name retained: true means the event can leave the installation outbox,
+        // including invalid events and installations whose access has been revoked.
         delivered: bool,
     },
 }

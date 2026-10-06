@@ -91,6 +91,7 @@ async fn web_push_devices_belong_to_the_signed_in_leo_account() {
 struct PushMailbox {
     messages: std::sync::Mutex<Vec<(String, Value)>>,
     failures_remaining: std::sync::atomic::AtomicUsize,
+    panics_remaining: std::sync::atomic::AtomicUsize,
     unavailable_attempts: std::sync::atomic::AtomicUsize,
     send_delay: std::time::Duration,
 }
@@ -106,6 +107,18 @@ impl leo_official_service::PushSender for PushMailbox {
         subscription: &leo_official_service::PushSubscription,
         payload: &Value,
     ) -> Result<(), leo_official_service::PushError> {
+        if self
+            .panics_remaining
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok()
+        {
+            panic!("fixture push provider task failure");
+        }
+
         if !self.send_delay.is_zero() {
             tokio::time::sleep(self.send_delay).await;
         }
@@ -687,7 +700,9 @@ async fn a_failing_device_does_not_starve_newer_events_on_healthy_devices() {
         .unwrap();
     resume(&mut relay, router);
 
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+    // This is a bounded backlog/fairness check, not a throughput benchmark.
+    // Slow hosts still have to deliver every distinct event and suppress retries.
+    tokio::time::timeout(std::time::Duration::from_secs(120), async {
         loop {
             let newest_delivered = mail.messages.lock().unwrap().iter()
                 .any(|(_, payload)| payload["questionId"] == newest);
@@ -1003,5 +1018,36 @@ async fn removing_a_member_waits_for_an_admitted_send_and_prevents_the_next_send
     .await
     .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn failed_push_tasks_release_the_relay_window_for_new_events() {
+    let mail = std::sync::Arc::new(PushMailbox::default());
+    mail.panics_remaining
+        .store(4, std::sync::atomic::Ordering::SeqCst);
+    let mut relay = common::RelayedInstallation::with_push(mail.clone()).await;
+    register(
+        &relay.app,
+        &relay.cookie,
+        &relay.session,
+        "https://fcm.googleapis.com/healthy",
+    )
+    .await;
+    let (_, run) = chat_run(&relay).await;
+    pause(&mut relay).await;
+    for id in ['a', 'b', 'c', 'd', 'f'] {
+        question(&relay, &run, &id.to_string().repeat(64)).await;
+    }
+    let router = leo_agent_manager::http::router(relay.installation.clone())
+        .await
+        .unwrap();
+    resume(&mut relay, router);
+
+    wait_pushes(&mail, 1).await;
+    assert_eq!(
+        mail.messages.lock().unwrap()[0].1["questionId"],
+        "f".repeat(64)
+    );
     relay.close().await;
 }

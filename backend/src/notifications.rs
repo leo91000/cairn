@@ -7,7 +7,7 @@ use crate::{
     store::Db,
     validation::text,
 };
-use leo_relay_protocol::{MAX_IN_FLIGHT, NotificationEvent, NotificationKind};
+use leo_relay_protocol::{MAX_NOTIFICATION_IN_FLIGHT, NotificationEvent, NotificationKind};
 use serde_json::Value;
 use std::collections::HashSet;
 
@@ -65,7 +65,13 @@ pub async fn pending(
     service: &Service,
     recently_sent: HashSet<String>,
     after: String,
+    limit: usize,
 ) -> Result<Vec<NotificationEvent>> {
+    let limit = limit.min(MAX_NOTIFICATION_IN_FLIGHT);
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
     service
         .store
         .transaction(move |db| {
@@ -102,7 +108,7 @@ pub async fn pending(
                     }
                 }
                 events.push(event);
-                if events.len() == MAX_IN_FLIGHT {
+                if events.len() == limit {
                     break;
                 }
             }

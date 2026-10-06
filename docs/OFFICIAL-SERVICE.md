@@ -458,7 +458,9 @@ departure and detachment serialize with an already admitted send, whose timeout
 is five seconds, and prevent subsequent sends. Account devices remain available
 for other installations; there is no installation-specific subscription to
 preserve accidentally after removal. Deleted accounts lose their devices via
-the account foreign key. Expired provider endpoints (404/410) are removed.
+the account foreign key. Provider 4xx responses other than 429 remove the
+registration, including stale VAPID credentials (401/403). Rate limits (429),
+server errors and transport failures remain retryable.
 
 The official service keeps event content and delivery work only in bounded
 memory. The installation retains events for up to one hour until acknowledged;
@@ -466,3 +468,23 @@ transient failures or tunnel loss retry without interrupting agent execution.
 Delivery is at least once: interruption after a provider accepted a push can
 repeat it. Notification tags include the installation and event identifiers.
 Question payloads contain generic text and identifiers, never question fields.
+
+Successful deliveries are remembered per event and current device registration
+in process memory, across tunnel reconnects. An unavailable device therefore
+does not repeat pushes to healthy devices. Receipts include the installation
+credential generation, account and subscription keys, expire after one hour,
+and have a limit of 20,000 per process. At capacity, new attempts stay in the
+installation outbox. Cancelled or failed attempts release their reservation.
+A service restart can repeat an already accepted push; this remains at-least-once
+delivery, with the existing notification tags.
+
+Push delivery uses a separate Postgres pool of four connections per process,
+so provider waits cannot occupy the account/session API pool. Sharing locks
+remain held through each admitted provider attempt to serialize with revocation.
+
+Treat a subscription endpoint and its encryption keys as device credentials.
+Account authentication authorizes registration but does not prove physical
+ownership of the browser: someone holding the complete subscription can
+explicitly register it on another account and move its endpoint. Avoid logging
+or sharing subscription values. Endpoint transfer supports explicit account
+switching; it is not performed on sign-in or session changes.

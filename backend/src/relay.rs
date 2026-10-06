@@ -451,6 +451,14 @@ pub async fn connect(
     }
 }
 
+#[derive(Default)]
+struct NotificationSchedule {
+    recently_sent: HashMap<String, tokio::time::Instant>,
+    in_flight: HashSet<String>,
+    cursor: String,
+    poll: bool,
+}
+
 async fn connected(
     identity: &Identity,
     official: &url::Url,
@@ -524,19 +532,20 @@ async fn connected(
     let (output, mut frames) = mpsc::channel::<Frame>(MAX_IN_FLIGHT + MAX_PUBLIC_IN_FLIGHT);
     let mut notifications = tokio::time::interval(Duration::from_secs(1));
     notifications.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut sent = HashMap::<String, tokio::time::Instant>::new();
-    let mut notification_in_flight = HashSet::new();
-    let mut notification_cursor = String::new();
-    let mut poll_notifications = true;
+    let mut notification_schedule = NotificationSchedule {
+        poll: true,
+        ..NotificationSchedule::default()
+    };
     loop {
-        if version >= 3 && poll_notifications {
-            poll_notifications = false;
-            let available = MAX_NOTIFICATION_IN_FLIGHT - notification_in_flight.len();
+        if version >= 3 && notification_schedule.poll {
+            notification_schedule.poll = false;
+            let available = MAX_NOTIFICATION_IN_FLIGHT - notification_schedule.in_flight.len();
             if available > 0 {
-                let recently_sent = sent
+                let recently_sent = notification_schedule
+                    .recently_sent
                     .iter()
                     .filter(|(id, at)| {
-                        notification_in_flight.contains(*id)
+                        notification_schedule.in_flight.contains(*id)
                             || at.elapsed() < Duration::from_secs(10)
                     })
                     .map(|(id, _)| id.clone())
@@ -544,11 +553,12 @@ async fn connected(
                 let events = crate::notifications::pending(
                     service,
                     recently_sent,
-                    notification_cursor.clone(),
+                    notification_schedule.cursor.clone(),
+                    available,
                 )
                 .await?;
 
-                for event in events.into_iter().take(available) {
+                for event in events {
                     let id = event.id.clone();
                     socket
                         .send(Message::Text(
@@ -556,19 +566,22 @@ async fn connected(
                         ))
                         .await
                         .map_err(Error::internal)?;
-                    notification_cursor = id.clone();
-                    notification_in_flight.insert(id.clone());
-                    sent.insert(id, tokio::time::Instant::now());
+                    notification_schedule.cursor = id.clone();
+                    notification_schedule.in_flight.insert(id.clone());
+                    notification_schedule
+                        .recently_sent
+                        .insert(id, tokio::time::Instant::now());
                 }
-                sent.retain(|id, at| {
-                    notification_in_flight.contains(id) || at.elapsed() < Duration::from_secs(60)
+                notification_schedule.recently_sent.retain(|id, at| {
+                    notification_schedule.in_flight.contains(id)
+                        || at.elapsed() < Duration::from_secs(60)
                 });
             }
         }
 
         tokio::select! {
             _ = notifications.tick(), if version >= 3 => {
-                poll_notifications = true;
+                notification_schedule.poll = true;
             }
             result = requests.join_next_with_id(), if !requests.is_empty() => {
                 let completed = result
@@ -619,15 +632,21 @@ async fn connected(
                                 }
                                 continue;
                             }
-                            Frame::NotificationAck { id, delivered } if version >= 3 => {
-                                if notification_in_flight.remove(&id) {
-                                    if delivered {
-                                        sent.remove(&id);
+                            Frame::NotificationAck {
+                                id,
+                                delivered: outbox_complete,
+                            } if version >= 3 => {
+                                if notification_schedule.in_flight.remove(&id) {
+                                    if outbox_complete {
+                                        notification_schedule.recently_sent.remove(&id);
                                         crate::notifications::acknowledge(service, &id).await?;
                                     } else {
-                                        sent.insert(id, tokio::time::Instant::now());
+                                        notification_schedule.recently_sent.insert(
+                                            id,
+                                            tokio::time::Instant::now(),
+                                        );
                                     }
-                                    poll_notifications = true;
+                                    notification_schedule.poll = true;
                                 }
                                 continue;
                             }
