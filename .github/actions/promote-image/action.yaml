@@ -1,0 +1,40 @@
+name: Promote a validated image
+description: Tag an already validated image digest for this commit, main or a release without rebuilding it.
+inputs:
+  digest:
+    description: Immutable digest of the validated image.
+    required: true
+  token:
+    description: Token allowed to write this repository's packages.
+    required: true
+runs:
+  using: composite
+  steps:
+    # Manifest promotion needs only the runner's Buildx client, no builder daemon.
+    - run: docker buildx version
+      shell: bash
+    - uses: docker/login-action@v4.6.0
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ inputs.token }}
+    - uses: docker/metadata-action@v6.2.0
+      id: meta
+      with:
+        images: ghcr.io/${{ github.repository }}
+        tags: |
+          type=sha,format=long
+          type=raw,value=latest,enable={{is_default_branch}}
+          type=semver,pattern={{version}}
+    - name: Promote the tested digest
+      shell: bash
+      env:
+        IMAGE_DIGEST: ${{ inputs.digest }}
+        IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+      run: |
+        [[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+        args=()
+        while IFS= read -r tag; do
+          args+=(--tag "$tag")
+        done <<< "$IMAGE_TAGS"
+        docker buildx imagetools create "${args[@]}" "ghcr.io/${GITHUB_REPOSITORY}@${IMAGE_DIGEST}"

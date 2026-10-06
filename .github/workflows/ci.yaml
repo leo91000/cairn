@@ -26,6 +26,9 @@ jobs:
     outputs:
       reuse: ${{ steps.resolve.outputs.reuse }}
       digest: ${{ steps.resolve.outputs.digest }}
+      commit: ${{ steps.resolve.outputs.commit }}
+      tree: ${{ steps.resolve.outputs.tree }}
+      artifact: ${{ steps.resolve.outputs.artifact }}
       codex: ${{ steps.tools.outputs.codex }}
       gh: ${{ steps.tools.outputs.gh }}
     steps:
@@ -43,7 +46,53 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CODEX_VERSION: ${{ steps.tools.outputs.codex }}
           GH_VERSION: ${{ steps.tools.outputs.gh }}
-        run: node scripts/resolve-release.mjs
+        run: GIT_TREE="$(git rev-parse 'HEAD^{tree}')" node scripts/resolve-release.mjs
+  build:
+    # Browser tests need only these binaries and the frontend, not the whole quality job.
+    needs: resolve
+    if: needs.resolve.outputs.reuse != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          cache: true
+      - run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
+      - name: Install bindings toolchain for the optional ublk transport
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev
+      # The quality job owns this cache; restoring it here keeps one compiled dependency set.
+      - uses: actions/cache/restore@v6.1.0
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            target/
+          key: rust-${{ runner.os }}-1.97.1-debug0-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-${{ runner.os }}-1.97.1-debug0-
+      - name: Build the browser-test backend and frontend
+        run: |
+          cargo build --locked --bin leo --example browser_fixture --features ublk
+          cargo build --locked -p leo-official-service --bin leo-official
+          pnpm exec vite build
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: browser-backend
+          path: |
+            target/debug/leo
+            target/debug/leo-official
+            target/debug/examples/browser_fixture
+          retention-days: 1
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: browser-build
+          path: dist/
+          retention-days: 1
   quality:
     services:
       postgres:
@@ -57,7 +106,10 @@ jobs:
           --health-cmd "pg_isready -U leo -d leo_official_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     needs: resolve
-    if: needs.resolve.outputs.reuse != 'true'
+    # Main still runs these checks after reusing a pull request image: they report
+    # main's health and save the Rust cache for a changed Cargo.lock, which pull
+    # requests cannot share with each other.
+    if: needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -90,6 +142,7 @@ jobs:
           git diff --exit-code -- backend/schemas/inputs.json
           cargo clippy --locked --workspace --all-targets --features ublk-prototype -- -D warnings
           node scripts/test-backend.mjs --features ublk-prototype
+          # Also compile the browser-test binaries into the cache that later build jobs restore.
           cargo build --locked --bin leo --example browser_fixture --features ublk
           cargo build --locked -p leo-official-service --bin leo-official
       - name: Validate node supervisor and S3 recovery
@@ -102,19 +155,6 @@ jobs:
           python3 -m venv .node-s3-test
           .node-s3-test/bin/pip install 'moto[server]==5.2.3' awscli
           PATH="$PWD/.node-s3-test/bin:$PATH" .node-s3-test/bin/python tests/node_s3_test.py
-      - uses: actions/upload-artifact@v7.0.1
-        with:
-          name: browser-backend
-          path: |
-            target/debug/leo
-            target/debug/leo-official
-            target/debug/examples/browser_fixture
-          retention-days: 1
-      - uses: actions/upload-artifact@v7.0.1
-        with:
-          name: browser-build
-          path: dist/
-          retention-days: 1
   browser:
     services:
       postgres:
@@ -129,7 +169,7 @@ jobs:
     env:
       LEO_OFFICIAL_TEST_DATABASE_URL: postgres://leo:test-only@postgres:5432/leo_official_test
     name: browser (${{ matrix.group }})
-    needs: [resolve, quality]
+    needs: [resolve, build]
     if: needs.resolve.outputs.reuse != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -147,6 +187,11 @@ jobs:
           - group: journeys
             browser: chromium
             projects: journeys*
+            shard: 1/2
+          - group: journeys-extra
+            browser: chromium
+            projects: journeys*
+            shard: 2/2
           - group: chromium
             browser: chromium
             projects: layout-chromium-*
@@ -201,16 +246,22 @@ jobs:
             docs/screenshots/
           retention-days: 14
   image:
-    # The exact-image smoke test uses the already validated official binary.
-    needs: [resolve, quality]
+    # The exact-image smoke test uses the official binary and frontend from the
+    # build job, which finishes long before the image does; quality never gates it.
+    needs: [resolve, build]
     if: needs.resolve.outputs.reuse != 'true'
     outputs:
       digest: ${{ steps.build.outputs.digest }}
+      published: ${{ env.PUBLISH }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: read
       packages: write
+    env:
+      # A pull request from this repository can become the release, so its image
+      # is published like main's. Fork images stay local.
+      PUBLISH: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Prepare KVM build host
@@ -225,7 +276,12 @@ jobs:
             grep -qw svm /proc/cpuinfo
             grep -Eq '^(Y|1)$' /sys/module/kvm_amd/parameters/nested
           fi
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android
+          df -h /
+          # Hosted runners currently have ~87 GB free. Deleting unused SDKs takes up
+          # to minutes, so do it only if a smaller disk ever needs the space.
+          if (( $(df --output=avail -BG / | tail -1 | tr -dc 0-9) < 40 )); then
+            sudo rm -rf /usr/share/dotnet /usr/local/lib/android
+          fi
       - name: Use Docker's containerd image store
         if: github.event_name == 'pull_request'
         run: |
@@ -241,7 +297,7 @@ jobs:
       - uses: docker/setup-buildx-action@v4.3.0
         if: github.event_name != 'pull_request'
       - uses: docker/login-action@v4.6.0
-        if: github.event_name != 'pull_request'
+        if: env.PUBLISH == 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -254,16 +310,29 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           labels: org.opencontainers.image.version=${{ steps.package.outputs.version }}
-      # Publish only an untagged digest. Release/latest tags wait for all checks.
-      # PRs remain local and need no registry credentials or package writes.
+      - name: Choose the image destination
+        id: target
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY}"
+          if [[ "$GITHUB_EVENT_NAME" != pull_request ]]; then
+            # Publish only an untagged digest. Release/latest tags wait for all checks.
+            echo "destination=type=image,name=$image,push-by-digest=true,name-canonical=true,push=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$PUBLISH" == true ]]; then
+            # Pull requests build into the local containerd store, so smoke tests never
+            # pull. That driver cannot push by digest: one candidate tag moves with each
+            # run, and only digests are ever promoted.
+            echo "destination=type=image,name=$image:pull-request,push=true" >> "$GITHUB_OUTPUT"
+            echo "local=$image:pull-request" >> "$GITHUB_OUTPUT"
+          else
+            echo "destination=type=docker,name=leo-agent-manager:test" >> "$GITHUB_OUTPUT"
+            echo "local=leo-agent-manager:test" >> "$GITHUB_OUTPUT"
+          fi
       - uses: docker/build-push-action@v7.3.0
         id: build
         with:
           builder: ${{ github.event_name == 'pull_request' && 'default' || '' }}
           context: .
-          load: ${{ github.event_name == 'pull_request' }}
-          tags: ${{ github.event_name == 'pull_request' && 'leo-agent-manager:test' || '' }}
-          outputs: ${{ github.event_name != 'pull_request' && format('type=image,name=ghcr.io/{0},push-by-digest=true,name-canonical=true,push=true', github.repository) || '' }}
+          outputs: ${{ steps.target.outputs.destination }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VCS_REF=${{ github.sha }}
@@ -276,8 +345,25 @@ jobs:
             type=gha
           cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true', github.repository) || '' }}
           secrets: github_token=${{ github.token }}
-          provenance: ${{ github.event_name != 'pull_request' && 'mode=max' || 'false' }}
-          sbom: ${{ github.event_name != 'pull_request' }}
+          provenance: ${{ env.PUBLISH == 'true' && 'mode=max' || 'false' }}
+          sbom: ${{ env.PUBLISH == 'true' }}
+      - name: Select the image under test
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          LOCAL_IMAGE: ${{ steps.target.outputs.local }}
+        run: |
+          if [[ -z "$LOCAL_IMAGE" ]]; then
+            echo "SMOKE_IMAGE=ghcr.io/${GITHUB_REPOSITORY}@${IMAGE_DIGEST}" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          if [[ "$PUBLISH" == true ]]; then
+            # The local candidate must be exactly the digest a later release may promote.
+            id=$(docker image inspect -f '{{.Id}}' "$LOCAL_IMAGE")
+            repo_digests=$(docker image inspect -f '{{json .RepoDigests}}' "$LOCAL_IMAGE")
+            echo "Local $LOCAL_IMAGE: $id $repo_digests; published $IMAGE_DIGEST"
+            [[ "$id" == "$IMAGE_DIGEST" || "$repo_digests" == *"@$IMAGE_DIGEST"* ]]
+          fi
+          echo "SMOKE_IMAGE=$LOCAL_IMAGE" >> "$GITHUB_ENV"
       - uses: ./.github/actions/setup-pnpm
         with:
           cache: true
@@ -314,7 +400,6 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           LEO_OFFICIAL_TEST_DATABASE_URL: postgres://leo:test-only@127.0.0.1:5432/leo_official_test
           LEO_SMOKE_OFFICIAL_BINARY: official-smoke-bin/leo-official
-          SMOKE_IMAGE: ${{ github.event_name == 'pull_request' && 'leo-agent-manager:test' || format('ghcr.io/{0}@{1}', github.repository, steps.build.outputs.digest) }}
         run: |
           node tests/container-smoke.mjs "$SMOKE_IMAGE"
           node tests/runner-smoke.mjs "$SMOKE_IMAGE"
@@ -323,7 +408,6 @@ jobs:
         run: docker rm --force leo-official-smoke-db
       - name: Verify retained conversation memory, crash recovery and active admission
         env:
-          SMOKE_IMAGE: ${{ github.event_name == 'pull_request' && 'leo-agent-manager:test' || format('ghcr.io/{0}@{1}', github.repository, steps.build.outputs.digest) }}
           LEO_RETENTION_MEMORY_GIB: 4
           LEO_RETENTION_TURNS: 4
           LEO_RETENTION_CRASH_AFTER: 2
@@ -331,11 +415,45 @@ jobs:
           LEO_RETENTION_PUBLISH: 'true'
           LEO_RETENTION_ASYNC_PUBLISH: 'true'
         run: node tests/runner-retention-smoke.mjs "$SMOKE_IMAGE"
+      - name: Report remaining disk space
+        if: always()
+        run: df -h /
+  image-cache:
+    # Main reuses a pull request image without building it; refresh the shared
+    # layer cache for later pull requests. This never gates a release.
+    needs: resolve
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.resolve.outputs.reuse == 'true'
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: docker/setup-buildx-action@v4.3.0
+      - uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          outputs: type=cacheonly
+          build-args: |
+            VCS_REF=${{ github.sha }}
+            CODEX_VERSION=${{ needs.resolve.outputs.codex }}
+            GH_VERSION=${{ needs.resolve.outputs.gh }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true
+          secrets: github_token=${{ github.token }}
+          provenance: false
   publish:
     # The Intel nested Android test needs hardware GitHub does not provide; it runs locally
     # before releases when Android or runner changes need it (docs/DEPLOYMENT.md) and does not gate CI.
     needs: [resolve, quality, browser, image]
-    if: always() && !cancelled() && github.event_name != 'pull_request' && needs.resolve.outputs.reuse != 'true' && needs.quality.result == 'success' && needs.browser.result == 'success' && needs.image.result == 'success'
+    if: always() && !cancelled() && needs.resolve.outputs.reuse != 'true' && needs.quality.result == 'success' && needs.browser.result == 'success' && needs.image.result == 'success' && needs.image.outputs.published == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -343,56 +461,52 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v7.0.1
-      # Manifest promotion needs only the runner's Buildx client, no builder daemon.
-      - run: docker buildx version
-      - uses: docker/login-action@v4.6.0
+      # Pull request images keep only the moving candidate tag until main or a
+      # release promotes their digest.
+      - uses: ./.github/actions/promote-image
+        if: github.event_name != 'pull_request'
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/metadata-action@v6.2.0
-        id: meta
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=sha,format=long
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=semver,pattern={{version}}
-      - name: Promote the tested digest
-        env:
-          IMAGE_DIGEST: ${{ needs.image.outputs.digest }}
-          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
-        run: |
-          args=()
-          while IFS= read -r tag; do
-            args+=(--tag "$tag")
-          done <<< "$IMAGE_TAGS"
-          docker buildx imagetools create "${args[@]}" "ghcr.io/${GITHUB_REPOSITORY}@${IMAGE_DIGEST}"
+          digest: ${{ needs.image.outputs.digest }}
+          token: ${{ secrets.GITHUB_TOKEN }}
       - name: Record the validated image
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
         env:
           IMAGE_DIGEST: ${{ needs.image.outputs.digest }}
+          GIT_TREE: ${{ needs.resolve.outputs.tree }}
           CODEX_VERSION: ${{ needs.resolve.outputs.codex }}
           GH_VERSION: ${{ needs.resolve.outputs.gh }}
         run: |
           mkdir -p release-evidence
           node --input-type=module <<'JS'
           import { writeFileSync } from 'node:fs'
-          writeFileSync('release-evidence/image.json', JSON.stringify({ schema: 1, repository: process.env.GITHUB_REPOSITORY.toLowerCase(), commit: process.env.GITHUB_SHA, digest: process.env.IMAGE_DIGEST, runId: Number(process.env.GITHUB_RUN_ID), tools: { codex: process.env.CODEX_VERSION, gh: process.env.GH_VERSION } }))
+          writeFileSync('release-evidence/image.json', JSON.stringify({ schema: 2, repository: process.env.GITHUB_REPOSITORY.toLowerCase(), tree: process.env.GIT_TREE, commit: process.env.GITHUB_SHA, digest: process.env.IMAGE_DIGEST, runId: Number(process.env.GITHUB_RUN_ID), tools: { codex: process.env.CODEX_VERSION, gh: process.env.GH_VERSION } }))
           JS
       - uses: actions/upload-artifact@v7.0.1
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
         with:
-          name: validated-image
+          name: ${{ needs.resolve.outputs.artifact }}
           path: release-evidence/image.json
           retention-days: 90
           overwrite: true
-  deploy:
-    if: always() && !cancelled() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.resolve.result == 'success' && (needs.resolve.outputs.reuse == 'true' || needs.publish.result == 'success')
-    needs: [resolve, image, publish]
+  promote:
+    needs: resolve
+    if: needs.resolve.outputs.reuse == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
       packages: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/promote-image
+        with:
+          digest: ${{ needs.resolve.outputs.digest }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+  deploy:
+    if: always() && !cancelled() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && (needs.publish.result == 'success' || needs.promote.result == 'success')
+    needs: [resolve, image, publish, promote]
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment:
@@ -406,19 +520,6 @@ jobs:
       - uses: ./.github/actions/setup-pnpm
         with:
           cache: true
-      - run: docker buildx version
-        if: needs.resolve.outputs.reuse == 'true'
-      - uses: docker/login-action@v4.6.0
-        if: needs.resolve.outputs.reuse == 'true'
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Promote the validated digest to the release tag
-        if: needs.resolve.outputs.reuse == 'true'
-        env:
-          IMAGE_DIGEST: ${{ needs.resolve.outputs.digest }}
-        run: docker buildx imagetools create --tag "ghcr.io/${GITHUB_REPOSITORY}:${GITHUB_REF_NAME#v}" "ghcr.io/${GITHUB_REPOSITORY}@${IMAGE_DIGEST}"
       - name: Deploy the published image and verify the running commit
         env:
           COOLIFY_URL: ${{ vars.COOLIFY_URL }}
@@ -426,5 +527,6 @@ jobs:
           COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
           LEO_PUBLIC_URL: ${{ vars.LEO_PUBLIC_URL }}
           DEPLOY_IMAGE: ghcr.io/${{ github.repository }}@${{ needs.resolve.outputs.digest || needs.image.outputs.digest }}
-          DEPLOY_COMMIT: ${{ github.sha }}
+          # A reused image reports the commit it was validated at, with this tag's tree.
+          DEPLOY_COMMIT: ${{ needs.resolve.outputs.commit }}
         run: node scripts/deploy-coolify.mjs

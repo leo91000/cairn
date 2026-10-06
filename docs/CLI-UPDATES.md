@@ -77,9 +77,9 @@ continue to deploy their own validated image. Every CI run, including every tag
 release, resolves the latest stable Codex and GitHub CLI versions before deciding
 whether to reuse an image. There are no default Codex/GitHub CLI version numbers
 in the Dockerfile. The resolved versions are passed to the build and recorded in
-its validation evidence. A tag reuses the tested image for its exact commit only
-when both tool versions match the latest discovery; otherwise it builds and tests
-a fresh image. Tools never change after image validation.
+its validation evidence. Main or a tag reuses the tested image for its exact source
+tree only when both tool versions match the latest discovery; otherwise it builds
+and tests a fresh image. Tools never change after image validation.
 Direct Docker builds must pass the resolved `CODEX_VERSION` and `GH_VERSION` build
 arguments. For local Compose, see [deployment setup](DEPLOYMENT.md).
 Application version tags remain immutable.
