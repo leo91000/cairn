@@ -309,8 +309,15 @@ async fn complete_callback(
         return Err(rejected());
     }
 
-    let session_response =
-        create_session(service, &mut transaction, &account_id, &email, headers).await?;
+    let session_response = create_session(
+        service,
+        &mut transaction,
+        &account_id,
+        &email,
+        headers,
+        SessionProof::OAuth,
+    )
+    .await?;
     transaction.commit().await?;
 
     // Provider tokens are deliberately discarded: GitHub identification grants no agent access.

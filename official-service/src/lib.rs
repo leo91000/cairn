@@ -153,6 +153,7 @@ pub async fn router_with_network(
     Ok(Router::new()
         .route("/api/account/email-code", post(request_code))
         .route("/api/account/verify", post(verify_code))
+        .route("/api/account/reauth/email", post(reauthenticate_email))
         .route("/api/account/session", get(session))
         .route("/api/account/logout", post(logout))
         .route("/api/account/sessions", get(account::sessions))
@@ -181,6 +182,14 @@ pub async fn router_with_network(
         .route(
             "/api/account/passkeys/login/finish",
             post(passkeys::login_finish),
+        )
+        .route(
+            "/api/account/passkeys/reauth/start",
+            post(passkeys::reauth_start),
+        )
+        .route(
+            "/api/account/passkeys/reauth/finish",
+            post(passkeys::reauth_finish),
         )
         .route("/api/account/options", get(oauth::options))
         .route("/api/account/oauth/{provider}/start", post(oauth::start))
@@ -463,6 +472,26 @@ async fn verify_code(
     headers: HeaderMap,
     Json(input): Json<Verification>,
 ) -> Result<Response, ApiError> {
+    verify_email(&service, peer, &headers, input, false).await
+}
+
+async fn reauthenticate_email(
+    State(service): State<Service>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(input): Json<Verification>,
+) -> Result<Response, ApiError> {
+    methods::authenticated(&service, &headers, true).await?;
+    verify_email(&service, peer, &headers, input, true).await
+}
+
+async fn verify_email(
+    service: &Service,
+    peer: SocketAddr,
+    headers: &HeaderMap,
+    input: Verification,
+    reauthenticate: bool,
+) -> Result<Response, ApiError> {
     consume_limit(&service.pool, &format!("verification:{}", peer.ip()), 30).await?;
 
     let invalid = || ApiError::Http(StatusCode::UNAUTHORIZED, "Invalid or expired code");
@@ -505,6 +534,25 @@ async fn verify_code(
         return Err(invalid());
     }
 
+    if reauthenticate {
+        let (account, current_email) =
+            methods::authenticated_on(&mut transaction, headers, true).await?;
+        if current_email != email {
+            return Err(invalid());
+        }
+        query("SELECT id FROM leo_accounts WHERE id = $1 FOR UPDATE")
+            .bind(&account)
+            .execute(&mut *transaction)
+            .await?;
+        account::confirm_identity(&mut transaction, headers).await?;
+        query("DELETE FROM email_codes WHERE challenge = $1")
+            .bind(&code_challenge)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+
     query("DELETE FROM email_codes WHERE challenge = $1")
         .bind(&code_challenge)
         .execute(&mut *transaction)
@@ -519,7 +567,7 @@ async fn verify_code(
             .fetch_optional(&mut *transaction)
             .await?;
     if removed == Some((true,)) {
-        let linked = methods::authenticated_on(&mut transaction, &headers, true).await?;
+        let linked = methods::authenticated_on(&mut transaction, headers, true).await?;
         if linked.0 != account_id {
             return Err(ApiError::Http(
                 StatusCode::UNAUTHORIZED,
@@ -531,10 +579,23 @@ async fn verify_code(
     query("INSERT INTO sign_in_methods (id, account_id, kind, subject, label) VALUES ($1, $2, 'email', $3, $3) ON CONFLICT (kind, subject) DO UPDATE SET removed = false")
         .bind(uuid::Uuid::new_v4().to_string()).bind(&account_id).bind(&email).execute(&mut *transaction).await?;
 
-    let response =
-        create_session(&service, &mut transaction, &account_id, &email, &headers).await?;
+    let response = create_session(
+        service,
+        &mut transaction,
+        &account_id,
+        &email,
+        headers,
+        SessionProof::Email,
+    )
+    .await?;
     transaction.commit().await?;
     Ok(response)
+}
+
+enum SessionProof {
+    Email,
+    Passkey,
+    OAuth,
 }
 
 async fn create_session(
@@ -543,19 +604,25 @@ async fn create_session(
     account_id: &str,
     email: &str,
     headers: &HeaderMap,
+    proof: SessionProof,
 ) -> Result<Response, ApiError> {
     let token = random_token();
     let csrf = random_token();
     let device: String = headers
         .get(header::USER_AGENT)
-        .and_then(|value| value.to_str().ok())
+        .and_then(|value| std::str::from_utf8(value.as_bytes()).ok())
         .unwrap_or("Unknown device")
         .chars()
-        .filter(|character| !character.is_control())
+        .filter(|character| {
+            let bidi_control = matches!(character,
+                '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+            !character.is_control() && !bidi_control
+        })
         .take(256)
         .collect();
-    query("INSERT INTO web_sessions (digest, account_id, csrf, expires_at, device) VALUES ($1, $2, $3, now() + interval '7 days', $4)")
-        .bind(digest(&token)).bind(account_id).bind(&csrf).bind(device).execute(&mut *connection).await?;
+    let recent_proof = matches!(proof, SessionProof::Email | SessionProof::Passkey);
+    query("INSERT INTO web_sessions (digest, account_id, csrf, expires_at, device, authenticated_at) VALUES ($1, $2, $3, now() + interval '7 days', $4, CASE WHEN $5 THEN clock_timestamp() END)")
+        .bind(digest(&token)).bind(account_id).bind(&csrf).bind(device).bind(recent_proof).execute(&mut *connection).await?;
 
     let secure = if service.origin.starts_with("https://") {
         "; Secure"

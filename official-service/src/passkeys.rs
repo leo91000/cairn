@@ -66,6 +66,10 @@ pub(super) async fn register_start(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let (account_id, email) = methods::authenticated(&service, &headers, true).await?;
+    {
+        let mut connection = service.pool.acquire().await?;
+        account::require_recent_proof(&mut connection, &headers).await?;
+    }
     consume_limit(
         &service.pool,
         &format!("passkey-registration:{account_id}"),
@@ -154,6 +158,11 @@ pub(super) async fn register_finish(
         .bind(&account_id)
         .execute(&mut *transaction)
         .await?;
+    // A stale session cannot mint the passkey used to manufacture a fresh proof.
+    // Recheck after the account lock, since the independent proof may expire.
+    methods::authenticated_on(&mut transaction, &headers, true).await?;
+    account::require_recent_proof(&mut transaction, &headers).await?;
+
     let (count,): (i64,) = query_as("SELECT count(*) FROM sign_in_methods WHERE account_id = $1 AND kind = 'passkey' AND NOT removed")
         .bind(&account_id).fetch_one(&mut *transaction).await?;
     if count >= 20 {
@@ -206,6 +215,41 @@ pub(super) async fn login_start(
         .into_response())
 }
 
+pub(super) async fn reauth_start(
+    State(service): State<Service>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (account, _) = methods::authenticated(&service, &headers, true).await?;
+    consume_limit(&service.pool, &format!("passkey-reauth:{account}"), 10).await?;
+    let (options, state) = webauthn(&service)?
+        .start_discoverable_authentication()
+        .map_err(|_| rejected())?;
+    let token = session_token(&headers);
+    let challenge = store_challenge(
+        &service,
+        "passkey-reauth",
+        token,
+        Some(&account),
+        Some(token),
+        &state,
+    )
+    .await?;
+    Ok(Json(json!({
+        "challenge": challenge,
+        "options": options,
+    })))
+}
+
+pub(super) async fn reauth_finish(
+    State(service): State<Service>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(input): Json<Authentication>,
+) -> Result<Response, ApiError> {
+    methods::authenticated(&service, &headers, true).await?;
+    complete_login(&service, peer, &headers, input, true).await
+}
+
 #[derive(Deserialize)]
 pub(super) struct Authentication {
     challenge: String,
@@ -219,7 +263,7 @@ pub(super) async fn login_finish(
     input: Result<Json<Authentication>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
     let result = match input {
-        Ok(Json(input)) => complete_login(&service, peer, &headers, input).await,
+        Ok(Json(input)) => complete_login(&service, peer, &headers, input, false).await,
         Err(_) => Err(ApiError::Http(
             StatusCode::BAD_REQUEST,
             "Invalid passkey proof",
@@ -243,14 +287,23 @@ async fn complete_login(
     peer: SocketAddr,
     headers: &HeaderMap,
     input: Authentication,
+    reauthenticate: bool,
 ) -> Result<Response, ApiError> {
     consume_limit(&service.pool, &format!("passkey-login:{}", peer.ip()), 30).await?;
 
-    let (_, _, state) = take_challenge(
+    let (owner_session, bound_session, state) = take_challenge(
         service,
         &input.challenge,
-        "passkey-login",
-        cookie_token(headers, "leo_passkey"),
+        if reauthenticate {
+            "passkey-reauth"
+        } else {
+            "passkey-login"
+        },
+        if reauthenticate {
+            session_token(headers)
+        } else {
+            cookie_token(headers, "leo_passkey")
+        },
     )
     .await?;
     let state: DiscoverableAuthentication = serde_json::from_str(&state).map_err(|_| rejected())?;
@@ -259,6 +312,12 @@ async fn complete_login(
         .identify_discoverable_authentication(&input.credential)
         .map_err(|_| rejected())?;
     let account_id = owner.to_string();
+    if reauthenticate
+        && (owner_session.as_deref() != Some(&account_id)
+            || bound_session.as_deref() != Some(digest(session_token(headers)).as_str()))
+    {
+        return Err(rejected());
+    }
 
     let mut transaction = service.pool.begin().await?;
     let row: Option<(String,)> =
@@ -288,7 +347,20 @@ async fn complete_login(
         .execute(&mut *transaction)
         .await?;
 
-    let response = create_session(service, &mut transaction, &account_id, &email, headers).await?;
+    let response = if reauthenticate {
+        account::confirm_identity(&mut transaction, headers).await?;
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        create_session(
+            service,
+            &mut transaction,
+            &account_id,
+            &email,
+            headers,
+            SessionProof::Passkey,
+        )
+        .await?
+    };
 
     transaction.commit().await?;
 

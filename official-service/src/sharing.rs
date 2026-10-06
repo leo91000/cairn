@@ -114,10 +114,12 @@ pub(super) async fn invite(
         .await?;
     super::audit::record(
         &mut transaction,
-        &account,
-        Some(&installation),
-        "invitation.created",
-        Some(&id),
+        super::audit::Event {
+            actor_id: &account,
+            installation_id: Some(&installation),
+            action: super::audit::Action::InvitationCreated,
+            target_id: Some(&id),
+        },
     )
     .await?;
     transaction.commit().await?;
@@ -155,10 +157,12 @@ pub(super) async fn invite(
             .await?;
         super::audit::record(
             &mut transaction,
-            &account,
-            Some(&installation),
-            "invitation.delivery_failed",
-            Some(&id),
+            super::audit::Event {
+                actor_id: &account,
+                installation_id: Some(&installation),
+                action: super::audit::Action::InvitationDeliveryFailed,
+                target_id: Some(&id),
+            },
         )
         .await?;
         transaction.commit().await?;
@@ -245,10 +249,12 @@ pub(super) async fn accept(
         .bind(&installation).bind(&account).execute(&mut *transaction).await?;
     super::audit::record(
         &mut transaction,
-        &account,
-        Some(&installation),
-        "invitation.accepted",
-        Some(&invitation),
+        super::audit::Event {
+            actor_id: &account,
+            installation_id: Some(&installation),
+            action: super::audit::Action::InvitationAccepted,
+            target_id: Some(&invitation),
+        },
     )
     .await?;
     transaction.commit().await?;
@@ -286,10 +292,12 @@ pub(super) async fn remove(
     let mut transaction = owner_transaction(&service, &installation, &account).await?;
     super::audit::record(
         &mut transaction,
-        &account,
-        Some(&installation),
-        "member.removed",
-        Some(&member),
+        super::audit::Event {
+            actor_id: &account,
+            installation_id: Some(&installation),
+            action: super::audit::Action::MemberRemoved,
+            target_id: Some(&member),
+        },
     )
     .await?;
     remove_membership(&service, transaction, &installation, &member).await
@@ -317,10 +325,12 @@ pub(super) async fn leave(
 
     super::audit::record(
         &mut transaction,
-        &account,
-        Some(&installation),
-        "member.left",
-        Some(&account),
+        super::audit::Event {
+            actor_id: &account,
+            installation_id: Some(&installation),
+            action: super::audit::Action::MemberLeft,
+            target_id: Some(&account),
+        },
     )
     .await?;
     remove_membership(&service, transaction, &installation, &account).await
@@ -349,10 +359,12 @@ pub(super) async fn cancel(
 
     super::audit::record(
         &mut transaction,
-        &account,
-        Some(&installation),
-        "invitation.cancelled",
-        Some(&invitation),
+        super::audit::Event {
+            actor_id: &account,
+            installation_id: Some(&installation),
+            action: super::audit::Action::InvitationCancelled,
+            target_id: Some(&invitation),
+        },
     )
     .await?;
     transaction.commit().await?;

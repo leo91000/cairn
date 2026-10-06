@@ -706,3 +706,392 @@ async fn deletion_retries_rolled_back_database_deadlocks_and_bounds_persistent_f
     assert_eq!(status["installations"][0]["role"], "owner");
     relay.close().await;
 }
+
+#[tokio::test]
+async fn deletion_requires_a_recent_email_or_passkey_proof_in_the_callers_session() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let app = &relay.app;
+    query("UPDATE web_sessions SET authenticated_at = now() - interval '1 hour'")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+
+    let rejected = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            "/api/account/delete",
+        )
+        .json(&json!({ "email": "relay-owner@example.test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn email_confirmation_is_single_use_for_only_the_current_account_and_session() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let app = &relay.app;
+    query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key LIKE 'email:%'")
+        .execute(&app.pool).await.unwrap();
+    let (other_cookie, other_session) = login(app, "relay-owner@example.test").await;
+    let (stranger_cookie, stranger) = login(app, "stranger@example.test").await;
+    query("UPDATE web_sessions SET authenticated_at = NULL")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key LIKE 'email:%'")
+        .execute(&app.pool).await.unwrap();
+    let challenge: Value = app
+        .post(
+            "/api/account/email-code",
+            json!({ "email": "relay-owner@example.test" }),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+    let code = app.mail.0.lock().unwrap().last().unwrap().1.clone();
+    let proof = json!({ "challenge": challenge["challenge"], "code": code });
+    let foreign = app
+        .authenticated(
+            &stranger_cookie,
+            &stranger,
+            Method::POST,
+            "/api/account/reauth/email",
+        )
+        .json(&proof)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign.status(), StatusCode::UNAUTHORIZED);
+    let wrong_csrf = app
+        .client
+        .post(format!("{}/api/account/reauth/email", app.url))
+        .header("origin", &app.url)
+        .header("cookie", &relay.cookie)
+        .json(&proof)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_csrf.status(), StatusCode::FORBIDDEN);
+    let confirmed = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            "/api/account/reauth/email",
+        )
+        .json(&proof)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(confirmed.status(), StatusCode::NO_CONTENT);
+    assert!(!confirmed.headers().contains_key("set-cookie"));
+    let replay = app
+        .authenticated(
+            &other_cookie,
+            &other_session,
+            Method::POST,
+            "/api/account/reauth/email",
+        )
+        .json(&proof)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+    let other_delete = app
+        .authenticated(
+            &other_cookie,
+            &other_session,
+            Method::POST,
+            "/api/account/delete",
+        )
+        .json(&json!({ "email": "relay-owner@example.test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(other_delete.status(), StatusCode::FORBIDDEN);
+    let deleted = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            "/api/account/delete",
+        )
+        .json(&json!({ "email": "relay-owner@example.test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        app.authenticated(
+            &other_cookie,
+            &other_session,
+            Method::GET,
+            "/api/account/sessions"
+        )
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn deletion_revokes_other_sessions_mcp_token_families_and_inbound_invitations() {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use sha2::{Digest, Sha256};
+
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let app = &relay.app;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key LIKE 'email:%'")
+        .execute(&app.pool).await.unwrap();
+    let (other_cookie, other_session) = login(app, "relay-owner@example.test").await;
+    let personal: Value = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            &format!("/api/installations/{id}/tokens"),
+        )
+        .json(&json!({ "label": "Personal", "scopes": ["read"] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let client: Value = app
+        .post(
+            "/oauth/register",
+            json!({
+                "client_name": "Deletion test",
+                "redirect_uris": ["http://localhost:9999/callback"],
+                "token_endpoint_auth_method": "none",
+            }),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+    let verifier = "v".repeat(43);
+    let consent: Value = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            "/api/mcp/oauth/consent",
+        )
+        .json(&json!({
+            "parameters": {
+                "client_id": client["client_id"],
+                "redirect_uri": "http://localhost:9999/callback",
+                "response_type": "code",
+                "code_challenge_method": "S256",
+                "code_challenge": URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
+                "scope": "read",
+            },
+            "installationId": id,
+            "approved": true,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let callback = url::Url::parse(consent["redirect"].as_str().unwrap()).unwrap();
+    let code = callback
+        .query_pairs()
+        .find(|(key, _)| key == "code")
+        .unwrap()
+        .1
+        .to_string();
+    let tokens: Value = app
+        .client
+        .post(format!("{}/oauth/token", app.url))
+        .form(&json!({
+            "grant_type": "authorization_code",
+            "client_id": client["client_id"],
+            "redirect_uri": "http://localhost:9999/callback",
+            "code": code,
+            "code_verifier": verifier,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let call = |token: &Value| {
+        app.client
+            .post(format!("{}/mcp", app.url))
+            .bearer_auth(token.as_str().unwrap())
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/list",
+            }))
+    };
+    for token in [&personal["token"], &tokens["access_token"]] {
+        assert_eq!(call(token).send().await.unwrap().status(), StatusCode::OK);
+    }
+
+    let (inviter_cookie, inviter) = login(app, "inviter@example.test").await;
+    let claim: Value = app
+        .authenticated(
+            &inviter_cookie,
+            &inviter,
+            Method::POST,
+            "/api/installations/claim-code",
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let installation: Value = app
+        .post(
+            "/api/relay/claim",
+            json!({
+                "code": claim["code"],
+                "name": "Invitation source",
+                "protocol": 1,
+            }),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+    let invitation_route = format!(
+        "/api/installations/{}/sharing/invitations",
+        installation["installationId"].as_str().unwrap()
+    );
+    let invitation = app
+        .authenticated(&inviter_cookie, &inviter, Method::POST, &invitation_route)
+        .json(&json!({ "email": "relay-owner@example.test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invitation.status(), StatusCode::CREATED);
+    let pending: Value = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::GET,
+            "/api/account/invitations",
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(pending.as_array().unwrap().len(), 1);
+
+    let deleted = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            "/api/account/delete",
+        )
+        .json(&json!({ "email": "relay-owner@example.test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        app.authenticated(
+            &other_cookie,
+            &other_session,
+            Method::GET,
+            "/api/account/sessions"
+        )
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    for token in [&personal["token"], &tokens["access_token"]] {
+        assert_eq!(
+            call(token).send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let refresh = app
+        .client
+        .post(format!("{}/oauth/token", app.url))
+        .form(&json!({
+            "grant_type": "refresh_token",
+            "client_id": client["client_id"],
+            "refresh_token": tokens["refresh_token"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refresh.status(), StatusCode::BAD_REQUEST);
+    let sharing: Value = app
+        .authenticated(
+            &inviter_cookie,
+            &inviter,
+            Method::GET,
+            &format!(
+                "/api/installations/{}/sharing",
+                installation["installationId"].as_str().unwrap()
+            ),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(sharing["invitations"], json!([]));
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn a_proof_expiring_while_deletion_waits_does_not_authorize_the_mutation() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let app = &relay.app;
+    let mut barrier = app.pool.begin().await.unwrap();
+    query("SELECT id FROM installations FOR UPDATE")
+        .execute(&mut *barrier)
+        .await
+        .unwrap();
+    let request = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            "/api/account/delete",
+        )
+        .json(&json!({ "email": "relay-owner@example.test" }));
+    let deletion = tokio::spawn(async move { request.send().await.unwrap() });
+    wait_for_account_lock(app, relay.session["account"]["id"].as_str().unwrap()).await;
+    query("UPDATE web_sessions SET authenticated_at = clock_timestamp() - interval '5 minutes'")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    barrier.commit().await.unwrap();
+    assert_eq!(deletion.await.unwrap().status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    relay.close().await;
+}

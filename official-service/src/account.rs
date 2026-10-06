@@ -67,7 +67,16 @@ async fn revoke(
         return Err(ApiError::Http(StatusCode::NOT_FOUND, "Session not found"));
     }
     if !removed.is_empty() {
-        audit::record(&mut transaction, &account, None, "session.revoked", target).await?;
+        audit::record(
+            &mut transaction,
+            audit::Event {
+                actor_id: &account,
+                installation_id: None,
+                action: audit::Action::SessionRevoked,
+                target_id: target,
+            },
+        )
+        .await?;
     }
     transaction.commit().await?;
 
@@ -152,16 +161,23 @@ async fn delete_access(
     let access: Vec<(String, bool)> = query_as(
         "SELECT i.id, COALESCE(i.owner_id = $1, false) FROM installations i WHERE i.owner_id = $1 OR EXISTS (SELECT 1 FROM installation_members m WHERE m.installation_id = i.id AND m.account_id = $1) ORDER BY i.id FOR UPDATE",
     ).bind(account).fetch_all(&mut *transaction).await?;
+    // Row/advisory locks can wait: check the caller and proof at wall-clock time
+    // after all access locks, before any irreversible account mutation.
+    methods::authenticated_on(&mut transaction, headers, true).await?;
+    require_recent_proof(&mut transaction, headers).await?;
+
     for (installation, owner) in &access {
         if *owner {
             installations::detach_on(&mut transaction, installation, account).await?;
         } else {
             audit::record(
                 &mut transaction,
-                account,
-                Some(installation),
-                "member.left",
-                Some(account),
+                audit::Event {
+                    actor_id: account,
+                    installation_id: Some(installation),
+                    action: audit::Action::MemberLeft,
+                    target_id: Some(account),
+                },
             )
             .await?;
         }
@@ -182,7 +198,16 @@ async fn delete_access(
         .bind(email)
         .execute(&mut *transaction)
         .await?;
-    audit::record(&mut transaction, account, None, "account.deleted", None).await?;
+    audit::record(
+        &mut transaction,
+        audit::Event {
+            actor_id: account,
+            installation_id: None,
+            action: audit::Action::AccountDeleted,
+            target_id: None,
+        },
+    )
+    .await?;
     query("UPDATE account_audit SET account_id = NULL WHERE account_id = $1")
         .bind(account)
         .execute(&mut *transaction)
@@ -198,4 +223,33 @@ async fn delete_access(
         installations: access,
         sessions,
     })
+}
+
+pub(super) async fn require_recent_proof(
+    connection: &mut sqlx_postgres::PgConnection,
+    headers: &HeaderMap,
+) -> Result<(), ApiError> {
+    let (recent,): (bool,) = query_as("SELECT EXISTS (SELECT 1 FROM web_sessions WHERE digest = $1 AND authenticated_at > clock_timestamp() - interval '5 minutes' AND authenticated_at <= clock_timestamp())")
+        .bind(digest(session_token(headers))).fetch_one(connection).await?;
+    if !recent {
+        return Err(ApiError::Http(
+            StatusCode::FORBIDDEN,
+            "Confirm your identity with an email code or passkey before continuing",
+        ));
+    }
+    Ok(())
+}
+
+/// Call under the account lock after a successful email/passkey proof. Preserve
+/// this session's bearer, CSRF, deadline and other devices' authentication age.
+pub(super) async fn confirm_identity(
+    connection: &mut sqlx_postgres::PgConnection,
+    headers: &HeaderMap,
+) -> Result<(), ApiError> {
+    methods::authenticated_on(connection, headers, true).await?;
+    query("UPDATE web_sessions SET authenticated_at = clock_timestamp() WHERE digest = $1")
+        .bind(digest(session_token(headers)))
+        .execute(connection)
+        .await?;
+    Ok(())
 }
