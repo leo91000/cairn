@@ -80,6 +80,11 @@ The app connects only to the official service. Sign in with a code received by
 email, then choose an installation belonging to or shared with your Leo account.
 It reopens the last installation used by that account. Members can read agents,
 projects and skills and work in conversations; owner management is hidden.
+Appearance, app updates and notification permissions remain available to members.
+The selector shows each installation’s role and availability. With no installation,
+the app links to the official claim page to add or associate one.
+If the official service is temporarily unreachable, the app preserves the stored
+session and offers a retry; an explicit rejection returns to email sign-in.
 There is no server-address, owner-password or bootstrap-token form.
 
 Set `LEO_OFFICIAL_ORIGIN` to the fixed official HTTPS origin when building the
@@ -236,7 +241,7 @@ SSE stream. The snapshot includes the accepted cursor, decoded messages, tool
 activity, artifact metadata and reading position. Files are loaded on demand.
 Android encrypts disk records with an Android Keystore AES-GCM key, excludes them
 from backups, and scopes them to the server and authenticated session. Signing
-out or forgetting the server clears the cache. Storage failure falls back to the
+out, switching installations or losing access clears the cache and downloaded files. Storage failure falls back to the
 normal stream. Limits: 12 histories, 4 MiB per history, 20 MiB total, seven days.
 The cache retains up to 200 recent decoded events within a 3 MiB payload budget,
 instead of discarding the whole conversation when it grows. The backwards cursor

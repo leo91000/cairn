@@ -27,7 +27,8 @@ class NativeUiTest {
 
     private val workspace =
         Workspace(
-            installation = Installation("fixture", "Installation de test", "owner", true),
+            installation =
+                Installation("fixture", "Installation de test", InstallationRole.Owner, true),
             ready = true,
             agents = listOf(Agent(id = "agent", name = "Reviewer")),
             projects = listOf(Project(id = "project", name = "Leo Agent Manager")),

@@ -1,5 +1,6 @@
 package dev.leo.manager.data
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 
@@ -16,10 +17,16 @@ data class Session(
 @Serializable data class LeoAccount(val id: String, val email: String)
 
 @Serializable
+enum class InstallationRole(val value: String, val label: String) {
+    @SerialName("owner") Owner("owner", "Propriétaire"),
+    @SerialName("member") Member("member", "Membre"),
+}
+
+@Serializable
 data class Installation(
     val id: String,
     val name: String,
-    val role: String = "member",
+    val role: InstallationRole = InstallationRole.Member,
     val online: Boolean = false,
 )
 

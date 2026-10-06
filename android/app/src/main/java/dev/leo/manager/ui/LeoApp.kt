@@ -19,6 +19,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -51,7 +52,7 @@ fun LeoApp(
     consumedShare: () -> Unit = {},
     vm: LeoViewModel = viewModel(),
     targetChat: String = "",
-    targetOrigin: String = "",
+    targetCacheScope: String = "",
     consumedTarget: () -> Unit = {},
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
@@ -97,6 +98,7 @@ fun LeoApp(
     }
 
     if (state.installation == null) {
+        val context = LocalContext.current
         Page {
             Heading(
                 "Aucune installation",
@@ -104,6 +106,12 @@ fun LeoApp(
             )
             Text(state.session.account?.email.orEmpty())
             Text("Les installations de votre compte Leo apparaîtront ici.")
+            Text(
+                "Obtenez la commande d’installation dans le service officiel, ou associez une installation existante avec leo claim."
+            )
+            Button(onClick = { browse(context, state.origin.trimEnd('/') + "/claim") }) {
+                Text("Ajouter une installation")
+            }
             TextButton(onClick = { vm.perform { refreshInstallations() } }) { Text("Actualiser") }
             TextButton(onClick = { vm.perform { logout() } }) { Text("Se déconnecter") }
             state.error?.let { ErrorNotice(it, vm::clearMessage) }
@@ -121,22 +129,18 @@ fun LeoApp(
                     modifier =
                         Modifier.semantics { contentDescription = "Choisir une installation" },
                 ) {
-                    Text(
-                        "${installation.name} · ${if (installation.online) "En ligne" else "Hors ligne"}"
-                    )
+                    InstallationLabel(installation)
                 }
             else
-                Text(
-                    "${installation.name} · ${if (installation.online) "En ligne" else "Hors ligne"}",
+                InstallationLabel(
+                    installation,
                     Modifier.padding(horizontal = 8.dp, vertical = 12.dp),
                 )
             DropdownMenu(expanded = choosing, onDismissRequest = { choosing = false }) {
                 state.session.installations.forEach { choice ->
                     DropdownMenuItem(
                         text = {
-                            Text(
-                                "${choice.name} · ${if (choice.online) "En ligne" else "Hors ligne"}"
-                            )
+                            InstallationLabel(choice)
                         },
                         onClick = {
                             choosing = false
@@ -168,11 +172,19 @@ fun LeoApp(
                         sharedUrl,
                         consumedShare,
                         targetChat,
-                        targetOrigin,
+                        targetCacheScope,
                         consumedTarget,
                     )
             }
         }
+    }
+}
+
+@Composable
+private fun InstallationLabel(installation: Installation, modifier: Modifier = Modifier) {
+    Column(modifier) {
+        Text("${installation.name} · ${if (installation.online) "En ligne" else "Hors ligne"}")
+        Text(installation.role.label, style = MaterialTheme.typography.labelSmall)
     }
 }
 
@@ -184,10 +196,15 @@ private fun WorkspaceApp(
     sharedUrl: String,
     consumedShare: () -> Unit,
     targetChat: String,
-    targetOrigin: String,
+    targetCacheScope: String,
     consumedTarget: () -> Unit,
 ) {
     val nav = rememberNavController()
+    fun openConnections() {
+        if (state.isOwner) nav.navigate("connections")
+        else vm.notify("Demandez au propriétaire de reconnecter le compte.")
+    }
+
     val backStack by nav.currentBackStackEntryAsState()
     val route = backStack?.destination?.route ?: "fil"
     LaunchedEffect(sharedUrl) {
@@ -200,7 +217,7 @@ private fun WorkspaceApp(
         }
     }
     LaunchedEffect(targetChat, vm.api.cacheScope) {
-        if (targetChat.isNotBlank() && targetOrigin == vm.api.cacheScope) {
+        if (targetChat.isNotBlank() && targetCacheScope == vm.api.cacheScope) {
             nav.navigate("chat/${segment(targetChat)}") {
                 // A pager may now display a different chat from its route's starting id.
                 if (nav.currentDestination?.route == "chat/{id}") {
@@ -321,13 +338,7 @@ private fun WorkspaceApp(
                                     state,
                                     openChat = { nav.navigate("chat/$it") },
                                     openRun = { nav.navigate("run/$it") },
-                                    openConnections = {
-                                        if (state.isOwner) nav.navigate("connections")
-                                        else
-                                            vm.notify(
-                                                "Demandez au propriétaire de reconnecter le compte."
-                                            )
-                                    },
+                                    openConnections = ::openConnections,
                                     search = { nav.navigate("search") },
                                 )
                             }
@@ -356,13 +367,7 @@ private fun WorkspaceApp(
                                     openRun = { nav.navigate("run/$it") },
                                     back = { nav.popBackStack() },
                                     create = { nav.navigate("new-chat") },
-                                    openConnections = {
-                                        if (state.isOwner) nav.navigate("connections")
-                                        else
-                                            vm.notify(
-                                                "Demandez au propriétaire de reconnecter le compte."
-                                            )
-                                    },
+                                    openConnections = ::openConnections,
                                 )
                             }
                             composable("new-chat?agent={agent}&project={project}") { entry ->
@@ -379,13 +384,7 @@ private fun WorkspaceApp(
                                     openRun = { nav.navigate("run/$it") },
                                     back = { nav.popBackStack() },
                                     create = { nav.navigate("new-chat") },
-                                    openConnections = {
-                                        if (state.isOwner) nav.navigate("connections")
-                                        else
-                                            vm.notify(
-                                                "Demandez au propriétaire de reconnecter le compte."
-                                            )
-                                    },
+                                    openConnections = ::openConnections,
                                 )
                             }
                             composable("missions") {

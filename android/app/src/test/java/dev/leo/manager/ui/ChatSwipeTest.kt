@@ -385,7 +385,8 @@ class ChatSwipeTest {
                     LeoApp(
                         vm = vm,
                         targetChat = incomingChat,
-                        targetOrigin = if (state.installation != null) vm.api.cacheScope else "",
+                        targetCacheScope =
+                            if (state.installation != null) vm.api.cacheScope else "",
                         consumedTarget = { incomingChat = "" },
                     )
                 }

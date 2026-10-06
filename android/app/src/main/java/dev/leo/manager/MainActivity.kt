@@ -23,7 +23,7 @@ import dev.leo.manager.update.UpdateViewModel
 
 class MainActivity : ComponentActivity() {
     private var targetChat by mutableStateOf("")
-    private var targetOrigin by mutableStateOf("")
+    private var targetCacheScope by mutableStateOf("")
     private var sharedUrl by mutableStateOf("")
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -53,7 +53,7 @@ class MainActivity : ComponentActivity() {
                         consumedShare = { sharedUrl = "" },
                         vm = vm,
                         targetChat = targetChat,
-                        targetOrigin = targetOrigin,
+                        targetCacheScope = targetCacheScope,
                         consumedTarget = { targetChat = "" },
                     )
                 }
@@ -74,7 +74,7 @@ class MainActivity : ComponentActivity() {
                     .orEmpty()
                     .takeIf { runCatching { java.util.UUID.fromString(it) }.isSuccess }
                     .orEmpty()
-            targetOrigin = intent.getStringExtra("origin").orEmpty()
+            targetCacheScope = intent.getStringExtra("origin").orEmpty()
         }
         if (intent.action == Intent.ACTION_SEND && intent.type == "text/plain") {
             sharedUrl = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()

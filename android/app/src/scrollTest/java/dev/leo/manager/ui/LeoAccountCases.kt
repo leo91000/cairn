@@ -130,6 +130,7 @@ abstract class LeoAccountCases {
                     .fetchSemanticsNodes()
                     .isNotEmpty() && !model.value.state.value.busy
             }
+            compose.onNodeWithText("Membre").assertIsDisplayed()
             assertFalse(homeFile.exists())
             compose.onNodeWithText("Agent selection-home").assertDoesNotExist()
             compose.onNodeWithContentDescription("Atelier").performClick()
@@ -213,7 +214,7 @@ abstract class LeoAccountCases {
                     .onAllNodesWithText("Maison · En ligne")
                     .fetchSemanticsNodes()
                     .isNotEmpty() &&
-                    model.value.state.value.installation?.role == "member" &&
+                    model.value.state.value.installation?.role == InstallationRole.Member &&
                     !model.value.state.value.busy
             }
             compose.onNodeWithContentDescription("Atelier").performClick()
@@ -230,6 +231,7 @@ abstract class LeoAccountCases {
                     .isNotEmpty() && !model.value.state.value.busy
             }
             compose.onNodeWithContentDescription("Atelier").assertDoesNotExist()
+            compose.onNodeWithText("Ajouter une installation").assertIsDisplayed()
             assertTrue(model.value.state.value.session.authenticated)
         }
     }

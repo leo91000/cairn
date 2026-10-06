@@ -46,7 +46,7 @@ data class Workspace(
     val overview: Overview = Overview(),
 ) {
     val isOwner: Boolean
-        get() = installation?.role == "owner"
+        get() = installation?.role == InstallationRole.Owner
 }
 
 class LeoViewModel
@@ -321,7 +321,7 @@ constructor(
             clearDrafts()
 
             val accountId = checkNotNull(session.account).id
-            val scope = "${current.origin}:$accountId:${installation.id}:${installation.role}"
+            val scope = "${current.origin}:$accountId:${installation.id}:${installation.role.value}"
             val scopeChanged = notifications.selectScope(scope)
             val sessionChanged = previous != null && previous.csrf != session.csrf
             if (scopeChanged || sessionChanged) {

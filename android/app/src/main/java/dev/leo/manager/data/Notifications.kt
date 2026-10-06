@@ -188,7 +188,7 @@ constructor(
             prefs.setSeen(all)
             // A master without node alerts must not delay question notifications.
             val alerts =
-                if (installation.role != "owner") null
+                if (installation.role != InstallationRole.Owner) null
                 else
                     try {
                         api.get<List<NodeAlert>>("/nodes/alerts")
@@ -218,7 +218,7 @@ private suspend fun notifyAlerts(
     manager: NotificationManager,
     prefs: NotificationPreferences,
     alerts: List<NodeAlert>,
-    origin: String,
+    cacheScope: String,
 ) {
     val newest = alerts.maxOfOrNull { it.createdAt } ?: return
     val until = prefs.alertsUntil()
@@ -236,10 +236,11 @@ private suspend fun notifyAlerts(
             Intent(context, MainActivity::class.java)
                 .setAction("dev.leo.manager.OPEN_CHAT")
                 .setData(
-                    "leo-manager://chat/${segment(alert.chatId)}?origin=${segment(origin)}".toUri()
+                    "leo-manager://chat/${segment(alert.chatId)}?origin=${segment(cacheScope)}"
+                        .toUri()
                 )
                 .putExtra("chat", alert.chatId)
-                .putExtra("origin", origin)
+                .putExtra("origin", cacheScope)
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val notification =
             NotificationCompat.Builder(context, EXECUTION_CHANNEL)
