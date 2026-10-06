@@ -142,16 +142,22 @@ class LeoApi(
 
     internal fun url(path: String): HttpUrl {
         require(path.startsWith("/") && !path.startsWith("//"))
+        val route = path.substringBefore('?')
         val accountPath =
-            path.startsWith("/account/") ||
-                path == "/installations" ||
-                path.startsWith("/installations/")
+            route.startsWith("/account/") ||
+                route == "/installations" ||
+                route.startsWith("/installations/") ||
+                route.startsWith("/mcp/oauth/")
         val prefix =
-            if (installationId == null || accountPath) "/api"
-            else "/api/installations/${segment(installationId)}/api"
+            when {
+                installationId == null || accountPath -> "/api"
+                route == "/tokens" || route.startsWith("/tokens/") ->
+                    "/api/installations/${segment(installationId)}"
+                else -> "/api/installations/${segment(installationId)}/api"
+            }
         return origin
             .newBuilder()
-            .encodedPath(prefix + path.substringBefore('?'))
+            .encodedPath(prefix + route)
             .encodedQuery(path.substringAfter('?', "").ifEmpty { null })
             .build()
     }

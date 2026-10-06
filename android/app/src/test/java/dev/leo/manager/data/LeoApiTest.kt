@@ -21,6 +21,24 @@ class MemoryVault : SessionVault {
 
 class LeoApiTest {
     @Test
+    fun `official MCP grants and consent stay on the official service`() = runTest {
+        MockWebServer().use { server ->
+            repeat(2) { server.enqueue(MockResponse().setBody("{}")) }
+            server.start()
+            val api = LeoApi(server.url("/"), MemoryVault(), installationId = "shared")
+            api.csrf = "account-csrf"
+
+            api.request("GET", "/tokens")
+            assertEquals("/api/installations/shared/tokens", server.takeRequest().path)
+
+            api.request("POST", "/mcp/oauth/preview", body("client_id" to "assistant"))
+            val preview = server.takeRequest()
+            assertEquals("/api/mcp/oauth/preview", preview.path)
+            assertEquals("account-csrf", preview.getHeader("X-CSRF-Token"))
+        }
+    }
+
+    @Test
     fun `anonymous official session accepts null account and csrf`() {
         val session =
             wireJson.decodeFromString<Session>(

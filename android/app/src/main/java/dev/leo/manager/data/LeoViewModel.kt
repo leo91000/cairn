@@ -163,20 +163,29 @@ constructor(
     internal suspend fun connect(input: String) {
         val origin = serverOrigin(input, BuildConfig.DEBUG)
         val next = withContext(Dispatchers.IO) { LeoApi(origin, vault) }
+        val wasBusy = state.value.busy
         connection?.closeStreams()
         accountConnection?.closeStreams()
-        historyCache.clear()
         clearDrafts()
         accountConnection = next
         emailChallenge = null
-        connection = null
-        mutable.update { Workspace(ready = true, busy = it.busy, origin = origin.toString()) }
-        val session = next.get<Session>("/account/session")
-        next.csrf = session.csrf.orEmpty()
-        mutable.update {
-            Workspace(ready = true, busy = it.busy, origin = origin.toString(), session = session)
+        mutable.update { Workspace(busy = true, origin = origin.toString()) }
+        try {
+            val session = next.get<Session>("/account/session")
+            next.csrf = session.csrf.orEmpty()
+            if (session.authenticated) openAccount(session)
+            else {
+                historyCache.clear()
+                next.clearSession()
+                connection = null
+                schedule(getApplication(), false)
+                mutable.update {
+                    Workspace(busy = true, origin = origin.toString(), session = session)
+                }
+            }
+        } finally {
+            mutable.update { it.copy(ready = true, busy = wasBusy) }
         }
-        if (session.authenticated) openAccount(session)
     }
 
     suspend fun requestEmailCode(email: String) {
@@ -216,40 +225,66 @@ constructor(
         val account = checkNotNull(accountConnection)
         account.csrf = session.csrf.orEmpty()
         emailChallenge = null
-        mutable.update { it.copy(session = session, emailForCode = null) }
         val saved = preferences.lastInstallation(state.value.origin, session.account.id)
         val installation =
             session.installations.find { it.id == saved } ?: session.installations.firstOrNull()
-        if (installation != null) selectInstallation(installation.id)
+        if (installation != null) openInstallation(session, installation)
+        else {
+            connection?.closeStreams()
+            historyCache.clear()
+            connection = null
+            schedule(getApplication(), false)
+            mutable.update {
+                Workspace(ready = true, busy = it.busy, origin = it.origin, session = session)
+            }
+        }
     }
 
     suspend fun selectInstallation(id: String) {
         val current = state.value
         val installation = current.session.installations.first { it.id == id }
+        if (current.installation == installation) return
+        openInstallation(current.session, installation)
+    }
+
+    private suspend fun openInstallation(session: Session, installation: Installation) {
+        val current = state.value
+        val previous = connection
         val account = checkNotNull(accountConnection)
-        connection?.closeStreams()
-        clearDrafts()
-        historyCache.clear()
-        val accountId = checkNotNull(current.session.account).id
-        val scope = "${current.origin}:$accountId:$id:${installation.role}"
-        if (notifications.selectScope(scope)) schedule(getApplication(), false)
-        preferences.selectInstallation(current.origin, accountId, id)
-        val next =
-            withContext(Dispatchers.IO) {
-                LeoApi(account.origin, vault, installationId = id).also { it.csrf = account.csrf }
+        mutable.update { it.copy(busy = true) }
+        try {
+            previous?.closeStreams()
+            clearDrafts()
+            val accountId = checkNotNull(session.account).id
+            val scope = "${current.origin}:$accountId:${installation.id}:${installation.role}"
+            val scopeChanged = notifications.selectScope(scope)
+            val sessionChanged = previous != null && previous.csrf != session.csrf
+            if (scopeChanged || sessionChanged) {
+                historyCache.clear()
+                schedule(getApplication(), false)
             }
-        connection = next
-        mutable.update {
-            Workspace(
-                ready = true,
-                origin = current.origin,
-                session = current.session,
-                installation = installation,
-                busy = it.busy,
-            )
+            preferences.selectInstallation(current.origin, accountId, installation.id)
+            val next =
+                withContext(Dispatchers.IO) {
+                    LeoApi(account.origin, vault, installationId = installation.id).also {
+                        it.csrf = account.csrf
+                    }
+                }
+            connection = next
+            mutable.update {
+                Workspace(
+                    ready = true,
+                    origin = current.origin,
+                    session = session,
+                    installation = installation,
+                    busy = true,
+                )
+            }
+            if (installation.online) refresh()
+            schedule(getApplication(), notifications.enabled.first())
+        } finally {
+            mutable.update { it.copy(busy = current.busy) }
         }
-        if (installation.online) refresh()
-        schedule(getApplication(), notifications.enabled.first())
     }
 
     suspend fun refreshInstallations() {

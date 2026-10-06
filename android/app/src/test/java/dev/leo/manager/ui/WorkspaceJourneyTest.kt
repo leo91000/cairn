@@ -105,7 +105,7 @@ class WorkspaceJourneyTest {
                                     """[{"id":"project","name":"Leo Agent Manager","path":"/fixtures/leo"}]"""
                                 "/api/installations/fixture/api/mcps",
                                 "/api/installations/fixture/api/skills",
-                                "/api/installations/fixture/api/tokens",
+                                "/api/installations/fixture/tokens",
                                 "/api/installations/fixture/api/audit" -> "[]"
                                 "/api/installations/fixture/api/tasks/activity" ->
                                     if (launched)
