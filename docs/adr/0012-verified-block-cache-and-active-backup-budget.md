@@ -78,6 +78,27 @@ resume does not recover it. The local journal remains durable, but loss of the
 node before remote publication still loses unpublished work. This is asynchronous
 S3 synchronization, not synchronous remote durability.
 
+### Bounded backup-lag pause (2026-10-06)
+
+On 2026-10-05 a remote node's uploads were cut after 60 s by the master's
+reverse proxy (Traefik's default request read timeout) on every attempt: each
+publication was streamed as one response of 1.8–5.4 GB. Its VM stayed paused for
+`backup-lag` for 11 hours with nothing visible, while the master retried every
+~90 s and re-read gigabytes from S3 each time.
+
+A `backup-lag` pause now lasts at most ten minutes per late backlog. If backups
+still fail, the VM continues and the volume reports `backupDegraded`; the
+backlog's age, urgency and alerts are unchanged, and the pause applies again
+once a backlog is late after having caught up. Integrity, disk-space and
+unavailable-storage pauses stay unbounded. This prefers progress over
+durability when synchronization is broken: unpublished work remains only in
+the local journal until a later publication succeeds.
+
+Publication responses are bounded to 32 MiB (`PUBLICATION_BATCH` blocks), so a
+node upload finishes within 60 s from a 5 Mbit/s uplink. Consecutive failed
+synchronizations of a conversation back off exponentially from one minute to
+thirty, instead of the five-second urgent floor.
+
 ## Validation
 
 The regression uses 576 alternating 4 KiB reads over nine 4 MiB blocks. Current

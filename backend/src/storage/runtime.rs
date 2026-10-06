@@ -51,6 +51,9 @@ pub(crate) fn configure(state: &Path, policy: &Policy) -> Result<()> {
     Ok(())
 }
 
+/// Longest pause waiting for a late backup before the VM continues without it.
+pub const BACKUP_LAG_PAUSE_MS: i64 = 10 * 60 * 1000;
+
 pub struct Volume {
     pub disk: Arc<LazyDisk>,
     pub source: Arc<Source>,
@@ -60,6 +63,10 @@ pub struct Volume {
     control_policy: RwLock<Policy>,
     active_since: AtomicI64,
     active_attempt: Mutex<String>,
+    /// When the current late backlog first paused the VM; zero when none.
+    backup_lag_since: AtomicI64,
+    /// The backlog outlived its pause: the VM runs while backups keep failing.
+    backup_degraded: AtomicBool,
     pressure: AtomicBool,
     space_pressure: AtomicBool,
     fault: AtomicBool,
@@ -139,6 +146,8 @@ pub fn open(directory: &Path) -> Result<Arc<Volume>> {
         policy: RwLock::new(policy),
         active_since: AtomicI64::new(0),
         active_attempt: Mutex::new(String::new()),
+        backup_lag_since: AtomicI64::new(0),
+        backup_degraded: AtomicBool::new(false),
         pressure: AtomicBool::new(false),
         space_pressure: AtomicBool::new(false),
         fault: AtomicBool::new(false),
@@ -360,13 +369,29 @@ impl Volume {
         }
         let policy = self.control_policy.read().map_err(Error::internal)?;
         let active_since = self.active_since.load(Ordering::Acquire);
-        Ok(self
-            .disk
-            .dirty_since()
-            .filter(|&at| {
-                now.saturating_sub(at.max(active_since)) >= (policy.max_dirty_seconds * 1000) as i64
-            })
-            .map(|_| "backup-lag"))
+        let late = self.disk.dirty_since().is_some_and(|at| {
+            now.saturating_sub(at.max(active_since)) >= (policy.max_dirty_seconds * 1000) as i64
+        });
+        if !late {
+            self.backup_lag_since.store(0, Ordering::Release);
+            self.backup_degraded.store(false, Ordering::Release);
+            return Ok(None);
+        }
+
+        // The pause gives backups time to catch up. When they keep failing,
+        // the VM continues without them instead of freezing indefinitely.
+        let since = match self.backup_lag_since.compare_exchange(
+            0,
+            now,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => now,
+            Err(since) => since,
+        };
+        let expired = now.saturating_sub(since) >= BACKUP_LAG_PAUSE_MS;
+        self.backup_degraded.store(expired, Ordering::Release);
+        Ok((!expired).then_some("backup-lag"))
     }
 
     /// Called under the attempt's control lock, shared with checkpoint capture.
@@ -505,6 +530,9 @@ impl Volume {
                 crate::config::now(),
             )
         };
+        let degraded = self.backup_degraded.load(Ordering::Acquire);
+        let reason = reason.filter(|reason| !(degraded && *reason == "backup-lag"));
+        status["backupDegraded"] = degraded.into();
         status["mode"] = "on-demand".into();
         status["grantId"] = self.source.authorization()?.into();
         status["waitingFor"] = reason.into();
@@ -797,6 +825,52 @@ mod tests {
         volume.fault.store(false, Ordering::SeqCst);
         volume.pressure.store(true, Ordering::SeqCst);
         assert_eq!(volume.control_reason(resumed).unwrap(), Some("disk-space"));
+    }
+
+    #[tokio::test]
+    async fn failing_backups_pause_a_vm_once_then_let_it_run() {
+        let root = tempfile::tempdir().unwrap();
+        let (volume, _, _) = controller_fixture(root.path()).await;
+        volume.disk.write_at(0, b"unsaved work").unwrap();
+        let dirty_since = volume.disk.dirty_since().unwrap();
+        let lagging = dirty_since + 300_000;
+        assert_eq!(volume.control_reason(lagging).unwrap(), Some("backup-lag"));
+        assert_eq!(
+            volume
+                .control_reason(lagging + BACKUP_LAG_PAUSE_MS - 1)
+                .unwrap(),
+            Some("backup-lag")
+        );
+
+        // Production 2026-10-05: a node whose backups kept failing held its
+        // VM paused for 11 hours. The VM continues once the pause expires.
+        assert_eq!(
+            volume
+                .control_reason(lagging + BACKUP_LAG_PAUSE_MS)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            volume
+                .control_reason(lagging + 10 * BACKUP_LAG_PAUSE_MS)
+                .unwrap(),
+            None
+        );
+        assert_eq!(volume.health().unwrap()["backupDegraded"], true);
+
+        // Pauses that protect the disk itself are never bounded.
+        volume.pressure.store(true, Ordering::SeqCst);
+        assert_eq!(
+            volume
+                .control_reason(lagging + 10 * BACKUP_LAG_PAUSE_MS)
+                .unwrap(),
+            Some("disk-space")
+        );
+        volume.pressure.store(false, Ordering::SeqCst);
+
+        // Once the backlog is no longer late, a later backlog pauses again.
+        assert_eq!(volume.control_reason(dirty_since).unwrap(), None);
+        assert_eq!(volume.control_reason(lagging).unwrap(), Some("backup-lag"));
     }
 
     #[tokio::test]
