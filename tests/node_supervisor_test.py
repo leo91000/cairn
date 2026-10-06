@@ -50,6 +50,7 @@ class Supervisor(unittest.TestCase):
         host = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(host)
         self.assertEqual(host.vm_arguments({}), [])
+        self.assertEqual(host.vm_arguments({'readyVmPool': False}), ['-e', 'LEO_READY_VM_POOL=false'])
         config = {'blockTransport': 'ublk', 'vmSnapshots': True}
         self.assertEqual(host.vm_arguments(config), ['-e', 'LEO_DISK_LAYOUT=paired-ext4-v1', '-e', 'LEO_VM_SNAPSHOTS=true'])
         config['readyVmPoolSize'] = 4
