@@ -116,6 +116,10 @@ Sources and library options: [DIRECT-TRANSPORT-RESEARCH.md](DIRECT-TRANSPORT-RES
 
 ## Validation plan
 
+The reproducible Linux bench, commands and current relay-only evidence are in
+[NETWORK-BENCH.md](NETWORK-BENCH.md). It runs without KVM; Android device
+qualification remains part of #105.
+
 A network test bench runs both real binaries, a headless browser and the Android
 emulator through simulated networks:
 

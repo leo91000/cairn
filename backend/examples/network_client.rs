@@ -2,15 +2,22 @@
 use std::{
     env,
     io::{Read, Write},
-    net::{TcpStream, UdpSocket},
+    net::{SocketAddr, TcpStream, UdpSocket},
     time::{Duration, Instant},
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
+    if args.len() < 3 {
+        return Err("Use udp-server ADDRESS, udp-probe LOCAL TARGET TARGET, or http ADDRESS PATH STATUS [MARKER]".into());
+    }
+
     match args.get(1).map(String::as_str) {
         Some("udp-server") => {
             let socket = UdpSocket::bind(&args[2])?;
+            if let Some(ready) = args.get(3) {
+                std::fs::write(ready, b"ready")?;
+            }
             let mut bytes = [0; 512];
             loop {
                 let (length, peer) = socket.recv_from(&mut bytes)?;
@@ -19,6 +26,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Some("udp-probe") => {
+            if args.len() != 5 {
+                return Err("udp-probe requires a local address and two destinations".into());
+            }
             let socket = UdpSocket::bind(&args[2])?;
             socket.set_read_timeout(Some(Duration::from_millis(150)))?;
             let mut received = 0;
@@ -46,6 +56,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Some("http") => {
+            if !(5..=6).contains(&args.len()) {
+                return Err("http requires an address, path and expected status".into());
+            }
             // The bench forwards its loopback development origin through the topology.
             // Credentials come from stdin and are never printed or passed in argv.
             let mut cookie = String::new();
@@ -54,7 +67,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Err("Invalid fixture cookie".into());
             }
             let started = Instant::now();
-            let mut stream = TcpStream::connect(&args[2])?;
+            let address: SocketAddr = args[2].parse()?;
+            if !address.ip().is_loopback() || args[3].contains(['\r', '\n']) {
+                return Err("HTTP probe accepts only a loopback fixture and a valid path".into());
+            }
+            let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(5))?;
             stream.set_read_timeout(Some(Duration::from_secs(5)))?;
             stream.set_write_timeout(Some(Duration::from_secs(5)))?;
             write!(
@@ -63,12 +80,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 args[3], cookie
             )?;
             let mut response = String::new();
-            stream.read_to_string(&mut response)?;
+            stream.take(9_000_001).read_to_string(&mut response)?;
+            if response.len() > 9_000_000 {
+                return Err("Fixture response exceeded the probe limit".into());
+            }
             let status = response
                 .split_whitespace()
                 .nth(1)
-                .ok_or("Missing HTTP status")?;
-            let expected_status = &args[4];
+                .ok_or("Missing HTTP status")?
+                .parse::<u16>()?;
+            let expected_status = args[4].parse::<u16>()?;
             if status != expected_status {
                 return Err(format!("Expected HTTP {expected_status}, received {status}").into());
             }
