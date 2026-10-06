@@ -90,7 +90,7 @@ class Supervisor(unittest.TestCase):
         def read(path):
             return '0' if path.name == 'io_uring_disabled' else devices
 
-        with patch.object(host, 'command') as command, patch.object(Path, 'stat', return_value=control), patch.object(Path, 'read_text', read):
+        with patch.object(host, 'command') as command, patch.object(Path, 'is_dir', return_value=False), patch.object(Path, 'stat', return_value=control), patch.object(Path, 'read_text', read):
             arguments = host.block_device_arguments('ublk')
         self.assertEqual(command.call_args.args[0], ['modprobe', 'ublk_drv'])
         self.assertEqual(arguments, ['--cap-add=SYS_RESOURCE', '--device=/dev/ublk-control', '--device-cgroup-rule=c 507:* rwm', '--device-cgroup-rule=b 260:* rwm', '-e', 'LEO_BLOCK_TRANSPORT=ublk'])
@@ -104,6 +104,24 @@ class Supervisor(unittest.TestCase):
                 host.block_device_arguments('ublk')
         with self.assertRaisesRegex(ValueError, 'Unsupported block transport'):
             host.block_device_arguments('unknown')
+
+    def test_loaded_ublk_does_not_require_the_running_kernels_module_files(self):
+        spec = importlib.util.spec_from_file_location('node_supervisor', SOURCE)
+        host = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(host)
+        control = SimpleNamespace(st_mode=stat.S_IFCHR, st_rdev=os.makedev(10, 261))
+        devices = 'Character devices:\n 507 ublk-char\n\nBlock devices:\n 260 blkext\n'
+
+        def read(path):
+            return '0' if path.name == 'io_uring_disabled' else devices
+
+        with patch.object(host, 'command', side_effect=RuntimeError('Running kernel modules were upgraded')) as command, patch.object(Path, 'is_dir', return_value=True), patch.object(Path, 'stat', return_value=control), patch.object(Path, 'read_text', read):
+            arguments = host.block_device_arguments('ublk')
+
+        command.assert_not_called()
+        self.assertIn('--device=/dev/ublk-control', arguments)
+        self.assertIn('--device-cgroup-rule=c 507:* rwm', arguments)
+        self.assertIn('--device-cgroup-rule=b 260:* rwm', arguments)
 
     def test_ublk_preflight_does_not_remove_a_running_node(self):
         spec = importlib.util.spec_from_file_location('node_supervisor', SOURCE)

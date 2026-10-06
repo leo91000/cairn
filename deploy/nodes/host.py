@@ -132,7 +132,10 @@ def block_device_arguments(transport):
         return []
     if transport != 'ublk':
         raise ValueError('Unsupported block transport')
-    command(['modprobe', 'ublk_drv'], timeout=10)
+    # Package upgrades can remove the running kernel's module files while the
+    # driver is still loaded. Its live devices remain usable until reboot.
+    if not Path('/sys/module/ublk_drv').is_dir():
+        command(['modprobe', 'ublk_drv'], timeout=10)
     control = Path('/dev/ublk-control').stat()
     if not stat.S_ISCHR(control.st_mode):
         raise RuntimeError('Missing ublk control device')

@@ -6,6 +6,14 @@ export interface NodeResources {
   diskMiB: number
 }
 
+export function diskCapacity(node: ExecutionNode): number {
+  const total = node.capabilities.diskTotalMiB
+  if (total !== undefined && total > 0)
+    return total
+
+  return node.capabilities.diskMiB
+}
+
 export interface ExecutionNode {
   id: string
   name: string
@@ -16,6 +24,7 @@ export interface ExecutionNode {
   tags: string[]
   systemTags?: string[]
   capabilities: NodeResources & {
+    diskTotalMiB?: number
     os: string
     arch: string
     kvm: boolean
