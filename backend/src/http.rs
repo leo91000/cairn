@@ -52,11 +52,10 @@ pub async fn router(service: Arc<Service>) -> Result<Router> {
         toolkit,
         limits: Arc::default(),
     };
-    Ok(Router::new()
-        .route("/health", any(health))
-        .route("/mcp", any(crate::mcp_server::handle))
-        .route("/mcp-workspace", any(crate::mcp_server::handle))
-        .route("/mcp-gateway/{id}", any(crate::mcp_server::handle))
+    // Node and execution traffic is never compressed: it carries binary transfers whose
+    // readers require the declared Content-Length, and a proxy in front of the public
+    // origin may add Accept-Encoding to these machine requests.
+    let internal = Router::new()
         .route("/internal/deployment-lease", any(lease))
         .route(
             "/internal/nodes/release",
@@ -86,12 +85,19 @@ pub async fn router(service: Arc<Service>) -> Result<Router> {
         .route(
             "/internal/execution/{*path}",
             any(crate::nodes::transport::proxy),
-        )
+        );
+
+    Ok(Router::new()
+        .route("/health", any(health))
+        .route("/mcp", any(crate::mcp_server::handle))
+        .route("/mcp-workspace", any(crate::mcp_server::handle))
+        .route("/mcp-gateway/{id}", any(crate::mcp_server::handle))
         .route("/api/{*path}", any(api))
         .route("/oauth/{*path}", any(oauth))
         .route("/.well-known/{*path}", any(metadata))
         .fallback_service(ServeDir::new("dist").fallback(ServeFile::new("dist/index.html")))
         .layer(CompressionLayer::new())
+        .merge(internal)
         .layer(middleware::from_fn_with_state(app.clone(), security))
         .with_state(app))
 }
