@@ -1662,3 +1662,96 @@ async fn oauth_sign_in_requires_an_email_confirmation_before_account_deletion() 
     app.close().await;
     provider.server.abort();
 }
+
+#[tokio::test]
+async fn a_session_alone_cannot_register_a_passkey_to_fabricate_a_deletion_proof() {
+    let relay = common::RelayedInstallation::new(axum::Router::new()).await;
+    let app = &relay.app;
+    let start = || {
+        app.authenticated(
+            &relay.cookie,
+            &relay.session,
+            reqwest::Method::POST,
+            "/api/account/passkeys/register/start",
+        )
+    };
+    let mut authenticator = SoftwarePasskey::new(true);
+    let registration: Value = start().send().await.unwrap().json().await.unwrap();
+    let credential = authenticator
+        .do_registration(
+            url::Url::parse(&app.url).unwrap(),
+            serde_json::from_value(registration["options"].clone()).unwrap(),
+        )
+        .unwrap();
+    query("UPDATE web_sessions SET authenticated_at = NULL")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        start().send().await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    let finish = |challenge: &Value,
+                  credential: webauthn_rs::prelude::RegisterPublicKeyCredential| {
+        app.authenticated(
+            &relay.cookie,
+            &relay.session,
+            reqwest::Method::POST,
+            "/api/account/passkeys/register/finish",
+        )
+        .json(&json!({
+            "challenge": challenge,
+            "credential": credential,
+            "label": "Independent confirmation",
+        }))
+    };
+    let rejected = finish(&registration["challenge"], credential)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key LIKE 'email:%'")
+        .execute(&app.pool).await.unwrap();
+    let challenge: Value = app
+        .post(
+            "/api/account/email-code",
+            json!({ "email": "relay-owner@example.test" }),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+    let code = app.mail.0.lock().unwrap().last().unwrap().1.clone();
+    let confirmed = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            reqwest::Method::POST,
+            "/api/account/reauth/email",
+        )
+        .json(&json!({ "challenge": challenge["challenge"], "code": code }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(confirmed.status(), StatusCode::NO_CONTENT);
+    let registration: Value = start().send().await.unwrap().json().await.unwrap();
+    let credential = authenticator
+        .do_registration(
+            url::Url::parse(&app.url).unwrap(),
+            serde_json::from_value(registration["options"].clone()).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        finish(&registration["challenge"], credential)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    relay.close().await;
+}

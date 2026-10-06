@@ -66,6 +66,10 @@ pub(super) async fn register_start(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let (account_id, email) = methods::authenticated(&service, &headers, true).await?;
+    {
+        let mut connection = service.pool.acquire().await?;
+        account::require_recent_proof(&mut connection, &headers).await?;
+    }
     consume_limit(
         &service.pool,
         &format!("passkey-registration:{account_id}"),
@@ -154,6 +158,11 @@ pub(super) async fn register_finish(
         .bind(&account_id)
         .execute(&mut *transaction)
         .await?;
+    // A stale session cannot mint the passkey used to manufacture a fresh proof.
+    // Recheck after the account lock, since the independent proof may expire.
+    methods::authenticated_on(&mut transaction, &headers, true).await?;
+    account::require_recent_proof(&mut transaction, &headers).await?;
+
     let (count,): (i64,) = query_as("SELECT count(*) FROM sign_in_methods WHERE account_id = $1 AND kind = 'passkey' AND NOT removed")
         .bind(&account_id).fetch_one(&mut *transaction).await?;
     if count >= 20 {

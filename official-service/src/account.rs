@@ -225,7 +225,7 @@ async fn delete_access(
     })
 }
 
-async fn require_recent_proof(
+pub(super) async fn require_recent_proof(
     connection: &mut sqlx_postgres::PgConnection,
     headers: &HeaderMap,
 ) -> Result<(), ApiError> {
@@ -234,7 +234,7 @@ async fn require_recent_proof(
     if !recent {
         return Err(ApiError::Http(
             StatusCode::FORBIDDEN,
-            "Confirm your identity with an email code or passkey before deleting your account",
+            "Confirm your identity with an email code or passkey before continuing",
         ));
     }
     Ok(())

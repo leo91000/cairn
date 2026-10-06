@@ -940,8 +940,8 @@ async fn deletion_revokes_other_sessions_mcp_token_families_and_inbound_invitati
             .bearer_auth(token.as_str().unwrap())
             .json(&json!({
                 "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/list",
+                "id": 1,
+                "method": "tools/list",
             }))
     };
     for token in [&personal["token"], &tokens["access_token"]] {
@@ -966,10 +966,10 @@ async fn deletion_revokes_other_sessions_mcp_token_families_and_inbound_invitati
         .post(
             "/api/relay/claim",
             json!({
-                    "code": claim["code"],
-            "name": "Invitation source",
-            "protocol": 1,
-                }),
+                "code": claim["code"],
+                "name": "Invitation source",
+                "protocol": 1,
+            }),
         )
         .await
         .json()

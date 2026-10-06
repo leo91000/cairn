@@ -39,6 +39,7 @@ const options = ref({ google: false, github: false, passkeys: false })
 const methods = ref<SignInMethod[]>([])
 const showMethods = ref(false)
 const showSecurity = ref(false)
+const showIdentityConfirmation = ref(false)
 const passkeyName = ref('My passkey')
 const methodNames = {
   email: 'Email',
@@ -127,6 +128,7 @@ watch(() => state.authenticated, (authenticated) => {
     installation.value = null
     showMethods.value = false
     showSecurity.value = false
+    showIdentityConfirmation.value = false
   }
 })
 
@@ -195,6 +197,7 @@ async function signOut() {
     session.value = null
     showMethods.value = false
     showSecurity.value = false
+    showIdentityConfirmation.value = false
     installation.value = null
     claimCode.value = ''
     deviceCode.value = ''
@@ -768,10 +771,12 @@ onMounted(async () => {
         </UiButton>
       </template>
       <AccountSecurity
-        v-else-if="session?.authenticated && showSecurity"
+        v-else-if="session?.authenticated && (showSecurity || showIdentityConfirmation)"
         :email="session.account?.email || ''"
         :passkeys="options.passkeys"
-        @close="showSecurity = false"
+        :confirmation-only="showIdentityConfirmation"
+        @close="showSecurity = false; showIdentityConfirmation = false"
+        @confirmed="showIdentityConfirmation = false; error = ''"
         @signed-out="redirect('/')"
       />
       <template v-else-if="session?.authenticated && showMethods">
@@ -797,6 +802,17 @@ onMounted(async () => {
             </UiButton>
           </li>
         </ul>
+        <p v-if="options.passkeys" class="text-muted mb-3">
+          Adding a passkey requires an email code or existing passkey confirmed in the last five minutes.
+        </p>
+        <UiButton
+          v-if="options.passkeys"
+          class="mb-3"
+          :disabled="busy"
+          @click="showIdentityConfirmation = true"
+        >
+          Confirm identity
+        </UiButton>
         <form v-if="options.passkeys" class="grid gap-3 mb-6" @submit.prevent="passkey(true)">
           <label>Passkey name<input
             v-model="passkeyName"

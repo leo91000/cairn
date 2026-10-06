@@ -164,7 +164,12 @@ browsers receive an unavailable message and can use email or OAuth instead.
 Passkey sign-in is discoverable: the browser selects a resident key without an
 email lookup. Start options are identical for known, unknown and omitted emails
 and contain no credential IDs. Registration requires a resident credential.
-Adding a named passkey requires a current session, origin and CSRF token; up to
+Adding a named passkey requires a current session, origin, CSRF token and an
+independent email-code or existing passkey proof from the last five minutes in
+that session, checked at both registration start and finish. A session alone
+cannot enroll an attacker's passkey to manufacture a deletion proof. The Sign-in
+methods screen offers Confirm identity before registration; OAuth users can
+confirm a code sent to their verified account email. Up to
 20 passkeys can be registered per account. Registration and authentication states
 stay only in Postgres, expire after five minutes and are consumed once, even on
 invalid proofs. Only public credentials are stored. Removing a passkey also

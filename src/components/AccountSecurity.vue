@@ -12,8 +12,8 @@ interface AccountDevice {
   current: boolean
 }
 
-const props = defineProps<{ email: string, passkeys: boolean }>()
-const emit = defineEmits<{ close: [], signedOut: [] }>()
+const props = defineProps<{ email: string, passkeys: boolean, confirmationOnly?: boolean }>()
+const emit = defineEmits<{ close: [], signedOut: [], confirmed: [] }>()
 const confirmDelete = ref(false)
 const confirmation = ref('')
 const sessions = ref<AccountDevice[]>([])
@@ -110,6 +110,11 @@ async function confirmIdentity(method: 'send-code' | 'email' | 'passkey') {
 
     challenge.value = ''
     code.value = ''
+    if (props.confirmationOnly) {
+      emit('confirmed')
+      return
+    }
+
     identityConfirmed.value = true
     clearTimeout(confirmationTimer)
     confirmationTimer = setTimeout(() => identityConfirmed.value = false, 5 * 60 * 1000)
@@ -145,61 +150,68 @@ function date(value: string) {
   return new Date(value).toLocaleString()
 }
 
-onMounted(() => update())
+onMounted(() => {
+  if (!props.confirmationOnly)
+    void update()
+})
 </script>
 
 <template>
   <div class="grid gap-4" :aria-busy="busy">
     <h1 class="font-heading text-2xl">
-      Account security
+      {{ props.confirmationOnly ? 'Confirm identity' : 'Account security' }}
     </h1>
-    <h2 class="font-semibold">
-      Active sessions
-    </h2>
-    <p class="text-muted">
-      Revoke a lost device to sign it out and close its live views. Agent work continues on your installations.
-    </p>
-    <ul class="grid gap-3">
-      <li v-for="session in sessions" :key="session.id" class="border border-line rounded-xl p-4 grid gap-2 min-w-0">
-        <strong v-if="session.current">This device</strong>
-        <span class="break-all">{{ session.device }}</span>
-        <span class="text-muted">Signed in {{ date(session.createdAt) }}</span>
-        <span class="text-muted">Expires {{ date(session.expiresAt) }}</span>
-        <UiButton :disabled="busy" :aria-label="`Revoke ${session.current ? 'this device' : session.device}`" @click="update(`sessions/${encodeURIComponent(session.id)}`, session.current)">
-          {{ session.current ? 'Sign out this device' : 'Revoke session' }}
-        </UiButton>
-      </li>
-    </ul>
-    <UiButton :disabled="busy || !sessions.some(session => !session.current)" @click="update('sessions/revoke-others')">
-      Revoke other devices
-    </UiButton>
+    <template v-if="!props.confirmationOnly">
+      <h2 class="font-semibold">
+        Active sessions
+      </h2>
+      <p class="text-muted">
+        Revoke a lost device to sign it out and close its live views. Agent work continues on your installations.
+      </p>
+      <ul class="grid gap-3">
+        <li v-for="session in sessions" :key="session.id" class="border border-line rounded-xl p-4 grid gap-2 min-w-0">
+          <strong v-if="session.current">This device</strong>
+          <span class="break-all">{{ session.device }}</span>
+          <span class="text-muted">Signed in {{ date(session.createdAt) }}</span>
+          <span class="text-muted">Expires {{ date(session.expiresAt) }}</span>
+          <UiButton :disabled="busy" :aria-label="`Revoke ${session.current ? 'this device' : session.device}`" @click="update(`sessions/${encodeURIComponent(session.id)}`, session.current)">
+            {{ session.current ? 'Sign out this device' : 'Revoke session' }}
+          </UiButton>
+        </li>
+      </ul>
+      <UiButton :disabled="busy || !sessions.some(session => !session.current)" @click="update('sessions/revoke-others')">
+        Revoke other devices
+      </UiButton>
+    </template>
     <section class="border-t border-line pt-4 grid gap-3">
       <h2 class="font-semibold">
-        Delete account
+        {{ props.confirmationOnly ? 'Confirm identity before adding a passkey' : 'Delete account' }}
       </h2>
-      <UiButton v-if="!confirmDelete" :disabled="busy" @click="confirmDelete = true">
+      <UiButton v-if="!confirmDelete && !props.confirmationOnly" :disabled="busy" @click="confirmDelete = true">
         Delete account
       </UiButton>
-      <form v-else class="grid gap-3" @submit.prevent="deleteAccount">
-        <p>Your installations become unclaimed. Their data stays on their machines; all members lose access.</p>
-        <p class="text-muted">
-          Your sessions and sign-in methods are removed. Running agent work continues. You can claim the installations again from their machines.
-        </p>
-        <label>Account email to confirm deletion<input
-          v-model="confirmation"
-          type="email"
-          autocomplete="off"
-          required
-          :disabled="busy"
-        ></label>
-        <p class="text-muted break-all">
-          Enter {{ props.email }} to confirm.
-        </p>
+      <form v-else class="grid gap-3" @submit.prevent="props.confirmationOnly ? confirmIdentity(challenge ? 'email' : 'send-code') : deleteAccount()">
+        <template v-if="!props.confirmationOnly">
+          <p>Your installations become unclaimed. Their data stays on their machines; all members lose access.</p>
+          <p class="text-muted">
+            Your sessions and sign-in methods are removed. Running agent work continues. You can claim the installations again from their machines.
+          </p>
+          <label>Account email to confirm deletion<input
+            v-model="confirmation"
+            type="email"
+            autocomplete="off"
+            required
+            :disabled="busy"
+          ></label>
+          <p class="text-muted break-all">
+            Enter {{ props.email }} to confirm.
+          </p>
+        </template>
         <p v-if="identityConfirmed" role="status">
           Identity confirmed for five minutes.
         </p>
         <template v-else>
-          <p>Confirm your identity with an email code or passkey before deleting your account.</p>
+          <p>Confirm your identity with an email code or passkey to continue.</p>
           <UiButton v-if="props.passkeys" :disabled="busy" @click="confirmIdentity('passkey')">
             Confirm with a passkey
           </UiButton>
@@ -218,10 +230,10 @@ onMounted(() => update())
             </UiButton>
           </template>
         </template>
-        <UiButton type="submit" :disabled="busy || !identityConfirmed || confirmation.trim() !== props.email">
+        <UiButton v-if="!props.confirmationOnly" type="submit" :disabled="busy || !identityConfirmed || confirmation.trim() !== props.email">
           Confirm account deletion
         </UiButton>
-        <UiButton :disabled="busy" @click="resetDeletion">
+        <UiButton v-if="!props.confirmationOnly" :disabled="busy" @click="resetDeletion">
           Cancel deletion
         </UiButton>
       </form>
@@ -230,7 +242,7 @@ onMounted(() => update())
       {{ error }}
     </UiAlert>
     <UiButton :disabled="busy" @click="emit('close')">
-      Back to installations
+      {{ props.confirmationOnly ? 'Back to sign-in methods' : 'Back to installations' }}
     </UiButton>
   </div>
 </template>
