@@ -173,7 +173,9 @@ confirm a code sent to their verified account email. Up to
 20 passkeys can be registered per account. Registration and authentication states
 stay only in Postgres, expire after five minutes and are consumed once, even on
 invalid proofs. Only public credentials are stored. Removing a passkey also
-invalidates challenges already issued for it.
+invalidates challenges already issued for it. Removing any sign-in method
+requires the same recent independent proof as registration, checked before and
+after waiting for the account lock. OAuth alone cannot remove recovery methods.
 
 Sign-in methods are managed from the empty installation screen. Concurrent
 removals lock the account and preserve at least one method. Removed email and
@@ -324,12 +326,27 @@ No request deletes installation data or stops admitted work. Owned installations
 remain unclaimed under their existing IDs; run `leo claim` on each machine and
 restart its manager to recover access. Members never inherit ownership.
 Deleting a member preserves other people's installations and sessions.
-Account deletion additionally requires an email-code or user-verified passkey
+Account deletion, installation detachment, definitive installation revocation
+and removal of sign-in methods require an email-code or user-verified passkey
 proof from the last **five minutes**, in the **calling session**. A fresh email
 or passkey sign-in qualifies; OAuth sign-in alone does not. Sessions issued before
 the additive migration remain usable but have no qualifying proof. The web asks
 for an explicit confirmation before enabling deletion, including after a reload
 or cancelling and reopening the form. Reconfirm if the five-minute window expires.
+
+The proof grants a **reusable five-minute window**, not a one-use authorization:
+several sensitive actions can use it in that session until it expires. The email
+code or WebAuthn challenge itself is still consumed once. `web_sessions.last_proof_at`
+records the last independent email/passkey proof, not an OAuth login or session
+activity. A new additive rename migration preserves existing proof timestamps,
+CSRF, cookie digests and deadlines, leaving historical SQLx checksums intact.
+Update the official binary with this migration; older binaries still using the
+previous column name cannot serve that database. Upgrade its web bundle too.
+
+The installation actions expose **Confirm identity** in their confirmation form;
+after verification the app returns to that form without performing the action.
+Sign-in methods offers the same control for both registration and removal,
+including email confirmation on browsers without WebAuthn support.
 
 `POST /api/account/reauth/email` accepts the existing email-code challenge and
 code, using the normal delivery and verification limits. It checks the proof's
@@ -342,8 +359,13 @@ implementation, with a single-use challenge bound to the current account/session
 A passkey belonging to a different account cannot confirm the caller. Origin,
 CSRF, current session and current credential checks remain mandatory. Confirmation
 preserves the session bearer, CSRF and expiration; other devices are unaffected.
-Deletion returns 403 without a recent proof and rechecks the session and proof
-after waiting for all affected access locks, immediately before mutations.
+Sensitive actions return 403 without a recent proof before taking account/access
+locks. Unconfirmed deletion attempts do not spend the account-delete budget.
+Each action rechecks the current session and proof after waiting for all its
+account/installation locks, immediately before mutations. Installation removal
+locks the account then its installation, consistently with account deletion.
+Rejected actions preserve the installation, sharing and live streams; successful
+removal retains the existing transaction and relay-revocation behavior.
 
 Deletion shares the address lock with code delivery/verification, rechecks the
 session against the current clock after waiting, and retries a rolled-back

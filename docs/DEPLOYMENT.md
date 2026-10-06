@@ -72,6 +72,10 @@ run-scoped `/mcp-workspace` and `/mcp-gateway` retain their own machine credenti
 they do not accept browser sessions or local personal tokens. Keep port 4310
 private, only reachable by runners/nodes and deployment health checks.
 
+Detaching or definitively revoking an installation requires an email/passkey
+proof from the last five minutes in the calling session; use **Confirm identity**
+in its confirmation form.
+
 Detaching an installation revokes access and disconnects the active tunnel while
 preserving the official installation record and its local data. Deleting its
 owner account has the same effect. To claim it again, run `leo claim` on its

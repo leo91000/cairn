@@ -755,6 +755,23 @@ async fn verified_google_and_github_emails_attach_to_the_same_leo_account() {
             .iter()
             .find(|method| method["kind"] == name)
             .unwrap();
+        // OAuth alone is not an independent mailbox/passkey proof. Advance the
+        // fixture's email delivery window, then confirm this OAuth session.
+        query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key LIKE 'email:%'")
+            .execute(&app.pool).await.unwrap();
+        let (challenge, code) = app.code("alice@example.test").await;
+        let confirmation = app
+            .authenticated(
+                session_cookie,
+                &session,
+                reqwest::Method::POST,
+                "/api/account/reauth/email",
+            )
+            .json(&json!({ "challenge": challenge, "code": code }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(confirmation.status(), StatusCode::NO_CONTENT);
         let removed = app
             .client
             .post(format!("{}/api/account/methods/remove", app.url))
@@ -1512,7 +1529,7 @@ async fn a_verified_passkey_confirms_only_its_bound_session_before_account_delet
     query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key LIKE 'email:%'")
         .execute(&app.pool).await.unwrap();
     let (other_cookie, other_session) = common::login(app, "relay-owner@example.test").await;
-    query("UPDATE web_sessions SET authenticated_at = NULL")
+    query("UPDATE web_sessions SET last_proof_at = NULL")
         .execute(&app.pool)
         .await
         .unwrap();
@@ -1683,7 +1700,7 @@ async fn a_session_alone_cannot_register_a_passkey_to_fabricate_a_deletion_proof
             serde_json::from_value(registration["options"].clone()).unwrap(),
         )
         .unwrap();
-    query("UPDATE web_sessions SET authenticated_at = NULL")
+    query("UPDATE web_sessions SET last_proof_at = NULL")
         .execute(&app.pool)
         .await
         .unwrap();
@@ -1752,6 +1769,273 @@ async fn a_session_alone_cannot_register_a_passkey_to_fabricate_a_deletion_proof
     assert_eq!(
         relay.get("/chats").send().await.unwrap().status(),
         StatusCode::OK
+    );
+    relay.close().await;
+}
+
+async fn register_confirmation_key(
+    app: &Fixture,
+    cookie: &str,
+    session: &Value,
+) -> SoftwarePasskey {
+    let mut authenticator = SoftwarePasskey::new(true);
+    let registration: Value = app
+        .authenticated(
+            cookie,
+            session,
+            reqwest::Method::POST,
+            "/api/account/passkeys/register/start",
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let credential = authenticator
+        .do_registration(
+            url::Url::parse(&app.url).unwrap(),
+            serde_json::from_value(registration["options"].clone()).unwrap(),
+        )
+        .unwrap();
+    let registered = app
+        .authenticated(
+            cookie,
+            session,
+            reqwest::Method::POST,
+            "/api/account/passkeys/register/finish",
+        )
+        .json(&json!({
+            "challenge": registration["challenge"],
+            "credential": credential,
+            "label": "Confirmation key",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), StatusCode::CREATED);
+    authenticator
+}
+
+#[tokio::test]
+async fn removing_sign_in_methods_requires_a_recent_reusable_session_proof() {
+    let relay = common::RelayedInstallation::new(axum::Router::new()).await;
+    let app = &relay.app;
+    register_confirmation_key(app, &relay.cookie, &relay.session).await;
+    register_confirmation_key(app, &relay.cookie, &relay.session).await;
+    let methods: Value = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            reqwest::Method::GET,
+            "/api/account/methods",
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(methods["methods"].as_array().unwrap().len(), 3);
+    query("UPDATE web_sessions SET last_proof_at = now() - interval '6 minutes'")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    for method in &methods["methods"].as_array().unwrap()[..2] {
+        let rejected = app
+            .authenticated(
+                &relay.cookie,
+                &relay.session,
+                reqwest::Method::POST,
+                "/api/account/methods/remove",
+            )
+            .json(&json!({ "id": method["id"] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    }
+    let preserved: Value = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            reqwest::Method::GET,
+            "/api/account/methods",
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(preserved, methods);
+
+    query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second'")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let (challenge, code) = app.code("relay-owner@example.test").await;
+    let confirmed = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            reqwest::Method::POST,
+            "/api/account/reauth/email",
+        )
+        .json(&json!({ "challenge": challenge, "code": code }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(confirmed.status(), StatusCode::NO_CONTENT);
+    for method in &methods["methods"].as_array().unwrap()[..2] {
+        let removed = app
+            .authenticated(
+                &relay.cookie,
+                &relay.session,
+                reqwest::Method::POST,
+                "/api/account/methods/remove",
+            )
+            .json(&json!({ "id": method["id"] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+    }
+    let last = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            reqwest::Method::POST,
+            "/api/account/methods/remove",
+        )
+        .json(&json!({ "id": methods["methods"][2]["id"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(last.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn another_accounts_passkey_cannot_confirm_a_session_or_authorize_deletion() {
+    let relay = common::RelayedInstallation::new(axum::Router::new()).await;
+    let app = &relay.app;
+    let (foreign_cookie, foreign_session) = common::login(app, "foreign@example.test").await;
+    let mut foreign_key = register_confirmation_key(app, &foreign_cookie, &foreign_session).await;
+    query("UPDATE web_sessions SET last_proof_at = NULL")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let start: Value = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            reqwest::Method::POST,
+            "/api/account/passkeys/reauth/start",
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let credential = foreign_key
+        .do_authentication(
+            url::Url::parse(&app.url).unwrap(),
+            serde_json::from_value(start["options"].clone()).unwrap(),
+        )
+        .unwrap();
+    let response = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            reqwest::Method::POST,
+            "/api/account/passkeys/reauth/finish",
+        )
+        .json(&json!({ "challenge": start["challenge"], "credential": credential }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let rejected = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            reqwest::Method::POST,
+            "/api/account/delete",
+        )
+        .json(&json!({ "email": "relay-owner@example.test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn a_fresh_passkey_sign_in_can_delete_the_account_without_another_confirmation() {
+    let relay = common::RelayedInstallation::new(axum::Router::new()).await;
+    let app = &relay.app;
+    let mut key = register_confirmation_key(app, &relay.cookie, &relay.session).await;
+    let start = app
+        .post("/api/account/passkeys/login/start", json!({}))
+        .await;
+    let browser_cookie = start.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let start: Value = start.json().await.unwrap();
+    let credential = key
+        .do_authentication(
+            url::Url::parse(&app.url).unwrap(),
+            serde_json::from_value(start["options"].clone()).unwrap(),
+        )
+        .unwrap();
+    let response = app
+        .client
+        .post(format!("{}/api/account/passkeys/login/finish", app.url))
+        .header("origin", &app.url)
+        .header("cookie", browser_cookie)
+        .json(&json!({ "challenge": start["challenge"], "credential": credential }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let session: Value = response.json().await.unwrap();
+    assert_eq!(session["account"], relay.session["account"]);
+    let deleted = app
+        .authenticated(
+            &cookie,
+            &session,
+            reqwest::Method::POST,
+            "/api/account/delete",
+        )
+        .json(&json!({ "email": "relay-owner@example.test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
     );
     relay.close().await;
 }

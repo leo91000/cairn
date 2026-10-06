@@ -247,7 +247,14 @@ pub(super) async fn reauth_finish(
     Json(input): Json<Authentication>,
 ) -> Result<Response, ApiError> {
     methods::authenticated(&service, &headers, true).await?;
-    complete_login(&service, peer, &headers, input, true).await
+    complete_login(
+        &service,
+        peer,
+        &headers,
+        input,
+        ProofPurpose::ConfirmSession,
+    )
+    .await
 }
 
 #[derive(Deserialize)]
@@ -263,7 +270,9 @@ pub(super) async fn login_finish(
     input: Result<Json<Authentication>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
     let result = match input {
-        Ok(Json(input)) => complete_login(&service, peer, &headers, input, false).await,
+        Ok(Json(input)) => {
+            complete_login(&service, peer, &headers, input, ProofPurpose::SignIn).await
+        }
         Err(_) => Err(ApiError::Http(
             StatusCode::BAD_REQUEST,
             "Invalid passkey proof",
@@ -287,19 +296,19 @@ async fn complete_login(
     peer: SocketAddr,
     headers: &HeaderMap,
     input: Authentication,
-    reauthenticate: bool,
+    purpose: ProofPurpose,
 ) -> Result<Response, ApiError> {
     consume_limit(&service.pool, &format!("passkey-login:{}", peer.ip()), 30).await?;
 
     let (owner_session, bound_session, state) = take_challenge(
         service,
         &input.challenge,
-        if reauthenticate {
+        if purpose == ProofPurpose::ConfirmSession {
             "passkey-reauth"
         } else {
             "passkey-login"
         },
-        if reauthenticate {
+        if purpose == ProofPurpose::ConfirmSession {
             session_token(headers)
         } else {
             cookie_token(headers, "leo_passkey")
@@ -312,7 +321,7 @@ async fn complete_login(
         .identify_discoverable_authentication(&input.credential)
         .map_err(|_| rejected())?;
     let account_id = owner.to_string();
-    if reauthenticate
+    if purpose == ProofPurpose::ConfirmSession
         && (owner_session.as_deref() != Some(&account_id)
             || bound_session.as_deref() != Some(digest(session_token(headers)).as_str()))
     {
@@ -347,7 +356,7 @@ async fn complete_login(
         .execute(&mut *transaction)
         .await?;
 
-    let response = if reauthenticate {
+    let response = if purpose == ProofPurpose::ConfirmSession {
         account::confirm_identity(&mut transaction, headers).await?;
         StatusCode::NO_CONTENT.into_response()
     } else {

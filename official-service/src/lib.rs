@@ -472,7 +472,7 @@ async fn verify_code(
     headers: HeaderMap,
     Json(input): Json<Verification>,
 ) -> Result<Response, ApiError> {
-    verify_email(&service, peer, &headers, input, false).await
+    verify_email(&service, peer, &headers, input, ProofPurpose::SignIn).await
 }
 
 async fn reauthenticate_email(
@@ -482,7 +482,14 @@ async fn reauthenticate_email(
     Json(input): Json<Verification>,
 ) -> Result<Response, ApiError> {
     methods::authenticated(&service, &headers, true).await?;
-    verify_email(&service, peer, &headers, input, true).await
+    verify_email(
+        &service,
+        peer,
+        &headers,
+        input,
+        ProofPurpose::ConfirmSession,
+    )
+    .await
 }
 
 async fn verify_email(
@@ -490,7 +497,7 @@ async fn verify_email(
     peer: SocketAddr,
     headers: &HeaderMap,
     input: Verification,
-    reauthenticate: bool,
+    purpose: ProofPurpose,
 ) -> Result<Response, ApiError> {
     consume_limit(&service.pool, &format!("verification:{}", peer.ip()), 30).await?;
 
@@ -534,7 +541,7 @@ async fn verify_email(
         return Err(invalid());
     }
 
-    if reauthenticate {
+    if purpose == ProofPurpose::ConfirmSession {
         let (account, current_email) =
             methods::authenticated_on(&mut transaction, headers, true).await?;
         if current_email != email {
@@ -592,6 +599,13 @@ async fn verify_email(
     Ok(response)
 }
 
+/// Whether a valid independent proof creates a session or confirms the caller.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProofPurpose {
+    SignIn,
+    ConfirmSession,
+}
+
 enum SessionProof {
     Email,
     Passkey,
@@ -621,7 +635,7 @@ async fn create_session(
         .take(256)
         .collect();
     let recent_proof = matches!(proof, SessionProof::Email | SessionProof::Passkey);
-    query("INSERT INTO web_sessions (digest, account_id, csrf, expires_at, device, authenticated_at) VALUES ($1, $2, $3, now() + interval '7 days', $4, CASE WHEN $5 THEN clock_timestamp() END)")
+    query("INSERT INTO web_sessions (digest, account_id, csrf, expires_at, device, last_proof_at) VALUES ($1, $2, $3, now() + interval '7 days', $4, CASE WHEN $5 THEN clock_timestamp() END)")
         .bind(digest(&token)).bind(account_id).bind(&csrf).bind(device).bind(recent_proof).execute(&mut *connection).await?;
 
     let secure = if service.origin.starts_with("https://") {

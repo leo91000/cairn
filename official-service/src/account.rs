@@ -105,6 +105,10 @@ pub(super) async fn delete(
     Json(input): Json<Deletion>,
 ) -> Result<Response, ApiError> {
     let (account, email) = methods::authenticated(&service, &headers, true).await?;
+    {
+        let mut connection = service.pool.acquire().await?;
+        require_recent_proof(&mut connection, &headers).await?;
+    }
     consume_limit(&service.pool, &format!("account-delete:{account}"), 5).await?;
 
     if input.email.trim() != email {
@@ -229,7 +233,7 @@ pub(super) async fn require_recent_proof(
     connection: &mut sqlx_postgres::PgConnection,
     headers: &HeaderMap,
 ) -> Result<(), ApiError> {
-    let (recent,): (bool,) = query_as("SELECT EXISTS (SELECT 1 FROM web_sessions WHERE digest = $1 AND authenticated_at > clock_timestamp() - interval '5 minutes' AND authenticated_at <= clock_timestamp())")
+    let (recent,): (bool,) = query_as("SELECT EXISTS (SELECT 1 FROM web_sessions WHERE digest = $1 AND expires_at > clock_timestamp() AND last_proof_at > clock_timestamp() - interval '5 minutes' AND last_proof_at <= clock_timestamp())")
         .bind(digest(session_token(headers))).fetch_one(connection).await?;
     if !recent {
         return Err(ApiError::Http(
@@ -247,7 +251,7 @@ pub(super) async fn confirm_identity(
     headers: &HeaderMap,
 ) -> Result<(), ApiError> {
     methods::authenticated_on(connection, headers, true).await?;
-    query("UPDATE web_sessions SET authenticated_at = clock_timestamp() WHERE digest = $1")
+    query("UPDATE web_sessions SET last_proof_at = clock_timestamp() WHERE digest = $1")
         .bind(digest(session_token(headers)))
         .execute(connection)
         .await?;

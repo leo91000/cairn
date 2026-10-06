@@ -711,7 +711,7 @@ async fn deletion_retries_rolled_back_database_deadlocks_and_bounds_persistent_f
 async fn deletion_requires_a_recent_email_or_passkey_proof_in_the_callers_session() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     let app = &relay.app;
-    query("UPDATE web_sessions SET authenticated_at = now() - interval '1 hour'")
+    query("UPDATE web_sessions SET last_proof_at = now() - interval '1 hour'")
         .execute(&app.pool)
         .await
         .unwrap();
@@ -743,7 +743,7 @@ async fn email_confirmation_is_single_use_for_only_the_current_account_and_sessi
         .execute(&app.pool).await.unwrap();
     let (other_cookie, other_session) = login(app, "relay-owner@example.test").await;
     let (stranger_cookie, stranger) = login(app, "stranger@example.test").await;
-    query("UPDATE web_sessions SET authenticated_at = NULL")
+    query("UPDATE web_sessions SET last_proof_at = NULL")
         .execute(&app.pool)
         .await
         .unwrap();
@@ -1083,7 +1083,7 @@ async fn a_proof_expiring_while_deletion_waits_does_not_authorize_the_mutation()
         .json(&json!({ "email": "relay-owner@example.test" }));
     let deletion = tokio::spawn(async move { request.send().await.unwrap() });
     wait_for_account_lock(app, relay.session["account"]["id"].as_str().unwrap()).await;
-    query("UPDATE web_sessions SET authenticated_at = clock_timestamp() - interval '5 minutes'")
+    query("UPDATE web_sessions SET last_proof_at = clock_timestamp() - interval '5 minutes'")
         .execute(&app.pool)
         .await
         .unwrap();
@@ -1093,5 +1093,73 @@ async fn a_proof_expiring_while_deletion_waits_does_not_authorize_the_mutation()
         relay.get("/chats").send().await.unwrap().status(),
         StatusCode::OK
     );
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn an_unconfirmed_deletion_neither_waits_for_account_locks_nor_spends_the_deletion_budget() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let app = &relay.app;
+    query("UPDATE web_sessions SET last_proof_at = NULL")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let mut barrier = app.pool.begin().await.unwrap();
+    query("SELECT id FROM leo_accounts FOR UPDATE")
+        .execute(&mut *barrier)
+        .await
+        .unwrap();
+    for _ in 0..6 {
+        let request = app
+            .authenticated(
+                &relay.cookie,
+                &relay.session,
+                Method::POST,
+                "/api/account/delete",
+            )
+            .json(&json!({ "email": "relay-owner@example.test" }));
+        let response = tokio::time::timeout(Duration::from_secs(1), request.send())
+            .await
+            .expect("a missing proof must be refused before waiting for locks")
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+    barrier.commit().await.unwrap();
+    query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key LIKE 'email:%'")
+        .execute(&app.pool).await.unwrap();
+    let challenge: Value = app
+        .post(
+            "/api/account/email-code",
+            json!({ "email": "relay-owner@example.test" }),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+    let code = app.mail.0.lock().unwrap().last().unwrap().1.clone();
+    let confirmation = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            "/api/account/reauth/email",
+        )
+        .json(&json!({ "challenge": challenge["challenge"], "code": code }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(confirmation.status(), StatusCode::NO_CONTENT);
+    let deletion = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            "/api/account/delete",
+        )
+        .json(&json!({ "email": "relay-owner@example.test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deletion.status(), StatusCode::NO_CONTENT);
     relay.close().await;
 }
