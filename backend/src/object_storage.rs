@@ -20,7 +20,8 @@ type PendingRead = OnceCell<Result<bytes::Bytes>>;
 
 type ReadKey = (String, String, u64, Option<String>, String);
 
-pub(crate) const HOT_WRITE_CONCURRENCY: usize = 4;
+// Shared by all publications; each slot includes full read-back verification.
+pub(crate) const HOT_WRITE_CONCURRENCY: usize = 16;
 
 #[derive(PartialEq, Eq)]
 struct ClientKey {
@@ -600,9 +601,127 @@ impl Storage {
 mod tests {
     use super::*;
 
+    async fn fixture_storage(endpoint: &str, bucket: &str, hot: Arc<HotS3>) -> Storage {
+        use aws_sdk_s3::config::{Credentials, Region, retry::RetryConfig};
+
+        let sdk = aws_sdk_s3::Client::from_conf(
+            aws_sdk_s3::config::Builder::new()
+                .behavior_version_latest()
+                .region(Region::new("us-east-1"))
+                .credentials_provider(Credentials::new(
+                    "fixture", "fixture", None, None, "fixture",
+                ))
+                .endpoint_url(endpoint)
+                .force_path_style(true)
+                .retry_config(RetryConfig::standard().with_max_attempts(1))
+                .build(),
+        );
+        *hot.client.lock().await = Some((
+            ClientKey {
+                endpoint: Some(endpoint.into()),
+                region: "us-east-1".into(),
+                environment_endpoint: std::env::var("AWS_ENDPOINT_URL_S3").ok(),
+                profile: std::env::var("AWS_PROFILE").ok(),
+            },
+            sdk,
+        ));
+        Storage {
+            bucket: bucket.into(),
+            binary: "unused".into(),
+            endpoint: Some(endpoint.into()),
+            region: "us-east-1".into(),
+            hot,
+        }
+    }
+
+    #[tokio::test]
+    async fn uploads_share_sixteen_slots_until_readback_and_release_them_after_corruption() {
+        use axum::{
+            Router,
+            body::{Bytes, to_bytes},
+            extract::Request,
+            http::Method,
+        };
+        use tokio::task::JoinSet;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let objects = Arc::new(Mutex::new(HashMap::<String, Bytes>::new()));
+        let put_started = Arc::new(Semaphore::new(0));
+        let verify_gate = Arc::new(Semaphore::new(0));
+        let app = Router::new().fallback({
+            let objects = objects.clone();
+            let put_started = put_started.clone();
+            let verify_gate = verify_gate.clone();
+            move |request: Request| {
+                let objects = objects.clone();
+                let put_started = put_started.clone();
+                let verify_gate = verify_gate.clone();
+                async move {
+                    let key = request.uri().path().to_owned();
+                    if request.method() == Method::PUT {
+                        let bytes = to_bytes(request.into_body(), 64).await.unwrap();
+                        objects.lock().await.insert(key, bytes);
+                        put_started.add_permits(1);
+                        return Bytes::new();
+                    }
+
+                    assert_eq!(request.method(), Method::GET);
+                    verify_gate.acquire().await.unwrap().forget();
+                    if key.ends_with("/corrupt") {
+                        return Bytes::from_static(b"broken");
+                    }
+                    objects.lock().await.get(&key).unwrap().clone()
+                }
+            }
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let hot = Arc::new(HotS3::new());
+        let first = fixture_storage(&endpoint, "first", hot.clone()).await;
+        let second = fixture_storage(&endpoint, "second", hot.clone()).await;
+        let mut uploads = JoinSet::new();
+        for index in 0..17 {
+            let storage = if index % 2 == 0 {
+                first.clone()
+            } else {
+                second.clone()
+            };
+            uploads.spawn(async move {
+                storage
+                    .upload_bytes(b"backup".to_vec(), &format!("block-{index}"))
+                    .await
+            });
+        }
+
+        tokio::time::timeout(Duration::from_secs(5), put_started.acquire_many(16))
+            .await
+            .expect("sixteen uploads must start across both storage instances")
+            .unwrap()
+            .forget();
+        assert_eq!(objects.lock().await.len(), 16);
+        assert_eq!(hot.writes.available_permits(), 0);
+        assert!(
+            uploads.try_join_next().is_none(),
+            "uploads must wait for readback"
+        );
+
+        verify_gate.add_permits(18);
+        while let Some(upload) = uploads.join_next().await {
+            upload.unwrap().unwrap();
+        }
+        assert_eq!(objects.lock().await.len(), 17);
+
+        let error = first
+            .upload_bytes(b"backup".to_vec(), "corrupt")
+            .await
+            .unwrap_err();
+        assert_eq!(error.message, "Remote backup checksum mismatch.");
+        assert_eq!(hot.writes.available_permits(), 16);
+        server.abort();
+    }
+
     #[tokio::test]
     async fn recovery_reads_distinguish_permanent_refusals_from_temporary_outages() {
-        use aws_sdk_s3::config::{Credentials, Region, retry::RetryConfig};
         use axum::{Router, http::StatusCode, routing::get};
         for (status, code, expected) in [
             (403, "AccessDenied", 424),
@@ -622,35 +741,7 @@ mod tests {
                 )
             }));
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            let sdk = aws_sdk_s3::Client::from_conf(
-                aws_sdk_s3::config::Builder::new()
-                    .behavior_version_latest()
-                    .region(Region::new("us-east-1"))
-                    .credentials_provider(Credentials::new(
-                        "fixture", "fixture", None, None, "fixture",
-                    ))
-                    .endpoint_url(&endpoint)
-                    .force_path_style(true)
-                    .retry_config(RetryConfig::standard().with_max_attempts(1))
-                    .build(),
-            );
-            let hot = Arc::new(HotS3::new());
-            *hot.client.lock().await = Some((
-                ClientKey {
-                    endpoint: Some(endpoint.clone()),
-                    region: "us-east-1".into(),
-                    environment_endpoint: std::env::var("AWS_ENDPOINT_URL_S3").ok(),
-                    profile: std::env::var("AWS_PROFILE").ok(),
-                },
-                sdk,
-            ));
-            let storage = Storage {
-                bucket: "fixture".into(),
-                binary: "unused".into(),
-                endpoint: Some(endpoint),
-                region: "us-east-1".into(),
-                hot,
-            };
+            let storage = fixture_storage(&endpoint, "fixture", Arc::new(HotS3::new())).await;
             let error = storage.download_bytes("block", 4096).await.unwrap_err();
             server.abort();
             assert_eq!(
