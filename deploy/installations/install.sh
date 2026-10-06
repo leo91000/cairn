@@ -59,24 +59,21 @@ main() {
   LEO_INSTALL_TEMP=$(mktemp "$LEO_INSTALLATION_ROOT/install.XXXXXX")
   trap 'rm -f "$LEO_INSTALL_TEMP"' EXIT
 
-  curl --fail --silent --show-error --proto '=https' --max-time 30 "${LEO_OFFICIAL_ORIGIN}/install/host.py" > "$LEO_INSTALL_TEMP" || fail 'Cannot download the installer. Check outbound HTTPS connectivity.'
-  python3 - "$LEO_INSTALL_TEMP" "$LEO_HOST_SHA256" <<'PYTHON' || fail 'Installer checksum mismatch. Download a fresh command from the official app and retry.'
+  download_supervisor() {
+    local asset=$1 checksum=$2 destination=$3
+    curl --fail --silent --show-error --proto '=https' --max-time 30 "${LEO_OFFICIAL_ORIGIN}/install/${asset}" > "$LEO_INSTALL_TEMP" || fail 'Cannot download the supervisor. Check outbound HTTPS connectivity.'
+    python3 - "$LEO_INSTALL_TEMP" "$checksum" <<'PYTHON' || fail 'Supervisor checksum mismatch. Download a fresh command from the official app and retry.'
 import hashlib
 from pathlib import Path
 import sys
 sys.exit(0 if hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest() == sys.argv[2] else 1)
 PYTHON
-  python3 -m py_compile "$LEO_INSTALL_TEMP"
-  install -m 0700 "$LEO_INSTALL_TEMP" "$LEO_INSTALLATION_ROOT/host.py"
-  curl --fail --silent --show-error --proto '=https' --max-time 30 "${LEO_OFFICIAL_ORIGIN}/install/node-host.py" > "$LEO_INSTALL_TEMP" || fail 'Cannot download the shared node supervisor.'
-  python3 - "$LEO_INSTALL_TEMP" "$LEO_NODE_HOST_SHA256" <<'PYTHON' || fail 'Node supervisor checksum mismatch.'
-import hashlib
-from pathlib import Path
-import sys
-sys.exit(0 if hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest() == sys.argv[2] else 1)
-PYTHON
-  python3 -m py_compile "$LEO_INSTALL_TEMP"
-  install -m 0700 "$LEO_INSTALL_TEMP" "$LEO_INSTALLATION_ROOT/node-host.py"
+    python3 -m py_compile "$LEO_INSTALL_TEMP"
+    install -m 0700 "$LEO_INSTALL_TEMP" "$LEO_INSTALLATION_ROOT/$destination"
+  }
+
+  download_supervisor host.py "$LEO_HOST_SHA256" host.py
+  download_supervisor node-host.py "$LEO_NODE_HOST_SHA256" node-host.py
   if [[ $# == 2 && $1 == --claim-code ]]; then
     export LEO_INSTALLATION_CLAIM_CODE=$2
   elif [[ $# != 0 ]]; then

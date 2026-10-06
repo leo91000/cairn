@@ -353,7 +353,8 @@ fetch('http://127.0.0.1:4310/health').then(response => {{
         # Recover the last committed approved image before accepting another.
         managers = docker_output(docker[1:] + ['ps', '--all', '--format', 'json', 'manager'])
         manager = managers[0] if isinstance(managers, list) and managers else managers
-        if not config.get('leaseAcquired') or manager and manager.get('State') == 'running':
+        manager_active = bool(manager) and manager.get('State') not in ('exited', 'dead')
+        if not config.get('leaseAcquired') or manager_active:
             # A persisted acknowledgement may outlive the twenty-minute lease.
             # Reacquire before stopping a running manager; another owner wins.
             # If our interrupted replacement already stopped it, the recorded
