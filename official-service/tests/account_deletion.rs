@@ -706,3 +706,31 @@ async fn deletion_retries_rolled_back_database_deadlocks_and_bounds_persistent_f
     assert_eq!(status["installations"][0]["role"], "owner");
     relay.close().await;
 }
+
+#[tokio::test]
+async fn deletion_requires_a_recent_email_or_passkey_proof_in_the_callers_session() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let app = &relay.app;
+    query("UPDATE web_sessions SET created_at = now() - interval '1 hour'")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+
+    let rejected = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            "/api/account/delete",
+        )
+        .json(&json!({ "email": "relay-owner@example.test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    relay.close().await;
+}
