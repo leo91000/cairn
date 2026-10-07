@@ -30,8 +30,15 @@ export async function deploy(config, { timeoutMs = 600000, intervalMs = 2000 } =
       throw new Error(`Coolify ${method} ${path} failed (HTTP ${response.status})`)
     }
 
-    if (read)
-      return response.json()
+    if (read) {
+      try {
+        return await response.json()
+      }
+      catch {
+        throw new Error(`Coolify ${method} ${path} returned invalid JSON`)
+      }
+    }
+
     await response.body?.cancel()
   }
 
@@ -39,7 +46,14 @@ export async function deploy(config, { timeoutMs = 600000, intervalMs = 2000 } =
   const service = await api(servicePath, 'GET', undefined, true)
   const official = !!config.installationImage
   if (official) {
-    const document = parse(service.docker_compose_raw)
+    let document
+    try {
+      document = parse(service.docker_compose_raw)
+    }
+    catch {
+      throw new Error('Coolify returned invalid official production Compose')
+    }
+
     const officialService = document?.services?.official
     // Reject the old manager target before changing any environment values.
     // eslint-disable-next-line no-template-curly-in-string -- Coolify must retain these Compose expressions.

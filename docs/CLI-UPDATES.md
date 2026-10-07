@@ -1,7 +1,11 @@
 # Automatic Codex and GitHub CLI updates
 
-**Historical standalone-manager workflow:** its Coolify deployment job is disabled
-for the official-service cutover (#110). Do not enable its host dispatch timer on
+**Historical standalone-manager workflow:** the entire **Update agent tools**
+workflow is
+explicitly disabled after the official-service cutover (#113). Manual dispatch
+only explains the supported release path; it reads no production environment,
+queries no manager or Coolify API, and builds/deploys no candidate. Do not enable
+its host dispatch timer on
 the new deployment or reuse the official service UUID for it. New installations
 follow the approved immutable image through `leo-installation-update.timer`;
 application CI resolves stable CLI versions before validating those images.
@@ -49,7 +53,7 @@ inspect the failed workflow before retrying.
 The update workflow also maintains mise, global runtimes and the agent toolbox.
 See [Agent toolkit](TOOLKIT.md) for the catalogue, project overrides and update policy.
 
-## Setup
+## Historical setup (do not enable on the official deployment)
 
 First deploy an application version that supports runtime metadata and deployment
 leases (0.2.1 or newer). The manager creates `/data/maintenance-token`, mode 0600.

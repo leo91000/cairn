@@ -29,7 +29,10 @@ The existing `deploy/official/compose.yaml` remains development-only.
 Follow [the cairn.build runbook](PRODUCTION-CAIRN.md) for the fresh same-server
 installation, proxy trust, email, OAuth, approval gates and Postgres rollback.
 `/health` returns no-store JSON (`status`, `commit`, `runtimeId`) and verifies
-Postgres availability; deployment checks its exact validated build identity.
+Postgres availability through a cache sampled every five seconds with a
+one-second timeout. HTTP probes never query the database, and startup remains
+unavailable until the first successful sample. Deployment checks its exact
+validated build identity.
 
 ## Configuration
 

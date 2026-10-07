@@ -27,6 +27,7 @@ describe('coolify deployment over HTTP', () => {
   let releaseImage
   let environment
   let bulkFailures
+  let environmentResponse
 
   beforeEach(async () => {
     requests = []
@@ -36,6 +37,7 @@ describe('coolify deployment over HTTP', () => {
     normalizeCompose = false
     releaseImage = undefined
     bulkFailures = []
+    environmentResponse = undefined
     environment = [
       { key: 'LEO_OFFICIAL_IMAGE', value: `ghcr.io/owner/leo-official@sha256:${'c'.repeat(64)}`, is_literal: true },
       { key: 'LEO_INSTALLATION_IMAGE', value: `ghcr.io/owner/leo@sha256:${'d'.repeat(64)}`, is_literal: true },
@@ -65,7 +67,7 @@ describe('coolify deployment over HTTP', () => {
       }
 
       if (request.url === '/api/v1/services/leo-service/envs' && request.method === 'GET') {
-        response.end(JSON.stringify(environment))
+        response.end(environmentResponse ?? JSON.stringify(environment))
         return
       }
 
@@ -181,6 +183,21 @@ describe('coolify deployment over HTTP', () => {
     bulkFailures = ['partial', 'reject', 'reject']
     await expect(deploy(config)).rejects.toThrow('freeze restarts and repair both values manually')
     expect(requests.some(request => request.path.endsWith('/restart'))).toBe(false)
+  })
+
+  it('never includes a malformed environment response in an error', async () => {
+    compose = readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
+    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
+    environmentResponse = 'fixture-sensitive-env'
+    await expect(deploy(config)).rejects.toMatchObject({ message: 'Coolify GET /api/v1/services/leo-service/envs returned invalid JSON' })
+    expect(requests.every(request => request.method === 'GET')).toBe(true)
+  })
+
+  it('never includes malformed Compose contents in an error', async () => {
+    compose = 'services: [fixture-sensitive-compose'
+    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
+    await expect(deploy(config)).rejects.toMatchObject({ message: 'Coolify returned invalid official production Compose' })
+    expect(requests.every(request => request.method === 'GET')).toBe(true)
   })
 
   it.each(['old-manager', 'two-replicas', 'start-first'])('refuses unsafe official target %s before any mutation', async (target) => {

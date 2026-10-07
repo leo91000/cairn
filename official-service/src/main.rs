@@ -1,4 +1,13 @@
-use std::{env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    env,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use axum::{
@@ -265,6 +274,8 @@ async fn run() -> Result<(), String> {
         };
     let relay = Relay::default();
     let health_pool = pool.clone();
+    let readiness = Arc::new(AtomicBool::new(false));
+    let health_readiness = readiness.clone();
     let commit = env::var("APP_COMMIT").unwrap_or_else(|_| "development".into());
     let runtime_id = env::var("APP_RUNTIME_ID").unwrap_or_else(|_| commit.clone());
     let mut app = router_with_network_and_push(
@@ -284,14 +295,10 @@ async fn run() -> Result<(), String> {
     .route(
         "/health",
         get(move || {
-            let pool = health_pool.clone();
+            let ready = health_readiness.load(Ordering::Relaxed);
             let commit = commit.clone();
             let runtime_id = runtime_id.clone();
             async move {
-                let ready = sqlx_core::query::query("SELECT 1")
-                    .execute(&pool)
-                    .await
-                    .is_ok();
                 let status = if ready {
                     StatusCode::OK
                 } else {
@@ -334,6 +341,25 @@ async fn run() -> Result<(), String> {
         .await
         .map_err(|_| "Could not bind LEO_OFFICIAL_LISTEN")?;
 
+    // Public probes read this cache, never borrow a database connection.
+    // Start unavailable and bound sampling even if the API pool is saturated.
+    let readiness_probe = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            interval.tick().await;
+
+            let sample = tokio::time::timeout(
+                Duration::from_secs(1),
+                sqlx_core::query::query("SELECT 1").execute(&health_pool),
+            )
+            .await;
+            let ready = matches!(sample, Ok(Ok(_)));
+            readiness.store(ready, Ordering::Relaxed);
+        }
+    });
+
     let maintenance = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(3600));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -362,6 +388,7 @@ async fn run() -> Result<(), String> {
     })
     .await
     .map_err(|_| "Official HTTP server stopped unexpectedly".to_owned());
+    readiness_probe.abort();
     maintenance.abort();
     result
 }

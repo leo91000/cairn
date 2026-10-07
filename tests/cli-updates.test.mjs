@@ -199,22 +199,21 @@ describe('global toolkit update selection', () => {
   })
 })
 
-describe('candidate image verification', () => {
-  it('uses smoke tests from the deployed application commit with official prerequisites', () => {
-    const workflow = parse(readFileSync('.github/workflows/cli-updates.yaml', 'utf8'))
-    const steps = workflow.jobs.image.steps
-    const verify = steps.findIndex(step => step.name === 'Verify the candidate image before deployment')
-    const checkout = steps.findIndex(step => step.name === 'Check out the deployed application for its smoke tests')
-    expect(checkout).toBeGreaterThan(steps.findIndex(step => step.id === 'build'))
-    expect(checkout).toBeLessThan(verify)
-    // eslint-disable-next-line no-template-curly-in-string -- GitHub Actions resolves this expression.
-    expect(steps[checkout].with.ref).toBe('${{ needs.check.outputs.commit }}')
-    expect(workflow.jobs.image.services.postgres.env.POSTGRES_DB).toBe('leo_official_test')
-    expect(steps.slice(checkout, verify).some(step => step.uses === './.github/actions/setup-pnpm')).toBe(true)
-    const prepare = steps.find(step => step.name === 'Build official smoke prerequisites when present')
-    expect(prepare.run).toContain('test -f official-service/Cargo.toml')
-    expect(prepare.run).toContain('pnpm build')
-    expect(prepare.run).toContain('cargo build --locked --bin leo-official')
-    expect(steps[verify].env.LEO_OFFICIAL_TEST_DATABASE_URL).toBe('postgres://leo:test-only@127.0.0.1:5432/leo_official_test')
+describe('standalone tool workflow', () => {
+  it('only explains the supported update path without reading production configuration or running updates', () => {
+    const source = readFileSync('.github/workflows/cli-updates.yaml', 'utf8')
+    const workflow = parse(source)
+    expect(source).not.toMatch(/COOLIFY_|LEO_PUBLIC_URL|LEO_IMAGE|secrets\.|\$\{\{/)
+    expect(Object.values(workflow.permissions).every(permission => permission === 'read')).toBe(true)
+    for (const job of Object.values(workflow.jobs)) {
+      expect(job.environment).toBeUndefined()
+      expect(job.services).toBeUndefined()
+      expect(job.steps.length).toBeGreaterThan(0)
+      for (const step of job.steps) {
+        expect(step.uses).toBeUndefined()
+        expect(step.env).toBeUndefined()
+        expect(step.run).toMatch(/^echo '[^']+'$/)
+      }
+    }
   })
 })

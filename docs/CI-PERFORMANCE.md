@@ -17,7 +17,12 @@ records both digests for the same Git tree and run. Single-image evidence is
 ineligible, so its first release falls back to complete validation. Promotion
 accepts a repository parameter and tags both digests; deployment verifies official
 health and the paired installation approval. Main/PR/manual runs never deploy.
-The official job has its own registry cache and no KVM dependency. No elapsed-time
+The official job has its own registry cache and no KVM dependency. When main
+reuses the validated pair, the existing optional cache job also refreshes
+`-official:buildcache` with the `official` target; it does not gate publication.
+The official smoke now checks cached readiness under 100 public probes,
+root-owned web assets, database loss/recovery, and the operator backup/restore
+helper against pinned disposable Postgres. No elapsed-time
 improvement is claimed for this additional job before hosted measurements.
 
 ## Pull request to release, 2026-10-04
