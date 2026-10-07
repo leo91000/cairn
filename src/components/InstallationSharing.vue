@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { state } from '../api'
+import AccountConfirmation from './AccountConfirmation.vue'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
 
@@ -10,6 +11,7 @@ const sharing = ref<{ members: Array<{ id: string, email: string }>, invitations
 const email = ref('')
 const busy = ref(false)
 const error = ref('')
+const confirmingIdentity = ref(false)
 
 async function request(path = '', method = 'GET', body?: unknown) {
   const response = await fetch(`/api/installations/${encodeURIComponent(props.installationId)}/sharing${path}`, {
@@ -46,47 +48,59 @@ onMounted(() => update())
 
 <template>
   <section aria-label="Installation sharing" class="grid gap-3 border-b border-line px-4 py-3">
-    <h2 class="font-semibold">
-      Installation sharing
-    </h2>
-    <p>Members use your coding-agent accounts and secrets.</p>
-    <form class="flex flex-wrap items-end gap-3" @submit.prevent="update('/invitations', 'POST', { email })">
-      <label>Invite by email<input
-        v-model="email"
-        type="email"
-        required
-        maxlength="254"
-        :disabled="busy"
-      ></label>
-      <UiButton type="submit" :disabled="busy">
-        Send invitation
+    <AccountConfirmation
+      v-if="confirmingIdentity"
+      title="Confirm identity before inviting or removing members"
+      return-label="Back to sharing"
+      @close="confirmingIdentity = false"
+      @confirmed="confirmingIdentity = false; error = ''"
+    />
+    <div v-show="!confirmingIdentity" class="grid gap-3">
+      <h2 class="font-semibold">
+        Installation sharing
+      </h2>
+      <p>Members use your coding-agent accounts and secrets.</p>
+      <UiButton :disabled="busy" @click="confirmingIdentity = true">
+        Confirm identity
       </UiButton>
-    </form>
-    <h3>Members</h3>
-    <p v-if="!sharing.members.length">
-      No members yet.
-    </p>
-    <div v-for="member in sharing.members" :key="member.id" class="flex flex-wrap items-center gap-3">
-      <span class="break-all">{{ member.email }}</span>
-      <UiButton :disabled="busy" :aria-label="`Remove ${member.email}`" @click="update(`/members/${encodeURIComponent(member.id)}`, 'DELETE')">
-        Remove
+      <form class="flex flex-wrap items-end gap-3" @submit.prevent="update('/invitations', 'POST', { email })">
+        <label>Invite by email<input
+          v-model="email"
+          type="email"
+          required
+          maxlength="254"
+          :disabled="busy"
+        ></label>
+        <UiButton type="submit" :disabled="busy">
+          Send invitation
+        </UiButton>
+      </form>
+      <h3>Members</h3>
+      <p v-if="!sharing.members.length">
+        No members yet.
+      </p>
+      <div v-for="member in sharing.members" :key="member.id" class="flex flex-wrap items-center gap-3">
+        <span class="break-all">{{ member.email }}</span>
+        <UiButton :disabled="busy" :aria-label="`Remove ${member.email}`" @click="update(`/members/${encodeURIComponent(member.id)}`, 'DELETE')">
+          Remove
+        </UiButton>
+      </div>
+      <h3>Pending invitations</h3>
+      <p v-if="!sharing.invitations.length">
+        No pending invitations.
+      </p>
+      <div v-for="invitation in sharing.invitations" :key="invitation.id" class="flex flex-wrap items-center gap-3">
+        <span class="break-all">{{ invitation.email }}</span>
+        <UiButton :disabled="busy" :aria-label="`Cancel invitation to ${invitation.email}`" @click="update(`/invitations/${encodeURIComponent(invitation.id)}`, 'DELETE')">
+          Cancel invitation
+        </UiButton>
+      </div>
+      <UiAlert v-if="error">
+        {{ error }}
+      </UiAlert>
+      <UiButton @click="emit('close')">
+        Close sharing
       </UiButton>
     </div>
-    <h3>Pending invitations</h3>
-    <p v-if="!sharing.invitations.length">
-      No pending invitations.
-    </p>
-    <div v-for="invitation in sharing.invitations" :key="invitation.id" class="flex flex-wrap items-center gap-3">
-      <span class="break-all">{{ invitation.email }}</span>
-      <UiButton :disabled="busy" :aria-label="`Cancel invitation to ${invitation.email}`" @click="update(`/invitations/${encodeURIComponent(invitation.id)}`, 'DELETE')">
-        Cancel invitation
-      </UiButton>
-    </div>
-    <UiAlert v-if="error">
-      {{ error }}
-    </UiAlert>
-    <UiButton @click="emit('close')">
-      Close sharing
-    </UiButton>
   </section>
 </template>

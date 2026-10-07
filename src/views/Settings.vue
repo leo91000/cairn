@@ -7,6 +7,7 @@ import {
   notify,
   officialEntry,
 } from '../api'
+import AccountConfirmation from '../components/AccountConfirmation.vue'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
 import StorageSettings from '../components/StorageSettings.vue'
@@ -25,6 +26,7 @@ const settings = ref<any>()
 const grants = ref<any[]>([])
 const audit = ref<any[]>([])
 const open = ref(false)
+const confirmingIdentity = ref(false)
 const label = ref('')
 const scopes = ref(['read'])
 const created = ref('')
@@ -147,6 +149,7 @@ async function copy(value: string) {
           @click="
             open = true;
             created = '';
+            confirmingIdentity = false;
             label = '';
             scopes = ['read'];
           "
@@ -214,9 +217,17 @@ async function copy(value: string) {
     @close="
       open = false;
       created = '';
+      confirmingIdentity = false;
     "
   >
     <div class="modal-body px-6.5 py-6 phone:p-5">
+      <AccountConfirmation
+        v-if="confirmingIdentity"
+        title="Confirm identity before creating an access token"
+        return-label="Back to access token"
+        @close="confirmingIdentity = false"
+        @confirmed="confirmingIdentity = false; error = ''"
+      />
       <template v-if="created">
         <p>
           This token is shown once. Store it securely and use it as a Bearer
@@ -229,7 +240,12 @@ async function copy(value: string) {
           <Icon :name="Copy" :size="16" />Copy token
         </UiButton>
       </template>
-      <form v-else class="token-form" @submit.prevent="create">
+      <form
+        v-else
+        v-show="!confirmingIdentity"
+        class="token-form"
+        @submit.prevent="create"
+      >
         <label>Name<input
           v-model="label"
           required
@@ -259,6 +275,9 @@ async function copy(value: string) {
         <UiAlert v-if="error">
           {{ error }}
         </UiAlert>
+        <UiButton v-if="officialEntry" @click="confirmingIdentity = true">
+          Confirm identity
+        </UiButton>
         <UiButton variant="primary" type="submit" :disabled="!scopes.length">
           Create token
         </UiButton>

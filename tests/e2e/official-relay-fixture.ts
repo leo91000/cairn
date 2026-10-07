@@ -1,5 +1,6 @@
 import type { ChildProcess } from 'node:child_process'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { once } from 'node:events'
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { createServer } from 'node:http'
@@ -58,9 +59,9 @@ export async function officialRelayFixture(port = 4395, listen = '127.0.0.1', di
     }
   }
 
-  function official() {
+  function official(databaseUrl = process.env.LEO_OFFICIAL_TEST_DATABASE_URL) {
     return start('target/debug/leo-official', {
-      LEO_OFFICIAL_DATABASE_URL: process.env.LEO_OFFICIAL_TEST_DATABASE_URL,
+      LEO_OFFICIAL_DATABASE_URL: databaseUrl,
       LEO_OFFICIAL_ORIGIN: url,
       LEO_OFFICIAL_LISTEN: `${listen}:${port}`,
       LEO_OFFICIAL_EMAIL_ENDPOINT: `http://127.0.0.1:${mailPort}/emails`,
@@ -87,4 +88,30 @@ export async function officialRelayFixture(port = 4395, listen = '127.0.0.1', di
     official,
     close,
   }
+}
+
+export function executeOfficialSql(database: URL, sql: string) {
+  execFileSync('psql', ['-v', 'ON_ERROR_STOP=1', '-c', sql], {
+    env: {
+      ...process.env,
+      PGHOST: database.hostname,
+      PGPORT: database.port || '5432',
+      PGUSER: decodeURIComponent(database.username),
+      PGPASSWORD: decodeURIComponent(database.password),
+      PGDATABASE: decodeURIComponent(database.pathname.slice(1)),
+      PGOPTIONS: database.searchParams.get('options') || '',
+    },
+    stdio: 'pipe',
+  })
+}
+
+export function expireAccountProof(database: URL, email: string) {
+  const emailLiteral = email.replaceAll('\'', '\'\'')
+  const emailDigest = createHash('sha256').update(email).digest('hex')
+  executeOfficialSql(database, `
+    UPDATE web_sessions SET last_proof_at = NULL
+    WHERE account_id IN (SELECT id FROM leo_accounts WHERE email = '${emailLiteral}');
+    UPDATE account_rate_limits SET resets_at = now() - interval '1 second'
+    WHERE key = 'email:${emailDigest}'
+  `)
 }

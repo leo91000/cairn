@@ -17,7 +17,7 @@ export default defineConfig({
   projects: [
     { name: 'journeys-official-account', testMatch: ['official-account.spec.ts', 'official-oauth.spec.ts'] },
     { name: 'journeys-official-notifications', testMatch: 'official-notifications.spec.ts' },
-    { name: 'journeys-official-relay', testMatch: ['official-relay.spec.ts', 'official-relay-v1.spec.ts', 'official-installations.spec.ts', 'official-claim.spec.ts', 'official-sharing.spec.ts'] },
+    { name: 'journeys-official-relay', testMatch: ['official-relay.spec.ts', 'official-relay-v1.spec.ts', 'official-installations.spec.ts', 'official-claim.spec.ts', 'official-sharing.spec.ts', 'official-sensitive-access.spec.ts'] },
     { name: 'journeys-nodes', testMatch: 'nodes.spec.ts' },
     { name: 'layout-webkit-nodes', testMatch: 'nodes.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
     { name: 'journeys-agent-avatars', testMatch: 'agent-avatars.spec.ts' },

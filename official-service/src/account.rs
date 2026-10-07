@@ -49,6 +49,18 @@ async fn revoke(
     target: Option<&str>,
 ) -> Result<Response, ApiError> {
     let (account, _) = methods::authenticated(service, headers, true).await?;
+    let current = digest(session_token(headers));
+    let (revokes_current,): (bool,) = query_as(
+        "SELECT EXISTS (SELECT 1 FROM web_sessions WHERE account_id = $1 AND id = $2 AND digest = $3)",
+    )
+    .bind(&account)
+    .bind(target)
+    .bind(&current)
+    .fetch_one(&service.pool)
+    .await?;
+    if !revokes_current {
+        confirmed_session(service, headers).await?;
+    }
     consume_limit(&service.pool, &format!("session-revoke:{account}"), 30).await?;
 
     let mut transaction = service.pool.begin().await?;
@@ -58,8 +70,10 @@ async fn revoke(
         .execute(&mut *transaction)
         .await?;
     methods::authenticated_on(&mut transaction, headers, true).await?;
+    if !revokes_current {
+        require_recent_proof(&mut transaction, headers).await?;
+    }
 
-    let current = digest(session_token(headers));
     let removed: Vec<(String,)> = query_as(
         "DELETE FROM web_sessions WHERE account_id = $1 AND (id = $2 OR ($2 IS NULL AND digest <> $3)) RETURNING digest",
     ).bind(&account).bind(target).bind(&current).fetch_all(&mut *transaction).await?;
@@ -104,11 +118,7 @@ pub(super) async fn delete(
     headers: HeaderMap,
     Json(input): Json<Deletion>,
 ) -> Result<Response, ApiError> {
-    let (account, email) = methods::authenticated(&service, &headers, true).await?;
-    {
-        let mut connection = service.pool.acquire().await?;
-        require_recent_proof(&mut connection, &headers).await?;
-    }
+    let (account, email) = confirmed_session(&service, &headers).await?;
     consume_limit(&service.pool, &format!("account-delete:{account}"), 5).await?;
 
     if input.email.trim() != email {
@@ -167,8 +177,7 @@ async fn delete_access(
     ).bind(account).fetch_all(&mut *transaction).await?;
     // Row/advisory locks can wait: check the caller and proof at wall-clock time
     // after all access locks, before any irreversible account mutation.
-    methods::authenticated_on(&mut transaction, headers, true).await?;
-    require_recent_proof(&mut transaction, headers).await?;
+    confirmed_session_on(&mut transaction, headers).await?;
 
     for (installation, owner) in &access {
         if *owner {
@@ -242,6 +251,23 @@ pub(super) async fn require_recent_proof(
         ));
     }
     Ok(())
+}
+
+pub(super) async fn confirmed_session(
+    service: &Service,
+    headers: &HeaderMap,
+) -> Result<(String, String), ApiError> {
+    let mut connection = service.pool.acquire().await?;
+    confirmed_session_on(&mut connection, headers).await
+}
+
+pub(super) async fn confirmed_session_on(
+    connection: &mut sqlx_postgres::PgConnection,
+    headers: &HeaderMap,
+) -> Result<(String, String), ApiError> {
+    let account = methods::authenticated_on(connection, headers, true).await?;
+    require_recent_proof(connection, headers).await?;
+    Ok(account)
 }
 
 /// Call under the account lock after a successful email/passkey proof. Preserve

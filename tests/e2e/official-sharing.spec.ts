@@ -11,6 +11,7 @@ import { expect, test } from '@playwright/test'
 import { config as loadConfig } from '../legacy/server/config'
 import { Service as SeedService } from '../legacy/server/service'
 import { Store } from '../legacy/server/store'
+import { expireAccountProof } from './official-relay-fixture'
 
 test('owner shares an installation and member works without management controls', async ({ page, browser }) => {
   test.setTimeout(120000)
@@ -30,6 +31,7 @@ test('owner shares an installation and member works without management controls'
   await once(mail, 'listening')
   const url = 'http://localhost:4397'
   let seed: SeedService | undefined
+  const ownerEmail = `owner-${Date.now()}@example.test`
   const memberEmail = `member-${Date.now()}@example.test`
   const memberContext = await browser.newContext()
   const member = await memberContext.newPage()
@@ -71,7 +73,7 @@ test('owner shares an installation and member works without management controls'
         throw new Error(diagnostics.join('') || `Official service exited: ${official.exitCode}`)
       return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
     }, { timeout: 30000 }).toBe(true)
-    await signIn(page, `owner-${Date.now()}@example.test`)
+    await signIn(page, ownerEmail)
     await expect(page.getByRole('heading', { name: 'No installations yet' })).toBeVisible()
     await page.getByRole('button', { name: 'Add an installation', exact: true }).click()
     const code = await page.getByLabel('Installation claim code').inputValue()
@@ -106,7 +108,21 @@ test('owner shares an installation and member works without management controls'
     await page.getByText('Installation options', { exact: true }).click()
     await page.getByRole('button', { name: 'Share installation', exact: true }).click()
     await expect(page.getByText('Members use your coding-agent accounts and secrets.', { exact: true })).toBeVisible()
+    expireAccountProof(new URL(process.env.LEO_OFFICIAL_TEST_DATABASE_URL!), ownerEmail)
     await page.getByLabel('Invite by email', { exact: true }).fill(memberEmail)
+    await page.getByRole('button', { name: 'Send invitation', exact: true }).click()
+    await expect(page.getByRole('alert')).toContainText('Confirm your identity')
+    await expect(page.getByRole('button', { name: 'Confirm identity', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Confirm identity', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'Confirm identity', exact: true })).toBeVisible()
+    const emailsBeforeConfirmation = messages.length
+    await page.getByRole('button', { name: 'Send confirmation code', exact: true }).click()
+    await expect.poll(() => messages.slice(emailsBeforeConfirmation).find(message => message.to.includes(ownerEmail) && /\b\d{8}\b/.test(message.text))?.text).toBeTruthy()
+    const confirmation = messages.slice(emailsBeforeConfirmation).find(message => message.to.includes(ownerEmail) && /\b\d{8}\b/.test(message.text))!
+    await page.getByLabel('Confirmation code').fill(confirmation.text.match(/\b\d{8}\b/)![0])
+    await page.getByRole('button', { name: 'Verify confirmation code', exact: true }).click()
+    await expect(page.getByLabel('Invite by email', { exact: true })).toHaveValue(memberEmail)
+    expect(messages.some(message => message.to.includes(memberEmail))).toBe(false)
     await page.getByRole('button', { name: 'Send invitation', exact: true }).click()
     await expect(page.getByRole('region', { name: 'Installation sharing' }).getByText(memberEmail, { exact: true })).toBeVisible()
     await expect.poll(() => messages.some(message => message.to.includes(memberEmail) && message.text.includes('Shared home'))).toBe(true)

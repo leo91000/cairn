@@ -228,6 +228,9 @@ jobs:
           name: browser-backend
           path: target/debug/
       - run: chmod +x target/debug/leo target/debug/leo-official target/debug/examples/browser_fixture
+      - name: Install Postgres client for official account fixtures
+        if: startsWith(matrix.group, 'journeys')
+        run: apt-get update -qq && apt-get install -y --no-install-recommends postgresql-client
       - run: |
           args=(--project="$BROWSER_PROJECTS" --workers="$BROWSER_WORKERS")
           if [[ -n "$BROWSER_SHARD" ]]; then

@@ -181,14 +181,10 @@ pub(super) async fn forget(
     Path(installation): Path<String>,
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
-    let owner = account(&service, &headers, &Method::DELETE).await?;
-    {
-        let mut connection = service.pool.acquire().await?;
-        account_security::require_recent_proof(&mut connection, &headers).await?;
-    }
+    let (owner, _) = account_security::confirmed_session(&service, &headers).await?;
     consume_limit(&service.pool, &format!("installation-forget:{owner}"), 10).await?;
     let mut transaction = service.pool.begin().await?;
-    lock_removal(&mut transaction, &headers, &installation, &owner).await?;
+    lock_confirmed_owner(&mut transaction, &headers, &installation, &owner).await?;
     let forgotten = query("DELETE FROM installations WHERE id = $1 AND owner_id = $2")
         .bind(&installation)
         .bind(&owner)
@@ -226,13 +222,9 @@ pub(super) async fn detach(
     Path(installation): Path<String>,
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
-    let owner = account(&service, &headers, &Method::POST).await?;
-    {
-        let mut connection = service.pool.acquire().await?;
-        account_security::require_recent_proof(&mut connection, &headers).await?;
-    }
+    let (owner, _) = account_security::confirmed_session(&service, &headers).await?;
     let mut transaction = service.pool.begin().await?;
-    lock_removal(&mut transaction, &headers, &installation, &owner).await?;
+    lock_confirmed_owner(&mut transaction, &headers, &installation, &owner).await?;
     detach_on(&mut transaction, &installation, &owner).await?;
     transaction.commit().await?;
 
@@ -242,13 +234,15 @@ pub(super) async fn detach(
 
 // Match account deletion's lock order. Revalidate after both locks, before any
 // access mutation, since a session or its independent proof can expire waiting.
-async fn lock_removal(
+pub(super) async fn lock_confirmed_owner(
     connection: &mut sqlx_postgres::PgConnection,
     headers: &HeaderMap,
     installation: &str,
     owner: &str,
 ) -> Result<(), ApiError> {
-    query("SELECT id FROM leo_accounts WHERE id = $1 FOR UPDATE")
+    // Allow FK checks from an OAuth exchange already holding an installation
+    // read lock, while serializing account mutations and deletion.
+    query("SELECT id FROM leo_accounts WHERE id = $1 FOR NO KEY UPDATE")
         .bind(owner)
         .execute(&mut *connection)
         .await?;
@@ -259,8 +253,7 @@ async fn lock_removal(
             .fetch_optional(&mut *connection)
             .await?;
 
-    methods::authenticated_on(connection, headers, true).await?;
-    account_security::require_recent_proof(connection, headers).await?;
+    account_security::confirmed_session_on(connection, headers).await?;
     if owned.is_none() {
         return Err(ApiError::Http(
             StatusCode::NOT_FOUND,

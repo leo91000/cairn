@@ -71,11 +71,7 @@ pub(super) async fn remove(
     headers: HeaderMap,
     Json(input): Json<Removal>,
 ) -> Result<StatusCode, ApiError> {
-    let (account_id, _) = authenticated(&service, &headers, true).await?;
-    {
-        let mut connection = service.pool.acquire().await?;
-        account::require_recent_proof(&mut connection, &headers).await?;
-    }
+    let (account_id, _) = account::confirmed_session(&service, &headers).await?;
 
     let mut transaction = service.pool.begin().await?;
     // Serialize all changes to this account's methods, including concurrent removals.
@@ -83,8 +79,7 @@ pub(super) async fn remove(
         .bind(&account_id)
         .execute(&mut *transaction)
         .await?;
-    authenticated_on(&mut transaction, &headers, true).await?;
-    account::require_recent_proof(&mut transaction, &headers).await?;
+    account::confirmed_session_on(&mut transaction, &headers).await?;
 
     let rows: Vec<(String,)> =
         query_as("SELECT id FROM sign_in_methods WHERE account_id = $1 AND NOT removed")
