@@ -1,70 +1,22 @@
-import type { ChildProcess } from 'node:child_process'
 import { Buffer } from 'node:buffer'
-import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
-import { createServer } from 'node:http'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import process from 'node:process'
 import { expect, test } from '@playwright/test'
-import { config as loadConfig } from '../legacy/server/config'
-import { Service as SeedService } from '../legacy/server/service'
-import { Store } from '../legacy/server/store'
+import { officialRelayFixture } from './official-relay-fixture'
 
 test('claims an installation and sends after relay restarts and official session renewal', async ({ page }) => {
   test.setTimeout(120000)
-  const messages: string[] = []
-  const mail = createServer(async (request, response) => {
-    let body = ''
-    for await (const chunk of request)
-      body += chunk
-    messages.push(JSON.parse(body).text)
-    response.writeHead(200, { 'content-type': 'application/json' }).end('{}')
-  })
-  mail.listen(0, '127.0.0.1')
-  await once(mail, 'listening')
-  const mailPort = (mail.address() as { port: number }).port
-  const root = await mkdtemp(join(tmpdir(), 'leo-official-relay-'))
-  await Promise.all([mkdir(join(root, 'data')), mkdir(join(root, 'home'))])
-  const url = 'http://localhost:4395'
-  const children: ChildProcess[] = []
+  const fixture = await officialRelayFixture()
+  const {
+    root,
+    url,
+    messages,
+    seed,
+    start,
+    stop,
+    official,
+  } = fixture
   let hostilePeer: WebSocket | undefined
-  // As in the native browser fixtures, open the seeding module before the
-  // native process applies newer database migrations.
-  const seed = new SeedService(new Store(join(root, 'data')), loadConfig({
-    dataDir: join(root, 'data'),
-    home: join(root, 'home'),
-    workspaceRoots: [root],
-    workerEnabled: false,
-    logger: false,
-  }))
-
-  function start(binary: string, env: NodeJS.ProcessEnv) {
-    const child = spawn(binary, [], { env: { ...process.env, ...env }, stdio: ['ignore', 'ignore', 'ignore'] })
-    children.push(child)
-    return child
-  }
-
-  async function stop(child: ChildProcess) {
-    if (child.exitCode !== null || child.signalCode !== null)
-      return
-    const exited = once(child, 'exit')
-    child.kill('SIGTERM')
-    await exited
-  }
-
-  function official() {
-    return start('target/debug/leo-official', {
-      LEO_OFFICIAL_DATABASE_URL: process.env.LEO_OFFICIAL_TEST_DATABASE_URL,
-      LEO_OFFICIAL_ORIGIN: url,
-      LEO_OFFICIAL_LISTEN: '127.0.0.1:4395',
-      LEO_OFFICIAL_EMAIL_ENDPOINT: `http://127.0.0.1:${mailPort}/emails`,
-      LEO_OFFICIAL_EMAIL_KEY: 'fixture-only',
-      LEO_OFFICIAL_EMAIL_FROM: 'leo@example.test',
-    })
-  }
-
   let service = official()
   try {
     await expect.poll(() => fetch(`${url}/health`).then(response => response.ok).catch(() => false)).toBe(true)
@@ -281,10 +233,6 @@ test('claims an installation and sends after relay restarts and official session
   }
   finally {
     hostilePeer?.close()
-    await Promise.all(children.map(stop))
-    await seed.accounts.close()
-    seed.store.close()
-    await new Promise<void>(resolve => mail.close(() => resolve()))
-    await rm(root, { recursive: true, force: true })
+    await fixture.close()
   }
 })
