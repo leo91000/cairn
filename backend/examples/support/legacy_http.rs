@@ -157,8 +157,8 @@ async fn oauth(service: &Arc<Service>, mut request: Request) -> Result<Response>
         } else {
             "expired".into()
         };
-        let mut response =
-            axum::response::Redirect::temporary(&format!("/mcps?oauth={result}")).into_response();
+        let location = format!("{}/mcps?oauth={result}", service.config.public_url);
+        let mut response = axum::response::Redirect::temporary(&location).into_response();
         response
             .headers_mut()
             .insert("referrer-policy", HeaderValue::from_static("no-referrer"));

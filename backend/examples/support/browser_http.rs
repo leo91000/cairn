@@ -247,7 +247,7 @@ pub async fn claimed(service: &Service) -> Result<()> {
         .and_then(|origin| origin.port())
         .unwrap_or(0);
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
-    let origin = format!("http://localhost:{}", listener.local_addr()?.port());
+    let origin = format!("http://{}", listener.local_addr()?);
     // Historical journeys keep their synthetic owner, but exercise the real
     // installation handlers and the same HTTP policy lookup as production.
     let app = installation_router(Arc::new(service.clone())).await?.route(

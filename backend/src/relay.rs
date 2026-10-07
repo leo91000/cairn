@@ -67,7 +67,12 @@ pub(crate) async fn task_author_policy(
         .timeout(Duration::from_secs(5))
         .send()
         .await
-        .map_err(|_| Error::unavailable("Task-author check unavailable."))?
+        .map_err(|_| Error::unavailable("Task-author check unavailable."))?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(Error::unauthorized("Installation identity revoked."));
+    }
+
+    let response = response
         .error_for_status()
         .map_err(|_| Error::unavailable("Task-author check unavailable."))?;
     response
