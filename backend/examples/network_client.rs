@@ -38,11 +38,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let message = format!("leo-network-probe-{sequence}");
                 socket.send_to(message.as_bytes(), target)?;
                 let mut bytes = [0; 512];
-                if let Ok((length, _)) = socket.recv_from(&mut bytes) {
+                let deadline = Instant::now() + Duration::from_millis(150);
+                while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+                    socket.set_read_timeout(Some(remaining))?;
+                    let Ok((length, source)) = socket.recv_from(&mut bytes) else {
+                        break;
+                    };
+                    if source != target.parse::<SocketAddr>()? {
+                        continue;
+                    }
                     let reply = std::str::from_utf8(&bytes[..length])?;
                     if let Some(peer) = reply.strip_suffix(&format!(" {message}")) {
                         received += 1;
                         peers.push(peer.to_owned());
+                        break;
                     }
                 }
             }
