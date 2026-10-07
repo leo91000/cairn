@@ -114,11 +114,18 @@ impl PeerConnectionEventHandler for PeerEvents {
         {
             // Only an explicit, port-preserving NAT mapping. Keep the bound
             // host candidate inside ICE; announce its public alias to the peer.
-            self.direct.send_signal(&self.id, DirectSignal::Candidate {
-                candidate: format!("candidate:leo-public 1 udp 1694498815 {public} {} typ srflx raddr {local} rport {}", event.candidate.port, event.candidate.port),
-                sdp_mid: Some("0".into()),
-                sdp_m_line_index: Some(0),
-            })
+            let port = event.candidate.port;
+            let candidate = format!(
+                "candidate:leo-public 1 udp 1694498815 {public} {port} typ srflx raddr {local} rport {port}"
+            );
+            self.direct.send_signal(
+                &self.id,
+                DirectSignal::Candidate {
+                    candidate,
+                    sdp_mid: Some("0".into()),
+                    sdp_m_line_index: Some(0),
+                },
+            )
         } else {
             Ok(())
         };
@@ -158,40 +165,54 @@ pub async fn run(
             biased;
             () = stop.cancelled() => break,
             Some(completed) = jobs.join_next(), if !jobs.is_empty() => {
-                if let Ok(id) = completed { peers.remove(&id); }
-            }
-            event = events.recv() => {
-                match event {
-                    Ok(DirectEvent::Signal { id, signal }) => {
-                        if let Some(peer) = peers.get(&id) {
-                            if peer.try_send(signal).is_err() { direct.release_peer(&id); }
-                        } else if let DirectSignal::Offer { sdp } = signal
-                            && let Some((authorization, closed)) = direct.pending_peer(&id) {
-                            let (sender, receiver) = mpsc::channel(16);
-                            peers.insert(id.clone(), sender);
-                            let direct = direct.clone();
-                            let config = config.clone();
-                            let router = router.clone();
-                            let traffic = traffic.clone();
-                            jobs.spawn(async move {
-                                let failed = CancellationToken::new();
-                                let negotiation = Negotiation { authorization, sdp, signals: receiver };
-                                let operation = serve_peer(router, direct.clone(), negotiation, config, failed.clone(), traffic);
-                                tokio::select! {
-                                    biased;
-                                    () = closed.cancelled() => {},
-                                    () = failed.cancelled() => {},
-                                    _ = operation => {},
-                                }
-                                direct.release_peer(&id);
-                                id
-                            });
-                        }
-                    }
-                    Ok(DirectEvent::Revoked(_)) => {},
-                    Err(_) => break,
+                if let Ok(id) = completed {
+                    peers.remove(&id);
                 }
             }
+            event = events.recv() => match event {
+                Ok(DirectEvent::Signal { id, signal }) => {
+                    if let Some(peer) = peers.get(&id) {
+                        if peer.try_send(signal).is_err() {
+                            direct.release_peer(&id);
+                        }
+                    } else if let DirectSignal::Offer { sdp } = signal
+                        && let Some((authorization, closed)) = direct.pending_peer(&id)
+                    {
+                        let (sender, receiver) = mpsc::channel(16);
+                        peers.insert(id.clone(), sender);
+                        let direct = direct.clone();
+                        let config = config.clone();
+                        let router = router.clone();
+                        let traffic = traffic.clone();
+                        jobs.spawn(async move {
+                            let failed = CancellationToken::new();
+                            let negotiation = Negotiation {
+                                authorization,
+                                sdp,
+                                signals: receiver,
+                            };
+                            let operation = serve_peer(
+                                router,
+                                direct.clone(),
+                                negotiation,
+                                config,
+                                failed.clone(),
+                                traffic,
+                            );
+                            tokio::select! {
+                                biased;
+                                () = closed.cancelled() => {}
+                                () = failed.cancelled() => {}
+                                _ = operation => {}
+                            }
+                            direct.release_peer(&id);
+                            id
+                        });
+                    }
+                }
+                Ok(DirectEvent::Revoked(_)) => {}
+                Err(_) => break,
+            },
         }
     }
     // Dropping each peer task closes its transport; never touches agent execution.
@@ -264,15 +285,19 @@ async fn serve_peer(
     };
     let result: Result<()> = async {
         peer.set_remote_description(RTCSessionDescription::offer(sdp).map_err(Error::internal)?)
-            .await.map_err(Error::internal)?;
+            .await
+            .map_err(Error::internal)?;
+
         let mut answer = peer.create_answer(None).await.map_err(Error::internal)?;
-        answer.sdp = answer.sdp.lines().map(|line| {
-            if let Some(fingerprint) = line.strip_prefix("a=fingerprint:sha-256 ") {
-                format!("a=fingerprint:sha-256 {}", fingerprint.to_ascii_uppercase())
-            } else { line.to_owned() }
-        }).collect::<Vec<_>>().join("\r\n") + "\r\n";
-        peer.set_local_description(answer.clone()).await.map_err(Error::internal)?;
-        direct.send_signal(&authorization.claims.connection_id, DirectSignal::Answer { sdp: answer.sdp })?;
+        answer.sdp = leo_relay_protocol::direct::uppercase_sdp_fingerprints(&answer.sdp);
+        peer.set_local_description(answer.clone())
+            .await
+            .map_err(Error::internal)?;
+        direct.send_signal(
+            &authorization.claims.connection_id,
+            DirectSignal::Answer { sdp: answer.sdp },
+        )?;
+
         let deadline = tokio::time::sleep(leo_relay_protocol::REQUEST_TIMEOUT);
         tokio::pin!(deadline);
         let channel = loop {
@@ -285,32 +310,64 @@ async fn serve_peer(
         *channel_to_close.lock().unwrap() = Some(channel.clone());
         if channel.label().await.map_err(Error::internal)? != "leo.v4"
             || !channel.ordered().await.map_err(Error::internal)?
-            || channel.max_retransmits().await.map_err(Error::internal)?.is_some()
-            || channel.max_packet_life_time().await.map_err(Error::internal)?.is_some() {
+            || channel
+                .max_retransmits()
+                .await
+                .map_err(Error::internal)?
+                .is_some()
+            || channel
+                .max_packet_life_time()
+                .await
+                .map_err(Error::internal)?
+                .is_some()
+        {
             return Err(Error::bad("A reliable ordered leo.v4 channel is required."));
         }
-        let certificates = peer.sctp().await.ok_or_else(|| Error::unauthorized("No DTLS transport."))?
-            .transport().get_remote_certificates().await.map_err(Error::internal)?;
-        let certificate = certificates.first().ok_or_else(|| Error::unauthorized("No observed DTLS certificate."))?;
-        let fingerprint = format!("sha-256 {}", Sha256::digest(certificate).iter()
-            .map(|byte| format!("{byte:02X}")).collect::<Vec<_>>().join(":"));
-        let (current, _) = direct.pending_peer(&authorization.claims.connection_id)
+
+        let certificates = peer
+            .sctp()
+            .await
+            .ok_or_else(|| Error::unauthorized("No DTLS transport."))?
+            .transport()
+            .get_remote_certificates()
+            .await
+            .map_err(Error::internal)?;
+        let certificate = certificates
+            .first()
+            .ok_or_else(|| Error::unauthorized("No observed DTLS certificate."))?;
+        let fingerprint = format!(
+            "sha-256 {}",
+            Sha256::digest(certificate)
+                .iter()
+                .map(|byte| format!("{byte:02X}"))
+                .collect::<Vec<_>>()
+                .join(":")
+        );
+        let (current, _) = direct
+            .pending_peer(&authorization.claims.connection_id)
             .ok_or_else(|| Error::unauthorized("Direct authorization closed."))?;
         let lease = direct.accept_peer(&current, &current.claims.session_id, &fingerprint)?;
+
         let (requests, input) = mpsc::channel(leo_relay_protocol::MAX_IN_FLIGHT);
         let (output, mut frames) = mpsc::channel(2);
         let dispatcher = traffic.serve(router, lease.clone(), input, output);
+
         let writer = async {
             let mut transfer = 1_u32;
             while let Some(frame) = frames.recv().await {
-                let encoded = leo_relay_protocol::data_channel::EncodedFrame::new(transfer, &frame).map_err(Error::bad)?;
+                let encoded = leo_relay_protocol::data_channel::EncodedFrame::new(transfer, &frame)
+                    .map_err(Error::bad)?;
                 transfer = transfer.wrapping_add(1).max(1);
                 for packet in encoded.packets() {
-                    channel.send(bytes::BytesMut::from(packet.as_slice())).await.map_err(Error::internal)?;
+                    channel
+                        .send(bytes::BytesMut::from(packet.as_slice()))
+                        .await
+                        .map_err(Error::internal)?;
                 }
             }
             Ok::<_, Error>(())
         };
+
         let reader = async {
             let mut decoder = leo_relay_protocol::data_channel::FrameDecoder::default();
             let mut timeout = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -321,32 +378,38 @@ async fn serve_peer(
                     Some(_) = incoming.recv() => return Err(Error::bad("Only one DataChannel is allowed.")),
                     signal = signals.recv() => apply_signal(peer.as_ref(), signal).await?,
                     _ = timeout.tick() => {
-                        if decoder.expired() { return Err(Error::bad("Incomplete frame expired.")); }
-                    }
-                    event = channel.poll() => {
-                        match event {
-                            Some(DataChannelEvent::OnMessage(message)) if !message.is_string => {
-                                if let Some(frame) = decoder.push(&message.data).map_err(Error::bad)? {
-                                    requests.try_send(frame).map_err(|_| Error::unavailable("Direct ingress busy."))?;
-                                }
-                            }
-                            None | Some(DataChannelEvent::OnClose) => return Ok(()),
-                            Some(DataChannelEvent::OnMessage(_) | DataChannelEvent::OnError) => return Err(Error::bad("Invalid DataChannel message.")),
-                            _ => {},
+                        if decoder.expired() {
+                            return Err(Error::bad("Incomplete frame expired."));
                         }
                     }
+                    event = channel.poll() => match event {
+                        Some(DataChannelEvent::OnMessage(message)) if !message.is_string => {
+                            if let Some(frame) = decoder.push(&message.data).map_err(Error::bad)? {
+                                requests
+                                    .try_send(frame)
+                                    .map_err(|_| Error::unavailable("Direct ingress busy."))?;
+                            }
+                        }
+                        None | Some(DataChannelEvent::OnClose) => return Ok(()),
+                        Some(DataChannelEvent::OnMessage(_) | DataChannelEvent::OnError) => {
+                            return Err(Error::bad("Invalid DataChannel message."));
+                        }
+                        _ => {}
+                    },
                 }
             }
         };
+
         tokio::select! {
             biased;
-            () = lease.closed.cancelled() => {},
+            () = lease.closed.cancelled() => {}
             result = dispatcher => result?,
             result = reader => result?,
             result = writer => result?,
         }
         Ok(())
-    }.await;
+    }
+    .await;
     result
 }
 

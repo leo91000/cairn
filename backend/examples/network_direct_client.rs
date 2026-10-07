@@ -100,26 +100,65 @@ async fn direct_read(
     let result = tokio::time::timeout(Duration::from_secs(10), async {
         let channel = peer.create_data_channel("leo.v4", None).await?;
         let mut offer = peer.create_offer(None).await?;
-        offer.sdp = offer.sdp.lines().map(|line| {
-            if let Some(value) = line.strip_prefix("a=fingerprint:sha-256 ") {
-                format!("a=fingerprint:sha-256 {}", value.to_ascii_uppercase())
-            } else { line.to_owned() }
-        }).collect::<Vec<_>>().join("\r\n") + "\r\n";
-        let fingerprint = offer.sdp.lines().find_map(|line| line.strip_prefix("a=fingerprint:")).ok_or("DTLS fingerprint missing")?;
-        let response: Value = http.post(format!("{origin}/api/installations/{installation}/direct/authorize"))
-            .header("origin", origin).header("cookie", cookie).header("x-csrf-token", csrf)
-            .json(&json!({ "fingerprint": fingerprint, "versions": [4] }))
-            .send().await?.error_for_status()?.json().await?;
+        offer.sdp = leo_relay_protocol::direct::uppercase_sdp_fingerprints(&offer.sdp);
+        let fingerprint = offer
+            .sdp
+            .lines()
+            .find_map(|line| line.strip_prefix("a=fingerprint:"))
+            .ok_or("DTLS fingerprint missing")?;
+
+        let response: Value = http
+            .post(format!(
+                "{origin}/api/installations/{installation}/direct/authorize"
+            ))
+            .header("origin", origin)
+            .header("cookie", cookie)
+            .header("x-csrf-token", csrf)
+            .json(&json!({
+                "fingerprint": fingerprint,
+                "versions": [4],
+            }))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
         let grant: DirectAuthorization = serde_json::from_value(response["grant"].clone())?;
         if config.stun_urls.is_empty() {
-            let stun = response["iceServers"][0]["urls"][0].as_str().ok_or("Official STUN missing")?;
-            peer.set_configuration(RTCConfigurationBuilder::default().with_ice_servers(vec![RTCIceServer { urls: vec![stun.to_owned()], ..Default::default() }]).build()).await?;
+            let stun = response["iceServers"][0]["urls"][0]
+                .as_str()
+                .ok_or("Official STUN missing")?;
+            peer.set_configuration(
+                RTCConfigurationBuilder::default()
+                    .with_ice_servers(vec![RTCIceServer {
+                        urls: vec![stun.to_owned()],
+                        ..Default::default()
+                    }])
+                    .build(),
+            )
+            .await?;
         }
-        let base = format!("{origin}/api/installations/{installation}/direct/{}", grant.claims.connection_id);
+
+        let base = format!(
+            "{origin}/api/installations/{installation}/direct/{}",
+            grant.claims.connection_id
+        );
         peer.set_local_description(offer.clone()).await?;
-        send_signal(http, &base, cookie, csrf, &DirectSignal::Offer { sdp: offer.sdp }).await?;
-        let mut signals = http.get(format!("{base}/events")).header("cookie", cookie)
-            .send().await?.error_for_status()?;
+        send_signal(
+            http,
+            &base,
+            cookie,
+            csrf,
+            &DirectSignal::Offer { sdp: offer.sdp },
+        )
+        .await?;
+        let mut signals = http
+            .get(format!("{base}/events"))
+            .header("cookie", cookie)
+            .send()
+            .await?
+            .error_for_status()?;
+
         let mut buffered = String::new();
         let mut early = Vec::new();
         let mut answered = false;
@@ -128,22 +167,42 @@ async fn direct_read(
                 Some(candidate) = candidates.recv() => send_signal(http, &base, cookie, csrf, &candidate).await?,
                 chunk = signals.chunk() => {
                     buffered.push_str(std::str::from_utf8(&chunk?.ok_or("Signaling closed")?)?);
-                    if buffered.len() > 65_536 { return Err::<_, Box<dyn std::error::Error + Send + Sync>>("Signaling buffer full".into()); }
+                    if buffered.len() > 65_536 {
+                        return Err::<_, Box<dyn std::error::Error + Send + Sync>>(
+                            "Signaling buffer full".into(),
+                        );
+                    }
                     while let Some(end) = buffered.find("\n\n") {
                         let event: String = buffered.drain(..end + 2).collect();
                         for line in event.lines() {
                             if let Some(data) = line.strip_prefix("data: ") {
                                 match serde_json::from_str::<DirectSignal>(data)? {
                                     DirectSignal::Answer { sdp } => {
-                                        peer.set_remote_description(RTCSessionDescription::answer(sdp)?).await?;
+                                        peer.set_remote_description(RTCSessionDescription::answer(sdp)?)
+                                            .await?;
                                         answered = true;
-                                        for candidate in early.drain(..) { peer.add_ice_candidate(candidate).await?; }
+                                        for candidate in early.drain(..) {
+                                            peer.add_ice_candidate(candidate).await?;
+                                        }
                                     }
-                                    DirectSignal::Candidate { candidate, sdp_mid, sdp_m_line_index } => {
-                                        let candidate = RTCIceCandidateInit { candidate, sdp_mid, sdp_mline_index: sdp_m_line_index, ..Default::default() };
-                                        if answered { peer.add_ice_candidate(candidate).await?; }
-                                        else if early.len() < 16 { early.push(candidate); }
-                                        else { return Err("Too many early candidates".into()); }
+                                    DirectSignal::Candidate {
+                                        candidate,
+                                        sdp_mid,
+                                        sdp_m_line_index,
+                                    } => {
+                                        let candidate = RTCIceCandidateInit {
+                                            candidate,
+                                            sdp_mid,
+                                            sdp_mline_index: sdp_m_line_index,
+                                            ..Default::default()
+                                        };
+                                        if answered {
+                                            peer.add_ice_candidate(candidate).await?;
+                                        } else if early.len() < 16 {
+                                            early.push(candidate);
+                                        } else {
+                                            return Err("Too many early candidates".into());
+                                        }
                                     }
                                     _ => return Err("Unexpected offer".into()),
                                 }
@@ -151,39 +210,76 @@ async fn direct_read(
                         }
                     }
                 }
-                event = channel.poll() => {
-                    match event {
-                        Some(DataChannelEvent::OnOpen) => break,
-                        None | Some(DataChannelEvent::OnClose | DataChannelEvent::OnError) => return Err("Direct channel closed".into()),
-                        _ => {},
+                event = channel.poll() => match event {
+                    Some(DataChannelEvent::OnOpen) => break,
+                    None | Some(DataChannelEvent::OnClose | DataChannelEvent::OnError) => {
+                        return Err("Direct channel closed".into());
                     }
-                }
+                    _ => {}
+                },
             }
         }
+
         let request = Frame::Request(ApiRequest {
-            id: "bench-read".into(), account_id: String::new(), role: Role::Member, mcp_scopes: None, public_artifact: None,
-            method: "GET".into(), path: path.into(), headers: Vec::new(), body: Vec::new(),
+            id: "bench-read".into(),
+            account_id: String::new(),
+            role: Role::Member,
+            mcp_scopes: None,
+            public_artifact: None,
+            method: "GET".into(),
+            path: path.into(),
+            headers: Vec::new(),
+            body: Vec::new(),
         });
-        for packet in EncodedFrame::new(1, &request).map_err(std::io::Error::other)?.packets() {
+        for packet in EncodedFrame::new(1, &request)
+            .map_err(std::io::Error::other)?
+            .packets()
+        {
             channel.send(BytesMut::from(packet.as_slice())).await?;
         }
+
         let mut decoder = FrameDecoder::default();
         loop {
             match channel.poll().await {
                 Some(DataChannelEvent::OnMessage(message)) if !message.is_string => {
-                    if let Some(Frame::Response(response)) = decoder.push(&message.data).map_err(std::io::Error::other)? {
-                        if response.id != "bench-read" || response.status != 200 { return Err("Direct API read failed".into()); }
-                        let pair = peer.sctp().await.ok_or("SCTP missing")?.transport().ice_transport()
-                            .get_selected_candidate_pair().await?.ok_or("No selected ICE route")?;
-                        if !pair.local().protocol.to_string().eq_ignore_ascii_case("udp") { return Err("UDP route required".into()); }
-                        return Ok((response.body, pair.local().typ.to_string(), pair.remote().typ.to_string()));
+                    if let Some(Frame::Response(response)) =
+                        decoder.push(&message.data).map_err(std::io::Error::other)?
+                    {
+                        if response.id != "bench-read" || response.status != 200 {
+                            return Err("Direct API read failed".into());
+                        }
+                        let pair = peer
+                            .sctp()
+                            .await
+                            .ok_or("SCTP missing")?
+                            .transport()
+                            .ice_transport()
+                            .get_selected_candidate_pair()
+                            .await?
+                            .ok_or("No selected ICE route")?;
+                        if !pair
+                            .local()
+                            .protocol
+                            .to_string()
+                            .eq_ignore_ascii_case("udp")
+                        {
+                            return Err("UDP route required".into());
+                        }
+                        return Ok((
+                            response.body,
+                            pair.local().typ.to_string(),
+                            pair.remote().typ.to_string(),
+                        ));
                     }
                 }
-                None | Some(DataChannelEvent::OnClose | DataChannelEvent::OnError) => return Err("Direct read interrupted".into()),
-                _ => {},
+                None | Some(DataChannelEvent::OnClose | DataChannelEvent::OnError) => {
+                    return Err("Direct read interrupted".into());
+                }
+                _ => {}
             }
         }
-    }).await;
+    })
+    .await;
     peer.close().await?;
     result.map_err(|_| "Direct negotiation timed out")?
 }
@@ -246,7 +342,12 @@ async fn main() -> TestResult<()> {
     }
     println!(
         "{}",
-        json!({ "route": route, "status": 200, "elapsedMs": started.elapsed().as_millis(), "candidatePair": candidates })
+        json!({
+            "route": route,
+            "status": 200,
+            "elapsedMs": started.elapsed().as_millis(),
+            "candidatePair": candidates,
+        })
     );
     Ok(())
 }

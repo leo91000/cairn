@@ -191,17 +191,33 @@ async fn client_with_fingerprint(
             tokio::select! {
                 Some(candidate) = candidates.recv() => signal_as(relay, cookie, session, &grant, &candidate).await,
                 chunk = events.chunk() => {
-                    buffered.push_str(std::str::from_utf8(&chunk.unwrap().expect("signaling remains open")).unwrap());
+                    buffered.push_str(
+                        std::str::from_utf8(&chunk.unwrap().expect("signaling remains open")).unwrap(),
+                    );
                     while let Some(end) = buffered.find("\n\n") {
                         let event: String = buffered.drain(..end + 2).collect();
                         for line in event.lines() {
                             if let Some(data) = line.strip_prefix("data: ") {
                                 match serde_json::from_str::<DirectSignal>(data).unwrap() {
-                                    DirectSignal::Answer { sdp } => peer.set_remote_description(RTCSessionDescription::answer(sdp).unwrap()).await.unwrap(),
-                                    DirectSignal::Candidate { candidate, sdp_mid, sdp_m_line_index } => {
-                                        peer.add_ice_candidate(webrtc::peer_connection::RTCIceCandidateInit {
-                                            candidate, sdp_mid, sdp_mline_index: sdp_m_line_index, ..Default::default()
-                                        }).await.unwrap();
+                                    DirectSignal::Answer { sdp } => peer
+                                        .set_remote_description(RTCSessionDescription::answer(sdp).unwrap())
+                                        .await
+                                        .unwrap(),
+                                    DirectSignal::Candidate {
+                                        candidate,
+                                        sdp_mid,
+                                        sdp_m_line_index,
+                                    } => {
+                                        peer.add_ice_candidate(
+                                            webrtc::peer_connection::RTCIceCandidateInit {
+                                                candidate,
+                                                sdp_mid,
+                                                sdp_mline_index: sdp_m_line_index,
+                                                ..Default::default()
+                                            },
+                                        )
+                                        .await
+                                        .unwrap();
                                     }
                                     _ => panic!("unexpected installation offer"),
                                 }
@@ -210,12 +226,20 @@ async fn client_with_fingerprint(
                     }
                 }
                 event = channel.poll() => {
-                    if matches!(event, Some(DataChannelEvent::OnOpen)) { return true; }
-                    if matches!(event, None | Some(DataChannelEvent::OnClose | DataChannelEvent::OnError)) { return false; }
+                    if matches!(event, Some(DataChannelEvent::OnOpen)) {
+                        return true;
+                    }
+                    if matches!(
+                        event,
+                        None | Some(DataChannelEvent::OnClose | DataChannelEvent::OnError)
+                    ) {
+                        return false;
+                    }
                 }
             }
         }
-    }).await;
+    })
+    .await;
     if mismatched {
         assert!(
             !matches!(negotiated, Ok(true)),
@@ -571,8 +595,22 @@ async fn disabling_direct_refuses_authorization_and_preserves_the_relay() {
     )
     .await;
     let id = relay.session["installations"][0]["id"].as_str().unwrap();
-    let response = relay.app.authenticated(&relay.cookie, &relay.session, Method::POST, &format!("/api/installations/{id}/direct/authorize"))
-        .json(&json!({ "fingerprint": format!("sha-256 {}", vec!["AB"; 32].join(":")), "versions": [4] })).send().await.unwrap();
+    let fingerprint = format!("sha-256 {}", vec!["AB"; 32].join(":"));
+    let response = relay
+        .app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            &format!("/api/installations/{id}/direct/authorize"),
+        )
+        .json(&json!({
+            "fingerprint": fingerprint,
+            "versions": [4],
+        }))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert_eq!(
         relay.get("/chats").send().await.unwrap().status(),
@@ -771,5 +809,70 @@ async fn installation_stream_and_request_limits_span_real_peers_and_release_on_c
     for (peer, _) in peers {
         peer.close().await.unwrap();
     }
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn cancelling_then_reusing_a_request_id_keeps_new_stream_credit_and_tracking() {
+    let mut relay = RelayedInstallation::new(stream_router()).await;
+    production_connector(&mut relay).await;
+    let (peer, channel, _) = client(&relay).await;
+    for cycle in 0..100 {
+        let transfer = 1 + cycle * 5;
+        send_frame(
+            channel.as_ref(),
+            transfer,
+            &request("reused", "/api/fixture/stream"),
+        )
+        .await;
+        assert!(matches!(
+            response(channel.as_ref()).await,
+            Frame::StreamStart(_)
+        ));
+        send_frame(
+            channel.as_ref(),
+            transfer + 1,
+            &Frame::Cancel {
+                id: "reused".into(),
+            },
+        )
+        .await;
+        send_frame(
+            channel.as_ref(),
+            transfer + 2,
+            &request("reused", "/api/fixture/stream"),
+        )
+        .await;
+        send_frame(
+            channel.as_ref(),
+            transfer + 3,
+            &Frame::StreamCredit {
+                id: "reused".into(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            response(channel.as_ref()).await,
+            Frame::StreamStart(_)
+        ));
+        assert!(
+            matches!(response(channel.as_ref()).await, Frame::StreamChunk { body, .. } if body == b"hello-stream")
+        );
+        // The existing relay dispatcher requires credit for the EOF read too.
+        send_frame(
+            channel.as_ref(),
+            transfer + 4,
+            &Frame::StreamCredit {
+                id: "reused".into(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            response(channel.as_ref()).await,
+            Frame::StreamEnd { .. }
+        ));
+    }
+    channel.close().await.unwrap();
+    peer.close().await.unwrap();
     relay.close().await;
 }
