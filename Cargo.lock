@@ -2950,6 +2950,7 @@ dependencies = [
  "futures-util",
  "hex",
  "ipnet",
+ "jwt-simple",
  "leo-agent-manager",
  "leo-relay-protocol",
  "p256",

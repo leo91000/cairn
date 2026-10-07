@@ -130,6 +130,10 @@ impl From<web_push::WebPushError> for PushError {
 pub trait PushSender: Send + Sync {
     fn public_key(&self) -> &str;
 
+    fn android_available(&self) -> bool {
+        false
+    }
+
     async fn send(&self, subscription: &PushSubscription, payload: &Value)
     -> Result<(), PushError>;
 }
@@ -193,17 +197,69 @@ pub(super) async fn subscribe(
     }
 
     let id = digest(&input.endpoint);
+    register_device(&service, &account, &id, input).await?;
+    Ok(Json(json!({ "id": id })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct AndroidDevice {
+    device_id: String,
+    token: String,
+}
+
+pub(super) async fn subscribe_android(
+    State(service): State<Service>,
+    headers: HeaderMap,
+    Json(input): Json<AndroidDevice>,
+) -> Result<Json<Value>, ApiError> {
+    let account = installations::account(&service, &headers, &Method::POST).await?;
+    let device = uuid::Uuid::parse_str(&input.device_id).map_err(|_| {
+        ApiError::Http(
+            StatusCode::BAD_REQUEST,
+            "Invalid Android device registration",
+        )
+    })?;
+    if !valid_native_token(&input.token) {
+        return Err(ApiError::Http(
+            StatusCode::BAD_REQUEST,
+            "Invalid Android device registration",
+        ));
+    }
+    let id = digest(&format!("android:{device}"));
+    let subscription = PushSubscription {
+        endpoint: format!("fcm:{}", input.token),
+        keys: PushKeys {
+            p256dh: String::new(),
+            auth: String::new(),
+        },
+    };
+    register_device(&service, &account, &id, subscription).await?;
+    Ok(Json(json!({ "id": id })))
+}
+
+fn valid_native_token(token: &str) -> bool {
+    !token.is_empty() && token.len() <= 4096 && token.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+async fn register_device(
+    service: &Service,
+    account: &str,
+    id: &str,
+    input: PushSubscription,
+) -> Result<(), ApiError> {
     let mut transaction = service.pool.begin().await?;
     // Serialize additions for this account so concurrent devices cannot exceed its limit.
     query("SELECT id FROM leo_accounts WHERE id = $1 FOR UPDATE")
-        .bind(&account)
+        .bind(account)
         .execute(&mut *transaction)
         .await?;
 
     let (count,): (i64,) =
-        query_as("SELECT count(*) FROM notification_devices WHERE account_id = $1 AND id <> $2")
-            .bind(&account)
-            .bind(&id)
+        query_as("SELECT count(*) FROM notification_devices WHERE account_id = $1 AND id <> $2 AND endpoint <> $3")
+            .bind(account)
+            .bind(id)
+            .bind(&input.endpoint)
             .fetch_one(&mut *transaction)
             .await?;
 
@@ -214,7 +270,19 @@ pub(super) async fn subscribe(
         ));
     }
 
-    // A browser endpoint has one current account, even after switching accounts.
+    // A rotated native token replaces the previous registration, including explicit account switches.
+    // Serializing the endpoint prevents two phones registering the same token concurrently.
+    query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&input.endpoint)
+        .execute(&mut *transaction)
+        .await?;
+    query("DELETE FROM notification_devices WHERE endpoint = $1 AND id <> $2")
+        .bind(&input.endpoint)
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+
+    // Each endpoint has one current account, even after switching accounts.
     query(
         "INSERT INTO notification_devices (id, account_id, endpoint, p256dh, auth)
          VALUES ($1, $2, $3, $4, $5)
@@ -224,7 +292,7 @@ pub(super) async fn subscribe(
              p256dh = EXCLUDED.p256dh,
              auth = EXCLUDED.auth",
     )
-    .bind(&id)
+    .bind(id)
     .bind(account)
     .bind(input.endpoint)
     .bind(input.keys.p256dh)
@@ -233,7 +301,7 @@ pub(super) async fn subscribe(
     .await?;
 
     transaction.commit().await?;
-    Ok(Json(json!({ "id": id })))
+    Ok(())
 }
 
 pub(super) async fn registered(
@@ -385,6 +453,7 @@ pub(super) async fn deliver(
                 event.id,
                 id,
                 account,
+                subscription.endpoint,
                 subscription.keys.p256dh,
                 subscription.keys.auth,
             ])
@@ -399,10 +468,18 @@ pub(super) async fn deliver(
             ReceiptAdmission::Reserved(receipt) => receipt,
         };
 
-        let result = if valid_subscription(&subscription) {
+        let native = subscription
+            .endpoint
+            .strip_prefix("fcm:")
+            .is_some_and(valid_native_token);
+        let mut device_payload = payload.clone();
+        if native {
+            device_payload["accountId"] = account.into();
+        }
+        let result = if native || valid_subscription(&subscription) {
             tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                sender.send(&subscription, &payload),
+                sender.send(&subscription, &device_payload),
             )
             .await
         } else {
@@ -435,7 +512,23 @@ pub(super) async fn configuration(
         StatusCode::SERVICE_UNAVAILABLE,
         "Push notifications are not configured on the official service",
     ))?;
+    if sender.public_key().is_empty() {
+        return Err(ApiError::Http(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Web push is not configured",
+        ));
+    }
     Ok(Json(json!({ "publicKey": sender.public_key() })))
+}
+
+pub(super) async fn android_configuration(
+    State(service): State<Service>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    installations::account(&service, &headers, &Method::GET).await?;
+    Ok(Json(
+        json!({"enabled": service.push.as_ref().is_some_and(|sender| sender.android_available())}),
+    ))
 }
 
 /// The private key comes only from operator configuration, never an installation or database.

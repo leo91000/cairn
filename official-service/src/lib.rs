@@ -4,6 +4,7 @@ extern crate sqlx_core as sqlx;
 
 mod account;
 mod audit;
+mod fcm;
 mod installations;
 pub mod installer;
 mod mcp;
@@ -15,6 +16,7 @@ mod passkeys;
 mod relay;
 mod sharing;
 
+pub use fcm::{AccountPushSender, FcmPushSender};
 pub use network::TrustedProxies;
 pub use notifications::{PushError, PushSender, PushSubscription, WebPushSender};
 pub use oauth::{OAuthProvider, OAuthProviders};
@@ -196,6 +198,7 @@ pub async fn router_with_network_and_push(
         push_pool,
     };
     Ok(Router::new()
+        .route("/.well-known/assetlinks.json", get(passkeys::assetlinks))
         .route("/api/account/email-code", post(request_code))
         .route("/api/account/verify", post(verify_code))
         .route("/api/account/reauth/email", post(reauthenticate_email))
@@ -217,12 +220,24 @@ pub async fn router_with_network_and_push(
             get(notifications::configuration),
         )
         .route(
+            "/api/account/notifications/android",
+            post(notifications::subscribe_android).get(notifications::android_configuration),
+        )
+        .route(
             "/api/account/notifications/subscriptions",
             post(notifications::subscribe),
         )
         .route(
             "/api/account/notifications/subscriptions/{id}",
             get(notifications::registered).delete(notifications::unsubscribe),
+        )
+        .route(
+            "/api/account/oauth/{name}/native/browser",
+            get(oauth::native_browser),
+        )
+        .route(
+            "/api/account/oauth/{name}/native/finish",
+            post(oauth::native_finish),
         )
         .route(
             "/api/account/passkeys/register/start",
@@ -252,7 +267,7 @@ pub async fn router_with_network_and_push(
         .route("/api/account/oauth/{provider}/start", post(oauth::start))
         .route(
             "/api/account/oauth/{provider}/callback",
-            get(oauth::callback),
+            get(oauth::callback).post(oauth::google_credential),
         )
         .route("/api/account/invitations", get(sharing::pending))
         .route(
@@ -858,6 +873,7 @@ pub async fn cleanup_expired(pool: &PgPool) -> Result<(), sqlx_core::error::Erro
         "DELETE FROM web_sessions WHERE expires_at <= now()",
         "DELETE FROM account_rate_limits WHERE resets_at < now() - interval '1 day'",
         "DELETE FROM sign_in_challenges WHERE expires_at <= now()",
+        "DELETE FROM native_oauth_handovers WHERE expires_at <= now()",
         "DELETE FROM installation_claim_codes WHERE expires_at <= now()",
         "DELETE FROM installation_device_claims WHERE expires_at <= now()",
         "DELETE FROM installation_invitations WHERE expires_at <= now()",

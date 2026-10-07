@@ -6,8 +6,8 @@ use axum::{
     routing::{any, get},
 };
 use leo_official_service::{
-    EmailSender, OAuthProvider, OAuthProviders, Relay, TrustedProxies, WebPushSender,
-    router_with_network_and_push,
+    AccountPushSender, EmailSender, FcmPushSender, OAuthProvider, OAuthProviders, Relay,
+    TrustedProxies, WebPushSender, router_with_network_and_push,
 };
 use reqwest::Client;
 use serde_json::json;
@@ -202,12 +202,24 @@ async fn run() -> Result<(), String> {
     let oauth = OAuthProviders {
         google: configured_oauth("GOOGLE", loopback)?,
         github: configured_oauth("GITHUB", loopback)?,
+        android_certificates: env::var("LEO_OFFICIAL_ANDROID_CERTIFICATES")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| {
+                let decoded = hex::decode(value.trim().replace(':', ""))
+                    .map_err(|_| "Invalid Android signing certificate fingerprint")?;
+                <[u8; 32]>::try_from(decoded)
+                    .map_err(|_| "Android signing fingerprints require SHA-256")
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        ..Default::default()
     };
     let proxies: TrustedProxies = env::var("LEO_OFFICIAL_TRUSTED_PROXIES")
         .unwrap_or_default()
         .parse()
         .map_err(str::to_owned)?;
-    let push: Option<Arc<dyn leo_official_service::PushSender>> = match (
+    let web_push = match (
         env::var("LEO_OFFICIAL_VAPID_PRIVATE_KEY")
             .ok()
             .filter(|value| !value.is_empty()),
@@ -216,13 +228,31 @@ async fn run() -> Result<(), String> {
             .filter(|value| !value.is_empty()),
     ) {
         (None, None) => None,
-        (Some(private), Some(subject)) => Some(Arc::new(WebPushSender::new(private, subject)?)),
+        (Some(private), Some(subject)) => Some(WebPushSender::new(private, subject)?),
         _ => {
             return Err(
                 "Set both LEO_OFFICIAL_VAPID_PRIVATE_KEY and LEO_OFFICIAL_VAPID_SUBJECT".into(),
             );
         }
     };
+    let android_push = env::var("LEO_OFFICIAL_FCM_SERVICE_ACCOUNT")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(|path| {
+            let account = std::fs::read_to_string(path)
+                .map_err(|_| "Could not read FCM service account file")?;
+            FcmPushSender::new(&account)
+        })
+        .transpose()?;
+    let push: Option<Arc<dyn leo_official_service::PushSender>> =
+        if web_push.is_some() || android_push.is_some() {
+            Some(Arc::new(AccountPushSender {
+                web: web_push,
+                android: android_push,
+            }))
+        } else {
+            None
+        };
     let relay = Relay::default();
     let mut app = router_with_network_and_push(
         pool.clone(),

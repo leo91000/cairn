@@ -461,6 +461,117 @@ struct OAuthMock {
     state: OAuthMockState,
 }
 
+#[tokio::test]
+async fn native_github_handover_links_with_the_original_session_and_is_one_use() {
+    let provider = OAuthMock::new().await;
+    let app = Fixture::with_oauth(provider.providers()).await;
+    let (cookie, session) = common::login(&app, "alice@example.test").await;
+    let response = app
+        .client
+        .post(format!("{}/api/account/oauth/github/start", app.url))
+        .header("origin", &app.url)
+        .header("cookie", &cookie)
+        .header("x-csrf-token", session["csrf"].as_str().unwrap())
+        .json(&json!({"native": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let start: Value = response.json().await.unwrap();
+    assert!(start["url"].as_str().unwrap().starts_with(&app.url));
+    let exchange = || {
+        app.client
+            .post(format!(
+                "{}/api/account/oauth/github/native/finish",
+                app.url
+            ))
+            .header("origin", &app.url)
+            .header("cookie", &cookie)
+            .header("x-csrf-token", session["csrf"].as_str().unwrap())
+            .json(&json!({
+                "challenge": start["challenge"],
+                "secret": start["secret"],
+            }))
+    };
+    assert_eq!(
+        exchange().send().await.unwrap().status(),
+        StatusCode::ACCEPTED
+    );
+    let browser_client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let launch = browser_client
+        .get(start["url"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(launch.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        browser_client
+            .get(start["url"].as_str().unwrap())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let browser_cookie = launch.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let authorization = url::Url::parse(launch.headers()["location"].to_str().unwrap()).unwrap();
+    provider.expect_authorization(
+        &authorization,
+        format!("{}/api/account/oauth/github/callback", app.url),
+    );
+    assert_eq!(
+        authorization
+            .query_pairs()
+            .find(|(key, _)| key == "scope")
+            .unwrap()
+            .1,
+        "user:email"
+    );
+    let state = authorization
+        .query_pairs()
+        .find(|(key, _)| key == "state")
+        .unwrap()
+        .1
+        .to_string();
+    let callback = browser_client
+        .get(format!(
+            "{}/api/account/oauth/github/callback?state={state}&code=verified",
+            app.url
+        ))
+        .header("cookie", browser_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(callback.status(), StatusCode::OK);
+    assert!(
+        callback
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .all(|value| !value.to_str().unwrap().starts_with("leo_session="))
+    );
+    let response = exchange().send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["account"]["id"],
+        session["account"]["id"]
+    );
+    assert_eq!(
+        exchange().send().await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    provider.server.abort();
+    app.close().await;
+}
+
 impl OAuthMock {
     async fn new() -> Self {
         use axum::{
@@ -552,6 +663,7 @@ impl OAuthMock {
                 userinfo_url: format!("{}/github/user", self.url),
                 emails_url: Some(format!("{}/github/emails", self.url)),
             }),
+            ..Default::default()
         }
     }
 

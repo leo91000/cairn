@@ -1090,7 +1090,7 @@ async fn failed_push_tasks_release_the_relay_window_for_new_events() {
 }
 
 #[tokio::test]
-async fn android_device_registration_rotates_one_account_device_and_stops_on_logout() {
+async fn android_device_registration_rotates_one_account_device_and_can_be_removed() {
     let app = Fixture::new().await;
     let (cookie, session) = login(&app, "android@example.test").await;
     let path = "/api/account/notifications/android";
@@ -1141,4 +1141,68 @@ async fn android_device_registration_rotates_one_account_device_and_stops_on_log
         json!({ "registered": false })
     );
     app.close().await;
+}
+
+#[tokio::test]
+async fn native_push_reuses_current_membership_and_drops_removed_members_immediately() {
+    let mail = std::sync::Arc::new(PushMailbox::default());
+    let relay = common::RelayedInstallation::with_push(mail.clone()).await;
+    let (member_cookie, member_session) = invite(&relay, "native-member@example.test").await;
+    for (cookie, session, token) in [
+        (&relay.cookie, &relay.session, "fixture-native-owner"),
+        (&member_cookie, &member_session, "fixture-native-member"),
+    ] {
+        let response = request(
+            &relay.app,
+            cookie,
+            session,
+            Method::POST,
+            "/api/account/notifications/android",
+        )
+        .json(&json!({ "deviceId": uuid::Uuid::new_v4().to_string(), "token": token }))
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let (chat, run) = chat_run(&relay).await;
+    question(&relay, &run, &"c".repeat(64)).await;
+    wait_pushes(&mail, 2).await;
+    let mut endpoints: Vec<_> = mail
+        .messages
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|message| message.0.clone())
+        .collect();
+    endpoints.sort();
+    assert_eq!(
+        endpoints,
+        ["fcm:fixture-native-member", "fcm:fixture-native-owner"]
+    );
+    let installation = relay.session["installations"][0]["id"].as_str().unwrap();
+    for (_, payload) in mail.messages.lock().unwrap().iter() {
+        assert_eq!(payload["installationId"], installation);
+        assert_eq!(payload["chatId"], chat);
+        assert!(!payload.to_string().contains("Private question content"));
+    }
+    let member = member_session["account"]["id"].as_str().unwrap();
+    let response = request(
+        &relay.app,
+        &relay.cookie,
+        &relay.session,
+        Method::DELETE,
+        &format!("/api/installations/{installation}/sharing/members/{member}"),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    question(&relay, &run, &"d".repeat(64)).await;
+    wait_pushes(&mail, 3).await;
+    assert_eq!(
+        mail.messages.lock().unwrap()[2].0,
+        "fcm:fixture-native-owner"
+    );
+    relay.close().await;
 }
