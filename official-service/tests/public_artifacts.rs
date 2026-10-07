@@ -350,3 +350,74 @@ async fn public_download_rate_limit_uses_the_peer_and_preserves_account_access()
     );
     relay.close().await;
 }
+
+#[tokio::test]
+async fn only_owner_controls_public_links_and_member_removal_preserves_them() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let cookies = common::stream_accounts(&relay).await;
+    let cookie = &cookies[1];
+    let session: Value = relay
+        .app
+        .client
+        .get(format!("{}/api/account/session", relay.app.url))
+        .header("cookie", cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let (run, artifact) = seeded_artifact(&relay, b"Report", "text/plain").await;
+    let path = format!("{}/runs/{run}/artifacts/{artifact}/visibility", relay.base);
+    for value in ["public", "private"] {
+        let response = relay
+            .app
+            .client
+            .put(&path)
+            .header("cookie", cookie)
+            .header("origin", &relay.app.url)
+            .header("x-csrf-token", session["csrf"].as_str().unwrap())
+            .json(&json!({ "visibility": value }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+    let shared = visibility(&relay, &run, &artifact, "public").await;
+    let public = shared["publicUrl"].as_str().unwrap();
+    let installation = relay.session["installations"][0]["id"].as_str().unwrap();
+    let removed = relay
+        .app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            reqwest::Method::DELETE,
+            &format!(
+                "/api/installations/{installation}/sharing/members/{}",
+                session["account"]["id"].as_str().unwrap()
+            ),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        relay
+            .app
+            .client
+            .get(public)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap(),
+        "Report"
+    );
+    visibility(&relay, &run, &artifact, "private").await;
+    assert_eq!(
+        relay.app.client.get(public).send().await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    relay.close().await;
+}

@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 pub struct Service {
+    pub task_author_lock: Arc<tokio::sync::Mutex<()>>,
     pub node_maintenance_tasks: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
     pub node_lease_deadlines:
         Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::time::Instant>>>,
@@ -56,6 +57,7 @@ impl Service {
         let store = Store::open(&config.data_dir)?;
         let vault = Vault::new(store.clone(), &config.data_dir)?;
         let service = Arc::new(Self {
+            task_author_lock: Arc::default(),
             node_maintenance_tasks: Arc::default(),
             node_lease_deadlines: Arc::default(),
             started: tokio::time::Instant::now(),
@@ -224,6 +226,15 @@ impl Service {
     }
 
     pub async fn task(&self, input: Value, existing: Option<&str>) -> Result<Value> {
+        self.task_as(input, existing, None).await
+    }
+
+    pub(crate) async fn save_task(
+        &self,
+        input: Value,
+        existing: Option<&str>,
+        author: Option<leo_relay_protocol::TaskAuthorGrant>,
+    ) -> Result<Value> {
         let mut task = parse("task", input)?;
         let agent = self.get("agents", text(&task, "agentId")).await?;
         task_projects(&agent, &task, &self.store.list("projects").await?)?;
@@ -232,12 +243,25 @@ impl Service {
         }
         task["id"] = existing.map_or_else(id, str::to_owned).into();
         task["createdAt"] = if let Some(id) = existing {
-            self.get("tasks", id).await?["createdAt"].clone()
+            let previous = self.get("tasks", id).await?;
+            task["authorId"] = previous["authorId"].clone();
+            task["authorAccessId"] = previous["authorAccessId"].clone();
+            task["authorRemoved"] = previous["authorRemoved"].clone();
+            previous["createdAt"].clone()
         } else {
+            if let Some(author) = author {
+                task["authorId"] = author.account_id.into();
+                task["authorAccessId"] = author.access_id.into();
+            }
             now().into()
         };
         let scheduled =
             task["enabled"] == true && task["archived"] != true && task["cron"].is_string();
+        if scheduled && task["authorRemoved"] == true {
+            return Err(Error::conflict(
+                "This author's access ended. Duplicate the task to schedule it again.",
+            ));
+        }
         task["nextRun"] = if scheduled {
             next_occurrences(text(&task, "cron"), text(&task, "timezone"), now(), 1)?[0].into()
         } else {
@@ -380,8 +404,17 @@ impl Service {
     }
 
     pub async fn schedule(&self) -> Result<()> {
+        let _guard = self.task_author_lock.lock().await;
+        if !self.store.list("tasks").await?.iter().any(schedule_due) {
+            return Ok(());
+        }
+        // No new scheduled work is admitted without the current official authority.
+        // Already admitted work continues through a temporary official outage.
+        let Ok(policy) = self.synchronize_task_authors_locked().await else {
+            return Ok(());
+        };
         for task in self.store.list("tasks").await? {
-            if !schedule_due(&task) {
+            if !schedule_due(&task) || policy.is_none() && task["authorId"].is_string() {
                 continue;
             }
             if let Err(error) = self

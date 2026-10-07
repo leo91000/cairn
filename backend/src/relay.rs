@@ -45,6 +45,38 @@ struct Identity {
     token: String,
 }
 
+pub(crate) async fn task_author_policy(
+    service: &crate::service::Service,
+) -> Result<Option<leo_relay_protocol::TaskAuthorPolicy>> {
+    let directory = service.config.data_dir.join("installation-relay");
+    let Some(identity) = read_identity(&directory).await? else {
+        return Ok(None);
+    };
+    let official = origin(&identity.origin)?;
+    let response = service
+        .http
+        .get(
+            official
+                .join(&format!(
+                    "api/relay/{}/task-authors",
+                    identity.installation_id
+                ))
+                .map_err(Error::internal)?,
+        )
+        .bearer_auth(&identity.token)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|_| Error::unavailable("Task-author check unavailable."))?
+        .error_for_status()
+        .map_err(|_| Error::unavailable("Task-author check unavailable."))?;
+    response
+        .json()
+        .await
+        .map(Some)
+        .map_err(|_| Error::unavailable("Task-author check unavailable."))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Claimed {
@@ -512,6 +544,7 @@ async fn connected(
     service: &crate::service::Service,
     direct: crate::direct::DirectConnections,
 ) -> Result<()> {
+    service.synchronize_task_authors().await?;
     let mut url = official
         .join(&format!("api/relay/{}/connect", identity.installation_id))
         .map_err(Error::internal)?;

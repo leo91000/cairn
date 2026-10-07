@@ -156,7 +156,12 @@ const statusLabels: Record<RunListItem['status'], string> = {
           >
             <Icon :name="ArrowUpRight" :size="15" />Open the latest run
           </RouterLink>
-          <button class="mission-menu-item text-danger" role="menuitem" @click="act('remove')">
+          <button
+            v-if="state.installationRole === 'owner'"
+            class="mission-menu-item text-danger"
+            role="menuitem"
+            @click="act('remove')"
+          >
             <Icon :name="Trash2" :size="15" />Delete
           </button>
         </div>
@@ -240,6 +245,9 @@ const statusLabels: Record<RunListItem['status'], string> = {
         </RouterLink>
       </li>
     </ul>
+    <p v-if="task.authorRemoved && task.cron" class="m-0! text-sm text-muted">
+      Schedule stopped because its author's access ended. Duplicate this mission to schedule it again.
+    </p>
     <div class="mt-4 flex items-center gap-2.5">
       <button
         class="mission-round"
@@ -253,7 +261,7 @@ const statusLabels: Record<RunListItem['status'], string> = {
         v-if="!task.archived && task.cron"
         class="mission-round"
         :aria-label="task.enabled ? 'Pause schedule' : 'Resume schedule'"
-        :disabled="busy"
+        :disabled="busy || task.authorRemoved === true"
         @click="emit('pause')"
       >
         <Icon :name="task.enabled ? Pause : Clock" :size="18" />

@@ -82,6 +82,8 @@ export type Task = z.infer<typeof taskInput> & {
   id: string
   createdAt: number
   nextRun: number | null
+  authorId?: string | null
+  authorRemoved?: boolean | null
 }
 export type RunStatus
   = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'

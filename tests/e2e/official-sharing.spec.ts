@@ -1,8 +1,14 @@
 import type { Page } from '@playwright/test'
 import type { ChildProcess } from 'node:child_process'
 import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import {
+  mkdir,
+  mkdtemp,
+  rm,
+  writeFile,
+} from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -131,6 +137,28 @@ test('owner shares an installation and member works without management controls'
     await member.getByRole('button', { name: 'Accept invitation', exact: true }).click()
     await expect(member).toHaveURL(/\/installations\/[^/]+\/$/)
     const installationUrl = member.url()
+    const memberSession = await (await member.request.get(`${url}/api/account/session`)).json()
+    const apiRoot = `${url}/api/installations/${memberSession.installations[0].id}/api`
+    const agents = await (await member.request.get(`${apiRoot}/agents`)).json()
+    const taskResponse = await member.request.post(`${apiRoot}/tasks`, {
+      headers: { 'origin': url, 'x-csrf-token': memberSession.csrf },
+      data: {
+        name: 'Member commitment',
+        prompt: 'Shared scheduled work',
+        agentId: agents[0].id,
+        cron: '0 9 * * *',
+        timezone: 'UTC',
+        enabled: true,
+      },
+    })
+    expect(taskResponse.status()).toBe(200)
+    const task = await taskResponse.json()
+    expect(task.authorId).toBe(memberSession.account.id)
+    await member.goto(`${installationUrl}tasks?task=${task.id}`)
+    await member.getByRole('button', { name: 'Mission actions', exact: true }).click()
+    await expect(member.getByRole('menuitem', { name: 'Delete', exact: true })).toHaveCount(0)
+    await expect(member.getByRole('menuitem', { name: 'Duplicate (paused)', exact: true })).toBeVisible()
+    await member.goto(installationUrl)
     await member.getByText('Installation options', { exact: true }).click()
     await expect(member.getByRole('button', { name: 'Rename installation', exact: true })).toHaveCount(0)
     await expect(member.getByRole('button', { name: 'Share installation', exact: true })).toHaveCount(0)
@@ -154,12 +182,63 @@ test('owner shares an installation and member works without management controls'
     await expect(member.getByRole('heading', { name: 'Shared conversation', exact: true })).toBeVisible()
     await member.reload()
     await expect(member.getByRole('heading', { name: 'Shared conversation', exact: true })).toBeVisible()
+    const conversationUrl = member.url()
+    const runResponse = await member.request.post(`${apiRoot}/tasks/${task.id}/run`, {
+      headers: { 'origin': url, 'x-csrf-token': memberSession.csrf },
+    })
+    expect(runResponse.status()).toBe(200)
+    const runId = (await runResponse.json()).id
+    const report = {
+      id: randomUUID(),
+      runId,
+      messageId: null,
+      key: 'shared-report',
+      version: 1,
+      title: 'Shared report',
+      name: 'report.md',
+      kind: 'markdown',
+      size: 15,
+      mediaType: 'text/plain',
+      createdAt: Date.now(),
+      url: '',
+      group: 'Shared report',
+      previewStatus: 'none',
+      visibility: 'private',
+      excerpt: '# Shared report',
+    }
+    await mkdir(join(root, 'data', 'artifacts'), { recursive: true })
+    await writeFile(join(root, 'data', 'artifacts', report.id), '# Shared report')
+    seed.store.set(`artifact:${runId}:${report.id}`, report)
+    seed.store.event(runId, 'artifact', report.title, report)
+    await member.goto(`${installationUrl}runs/${runId}`)
+    await member.getByRole('button', { name: 'Open Shared report', exact: true }).click()
+    await member.getByRole('button', { name: 'Share file', exact: true }).click()
+    const memberSharing = member.getByRole('region', { name: 'File sharing' })
+    await expect(memberSharing.getByRole('button', { name: 'Enable public link', exact: true })).toHaveCount(0)
+    await expect(memberSharing.getByText('The installation owner controls public links.', { exact: true })).toBeVisible()
+    await member.getByRole('button', { name: 'Close viewer', exact: true }).click()
+    await page.goto(`${installationUrl}runs/${runId}`)
+    await page.getByRole('button', { name: 'Open Shared report', exact: true }).click()
+    await page.getByRole('button', { name: 'Share file', exact: true }).click()
+    const ownerSharing = page.getByRole('region', { name: 'File sharing' })
+    await ownerSharing.getByRole('button', { name: 'Enable public link', exact: true }).click()
+    await expect(ownerSharing.getByRole('textbox', { name: 'Public link', exact: true })).toBeVisible()
+    const publicUrl = await ownerSharing.getByRole('textbox', { name: 'Public link', exact: true }).inputValue()
+    await member.reload()
+    await member.getByRole('button', { name: 'Open Shared report', exact: true }).click()
+    await member.getByRole('button', { name: 'Share file', exact: true }).click()
+    await expect(memberSharing.getByRole('button', { name: 'Copy public link', exact: true })).toBeVisible()
+    await expect(memberSharing.getByRole('button', { name: 'Disable public link', exact: true })).toHaveCount(0)
+    await member.getByRole('button', { name: 'Close viewer', exact: true }).click()
+    await member.goto(conversationUrl)
+    await page.goto(installationUrl)
     expect(forbidden).toEqual([])
     await page.reload()
     await page.getByText('Installation options', { exact: true }).click()
     await page.getByRole('button', { name: 'Share installation', exact: true }).click()
     await page.getByRole('button', { name: `Remove ${memberEmail}`, exact: true }).click()
     await expect(page.getByRole('region', { name: 'Installation sharing' }).getByText(memberEmail, { exact: true })).toHaveCount(0)
+    expect((await page.request.get(publicUrl)).status()).toBe(200)
     await member.reload()
     await expect(member.getByRole('alert')).toContainText('no longer accessible')
     await page.getByLabel('Invite by email', { exact: true }).fill(memberEmail)
@@ -181,6 +260,12 @@ test('owner shares an installation and member works without management controls'
     await page.getByRole('button', { name: 'Send invitation', exact: true }).click()
     await page.getByRole('button', { name: `Cancel invitation to ${cancelledEmail}`, exact: true }).click()
     await expect(page.getByText('No pending invitations.', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Close sharing', exact: true }).click()
+    await page.goto(`${installationUrl}tasks?task=${task.id}`)
+    await expect(page.getByText('Schedule stopped because its author\'s access ended. Duplicate this mission to schedule it again.', { exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Resume schedule', exact: true })).toBeDisabled()
+    await page.getByRole('button', { name: 'Mission actions', exact: true }).click()
+    await expect(page.getByRole('menuitem', { name: 'Delete', exact: true })).toBeVisible()
   }
   finally {
     await memberContext.close()

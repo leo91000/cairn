@@ -29,3 +29,37 @@ consommation future de ses abonnements en retirant un membre. L'auteur des tâch
 sert uniquement à cette gestion des engagements ; il n'introduit ni conversations
 privées ni nouveau rôle. La mise en œuvre de ce complément appartient à la suite
 de #59 après les bloquants de déploiement public.
+
+## Complément : engagements et liens publics (2026-10-07, #59)
+
+L'auteur d'une tâche est le compte vérifié à sa création et reste inchangé quand
+un autre membre ou le propriétaire la modifie. Les tâches anciennes sans auteur,
+et celles créées par un agent avec ses droits internes, sont attribuées au
+propriétaire. L'auteur ne rend aucune conversation privée.
+
+Un engagement appartient à une adhésion précise : retirer, faire partir ou
+supprimer le compte d'un membre met fin à ses engagements planifiés. Le compte
+reste enregistré comme auteur. Réinviter le même compte ne relance pas ses anciens
+engagements. Pour reprendre une planification, un compte autorisé duplique la tâche ;
+il devient l'auteur de cette nouvelle tâche. Les anciennes tâches restent visibles,
+modifiables et exécutables manuellement. Seul le propriétaire peut supprimer une
+tâche, quel que soit son auteur.
+
+L'installation consulte l'autorité officielle avant de créer ou modifier une tâche,
+avant une admission planifiée et avant de reconnecter son relais. Elle ne conserve
+pas une liste de membres faisant autorité. Le retrait demande aussi une réconciliation
+immédiate à l'installation en ligne. Si l'installation est hors ligne ou si cette
+demande échoue, le prochain contrôle précède toute nouvelle admission planifiée.
+Une indisponibilité temporaire reporte les nouvelles admissions, sans désactiver
+définitivement les engagements encore valides. Les exécutions admises avant le
+retrait continuent. Cela préfère une planification retardée à une consommation
+future impossible à révoquer pendant une partition réseau.
+
+Le propriétaire contrôle la création et la révocation des liens publics dans
+l'interface partagée, y compris pour les livrables des membres et les liens anciens.
+Les membres peuvent consulter et copier un lien déjà publié. Le retrait d'un membre
+ne révoque pas automatiquement ces liens : le propriétaire conserve la publication
+et peut la révoquer explicitement. Les liens existants n'ont pas d'auteur fiable ;
+les supprimer en masse au retrait ferait perdre des publications légitimes. Les
+autorisations explicites des agents, limitées à leur exécution, restent applicables.
+Les copies déjà téléchargées restent évidemment chez leurs destinataires.

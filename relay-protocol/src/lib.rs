@@ -27,6 +27,27 @@ pub enum Role {
     Member,
 }
 
+/// Scheduling eligibility from the official authority, never local request authorization.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TaskAuthorGrant {
+    pub account_id: String,
+    pub access_id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TaskAuthorPolicy {
+    pub owner: TaskAuthorGrant,
+    pub members: Vec<TaskAuthorGrant>,
+}
+
+impl TaskAuthorPolicy {
+    pub fn grant(&self, account: &str) -> Option<&TaskAuthorGrant> {
+        std::iter::once(&self.owner)
+            .chain(&self.members)
+            .find(|grant| grant.account_id == account)
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct ApiRequest {
     pub id: String,

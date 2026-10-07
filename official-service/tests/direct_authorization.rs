@@ -32,6 +32,7 @@ async fn filter_tunnel_with_pause(
 
     relay.stop.cancel();
     (&mut relay.connector).await.unwrap().unwrap();
+    let policy_origin = relay.app.url.clone();
     let official = relay.app.url.replace("http:", "ws:");
     let routes = axum::Router::new().route("/api/relay/{installation}/connect", get(move |Path(id): Path<String>, headers: HeaderMap, upgrade: WebSocketUpgrade| {
         let official = official.clone();
@@ -90,6 +91,21 @@ async fn filter_tunnel_with_pause(
             })
         }
     }));
+    let routes = routes.route(
+        "/api/relay/{installation}/task-authors",
+        get(move |Path(id): Path<String>, headers: HeaderMap| {
+            let origin = policy_origin.clone();
+            async move {
+                let response = reqwest::Client::new()
+                    .get(format!("{origin}/api/relay/{id}/task-authors"))
+                    .header("authorization", headers["authorization"].clone())
+                    .send()
+                    .await
+                    .unwrap();
+                (response.status(), response.bytes().await.unwrap())
+            }
+        }),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://localhost:{}", listener.local_addr().unwrap().port());
     let server = tokio::spawn(async move {

@@ -630,3 +630,18 @@ checks current access again before displaying delayed messages. FCM authorizatio
 errors, outages and `INVALID_ARGUMENT` never delete device registrations: that
 error can indicate our payload rather than the device token. Only a 400/404 with
 the FCM-specific `UNREGISTERED` code removes an expired registration.
+
+## Shared task commitments
+
+`GET /api/relay/{installation}/task-authors` authenticates the current installation
+machine token, returns the owner and current membership grants, and sends
+`Cache-Control: no-store`. Browser cookies cannot authenticate this route. Each
+membership has a distinct access identifier; accepting a new invitation never
+restores commitments from an earlier membership of the same account.
+
+Removal, leaving and member account deletion request task reconciliation on the
+live relay after committing the access change. If that request is lost, the
+installation reconciles before admitting scheduled work and on reconnection.
+No account session or member list is persisted on the installation for access
+control. See [ADR-0029](adr/0029-sharing-whole-installations.md) for authorship,
+manual work and public-link decisions.

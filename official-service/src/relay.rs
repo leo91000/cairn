@@ -858,6 +858,41 @@ pub(super) async fn forward(
     .await
 }
 
+/// Access has already committed. A lost refresh is reconciled before any future
+/// scheduled admission and on reconnect, including a removal followed by re-invitation.
+pub(super) async fn refresh_task_authors(service: &Service, installation: &str) {
+    let tunnel = service
+        .relay
+        .connections
+        .lock()
+        .unwrap()
+        .get(installation)
+        .cloned();
+    if tunnel.is_none() {
+        return;
+    }
+    let request = Request::builder()
+        .method("POST")
+        .body(Body::empty())
+        .unwrap();
+    let refreshed = tokio::time::timeout(
+        Duration::from_secs(5),
+        send(
+            service,
+            tunnel,
+            0,
+            String::new(),
+            Capability::Maintenance,
+            "/api/task-authors/refresh",
+            request,
+        ),
+    )
+    .await;
+    if !matches!(refreshed, Ok(Ok(response)) if response.status().is_success()) {
+        tracing::warn!("Task schedules await the next official author check");
+    }
+}
+
 pub(super) async fn mcp(
     service: &Service,
     grant: super::mcp::McpAccess,
@@ -907,6 +942,7 @@ pub(super) async fn mcp(
 
 enum Capability {
     Account(Role),
+    Maintenance,
     Mcp {
         scopes: Vec<String>,
         credential_digest: String,
@@ -1078,6 +1114,7 @@ async fn send(
         .collect();
     let (role, mcp_scopes, public_artifact, mcp_credential, mcp_permit) = match capability {
         Capability::Account(role) => (role, None, None, None, None),
+        Capability::Maintenance => (Role::Owner, None, None, None, None),
         Capability::Mcp {
             scopes,
             credential_digest,
