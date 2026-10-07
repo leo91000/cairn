@@ -650,6 +650,14 @@ onMounted(async () => {
       <span role="status" aria-label="Installation availability" class="text-xs text-muted">
         {{ installationStatus(installation) }}
       </span>
+      <span
+        role="status"
+        aria-label="Connection route"
+        :data-transport-route="state.transportRoute"
+        class="text-xs text-muted"
+      >
+        {{ state.transportRoute === 'direct' ? 'Direct' : 'Relais' }}
+      </span>
       <details ref="installationMenu" class="relative ml-auto shrink-0">
         <summary class="cursor-pointer list-none rounded-lg border border-line px-3 py-2">
           Installation options
