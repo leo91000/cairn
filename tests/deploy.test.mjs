@@ -25,6 +25,8 @@ describe('coolify deployment over HTTP', () => {
   let persistCompose
   let normalizeCompose
   let releaseImage
+  let environment
+  let bulkFailures
 
   beforeEach(async () => {
     requests = []
@@ -33,6 +35,11 @@ describe('coolify deployment over HTTP', () => {
     persistCompose = true
     normalizeCompose = false
     releaseImage = undefined
+    bulkFailures = []
+    environment = [
+      { key: 'LEO_OFFICIAL_IMAGE', value: `ghcr.io/owner/leo-official@sha256:${'c'.repeat(64)}`, is_literal: true },
+      { key: 'LEO_INSTALLATION_IMAGE', value: `ghcr.io/owner/leo@sha256:${'d'.repeat(64)}`, is_literal: true },
+    ]
     healthResponses = [{ status: 'ok', commit: 'new-commit' }]
     server = createServer(async (request, response) => {
       let body = ''
@@ -54,6 +61,29 @@ describe('coolify deployment over HTTP', () => {
 
         response.statusCode = request.method === 'PATCH' ? patchStatus : 200
         response.end(JSON.stringify({ docker_compose_raw: compose }))
+        return
+      }
+
+      if (request.url === '/api/v1/services/leo-service/envs' && request.method === 'GET') {
+        response.end(JSON.stringify(environment))
+        return
+      }
+
+      if (request.url === '/api/v1/services/leo-service/envs/bulk') {
+        const failure = bulkFailures.shift()
+        const data = JSON.parse(body).data
+        if (failure === 'partial') {
+          Object.assign(environment[0], data[0])
+        }
+        else if (patchStatus < 300 && failure !== 'reject') {
+          for (const item of data) {
+            const current = environment.find(env => env.key === item.key)
+            Object.assign(current, item)
+          }
+        }
+
+        response.statusCode = failure === 'partial' || failure === 'reject' ? 500 : patchStatus
+        response.end('{}')
         return
       }
 
@@ -100,12 +130,57 @@ describe('coolify deployment over HTTP', () => {
     healthResponses = [{ status: 'ok', commit: 'old-commit' }, { status: 'ok', commit: config.commit }]
     await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
     expect(requests.filter(request => request.method !== 'GET').map(request => [request.method, request.path, request.body])).toEqual([
-      ['PATCH', '/api/v1/services/leo-service/envs', { key: 'LEO_OFFICIAL_IMAGE', value: config.image, is_literal: true }],
-      ['PATCH', '/api/v1/services/leo-service/envs', { key: 'LEO_INSTALLATION_IMAGE', value: config.installationImage, is_literal: true }],
+      ['PATCH', '/api/v1/services/leo-service/envs/bulk', {
+        data: [
+          { key: 'LEO_OFFICIAL_IMAGE', value: config.image, is_literal: true },
+          { key: 'LEO_INSTALLATION_IMAGE', value: config.installationImage, is_literal: true },
+        ],
+      }],
       ['POST', '/api/v1/services/leo-service/restart', undefined],
     ])
+    expect(environment.map(env => env.value)).toEqual([config.image, config.installationImage])
     expect(requests.some(request => request.path === '/internal/nodes/release')).toBe(false)
     expect(requests.some(request => request.path === '/install/release')).toBe(true)
+  })
+
+  it('repairs a half-applied bulk update before restarting', async () => {
+    compose = readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
+    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
+    bulkFailures = ['partial']
+    await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
+    expect(environment.map(env => env.value)).toEqual([config.image, config.installationImage])
+    const mutations = requests.filter(request => request.method !== 'GET')
+    expect(mutations.map(request => request.path)).toEqual([
+      '/api/v1/services/leo-service/envs/bulk',
+      '/api/v1/services/leo-service/envs/bulk',
+      '/api/v1/services/leo-service/restart',
+    ])
+  })
+
+  it('refuses masked previous values before any mutation', async () => {
+    compose = readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
+    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
+    environment[0].value = '********'
+    await expect(deploy(config)).rejects.toThrow('read:sensitive')
+    expect(requests.every(request => request.method === 'GET')).toBe(true)
+  })
+
+  it('restores the previous pair if a half-applied update cannot be repaired', async () => {
+    compose = readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
+    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
+    const previous = structuredClone(environment)
+    bulkFailures = ['partial', 'reject']
+    await expect(deploy(config)).rejects.toThrow('Previous image pair restored')
+    expect(environment).toEqual(previous)
+    expect(requests.some(request => request.path.endsWith('/restart'))).toBe(false)
+  })
+
+  it('reports that restarts must stay frozen when repair and restoration both fail', async () => {
+    compose = readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
+    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
+    bulkFailures = ['partial', 'reject', 'reject']
+    await expect(deploy(config)).rejects.toThrow('freeze restarts and repair both values manually')
+    expect(requests.some(request => request.path.endsWith('/restart'))).toBe(false)
   })
 
   it.each(['old-manager', 'two-replicas', 'start-first'])('refuses unsafe official target %s before any mutation', async (target) => {

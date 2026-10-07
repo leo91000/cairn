@@ -59,15 +59,53 @@ export async function deploy(config, { timeoutMs = 600000, intervalMs = 2000 } =
       throw new Error('Coolify did not persist the runner configuration.')
   }
 
-  await api(`${servicePath}/envs`, 'PATCH', {
-    key: official ? 'LEO_OFFICIAL_IMAGE' : 'LEO_IMAGE',
-    value: image,
-    is_literal: true,
-  })
   if (official) {
+    const data = [
+      { key: 'LEO_OFFICIAL_IMAGE', value: image, is_literal: true },
+      { key: 'LEO_INSTALLATION_IMAGE', value: config.installationImage, is_literal: true },
+    ]
+    const previousEnvironment = await api(`${servicePath}/envs`, 'GET', undefined, true)
+    const previous = data.map(({ key }) => {
+      const entry = previousEnvironment.find(env => env.key === key)
+      if (!entry || typeof entry.value !== 'string' || !/^ghcr\.io\/[a-z0-9_.\-/]+@sha256:[a-f0-9]{64}$/.test(entry.value))
+        throw new Error('Coolify must expose both previous image values (read:sensitive permission); refusing update')
+      return { key, value: entry.value, is_literal: entry.is_literal === true }
+    })
+
+    async function persistPair(pair) {
+      await api(`${servicePath}/envs/bulk`, 'PATCH', { data: pair })
+      const environment = await api(`${servicePath}/envs`, 'GET', undefined, true)
+      const persisted = pair.every(expected => environment.some(actual => actual.key === expected.key
+        && actual.value === expected.value && actual.is_literal === expected.is_literal))
+      if (!persisted)
+        throw new Error('Coolify did not persist the paired image environment; refusing restart')
+    }
+
+    try {
+      await persistPair(data)
+    }
+    catch {
+      // A bulk request can fail after persisting one field, or lose its response.
+      // Repair the candidate pair before any restart, even when rerunning a deploy.
+      try {
+        await persistPair(data)
+      }
+      catch (error) {
+        try {
+          await persistPair(previous)
+        }
+        catch {
+          throw new Error(`Coolify image pair could not be repaired or restored; freeze restarts and repair both values manually: ${error.message}`)
+        }
+
+        throw new Error(`Previous image pair restored; no restart: ${error.message}`)
+      }
+    }
+  }
+  else {
     await api(`${servicePath}/envs`, 'PATCH', {
-      key: 'LEO_INSTALLATION_IMAGE',
-      value: config.installationImage,
+      key: 'LEO_IMAGE',
+      value: image,
       is_literal: true,
     })
   }
