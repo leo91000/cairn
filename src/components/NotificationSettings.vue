@@ -71,7 +71,16 @@ async function toggle() {
     }
 
     subscription ??= await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key })
-    const { id } = await accountApi<{ id: string }>('/notifications/subscriptions', { method: 'POST', body: JSON.stringify(subscription.toJSON()) })
+    let id: string
+    try {
+      ({ id } = await accountApi<{ id: string }>('/notifications/subscriptions', { method: 'POST', body: JSON.stringify(subscription.toJSON()) }))
+    }
+    catch (cause) {
+      await subscription.unsubscribe()
+      localStorage.removeItem(deviceKey)
+      throw cause
+    }
+
     localStorage.setItem(deviceKey, id)
     enabled.value = true
   }
@@ -130,6 +139,9 @@ async function toggle() {
         {{ busy ? 'Updating…' : enabled ? 'Disable on this device' : 'Enable on this device' }}
       </UiButton><span v-if="enabled" class="text-[11px] text-accent" role="status">Notifications on</span>
     </div>
+    <p v-if="signedIn && supported && !enabled" class="text-xs text-muted">
+      Confirm with an email code or passkey before enabling notifications. Google or GitHub sign-in alone doesn’t confirm this action.
+    </p>
     <UiAlert v-if="error">
       {{ error }}
     </UiAlert>

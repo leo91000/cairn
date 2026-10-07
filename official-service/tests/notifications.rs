@@ -1378,6 +1378,186 @@ async fn android_device_registration_rotates_without_new_proof_and_can_be_remove
 }
 
 #[tokio::test]
+async fn native_rotation_does_not_exempt_new_removed_or_foreign_account_devices() {
+    let mail = std::sync::Arc::new(PushMailbox::default());
+    let relay = common::RelayedInstallation::with_push(mail.clone()).await;
+    let app = &relay.app;
+    let path = "/api/account/notifications/android";
+    let device = uuid::Uuid::new_v4().to_string();
+    let input = json!({
+        "deviceId": device,
+        "token": "fixture-owned-token",
+    });
+    let registered = request(app, &relay.cookie, &relay.session, Method::POST, path)
+        .json(&input)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), StatusCode::OK);
+    let registration: Value = registered.json().await.unwrap();
+    let (other_cookie, other_session) = login(app, "foreign-device@example.test").await;
+
+    query("UPDATE web_sessions SET last_proof_at = NULL")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    for (cookie, session, device_id) in [
+        (
+            &relay.cookie,
+            &relay.session,
+            uuid::Uuid::new_v4().to_string(),
+        ),
+        (&other_cookie, &other_session, device.clone()),
+    ] {
+        let refused = request(app, cookie, session, Method::POST, path)
+            .json(&json!({
+                "deviceId": device_id,
+                "token": "fixture-refused-token",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    }
+
+    let (_, run) = chat_run(&relay).await;
+    question(&relay, &run, &"b".repeat(64)).await;
+    wait_pushes(&mail, 1).await;
+    assert_eq!(
+        mail.messages.lock().unwrap()[0].0,
+        "fcm:fixture-owned-token"
+    );
+
+    let lookup = format!(
+        "/api/account/notifications/subscriptions/{}",
+        registration["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        request(app, &relay.cookie, &relay.session, Method::DELETE, &lookup)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let refused = request(app, &relay.cookie, &relay.session, Method::POST, path)
+        .json(&input)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    let absent: Value = request(app, &relay.cookie, &relay.session, Method::GET, &lookup)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(absent, json!({ "registered": false }));
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn native_rotation_rechecks_session_and_device_after_waiting_for_locks() {
+    for scenario in ["account", "endpoint", "device", "removed"] {
+        let relay = common::RelayedInstallation::new(axum::Router::new()).await;
+        let app = &relay.app;
+        let path = "/api/account/notifications/android";
+        let device = uuid::Uuid::new_v4().to_string();
+        let response = request(app, &relay.cookie, &relay.session, Method::POST, path)
+            .json(&json!({
+                "deviceId": device,
+                "token": "fixture-old-token",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let registration: Value = response.json().await.unwrap();
+        let id = registration["id"].as_str().unwrap();
+        query("UPDATE web_sessions SET last_proof_at = NULL")
+            .execute(&app.pool)
+            .await
+            .unwrap();
+
+        let mut barrier = app.pool.begin().await.unwrap();
+        let (pid,): (i32,) = sqlx_core::query_as::query_as("SELECT pg_backend_pid()")
+            .fetch_one(&mut *barrier)
+            .await
+            .unwrap();
+        match scenario {
+            "endpoint" => {
+                query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                    .bind("fcm:fixture-rotated-token")
+                    .execute(&mut *barrier)
+                    .await
+                    .unwrap();
+            }
+            "device" => {
+                query("SELECT id FROM notification_devices WHERE id = $1 FOR UPDATE")
+                    .bind(id)
+                    .execute(&mut *barrier)
+                    .await
+                    .unwrap();
+            }
+            _ => {
+                query("SELECT id FROM leo_accounts FOR UPDATE")
+                    .execute(&mut *barrier)
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let renewal =
+            request(app, &relay.cookie, &relay.session, Method::POST, path).json(&json!({
+                "deviceId": device,
+                "token": "fixture-rotated-token",
+            }));
+        let pending = tokio::spawn(async move { renewal.send().await.unwrap() });
+        app.wait_for_blocked_request(pid).await;
+
+        let lookup = format!("/api/account/notifications/subscriptions/{id}");
+        if scenario == "removed" {
+            assert_eq!(
+                request(app, &relay.cookie, &relay.session, Method::DELETE, &lookup)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::OK
+            );
+        } else {
+            query(
+                "UPDATE web_sessions SET expires_at = clock_timestamp() - interval '1 millisecond'",
+            )
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        }
+        barrier.commit().await.unwrap();
+
+        let refused = pending.await.unwrap();
+        let expected_status = if scenario == "removed" {
+            StatusCode::FORBIDDEN
+        } else {
+            StatusCode::UNAUTHORIZED
+        };
+        assert_eq!(refused.status(), expected_status);
+        if scenario == "removed" {
+            let absent: Value = request(app, &relay.cookie, &relay.session, Method::GET, &lookup)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(absent, json!({ "registered": false }));
+        }
+        relay.close().await;
+    }
+}
+
+#[tokio::test]
 async fn native_push_reuses_current_membership_and_drops_removed_members_immediately() {
     let mail = std::sync::Arc::new(PushMailbox::default());
     let relay = common::RelayedInstallation::with_push(mail.clone()).await;

@@ -154,6 +154,7 @@ test('a browser registers once for all Leo installations and can disable account
     await expect(page).toHaveURL(/\/installations\/[^/]+\/$/)
     await page.getByText('Installation options', { exact: true }).click()
     await page.getByRole('button', { name: 'Notifications', exact: true }).click()
+    await expect(page.getByText('Google or GitHub sign-in alone doesn’t confirm this action.', { exact: false })).toBeVisible()
     expireAccountProof(new URL(process.env.LEO_OFFICIAL_TEST_DATABASE_URL!), email)
     await page.getByRole('button', { name: 'Enable on this device' }).click()
     await expect(page.getByRole('alert')).toContainText('Confirm your identity')
