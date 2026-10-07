@@ -23,6 +23,7 @@ type ReadKey = (String, String, u64, Option<String>, String);
 
 // Shared by all publications; each slot includes full read-back verification.
 pub(crate) const HOT_WRITE_CONCURRENCY: usize = 16;
+const HOT_READ_CONCURRENCY: usize = 16;
 
 #[derive(PartialEq, Eq, Hash)]
 struct ClientKey {
@@ -57,7 +58,7 @@ impl HotS3 {
         Self {
             clients: Mutex::new(HashMap::new()),
             settings_lock: Mutex::new(()),
-            reads: Semaphore::new(8),
+            reads: Semaphore::new(HOT_READ_CONCURRENCY),
             writes: Semaphore::new(HOT_WRITE_CONCURRENCY),
             pending: Mutex::new(HashMap::new()),
             get_metrics: Counter::default(),
@@ -148,6 +149,23 @@ pub struct Storage {
     credentials: Option<StorageCredentials>,
     integrated: bool,
     r2: bool,
+    server_side_encryption: Option<aws_sdk_s3::types::ServerSideEncryption>,
+}
+
+fn server_side_encryption(
+    value: &str,
+    r2: bool,
+) -> Result<Option<aws_sdk_s3::types::ServerSideEncryption>> {
+    use aws_sdk_s3::types::ServerSideEncryption;
+
+    match value {
+        "" if r2 => Ok(None),
+        "" | "AES256" => Ok(Some(ServerSideEncryption::Aes256)),
+        "none" => Ok(None),
+        _ => Err(Error::bad(
+            "STORAGE_S3_SERVER_SIDE_ENCRYPTION must be AES256 or none.",
+        )),
+    }
 }
 
 fn setting(config: &Value, suffix: &str, key: &str) -> String {
@@ -389,6 +407,10 @@ impl Storage {
             },
             integrated,
             r2,
+            server_side_encryption: server_side_encryption(
+                &setting(config, "SERVER_SIDE_ENCRYPTION", "serverSideEncryption"),
+                r2,
+            )?,
         })
     }
 
@@ -584,9 +606,7 @@ impl Storage {
             .put_object()
             .bucket(&self.bucket)
             .key(key)
-            .set_server_side_encryption(
-                (!self.r2).then_some(aws_sdk_s3::types::ServerSideEncryption::Aes256),
-            )
+            .set_server_side_encryption(self.server_side_encryption.clone())
             .body(aws_sdk_s3::primitives::ByteStream::from(bytes.clone()))
             .send()
             .await
@@ -884,8 +904,118 @@ mod tests {
             credentials: None,
             integrated: false,
             r2: false,
+            server_side_encryption: Some(aws_sdk_s3::types::ServerSideEncryption::Aes256),
             hot,
         }
+    }
+
+    #[tokio::test]
+    async fn r2_cleanup_deletes_only_the_exact_key_without_version_listing() {
+        use axum::{
+            Router,
+            extract::Request,
+            http::{Method, StatusCode},
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new().fallback({
+            let requests = requests.clone();
+            move |request: Request| {
+                let requests = requests.clone();
+                async move {
+                    requests
+                        .lock()
+                        .await
+                        .push((request.method().clone(), request.uri().path().to_owned()));
+                    StatusCode::NO_CONTENT
+                }
+            }
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut storage = fixture_storage(&endpoint, "fixture", Arc::new(HotS3::new())).await;
+        storage.r2 = true;
+        storage
+            .purge_key("shared-blocks/v1/hash/object")
+            .await
+            .unwrap();
+        assert_eq!(
+            *requests.lock().await,
+            [(
+                Method::DELETE,
+                "/fixture/shared-blocks/v1/hash/object".to_owned()
+            )]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn optional_sse_header_preserves_exact_readback_and_provider_defaults() {
+        use axum::{
+            Router,
+            body::{Bytes, to_bytes},
+            extract::Request,
+            http::Method,
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let objects = Arc::new(Mutex::new(HashMap::<String, Bytes>::new()));
+        let headers = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new().fallback({
+            let objects = objects.clone();
+            let headers = headers.clone();
+            move |request: Request| {
+                let objects = objects.clone();
+                let headers = headers.clone();
+                async move {
+                    let key = request.uri().path().to_owned();
+                    if request.method() == Method::PUT {
+                        headers.lock().await.push(
+                            request
+                                .headers()
+                                .get("x-amz-server-side-encryption")
+                                .map(|value| value.to_str().unwrap().to_owned()),
+                        );
+                        objects
+                            .lock()
+                            .await
+                            .insert(key, to_bytes(request.into_body(), 64).await.unwrap());
+                        return Bytes::new();
+                    }
+                    assert_eq!(request.method(), Method::GET);
+                    objects.lock().await.get(&key).unwrap().clone()
+                }
+            }
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut storage = fixture_storage(&endpoint, "fixture", Arc::new(HotS3::new())).await;
+        for (index, (value, r2)) in [("", false), ("", true), ("none", false), ("AES256", false)]
+            .into_iter()
+            .enumerate()
+        {
+            storage.server_side_encryption = server_side_encryption(value, r2).unwrap();
+            storage
+                .upload_bytes(
+                    b"already encrypted payload".to_vec(),
+                    &format!("block-{index}"),
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            *headers.lock().await,
+            [
+                Some("AES256".to_owned()),
+                None,
+                None,
+                Some("AES256".to_owned())
+            ]
+        );
+        assert!(server_side_encryption("disabled", false).is_err());
+        assert!(server_side_encryption("false", true).is_err());
+        server.abort();
     }
 
     #[tokio::test]
@@ -971,6 +1101,63 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.message, "Remote backup checksum mismatch.");
         assert_eq!(hot.writes.available_permits(), 16);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn recovery_reads_share_sixteen_slots_and_release_them_after_refusal() {
+        use axum::{Router, body::Bytes, extract::Request, routing::get};
+        use tokio::task::JoinSet;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let started = Arc::new(Semaphore::new(0));
+        let release = Arc::new(Semaphore::new(0));
+        let app = Router::new().fallback(get({
+            let started = started.clone();
+            let release = release.clone();
+            move |request: Request| {
+                let started = started.clone();
+                let release = release.clone();
+                async move {
+                    started.add_permits(1);
+                    release.acquire().await.unwrap().forget();
+                    if request.uri().path().ends_with("/oversized") {
+                        return Bytes::from_static(b"too large");
+                    }
+                    Bytes::from_static(b"block")
+                }
+            }
+        }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let hot = Arc::new(HotS3::new());
+        let first = fixture_storage(&endpoint, "first", hot.clone()).await;
+        let second = fixture_storage(&endpoint, "second", hot.clone()).await;
+        let mut reads = JoinSet::new();
+        for index in 0..17 {
+            let storage = if index % 2 == 0 {
+                first.clone()
+            } else {
+                second.clone()
+            };
+            reads.spawn(async move { storage.download_bytes(&format!("block-{index}"), 5).await });
+        }
+
+        tokio::time::timeout(Duration::from_secs(2), started.acquire_many(16))
+            .await
+            .expect("sixteen independent recovery reads must reach S3 together")
+            .unwrap()
+            .forget();
+        assert_eq!(hot.reads.available_permits(), 0);
+        assert!(reads.try_join_next().is_none());
+
+        release.add_permits(18);
+        while let Some(read) = reads.join_next().await {
+            assert_eq!(read.unwrap().unwrap(), b"block");
+        }
+        let error = first.download_bytes("oversized", 5).await.unwrap_err();
+        assert_eq!(error.message, "Remote block exceeds the transfer limit.");
+        assert_eq!(hot.reads.available_permits(), 16);
         server.abort();
     }
 

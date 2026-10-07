@@ -32,6 +32,8 @@ use vmm_sys_util::{
     eventfd::EventFd,
 };
 
+mod reads;
+
 type Memory = GuestMemoryMmap<BitmapMmapRegion>;
 
 type Vring = VringRwLock<GuestMemoryAtomic<Memory>>;
@@ -189,6 +191,28 @@ impl Backend {
         Ok(())
     }
 
+    fn read_group(&self, vring: &Vring, requests: &mut Vec<Request>) -> io::Result<()> {
+        if requests.is_empty() {
+            return Ok(());
+        }
+        let memory = self.memory.memory();
+        for (request, succeeded) in reads::execute(&self.disk, std::mem::take(requests))? {
+            if !succeeded {
+                self.complete(vring, &request, 1, 1)?;
+                continue;
+            }
+            let mut copied = 0;
+            for (address, count) in &request.segments {
+                memory
+                    .write_slice(&request.bytes[copied..copied + count], *address)
+                    .map_err(error)?;
+                copied += count;
+            }
+            self.complete(vring, &request, 0, request.bytes.len() as u32 + 1)?;
+        }
+        Ok(())
+    }
+
     fn process_queue(&self, vring: &Vring) -> io::Result<bool> {
         let memory = self.memory.memory();
         let requests = {
@@ -206,8 +230,24 @@ impl Backend {
         }
         let mut pending = Vec::new();
         let mut pending_bytes = 0usize;
+        let mut reads = Vec::new();
+        let mut read_bytes = 0usize;
         for mut request in requests {
-            if request.kind == 1 {
+            if request.kind == VIRTIO_BLK_T_IN {
+                self.write_group(vring, &mut pending)?;
+                pending_bytes = 0;
+                if reads.len() >= reads::CONCURRENCY || read_bytes + request.length > MAX_BYTES {
+                    self.read_group(vring, &mut reads)?;
+                    read_bytes = 0;
+                }
+                request.load_payload(&memory)?;
+                read_bytes += request.length;
+                reads.push(request);
+                continue;
+            }
+            self.read_group(vring, &mut reads)?;
+            read_bytes = 0;
+            if request.kind == VIRTIO_BLK_T_OUT {
                 if pending_bytes + request.length > MAX_BYTES {
                     self.write_group(vring, &mut pending)?;
                     pending_bytes = 0;
@@ -220,28 +260,13 @@ impl Backend {
             self.write_group(vring, &mut pending)?;
             pending_bytes = 0;
             let (status, used) = match request.kind {
-                VIRTIO_BLK_T_IN => {
-                    request.load_payload(&memory)?;
-                    match self.disk.read_at(request.offset, &mut request.bytes) {
-                        Ok(()) => {
-                            let mut copied = 0;
-                            for (address, count) in &request.segments {
-                                memory
-                                    .write_slice(&request.bytes[copied..copied + count], *address)
-                                    .map_err(error)?;
-                                copied += count;
-                            }
-                            (0, request.bytes.len() as u32 + 1)
-                        }
-                        Err(_) => (1, 1),
-                    }
-                }
                 4 => (u8::from(self.disk.sync().is_err()), 1),
                 8 => (2, 1),
                 _ => (2, 1),
             };
             self.complete(vring, &request, status, used)?;
         }
+        self.read_group(vring, &mut reads)?;
         self.write_group(vring, &mut pending)?;
         if !self.event_idx || vring.needs_notification().map_err(error)? {
             vring.signal_used_queue().map_err(error)?;
