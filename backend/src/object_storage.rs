@@ -22,6 +22,7 @@ type ReadKey = (String, String, u64, Option<String>, String);
 
 // Shared by all publications; each slot includes full read-back verification.
 pub(crate) const HOT_WRITE_CONCURRENCY: usize = 16;
+const HOT_READ_CONCURRENCY: usize = 16;
 
 #[derive(PartialEq, Eq)]
 struct ClientKey {
@@ -47,7 +48,7 @@ impl HotS3 {
     pub fn new() -> Self {
         Self {
             client: Mutex::new(None),
-            reads: Semaphore::new(8),
+            reads: Semaphore::new(HOT_READ_CONCURRENCY),
             writes: Semaphore::new(HOT_WRITE_CONCURRENCY),
             pending: Mutex::new(HashMap::new()),
             get_metrics: Counter::default(),
@@ -121,6 +122,8 @@ pub struct Storage {
     /// S3-compatible providers (OVHcloud, Scaleway…) need an explicit endpoint.
     pub(crate) endpoint: Option<String>,
     region: String,
+    r2: bool,
+    server_side_encryption: Option<aws_sdk_s3::types::ServerSideEncryption>,
     hot: Arc<HotS3>,
 }
 
@@ -128,6 +131,22 @@ fn setting(config: &Value, suffix: &str, key: &str) -> String {
     non_empty_env(&format!("STORAGE_S3_{suffix}"))
         .or_else(|| non_empty_env(&format!("ARCHIVE_S3_{suffix}")))
         .unwrap_or_else(|| config[key].as_str().unwrap_or("").into())
+}
+
+fn server_side_encryption(
+    value: &str,
+    r2: bool,
+) -> Result<Option<aws_sdk_s3::types::ServerSideEncryption>> {
+    use aws_sdk_s3::types::ServerSideEncryption;
+
+    match value {
+        "" if r2 => Ok(None),
+        "" | "AES256" => Ok(Some(ServerSideEncryption::Aes256)),
+        "none" => Ok(None),
+        _ => Err(Error::bad(
+            "STORAGE_S3_SERVER_SIDE_ENCRYPTION must be AES256 or none.",
+        )),
+    }
 }
 
 fn non_empty_env(name: &str) -> Option<String> {
@@ -196,8 +215,30 @@ impl Storage {
                 "STORAGE_S3_ENDPOINT must be an https:// URL.",
             ));
         }
+        let r2 = endpoint.parse::<reqwest::Url>().is_ok_and(|url| {
+            url.host_str()
+                .is_some_and(|host| host.ends_with(".r2.cloudflarestorage.com"))
+        });
+        if r2
+            && setting(
+                &config,
+                "PRIVATE_BUCKET_CONFIRMED",
+                "privateBucketConfirmed",
+            ) != "true"
+            && config["privateBucketConfirmed"] != true
+        {
+            return Err(Error::bad(
+                "Confirm the R2 bucket has no public domains, locks or lifecycle rules with STORAGE_S3_PRIVATE_BUCKET_CONFIRMED=true.",
+            ));
+        }
+        let server_side_encryption = server_side_encryption(
+            &setting(&config, "SERVER_SIDE_ENCRYPTION", "serverSideEncryption"),
+            r2,
+        )?;
         Ok(Self {
             bucket,
+            r2,
+            server_side_encryption,
             binary: config["awsBinary"].as_str().unwrap_or("aws").into(),
             endpoint: Some(endpoint).filter(|e| !e.is_empty()),
             region: Some(setting(&config, "REGION", "region"))
@@ -262,56 +303,78 @@ impl Storage {
     }
 
     pub async fn validate(&self) -> Result<()> {
-        let block = self
-            .optional(
-                self.s3api("get-public-access-block", &[]),
-                Some("NotImplemented"),
-            )
-            .await?;
-        if block.is_null() {
-            self.validate_private().await?;
-        } else if [
-            "BlockPublicAcls",
-            "IgnorePublicAcls",
-            "BlockPublicPolicy",
-            "RestrictPublicBuckets",
-        ]
-        .iter()
-        .any(|k| block["PublicAccessBlockConfiguration"][k] != true)
-        {
-            return Err(Error::bad(
-                "The storage bucket must block all public access.",
-            ));
-        }
-        let lifecycle = self
-            .optional(
-                self.s3api("get-bucket-lifecycle-configuration", &[]),
-                Some("NoSuchLifecycleConfiguration"),
-            )
-            .await?;
-        if lifecycle["Rules"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|r| r["Status"] == "Enabled")
-        {
-            return Err(Error::bad(
-                "Use a dedicated storage bucket without lifecycle rules that could remove active disk blocks.",
-            ));
-        }
-        let lock = self
-            .optional(
-                self.s3api("get-object-lock-configuration", &[]),
-                Some("ObjectLockConfigurationNotFoundError"),
-            )
-            .await?;
-        if lock["ObjectLockConfiguration"]["ObjectLockEnabled"] == "Enabled" {
-            return Err(Error::bad(
-                "Object Lock is incompatible with automatic trash deletion. Use a dedicated \
-                    bucket without Object Lock.",
-            ));
-        }
-        self.call(self.s3api("head-bucket", &[])).await?;
+        let privacy = async {
+            if self.r2 {
+                // R2 public domains and locks are provider controls confirmed by the owner.
+                return Ok(());
+            }
+            let block = self
+                .optional(
+                    self.s3api("get-public-access-block", &[]),
+                    Some("NotImplemented"),
+                )
+                .await?;
+            if block.is_null() {
+                self.validate_private().await?;
+            } else if [
+                "BlockPublicAcls",
+                "IgnorePublicAcls",
+                "BlockPublicPolicy",
+                "RestrictPublicBuckets",
+            ]
+            .iter()
+            .any(|k| block["PublicAccessBlockConfiguration"][k] != true)
+            {
+                return Err(Error::bad(
+                    "The storage bucket must block all public access.",
+                ));
+            }
+            Ok(())
+        };
+        let lifecycle = async {
+            let lifecycle = self
+                .optional(
+                    self.s3api("get-bucket-lifecycle-configuration", &[]),
+                    Some("NoSuchLifecycleConfiguration"),
+                )
+                .await?;
+            if lifecycle["Rules"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|r| r["Status"] == "Enabled")
+            {
+                return Err(Error::bad(
+                    "Use a dedicated storage bucket without lifecycle rules that could remove active disk blocks.",
+                ));
+            }
+            Ok(())
+        };
+        let object_lock = async {
+            if self.r2 {
+                return Ok(());
+            }
+            let lock = self
+                .optional(
+                    self.s3api("get-object-lock-configuration", &[]),
+                    Some("ObjectLockConfigurationNotFoundError"),
+                )
+                .await?;
+            if lock["ObjectLockConfiguration"]["ObjectLockEnabled"] == "Enabled" {
+                return Err(Error::bad(
+                    "Object Lock is incompatible with automatic trash deletion. Use a dedicated \
+                        bucket without Object Lock.",
+                ));
+            }
+            Ok(())
+        };
+        // These read-only checks are independent. Run together to fit the relay deadline.
+        tokio::try_join!(
+            privacy,
+            lifecycle,
+            object_lock,
+            self.call(self.s3api("head-bucket", &[]))
+        )?;
         Ok(())
     }
 
@@ -360,7 +423,7 @@ impl Storage {
             .put_object()
             .bucket(&self.bucket)
             .key(key)
-            .server_side_encryption(aws_sdk_s3::types::ServerSideEncryption::Aes256)
+            .set_server_side_encryption(self.server_side_encryption.clone())
             .body(aws_sdk_s3::primitives::ByteStream::from(bytes.clone()))
             .send()
             .await
@@ -474,6 +537,19 @@ impl Storage {
             .hot
             .client(self.endpoint.as_deref(), &self.region)
             .await;
+        if self.r2 {
+            client
+                .delete_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .send()
+                .await
+                .map_err(|_| {
+                    Error::unavailable("Cannot delete obsolete disk object; cleanup will retry.")
+                })?;
+            sample.finish(0);
+            return Ok(());
+        }
         loop {
             let page = client
                 .list_object_versions()
@@ -542,29 +618,31 @@ impl Storage {
     }
 
     pub async fn purge(&self, prefix: &str) -> Result<()> {
-        let listed = self
-            .call(self.s3api("list-object-versions", &["--prefix", prefix]))
-            .await?;
-        for item in listed["Versions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .chain(listed["DeleteMarkers"].as_array().into_iter().flatten())
-        {
-            let key = item["Key"]
-                .as_str()
-                .filter(|k| k.starts_with(prefix))
-                .ok_or_else(|| Error::internal("Unexpected storage key"))?;
-            self.call(self.s3api(
-                "delete-object",
-                &[
-                    "--key",
-                    key,
-                    "--version-id",
-                    item["VersionId"].as_str().unwrap_or("null"),
-                ],
-            ))
-            .await?;
+        if !self.r2 {
+            let listed = self
+                .call(self.s3api("list-object-versions", &["--prefix", prefix]))
+                .await?;
+            for item in listed["Versions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .chain(listed["DeleteMarkers"].as_array().into_iter().flatten())
+            {
+                let key = item["Key"]
+                    .as_str()
+                    .filter(|k| k.starts_with(prefix))
+                    .ok_or_else(|| Error::internal("Unexpected storage key"))?;
+                self.call(self.s3api(
+                    "delete-object",
+                    &[
+                        "--key",
+                        key,
+                        "--version-id",
+                        item["VersionId"].as_str().unwrap_or("null"),
+                    ],
+                ))
+                .await?;
+            }
         }
         let uploads = self
             .call(self.s3api("list-multipart-uploads", &["--prefix", prefix]))
@@ -630,8 +708,176 @@ mod tests {
             binary: "unused".into(),
             endpoint: Some(endpoint.into()),
             region: "us-east-1".into(),
+            r2: false,
+            server_side_encryption: Some(aws_sdk_s3::types::ServerSideEncryption::Aes256),
             hot,
         }
+    }
+
+    #[tokio::test]
+    async fn r2_cleanup_deletes_only_the_exact_key_without_version_listing() {
+        use axum::{
+            Router,
+            extract::Request,
+            http::{Method, StatusCode},
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new().fallback({
+            let requests = requests.clone();
+            move |request: Request| {
+                let requests = requests.clone();
+                async move {
+                    requests
+                        .lock()
+                        .await
+                        .push((request.method().clone(), request.uri().path().to_owned()));
+                    StatusCode::NO_CONTENT
+                }
+            }
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut storage = fixture_storage(&endpoint, "fixture", Arc::new(HotS3::new())).await;
+        storage.r2 = true;
+        storage
+            .purge_key("shared-blocks/v1/hash/object")
+            .await
+            .unwrap();
+        assert_eq!(
+            *requests.lock().await,
+            [(
+                Method::DELETE,
+                "/fixture/shared-blocks/v1/hash/object".to_owned()
+            )]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn optional_sse_header_preserves_exact_readback_and_provider_defaults() {
+        use axum::{
+            Router,
+            body::{Bytes, to_bytes},
+            extract::Request,
+            http::Method,
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let objects = Arc::new(Mutex::new(HashMap::<String, Bytes>::new()));
+        let headers = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new().fallback({
+            let objects = objects.clone();
+            let headers = headers.clone();
+            move |request: Request| {
+                let objects = objects.clone();
+                let headers = headers.clone();
+                async move {
+                    let key = request.uri().path().to_owned();
+                    if request.method() == Method::PUT {
+                        headers.lock().await.push(
+                            request
+                                .headers()
+                                .get("x-amz-server-side-encryption")
+                                .map(|value| value.to_str().unwrap().to_owned()),
+                        );
+                        objects
+                            .lock()
+                            .await
+                            .insert(key, to_bytes(request.into_body(), 64).await.unwrap());
+                        return Bytes::new();
+                    }
+                    assert_eq!(request.method(), Method::GET);
+                    objects.lock().await.get(&key).unwrap().clone()
+                }
+            }
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut storage = fixture_storage(&endpoint, "fixture", Arc::new(HotS3::new())).await;
+        for (index, (value, r2)) in [("", false), ("", true), ("none", false), ("AES256", false)]
+            .into_iter()
+            .enumerate()
+        {
+            storage.server_side_encryption = server_side_encryption(value, r2).unwrap();
+            storage
+                .upload_bytes(
+                    b"already encrypted payload".to_vec(),
+                    &format!("block-{index}"),
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            *headers.lock().await,
+            [
+                Some("AES256".to_owned()),
+                None,
+                None,
+                Some("AES256".to_owned())
+            ]
+        );
+        assert!(server_side_encryption("disabled", false).is_err());
+        assert!(server_side_encryption("false", true).is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn recovery_reads_share_sixteen_slots_and_release_them_after_refusal() {
+        use axum::{Router, body::Bytes, extract::Request, routing::get};
+        use tokio::task::JoinSet;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let started = Arc::new(Semaphore::new(0));
+        let release = Arc::new(Semaphore::new(0));
+        let app = Router::new().fallback(get({
+            let started = started.clone();
+            let release = release.clone();
+            move |request: Request| {
+                let started = started.clone();
+                let release = release.clone();
+                async move {
+                    started.add_permits(1);
+                    release.acquire().await.unwrap().forget();
+                    if request.uri().path().ends_with("/oversized") {
+                        return Bytes::from_static(b"too large");
+                    }
+                    Bytes::from_static(b"block")
+                }
+            }
+        }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let hot = Arc::new(HotS3::new());
+        let first = fixture_storage(&endpoint, "first", hot.clone()).await;
+        let second = fixture_storage(&endpoint, "second", hot.clone()).await;
+        let mut reads = JoinSet::new();
+        for index in 0..17 {
+            let storage = if index % 2 == 0 {
+                first.clone()
+            } else {
+                second.clone()
+            };
+            reads.spawn(async move { storage.download_bytes(&format!("block-{index}"), 5).await });
+        }
+
+        tokio::time::timeout(Duration::from_secs(2), started.acquire_many(16))
+            .await
+            .expect("sixteen independent recovery reads must reach S3 together")
+            .unwrap()
+            .forget();
+        assert_eq!(hot.reads.available_permits(), 0);
+        assert!(reads.try_join_next().is_none());
+
+        release.add_permits(18);
+        while let Some(read) = reads.join_next().await {
+            assert_eq!(read.unwrap().unwrap(), b"block");
+        }
+        let error = first.download_bytes("oversized", 5).await.unwrap_err();
+        assert_eq!(error.message, "Remote block exceeds the transfer limit.");
+        assert_eq!(hot.reads.available_permits(), 16);
+        server.abort();
     }
 
     #[tokio::test]

@@ -310,3 +310,121 @@ fn shared_guest_accounting_counts_allocated_pages_once_and_observes_reclamation(
         "Unknown memory is never treated as free"
     );
 }
+
+#[test]
+fn guest_reads_overlap_without_crossing_writes_or_flushes() {
+    use std::sync::{Condvar, atomic::AtomicUsize};
+    use std::time::{Duration, Instant};
+
+    struct SlowDisk {
+        arrived: Mutex<usize>,
+        release: Condvar,
+        failed: AtomicBool,
+        active: AtomicUsize,
+        peak: AtomicUsize,
+    }
+    impl Disk for SlowDisk {
+        fn size(&self) -> u64 {
+            32 * 1024 * 1024
+        }
+
+        fn read_at(&self, _: u64, bytes: &mut [u8]) -> io::Result<()> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(active, Ordering::SeqCst);
+            let mut arrived = self.arrived.lock().unwrap();
+            *arrived += 1;
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while *arrived < 16 && !self.failed.load(Ordering::SeqCst) {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let (guard, timeout) = self.release.wait_timeout(arrived, remaining).unwrap();
+                arrived = guard;
+                if timeout.timed_out() {
+                    self.failed.store(true, Ordering::SeqCst);
+                    break;
+                }
+            }
+            self.release.notify_all();
+            drop(arrived);
+            bytes.fill(0x5a);
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn write_at(&self, _: u64, _: &[u8]) -> io::Result<()> {
+            panic!("Unexpected write")
+        }
+
+        fn sync(&self) -> io::Result<()> {
+            assert_eq!(
+                self.active.load(Ordering::SeqCst),
+                0,
+                "flush crossed active reads"
+            );
+            assert_eq!(*self.arrived.lock().unwrap(), 17);
+            Ok(())
+        }
+    }
+    let mut requests = vec![(VIRTIO_BLK_T_IN, 512); 17];
+    requests.push((VIRTIO_BLK_T_FLUSH, 0));
+    let (mut backend, vring, _, statuses) = fixture(&requests, false);
+    let disk = Arc::new(SlowDisk {
+        arrived: Mutex::new(0),
+        release: Condvar::new(),
+        failed: AtomicBool::new(false),
+        active: AtomicUsize::new(0),
+        peak: AtomicUsize::new(0),
+    });
+    backend.disk = disk.clone();
+    backend.process_queue(&vring).unwrap();
+    assert!(
+        !disk.failed.load(Ordering::SeqCst),
+        "the guest queue serialized cold reads"
+    );
+    assert_eq!(disk.peak.load(Ordering::SeqCst), 16);
+    for status in statuses {
+        assert_eq!(backend.memory.memory().read_obj::<u8>(status).unwrap(), 0);
+    }
+}
+
+#[test]
+fn read_failures_are_per_request_and_panics_fail_the_queue_without_killing_workers() {
+    struct FaultDisk {
+        panic: bool,
+    }
+    impl Disk for FaultDisk {
+        fn size(&self) -> u64 {
+            32 * 1024 * 1024
+        }
+
+        fn read_at(&self, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
+            if offset == 0 {
+                assert!(!self.panic, "Injected read worker panic");
+                return Err(error("Injected read error"));
+            }
+            bytes.fill(0x5a);
+            Ok(())
+        }
+
+        fn write_at(&self, _: u64, _: &[u8]) -> io::Result<()> {
+            panic!("Unexpected write")
+        }
+
+        fn sync(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    for panic in [false, true, false] {
+        let (mut backend, vring, _, statuses) = fixture(&[(VIRTIO_BLK_T_IN, 512); 2], false);
+        backend.disk = Arc::new(FaultDisk { panic });
+        let result = backend.handle_event(0, EventSet::IN, &[vring], 0);
+        assert_eq!(result.is_err(), panic);
+        assert_eq!(backend.failed.load(Ordering::Acquire), panic);
+        let expected = if panic { [0xff, 0xff] } else { [1, 0] };
+        for (status, expected) in statuses.into_iter().zip(expected) {
+            assert_eq!(
+                backend.memory.memory().read_obj::<u8>(status).unwrap(),
+                expected
+            );
+        }
+    }
+}
