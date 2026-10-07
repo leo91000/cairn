@@ -157,6 +157,7 @@ test('a browser registers once for all Leo installations and can disable account
     expireAccountProof(new URL(process.env.LEO_OFFICIAL_TEST_DATABASE_URL!), email)
     await page.getByRole('button', { name: 'Enable on this device' }).click()
     await expect(page.getByRole('alert')).toContainText('Confirm your identity')
+    expect(await page.evaluate(async () => (await navigator.serviceWorker.getRegistration())?.pushManager.getSubscription())).toBeNull()
     await page.getByRole('button', { name: 'Confirm identity', exact: true }).click()
     const messagesBeforeProof = messages.length
     await page.getByRole('button', { name: 'Send confirmation code', exact: true }).click()

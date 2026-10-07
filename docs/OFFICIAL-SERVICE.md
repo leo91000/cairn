@@ -478,7 +478,10 @@ official session; writes also require the official origin and CSRF token.
 Registration requires a recent independent email/passkey proof in the calling
 session, rechecked after waiting for both the account and endpoint locks. Notifications offers the
 existing Confirm identity flow and returns to the panel without automatically
-enabling push. Disabling a device needs no new proof. Registration is idempotent,
+enabling push. Google/GitHub sign-in alone does not count as this proof:
+confirm with an email code or an existing passkey before enabling notifications.
+A refused registration unsubscribes the browser subscription, so the panel does
+not leave an unregistered push endpoint behind. Disabling a device needs no new proof. Registration is idempotent,
 limited to 50 devices per account, and a browser
 endpoint has one current account. Registering it after switching accounts moves
 it to the new account. A foreign account cannot inspect or remove a device.
@@ -588,11 +591,21 @@ An authenticated Android client checks `GET /api/account/notifications/android`
 and registers its stable device UUID and current FCM token with
 `POST /api/account/notifications/android` (`deviceId`, `token`). The returned `id`
 uses the existing subscription lookup/removal routes. Token rotation updates the
-same registration. Registration and token rotation require a recent independent
-email/passkey proof in the calling session, checked before validation or locks
-and again after both account and endpoint locks. Android's existing account
-settings can confirm identity by email or passkey; the user then enables push
-explicitly. Disabling a device requires no new proof. The current account receives events from every accessible
+same registration. Creating a registration or moving a device to another account
+requires a recent independent email/passkey proof in the calling session,
+checked before the account lock and again after the registration locks. A
+Google/GitHub sign-in alone does not count as this proof. Android's existing
+account settings can confirm identity by email or passkey; the user then enables
+push explicitly.
+
+Firebase also rotates tokens in the background, after the enabling proof has
+expired. An active session with valid CSRF can renew an existing native
+registration for the same device UUID and account without a new proof. The
+service checks that ownership under the device row lock and rechecks the session
+after waiting for all locks. A new UUID, a removed registration or a different
+account still needs proof. Treat the locally persisted random device UUID as a
+device credential; it is not listed by the service. The public registration ID
+alone cannot be used to renew a token. Disabling a device requires no new proof. The current account receives events from every accessible
 installation. The existing recipient locks and membership checks also govern
 native sends, so member removal stops subsequent sends immediately. Android
 checks current access again before displaying delayed messages. FCM authorization
