@@ -213,7 +213,8 @@ pub(super) async fn subscribe_android(
     headers: HeaderMap,
     Json(input): Json<AndroidDevice>,
 ) -> Result<Json<Value>, ApiError> {
-    let account = installations::account(&service, &headers, &Method::POST).await?;
+    let (account, _) = account::confirmed_session(&service, &headers).await?;
+
     let device = uuid::Uuid::parse_str(&input.device_id).map_err(|_| {
         ApiError::Http(
             StatusCode::BAD_REQUEST,
@@ -278,6 +279,9 @@ async fn register_device(
         .bind(&input.endpoint)
         .execute(&mut *transaction)
         .await?;
+
+    account::confirmed_session_on(&mut transaction, headers).await?;
+
     query("DELETE FROM notification_devices WHERE endpoint = $1 AND id <> $2")
         .bind(&input.endpoint)
         .bind(id)

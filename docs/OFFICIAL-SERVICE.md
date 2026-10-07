@@ -476,7 +476,7 @@ The official routes are `GET /api/account/notifications`,
 `GET` / `DELETE /api/account/notifications/subscriptions/{id}`. They require the
 official session; writes also require the official origin and CSRF token.
 Registration requires a recent independent email/passkey proof in the calling
-session, rechecked after waiting for the account lock. Notifications offers the
+session, rechecked after waiting for both the account and endpoint locks. Notifications offers the
 existing Confirm identity flow and returns to the panel without automatically
 enabling push. Disabling a device needs no new proof. Registration is idempotent,
 limited to 50 devices per account, and a browser
@@ -561,7 +561,11 @@ Android polls `POST /api/account/oauth/github/native/finish` with the
 challenge and secret: 202 means pending; success creates the ordinary Leo session.
 The launcher and completed exchange are each one-use and expire in five minutes.
 The handover stores no session or provider access tokens, and authenticated linking
-remains bound to the original Leo session, rechecked after consent. The additive
+requires the original Leo session's recent independent email/passkey proof.
+The app session is checked before the provider callback and again under the
+account lock at consent, then at the final exchange. Browser consent does not
+replace this proof. Google native linking applies the same checks before its
+quota, before JWT/JWKS verification and after the account lock. The additive
 consent migration invalidates older in-flight handovers. Never log handover URLs,
 confirmation proofs or secrets.
 
@@ -584,7 +588,11 @@ An authenticated Android client checks `GET /api/account/notifications/android`
 and registers its stable device UUID and current FCM token with
 `POST /api/account/notifications/android` (`deviceId`, `token`). The returned `id`
 uses the existing subscription lookup/removal routes. Token rotation updates the
-same registration; the current account receives events from every accessible
+same registration. Registration and token rotation require a recent independent
+email/passkey proof in the calling session, checked before validation or locks
+and again after both account and endpoint locks. Android's existing account
+settings can confirm identity by email or passkey; the user then enables push
+explicitly. Disabling a device requires no new proof. The current account receives events from every accessible
 installation. The existing recipient locks and membership checks also govern
 native sends, so member removal stops subsequent sends immediately. Android
 checks current access again before displaying delayed messages. FCM authorization

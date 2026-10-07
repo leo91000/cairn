@@ -134,57 +134,122 @@ async fn registering_push_requires_a_recent_proof_but_disabling_it_does_not() {
 }
 
 #[tokio::test]
-async fn push_registration_rechecks_proof_and_session_after_waiting_for_the_account_lock() {
-    for expire_session in [false, true] {
-        let relay = common::RelayedInstallation::new(axum::Router::new()).await;
-        let app = &relay.app;
-        let mut barrier = app.pool.begin().await.unwrap();
-        let (pid,): (i32,) = sqlx_core::query_as::query_as("SELECT pg_backend_pid()")
-            .fetch_one(&mut *barrier)
-            .await
-            .unwrap();
-        query("SELECT id FROM leo_accounts FOR UPDATE")
-            .execute(&mut *barrier)
-            .await
-            .unwrap();
-        let pending_request = request(
-            app,
-            &relay.cookie,
-            &relay.session,
-            Method::POST,
-            "/api/account/notifications/subscriptions",
-        )
-        .json(&subscription(
-            "https://fcm.googleapis.com/expired-proof-device",
-        ));
-        let pending = tokio::spawn(async move { pending_request.send().await.unwrap() });
-        app.wait_for_blocked_request(pid).await;
+async fn android_push_requires_recent_proof_before_waiting_for_the_account_lock() {
+    let relay = common::RelayedInstallation::new(axum::Router::new()).await;
+    let app = &relay.app;
+    query("UPDATE web_sessions SET last_proof_at = NULL")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let mut barrier = app.pool.begin().await.unwrap();
+    query("SELECT id FROM leo_accounts FOR UPDATE")
+        .execute(&mut *barrier)
+        .await
+        .unwrap();
 
-        let expiry = if expire_session {
-            "UPDATE web_sessions SET expires_at = clock_timestamp() - interval '1 millisecond'"
-        } else {
-            "UPDATE web_sessions SET last_proof_at = clock_timestamp() - interval '5 minutes'"
-        };
-        query(expiry).execute(&app.pool).await.unwrap();
+    let registration = request(
+        app,
+        &relay.cookie,
+        &relay.session,
+        Method::POST,
+        "/api/account/notifications/android",
+    )
+    .json(&json!({
+        "deviceId": "72594180-fba7-425b-9926-3f7d521a46aa",
+        "token": "fixture-device-token",
+    }))
+    .send();
+    let refused = tokio::time::timeout(Duration::from_secs(1), registration)
+        .await
+        .expect("an unconfirmed request must not wait for the account lock")
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    assert!(refused.headers().get("set-cookie").is_none());
 
-        barrier.commit().await.unwrap();
+    barrier.commit().await.unwrap();
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    relay.close().await;
+}
 
-        let response = pending.await.unwrap();
-        assert_eq!(
-            response.status(),
-            if expire_session {
-                StatusCode::UNAUTHORIZED
-            } else {
-                StatusCode::FORBIDDEN
+#[tokio::test]
+async fn push_registration_rechecks_proof_and_session_after_waiting_for_all_locks() {
+    for native in [false, true] {
+        for lock_endpoint in [false, true] {
+            for expire_session in [false, true] {
+                let relay = common::RelayedInstallation::new(axum::Router::new()).await;
+                let app = &relay.app;
+                let mut barrier = app.pool.begin().await.unwrap();
+                let (pid,): (i32,) = sqlx_core::query_as::query_as("SELECT pg_backend_pid()")
+                    .fetch_one(&mut *barrier)
+                    .await
+                    .unwrap();
+                let endpoint = if native {
+                    "fcm:fixture-expired-proof-token"
+                } else {
+                    "https://fcm.googleapis.com/expired-proof-device"
+                };
+                if lock_endpoint {
+                    query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                        .bind(endpoint)
+                        .execute(&mut *barrier)
+                        .await
+                        .unwrap();
+                } else {
+                    query("SELECT id FROM leo_accounts FOR UPDATE")
+                        .execute(&mut *barrier)
+                        .await
+                        .unwrap();
+                }
+
+                let (path, input) = if native {
+                    (
+                        "/api/account/notifications/android",
+                        json!({
+                            "deviceId": "72594180-fba7-425b-9926-3f7d521a46aa",
+                            "token": "fixture-expired-proof-token",
+                        }),
+                    )
+                } else {
+                    (
+                        "/api/account/notifications/subscriptions",
+                        subscription(endpoint),
+                    )
+                };
+                let pending_request =
+                    request(app, &relay.cookie, &relay.session, Method::POST, path).json(&input);
+                let pending = tokio::spawn(async move { pending_request.send().await.unwrap() });
+                app.wait_for_blocked_request(pid).await;
+
+                let expiry = if expire_session {
+                    "UPDATE web_sessions SET expires_at = clock_timestamp() - interval '1 millisecond'"
+                } else {
+                    "UPDATE web_sessions SET last_proof_at = clock_timestamp() - interval '5 minutes'"
+                };
+                query(expiry).execute(&app.pool).await.unwrap();
+
+                barrier.commit().await.unwrap();
+
+                let response = pending.await.unwrap();
+                assert_eq!(
+                    response.status(),
+                    if expire_session {
+                        StatusCode::UNAUTHORIZED
+                    } else {
+                        StatusCode::FORBIDDEN
+                    }
+                );
+                if !expire_session {
+                    assert_eq!(
+                        relay.get("/chats").send().await.unwrap().status(),
+                        StatusCode::OK
+                    );
+                }
+                relay.close().await;
             }
-        );
-        if !expire_session {
-            assert_eq!(
-                relay.get("/chats").send().await.unwrap().status(),
-                StatusCode::OK
-            );
         }
-        relay.close().await;
     }
 }
 

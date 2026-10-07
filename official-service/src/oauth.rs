@@ -325,15 +325,13 @@ async fn complete_callback(
     let state: OAuthState = serde_json::from_str(&state).map_err(|_| rejected())?;
     if link_account.is_some() {
         if state.native {
-            let active: Option<(String,)> = query_as(
-                "SELECT account_id FROM web_sessions WHERE digest = $1 AND expires_at > now()",
+            let mut connection = service.pool.acquire().await?;
+            confirmed_native_link(
+                &mut connection,
+                link_account.as_deref().ok_or_else(rejected)?,
+                &session_digest,
             )
-            .bind(&session_digest)
-            .fetch_optional(&service.pool)
             .await?;
-            if active.map(|(id,)| id) != link_account {
-                return Err(rejected());
-            }
         } else {
             let account = methods::authenticated(service, headers, false).await?;
             if link_account.as_deref() != Some(&account.0)
@@ -510,6 +508,22 @@ pub(super) async fn native_confirm(
     Ok(response)
 }
 
+// The native browser has an independent cookie. Linking must still confirm the
+// exact app session recorded when the handover started.
+async fn confirmed_native_link(
+    connection: &mut sqlx_postgres::PgConnection,
+    account_id: &str,
+    session_digest: &str,
+) -> Result<(), ApiError> {
+    let (active,): (bool,) = query_as("SELECT EXISTS (SELECT 1 FROM web_sessions WHERE digest = $1 AND account_id = $2 AND expires_at > clock_timestamp())")
+        .bind(session_digest).bind(account_id).fetch_one(&mut *connection).await?;
+    if !active {
+        return Err(rejected());
+    }
+
+    account::require_recent_proof_for_session(connection, session_digest).await
+}
+
 // Both transports apply exactly the same verified-email and removed-method policy.
 async fn complete_identity(
     service: &Service,
@@ -573,11 +587,10 @@ async fn complete_identity(
 
     if let Some(linked_account) = link_account.as_ref() {
         if let Some(handover) = native {
-            let (active,): (bool,) = query_as("SELECT EXISTS(SELECT 1 FROM native_oauth_handovers h JOIN web_sessions s ON s.digest = h.session_digest WHERE h.id = $1 AND s.account_id = $2 AND s.expires_at > clock_timestamp())")
-                .bind(handover).bind(linked_account).fetch_one(&mut *transaction).await?;
-            if !active {
-                return Err(rejected());
-            }
+            let session: Option<(String,)> = query_as("SELECT session_digest FROM native_oauth_handovers WHERE id = $1 AND link_account = $2 AND expires_at > clock_timestamp()")
+                .bind(handover).bind(linked_account).fetch_optional(&mut *transaction).await?;
+            let (session_digest,) = session.ok_or_else(rejected)?;
+            confirmed_native_link(&mut transaction, linked_account, &session_digest).await?;
         } else if methods::authenticated_on(&mut transaction, headers, false)
             .await?
             .0
@@ -616,7 +629,7 @@ async fn complete_identity(
     }
 
     if let Some(id) = native {
-        let updated = query("UPDATE native_oauth_handovers SET ready_account = $2, method_subject = $3, pending_identity = NULL WHERE id = $1 AND provider = $4 AND expires_at > now()")
+        let updated = query("UPDATE native_oauth_handovers SET ready_account = $2, method_subject = $3, pending_identity = NULL WHERE id = $1 AND provider = $4 AND expires_at > clock_timestamp()")
             .bind(id).bind(&account_id).bind(&subject).bind(name).execute(&mut *transaction).await?;
         if updated.rows_affected() != 1 {
             return Err(rejected());
@@ -650,19 +663,31 @@ async fn google_start(
     peer: SocketAddr,
     headers: &HeaderMap,
 ) -> Result<Response, ApiError> {
-    consume_limit(&service.pool, &format!("oauth:{}", peer.ip()), 30).await?;
     let provider = service.oauth.provider("google")?;
     let account = if session_token(headers).is_empty() {
         None
     } else {
-        Some(methods::authenticated(service, headers, true).await?.0)
+        Some(account::confirmed_session(service, headers).await?.0)
     };
+    consume_limit(&service.pool, &format!("oauth:{}", peer.ip()), 30).await?;
+
     let challenge = random_token();
     let browser = random_token();
     let nonce = random_token();
+    let mut transaction = service.pool.begin().await?;
+    if let Some(account_id) = &account {
+        query("SELECT id FROM leo_accounts WHERE id = $1 FOR NO KEY UPDATE")
+            .bind(account_id)
+            .execute(&mut *transaction)
+            .await?;
+        account::confirmed_session_on(&mut transaction, headers).await?;
+    }
+
     query("INSERT INTO sign_in_challenges (id, kind, browser_digest, account_id, session_digest, state) VALUES ($1, 'google-native', $2, $3, $4, $5)")
         .bind(&challenge).bind(digest(&browser)).bind(account).bind(digest(session_token(headers))).bind(&nonce)
-        .execute(&service.pool).await?;
+        .execute(&mut *transaction).await?;
+    transaction.commit().await?;
+
     Ok((
         [(
             header::SET_COOKIE,
@@ -696,12 +721,13 @@ pub(super) async fn google_credential(
     let row: Option<(Option<String>, String, String)> = query_as("DELETE FROM sign_in_challenges WHERE id = $1 AND kind = 'google-native' AND browser_digest = $2 AND expires_at > now() RETURNING account_id, session_digest, state")
         .bind(&input.challenge).bind(digest(cookie_token(&headers, "leo_oauth"))).fetch_optional(&service.pool).await?;
     let (link_account, session, nonce) = row.ok_or_else(rejected)?;
-    if let Some(account) = link_account.as_ref()
-        && (methods::authenticated(&service, &headers, true).await?.0 != *account
-            || session != digest(session_token(&headers)))
-    {
-        return Err(rejected());
+    if let Some(account) = link_account.as_ref() {
+        let confirmed = account::confirmed_session(&service, &headers).await?;
+        if confirmed.0 != *account || session != digest(session_token(&headers)) {
+            return Err(rejected());
+        }
     }
+
     use jwt_simple::prelude::*;
     let metadata = Token::decode_metadata(&input.credential).map_err(|_| rejected())?;
     let kid = metadata.key_id().ok_or_else(rejected)?;
@@ -851,7 +877,7 @@ pub(super) async fn native_finish(
     Json(input): Json<NativeFinish>,
 ) -> Result<Response, ApiError> {
     let mut transaction = service.pool.begin().await?;
-    let row: Option<NativeHandover> = query_as("SELECT link_account, session_digest, ready_account, method_subject FROM native_oauth_handovers WHERE id = $1 AND provider = $2 AND secret_digest = $3 AND expires_at > now() FOR UPDATE")
+    let row: Option<NativeHandover> = query_as("SELECT link_account, session_digest, ready_account, method_subject FROM native_oauth_handovers WHERE id = $1 AND provider = $2 AND secret_digest = $3 AND expires_at > clock_timestamp() FOR UPDATE")
         .bind(&input.challenge).bind(&name).bind(digest(&input.secret)).fetch_optional(&mut *transaction).await?;
     let NativeHandover {
         link_account: link,
@@ -861,7 +887,7 @@ pub(super) async fn native_finish(
     } = row.ok_or_else(rejected)?;
     if let Some(id) = link.as_ref()
         && (session != digest(session_token(&headers))
-            || methods::authenticated_on(&mut transaction, &headers, true)
+            || account::confirmed_session_on(&mut transaction, &headers)
                 .await?
                 .0
                 != *id)
@@ -871,20 +897,21 @@ pub(super) async fn native_finish(
     let Some(account) = account else {
         return Ok((StatusCode::ACCEPTED, Json(json!({"pending": true}))).into_response());
     };
-    let (email,): (String,) = query_as("SELECT email FROM leo_accounts WHERE id = $1 FOR UPDATE")
-        .bind(&account)
-        .fetch_one(&mut *transaction)
-        .await?;
+    let (email,): (String,) =
+        query_as("SELECT email FROM leo_accounts WHERE id = $1 FOR NO KEY UPDATE")
+            .bind(&account)
+            .fetch_one(&mut *transaction)
+            .await?;
     if let Some(id) = link.as_ref()
-        && methods::authenticated_on(&mut transaction, &headers, true)
+        && account::confirmed_session_on(&mut transaction, &headers)
             .await?
             .0
             != *id
     {
         return Err(rejected());
     }
-    let method: Option<(String,)> = query_as("SELECT id FROM sign_in_methods WHERE account_id = $1 AND kind = $2 AND subject = $3 AND NOT removed")
-        .bind(&account).bind(name).bind(subject).fetch_optional(&mut *transaction).await?;
+    let method: Option<(String,)> = query_as("SELECT id FROM sign_in_methods WHERE account_id = $1 AND kind = $2 AND subject = $3 AND NOT removed AND EXISTS(SELECT 1 FROM native_oauth_handovers h WHERE h.id = $4 AND h.expires_at > clock_timestamp())")
+        .bind(&account).bind(name).bind(subject).bind(&input.challenge).fetch_optional(&mut *transaction).await?;
     if method.is_none() {
         return Err(rejected());
     }
