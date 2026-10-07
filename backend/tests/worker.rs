@@ -475,13 +475,21 @@ async fn verbose_tools_do_not_hide_chat_answers_or_failures() {
             })
             .await
             .unwrap();
+        let tools: Vec<_> = events
+            .iter()
+            .filter(|e| text(&e["payload"]["item"], "id").starts_with("verbose-"))
+            .collect();
+        assert_eq!(
+            tools.len(),
+            60,
+            "Every tool outcome must survive verbose output"
+        );
         assert!(
-            events
-                .iter()
-                .filter(|e| e["payload"]["item"]["type"] == "command_execution")
-                .count()
-                < 60,
-            "Verbose tool history must still be bounded"
+            tools.iter().all(|event| {
+                event["payload"]["item"]["details_truncated"] == true
+                    && serde_json::to_vec(event).unwrap().len() < 16 * 1024
+            }),
+            "Tool results must be abbreviated instead of dropping later calls"
         );
         if fail {
             assert!(events.iter().any(|e| e["type"] == "turn.failed"

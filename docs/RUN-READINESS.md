@@ -120,9 +120,14 @@ places a technically successful run under **Needs attention**.
 
 ## Conversation output retention
 
-The 5 MB per-execution log budget applies to tool and diagnostic output. Assistant
-messages, thread/turn markers and errors remain recorded after that budget is
-exhausted, so the conversation can display the answer alongside its final status.
+Every activity item has an independent 16 KiB detail limit. Larger items are
+abbreviated to their identity, command or tool name, outcome and a notice that
+details were shortened. Tool activity has no cumulative budget: start/completion
+transitions, exit codes, failures and small results remain recorded for the entire
+run. Assistant messages, thread/turn markers and errors also remain recorded.
+Technical logs and diagnostics have a separate 500 kB per-execution budget, which
+tool calls do not consume. Total conversation size therefore depends on the
+number of actions and messages.
 
 On startup, completed chats whose saved summary is missing from the latest user
 turn receive that summary as a recovered assistant message. Existing answers,

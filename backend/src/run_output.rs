@@ -66,6 +66,117 @@ pub fn payload(value: &Value, secrets: &[String]) -> Value {
     }
 }
 
+/// Keep an inspectable activity and its outcome without retaining large tool data.
+/// Redact complete fields before shortening them, so a cut cannot expose part of a secret.
+pub fn compact_activity(event: &Value, secrets: &[String]) -> Value {
+    const NOTICE: &str = "Details shortened: arguments and output were omitted.";
+    let source = &event["item"];
+    let mut item = serde_json::Map::new();
+    for key in [
+        "status",
+        "tool",
+        "server",
+        "cwd",
+        "working_directory",
+        "query",
+        "exit_code",
+        "exitCode",
+        "duration_ms",
+        "durationMs",
+    ] {
+        if let Some(value) = source
+            .get(key)
+            .filter(|value| !value.is_object() && !value.is_array())
+        {
+            item.insert(key.to_owned(), activity_preview(value, 256, secrets));
+        }
+    }
+    for key in ["id", "type"] {
+        if let Some(value) = source.get(key) {
+            item.insert(key.to_owned(), payload(value, secrets));
+        }
+    }
+    if let Some(command) = source.get("command") {
+        item.insert("command".into(), activity_preview(command, 1024, secrets));
+    }
+    if let Some(error) = source.get("error") {
+        let error = if error.is_object() {
+            json!({ "message": activity_preview(&error["message"], 512, secrets) })
+        } else if error.is_array() {
+            json!({ "message": NOTICE })
+        } else {
+            activity_preview(error, 512, secrets)
+        };
+        item.insert("error".into(), error);
+    }
+    item.insert("details_truncated".into(), true.into());
+    match text(source, "type") {
+        "command_execution" => {
+            item.insert("aggregated_output".into(), NOTICE.into());
+        }
+        "file_change" => {
+            let changes: Vec<_> = source["changes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .take(16)
+                .map(|change| {
+                    json!({
+                        "path": activity_preview(&change["path"], 256, secrets),
+                        "kind": activity_preview(&change["kind"], 64, secrets),
+                        "diff": NOTICE,
+                    })
+                })
+                .collect();
+            item.insert("changes".into(), changes.into());
+        }
+        "mcp_tool_call" | "web_search" => {
+            item.insert("arguments".into(), json!({ "notice": NOTICE }));
+            item.insert(
+                "result".into(),
+                json!({
+                    "isError": source["result"]["isError"] == true,
+                    "content": [{ "type": "text", "text": NOTICE }],
+                }),
+            );
+        }
+        "todo_list" => {
+            let tasks: Vec<_> = source["items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .take(16)
+                .map(|task| {
+                    json!({
+                        "text": activity_preview(&task["text"], 256, secrets),
+                        "completed": task["completed"] == true,
+                    })
+                })
+                .collect();
+            item.insert("items".into(), tasks.into());
+        }
+        _ => {
+            item.insert("text".into(), NOTICE.into());
+        }
+    }
+    json!({ "type": event["type"], "item": item })
+}
+
+fn activity_preview(value: &Value, limit: usize, secrets: &[String]) -> Value {
+    if value.is_object() || value.is_array() {
+        return Value::Null;
+    }
+    let redacted = payload(value, secrets);
+    let Some(text) = redacted.as_str() else {
+        return redacted;
+    };
+    if text.len() <= limit {
+        return redacted;
+    }
+
+    format!("{}…", &text[..text.floor_char_boundary(limit)]).into()
+}
+
 pub fn exhausted(event: &Value) -> bool {
     if !["turn.failed", "error"].contains(&text(event, "type")) {
         return false;

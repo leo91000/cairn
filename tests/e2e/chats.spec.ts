@@ -7,6 +7,35 @@ import {
   test,
 } from './fixtures'
 
+test('verbose tool calls keep their action steps with abbreviated details', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+    id: randomUUID(),
+    text: 'fixture:verbose-tools',
+  })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 15000 }).toBe('succeeded')
+  await page.goto(`/chats/${chat.id}`)
+  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await expect(page.getByText('Ready for the next step.', { exact: false }).last()).toBeVisible()
+  const actions = page.getByTestId('agent-actions').filter({ hasText: /ran 60 commands/i })
+  await expect(actions).toBeVisible()
+  await actions.locator(':scope > button').click()
+  const steps = page.getByTestId('agent-step').filter({ hasText: 'fixture verbose output' })
+  await expect(steps).toHaveCount(60)
+  await steps.last().click()
+  const sheet = page.getByTestId('agent-step-sheet')
+  await expect(sheet).toContainText('Completed')
+  await expect(sheet).toContainText('Details shortened: arguments and output were omitted.')
+  await expect(sheet).not.toContainText('x'.repeat(100))
+  for (const width of [1280, 390]) {
+    await page.setViewportSize({ width, height: 844 })
+    await expect(sheet).toBeVisible()
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+    await page.screenshot({ path: test.info().outputPath(`abbreviated-tool-details-${width}.png`) })
+  }
+})
+
 test('a transient agent error shows a retry countdown and resumes without user input', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {

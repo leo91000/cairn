@@ -21,11 +21,35 @@ impl Output {
             received: Instant::now(),
         }
     }
+
+    fn line(bytes: &[u8], secrets: &[String]) -> Self {
+        let raw = String::from_utf8_lossy(bytes);
+        if raw.len() > LINE_LIMIT
+            && let Ok(event) = serde_json::from_str::<Value>(&raw)
+            && text(&event, "type").starts_with("item.")
+            && event["item"].is_object()
+            && event["item"]["type"] != "agent_message"
+        {
+            return Self::new(
+                false,
+                run_output::compact_activity(&event, secrets).to_string(),
+            );
+        }
+
+        Self::new(
+            false,
+            raw[..raw.floor_char_boundary(raw.len().min(LINE_LIMIT))].to_owned(),
+        )
+    }
 }
 
-/// Output recorded per run before tool and diagnostic events are dropped.
-const OUTPUT_BUDGET: usize = 5_000_000;
+/// Separate budget for technical logs; tool activity has only a per-item detail limit.
+const LOG_BUDGET: usize = 500_000;
+const ITEM_DETAIL_LIMIT: usize = 16 * 1024;
 const LINE_LIMIT: usize = 2_000_000;
+// Match the resident Codex transport: supported tool frames must reach the JSON
+// parser intact before shortening. Large buffers are released after each frame.
+const TOOL_FRAME_LIMIT: usize = 100_000_000;
 const MESSAGE_LIMIT: usize = 100_000;
 const ERROR_LIMIT: usize = 10_000;
 
@@ -43,9 +67,11 @@ pub(super) async fn read_output(
     mut reader: impl AsyncRead + Unpin,
     diagnostic: bool,
     events: mpsc::Sender<Output>,
+    secrets: Vec<String>,
 ) {
     let mut bytes = [0; 8192];
     let mut line = Vec::new();
+    let mut object_frame = None;
     loop {
         let n = match reader.read(&mut bytes).await {
             Ok(0) | Err(_) => break,
@@ -60,26 +86,33 @@ pub(super) async fn read_output(
         }
         for byte in &bytes[..n] {
             if *byte != b'\n' {
-                if line.len() < LINE_LIMIT {
+                if object_frame.is_none() && !byte.is_ascii_whitespace() {
+                    object_frame = Some(*byte == b'{');
+                }
+                let limit = if object_frame == Some(true) {
+                    TOOL_FRAME_LIMIT
+                } else {
+                    LINE_LIMIT
+                };
+                if line.len() < limit {
                     line.push(*byte);
                 }
                 continue;
             }
-            let complete = String::from_utf8_lossy(&line).into_owned();
-            if events.send(Output::new(false, complete)).await.is_err() {
+            if events.send(Output::line(&line, &secrets)).await.is_err() {
                 return;
             }
-            line.clear();
+            if line.capacity() > LINE_LIMIT {
+                line = Vec::new();
+            } else {
+                line.clear();
+            }
+            object_frame = None;
         }
     }
     if !line.is_empty() {
         // The receiver only disappears once the run stopped listening.
-        let _ = events
-            .send(Output::new(
-                diagnostic,
-                String::from_utf8_lossy(&line).into_owned(),
-            ))
-            .await;
+        let _ = events.send(Output::line(&line, &secrets)).await;
     }
 }
 
@@ -90,16 +123,16 @@ pub(super) async fn record(
     output: &Output,
     checkpoint: &Checkpoint,
     secrets: &[String],
-    total: &mut usize,
+    log_total: &mut usize,
     activity: &mut crate::performance::Activity,
 ) -> Result<bool> {
     let raw = output.raw.as_str();
     if output.diagnostic {
-        record_raw(s, id, "diagnostic", raw, secrets, total).await?;
+        record_raw(s, id, "diagnostic", raw, secrets, log_total).await?;
         return Ok(false);
     }
     let Ok(event) = serde_json::from_str::<Value>(raw) else {
-        record_raw(s, id, "output", raw, secrets, total).await?;
+        record_raw(s, id, "output", raw, secrets, log_total).await?;
         return Ok(false);
     };
     activity.observe(&event);
@@ -108,14 +141,22 @@ pub(super) async fn record(
     }
     let exhausted = run_output::exhausted(&event);
     apply_event(s, id, &event, checkpoint, secrets).await?;
-    // Tool/diagnostic volume must never hide the conversation or its outcome.
+    // Every activity item has its own detail limit, regardless of earlier output.
     let conversation = event["item"]["type"] == "agent_message"
         || CONVERSATION_EVENTS.contains(&text(&event, "type"));
-    if conversation || *total < OUTPUT_BUDGET {
-        if !conversation {
-            *total += raw.len();
+    let activity_item = text(&event, "type").starts_with("item.") && event["item"].is_object();
+    if conversation || activity_item || *log_total < LOG_BUDGET {
+        let abbreviated = !conversation && activity_item && raw.len() > ITEM_DETAIL_LIMIT;
+        let stored = if abbreviated {
+            run_output::compact_activity(&event, secrets)
+        } else {
+            run_output::payload(&event, secrets)
+        };
+        let serialized = serde_json::to_string(&stored)?;
+        if !conversation && !activity_item {
+            *log_total = log_total.saturating_add(serialized.len());
         }
-        store_event(s, id, raw, &event, secrets).await?;
+        store_event(s, id, &serialized, &stored).await?;
     }
     if event["type"] == "turn.completed" {
         // Title failures cannot change the outcome of the user's turn.
@@ -130,15 +171,22 @@ async fn record_raw(
     kind: &str,
     raw: &str,
     secrets: &[String],
-    total: &mut usize,
+    log_total: &mut usize,
 ) -> Result<()> {
-    if *total >= OUTPUT_BUDGET {
+    if *log_total >= LOG_BUDGET {
         return Ok(());
     }
-    *total += raw.len();
-    s.store
-        .event(id, kind, &run_output::redact(raw, secrets), None)
-        .await
+    let redacted = run_output::redact(raw, secrets);
+    let remaining = LOG_BUDGET.saturating_sub(*log_total);
+    let recorded = &redacted[..redacted.floor_char_boundary(remaining.min(redacted.len()))];
+    *log_total += recorded.len();
+    if recorded.len() < redacted.len() {
+        *log_total = LOG_BUDGET;
+    }
+    if recorded.is_empty() {
+        return Ok(());
+    }
+    s.store.event(id, kind, recorded, None).await
 }
 
 /// Handles chat protocol messages, which are not run output.
@@ -206,13 +254,7 @@ async fn apply_event(
     Ok(())
 }
 
-async fn store_event(
-    s: &Service,
-    id: &str,
-    raw: &str,
-    event: &Value,
-    secrets: &[String],
-) -> Result<()> {
+async fn store_event(s: &Service, id: &str, raw: &str, event: &Value) -> Result<()> {
     let value = event["item"]
         .get("text")
         .or_else(|| event["item"].get("aggregated_output"))
@@ -225,16 +267,12 @@ async fn store_event(
         "" => "output",
         kind => kind,
     };
-    s.store
-        .event(
-            id,
-            kind,
-            &run_output::redact(&value, secrets),
-            Some(run_output::payload(event, secrets)),
-        )
-        .await
+    s.store.event(id, kind, &value, Some(event.clone())).await
 }
 
 fn truncate(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
+
+#[cfg(test)]
+mod tests;

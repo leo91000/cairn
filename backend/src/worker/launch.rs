@@ -87,10 +87,10 @@ async fn execute_inner(
     timing.next("session_lookup");
     let mut resume = execution.resume_session(&workspace).await?;
     timing.finish();
-    let mut output_total = 0;
+    let mut log_total = 0;
     loop {
         match execution
-            .attempt(&mut workspace, resume.as_deref(), &mut output_total)
+            .attempt(&mut workspace, resume.as_deref(), &mut log_total)
             .await?
         {
             Attempt::Finished => return Ok(()),
@@ -398,7 +398,7 @@ impl Execution<'_> {
         &mut self,
         workspace: &mut Workspace,
         resume: Option<&str>,
-        output_total: &mut usize,
+        log_total: &mut usize,
     ) -> Result<Attempt> {
         let s = self.s;
         self.attempt_id = crate::config::id();
@@ -445,7 +445,7 @@ impl Execution<'_> {
             self.prepare_runner(workspace, resume, chat, &mut launch)
                 .await?;
         }
-        let exit = self.supervise(workspace, launch, output_total).await?;
+        let exit = self.supervise(workspace, launch, log_total).await?;
         drop(auth_broker);
         self.checkpoint.update(|c| c.process = Some(None)).await?;
         if workspace.isolated() {
@@ -731,7 +731,7 @@ impl Execution<'_> {
         &mut self,
         workspace: &Workspace,
         launch: Launch,
-        output_total: &mut usize,
+        log_total: &mut usize,
     ) -> Result<Exit> {
         let s = self.s;
         let mut child = Supervised::spawn(
@@ -763,8 +763,13 @@ impl Execution<'_> {
         let stdout = child.child.stdout.take().unwrap();
         let stderr = child.child.stderr.take().unwrap();
         let (tx, mut events) = mpsc::channel(32);
-        let out = tokio::spawn(output::read_output(stdout, false, tx.clone()));
-        let err = tokio::spawn(output::read_output(stderr, true, tx));
+        let out = tokio::spawn(output::read_output(
+            stdout,
+            false,
+            tx.clone(),
+            self.sensitive.to_vec(),
+        ));
+        let err = tokio::spawn(output::read_output(stderr, true, tx, Vec::new()));
         if let Err(error) = child.start(launch.prompt).await {
             child.stop().await;
             out.abort();
@@ -773,7 +778,7 @@ impl Execution<'_> {
         }
         let span = tracing::info_span!(target: "leo_performance", "agent_attempt", run_id = self.id, attempt_id = self.attempt_id);
         let exit = self
-            .wait(&mut child, &mut events, output_total)
+            .wait(&mut child, &mut events, log_total)
             .instrument(span)
             .await?;
         let _ = out.await;
@@ -785,7 +790,7 @@ impl Execution<'_> {
         &mut self,
         child: &mut Supervised,
         events: &mut mpsc::Receiver<output::Output>,
-        output_total: &mut usize,
+        log_total: &mut usize,
     ) -> Result<Exit> {
         let s = self.s;
         let cancel = self.cancel;
@@ -831,7 +836,7 @@ impl Execution<'_> {
                             &output,
                             self.checkpoint,
                             self.sensitive,
-                            output_total,
+                            log_total,
                             &mut activity,
                         )).await?;
                     }

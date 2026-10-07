@@ -35,7 +35,10 @@ seconds, prevents overlapping fetches, and requests only events after the last I
 Finished runs do not keep polling; further event pages can be loaded explicitly.
 The UI retains at most 2,000 events for a viewed run. Server event pages contain at
 most 100 entries, each capped at 16,000 characters; captured CLI output is capped
-at approximately 5 MB and result-file reads at 100,000 bytes. Per-run event retention
+at 500 kB for technical logs and diagnostics. Tool items are independently reduced
+to summaries above 16 KiB, with no cumulative tool-call budget. All tool identities,
+outcomes and small results remain recorded throughout the run. Result-file reads
+are capped at 100,000 bytes. Per-run event retention
 and 30-day finished-event expiry bound log growth; preserved worktree disk usage
 still depends on projects and requires deliberate cleanup.
 
