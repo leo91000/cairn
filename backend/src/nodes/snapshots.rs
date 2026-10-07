@@ -23,6 +23,7 @@ pub const READ_BATCH: usize = 8;
 /// 60 s; 32 MiB finishes within that limit from a 5 Mbit/s uplink.
 pub const PUBLICATION_BATCH: usize = 8;
 pub const MAX_PUBLICATION_BLOCKS: usize = (1024_u64 * 1024 * 1024 * 1024 / BLOCK) as usize;
+const DIRECT_PUBLICATION_STARTUP: std::time::Duration = std::time::Duration::from_secs(1800);
 const TRANSFER_IDLE: std::time::Duration = std::time::Duration::from_secs(120);
 const MANIFEST_VERSION: u64 = 1;
 
@@ -414,6 +415,7 @@ pub struct Fetch {
     remaining: usize,
     legacy: bool,
     publication: bool,
+    publication_batch: usize,
 }
 
 impl Fetch {
@@ -432,7 +434,14 @@ impl Fetch {
             remaining: 0,
             legacy: false,
             publication: true,
+            publication_batch: PUBLICATION_BATCH,
         }
+    }
+
+    /// Direct controller transfers have no reverse-proxy request deadline.
+    pub fn direct_publication(mut self) -> Self {
+        self.publication_batch = MAX_PUBLICATION_BLOCKS;
+        self
     }
 
     pub async fn block(&mut self, hash: &str) -> Result<Vec<u8>> {
@@ -445,7 +454,7 @@ impl Fetch {
             .ok_or_else(|| Error::bad("Unexpected snapshot block."))?;
         while self.stream.is_none() && !self.legacy {
             let count = if self.publication {
-                PUBLICATION_BATCH
+                self.publication_batch
             } else {
                 READ_BATCH
             };
@@ -465,7 +474,14 @@ impl Fetch {
             if !self.publication {
                 request = request.timeout(TRANSFER_IDLE);
             }
-            let response = tokio::time::timeout(TRANSFER_IDLE, request.send())
+            // A stopped local journal is verified once before the response starts.
+            // Its byte stream still has the ordinary per-block idle deadline.
+            let startup = if self.publication && self.publication_batch == MAX_PUBLICATION_BLOCKS {
+                DIRECT_PUBLICATION_STARTUP
+            } else {
+                TRANSFER_IDLE
+            };
+            let response = tokio::time::timeout(startup, request.send())
                 .await
                 .map_err(|_| Error::unavailable("Backup block transfer interrupted."))?
                 .map_err(|_| Error::unavailable("Backup block transfer interrupted."))?;
@@ -544,8 +560,7 @@ mod tests {
         (format!("http://{address}"), server.abort_handle())
     }
 
-    #[tokio::test]
-    async fn fetch_publication_splits_large_backlogs_into_bounded_responses() {
+    async fn check_publication_fetch(direct: bool) {
         // Production 2026-10-05: a node uploading 1.8 GB in one response was cut
         // after 60 s by the master's reverse proxy on every attempt. Each bounded
         // response must stay short enough to finish within that limit.
@@ -591,6 +606,9 @@ mod tests {
             "fixture".into(),
             blocks.clone(),
         );
+        if direct {
+            fetch = fetch.direct_publication();
+        }
         for (index, (hash, size)) in blocks.iter().enumerate() {
             assert_eq!(
                 fetch.block(hash).await.unwrap(),
@@ -599,10 +617,24 @@ mod tests {
         }
         assert_eq!(
             *requests.lock().unwrap(),
-            vec![PUBLICATION_BATCH, PUBLICATION_BATCH, 1]
+            if direct {
+                vec![count]
+            } else {
+                vec![PUBLICATION_BATCH, PUBLICATION_BATCH, 1]
+            }
         );
         assert!(PUBLICATION_BATCH as u64 * BLOCK <= 32 * 1024 * 1024);
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn fetch_publication_splits_large_backlogs_into_bounded_responses() {
+        check_publication_fetch(false).await;
+    }
+
+    #[tokio::test]
+    async fn direct_publication_streams_all_blocks_in_one_response() {
+        check_publication_fetch(true).await;
     }
 
     #[tokio::test]

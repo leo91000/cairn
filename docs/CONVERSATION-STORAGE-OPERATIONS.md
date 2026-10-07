@@ -25,7 +25,10 @@ path; reads drain before a following write or flush. An upload slot remains held
 This bounds memory while allowing independent block transfers to overlap; an
 individual missing block still waits for its own transfer. Sealed journals also
 reconstruct up to sixteen independent blocks together, preserving generation
-fences and the existing foreground cache admission order. R2 requires a private
+fences and the existing foreground cache admission order. Direct local publications
+use one journal reader for the full stream; remote requests remain bounded to
+32 MiB to fit reverse-proxy deadlines. A local cold journal has up to 30 minutes
+to initialize, with the existing 120-second idle deadline for every streamed block. R2 requires a private
 dedicated bucket without public domains, locks or enabled lifecycle rules, with
 `STORAGE_S3_PRIVATE_BUCKET_CONFIRMED=true` after those provider controls are checked.
 
