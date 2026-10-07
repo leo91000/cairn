@@ -1558,6 +1558,84 @@ async fn native_rotation_rechecks_session_and_device_after_waiting_for_locks() {
 }
 
 #[tokio::test]
+async fn new_native_registration_rechecks_proof_and_session_after_concurrent_insertion() {
+    use sha2::{Digest, Sha256};
+
+    for expired in ["proof", "session"] {
+        let relay = common::RelayedInstallation::new(axum::Router::new()).await;
+        let app = &relay.app;
+        let (foreign_cookie, foreign_session) = login(app, "concurrent-device@example.test").await;
+        let device = uuid::Uuid::new_v4().to_string();
+        let id = format!("{:x}", Sha256::digest(format!("android:{device}")));
+        let foreign_account = foreign_session["account"]["id"].as_str().unwrap();
+
+        // An uncommitted registration is invisible to the handler's row lookup,
+        // but still makes its INSERT wait on the unique device ID.
+        let mut barrier = app.pool.begin().await.unwrap();
+        let (pid,): (i32,) = sqlx_core::query_as::query_as("SELECT pg_backend_pid()")
+            .fetch_one(&mut *barrier)
+            .await
+            .unwrap();
+        query(
+            "INSERT INTO notification_devices (id, account_id, endpoint, p256dh, auth)
+             VALUES ($1, $2, 'fcm:fixture-concurrent-owner', '', '')",
+        )
+        .bind(&id)
+        .bind(foreign_account)
+        .execute(&mut *barrier)
+        .await
+        .unwrap();
+
+        let registration = request(
+            app,
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            "/api/account/notifications/android",
+        )
+        .json(&json!({
+            "deviceId": device,
+            "token": "fixture-concurrent-transfer",
+        }));
+        let pending = tokio::spawn(async move { registration.send().await.unwrap() });
+        app.wait_for_blocked_request(pid).await;
+        let account_id = relay.session["account"]["id"].as_str().unwrap();
+        if expired == "proof" {
+            query("UPDATE web_sessions SET last_proof_at = NULL WHERE account_id = $1")
+                .bind(account_id)
+                .execute(&app.pool)
+                .await
+                .unwrap();
+        } else {
+            query("UPDATE web_sessions SET expires_at = clock_timestamp() - interval '1 millisecond' WHERE account_id = $1")
+                .bind(account_id)
+                .execute(&app.pool)
+                .await
+                .unwrap();
+        }
+        barrier.commit().await.unwrap();
+
+        let expected_status = if expired == "proof" {
+            StatusCode::FORBIDDEN
+        } else {
+            StatusCode::UNAUTHORIZED
+        };
+        assert_eq!(pending.await.unwrap().status(), expected_status);
+        let lookup = format!("/api/account/notifications/subscriptions/{id}");
+        let still_owned: Value =
+            request(app, &foreign_cookie, &foreign_session, Method::GET, &lookup)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+        assert_eq!(still_owned, json!({ "registered": true }));
+        relay.close().await;
+    }
+}
+
+#[tokio::test]
 async fn native_push_reuses_current_membership_and_drops_removed_members_immediately() {
     let mail = std::sync::Arc::new(PushMailbox::default());
     let relay = common::RelayedInstallation::with_push(mail.clone()).await;

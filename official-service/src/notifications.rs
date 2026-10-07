@@ -253,7 +253,7 @@ async fn registration_session(
     headers: &HeaderMap,
     id: &str,
     native: bool,
-) -> Result<(String, String), ApiError> {
+) -> Result<(String, bool), ApiError> {
     let account = methods::authenticated_on(connection, headers, true).await?;
     let rotating_owned_device = if native {
         let (owned,): (bool,) = query_as(
@@ -273,7 +273,7 @@ async fn registration_session(
         account::require_recent_proof(connection, headers).await?;
     }
 
-    Ok(account)
+    Ok((account.0, rotating_owned_device))
 }
 
 async fn register_device(
@@ -324,7 +324,8 @@ async fn register_device(
         .execute(&mut *transaction)
         .await?;
 
-    registration_session(&mut transaction, headers, id, native).await?;
+    let (_, rotating_owned_device) =
+        registration_session(&mut transaction, headers, id, native).await?;
 
     query("DELETE FROM notification_devices WHERE endpoint = $1 AND id <> $2")
         .bind(&input.endpoint)
@@ -349,6 +350,14 @@ async fn register_device(
     .bind(input.keys.auth)
     .execute(&mut *transaction)
     .await?;
+
+    // DELETE/UPSERT can still wait on an invisible insertion or another device's
+    // delivery lock. Recheck before commit using the exemption decided before
+    // mutation, so a new registration cannot authorize its own renewal.
+    methods::authenticated_on(&mut transaction, headers, true).await?;
+    if !rotating_owned_device {
+        account::require_recent_proof(&mut transaction, headers).await?;
+    }
 
     transaction.commit().await?;
     Ok(())
