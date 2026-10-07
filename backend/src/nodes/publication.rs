@@ -543,6 +543,10 @@ impl Publication<'_> {
             missing,
         );
 
+        if self.node == super::LOCAL_NODE_ID {
+            reads = reads.direct_publication();
+        }
+
         let mut uploads = JoinSet::<Result<()>>::new();
         let transfer = self
             .start_uploads(objects, &sources, &mut reads, &mut uploads)
