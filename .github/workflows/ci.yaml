@@ -112,7 +112,7 @@ jobs:
     # requests cannot share with each other.
     if: needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_INCREMENTAL: '0'
