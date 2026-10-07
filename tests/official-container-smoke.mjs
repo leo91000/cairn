@@ -2,7 +2,7 @@
 // delivery is replaced; migrations, Postgres, sessions and HTTP routing are real.
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { generateKeyPairSync, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import { createServer } from 'node:http'
 import process from 'node:process'
@@ -26,6 +26,10 @@ async function docker(...args) {
     throw new Error(`Official smoke Docker ${args[0]} failed`)
   }
 }
+
+// Synthetic, disposable key: no real provider credentials or network calls.
+const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 })
+const fcmAccount = JSON.stringify({ project_id: 'fixture-only', client_email: 'fixture@example.test', private_key: privateKey.export({ type: 'pkcs8', format: 'pem' }) })
 
 const messages = []
 const mail = createServer(async (request, response) => {
@@ -69,7 +73,7 @@ async function main() {
 
     const binding = JSON.parse((await docker('inspect', '--format', '{{json .NetworkSettings.Ports}}', `${name}-db`)).stdout)
     const databasePort = binding['5432/tcp'][0].HostPort
-    await docker('run', '-d', '--name', name, '--network', 'host', '-e', `LEO_OFFICIAL_DATABASE_URL=postgres://leo:fixture-only@127.0.0.1:${databasePort}/leo_official`, '-e', `LEO_OFFICIAL_ORIGIN=${origin}`, '-e', `LEO_OFFICIAL_LISTEN=127.0.0.1:${port}`, '-e', `LEO_OFFICIAL_EMAIL_ENDPOINT=http://127.0.0.1:${mail.address().port}/emails`, '-e', 'LEO_OFFICIAL_EMAIL_KEY=fixture-only', '-e', 'LEO_OFFICIAL_EMAIL_FROM=leo@example.test', '-e', `LEO_INSTALLATION_IMAGE=${installationImage}`, image)
+    await docker('run', '-d', '--name', name, '--network', 'host', '-e', `LEO_OFFICIAL_DATABASE_URL=postgres://leo:fixture-only@127.0.0.1:${databasePort}/leo_official`, '-e', `LEO_OFFICIAL_ORIGIN=${origin}`, '-e', `LEO_OFFICIAL_LISTEN=127.0.0.1:${port}`, '-e', `LEO_OFFICIAL_EMAIL_ENDPOINT=http://127.0.0.1:${mail.address().port}/emails`, '-e', 'LEO_OFFICIAL_EMAIL_KEY=fixture-only', '-e', 'LEO_OFFICIAL_EMAIL_FROM=leo@example.test', '-e', `LEO_INSTALLATION_IMAGE=${installationImage}`, '-e', `LEO_OFFICIAL_FCM_SERVICE_ACCOUNT_JSON=${fcmAccount}`, image)
     const healthResponse = await ready()
     assert.match(healthResponse.headers.get('cache-control'), /no-store/)
     assert.deepEqual(await healthResponse.json(), { status: 'ok', commit, runtimeId: commit })
@@ -109,6 +113,9 @@ async function main() {
     await ready()
     const session = await fetch(`${origin}/api/account/session`, { headers: { cookie } })
     assert.equal(session.status, 200, 'Sessions must survive official process replacement')
+    const nativePush = await fetch(`${origin}/api/account/notifications/android`, { headers: { cookie } })
+    assert.equal(nativePush.status, 200)
+    assert.deepEqual(await nativePush.json(), { enabled: true }, 'FCM configuration must accept environment-only credentials')
     await docker('stop', `${name}-db`)
     assert.equal((await fetch(`${origin}/health`)).status, 503, 'Readiness must detect database loss')
     console.warn(`Official exact-image smoke passed: ${image}; commit ${commit}; SPA, migrations, sign-in, restart and database readiness`)

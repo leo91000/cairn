@@ -29,7 +29,6 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     && printf 'fn main() {}\n' > backend/src/main.rs \
     && printf 'fn main() {}\n' > backend/examples/ublk_probe.rs \
     && printf '' > backend/src/lib.rs \
-    && printf 'fn main() {}\n' > backend/examples/ublk_probe.rs \
     && printf 'fn main() {}\n' > official-service/src/main.rs \
     && printf '' > relay-protocol/src/lib.rs \
     && printf '' > official-service/src/lib.rs && cargo build --locked --release --bin leo --features ublk

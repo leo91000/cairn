@@ -46,7 +46,10 @@ Schedule downtime and record the old service UUID, image digest and its exact
 volume/bind-mount names. Disable the old tag deployment target before the first
 new release: replace the GitHub `production` environment's
 `COOLIFY_SERVICE_UUID` with the **new official** service UUID in step 5.
-Pause any old host update timers while dismantling the old installation.
+Disable `leo-cli-update.timer` and any other old host dispatch/update timers
+while dismantling the old installation. The historical **Update agent tools**
+workflow's Coolify deploy job is disabled in code for this cutover; do not reuse
+it with the official service UUID. New installation updates use their own timer.
 
 Stop and remove the old Leo manager/runner Coolify service and its public domain
 route. Remove **only that service's identified** data, agent-home, workspaces,
@@ -106,12 +109,33 @@ Optional Web Push: generate and retain a VAPID P-256 key privately; set
 derives the public key. No keys in Git, build arguments, logs or screenshots.
 With neither configured, Web Push is unavailable; email sign-in still works.
 
-**FCM is deferred to #58:** this official binary has no native FCM sender or FCM
-environment contract. Do not put legacy installation Firebase credentials into
-the official Compose or claim Android push is enabled. After #58 supplies that
-contract, configure its Firebase project/service-account credentials privately,
-ship the matching Android app configuration and verify native delivery. FCM is
-optional and does not block this web/relay deployment.
+Optional Android/FCM (delivered by #58): create a Firebase project with an Android
+application for `dev.leo.manager`. Supply the matching approved APK SHA-256 signing
+certificate fingerprints to `LEO_OFFICIAL_ANDROID_CERTIFICATES` (comma-separated,
+colon-separated hex accepted). The official service publishes their association
+at `https://cairn.build/.well-known/assetlinks.json`. Register that Android package
+and its signing certificate in the Google OAuth project too; the existing Google
+web client ID remains the token audience.
+
+Enable the Firebase Cloud Messaging HTTP v1 interface and obtain a dedicated
+service account permitted to send for this project. Set its complete private JSON
+only as the secret `LEO_OFFICIAL_FCM_SERVICE_ACCOUNT_JSON` in the Coolify service
+environment. It must contain `project_id`, `client_email`, and the signing
+`private_key`; preserve the JSON escapes/newlines. The production Compose requires
+no secret file mount. The older file-path configuration remains supported outside
+this Compose; never configure both sources. Never distribute service-account keys
+to Android, an installation, build arguments or artifacts.
+
+For the matching Android release, set the repository's **public** workflow
+variables `LEO_ANDROID_FIREBASE_APP_ID`, `LEO_ANDROID_FIREBASE_PROJECT_ID`,
+`LEO_ANDROID_FIREBASE_API_KEY`, `LEO_ANDROID_FIREBASE_SENDER_ID` from that Firebase
+Android app, and the repository variable `LEO_OFFICIAL_ORIGIN=https://cairn.build`.
+These are separate from the GitHub `production` environment variables used by
+server deployment. Changing them requires APK revalidation under the existing
+Android workflow. Do not release the APK or create a tag until Léo approves.
+Verify opt-in native delivery on a real configured device; CI's controlled FCM
+adapter is not live-provider evidence. With FCM unset, native push is unavailable
+but sign-in remains usable. See [Android setup](../android/README.md#native-account-providers-and-push).
 
 ## 5. Create the official Coolify service
 
@@ -140,7 +164,7 @@ Set these values in the service environment, without committing an `.env` file:
 | `LEO_OFFICIAL_DATABASE_URL` | `postgres://leo:<URL-encoded same password>@postgres:5432/leo_official` |
 | `LEO_OFFICIAL_TRUSTED_PROXIES` | Actual controlled Traefik peer IP (`/32` or `/128`), plus only necessary controlled proxy hops |
 | `LEO_OFFICIAL_EMAIL_FROM`, `LEO_OFFICIAL_EMAIL_KEY` | Verified sender and private Resend key |
-| Optional OAuth/VAPID pairs | Step 4, or leave empty |
+| Optional OAuth/VAPID pairs and Android/FCM | Step 4, or leave empty |
 
 The official browser origin is fixed to `https://cairn.build` by Compose.
 Postgres is on a separate internal network, with no published port. Official has

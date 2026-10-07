@@ -236,15 +236,24 @@ async fn run() -> Result<(), String> {
             );
         }
     };
-    let android_push = env::var("LEO_OFFICIAL_FCM_SERVICE_ACCOUNT")
+    let fcm_json = env::var("LEO_OFFICIAL_FCM_SERVICE_ACCOUNT_JSON")
         .ok()
-        .filter(|value| !value.is_empty())
-        .map(|path| {
+        .filter(|value| !value.is_empty());
+    let fcm_file = env::var("LEO_OFFICIAL_FCM_SERVICE_ACCOUNT")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let android_push = match (fcm_json, fcm_file) {
+        (None, None) => None,
+        (Some(account), None) => Some(FcmPushSender::new(&account)?),
+        (None, Some(path)) => {
             let account = std::fs::read_to_string(path)
                 .map_err(|_| "Could not read FCM service account file")?;
-            FcmPushSender::new(&account)
-        })
-        .transpose()?;
+            Some(FcmPushSender::new(&account)?)
+        }
+        (Some(_), Some(_)) => {
+            return Err("Configure only one FCM service account source".into());
+        }
+    };
     let push: Option<Arc<dyn leo_official_service::PushSender>> =
         if web_push.is_some() || android_push.is_some() {
             Some(Arc::new(AccountPushSender {

@@ -553,7 +553,11 @@ these exact native passkey origins are trusted. The same RP publishes
 advertises no Android association. Registration, login, reauthentication and
 method removal keep their existing start/finish contracts and proof requirements.
 
-Set `LEO_OFFICIAL_FCM_SERVICE_ACCOUNT` to a private service-account JSON **file
+Production Compose uses `LEO_OFFICIAL_FCM_SERVICE_ACCOUNT_JSON`, the complete
+private service-account JSON supplied through the operator's secret environment,
+so it needs no credential file mount. Never configure both JSON and file sources.
+The existing file configuration remains supported for other deployments:
+set `LEO_OFFICIAL_FCM_SERVICE_ACCOUNT` to a private service-account JSON **file
 path** on the official server. The file must contain `project_id`, `client_email`
 and the signing `private_key`; never distribute it to Android or installations.
 The sender uses FCM HTTP v1, caches a short-lived OAuth access token and sends
