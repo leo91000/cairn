@@ -106,7 +106,7 @@ async fn startup_migrates_legacy_codes_with_300_failures_without_reopening_their
 }
 
 #[tokio::test]
-async fn existing_sessions_keep_their_access_and_deadlines_but_must_confirm_before_deletion() {
+async fn existing_sessions_keep_their_access_and_deadlines_but_must_confirm_sensitive_changes() {
     let database = std::env::var("LEO_OFFICIAL_TEST_DATABASE_URL").unwrap();
     let admin = PgPool::connect(&database).await.unwrap();
     let schema = format!("migration_{}", Uuid::new_v4().simple());
@@ -142,10 +142,10 @@ async fn existing_sessions_keep_their_access_and_deadlines_but_must_confirm_befo
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://localhost:{}", listener.local_addr().unwrap().port());
-    let app =
-        leo_official_service::router(pool.clone(), Arc::new(Mailbox::default()), origin.clone())
-            .await
-            .unwrap();
+    let mailbox = Arc::new(Mailbox::default());
+    let app = leo_official_service::router(pool.clone(), mailbox.clone(), origin.clone())
+        .await
+        .unwrap();
     let server = tokio::spawn(async move {
         axum::serve(
             listener,
@@ -193,6 +193,64 @@ async fn existing_sessions_keep_their_access_and_deadlines_but_must_confirm_befo
         .iter()
         .find(|record| record["current"] == false)
         .unwrap();
+    let revoked = client
+        .delete(format!(
+            "{origin}/api/account/sessions/{}",
+            phone["id"].as_str().unwrap()
+        ))
+        .header("cookie", "leo_session=legacy-browser")
+        .header("origin", &origin)
+        .header("x-csrf-token", "fixture-csrf")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        client
+            .get(format!("{origin}/api/account/sessions"))
+            .header("cookie", "leo_session=legacy-phone")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    let challenge: serde_json::Value = client
+        .post(format!("{origin}/api/account/email-code"))
+        .header("origin", &origin)
+        .json(&json!({ "email": "legacy@example.test" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let code = mailbox.0.lock().unwrap().last().unwrap().1.clone();
+    let confirmed = client
+        .post(format!("{origin}/api/account/reauth/email"))
+        .header("cookie", "leo_session=legacy-browser")
+        .header("origin", &origin)
+        .header("x-csrf-token", "fixture-csrf")
+        .json(&json!({
+            "challenge": challenge["challenge"],
+            "code": code
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(confirmed.status(), StatusCode::NO_CONTENT);
+    let confirmed_sessions: serde_json::Value = client
+        .get(format!("{origin}/api/account/sessions"))
+        .header("cookie", "leo_session=legacy-browser")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(confirmed_sessions, sessions);
+
     let revoked = client
         .delete(format!(
             "{origin}/api/account/sessions/{}",
