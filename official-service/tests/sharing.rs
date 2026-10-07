@@ -1103,3 +1103,44 @@ async fn expired_invitations_are_hidden_and_cannot_be_accepted() {
     );
     relay.close().await;
 }
+
+#[tokio::test]
+async fn shared_tasks_record_the_verified_author_and_only_the_owner_can_delete() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let (cookie, session) = member(&relay, "task-author@example.test").await;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let task_path = format!("/api/installations/{id}/api/tasks");
+    let response = request(&relay, &cookie, &session, Method::POST, &task_path)
+        .json(&json!({
+            "name": "Shared task",
+            "prompt": "Keep working",
+            "agentId": leo_agent_manager::config::MAIN_AGENT_ID,
+            "authorId": relay.session["account"]["id"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let task: Value = response.json().await.unwrap();
+    assert_eq!(task["authorId"], session["account"]["id"]);
+    assert!(task["authorId"].is_string());
+
+    let path = format!("{task_path}/{}", task["id"].as_str().unwrap());
+    assert_eq!(
+        request(&relay, &cookie, &session, Method::DELETE, &path)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        request(&relay, &relay.cookie, &relay.session, Method::DELETE, &path)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    relay.close().await;
+}
