@@ -381,6 +381,22 @@ async fn complete_identity(
         return Err(rejected());
     }
 
+    if let Some(linked_account) = link_account.as_ref() {
+        if let Some(handover) = native {
+            let (active,): (bool,) = query_as("SELECT EXISTS(SELECT 1 FROM native_oauth_handovers h JOIN web_sessions s ON s.digest = h.session_digest WHERE h.id = $1 AND s.account_id = $2 AND s.expires_at > clock_timestamp())")
+                .bind(handover).bind(linked_account).fetch_one(&mut *transaction).await?;
+            if !active {
+                return Err(rejected());
+            }
+        } else if methods::authenticated_on(&mut transaction, headers, false)
+            .await?
+            .0
+            != *linked_account
+        {
+            return Err(rejected());
+        }
+    }
+
     let existing: Option<(String, bool)> = query_as(
         "SELECT account_id, removed FROM sign_in_methods WHERE kind = $1 AND subject = $2",
     )

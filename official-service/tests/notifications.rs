@@ -1206,3 +1206,130 @@ async fn native_push_reuses_current_membership_and_drops_removed_members_immedia
     );
     relay.close().await;
 }
+
+#[tokio::test]
+async fn one_android_device_receives_both_installations_without_installation_subscriptions() {
+    use futures_util::{SinkExt, StreamExt};
+    use leo_relay_protocol::{Frame, NotificationEvent, NotificationKind};
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+
+    let mail = std::sync::Arc::new(PushMailbox::default());
+    let app = Fixture::with_push(mail.clone()).await;
+    let (cookie, session) = login(&app, "native-owner@example.test").await;
+    let registered = request(
+        &app,
+        &cookie,
+        &session,
+        Method::POST,
+        "/api/account/notifications/android",
+    )
+    .json(&json!({
+        "deviceId": uuid::Uuid::new_v4().to_string(),
+        "token": "fixture-global-device",
+    }))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(registered.status(), StatusCode::OK);
+    let mut installations = Vec::new();
+
+    for name in ["Home", "Work"] {
+        let code: Value = request(
+            &app,
+            &cookie,
+            &session,
+            Method::POST,
+            "/api/installations/claim-code",
+        )
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        let claim: Value = app
+            .client
+            .post(format!("{}/api/relay/claim", app.url))
+            .json(&json!({
+                "code": code["code"],
+                "name": name,
+                "protocol": 3,
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let id = claim["installationId"].as_str().unwrap();
+        installations.push(id.to_owned());
+        let mut connect = format!("{}/api/relay/{id}/connect", app.url.replace("http:", "ws:"))
+            .into_client_request()
+            .unwrap();
+        connect.headers_mut().insert(
+            "authorization",
+            format!("Bearer {}", claim["token"].as_str().unwrap())
+                .parse()
+                .unwrap(),
+        );
+        let (mut socket, _) = tokio_tungstenite::connect_async(connect).await.unwrap();
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&Frame::Hello { versions: vec![3] })
+                    .unwrap()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let welcome = socket.next().await.unwrap().unwrap();
+        assert!(matches!(
+            serde_json::from_str::<Frame>(welcome.to_text().unwrap()).unwrap(),
+            Frame::Welcome { version: 3 }
+        ));
+        let event = Frame::Notification(NotificationEvent {
+            id: "e".repeat(64),
+            chat_id: uuid::Uuid::new_v4().to_string(),
+            kind: NotificationKind::Question {
+                question_id: "e".repeat(64),
+            },
+        });
+        socket
+            .send(Message::Text(serde_json::to_string(&event).unwrap().into()))
+            .await
+            .unwrap();
+        let acknowledgement = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let message = socket.next().await.unwrap().unwrap();
+                if message.is_text() {
+                    break message;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            serde_json::from_str::<Frame>(acknowledgement.to_text().unwrap()).unwrap(),
+            Frame::NotificationAck {
+                delivered: true,
+                ..
+            }
+        ));
+        socket.close(None).await.unwrap();
+    }
+
+    let messages = mail.messages.lock().unwrap().clone();
+    assert_eq!(messages.len(), 2);
+    for (endpoint, payload) in &messages {
+        assert_eq!(endpoint, "fcm:fixture-global-device");
+        assert_eq!(payload["accountId"], session["account"]["id"]);
+    }
+    assert_eq!(
+        messages
+            .iter()
+            .map(|(_, payload)| payload["installationId"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>(),
+        installations
+    );
+    app.close().await;
+}
