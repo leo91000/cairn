@@ -163,10 +163,22 @@ async fn personal_tokens_require_proof_in_the_calling_session() {
         .unwrap();
     assert_eq!(accepted.status(), StatusCode::CREATED);
     let granted: Value = accepted.json().await.unwrap();
-    let call = app.client.post(format!("{}/mcp", app.url))
+    let call = app
+        .client
+        .post(format!("{}/mcp", app.url))
         .bearer_auth(granted["token"].as_str().unwrap())
-        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "list_agents", "arguments": {} } }))
-        .send().await.unwrap();
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "list_agents",
+                "arguments": {},
+            },
+        }))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(call.status(), StatusCode::OK);
     relay.close().await;
 }
@@ -407,10 +419,121 @@ async fn mcp_consent_requires_proof_for_approval_but_not_denial() {
         .client
         .post(format!("{}/mcp", app.url))
         .bearer_auth(token["access_token"].as_str().unwrap())
-        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+        }))
         .send()
         .await
         .unwrap();
     assert_eq!(call.status(), StatusCode::OK);
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn confirmed_token_creation_can_wait_for_access_without_deadlocking_oauth_exchange() {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use sha2::{Digest, Sha256};
+
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let app = &relay.app;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let client: Value = app
+        .client
+        .post(format!("{}/oauth/register", app.url))
+        .json(&json!({
+            "client_name": "Concurrent client",
+            "redirect_uris": ["http://localhost:9999/callback"],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let verifier = "a".repeat(43);
+    let parameters = json!({
+        "client_id": client["client_id"],
+        "redirect_uri": "http://localhost:9999/callback",
+        "response_type": "code",
+        "code_challenge_method": "S256",
+        "code_challenge": URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
+        "resource": format!("{}/mcp", app.url),
+        "scope": "read",
+    });
+    let approval: Value = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            "/api/mcp/oauth/consent",
+        )
+        .json(&json!({
+            "parameters": parameters,
+            "installationId": id,
+            "approved": true,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let redirect = url::Url::parse(approval["redirect"].as_str().unwrap()).unwrap();
+    let code = redirect
+        .query_pairs()
+        .find(|(key, _)| key == "code")
+        .unwrap()
+        .1
+        .into_owned();
+
+    // Hold the same installation read lock used by an in-flight OAuth exchange.
+    let mut barrier = app.pool.begin().await.unwrap();
+    let (barrier_pid,): (i32,) = sqlx_core::query_as::query_as("SELECT pg_backend_pid()")
+        .fetch_one(&mut *barrier)
+        .await
+        .unwrap();
+    query("SELECT id FROM installations WHERE id = $1 FOR SHARE")
+        .bind(id)
+        .execute(&mut *barrier)
+        .await
+        .unwrap();
+    let request = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            &format!("/api/installations/{id}/tokens"),
+        )
+        .json(&json!({ "label": "Waiting personal client", "scopes": ["read"] }));
+    let personal = tokio::spawn(async move { request.send().await.unwrap() });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let (waiting,): (bool,) = sqlx_core::query_as::query_as(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))",
+            ).bind(barrier_pid).fetch_one(&app.pool).await.unwrap();
+            if waiting { break; }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.expect("personal creation must wait behind the installation read lock");
+    let exchange_request = app.client.post(format!("{}/oauth/token", app.url)).form(&[
+        ("grant_type", "authorization_code"),
+        ("client_id", client["client_id"].as_str().unwrap()),
+        ("redirect_uri", "http://localhost:9999/callback"),
+        ("code", &code),
+        ("code_verifier", &verifier),
+        ("resource", &format!("{}/mcp", app.url)),
+    ]);
+    let exchanged = tokio::time::timeout(Duration::from_secs(3), exchange_request.send()).await;
+
+    // Release the barrier even on failure, so the test does not leave a pending request.
+    barrier.commit().await.unwrap();
+    let personal = personal.await.unwrap();
+    assert_eq!(personal.status(), StatusCode::CREATED);
+    let exchanged = exchanged
+        .expect("OAuth exchange must finish while confirmed creation is waiting")
+        .unwrap();
+    assert_eq!(exchanged.status(), StatusCode::OK);
     relay.close().await;
 }

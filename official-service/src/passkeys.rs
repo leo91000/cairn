@@ -65,11 +65,7 @@ pub(super) async fn register_start(
     State(service): State<Service>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    let (account_id, email) = methods::authenticated(&service, &headers, true).await?;
-    {
-        let mut connection = service.pool.acquire().await?;
-        account::require_recent_proof(&mut connection, &headers).await?;
-    }
+    let (account_id, email) = account::confirmed_session(&service, &headers).await?;
     consume_limit(
         &service.pool,
         &format!("passkey-registration:{account_id}"),
@@ -160,8 +156,7 @@ pub(super) async fn register_finish(
         .await?;
     // A stale session cannot mint the passkey used to manufacture a fresh proof.
     // Recheck after the account lock, since the independent proof may expire.
-    methods::authenticated_on(&mut transaction, &headers, true).await?;
-    account::require_recent_proof(&mut transaction, &headers).await?;
+    account::confirmed_session_on(&mut transaction, &headers).await?;
 
     let (count,): (i64,) = query_as("SELECT count(*) FROM sign_in_methods WHERE account_id = $1 AND kind = 'passkey' AND NOT removed")
         .bind(&account_id).fetch_one(&mut *transaction).await?;
@@ -300,30 +295,40 @@ async fn complete_login(
 ) -> Result<Response, ApiError> {
     consume_limit(&service.pool, &format!("passkey-login:{}", peer.ip()), 30).await?;
 
-    let (owner_session, bound_session, state) = take_challenge(
-        service,
-        &input.challenge,
-        if purpose == ProofPurpose::ConfirmSession {
-            "passkey-reauth"
-        } else {
-            "passkey-login"
-        },
-        if purpose == ProofPurpose::ConfirmSession {
-            session_token(headers)
-        } else {
-            cookie_token(headers, "leo_passkey")
-        },
-    )
-    .await?;
+    let (expected_owner, state) = match purpose {
+        ProofPurpose::ConfirmSession => {
+            let (owner, bound_session, state) = take_challenge(
+                service,
+                &input.challenge,
+                "passkey-reauth",
+                session_token(headers),
+            )
+            .await?;
+            if bound_session.as_deref() != Some(digest(session_token(headers)).as_str()) {
+                return Err(rejected());
+            }
+            (Some(owner.ok_or_else(rejected)?), state)
+        }
+        ProofPurpose::SignIn => {
+            let (_, _, state) = take_challenge(
+                service,
+                &input.challenge,
+                "passkey-login",
+                cookie_token(headers, "leo_passkey"),
+            )
+            .await?;
+            (None, state)
+        }
+    };
     let state: DiscoverableAuthentication = serde_json::from_str(&state).map_err(|_| rejected())?;
     let webauthn = webauthn(service)?;
     let (owner, credential_id) = webauthn
         .identify_discoverable_authentication(&input.credential)
         .map_err(|_| rejected())?;
     let account_id = owner.to_string();
-    if purpose == ProofPurpose::ConfirmSession
-        && (owner_session.as_deref() != Some(&account_id)
-            || bound_session.as_deref() != Some(digest(session_token(headers)).as_str()))
+    if expected_owner
+        .as_deref()
+        .is_some_and(|expected| expected != account_id)
     {
         return Err(rejected());
     }
@@ -356,19 +361,22 @@ async fn complete_login(
         .execute(&mut *transaction)
         .await?;
 
-    let response = if purpose == ProofPurpose::ConfirmSession {
-        account::confirm_identity(&mut transaction, headers).await?;
-        StatusCode::NO_CONTENT.into_response()
-    } else {
-        create_session(
-            service,
-            &mut transaction,
-            &account_id,
-            &email,
-            headers,
-            SessionProof::Passkey,
-        )
-        .await?
+    let response = match purpose {
+        ProofPurpose::ConfirmSession => {
+            account::confirm_identity(&mut transaction, headers).await?;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        ProofPurpose::SignIn => {
+            create_session(
+                service,
+                &mut transaction,
+                &account_id,
+                &email,
+                headers,
+                SessionProof::Passkey,
+            )
+            .await?
+        }
     };
 
     transaction.commit().await?;

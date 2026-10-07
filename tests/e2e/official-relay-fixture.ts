@@ -58,9 +58,9 @@ export async function officialRelayFixture(port = 4395, listen = '127.0.0.1', di
     }
   }
 
-  function official() {
+  function official(databaseUrl = process.env.LEO_OFFICIAL_TEST_DATABASE_URL) {
     return start('target/debug/leo-official', {
-      LEO_OFFICIAL_DATABASE_URL: process.env.LEO_OFFICIAL_TEST_DATABASE_URL,
+      LEO_OFFICIAL_DATABASE_URL: databaseUrl,
       LEO_OFFICIAL_ORIGIN: url,
       LEO_OFFICIAL_LISTEN: `${listen}:${port}`,
       LEO_OFFICIAL_EMAIL_ENDPOINT: `http://127.0.0.1:${mailPort}/emails`,

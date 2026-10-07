@@ -810,8 +810,9 @@ onMounted(async () => {
         :passkeys="options.passkeys"
         :confirmation-only="showIdentityConfirmation"
         :confirmation-title="confirmationTitle"
-        :return-label="showMethods ? 'Back to sign-in methods' : 'Back to installation'"
-        @close="showSecurity = false; showIdentityConfirmation = false"
+        :return-label="showMethods ? 'Back to sign-in methods' : showSecurity ? 'Back to account security' : 'Back to installation'"
+        @close="showIdentityConfirmation ? showIdentityConfirmation = false : showSecurity = false"
+        @confirm-identity="openIdentityConfirmation('Confirm identity before revoking other devices')"
         @confirmed="showIdentityConfirmation = false; error = ''"
         @signed-out="redirect('/')"
       />

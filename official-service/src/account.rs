@@ -59,8 +59,7 @@ async fn revoke(
     .fetch_one(&service.pool)
     .await?;
     if !revokes_current {
-        let mut connection = service.pool.acquire().await?;
-        require_recent_proof(&mut connection, headers).await?;
+        confirmed_session(service, headers).await?;
     }
     consume_limit(&service.pool, &format!("session-revoke:{account}"), 30).await?;
 
@@ -119,11 +118,7 @@ pub(super) async fn delete(
     headers: HeaderMap,
     Json(input): Json<Deletion>,
 ) -> Result<Response, ApiError> {
-    let (account, email) = methods::authenticated(&service, &headers, true).await?;
-    {
-        let mut connection = service.pool.acquire().await?;
-        require_recent_proof(&mut connection, &headers).await?;
-    }
+    let (account, email) = confirmed_session(&service, &headers).await?;
     consume_limit(&service.pool, &format!("account-delete:{account}"), 5).await?;
 
     if input.email.trim() != email {
@@ -182,8 +177,7 @@ async fn delete_access(
     ).bind(account).fetch_all(&mut *transaction).await?;
     // Row/advisory locks can wait: check the caller and proof at wall-clock time
     // after all access locks, before any irreversible account mutation.
-    methods::authenticated_on(&mut transaction, headers, true).await?;
-    require_recent_proof(&mut transaction, headers).await?;
+    confirmed_session_on(&mut transaction, headers).await?;
 
     for (installation, owner) in &access {
         if *owner {

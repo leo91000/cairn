@@ -181,11 +181,7 @@ pub(super) async fn forget(
     Path(installation): Path<String>,
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
-    let owner = account(&service, &headers, &Method::DELETE).await?;
-    {
-        let mut connection = service.pool.acquire().await?;
-        account_security::require_recent_proof(&mut connection, &headers).await?;
-    }
+    let (owner, _) = account_security::confirmed_session(&service, &headers).await?;
     consume_limit(&service.pool, &format!("installation-forget:{owner}"), 10).await?;
     let mut transaction = service.pool.begin().await?;
     lock_confirmed_owner(&mut transaction, &headers, &installation, &owner).await?;
@@ -226,11 +222,7 @@ pub(super) async fn detach(
     Path(installation): Path<String>,
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
-    let owner = account(&service, &headers, &Method::POST).await?;
-    {
-        let mut connection = service.pool.acquire().await?;
-        account_security::require_recent_proof(&mut connection, &headers).await?;
-    }
+    let (owner, _) = account_security::confirmed_session(&service, &headers).await?;
     let mut transaction = service.pool.begin().await?;
     lock_confirmed_owner(&mut transaction, &headers, &installation, &owner).await?;
     detach_on(&mut transaction, &installation, &owner).await?;
@@ -248,7 +240,9 @@ pub(super) async fn lock_confirmed_owner(
     installation: &str,
     owner: &str,
 ) -> Result<(), ApiError> {
-    query("SELECT id FROM leo_accounts WHERE id = $1 FOR UPDATE")
+    // Allow FK checks from an OAuth exchange already holding an installation
+    // read lock, while serializing account mutations and deletion.
+    query("SELECT id FROM leo_accounts WHERE id = $1 FOR NO KEY UPDATE")
         .bind(owner)
         .execute(&mut *connection)
         .await?;

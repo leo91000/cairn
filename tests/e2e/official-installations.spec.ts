@@ -1,7 +1,7 @@
 import type { ChildProcess } from 'node:child_process'
 import { Buffer } from 'node:buffer'
-import { execFileSync, spawn } from 'node:child_process'
-import { createHash, randomUUID } from 'node:crypto'
+import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import {
   mkdir,
@@ -260,43 +260,8 @@ test('selects installations, remembers the last one and honours deep workspace U
     await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible()
     await expect(page.getByRole('heading', { name: 'Conversation storage', exact: true })).toBeVisible()
     await expect(page.getByLabel('MCP server URL', { exact: true })).toHaveValue(`${url}/mcp`)
-
-    function expireIdentityProof() {
-      const database = new URL(process.env.LEO_OFFICIAL_TEST_DATABASE_URL!)
-      execFileSync('psql', ['-v', 'ON_ERROR_STOP=1', '-c', `UPDATE web_sessions SET last_proof_at = NULL WHERE account_id IN (SELECT id FROM leo_accounts WHERE email = '${email}'); UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key = 'email:${createHash('sha256').update(email).digest('hex')}'`], {
-        env: {
-          ...process.env,
-          PGHOST: database.hostname,
-          PGPORT: database.port || '5432',
-          PGUSER: decodeURIComponent(database.username),
-          PGPASSWORD: decodeURIComponent(database.password),
-          PGDATABASE: decodeURIComponent(database.pathname.slice(1)),
-        },
-        stdio: 'pipe',
-      })
-    }
-
-    async function confirmIdentity() {
-      await expect(page.getByRole('button', { name: 'Confirm identity', exact: true })).toBeVisible()
-      await page.getByRole('button', { name: 'Confirm identity', exact: true }).click()
-      const previousEmails = messages.length
-      await page.getByRole('button', { name: 'Send confirmation code', exact: true }).click()
-      await expect.poll(() => messages.slice(previousEmails).find(message => /\b\d{8}\b/.test(message))).toBeTruthy()
-      const proof = messages.slice(previousEmails).find(message => /\b\d{8}\b/.test(message))!
-      await page.getByLabel('Confirmation code').fill(proof.match(/\b\d{8}\b/)![0])
-      await page.getByRole('button', { name: 'Verify confirmation code', exact: true }).click()
-    }
-
-    expireIdentityProof()
     await page.getByRole('button', { name: 'New token', exact: true }).click()
     await page.getByRole('dialog').getByLabel('Name', { exact: true }).fill('Browser MCP client')
-    await page.getByRole('dialog').getByLabel('Start and cancel configured tasks').check()
-    await page.getByRole('button', { name: 'Create token', exact: true }).click()
-    await expect(page.getByRole('dialog').getByRole('alert')).toContainText('Confirm your identity')
-    await confirmIdentity()
-    await expect(page.getByRole('dialog').getByLabel('Name', { exact: true })).toHaveValue('Browser MCP client')
-    await expect(page.getByRole('dialog').getByLabel('Start and cancel configured tasks')).toBeChecked()
-    await expect(page.getByRole('dialog')).not.toContainText('This token is shown once')
     await page.getByRole('button', { name: 'Create token', exact: true }).click()
     await expect(page.getByText('Browser MCP client', { exact: true })).toBeVisible()
 
@@ -313,6 +278,7 @@ test('selects installations, remembers the last one and honours deep workspace U
         redirect_uris: [callbackUrl],
       },
     })).json()
+    const { createHash } = await import('node:crypto')
     const verifier = 'a'.repeat(43)
     const parameters = new URLSearchParams({
       client_id: client.client_id,

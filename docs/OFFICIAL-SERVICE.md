@@ -326,9 +326,10 @@ No request deletes installation data or stops admitted work. Owned installations
 remain unclaimed under their existing IDs; run `leo claim` on each machine and
 restart its manager to recover access. Members never inherit ownership.
 Deleting a member preserves other people's installations and sessions.
-Account deletion, installation detachment, definitive installation revocation
-and removal of sign-in methods require an email-code or user-verified passkey
-proof from the last **five minutes**, in the **calling session**. A fresh email
+Account deletion, installation detachment, definitive installation revocation,
+sign-in method removal, invitations, member removal, personal token creation,
+MCP consent approval and revocation of other devices (individually or together)
+require an email-code or user-verified passkey proof from the last **five minutes**, in the **calling session**. A fresh email
 or passkey sign-in qualifies; OAuth sign-in alone does not. Sessions issued before
 the additive migration remain usable but have no qualifying proof. The web asks
 for an explicit confirmation before enabling deletion, including after a reload
@@ -347,7 +348,12 @@ previous column name cannot serve that database. Upgrade its web bundle too.
 The installation actions expose **Confirm identity** in their confirmation form;
 after verification the app returns to that form without performing the action.
 Sign-in methods offers the same control for both registration and removal,
-including email confirmation on browsers without WebAuthn support.
+including email confirmation on browsers without WebAuthn support. Sharing,
+personal token creation, MCP consent and active sessions offer it too. The forms
+preserve invitation addresses, token names/permissions and the selected
+installation, and verification never automatically repeats an operation.
+Signing out the current device, denying consent, cancelling an invitation,
+leaving an installation and revoking an existing grant do not require this proof.
 
 `POST /api/account/reauth/email` accepts the existing email-code challenge and
 code, using the normal delivery and verification limits. It checks the proof's
@@ -361,10 +367,13 @@ A passkey belonging to a different account cannot confirm the caller. Origin,
 CSRF, current session and current credential checks remain mandatory. Confirmation
 preserves the session bearer, CSRF and expiration; other devices are unaffected.
 Sensitive actions return 403 without a recent proof before taking account/access
-locks. Unconfirmed deletion attempts do not spend the account-delete budget.
+locks. Unconfirmed attempts do not spend the operation's rate budget.
 Each action rechecks the current session and proof after waiting for all its
 account/installation locks, immediately before mutations. Installation removal
 locks the account then its installation, consistently with account deletion.
+Sharing changes and new grants use the same order and revalidation. Their account
+lock serializes mutations without blocking an OAuth exchange's foreign-key check
+while that exchange holds an installation read lock.
 Rejected actions preserve the installation, sharing and live streams; successful
 removal retains the existing transaction and relay-revocation behavior.
 

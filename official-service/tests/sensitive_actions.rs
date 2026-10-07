@@ -1,6 +1,6 @@
 mod common;
 
-use common::RelayedInstallation;
+use common::{RelayedInstallation, login};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use sqlx_core::query::query;
@@ -186,24 +186,140 @@ async fn sensitive_actions_recheck_proof_and_session_after_waiting_for_locks() {
     for (method, suffix) in [
         (Method::POST, "/detach"),
         (Method::DELETE, ""),
-        (Method::POST, "/methods/remove"),
+        (Method::POST, "/api/account/methods/remove"),
+        (Method::POST, "/sharing/invitations"),
+        (Method::DELETE, "/sharing/members"),
+        (Method::POST, "/tokens"),
+        (Method::POST, "/api/mcp/oauth/consent"),
+        (Method::POST, "/api/account/sessions/revoke-others"),
+        (Method::DELETE, "/api/account/sessions/other"),
     ] {
         for expire_session in [false, true] {
             let relay = RelayedInstallation::new(axum::Router::new()).await;
             let app = &relay.app;
             let id = relay.session["installations"][0]["id"].as_str().unwrap();
-            let removing_method = suffix == "/methods/remove";
-            let route = if removing_method {
-                "/api/account/methods/remove".to_owned()
+            let account_action = suffix.starts_with("/api/account/");
+            let mut route = if suffix.starts_with("/api/") {
+                suffix.to_owned()
             } else {
                 format!("/api/installations/{id}{suffix}")
             };
+            let body = match suffix {
+                "/api/account/methods/remove" => {
+                    let methods: Value = app
+                        .authenticated(
+                            &relay.cookie,
+                            &relay.session,
+                            Method::GET,
+                            "/api/account/methods",
+                        )
+                        .send()
+                        .await
+                        .unwrap()
+                        .json()
+                        .await
+                        .unwrap();
+                    Some(json!({ "id": methods["methods"][0]["id"] }))
+                }
+                "/sharing/invitations" => Some(json!({ "email": "blocked-invite@example.test" })),
+                "/tokens" => Some(json!({ "label": "Blocked client", "scopes": ["read"] })),
+                "/sharing/members" => {
+                    let (cookie, session) = login(app, "blocked-member@example.test").await;
+                    let invitation: Value = app
+                        .authenticated(
+                            &relay.cookie,
+                            &relay.session,
+                            Method::POST,
+                            &format!("/api/installations/{id}/sharing/invitations"),
+                        )
+                        .json(&json!({ "email": "blocked-member@example.test" }))
+                        .send()
+                        .await
+                        .unwrap()
+                        .json()
+                        .await
+                        .unwrap();
+                    let accepted = app
+                        .authenticated(
+                            &cookie,
+                            &session,
+                            Method::POST,
+                            &format!(
+                                "/api/account/invitations/{}/accept",
+                                invitation["id"].as_str().unwrap()
+                            ),
+                        )
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(accepted.status(), StatusCode::NO_CONTENT);
+                    route.push('/');
+                    route.push_str(session["account"]["id"].as_str().unwrap());
+                    None
+                }
+                "/api/mcp/oauth/consent" => {
+                    let client: Value = app
+                        .client
+                        .post(format!("{}/oauth/register", app.url))
+                        .json(&json!({
+                            "client_name": "Blocked client",
+                            "redirect_uris": ["http://localhost:9999/callback"],
+                        }))
+                        .send()
+                        .await
+                        .unwrap()
+                        .json()
+                        .await
+                        .unwrap();
+                    Some(json!({
+                        "parameters": {
+                            "client_id": client["client_id"],
+                            "redirect_uri": "http://localhost:9999/callback",
+                            "response_type": "code",
+                            "code_challenge_method": "S256",
+                            "code_challenge": "a".repeat(43),
+                            "resource": format!("{}/mcp", app.url),
+                            "scope": "read",
+                        },
+                        "installationId": id,
+                        "approved": true,
+                    }))
+                }
+                "/api/account/sessions/other" => {
+                    query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key LIKE 'email:%'")
+                        .execute(&app.pool).await.unwrap();
+                    let _ = login(app, "relay-owner@example.test").await;
+                    let sessions: Value = app
+                        .authenticated(
+                            &relay.cookie,
+                            &relay.session,
+                            Method::GET,
+                            "/api/account/sessions",
+                        )
+                        .send()
+                        .await
+                        .unwrap()
+                        .json()
+                        .await
+                        .unwrap();
+                    let other = sessions["sessions"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|session| session["current"] == false)
+                        .unwrap();
+                    route = format!("/api/account/sessions/{}", other["id"].as_str().unwrap());
+                    None
+                }
+                _ => None,
+            };
+
             let mut barrier = app.pool.begin().await.unwrap();
             let (barrier_pid,): (i32,) = sqlx_core::query_as::query_as("SELECT pg_backend_pid()")
                 .fetch_one(&mut *barrier)
                 .await
                 .unwrap();
-            let locked_table = if removing_method {
+            let locked_table = if account_action {
                 "leo_accounts"
             } else {
                 "installations"
@@ -214,21 +330,8 @@ async fn sensitive_actions_recheck_proof_and_session_after_waiting_for_locks() {
                 .unwrap();
             let mut request =
                 app.authenticated(&relay.cookie, &relay.session, method.clone(), &route);
-            if removing_method {
-                let methods: Value = app
-                    .authenticated(
-                        &relay.cookie,
-                        &relay.session,
-                        Method::GET,
-                        "/api/account/methods",
-                    )
-                    .send()
-                    .await
-                    .unwrap()
-                    .json()
-                    .await
-                    .unwrap();
-                request = request.json(&json!({ "id": methods["methods"][0]["id"] }));
+            if let Some(body) = body {
+                request = request.json(&body);
             }
             let pending = tokio::spawn(async move { request.send().await.unwrap() });
             tokio::time::timeout(Duration::from_secs(3), async {
@@ -241,11 +344,15 @@ async fn sensitive_actions_recheck_proof_and_session_after_waiting_for_locks() {
                 }
             }).await.expect("the real HTTP action must reach the lock barrier");
             let expiry = if expire_session {
-                "UPDATE web_sessions SET expires_at = clock_timestamp() - interval '1 millisecond'"
+                "UPDATE web_sessions SET expires_at = clock_timestamp() - interval '1 millisecond' WHERE csrf = $1"
             } else {
-                "UPDATE web_sessions SET last_proof_at = clock_timestamp() - interval '5 minutes'"
+                "UPDATE web_sessions SET last_proof_at = clock_timestamp() - interval '5 minutes' WHERE csrf = $1"
             };
-            query(expiry).execute(&app.pool).await.unwrap();
+            query(expiry)
+                .bind(relay.session["csrf"].as_str().unwrap())
+                .execute(&app.pool)
+                .await
+                .unwrap();
             barrier.commit().await.unwrap();
             let response = pending.await.unwrap();
             let expected = if expire_session {

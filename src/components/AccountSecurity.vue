@@ -19,7 +19,12 @@ const props = defineProps<{
   confirmationTitle?: string
   returnLabel?: string
 }>()
-const emit = defineEmits<{ close: [], signedOut: [], confirmed: [] }>()
+const emit = defineEmits<{
+  close: []
+  signedOut: []
+  confirmed: []
+  confirmIdentity: []
+}>()
 const confirmDelete = ref(false)
 const confirmation = ref('')
 const sessions = ref<AccountDevice[]>([])
@@ -185,6 +190,9 @@ onMounted(() => {
           </UiButton>
         </li>
       </ul>
+      <UiButton :disabled="busy" @click="emit('confirmIdentity')">
+        Confirm identity
+      </UiButton>
       <UiButton :disabled="busy || !sessions.some(session => !session.current)" @click="update('sessions/revoke-others')">
         Revoke other devices
       </UiButton>

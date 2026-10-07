@@ -454,7 +454,13 @@ pub(super) async fn consent(
     headers: HeaderMap,
     Json(input): Json<Consent>,
 ) -> Result<Json<Value>, ApiError> {
-    let account = installations::account(&service, &headers, &Method::POST).await?;
+    let account = if input.approved {
+        super::account::confirmed_session(&service, &headers)
+            .await?
+            .0
+    } else {
+        installations::account(&service, &headers, &Method::POST).await?
+    };
     super::consume_limit(&service.pool, &format!("mcp-consent:{account}"), 30).await?;
     let details = authorization(&service, &input.parameters).await?;
     let mut redirect = url::Url::parse(&details.redirect_uri).unwrap();
@@ -468,18 +474,13 @@ pub(super) async fn consent(
     } else {
         let code = random_token();
         let mut transaction = service.pool.begin().await?;
-        let owned: Option<(String,)> =
-            query_as("SELECT id FROM installations WHERE id = $1 AND owner_id = $2 FOR SHARE")
-                .bind(&input.installation_id)
-                .bind(&account)
-                .fetch_optional(&mut *transaction)
-                .await?;
-        if owned.is_none() {
-            return Err(ApiError::Http(
-                StatusCode::NOT_FOUND,
-                "Installation not found",
-            ));
-        }
+        installations::lock_confirmed_owner(
+            &mut transaction,
+            &headers,
+            &input.installation_id,
+            &account,
+        )
+        .await?;
         query("DELETE FROM mcp_codes WHERE grant_id IS NULL AND expires_at <= now()")
             .execute(&mut *transaction)
             .await?;
