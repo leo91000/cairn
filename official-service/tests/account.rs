@@ -558,6 +558,75 @@ async fn native_github_handover_links_with_the_original_session_and_is_one_use()
             .iter()
             .all(|value| !value.to_str().unwrap().starts_with("leo_session="))
     );
+    // Opening an official URL received from someone else must not authorize
+    // their Android session, even after GitHub silently authenticates us.
+    assert_eq!(
+        exchange().send().await.unwrap().status(),
+        StatusCode::ACCEPTED
+    );
+    let methods: Value = app
+        .client
+        .get(format!("{}/api/account/methods", app.url))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        methods["methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|method| method["kind"] != "github")
+    );
+
+    let confirmation_cookie = callback
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .find(|value| {
+            value
+                .to_str()
+                .unwrap()
+                .starts_with("leo_native_confirmation=")
+        })
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let html = callback.text().await.unwrap();
+    assert!(html.contains("application Leo pour Android"));
+    assert!(html.contains("alice@example.test"));
+    let proof = html
+        .split("name=proof value='")
+        .nth(1)
+        .unwrap()
+        .split('\'')
+        .next()
+        .unwrap();
+    let confirm = || {
+        browser_client
+            .post(format!(
+                "{}/api/account/oauth/github/native/confirm",
+                app.url
+            ))
+            .header("origin", &app.url)
+            .header("cookie", &confirmation_cookie)
+            .form(&[
+                ("challenge", start["challenge"].as_str().unwrap()),
+                ("proof", proof),
+            ])
+    };
+    assert_eq!(confirm().send().await.unwrap().status(), StatusCode::OK);
+    assert_eq!(
+        confirm().send().await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
     let response = exchange().send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(

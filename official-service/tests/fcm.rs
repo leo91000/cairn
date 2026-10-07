@@ -8,7 +8,7 @@ use std::{
 };
 
 #[tokio::test]
-async fn only_expired_or_invalid_device_tokens_are_removed_not_provider_outages() {
+async fn only_unregistered_device_tokens_are_removed_not_payload_errors_or_provider_outages() {
     let key = RS256KeyPair::generate(2048).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -61,7 +61,7 @@ async fn only_expired_or_invalid_device_tokens_are_removed_not_provider_outages(
     )
     .unwrap();
     for (code, gone) in [
-        (400, true),
+        (400, false),
         (404, true),
         (403, false),
         (429, false),
