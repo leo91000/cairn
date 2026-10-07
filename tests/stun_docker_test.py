@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import subprocess
+import time
 import unittest
 from pathlib import Path
 
@@ -25,11 +26,24 @@ class PublishedStunTest(unittest.TestCase):
                       "--publish", "0:3478/udp", "--volume",
                       str(Path("tests/network-bench.py").resolve()) + ":/bench.py:ro",
                       IMAGE, "python", "/bench.py", "stun-server", "0.0.0.0:3478", "/tmp/ready")
+            deadline = time.monotonic() + 30
+            while True:
+                try:
+                    ready = subprocess.run(["docker", "exec", name, "test", "-f", "/tmp/ready"],
+                                           capture_output=True, timeout=2).returncode == 0
+                except subprocess.TimeoutExpired:
+                    ready = False
+                if ready:
+                    break
+                if time.monotonic() >= deadline:
+                    self.fail("Published STUN fixture did not become ready")
+                time.sleep(0.1)
             inspect = json.loads(bench.run("docker", "inspect", name))[0]
             port = inspect["NetworkSettings"]["Ports"]["3478/udp"][0]["HostPort"]
             observed = json.loads(network.exec(client, "python3", str(Path("tests/network-bench.py").resolve()),
                                                 "stun-probe", "198.18.104.1:" + port))
             self.assertEqual(observed["address"], "198.18.104.2")
+            self.assertEqual(observed["port"], observed["localPort"])
             output = Path("test-results/network/docker-stun.json")
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(json.dumps({"publishedUdp": True, "expectedSource": "198.18.104.2",

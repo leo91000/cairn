@@ -130,7 +130,8 @@ cookies, claim codes, machine credentials or conversation exports.
 `python3 tests/stun_docker_test.py` publishes a disposable Binding-only Python
 fixture on a Docker UDP port using a pinned image digest. An external Linux
 namespace at `198.18.104.2` queries the host's `198.18.104.1` address, and the
-XOR-MAPPED-ADDRESS must retain the external client's address. This exercises the
+The test waits for the UDP listener before probing; XOR-MAPPED-ADDRESS must
+retain the external client's address and source port (`localPort`). This exercises the
 actual Docker DNAT path; a gateway address from a userland proxy fails the check.
 The fixture mounts only the diagnostic script read-only, removes its container
 and namespace in `finally`, and saves `test-results/network/docker-stun.json`.

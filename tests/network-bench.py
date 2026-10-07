@@ -454,7 +454,7 @@ def stun_probe(address):
             if family != 1:
                 raise RuntimeError("IPv4 STUN mapping expected")
             print(json.dumps({"address": socket.inet_ntoa((mapped_ip ^ 0x2112A442).to_bytes(4, "big")),
-                              "port": mapped_port ^ 0x2112}))
+                              "port": mapped_port ^ 0x2112, "localPort": client.getsockname()[1]}))
             return
     raise RuntimeError("STUN mapping unavailable")
 
