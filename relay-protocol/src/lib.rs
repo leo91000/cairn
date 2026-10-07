@@ -127,6 +127,12 @@ pub enum Frame {
     DirectSignal {
         id: String,
         signal: direct::DirectSignal,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    DirectSignalAck {
+        id: String,
+        accepted: bool,
     },
     DirectRevoke {
         scope: direct::DirectRevocation,

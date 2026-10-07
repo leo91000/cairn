@@ -7,7 +7,8 @@ use axum::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use leo_relay_protocol::direct::{
     DIRECT_TTL, DIRECT_VERSION, DirectAuthorization, DirectClaims, DirectSignal,
-    MAX_DIRECT_CONNECTIONS, MAX_DIRECT_PER_ACCOUNT, signing_bytes, unix_time, valid_fingerprint,
+    MAX_DIRECT_CONNECTIONS, MAX_DIRECT_MEMBER_CONNECTIONS, MAX_DIRECT_PER_ACCOUNT, signing_bytes,
+    unix_time, valid_fingerprint,
 };
 use ring::signature::KeyPair;
 use serde::Deserialize;
@@ -153,10 +154,20 @@ async fn issue(
                     "Direct connection not found",
                 ));
             }
+            // Track the attempted renewal before its acknowledgement. If refused or
+            // lost, retaining its later deadline is conservative: the installation
+            // still enforces the previous lease and scoped revocation stays possible.
             connection.authorization = authorization.clone();
             connection.reply = Some(reply);
         } else {
             if access.direct.len() >= MAX_DIRECT_CONNECTIONS
+                || role == Role::Member
+                    && access
+                        .direct
+                        .values()
+                        .filter(|connection| connection.authorization.claims.role == Role::Member)
+                        .count()
+                        >= MAX_DIRECT_MEMBER_CONNECTIONS
                 || access
                     .direct
                     .values()
@@ -313,22 +324,66 @@ pub(crate) async fn signal(
         &axum::http::Method::POST,
     )
     .await?;
-    let access = tunnel.access.lock().unwrap();
-    let valid = access.direct.get(&id).is_some_and(|connection| {
-        signal.valid()
-            && signal.matches_client_fingerprint(&connection.authorization.claims.fingerprint)
-    });
-    if !valid {
-        return Err(ApiError::Http(
-            StatusCode::BAD_REQUEST,
-            "Invalid direct signal",
-        ));
+    {
+        let access = tunnel.access.lock().unwrap();
+        let valid = access.direct.get(&id).is_some_and(|connection| {
+            signal.valid()
+                && signal.matches_client_fingerprint(&connection.authorization.claims.fingerprint)
+        });
+        if !valid {
+            return Err(ApiError::Http(
+                StatusCode::BAD_REQUEST,
+                "Invalid direct signal",
+            ));
+        }
     }
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let (reply, received) = oneshot::channel();
+    {
+        let mut replies = tunnel.signal_replies.lock().unwrap();
+        if replies.len() >= MAX_IN_FLIGHT {
+            return Err(ApiError::Http(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Signaling busy",
+            ));
+        }
+        replies.insert(request_id.clone(), reply);
+    }
+    let _pending = SignalReply {
+        tunnel: tunnel.clone(),
+        id: request_id.clone(),
+    };
     tunnel
         .control
-        .try_send(Frame::DirectSignal { id, signal })
+        .try_send(Frame::DirectSignal {
+            id,
+            signal,
+            request_id: Some(request_id),
+        })
         .map_err(|_| ApiError::Http(StatusCode::SERVICE_UNAVAILABLE, "Signaling busy"))?;
-    Ok(StatusCode::NO_CONTENT)
+    match tokio::time::timeout(Duration::from_secs(5), received).await {
+        Ok(Ok(true)) => Ok(StatusCode::NO_CONTENT),
+        Ok(Ok(false)) => Err(ApiError::Http(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Installation refused direct signal",
+        )),
+        _ => Err(ApiError::Http(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Signaling unavailable",
+        )),
+    }
+}
+
+// Also release bounded acknowledgement state when an HTTP request is abandoned.
+struct SignalReply {
+    tunnel: Arc<Tunnel>,
+    id: String,
+}
+
+impl Drop for SignalReply {
+    fn drop(&mut self) {
+        self.tunnel.signal_replies.lock().unwrap().remove(&self.id);
+    }
 }
 
 pub(crate) async fn events(
@@ -407,21 +462,16 @@ pub(super) fn acknowledge(tunnel: &Tunnel, id: &str, accepted: bool) {
 }
 
 pub(super) fn receive_signal(tunnel: &Tunnel, id: &str, signal: DirectSignal) {
-    {
-        let mut window = tunnel.signaling_window.lock().unwrap();
-        if window.0.elapsed() >= Duration::from_secs(60) {
-            *window = (tokio::time::Instant::now(), 0);
-        }
-        window.1 += 1;
-        if window.1 > 120 {
-            return;
-        }
-    }
     let access = tunnel.access.lock().unwrap();
     if let Some(connection) = access.direct.get(id)
         && connection.accepted
         && connection.authorization.claims.expires_at > unix_time()
         && signal.valid()
+        && tunnel
+            .signaling_window
+            .lock()
+            .unwrap()
+            .consume(&connection.authorization.claims)
     {
         let _ = connection.signals.send(signal);
     }

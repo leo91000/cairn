@@ -8,13 +8,13 @@ use leo_relay_protocol::{
     Frame, Role,
     direct::{
         DirectAuthorization, DirectClaims, DirectRevocation, DirectSignal, DirectVerifier,
-        MAX_DIRECT_CONNECTIONS, MAX_DIRECT_PER_ACCOUNT, unix_time,
+        MAX_DIRECT_CONNECTIONS, MAX_DIRECT_MEMBER_CONNECTIONS, MAX_DIRECT_PER_ACCOUNT,
+        SignalBudget, unix_time,
     },
 };
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -54,7 +54,7 @@ struct State {
     verifier: Option<DirectVerifier>,
     authorizations: HashMap<String, Authorized>,
     output: Option<mpsc::Sender<Frame>>,
-    signal_window: Option<(tokio::time::Instant, usize)>,
+    signals: SignalBudget,
 }
 
 #[derive(Clone)]
@@ -131,6 +131,13 @@ impl DirectConnections {
         } else {
             if existing.is_some()
                 || state.authorizations.len() >= MAX_DIRECT_CONNECTIONS
+                || claims.role == Role::Member
+                    && state
+                        .authorizations
+                        .values()
+                        .filter(|lease| lease.authorization.claims.role == Role::Member)
+                        .count()
+                        >= MAX_DIRECT_MEMBER_CONNECTIONS
                 || state
                     .authorizations
                     .values()
@@ -229,17 +236,18 @@ impl DirectConnections {
         let _ = self.events.send(DirectEvent::Revoked(scope));
     }
 
-    pub(crate) fn receive_signal(&self, id: String, signal: DirectSignal) {
+    pub(crate) fn receive_signal(&self, id: String, signal: DirectSignal) -> bool {
         let mut state = self.state.lock().unwrap();
-        let allowed = Self::signal_allowed(&mut state, &id)
-            && signal.valid()
+        let allowed = signal.valid()
             && state.authorizations.get(&id).is_some_and(|lease| {
                 signal.matches_client_fingerprint(&lease.authorization.claims.fingerprint)
-            });
+            })
+            && Self::signal_allowed(&mut state, &id);
         drop(state);
         if allowed {
             let _ = self.events.send(DirectEvent::Signal { id, signal });
         }
+        allowed
     }
 
     /// Return connection metadata to the originating official session via the tunnel.
@@ -256,21 +264,20 @@ impl DirectConnections {
             .try_send(Frame::DirectSignal {
                 id: id.to_owned(),
                 signal,
+                request_id: None,
             })
             .map_err(|_| Error::unavailable("Signaling busy."))
     }
 
     fn signal_allowed(state: &mut State, id: &str) -> bool {
-        let now = tokio::time::Instant::now();
-        let window = state.signal_window.get_or_insert((now, 0));
-        if window.0.elapsed() >= Duration::from_secs(60) {
-            *window = (now, 0);
+        if state.output.is_none() {
+            return false;
         }
-        window.1 += 1;
-        window.1 <= 120
-            && state.output.is_some()
-            && state.authorizations.get(id).is_some_and(|lease| {
-                !lease.closed.is_cancelled() && lease.authorization.claims.expires_at > unix_time()
-            })
+        let Some(lease) = state.authorizations.get(id) else {
+            return false;
+        };
+        !lease.closed.is_cancelled()
+            && lease.authorization.claims.expires_at > unix_time()
+            && state.signals.consume(&lease.authorization.claims)
     }
 }

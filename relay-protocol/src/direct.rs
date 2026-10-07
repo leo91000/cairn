@@ -10,10 +10,57 @@ use std::{
 
 pub const DIRECT_VERSION: u16 = 4;
 pub const DIRECT_TTL: u64 = 180;
+// Accommodate small signing/installation clock offsets without accepting expired grants.
+pub const DIRECT_CLOCK_SKEW: u64 = 30;
 pub const MAX_DIRECT_CONNECTIONS: usize = 32;
 pub const MAX_DIRECT_PER_ACCOUNT: usize = 8;
+pub const MAX_DIRECT_MEMBER_CONNECTIONS: usize = MAX_DIRECT_CONNECTIONS - MAX_DIRECT_PER_ACCOUNT;
 pub const MAX_SIGNAL: usize = 16_384;
 pub const SIGNING_CONTEXT: &[u8] = b"leo-direct-authorization-v4\0";
+
+pub const MAX_SIGNALS_PER_ACCOUNT: usize = 120;
+pub const MAX_SIGNALS_PER_TUNNEL: usize = 960;
+
+/// Account quotas use only verified claims. The global ceiling reserves owner capacity.
+pub struct SignalBudget {
+    started: std::time::Instant,
+    accounts: HashMap<String, usize>,
+    total: usize,
+    members: usize,
+}
+
+impl Default for SignalBudget {
+    fn default() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            accounts: HashMap::new(),
+            total: 0,
+            members: 0,
+        }
+    }
+}
+
+impl SignalBudget {
+    pub fn consume(&mut self, claims: &DirectClaims) -> bool {
+        if self.started.elapsed() >= std::time::Duration::from_secs(60) {
+            *self = Self::default();
+        }
+        let count = self.accounts.get(&claims.account_id).copied().unwrap_or(0);
+        if count >= MAX_SIGNALS_PER_ACCOUNT
+            || self.total >= MAX_SIGNALS_PER_TUNNEL
+            || claims.role == Role::Member
+                && self.members >= MAX_SIGNALS_PER_TUNNEL - MAX_SIGNALS_PER_ACCOUNT
+        {
+            return false;
+        }
+        *self.accounts.entry(claims.account_id.clone()).or_default() += 1;
+        self.total += 1;
+        if claims.role == Role::Member {
+            self.members += 1;
+        }
+        true
+    }
+}
 
 pub fn until_expiry(deadline: u64) -> std::time::Duration {
     (UNIX_EPOCH + std::time::Duration::from_secs(deadline))
@@ -178,7 +225,7 @@ impl DirectVerifier {
             .map_err(|_| "Invalid signature")?;
         if claims.installation_id != self.installation
             || claims.expires_at <= now
-            || claims.expires_at > now + DIRECT_TTL
+            || claims.expires_at > now + DIRECT_TTL + DIRECT_CLOCK_SKEW
             || !valid_fingerprint(&claims.fingerprint)
             || claims.connection_id.is_empty()
             || claims.account_id.is_empty()
@@ -208,8 +255,10 @@ impl DirectVerifier {
                 self.generations.insert(account_id.clone(), *generation);
             }
             DirectRevocation::Session { session_id } => {
-                self.sessions
-                    .insert(session_id.clone(), unix_time() + DIRECT_TTL);
+                self.sessions.insert(
+                    session_id.clone(),
+                    unix_time() + DIRECT_TTL + DIRECT_CLOCK_SKEW,
+                );
             }
             DirectRevocation::Installation => {
                 self.public_key.clear();

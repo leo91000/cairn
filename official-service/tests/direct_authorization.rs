@@ -1132,6 +1132,7 @@ async fn direct_capacity_is_bounded_without_using_fallback_request_or_stream_slo
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     let id = relay.session["installations"][0]["id"].as_str().unwrap();
     let mut cookies = stream_accounts(&relay).await;
+    cookies.remove(0);
     let (cookie, session) = login(&relay.app, "capacity-member@example.test").await;
     let response = relay
         .app
@@ -1239,8 +1240,11 @@ async fn direct_capacity_is_bounded_without_using_fallback_request_or_stream_slo
     assert_eq!(
         response.status(),
         StatusCode::SERVICE_UNAVAILABLE,
-        "32 direct authorizations fill only the direct allowance"
+        "member leases leave eight reserved slots for the owner"
     );
+    for _ in 0..8 {
+        authorization(&relay, &relay.cookie, &relay.session).await;
+    }
     assert_eq!(
         relay.get("/chats").send().await.unwrap().status(),
         StatusCode::OK
@@ -1535,5 +1539,211 @@ async fn installation_signaling_has_a_separate_bounded_budget() {
         StatusCode::OK
     );
     drop(events);
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn official_shutdown_keeps_established_peers_until_the_grant_expires() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    sqlx_core::query::query(
+        "UPDATE web_sessions SET expires_at = clock_timestamp() + interval '4 seconds'",
+    )
+    .execute(&relay.app.pool)
+    .await
+    .unwrap();
+    let grant = authorization(&relay, &relay.cookie, &relay.session).await;
+    let waiting = authorization(&relay, &relay.cookie, &relay.session).await;
+    let lease = relay
+        .direct
+        .accept_peer(&grant, &grant.claims.session_id, &fingerprint())
+        .unwrap();
+    let mut events = relay.direct.subscribe();
+
+    relay.app.relay.shutdown();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !lease.closed.is_cancelled(),
+        "shutdown is tunnel loss, not access revocation"
+    );
+    assert!(
+        events.try_recv().is_err(),
+        "shutdown must send no revocation frame"
+    );
+    assert!(
+        relay
+            .direct
+            .accept_peer(&waiting, &waiting.claims.session_id, &fingerprint())
+            .is_err()
+    );
+    tokio::time::timeout(Duration::from_secs(5), lease.closed.cancelled())
+        .await
+        .unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn installation_accepts_bounded_signing_clock_skew_but_rejects_long_lived_grants() {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use leo_relay_protocol::{Frame, direct::signing_bytes};
+    use ring::signature::KeyPair;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    };
+
+    let mut relay = RelayedInstallation::new(axum::Router::new()).await;
+    let key = Arc::new(ring::signature::Ed25519KeyPair::from_seed_unchecked(&[42; 32]).unwrap());
+    let offset = Arc::new(AtomicU64::new(1));
+    let signed = Arc::new(Mutex::new(None));
+    let proxy = filter_tunnel(&mut relay, {
+        let key = key.clone();
+        let offset = offset.clone();
+        let signed = signed.clone();
+        Arc::new(move |frame, official| {
+            if !official {
+                return Some(frame);
+            }
+            match frame {
+                Frame::DirectKey { .. } => Some(Frame::DirectKey {
+                    public_key: URL_SAFE_NO_PAD.encode(key.public_key().as_ref()),
+                }),
+                Frame::DirectAuthorize {
+                    id,
+                    mut authorization,
+                } => {
+                    // A signer whose clock is ahead, with the same three-minute TTL.
+                    authorization.claims.expires_at += offset.load(Ordering::SeqCst);
+                    authorization.signature = URL_SAFE_NO_PAD
+                        .encode(key.sign(&signing_bytes(&authorization.claims)).as_ref());
+                    *signed.lock().unwrap() = Some(authorization.clone());
+                    Some(Frame::DirectAuthorize { id, authorization })
+                }
+                _ => Some(frame),
+            }
+        })
+    })
+    .await;
+    let route = format!(
+        "/api/installations/{}/direct/authorize",
+        relay.session["installations"][0]["id"].as_str().unwrap()
+    );
+    for skew in [1, 30, 90] {
+        offset.store(skew, Ordering::SeqCst);
+        let response = relay
+            .app
+            .authenticated(&relay.cookie, &relay.session, Method::POST, &route)
+            .json(&json!({ "fingerprint": fingerprint(), "versions": [4] }))
+            .send()
+            .await
+            .unwrap();
+        if skew <= 30 {
+            assert_eq!(response.status(), StatusCode::OK, "clock skew {skew}");
+            let grant = signed.lock().unwrap().clone().unwrap();
+            relay
+                .direct
+                .accept_peer(&grant, &grant.claims.session_id, &fingerprint())
+                .unwrap();
+        } else {
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+    }
+    relay.close().await;
+    proxy.abort();
+}
+
+#[tokio::test]
+async fn one_members_signaling_budget_does_not_block_the_owner_and_refusals_are_visible() {
+    use common::stream_accounts;
+    use leo_relay_protocol::direct::DirectSignal;
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let cookies = stream_accounts(&relay).await;
+    let member_cookie = &cookies[1];
+    let member_session: Value = relay
+        .app
+        .client
+        .get(format!("{}/api/account/session", relay.app.url))
+        .header("cookie", member_cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let member = authorization(&relay, member_cookie, &member_session).await;
+    let owner = authorization(&relay, &relay.cookie, &relay.session).await;
+    let candidate = || DirectSignal::Candidate {
+        candidate: "candidate:1 1 udp 2122260223 192.0.2.2 50001 typ host".into(),
+        sdp_mid: Some("0".into()),
+        sdp_m_line_index: Some(0),
+    };
+    let prefix = format!(
+        "/api/installations/{}/direct",
+        member.claims.installation_id
+    );
+    let mut member_events = relay
+        .app
+        .client
+        .get(format!(
+            "{}{prefix}/{}/events",
+            relay.app.url, member.claims.connection_id
+        ))
+        .header("cookie", member_cookie)
+        .send()
+        .await
+        .unwrap();
+    for _ in 0..120 {
+        relay
+            .direct
+            .send_signal(&member.claims.connection_id, candidate())
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), member_events.chunk())
+                .await
+                .unwrap()
+                .unwrap()
+                .is_some()
+        );
+    }
+    let mut installation_events = relay.direct.subscribe();
+    let response = relay
+        .app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            &format!("{prefix}/{}/signal", owner.claims.connection_id),
+        )
+        .json(&candidate())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let event = tokio::time::timeout(Duration::from_secs(1), installation_events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(event, leo_agent_manager::direct::DirectEvent::Signal { id, .. } if id == owner.claims.connection_id)
+    );
+
+    let response = relay
+        .app
+        .authenticated(
+            member_cookie,
+            &member_session,
+            Method::POST,
+            &format!("{prefix}/{}/signal", member.claims.connection_id),
+        )
+        .json(&candidate())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "an installation refusal cannot be reported as delivered"
+    );
+    assert!(installation_events.try_recv().is_err());
+    drop(member_events);
     relay.close().await;
 }

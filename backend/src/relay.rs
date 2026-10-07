@@ -665,8 +665,14 @@ async fn connected(
                                 direct.revoke(scope);
                                 continue;
                             }
-                            Frame::DirectSignal { id, signal } if version >= leo_relay_protocol::direct::DIRECT_VERSION => {
-                                direct.receive_signal(id, signal);
+                            Frame::DirectSignal { id, signal, request_id } if version >= leo_relay_protocol::direct::DIRECT_VERSION => {
+                                let accepted = direct.receive_signal(id, signal);
+                                if let Some(id) = request_id {
+                                    let acknowledgement = Frame::DirectSignalAck { id, accepted };
+                                    let message = serde_json::to_string(&acknowledgement)?;
+                                    socket.send(Message::Text(message.into()))
+                                        .await.map_err(Error::internal)?;
+                                }
                                 continue;
                             }
                             Frame::Request(request) => request,

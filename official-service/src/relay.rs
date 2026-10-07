@@ -11,7 +11,7 @@ use axum::{
     response::{Html, IntoResponse, Response},
 };
 use futures_util::{SinkExt, StreamExt};
-use leo_relay_protocol::direct::{DIRECT_VERSION, DirectRevocation, unix_time};
+use leo_relay_protocol::direct::{DIRECT_VERSION, DirectRevocation, SignalBudget, unix_time};
 use leo_relay_protocol::{
     ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_NOTIFICATION_IN_FLIGHT,
     MAX_PUBLIC_IN_FLIGHT, MAX_STREAM_CHUNK, REQUEST_TIMEOUT, Role,
@@ -58,12 +58,14 @@ struct Tunnel {
     access: Mutex<Access>,
     access_changed: Notify,
     signing: ring::signature::Ed25519KeyPair,
-    signaling_window: Mutex<(tokio::time::Instant, usize)>,
+    signaling_window: Mutex<SignalBudget>,
+    signal_replies: Mutex<HashMap<String, oneshot::Sender<bool>>>,
     slots: Arc<Semaphore>,
     stream_slots: Arc<Semaphore>,
     public_slots: Arc<Semaphore>,
     // Replacing a connection closes the old generation and its pending replies.
     stop: watch::Sender<bool>,
+    installation_revoked: AtomicBool,
 }
 
 impl Tunnel {
@@ -192,6 +194,7 @@ impl Relay {
             // Cancellation must not wait for a backpressured HTTP body to poll.
             tunnel.access_changed.notify_one();
         } else {
+            tunnel.installation_revoked.store(true, Ordering::SeqCst);
             tunnel.stop.send_replace(true);
         }
     }
@@ -322,11 +325,13 @@ async fn serve_socket(
         access: Mutex::new(Access::default()),
         access_changed: Notify::new(),
         signing,
-        signaling_window: Mutex::new((tokio::time::Instant::now(), 0)),
+        signaling_window: Mutex::new(SignalBudget::default()),
+        signal_replies: Mutex::new(HashMap::new()),
         slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
         stream_slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT - RESERVED_API_SLOTS)),
         public_slots: Arc::new(Semaphore::new(MAX_PUBLIC_IN_FLIGHT)),
         stop,
+        installation_revoked: AtomicBool::new(false),
     });
     if version >= DIRECT_VERSION {
         let frame = Frame::DirectKey {
@@ -346,6 +351,7 @@ async fn serve_socket(
             return;
         }
         if let Some(previous) = tunnels.insert(installation.clone(), tunnel.clone()) {
+            previous.installation_revoked.store(true, Ordering::SeqCst);
             previous.stop.send_replace(true);
         }
     }
@@ -387,7 +393,10 @@ async fn serve_socket(
                             failures = 0;
                             false
                         }
-                        Ok(Ok(false)) => true,
+                        Ok(Ok(false)) => {
+                            check_tunnel.installation_revoked.store(true, Ordering::SeqCst);
+                            true
+                        },
                         _ => {
                             failures += 1;
                             tracing::warn!(failures, "Relay identity check unavailable");
@@ -431,7 +440,7 @@ async fn serve_socket(
             biased;
 
             _ = stopped.changed() => {
-                if version >= DIRECT_VERSION {
+                if version >= DIRECT_VERSION && tunnel.installation_revoked.load(Ordering::SeqCst) {
                     let frame = Frame::DirectRevoke {
                         scope: DirectRevocation::Installation,
                     };
@@ -671,7 +680,13 @@ async fn serve_socket(
                                 direct::acknowledge(&tunnel, &id, accepted);
                                 None
                             }
-                            Frame::DirectSignal { id, signal } if version >= DIRECT_VERSION => {
+                            Frame::DirectSignalAck { id, accepted } if version >= DIRECT_VERSION => {
+                                if let Some(reply) = tunnel.signal_replies.lock().unwrap().remove(&id) {
+                                    let _ = reply.send(accepted);
+                                }
+                                None
+                            }
+                            Frame::DirectSignal { id, signal, .. } if version >= DIRECT_VERSION => {
                                 direct::receive_signal(&tunnel, &id, signal);
                                 None
                             }
