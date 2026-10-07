@@ -1088,3 +1088,57 @@ async fn failed_push_tasks_release_the_relay_window_for_new_events() {
     assert_eq!(deliveries, 1);
     relay.close().await;
 }
+
+#[tokio::test]
+async fn android_device_registration_rotates_one_account_device_and_stops_on_logout() {
+    let app = Fixture::new().await;
+    let (cookie, session) = login(&app, "android@example.test").await;
+    let path = "/api/account/notifications/android";
+    let device = uuid::Uuid::new_v4().to_string();
+    let input = json!({ "deviceId": device, "token": "fixture-fcm-token-one" });
+    let response = request(&app, &cookie, &session, Method::POST, path)
+        .json(&input)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let registration: Value = response.json().await.unwrap();
+    let response = request(&app, &cookie, &session, Method::POST, path)
+        .json(&json!({ "deviceId": device, "token": "fixture-fcm-token-two" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.json::<Value>().await.unwrap(), registration);
+    let id = registration["id"].as_str().unwrap();
+    let registered = format!("/api/account/notifications/subscriptions/{id}");
+    let (other_cookie, other_session) = login(&app, "other-android@example.test").await;
+    let response = request(
+        &app,
+        &other_cookie,
+        &other_session,
+        Method::GET,
+        &registered,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(
+        response.json::<Value>().await.unwrap(),
+        json!({ "registered": false })
+    );
+    let response = request(&app, &cookie, &session, Method::DELETE, &registered)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = request(&app, &cookie, &session, Method::GET, &registered)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.json::<Value>().await.unwrap(),
+        json!({ "registered": false })
+    );
+    app.close().await;
+}
