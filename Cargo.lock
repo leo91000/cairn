@@ -2706,6 +2706,7 @@ dependencies = [
  "libc",
  "libublk",
  "lru",
+ "md-5",
  "p256",
  "rand 0.9.5",
  "regex",

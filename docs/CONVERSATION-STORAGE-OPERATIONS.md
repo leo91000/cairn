@@ -21,7 +21,12 @@ encryption of disk blocks or HTTPS transport. R2 encrypts objects at rest itself
 Recovery transfers share sixteen upload slots and sixteen read slots across the
 manager. The guest virtqueue also batches independent reads through sixteen shared
 workers, bounded to 8 MiB per batch. Single requests stay on the existing direct
-path; reads drain before a following write or flush. An upload slot remains held until full read-back verification succeeds.
+path; reads drain before a following write or flush. Each PUT includes a `Content-MD5` transfer checksum and holds its upload slot until
+the provider acknowledges the checksum-validated upload. A rejected or failed PUT
+keeps the local publication pending. Uploads do not download the object again;
+recovery reads retain their existing content-hash and authenticated-decryption checks.
+The provider must enforce `Content-MD5`; compatibility checks and periodic restore
+tests should include intentionally incorrect checksums and complete reads.
 This bounds memory while allowing independent block transfers to overlap; an
 individual missing block still waits for its own transfer. Sealed journals also
 reconstruct up to sixteen independent blocks together, preserving generation
