@@ -1,10 +1,12 @@
 //! Versioned frames for the authenticated, installation-initiated tunnel.
 //! Requests are independent: future streaming frames can share their request ID.
+pub mod direct;
+
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 pub const MIN_PROTOCOL_VERSION: u16 = 1;
-pub const SUPPORTED_VERSIONS: &[u16] = &[PROTOCOL_VERSION, 2, MIN_PROTOCOL_VERSION];
+pub const SUPPORTED_VERSIONS: &[u16] = &[PROTOCOL_VERSION, 3, 2, MIN_PROTOCOL_VERSION];
 pub const MAX_STREAM_CHUNK: usize = 65_536;
 pub const MAX_BODY: usize = 8_000_000;
 // Base64 expands by four bytes per three body bytes, plus envelope metadata.
@@ -15,7 +17,7 @@ pub const MAX_PUBLIC_IN_FLIGHT: usize = 4;
 pub const MAX_NOTIFICATION_IN_FLIGHT: usize = 4;
 pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     Owner,
@@ -105,6 +107,35 @@ pub enum Frame {
     },
     Welcome {
         version: u16,
+    },
+    // Version 4: control plane only, on the authenticated installation tunnel.
+    DirectKey {
+        public_key: String,
+    },
+    DirectAuthorize {
+        id: String,
+        authorization: direct::DirectAuthorization,
+    },
+    DirectRenew {
+        id: String,
+        authorization: direct::DirectAuthorization,
+    },
+    DirectAuthorized {
+        id: String,
+        accepted: bool,
+    },
+    DirectSignal {
+        id: String,
+        signal: direct::DirectSignal,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    DirectSignalAck {
+        id: String,
+        accepted: bool,
+    },
+    DirectRevoke {
+        scope: direct::DirectRevocation,
     },
     Request(ApiRequest),
     Response(ApiResponse),

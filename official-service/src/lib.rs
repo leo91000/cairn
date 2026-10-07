@@ -302,6 +302,22 @@ pub async fn router_with_network_and_push(
         .route("/api/account/methods/remove", post(methods::remove))
         .route("/api/installations", get(installations::status))
         .route(
+            "/api/installations/{installation}/direct/authorize",
+            post(relay::direct::authorize).layer(relay::direct::body_limit()),
+        )
+        .route(
+            "/api/installations/{installation}/direct/{connection}/renew",
+            post(relay::direct::renew).layer(relay::direct::body_limit()),
+        )
+        .route(
+            "/api/installations/{installation}/direct/{connection}/signal",
+            post(relay::direct::signal).layer(relay::direct::body_limit()),
+        )
+        .route(
+            "/api/installations/{installation}/direct/{connection}/events",
+            get(relay::direct::events),
+        )
+        .route(
             "/api/installations/claim-code",
             post(installations::claim_code),
         )

@@ -15,6 +15,7 @@ pub mod config;
 pub mod connections;
 pub mod conversation_deletion;
 pub mod conversation_lifecycle;
+pub mod direct;
 pub mod error;
 pub mod execution;
 pub mod file_lock;

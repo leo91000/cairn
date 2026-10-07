@@ -164,7 +164,7 @@ routing is implemented; sticky routing per installation is insufficient for
 immediate session revocation across installations.
 
 Version 2 adds SSE response headers, binary chunks, completion, credit and
-cancellation frames using the same request IDs. Hello offers `[3, 2, 1]`; Welcome
+cancellation frames using the same request IDs. Hello offers `[4, 3, 2, 1]`; Welcome
 selects the highest shared version. The claim HTTP request declares the minimum
 supported version (1), so a new installation can still claim against a v1 service;
 the WebSocket handshake remains authoritative for the actual tunnel version.
@@ -198,9 +198,10 @@ The same list and account session expose `updateRequired`. An incompatible Hello
 persists this state even after the refused socket closes or the official process
 restarts; a compatible authenticated Hello clears it. The web displays
 **Mise à jour nécessaire** and replaces the inaccessible workspace with that
-explanation. The selector and account actions remain available. Protocols 3 and 2
-are the current and previous supported versions. Version 1 remains compatible
-with the finite snapshot path; live streams and push events require newer versions.
+explanation. The selector and account actions remain available. Protocols 4 and 3
+are the current and previous supported versions. Versions 1 and 2 retain their
+finite API and stream contracts respectively; push events require v3 and direct
+control requires v4.
 
 Access management uses the same `Relay` handle supplied to `router_with_relay`.
 After committing a detachment, call `revoke_access(installation, None)`; after
@@ -307,7 +308,7 @@ its tunnel permit. The per-grant HTTP rate limit is persisted in Postgres.
 
 ## Notification events (version 3)
 
-Hello now offers `[3, 2, 1]`. Version 3 adds installation-to-official
+Version 3 adds installation-to-official
 `notification` frames and official-to-installation `notification_ack` frames.
 Versions 1 and 2 retain their finite API and SSE contracts and never receive
 notification frames.
@@ -340,3 +341,69 @@ negative acknowledgement instead of leaving the sender's window occupied.
 The existing `delivered` wire field means the event can leave the outbox; an
 invalid event or revoked installation can therefore receive a positive ack
 without calling the provider.
+
+## Version 4: direct authorization and signaling (#100)
+
+Hello now offers `[4, 3, 2, 1]`. A v1/v2/v3 tunnel receives no direct-control frames
+and retains its existing API/stream behavior. Clients that do not advertise v4
+receive `available: false` and keep using the relay.
+
+After Welcome(v4), the official service sends `DirectKey` over the authenticated
+installation tunnel. Its Ed25519 key is ephemeral and specific to that tunnel;
+no signing credential or conversation data is stored in Postgres. A new tunnel
+uses a new key, invalidating the previous direct leases at the installation.
+`DirectAuthorize` and `DirectRenew` carry a signed authorization; the installation
+returns `DirectAuthorized` only after checking its signature, installation,
+expiry, unused nonce and account access generation. The signed role must be
+owner or member; renewal also compares it with the existing lease.
+The HTTP response waits for this acknowledgement. Failed verification affects
+only that request, preserving the relay.
+
+The direct authorization binds a connection ID, installation, account, role,
+**public** session ID, access generation, canonical SHA-256 DTLS fingerprint,
+absolute expiry and single-use nonce. It lasts at most 180 seconds, capped by
+the official session deadline. Verification allows up to 30 seconds of signing
+clock skew in the maximum remaining lifetime; expiry is still strict on the
+installation clock. Revoked-session records cover that tolerance too. Session bearer digests and CSRF credentials never
+leave the official service. The installation's `DirectConnections::accept_peer`
+checks the observed DTLS fingerprint and session, accepts that grant once, and
+returns the trusted installation identity and a cancellation token. The WebRTC
+peer (#101) must stop all traffic when that token is cancelled. Expiry cancels it
+independently of tunnel/HTTP polling. Only an official `DirectRenew` can extend
+it; renewal preserves the original connection identity, role and fingerprint.
+
+`DirectSignal` carries offers, answers and ICE candidates in either direction,
+using the connection ID. Only bounded data-channel SDP and ICE metadata are
+accepted; application frames and arbitrary SDP attributes are refused. Signals
+live in bounded memory only and are not logged or persisted. `DirectRevoke`
+targets a public session, an account plus its next generation, or the whole
+installation. Existing logout/session-revocation/member-removal/access-change
+hooks send the corresponding scope; expiry is scheduled locally, and detachment,
+rotation and definitive revocation notify the whole installation before
+closing its tunnel. A normal official shutdown closes the tunnel without
+revoking established direct leases at shutdown. While the tunnel is down, new
+direct peers are denied and established leases end at their expiry. Reconnection
+supplies a new key and immediately closes the old leases, including after a normal
+official restart or deployment: the new tunnel no longer tracks the old leases
+for revocation. Clients fall back to the relay and obtain fresh authorizations,
+following the [switching rules](DIRECT-CONNECTION.md#switching-rules) without loss
+or duplication. Other accounts/devices and admitted agent work survive scoped
+revocation; changing transport never stops agent execution.
+
+Limits: 30 authorization/renewal attempts per minute per account; 120 client
+signals per minute per account. The installation budgets 120 signals/minute per
+verified account across both directions, with a 960/minute global ceiling and
+120 signals reserved for the owner (all members share an 840/minute ceiling).
+The official installation-to-client budget
+uses the same per-account/global ceilings. Signals sent by the client carry a
+request ID and receive `DirectSignalAck`: HTTP 204 requires installation acceptance;
+refusal returns 429 and a lost acknowledgement returns 503. At most 32 signal
+acknowledgements are pending, with a five-second deadline.
+
+There are 32 direct leases per installation, eight per account; members may use
+at most 24 leases, leaving eight for the owner. Each lease admits one signaling
+reader with a 16-signal queue. SDP is at most 16 KiB, ICE candidates at most 1 KiB,
+and official JSON control bodies at most 32 KiB. Direct-control frames use a dedicated 16-frame queue in each direction, separate
+from relay responses and credits. Saturation returns a signaling error without
+closing fallback streams. None consumes or changes the
+existing relay request, credited-stream or public-download allowances.
