@@ -1,5 +1,6 @@
 """Real Linux namespaces: network fixtures for #102, without KVM or live credentials."""
 import argparse
+import array
 import asyncio
 import fcntl
 import socket
@@ -24,14 +25,27 @@ def run(*args):
     return result.stdout.strip()
 
 
+def namespace_command(namespace, *args):
+    return ["sudo", "-n", "ip", "netns", "exec", namespace,
+            "setpriv", "--reuid", str(os.getuid()), "--regid", str(os.getgid()),
+            "--clear-groups", *args]
+
+
+def wait_ready(path, child, description):
+    deadline = time.monotonic() + 5
+    while not path.exists():
+        if child.poll() is not None or time.monotonic() > deadline:
+            raise RuntimeError(description + " did not start")
+        time.sleep(0.01)
+
+
 class Network:
     def __init__(self):
         self.prefix = "l102" + uuid.uuid4().hex[:6]
         self.namespaces = []
         self.links = []
         self.children = []
-        self.uid = os.getuid()
-        self.gid = os.getgid()
+        self.groups = []
 
     def namespace(self, role):
         name = self.prefix + "-" + role
@@ -46,13 +60,8 @@ class Network:
     def exec(self, namespace, *args):
         return run("ip", "netns", "exec", namespace, *args)
 
-    def command(self, namespace, *args):
-        return ["sudo", "-n", "ip", "netns", "exec", namespace,
-                "setpriv", "--reuid", str(self.uid), "--regid", str(self.gid),
-                "--clear-groups", *args]
-
     def spawn(self, namespace, *args, privileged=False):
-        command = ["sudo", "-n", "ip", "netns", "exec", namespace, *args] if privileged else self.command(namespace, *args)
+        command = ["sudo", "-n", "ip", "netns", "exec", namespace, *args] if privileged else namespace_command(namespace, *args)
         child = subprocess.Popen(command,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.children.append(child)
@@ -82,6 +91,13 @@ class Network:
         run("ip", "-n", namespace, "link", "set", name, "up")
 
     def close(self):
+        # The Playwright worker and official fixture are outside the namespaces.
+        # Terminate the whole group even if its pnpm parent has already exited.
+        for group in self.groups:
+            try:
+                os.killpg(group, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
         for child in self.children:
             if child.poll() is None:
                 child.terminate()
@@ -91,6 +107,11 @@ class Network:
             except subprocess.TimeoutExpired:
                 child.kill()
                 child.wait()
+        for group in self.groups:
+            try:
+                os.killpg(group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         for namespace in reversed(self.namespaces):
             for pid in run("ip", "netns", "pids", namespace).split():
                 subprocess.run(["sudo", "-n", "kill", "-KILL", pid],
@@ -138,6 +159,10 @@ class Network:
                         self.exec(router, "iptables", "-t", "nat", "-A", "POSTROUTING",
                                   "-o", external, "-p", "udp", "--dport", str(port),
                                   "-j", "SNAT", "--to-source", f"{external_ip}:{port + 2000}")
+                    # Every other UDP destination also gets a separate per-flow
+                    # allocation, rather than endpoint-independent port reuse.
+                    self.exec(router, "iptables", "-t", "nat", "-A", "POSTROUTING",
+                              "-o", external, "-p", "udp", "-j", "MASQUERADE", "--random-fully")
                 self.exec(router, "iptables", "-t", "nat", "-A", "POSTROUTING",
                           "-o", external, "-j", "MASQUERADE")
                 self.exec(router, "iptables", "-A", "FORWARD", "-i", external,
@@ -152,11 +177,7 @@ class Network:
                 ready = self.directory / ("loss-ready-" + role)
                 child = self.spawn(router, os.sys.executable, str(Path(__file__).resolve()),
                                    "loss-router", external, str(ready), privileged=True)
-                deadline = time.monotonic() + 5
-                while not ready.exists():
-                    if child.poll() is not None or time.monotonic() > deadline:
-                        raise RuntimeError("Deterministic loss router did not start")
-                    time.sleep(0.01)
+                wait_ready(ready, child, "Deterministic loss router")
                 self.exec(router, "ip", "route", "add", "table", "102", "default", "dev", "loss")
                 self.exec(router, "ip", "rule", "add", "iif", "lan", "lookup", "102")
             self.participants[role] = {"namespace": participant, "router": router,
@@ -179,11 +200,7 @@ class Network:
     def listen(self, binary, namespace, address, port):
         ready = self.directory / f"udp-ready-{port}"
         child = self.spawn(namespace, binary, "udp-server", f"{address}:{port}", str(ready))
-        deadline = time.monotonic() + 5
-        while not ready.exists():
-            if child.poll() is not None or time.monotonic() > deadline:
-                raise RuntimeError("UDP diagnostic listener did not start")
-            time.sleep(0.01)
+        wait_ready(ready, child, "UDP diagnostic listener")
 
     def probe(self, binary, role, targets=("198.18.102.1:49001", "198.18.102.1:49002")):
         participant = self.participants[role]
@@ -191,7 +208,7 @@ class Network:
                                    participant["address"] + ":0", *targets))
 
 
-async def forward(port, target):
+async def forward(port, target, ready=None):
     async def connection(reader, writer):
         remote_writer = None
         try:
@@ -214,6 +231,8 @@ async def forward(port, target):
             if remote_writer:
                 remote_writer.close()
     server = await asyncio.start_server(connection, "127.0.0.1", port)
+    if ready:
+        Path(ready).write_text(str(os.getpid()))
     async with server:
         await server.serve_forever()
 
@@ -285,14 +304,16 @@ def browser(network, binary, directory, args, report):
         env.pop(key, None)
     for role in ["client", "installation"]:
         participant = network.participants[role]
-        network.spawn(participant["namespace"], python, script, "forward", "4398", "198.18.103.1")
+        ready = directory / (role + "-proxy")
+        child = network.spawn(participant["namespace"], python, script, "forward", "4398", "198.18.103.1", str(ready))
+        wait_ready(ready, child, role + " TCP forwarder")
     proxy = subprocess.Popen([python, script, "forward", "4398", "198.18.103.1"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     network.children.append(proxy)
 
     def wrapper(name, role, executable, preserve=""):
         path = directory / name
-        command = network.command(network.participants[role]["namespace"], executable)
+        command = namespace_command(network.participants[role]["namespace"], executable)
         if preserve:
             command.insert(2, "--preserve-env=" + preserve)
         path.write_text("#!/bin/sh\nexec " + shlex.join(command) + ' "$@"\n')
@@ -302,26 +323,31 @@ def browser(network, binary, directory, args, report):
     env["LEO_NETWORK_INSTALLATION_BINARY"] = wrapper(
         "installation", "installation", str(Path("target/debug/leo").resolve()),
         "DATA_DIR,AGENT_HOME,WORKSPACE_ROOTS,NODE_ENV,WORKER_ENABLED,HOST,PORT,LEO_OFFICIAL_ORIGIN,LEO_INSTALLATION_CLAIM_CODE,LEO_INSTALLATION_NAME")
-    env["LEO_NETWORK_CHROMIUM"] = wrapper("chromium", "client", chromium)
+    # sudo closes inherited descriptors, including Playwright's CDP pipes (3/4).
+    # Transfer those descriptors over a private Unix socket after entering the
+    # namespace; browser traffic still traverses the real network topology.
+    browser_wrapper = directory / "chromium"
+    browser_command = [python, script, "browser-pipe", network.participants["client"]["namespace"], chromium, str(directory)]
+    browser_wrapper.write_text("#!/bin/sh\nexec " + shlex.join(browser_command) + ' "$@"\n')
+    browser_wrapper.chmod(0o700)
+    env["LEO_NETWORK_CHROMIUM"] = str(browser_wrapper)
     env["LEO_NETWORK_RUST_CLIENT"] = wrapper("rust-client", "client", binary)
     env["LEO_NETWORK_LOCAL_CLIENT"] = wrapper("local-client", "installation", binary)
     env["LEO_NETWORK_SCENARIO"] = args.scenario
     env["LEO_NETWORK_EXPECT_ROUTE"] = args.expect_route
     env["LEO_NETWORK_OUTPUT"] = str(args.output.resolve())
+    env["LEO_NETWORK_FIXTURE_DIRECTORY"] = str(directory)
     env["LEO_NETWORK_PLAYWRIGHT_OUTPUT"] = str(args.output.parent.resolve() / (args.scenario + "-playwright"))
     participant = network.participants["client"]
     change = directory / "change-network"
-    commands = [
-        ["sudo", "-n", "ip", "-n", participant["namespace"], "addr", "add", "10.102.1.9/24", "dev", participant["link"]],
-        ["sudo", "-n", "ip", "-n", participant["namespace"], "addr", "del", "10.102.1.2/24", "dev", participant["link"]],
-        # Real sockets on the old interface are cut, as on a mobile network switch.
-        ["sudo", "-n", "ip", "netns", "exec", participant["namespace"], "ss", "-K", "src", "10.102.1.2"],
-    ]
-    change.write_text("#!/bin/sh\nset -eu\n" + "\n".join(shlex.join(command) for command in commands) + "\n")
+    command = [python, script, "change-network", participant["namespace"], participant["link"], str(directory / "client-proxy")]
+    change.write_text("#!/bin/sh\nexec " + shlex.join(command) + "\n")
     change.chmod(0o700)
     env["LEO_NETWORK_CHANGE"] = str(change)
-    result = subprocess.run(["pnpm", "exec", "playwright", "test", "--config", "playwright.network.config.ts"], env=env)
-    if result.returncode:
+    process = subprocess.Popen(["pnpm", "exec", "playwright", "test", "--config", "playwright.network.config.ts"], env=env, start_new_session=True)
+    network.children.append(process)
+    network.groups.append(process.pid)
+    if process.wait():
         raise RuntimeError("Authenticated network scenario failed; see Playwright diagnostics")
 
 
@@ -345,10 +371,75 @@ def loss_router(external, ready):
                 count += 1
 
 
+def browser_pipe(namespace, executable, directory, arguments):
+    with tempfile.TemporaryDirectory(dir=directory) as private:
+        path = str(Path(private) / "control")
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(path)
+            listener.listen(1)
+            listener.settimeout(10)
+            command = namespace_command(namespace, os.sys.executable, str(Path(__file__).resolve()),
+                                        "browser-pipe-child", path, executable, *arguments)
+            child = subprocess.Popen(command)
+            try:
+                with listener.accept()[0] as connection:
+                    connection.sendmsg([b"CDP"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [3, 4]))])
+                return child.wait()
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+
+
+def browser_pipe_child(path, executable, arguments):
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.connect(path)
+        _, ancillary, _, _ = connection.recvmsg(3, socket.CMSG_SPACE(2 * array.array("i").itemsize))
+        descriptors = array.array("i")
+        for level, kind, data in ancillary:
+            if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                descriptors.frombytes(data)
+        if len(descriptors) != 2:
+            raise RuntimeError("Missing Playwright control pipes")
+        # Duplicate first so that neither dup2 overwrites the other source or
+        # the socket; closing the socket must not close Chromium's input pipe.
+        sources = [os.dup(descriptor) for descriptor in descriptors]
+    for source, destination in zip(sources, [3, 4]):
+        os.dup2(source, destination, inheritable=True)
+    for descriptor in [*sources, *descriptors]:
+        if descriptor not in {3, 4}:
+            os.close(descriptor)
+    os.execv(executable, [executable, *arguments])
+
+
+def change_network(namespace, link, ready_file):
+    ready = Path(ready_file)
+    # Deleting a primary IPv4 address also removes its secondary addresses.
+    # Add the replacement after deleting the old address, then restore routing.
+    run("ip", "-n", namespace, "addr", "del", "10.102.1.2/24", "dev", link)
+    run("ip", "-n", namespace, "addr", "add", "10.102.1.9/24", "dev", link)
+    run("ip", "-n", namespace, "route", "replace", "default", "via", "10.102.1.1")
+    # Close actual old TCP sockets without depending on INET_DIAG_DESTROY.
+    # This affects our test forwarder only; the browser and session stay alive.
+    os.kill(int(ready.read_text()), signal.SIGTERM)
+    ready.unlink()
+    command = namespace_command(namespace, os.sys.executable, str(Path(__file__).resolve()),
+                                "forward", "4398", "198.18.103.1", str(ready))
+    child = subprocess.Popen(command, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    wait_ready(ready, child, "Replacement client TCP forwarder")
+
+
 if __name__ == "__main__":
-    if len(os.sys.argv) == 4 and os.sys.argv[1] == "forward":
-        asyncio.run(forward(int(os.sys.argv[2]), os.sys.argv[3]))
+    if len(os.sys.argv) in {4, 5} and os.sys.argv[1] == "forward":
+        asyncio.run(forward(int(os.sys.argv[2]), os.sys.argv[3], os.sys.argv[4] if len(os.sys.argv) == 5 else None))
     elif len(os.sys.argv) == 4 and os.sys.argv[1] == "loss-router":
         loss_router(os.sys.argv[2], os.sys.argv[3])
+    elif len(os.sys.argv) >= 5 and os.sys.argv[1] == "browser-pipe":
+        raise SystemExit(browser_pipe(*os.sys.argv[2:5], os.sys.argv[5:]))
+    elif len(os.sys.argv) >= 4 and os.sys.argv[1] == "browser-pipe-child":
+        browser_pipe_child(*os.sys.argv[2:4], os.sys.argv[4:])
+    elif len(os.sys.argv) == 5 and os.sys.argv[1] == "change-network":
+        change_network(*os.sys.argv[2:5])
     else:
         main()

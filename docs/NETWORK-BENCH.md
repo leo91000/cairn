@@ -56,7 +56,7 @@ only the standard library and never serves installation data.
 | nat-installation | The same constraint on the installation router. |
 | nat-both | Independent NAT/filtering on both sides. |
 | udp-blocked | Every forwarded UDP datagram is dropped on both routers; TCP remains usable. |
-| symmetric-nat | Both routers use different UDP source ports per destination and deny unsolicited inbound packets. |
+| symmetric-nat | Both routers allocate UDP source ports per flow/destination and deny unsolicited inbound packets. The two probe destinations have distinct fixed mappings; arbitrary UDP destinations use fresh random port allocation. |
 | network-change | The client moves to a new source address during a live stream; old-address sockets are closed. |
 | packet-loss | A userspace TUN router drops every fifth outgoing IPv4 packet on both sides, including TCP; no random seed or optional netfilter/netem module. |
 
@@ -76,8 +76,10 @@ Browser evidence comes from successful requests to the actual official
 Rust verifies the same conversation marker through that endpoint. Anonymous
 requests fail, anonymous installation loopback access fails, and the old official
 cookie fails after logout. The network-change scenario measures from the address
-change to the first successful resumed stream, with a 30-second upper bound, then
-checks a Rust read and the retained conversation.
+change to a fresh message observed through the resumed stream, with a 30-second
+upper bound, then checks a Rust read and the retained conversation. The address
+really changes; restarting only the test TCP forwarder closes old sockets even
+on kernels without socket-destroy support. The browser and session stay alive.
 
 The shipped transport is currently **relay in every scenario**. #100/#101/#103
 provide signaling, the installation WebRTC peer and web route selection. This
@@ -98,6 +100,7 @@ change these contracts, local authentication, storage or central persistence.
 
 The separate **direct-relay network bench (no KVM)** job downloads the same real
 binaries/frontend as browser journeys, checks network effects, then runs all eight
-scenarios sequentially without retries. JSON reports and Playwright failure
-context are retained as `direct-relay-network-evidence`. Evidence contains no
+scenarios sequentially without retries. JSON reports are retained as
+`direct-relay-network-evidence`; Playwright diagnostics remain in the job log.
+Evidence contains no
 cookies, claim codes, machine credentials or conversation exports.

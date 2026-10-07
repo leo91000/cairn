@@ -295,7 +295,7 @@ jobs:
         if: always()
         with:
           name: direct-relay-network-evidence
-          path: test-results/network/
+          path: test-results/network/*.json
           retention-days: 14
   image:
     # The exact-image smoke test uses the official binary and frontend from the

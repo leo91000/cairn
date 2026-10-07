@@ -11,7 +11,7 @@ import { Service as SeedService } from '../legacy/server/service'
 import { Store } from '../legacy/server/store'
 
 // Shared by journeys-official-relay and the network bench: real processes, fake mail only.
-export async function officialRelayFixture(port = 4395, listen = '127.0.0.1') {
+export async function officialRelayFixture(port = 4395, listen = '127.0.0.1', directory = tmpdir()) {
   const messages: string[] = []
   const mail = createServer(async (request, response) => {
     let body = ''
@@ -23,7 +23,7 @@ export async function officialRelayFixture(port = 4395, listen = '127.0.0.1') {
   mail.listen(0, '127.0.0.1')
   await once(mail, 'listening')
   const mailPort = (mail.address() as { port: number }).port
-  const root = await mkdtemp(join(tmpdir(), 'leo-official-relay-'))
+  const root = await mkdtemp(join(directory, 'leo-official-relay-'))
   await Promise.all([mkdir(join(root, 'data')), mkdir(join(root, 'home'))])
   const url = `http://localhost:${port}`
   const children: ChildProcess[] = []

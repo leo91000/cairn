@@ -1,5 +1,6 @@
 import type { Browser } from '@playwright/test'
 import { execFileSync, spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -9,7 +10,7 @@ import { officialRelayFixture } from './official-relay-fixture'
 
 test('authenticated browser and Rust client keep using the observed route under network constraints', async () => {
   test.setTimeout(120000)
-  const fixture = await officialRelayFixture(4398, '198.18.103.1')
+  const fixture = await officialRelayFixture(4398, '198.18.103.1', process.env.LEO_NETWORK_FIXTURE_DIRECTORY)
   const {
     root,
     url,
@@ -85,12 +86,24 @@ test('authenticated browser and Rust client keep using the observed route under 
     // A loopback listener on the installation still refuses anonymous local access.
     const local = execFileSync(process.env.LEO_NETWORK_LOCAL_CLIENT!, ['http', '127.0.0.1:4399', '/api/chats', '401'], { input: '', encoding: 'utf8' })
     expect(JSON.parse(local).status).toBe(401)
+    const session = await (await page.request.get(`${url}/api/account/session`)).json()
 
     if (process.env.LEO_NETWORK_SCENARIO === 'network-change') {
       const resumed = page.waitForResponse(response => response.url().includes(`/api/installations/${installationId}/api/`) && /\/stream\?/.test(response.url()) && response.status() === 200, { timeout: 30000 })
       const changed = performance.now()
       execFileSync(process.env.LEO_NETWORK_CHANGE!, [], { stdio: 'ignore' })
+      // Publish through the public relay from a separate authenticated control
+      // client. Fresh content in the original page demonstrates stream recovery;
+      // retained DOM and successful HTTP headers alone are insufficient.
+      const fresh = 'Delivered after the client changed network'
+      const chatId = new URL(page.url()).pathname.split('/').at(-1)!
+      const published = await page.request.post(`${url}/api/installations/${installationId}/api/chats/${chatId}/messages`, {
+        headers: { 'origin': url, 'x-csrf-token': session.csrf },
+        data: { id: randomUUID(), text: fresh },
+      })
+      expect(published.status()).toBe(200)
       await resumed
+      await expect(page.getByText(fresh, { exact: true })).toBeVisible({ timeout: 30000 })
       evidence.push({ route: 'relay', operation: 'stream-resume', elapsedMs: performance.now() - changed })
       expect(evidence.at(-1)!.elapsedMs).toBeLessThan(30000)
       evidence.push({ ...await rustRequest(chatsPath, cookie, 200, marker), operation: 'rust-after-change' })
@@ -100,7 +113,6 @@ test('authenticated browser and Rust client keep using the observed route under 
     for (const observation of evidence)
       expect(observation.route, `${observation.operation}: actual route`).toBe(process.env.LEO_NETWORK_EXPECT_ROUTE || 'relay')
 
-    const session = await (await page.request.get(`${url}/api/account/session`)).json()
     const logout = await page.request.post(`${url}/api/account/logout`, { headers: { 'origin': url, 'x-csrf-token': session.csrf }, data: {} })
     expect(logout.ok()).toBe(true)
     await rustRequest(chatsPath, cookie, 401)
