@@ -1415,8 +1415,8 @@ async fn leaving_or_deleting_the_author_account_stops_their_schedules() {
             "prompt": "Scheduled work",
             "agentId": leo_agent_manager::config::MAIN_AGENT_ID,
             "cron": "0 9 * * *",
-                "timezone": "UTC",
-                "enabled": true,
+            "timezone": "UTC",
+            "enabled": true,
         }))
         .send()
         .await

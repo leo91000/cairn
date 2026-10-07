@@ -101,7 +101,7 @@ test('mission cards and sheet show the schedule, the brief and the history, as o
   await workspace.restart()
   const agent = workspace.service.store.list('agents')[0]
   const project = workspace.service.store.list('projects')[0]
-  const task = workspace.service.task({
+  const task = await workspace.api('/api/tasks', 'POST', {
     name: 'Weekly Graphile Worker upstream ports',
     agentId: agent.id,
     projectId: project.id,
