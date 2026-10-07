@@ -67,9 +67,7 @@ abstract class NativePushCases {
                 )
             assertTrue(receiver.receive(message(first, 'a')))
             assertTrue(receiver.receive(message(second, 'b')))
-            kotlinx.coroutines.withTimeout(5000) {
-                while (manager.activeNotifications.size != 2) kotlinx.coroutines.delay(25)
-            }
+            awaitNotificationCount(manager, 2)
             assertEquals(2, manager.activeNotifications.size)
             manager.activeNotifications.forEach {
                 assertEquals(
@@ -84,9 +82,7 @@ abstract class NativePushCases {
             assertFalse(receiver.receive(alert))
             owner.set(true)
             assertTrue(receiver.receive(alert))
-            kotlinx.coroutines.withTimeout(5000) {
-                while (manager.activeNotifications.size != 3) kotlinx.coroutines.delay(25)
-            }
+            awaitNotificationCount(manager, 3)
             accessible.set(listOf(first))
             assertFalse(receiver.receive(message(second, 'c')))
             assertEquals(3, manager.activeNotifications.size)
@@ -95,5 +91,19 @@ abstract class NativePushCases {
             preferences.setEnabled(false)
         }
         manager.cancelAll()
+    }
+
+    private suspend fun awaitNotificationCount(manager: NotificationManager, expected: Int) {
+        try {
+            kotlinx.coroutines.withTimeout(5000) {
+                while (manager.activeNotifications.size != expected) kotlinx.coroutines.delay(25)
+            }
+        } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {
+            val observed =
+                manager.activeNotifications.map {
+                    "id=${it.id}, flags=${it.notification.flags}, channel=${it.notification.channelId}"
+                }
+            throw AssertionError("Expected $expected notifications; observed $observed", timeout)
+        }
     }
 }
