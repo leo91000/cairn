@@ -56,11 +56,18 @@ interface SessionVault {
 
 class SessionCookies(private val origin: HttpUrl, private val vault: SessionVault) : CookieJar {
     private var session: Cookie? = vault.read(origin.toString())?.let { Cookie.parse(origin, it) }
+    private val challenges = mutableMapOf<String, Cookie>()
 
     @Synchronized
     override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
         if (url.scheme != origin.scheme || url.host != origin.host || url.port != origin.port)
             return
+        cookies
+            .filter { it.name in setOf("leo_oauth", "leo_passkey") }
+            .forEach {
+                if (it.expiresAt > System.currentTimeMillis()) challenges[it.name] = it
+                else challenges.remove(it.name)
+            }
         cookies
             .lastOrNull { it.name == "leo_session" }
             ?.let {
@@ -73,14 +80,18 @@ class SessionCookies(private val origin: HttpUrl, private val vault: SessionVaul
     override fun loadForRequest(url: HttpUrl): List<Cookie> {
         if (url.scheme != origin.scheme || url.host != origin.host || url.port != origin.port)
             return emptyList()
-        return listOfNotNull(
+        return (listOfNotNull(
             session?.takeIf { it.expiresAt > System.currentTimeMillis() && it.matches(url) }
-        )
+        ) +
+            challenges.values.filter {
+                it.expiresAt > System.currentTimeMillis() && it.matches(url)
+            })
     }
 
     @Synchronized
     fun clear() {
         session = null
+        challenges.clear()
         vault.write(origin.toString(), null)
     }
 }
@@ -95,7 +106,7 @@ class LeoApi(
 
     private val cookies = SessionCookies(origin, vault)
     val hasSession: Boolean
-        get() = cookies.loadForRequest(origin).isNotEmpty()
+        get() = cookies.loadForRequest(origin).any { it.name == "leo_session" }
 
     internal val http =
         client

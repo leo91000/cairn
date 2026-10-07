@@ -5,6 +5,16 @@ import { updateManifest } from './android-release.mjs'
 
 export const artifactName = 'validated-android-release'
 
+const firebaseKeys = ['APP_ID', 'PROJECT_ID', 'API_KEY', 'SENDER_ID']
+
+export function firebaseConfigurationFromEnvironment(environment = process.env) {
+  return Object.fromEntries(firebaseKeys.map(key => [key, environment[`LEO_ANDROID_FIREBASE_${key}`] || '']))
+}
+
+function firebaseBuildConfiguration(configuration = {}) {
+  return Object.fromEntries(firebaseKeys.map(key => [key, configuration[key] || '']))
+}
+
 function fixedOrigin(value) {
   if (!value)
     return ''
@@ -30,6 +40,7 @@ export async function recordBuild(directory, config) {
   const evidence = {
     schema: 1,
     officialOrigin: fixedOrigin(config.officialOrigin),
+    firebaseConfiguration: firebaseBuildConfiguration(config.firebaseConfiguration),
     repository: config.repository.toLowerCase(),
     commit: config.commit,
     runId: config.runId,
@@ -48,7 +59,8 @@ export async function verifyBuild(directory, config) {
     throw new Error('Android distribution requires the fixed HTTPS official service origin')
   const evidence = JSON.parse(await readFile(path.join(directory, 'validation.json'), 'utf8'))
   const manifest = await buildManifest(directory, config.tag)
-  if (evidence.schema !== 1 || evidence.officialOrigin !== officialOrigin || evidence.repository !== config.repository.toLowerCase()
+  if (JSON.stringify(evidence.firebaseConfiguration) !== JSON.stringify(firebaseBuildConfiguration(config.firebaseConfiguration))
+    || evidence.schema !== 1 || evidence.officialOrigin !== officialOrigin || evidence.repository !== config.repository.toLowerCase()
     || evidence.commit !== config.commit || evidence.runId !== config.runId
     || evidence.versionName !== manifest.versionName || evidence.versionCode !== manifest.versionCode
     || evidence.sha256 !== manifest.sha256 || evidence.size !== manifest.size) {
@@ -66,6 +78,7 @@ if (import.meta.main) {
     runId: Number(process.env.VALIDATED_RUN_ID || process.env.GITHUB_RUN_ID),
     tag: process.env.RELEASE_TAG || undefined,
     officialOrigin: process.env.LEO_OFFICIAL_ORIGIN,
+    firebaseConfiguration: firebaseConfigurationFromEnvironment(),
   }
   if (command === 'record')
     await recordBuild(directory, config)

@@ -88,3 +88,15 @@ needed (an inference from the explicit options initialization interface).
 [FirebaseApp initialization](https://firebase.google.com/docs/reference/android/com/google/firebase/FirebaseApp).
 Keep configuration absent-by-default for local/CI builds, and report
 real-provider tests separately from tested fake adapters and emulator execution.
+
+## Registration-token compatibility
+
+Firebase Messaging 25.1.3 marks `getToken`, `deleteToken` and `onNewToken` as
+deprecated in favor of its opt-in Firebase Installation ID registration mode.
+Firebase currently supports both targeting patterns. This ticket uses the
+registration-token mode with HTTP v1, matching its account/device token rotation
+contract. The SDK token is retrieved on enabled-app synchronization and token
+changes, and the official registration is checked before reusing the local
+receipt. No deprecated diagnostics are suppressed.
+[FCM registration management](https://firebase.google.com/docs/cloud-messaging/manage-tokens),
+[Android SDK token methods](https://firebase.google.com/docs/reference/android/com/google/firebase/messaging/FirebaseMessaging).

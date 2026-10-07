@@ -137,11 +137,13 @@ are configured; tag CI uses a persistent release key. Never commit a signing key
 - Documents use the Android picker, bounded streaming uploads, authenticated file
   downloads and scoped FileProvider sharing. Image, PDF, Markdown, code and media
   previews use native Android components; no arbitrary artifact URL is fetched.
-- Optional WorkManager checks notify about pending questions approximately every
-  15 minutes with a network constraint. No Firebase service or keys are required.
-  Android battery management can delay checks; force-stopping the app prevents
-  background work until it is opened again. The preference and permission are
-  managed in Settings, and notification taps open the corresponding conversation.
+- Native push is opt-in and registers each device once with the official service
+  for all installations accessible to its Leo account. FCM data-only messages
+  enqueue WorkManager delivery; the current Leo session and installation membership
+  are checked before displaying generic text. Removed members and signed-out
+  devices cannot display delayed messages. Settings controls the Android permission
+  and subscription. A notification opens its installation and conversation after
+  checking access again. Force-stopping the app prevents reception until reopened.
 - Markdown uses native Android text rendering, including tables and
   strikethrough. There is no WebView. Provider device login and OAuth callbacks
   open a browser Custom Tab, as these pages belong to the external provider.
@@ -175,7 +177,7 @@ See [validation](VALIDATION.md).
 | Attachments | Android file/photo picker, pasted images and keyboard image insertion, up to 8 files, 10 MiB per file / 40 MiB per message, stable upload/message identifiers for explicit retries |
 | Artifacts | Authenticated file previews, downloads through Android’s save picker, sharing/open-with, native opening of Markdown artifact links, latest/all versions, groups and search |
 | MCP servers | HTTP/stdio configuration, test/discovery, enabled tool selection, bearer/client secrets, environment variables, OAuth, removal/disconnect |
-| Notifications | Opt-in Android permission, periodic pending-question checks, deduplication, cancellation of resolved alerts and opening the related chat; no Firebase |
+| Notifications | Opt-in native FCM through the official service, one account/device registration for all accessible installations, current-access checks and scoped conversation intents |
 
 Destructive actions use native confirmation dialogs and remain subject to the
 same server checks as the web. No live task is launched as part of validation.
@@ -217,9 +219,9 @@ No deployment is performed by the Android build or CI.
 
 The current web API has no conversation rename/delete endpoints; those actions
 are not invented by the native client. Scheduled jobs continue on the server;
-there is no offline mutation queue. Notifications deliberately use periodic
-checks rather than the browser’s Web Push subscriptions, following the chosen
-Firebase-free approach.
+there is no offline mutation queue. Native notifications use the official
+service’s account/device subscriptions; previous periodic notification work is
+cancelled on upgrade. Browser Web Push continues to use its existing transport.
 
 Release gates: physical-device validation against the intended HTTPS server,
 deployment of the optional native MCP OAuth bridge, release signing identity and
@@ -320,3 +322,44 @@ Connections includes service account creation, token rotation, connection testin
 disabling/deleting accounts, and explicit per-agent grants. No agent receives
 access by default. Tokens use masked input and are not saved in instance state.
 See [server setup and access](../docs/ONEPASSWORD.md).
+
+
+## Native account providers and push
+
+Google sign-in and passkey creation, sign-in and confirmation use Android
+Credential Manager. Passkeys require API 28 or later; email and Google remain
+available on API 26. The service supplies the Google client ID and one-use nonce.
+GitHub uses a Custom Tab because Credential Manager has no GitHub provider. Its
+one-use handover returns to the initiating app session; the browser receives no
+Leo session or repository access. The official `user:email` scope, verified-email
+linking policy and passkey store are shared with the web client.
+
+Account settings let an authenticated member link Google or GitHub, create a
+named passkey, confirm identity by email or passkey, and remove a sign-in method.
+The official service enforces recent proof and retention of the last sign-in
+method. Challenge cookies and provider proofs remain in memory; only the Leo
+session enters Android Keystore storage.
+
+Build push support with all four **public** Firebase application configuration
+values: `LEO_ANDROID_FIREBASE_APP_ID`, `LEO_ANDROID_FIREBASE_PROJECT_ID`,
+`LEO_ANDROID_FIREBASE_API_KEY` and `LEO_ANDROID_FIREBASE_SENDER_ID`. These are the
+Android app configuration from Firebase, not a service-account private key. With
+all four unset, account sign-in still works and push opt-in reports unavailable.
+The SDK does not create an FCM registration until notifications are enabled.
+Release evidence binds the compiled APK to these public Firebase values as well
+as its official origin, commit and version; changing them requires revalidation.
+Configure the same project's private FCM sender only on the official service;
+see [official configuration](../docs/OFFICIAL-SERVICE.md).
+
+For native passkeys, configure trusted APK SHA-256 signing certificate hashes on
+the official service and serve its `/.well-known/assetlinks.json` over the HTTPS
+RP host. Register the Android package and certificate with the Google OAuth
+project as well; the server OAuth client remains the audience for Google tokens.
+Never put a Google OAuth client secret or an FCM service-account key in an APK.
+
+The shared native account and push cases run as JVM tests and as instrumentation
+on a Google APIs emulator. External credential results and FCM transport are
+controlled adapters in these cases; they do not demonstrate a live Google,
+GitHub or Firebase account. The official service tests verify signed Google JWTs,
+signed native-origin WebAuthn proofs, GitHub handover, FCM HTTP v1 and membership
+revocation separately.

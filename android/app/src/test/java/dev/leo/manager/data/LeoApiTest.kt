@@ -21,6 +21,23 @@ class MemoryVault : SessionVault {
 
 class LeoApiTest {
     @Test
+    fun `sign in challenges stay in memory and on the fixed official origin`() {
+        val origin = "https://leo.example/".toHttpUrl()
+        val vault = MemoryVault()
+        val cookies = SessionCookies(origin, vault)
+        cookies.saveFromResponse(
+            origin,
+            listOf(Cookie.parse(origin, "leo_passkey=challenge; Path=/; Secure")!!),
+        )
+        assertEquals("challenge", cookies.loadForRequest(origin).single().value)
+        assertTrue(vault.values.isEmpty())
+        assertTrue(cookies.loadForRequest("https://other.example/".toHttpUrl()).isEmpty())
+        assertTrue(SessionCookies(origin, vault).loadForRequest(origin).isEmpty())
+        cookies.clear()
+        assertTrue(cookies.loadForRequest(origin).isEmpty())
+    }
+
+    @Test
     fun `official MCP grants and consent stay on the official service`() = runTest {
         MockWebServer().use { server ->
             repeat(2) { server.enqueue(MockResponse().setBody("{}")) }

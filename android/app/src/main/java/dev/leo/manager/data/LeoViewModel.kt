@@ -33,6 +33,7 @@ data class Workspace(
     val emailForCode: String? = null,
     val busy: Boolean = false,
     val signingOut: Boolean = false,
+    val signingIn: Boolean = false,
     val restoringSession: Boolean = false,
     val mcps: List<Mcp> = emptyList(),
     val models: ModelCatalog = ModelCatalog(),
@@ -246,6 +247,86 @@ constructor(
         connect(state.value.origin)
     }
 
+    private var signInJob: kotlinx.coroutines.Job? = null
+
+    suspend fun accountOptions(): AccountOptions =
+        checkNotNull(accountConnection).get("/account/options")
+
+    suspend fun accountMethods(): AccountMethods =
+        checkNotNull(accountConnection).get("/account/methods")
+
+    suspend fun signIn(provider: String, credentials: LeoCredentials) {
+        val job = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
+        signInJob = job
+        mutable.update { it.copy(signingIn = true) }
+        try {
+            val signIn = LeoAccountSignIn(checkNotNull(accountConnection), credentials)
+            val session =
+                when (provider) {
+                    "Google" -> signIn.google()
+                    "GitHub" -> signIn.github()
+                    "une passkey" -> signIn.passkey()
+                    else -> error("Méthode de connexion inconnue.")
+                }
+            openAccount(session)
+        } finally {
+            if (signInJob === job) signInJob = null
+            mutable.update { it.copy(signingIn = false) }
+        }
+    }
+
+    fun cancelSignIn() {
+        signInJob?.cancel()
+    }
+
+    suspend fun createAccountPasskey(label: String, credentials: LeoCredentials) =
+        LeoAccountSignIn(checkNotNull(accountConnection), credentials).createPasskey(label)
+
+    suspend fun confirmAccountPasskey(credentials: LeoCredentials) =
+        LeoAccountSignIn(checkNotNull(accountConnection), credentials).confirmPasskey()
+
+    suspend fun accountConfirmationCode(): EmailChallenge =
+        checkNotNull(accountConnection)
+            .send(
+                "POST",
+                "/account/email-code",
+                body("email" to checkNotNull(state.value.session.account).email),
+            )
+
+    suspend fun confirmAccountEmail(challenge: String, code: String) {
+        checkNotNull(accountConnection)
+            .request(
+                "POST",
+                "/account/reauth/email",
+                body("challenge" to challenge, "code" to code.trim()),
+            )
+    }
+
+    suspend fun removeAccountMethod(id: String) {
+        checkNotNull(accountConnection).request("POST", "/account/methods/remove", body("id" to id))
+    }
+
+    suspend fun setNativeNotifications(enabled: Boolean) {
+        val registrar = NativeDeviceRegistrar(getApplication(), vault, officialOrigin)
+        if (enabled) registrar.enable() else registrar.disable()
+    }
+
+    suspend fun openNotification(cacheScope: String, accountId: String): Boolean {
+        val current = state.value
+        if (
+            !current.session.authenticated ||
+                (accountId.isNotBlank() && current.session.account?.id != accountId)
+        )
+            return false
+        val installationId = cacheScope.removePrefix(current.origin)
+        if (cacheScope != current.origin + installationId || installationId.isBlank()) return false
+        refreshInstallations()
+        val installation =
+            state.value.session.installations.find { it.id == installationId } ?: return false
+        selectInstallation(installation.id)
+        return true
+    }
+
     suspend fun requestEmailCode(email: String) {
         val target = checkNotNull(accountConnection) { "Le service officiel n’est pas configuré." }
         val normalizedEmail = email.trim().lowercase(java.util.Locale.ROOT)
@@ -290,7 +371,7 @@ constructor(
         else {
             connection?.closeStreams()
             clearDrafts()
-            schedule(getApplication(), false)
+            schedule(getApplication(), notifications.enabled.first())
 
             connection = null
             mutable.update {
@@ -327,7 +408,6 @@ constructor(
             if (scopeChanged || sessionChanged) {
                 historyCache.clear()
                 files.clear()
-                schedule(getApplication(), false)
             }
 
             preferences.selectInstallation(current.origin, accountId, installation.id)
@@ -391,14 +471,30 @@ constructor(
         connection?.closeStreams()
         schedule(getApplication(), false)
         try {
+            try {
+                NativeDeviceRegistrar(getApplication(), vault, officialOrigin).disable()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                notifications.setEnabled(false)
+            }
             checkNotNull(accountConnection).request("POST", "/account/logout")
         } finally {
-            withContext(Dispatchers.IO) {
-                connection?.clearSession()
-                accountConnection?.clearSession()
+            withContext(kotlinx.coroutines.NonCancellable) {
+                try {
+                    kotlinx.coroutines.withTimeout(5000) {
+                        AndroidLeoCredentials(getApplication()).clear()
+                    }
+                } catch (_: Exception) {
+                    /* Local logout wins over unavailable credential providers. */
+                }
+                withContext(Dispatchers.IO) {
+                    connection?.clearSession()
+                    accountConnection?.clearSession()
+                }
+                connection = null
+                mutable.update { Workspace(ready = true, origin = it.origin, busy = it.busy) }
             }
-            connection = null
-            mutable.update { Workspace(ready = true, origin = it.origin, busy = it.busy) }
         }
     }
 

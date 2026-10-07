@@ -21,7 +21,6 @@ import androidx.work.*
 import dev.leo.manager.BuildConfig
 import dev.leo.manager.MainActivity
 import dev.leo.manager.R
-import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -77,18 +76,11 @@ fun notificationsAllowed(context: Context): Boolean =
 
 fun schedule(context: Context, enabled: Boolean) {
     val manager = WorkManager.getInstance(context)
-    if (enabled)
-        manager.enqueueUniquePeriodicWork(
-            QUESTION_WORK,
-            ExistingPeriodicWorkPolicy.KEEP,
-            PeriodicWorkRequestBuilder<QuestionWorker>(15, TimeUnit.MINUTES)
-                .setConstraints(
-                    Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
-                )
-                .build(),
-        )
+    // Upgrade cancels the legacy per-installation polling; native push belongs to the account.
+    manager.cancelUniqueWork(QUESTION_WORK)
+    if (enabled) enqueueNativeDevice(context)
     else {
-        manager.cancelUniqueWork(QUESTION_WORK)
+        manager.cancelUniqueWork("leo-native-device")
         NotificationManagerCompat.from(context).cancelAll()
     }
 }

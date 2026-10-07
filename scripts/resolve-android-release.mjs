@@ -5,7 +5,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
 import { promisify } from 'node:util'
-import { artifactName, verifyBuild } from './android-build.mjs'
+import { artifactName, firebaseConfigurationFromEnvironment, verifyBuild } from './android-build.mjs'
 import { androidVersion } from './android-release.mjs'
 
 const exec = promisify(execFile)
@@ -72,6 +72,7 @@ if (import.meta.main) {
       commit: process.env.GITHUB_SHA,
       tag: process.env.GITHUB_REF_NAME,
       officialOrigin: process.env.LEO_OFFICIAL_ORIGIN,
+      firebaseConfiguration: firebaseConfigurationFromEnvironment(),
     }
     androidVersion(config.tag)
     try {

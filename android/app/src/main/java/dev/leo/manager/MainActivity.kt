@@ -22,6 +22,7 @@ import dev.leo.manager.ui.leoDarkTheme
 import dev.leo.manager.update.UpdateViewModel
 
 class MainActivity : ComponentActivity() {
+    private var targetAccount by mutableStateOf("")
     private var targetChat by mutableStateOf("")
     private var targetCacheScope by mutableStateOf("")
     private var sharedUrl by mutableStateOf("")
@@ -53,6 +54,7 @@ class MainActivity : ComponentActivity() {
                         consumedShare = { sharedUrl = "" },
                         vm = vm,
                         targetChat = targetChat,
+                        targetAccount = targetAccount,
                         targetCacheScope = targetCacheScope,
                         consumedTarget = { targetChat = "" },
                     )
@@ -75,6 +77,7 @@ class MainActivity : ComponentActivity() {
                     .takeIf { runCatching { java.util.UUID.fromString(it) }.isSuccess }
                     .orEmpty()
             targetCacheScope = intent.getStringExtra("origin").orEmpty()
+            targetAccount = intent.getStringExtra("account").orEmpty()
         }
         if (intent.action == Intent.ACTION_SEND && intent.type == "text/plain") {
             sharedUrl = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()

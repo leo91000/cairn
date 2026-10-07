@@ -69,6 +69,22 @@ describe('validated Android build reuse', () => {
       await expect(verifyBuild(directory, { ...config, officialOrigin })).rejects.toThrow()
   })
 
+  it('refuses cached APKs with different public Firebase configuration', async () => {
+    const directory = await temporaryBuild()
+    const firebaseConfiguration = {
+      APP_ID: '1:123:android:abc',
+      PROJECT_ID: 'leo-project',
+      API_KEY: 'public-key',
+      SENDER_ID: '123',
+    }
+    await fixture(directory, { ...config, firebaseConfiguration })
+    await expect(verifyBuild(directory, { ...config, firebaseConfiguration })).resolves.toMatchObject({ commit: config.commit })
+    await expect(verifyBuild(directory, config)).rejects.toThrow('evidence')
+    for (const key of Object.keys(firebaseConfiguration)) {
+      await expect(verifyBuild(directory, { ...config, firebaseConfiguration: { ...firebaseConfiguration, [key]: 'different' } })).rejects.toThrow('evidence')
+    }
+  })
+
   it('refuses altered APK bytes, metadata or evidence before signing', async () => {
     const directory = await temporaryBuild()
     await writeFile(path.join(directory, 'app-release-unsigned.apk'), 'modified APK bytes')
