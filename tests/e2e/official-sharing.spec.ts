@@ -1,7 +1,6 @@
 import type { Page } from '@playwright/test'
 import type { ChildProcess } from 'node:child_process'
-import { execFileSync, spawn } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { createServer } from 'node:http'
@@ -12,6 +11,7 @@ import { expect, test } from '@playwright/test'
 import { config as loadConfig } from '../legacy/server/config'
 import { Service as SeedService } from '../legacy/server/service'
 import { Store } from '../legacy/server/store'
+import { expireAccountProof } from './official-relay-fixture'
 
 test('owner shares an installation and member works without management controls', async ({ page, browser }) => {
   test.setTimeout(120000)
@@ -108,18 +108,7 @@ test('owner shares an installation and member works without management controls'
     await page.getByText('Installation options', { exact: true }).click()
     await page.getByRole('button', { name: 'Share installation', exact: true }).click()
     await expect(page.getByText('Members use your coding-agent accounts and secrets.', { exact: true })).toBeVisible()
-    const database = new URL(process.env.LEO_OFFICIAL_TEST_DATABASE_URL!)
-    execFileSync('psql', ['-v', 'ON_ERROR_STOP=1', '-c', `UPDATE web_sessions SET last_proof_at = NULL WHERE account_id IN (SELECT id FROM leo_accounts WHERE email = '${ownerEmail}'); UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key = 'email:${createHash('sha256').update(ownerEmail).digest('hex')}'`], {
-      env: {
-        ...process.env,
-        PGHOST: database.hostname,
-        PGPORT: database.port || '5432',
-        PGUSER: decodeURIComponent(database.username),
-        PGPASSWORD: decodeURIComponent(database.password),
-        PGDATABASE: decodeURIComponent(database.pathname.slice(1)),
-      },
-      stdio: 'pipe',
-    })
+    expireAccountProof(new URL(process.env.LEO_OFFICIAL_TEST_DATABASE_URL!), ownerEmail)
     await page.getByLabel('Invite by email', { exact: true }).fill(memberEmail)
     await page.getByRole('button', { name: 'Send invitation', exact: true }).click()
     await expect(page.getByRole('alert')).toContainText('Confirm your identity')

@@ -1,10 +1,9 @@
 import type { Page } from '@playwright/test'
-import { execFileSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import process from 'node:process'
 import { test as base, expect } from '@playwright/test'
-import { officialRelayFixture } from './official-relay-fixture'
+import { executeOfficialSql, expireAccountProof, officialRelayFixture } from './official-relay-fixture'
 
 type InstallationFixture = Awaited<ReturnType<typeof officialRelayFixture>> & { email: string, installationId: string, databaseUrl: string }
 
@@ -14,7 +13,7 @@ const test = base.extend<{ installation: InstallationFixture }>({
     const { root, url, messages } = fixture
     const schema = `sensitive_${randomUUID().replaceAll('-', '')}`
     const database = new URL(process.env.LEO_OFFICIAL_TEST_DATABASE_URL!)
-    executeSql(database, `CREATE SCHEMA ${schema}`)
+    executeOfficialSql(database, `CREATE SCHEMA ${schema}`)
     database.searchParams.set('options', `-csearch_path=${schema}`)
     fixture.official(database.toString())
     try {
@@ -52,31 +51,15 @@ const test = base.extend<{ installation: InstallationFixture }>({
     }
     finally {
       await fixture.close()
-      executeSql(new URL(process.env.LEO_OFFICIAL_TEST_DATABASE_URL!), `DROP SCHEMA ${schema} CASCADE`)
+      executeOfficialSql(new URL(process.env.LEO_OFFICIAL_TEST_DATABASE_URL!), `DROP SCHEMA ${schema} CASCADE`)
     }
   },
 })
 
 test.describe.configure({ timeout: 120000 })
 
-function executeSql(database: URL, sql: string) {
-  execFileSync('psql', ['-v', 'ON_ERROR_STOP=1', '-c', sql], {
-    env: {
-      ...process.env,
-      PGHOST: database.hostname,
-      PGPORT: database.port || '5432',
-      PGUSER: decodeURIComponent(database.username),
-      PGPASSWORD: decodeURIComponent(database.password),
-      PGDATABASE: decodeURIComponent(database.pathname.slice(1)),
-      PGOPTIONS: database.searchParams.get('options') || '',
-    },
-    stdio: 'pipe',
-  })
-}
-
 function expireProof(installation: InstallationFixture) {
-  const { email, databaseUrl } = installation
-  executeSql(new URL(databaseUrl), `UPDATE web_sessions SET last_proof_at = NULL WHERE account_id IN (SELECT id FROM leo_accounts WHERE email = '${email}'); UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key = 'email:${createHash('sha256').update(email).digest('hex')}'`)
+  expireAccountProof(new URL(installation.databaseUrl), installation.email)
 }
 
 async function confirmIdentity(page: Page, installation: InstallationFixture) {
