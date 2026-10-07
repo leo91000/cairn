@@ -397,5 +397,7 @@ acknowledgements are pending, with a five-second deadline.
 There are 32 direct leases per installation, eight per account; members may use
 at most 24 leases, leaving eight for the owner. Each lease admits one signaling
 reader with a 16-signal queue. SDP is at most 16 KiB, ICE candidates at most 1 KiB,
-and official JSON control bodies at most 32 KiB. None consumes or changes the
+and official JSON control bodies at most 32 KiB. Direct-control frames use a dedicated 16-frame queue in each direction, separate
+from relay responses and credits. Saturation returns a signaling error without
+closing fallback streams. None consumes or changes the
 existing relay request, credited-stream or public-download allowances.

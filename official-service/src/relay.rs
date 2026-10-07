@@ -54,6 +54,7 @@ struct Command {
 struct Tunnel {
     commands: mpsc::Sender<Command>,
     control: mpsc::Sender<Frame>,
+    signaling: mpsc::Sender<Frame>,
     version: u16,
     access: Mutex<Access>,
     access_changed: Notify,
@@ -311,6 +312,8 @@ async fn serve_socket(
     let (stop, mut stopped) = watch::channel(false);
     let (control, mut controls) =
         mpsc::channel::<Frame>((MAX_IN_FLIGHT + MAX_PUBLIC_IN_FLIGHT) * 2);
+    let (signaling, mut signals) =
+        mpsc::channel::<Frame>(leo_relay_protocol::direct::MAX_DIRECT_QUEUE);
     let Ok(key) = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
     else {
         return;
@@ -321,6 +324,7 @@ async fn serve_socket(
     let tunnel = Arc::new(Tunnel {
         commands,
         control,
+        signaling,
         version,
         access: Mutex::new(Access::default()),
         access_changed: Notify::new(),
@@ -440,11 +444,13 @@ async fn serve_socket(
             biased;
 
             _ = stopped.changed() => {
-                if version >= DIRECT_VERSION && tunnel.installation_revoked.load(Ordering::SeqCst) {
+                let revoked = tunnel.installation_revoked.load(Ordering::SeqCst);
+                if version >= DIRECT_VERSION && revoked {
                     let frame = Frame::DirectRevoke {
                         scope: DirectRevocation::Installation,
                     };
-                    let _ = socket.send(Message::Text(serde_json::to_string(&frame).unwrap().into())).await;
+                    let message = serde_json::to_string(&frame).unwrap();
+                    let _ = socket.send(Message::Text(message.into())).await;
                 }
                 break;
             },
@@ -501,11 +507,13 @@ async fn serve_socket(
                 }
             }
             _ = tunnel.access_changed.notified() => {
-                let revocations: Vec<_> = tunnel.access.lock().unwrap().direct_revocations.drain(..).collect();
+                let revocations: Vec<_> = tunnel.access.lock().unwrap()
+                    .direct_revocations.drain(..).collect();
                 for scope in revocations {
                     if version >= DIRECT_VERSION {
                         let frame = Frame::DirectRevoke { scope };
-                        if socket.send(Message::Text(serde_json::to_string(&frame).unwrap().into())).await.is_err() {
+                        let message = serde_json::to_string(&frame).unwrap();
+                        if socket.send(Message::Text(message.into())).await.is_err() {
                             break 'connection;
                         }
                     }
@@ -606,29 +614,6 @@ async fn serve_socket(
                 }
             }
             Some(frame) = controls.recv(), if version >= 2 => {
-                if version >= DIRECT_VERSION {
-                    let direct_frame = match &frame {
-                        Frame::DirectAuthorize { authorization, .. } | Frame::DirectRenew { authorization, .. } => {
-                            let access = tunnel.access.lock().unwrap();
-                            access.direct.get(&authorization.claims.connection_id)
-                                .is_some_and(|connection| {
-                                    connection.authorization == *authorization
-                                        && connection.reply.is_some()
-                                })
-                        }
-                        Frame::DirectSignal { id, .. } => {
-                            let access = tunnel.access.lock().unwrap();
-                            access.direct.get(id).is_some_and(|connection| connection.accepted)
-                        },
-                        _ => false,
-                    };
-                    if direct_frame {
-                        if socket.send(Message::Text(serde_json::to_string(&frame).unwrap().into())).await.is_err() {
-                            break;
-                        }
-                        continue;
-                    }
-                }
                 let id = match &frame {
                     Frame::Cancel { id } | Frame::StreamCredit { id } => id,
                     _ => continue,
@@ -642,6 +627,30 @@ async fn serve_socket(
                 let message = serde_json::to_string(&frame).unwrap();
                 if socket.send(Message::Text(message.into())).await.is_err() {
                     break;
+                }
+            }
+            Some(frame) = signals.recv(), if version >= DIRECT_VERSION => {
+                let current = match &frame {
+                    Frame::DirectAuthorize { authorization, .. }
+                    | Frame::DirectRenew { authorization, .. } => {
+                        let access = tunnel.access.lock().unwrap();
+                        access.direct.get(&authorization.claims.connection_id)
+                            .is_some_and(|connection| {
+                                connection.authorization == *authorization
+                                    && connection.reply.is_some()
+                            })
+                    }
+                    Frame::DirectSignal { id, .. } => {
+                        let access = tunnel.access.lock().unwrap();
+                        access.direct.get(id).is_some_and(|connection| connection.accepted)
+                    }
+                    _ => false,
+                };
+                if current {
+                    let message = serde_json::to_string(&frame).unwrap();
+                    if socket.send(Message::Text(message.into())).await.is_err() {
+                        break;
+                    }
                 }
             }
             message = socket.next() => {

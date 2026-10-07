@@ -16,6 +16,7 @@ pub const MAX_DIRECT_CONNECTIONS: usize = 32;
 pub const MAX_DIRECT_PER_ACCOUNT: usize = 8;
 pub const MAX_DIRECT_MEMBER_CONNECTIONS: usize = MAX_DIRECT_CONNECTIONS - MAX_DIRECT_PER_ACCOUNT;
 pub const MAX_SIGNAL: usize = 16_384;
+pub const MAX_DIRECT_QUEUE: usize = 16;
 pub const SIGNING_CONTEXT: &[u8] = b"leo-direct-authorization-v4\0";
 
 pub const MAX_SIGNALS_PER_ACCOUNT: usize = 120;

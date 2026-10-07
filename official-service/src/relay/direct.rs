@@ -223,7 +223,7 @@ async fn issue(
             }
         };
         tunnel
-            .control
+            .signaling
             .try_send(frame)
             .map_err(|_| ApiError::Http(StatusCode::SERVICE_UNAVAILABLE, "Signaling busy"))?;
         Ok::<_, ApiError>(())
@@ -354,7 +354,7 @@ pub(crate) async fn signal(
         id: request_id.clone(),
     };
     tunnel
-        .control
+        .signaling
         .try_send(Frame::DirectSignal {
             id,
             signal,

@@ -109,6 +109,27 @@ impl Fixture {
         proxies: leo_official_service::TrustedProxies,
         push: Option<Arc<dyn leo_official_service::PushSender>>,
     ) -> Self {
+        Self::with_socket_buffer(oauth, connections, proxies, push, None).await
+    }
+
+    pub async fn with_small_socket_buffer() -> Self {
+        Self::with_socket_buffer(
+            leo_official_service::OAuthProviders::default(),
+            5,
+            leo_official_service::TrustedProxies::default(),
+            None,
+            Some(1024),
+        )
+        .await
+    }
+
+    async fn with_socket_buffer(
+        oauth: leo_official_service::OAuthProviders,
+        connections: u32,
+        proxies: leo_official_service::TrustedProxies,
+        push: Option<Arc<dyn leo_official_service::PushSender>>,
+        send_buffer: Option<u32>,
+    ) -> Self {
         let database = std::env::var("LEO_OFFICIAL_TEST_DATABASE_URL")
             .expect("Set LEO_OFFICIAL_TEST_DATABASE_URL to a disposable Postgres database");
         let admin = PgPool::connect(&database).await.unwrap();
@@ -126,7 +147,14 @@ impl Fixture {
         }
 
         let pool = pool_options.connect_with(options).await.unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = if let Some(size) = send_buffer {
+            let socket = tokio::net::TcpSocket::new_v4().unwrap();
+            socket.set_send_buffer_size(size).unwrap();
+            socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            socket.listen(1024).unwrap()
+        } else {
+            tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap()
+        };
         let url = format!("http://localhost:{}", listener.local_addr().unwrap().port());
         let mail = Arc::new(Mailbox::default());
         let relay = leo_official_service::Relay::default();
@@ -223,6 +251,7 @@ pub async fn login(app: &Fixture, email: &str) -> (String, Value) {
 /// A real installation router behind its outbound connector and official HTTP API.
 /// Extra HTTP handlers let tests supply slow or broken responses at the transport seam.
 pub struct RelayedInstallation {
+    pub router: axum::Router,
     pub app: Fixture,
     pub installation: Arc<leo_agent_manager::service::Service>,
     pub cookie: String,
@@ -237,6 +266,15 @@ pub struct RelayedInstallation {
 impl RelayedInstallation {
     pub async fn new(extra_routes: axum::Router) -> Self {
         Self::with_runner_url(extra_routes, String::new()).await
+    }
+
+    pub async fn with_small_socket_buffer(extra_routes: axum::Router) -> Self {
+        Self::with_app(
+            extra_routes,
+            String::new(),
+            Fixture::with_small_socket_buffer().await,
+        )
+        .await
     }
 
     pub async fn with_runner_url(extra_routes: axum::Router, runner_url: String) -> Self {
@@ -340,13 +378,14 @@ impl RelayedInstallation {
         let direct = leo_agent_manager::direct::DirectConnections::default();
         let connector = tokio::spawn(leo_agent_manager::relay::connect_with_direct(
             identity_dir,
-            router,
+            router.clone(),
             installation.clone(),
             stop.clone(),
             direct.clone(),
         ));
         let base = format!("{}/api/installations/{id}/api", app.url);
         let fixture = Self {
+            router,
             app,
             installation,
             cookie,

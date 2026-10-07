@@ -75,7 +75,8 @@ official service's memory and logs; it is not end-to-end encryption against it.
   credential rotation and revoke-and-forget; the installation closes matching
   channels immediately, including active streams.
 - Without the tunnel, no new direct connection can start and existing ones close
-  at grant expiry. Agent executions are never stopped by transport changes.
+  at grant expiry, including on a normal official shutdown. Agent executions
+  are never stopped by transport changes.
 - The installation never accepts anonymous local access and no local password is
   reintroduced.
 
@@ -166,3 +167,11 @@ tunnel. Ed25519 signatures cover the protocol context and every claim. Keys are
 per tunnel, so a reconnect cannot restore an old authorization. Nonces, leases and
 signal queues are bounded in-memory control state. Access generations also remain
 in memory for the lifetime of the tunnel; none of these are conversation storage. See [Version 4 limits and installation integration](INSTALLATION-RELAY.md#version-4-direct-authorization-and-signaling-100).
+
+The installation tolerates up to 30 seconds of signing clock skew in the maximum
+remaining grant lifetime; its local expiry is strict. Direct signaling uses
+separate bounded queues from fallback responses and stream credits. A client
+signal gets HTTP 204 only after installation acknowledgement (429 on refusal,
+503 on saturation or acknowledgement timeout). Per-account quotas and reserved
+owner capacity prevent member bursts from exhausting the owner's allowance;
+see the version-4 limits in INSTALLATION-RELAY.md.

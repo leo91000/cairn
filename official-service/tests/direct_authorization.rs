@@ -14,6 +14,14 @@ async fn filter_tunnel(
     relay: &mut RelayedInstallation,
     filter: FrameFilter,
 ) -> tokio::task::JoinHandle<()> {
+    filter_tunnel_with_pause(relay, filter, tokio::sync::watch::channel(false).1).await
+}
+
+async fn filter_tunnel_with_pause(
+    relay: &mut RelayedInstallation,
+    filter: FrameFilter,
+    paused: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
     use axum::{
         extract::{Path, WebSocketUpgrade, ws::Message},
         http::HeaderMap,
@@ -28,6 +36,7 @@ async fn filter_tunnel(
     let routes = axum::Router::new().route("/api/relay/{installation}/connect", get(move |Path(id): Path<String>, headers: HeaderMap, upgrade: WebSocketUpgrade| {
         let official = official.clone();
         let filter = filter.clone();
+        let mut paused = paused.clone();
         async move {
             upgrade.on_upgrade(move |mut installation| async move {
                 let mut request = format!("{official}/api/relay/{id}/connect").into_client_request().unwrap();
@@ -35,6 +44,7 @@ async fn filter_tunnel(
                 let (mut upstream, _) = tokio_tungstenite::connect_async(request).await.unwrap();
                 loop {
                     tokio::select! {
+                        Ok(()) = paused.changed() => {},
                         message = installation.recv() => {
                             let Some(Ok(message)) = message else {
                                 break;
@@ -55,7 +65,7 @@ async fn filter_tunnel(
                                 break;
                             }
                         },
-                        message = upstream.next() => {
+                        message = upstream.next(), if !*paused.borrow() => {
                             let Some(Ok(message)) = message else {
                                 break;
                             };
@@ -100,9 +110,7 @@ async fn filter_tunnel(
     relay.stop = tokio_util::sync::CancellationToken::new();
     relay.connector = tokio::spawn(leo_agent_manager::relay::connect_with_direct(
         directory,
-        leo_agent_manager::http::router(relay.installation.clone())
-            .await
-            .unwrap(),
+        relay.router.clone(),
         relay.installation.clone(),
         relay.stop.clone(),
         relay.direct.clone(),
@@ -1560,6 +1568,7 @@ async fn official_shutdown_keeps_established_peers_until_the_grant_expires() {
     let mut events = relay.direct.subscribe();
 
     relay.app.relay.shutdown();
+    relay.app.server.abort();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
         !lease.closed.is_cancelled(),
@@ -1575,7 +1584,14 @@ async fn official_shutdown_keeps_established_peers_until_the_grant_expires() {
             .accept_peer(&waiting, &waiting.claims.session_id, &fingerprint())
             .is_err()
     );
-    tokio::time::timeout(Duration::from_secs(5), lease.closed.cancelled())
+    let before_expiry = leo_relay_protocol::direct::until_expiry(grant.claims.expires_at)
+        .saturating_sub(Duration::from_millis(100));
+    assert!(
+        tokio::time::timeout(before_expiry, lease.closed.cancelled())
+            .await
+            .is_err()
+    );
+    tokio::time::timeout(Duration::from_secs(1), lease.closed.cancelled())
         .await
         .unwrap();
     relay.close().await;
@@ -1746,4 +1762,107 @@ async fn one_members_signaling_budget_does_not_block_the_owner_and_refusals_are_
     assert!(installation_events.try_recv().is_err());
     drop(member_events);
     relay.close().await;
+}
+
+#[tokio::test]
+async fn saturated_direct_signaling_preserves_credited_fallback_streams() {
+    use axum::{
+        body::{Body, Bytes},
+        routing::get,
+    };
+    let routes = axum::Router::new().route(
+        "/api/fixture/burst/stream",
+        get(|| async {
+            let bytes = Bytes::from(vec![b'x'; leo_relay_protocol::MAX_STREAM_CHUNK]);
+            let stream = futures_util::stream::unfold(bytes, |bytes| async {
+                Some((Ok::<_, std::io::Error>(bytes.clone()), bytes))
+            });
+            (
+                [("content-type", "text/event-stream")],
+                Body::from_stream(stream),
+            )
+        }),
+    );
+    let mut relay = RelayedInstallation::with_small_socket_buffer(routes).await;
+    let (pause, paused) = tokio::sync::watch::channel(false);
+    let proxy =
+        filter_tunnel_with_pause(&mut relay, Arc::new(|frame, _| Some(frame)), paused).await;
+    let mut grants = Vec::new();
+    for _ in 0..8 {
+        grants.push(authorization(&relay, &relay.cookie, &relay.session).await);
+    }
+    let mut stream = relay.get("/fixture/burst/stream").send().await.unwrap();
+    assert_eq!(stream.status(), StatusCode::OK);
+    assert!(stream.chunk().await.unwrap().is_some());
+    pause.send_replace(true);
+
+    let sdp = format!(
+        "v=0\r\ns=-\r\nt=0 0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=fingerprint:{}\r\n{}",
+        fingerprint(),
+        "a=candidate:1 1 udp 2122260223 192.0.2.1 50000 typ host\r\n".repeat(270)
+    );
+    assert!(sdp.len() < leo_relay_protocol::direct::MAX_SIGNAL);
+    let prefix = format!(
+        "/api/installations/{}/direct",
+        grants[0].claims.installation_id
+    );
+    let mut signals = tokio::task::JoinSet::new();
+    for index in 0..32 {
+        let request = relay
+            .app
+            .authenticated(
+                &relay.cookie,
+                &relay.session,
+                Method::POST,
+                &format!("{prefix}/{}/signal", grants[index % 8].claims.connection_id),
+            )
+            .json(&json!({ "kind": "offer", "sdp": sdp }));
+        signals.spawn(async move { request.send().await.unwrap().status() });
+    }
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let mut renewals = tokio::task::JoinSet::new();
+    for grant in &grants {
+        let request = relay
+            .app
+            .authenticated(
+                &relay.cookie,
+                &relay.session,
+                Method::POST,
+                &format!("{prefix}/{}/renew", grant.claims.connection_id),
+            )
+            .json(&json!({ "fingerprint": fingerprint(), "versions": [4] }));
+        renewals.spawn(async move { request.send().await.unwrap().status() });
+    }
+    let busy = tokio::time::timeout(Duration::from_secs(2), renewals.join_next()).await;
+    // Read while the signaling socket is stalled: HTTP body polling grants stream
+    // credit independently, and must never fail because the direct queue is full.
+    let _ = tokio::time::timeout(Duration::from_millis(300), stream.chunk()).await;
+    pause.send_replace(false);
+    assert_eq!(
+        busy.unwrap().unwrap().unwrap(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a saturated direct queue must refuse control work without borrowing credit capacity"
+    );
+    while signals.join_next().await.is_some() {}
+    while renewals.join_next().await.is_some() {}
+    let mut received = 0;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while received < 8 * leo_relay_protocol::MAX_STREAM_CHUNK {
+            let chunk = stream
+                .chunk()
+                .await
+                .unwrap()
+                .expect("fallback stream was cut by signaling");
+            received += chunk.len();
+        }
+    })
+    .await
+    .expect("credited fallback stream must keep making progress");
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    drop(stream);
+    relay.close().await;
+    proxy.abort();
 }

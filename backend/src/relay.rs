@@ -546,6 +546,7 @@ async fn connected(
         return Err(Error::bad("Incompatible relay protocol."));
     }
 
+    let direct_supported = version >= leo_relay_protocol::direct::DIRECT_VERSION;
     let mut requests = JoinSet::new();
     let mut request_ids = HashMap::new();
     let mut active = HashMap::<String, (AbortHandle, std::sync::Arc<Semaphore>)>::new();
@@ -558,8 +559,10 @@ async fn connected(
         poll: true,
         ..NotificationSchedule::default()
     };
-    if version >= leo_relay_protocol::direct::DIRECT_VERSION {
-        direct.attach(output.clone());
+    let (direct_output, mut direct_frames) =
+        mpsc::channel::<Frame>(leo_relay_protocol::direct::MAX_DIRECT_QUEUE);
+    if direct_supported {
+        direct.attach(direct_output);
     }
     loop {
         if version >= 3 && notification_schedule.poll {
@@ -635,43 +638,61 @@ async fn connected(
                     .map_err(Error::internal)?;
             }
             Some(frame) = frames.recv() => {
-                socket.send(Message::Text(serde_json::to_string(&frame)?.into()))
-                    .await.map_err(Error::internal)?;
+                let message = serde_json::to_string(&frame)?;
+                socket
+                    .send(Message::Text(message.into()))
+                    .await
+                    .map_err(Error::internal)?;
+            }
+            Some(frame) = direct_frames.recv(), if direct_supported => {
+                let message = serde_json::to_string(&frame)?;
+                socket
+                    .send(Message::Text(message.into()))
+                    .await
+                    .map_err(Error::internal)?;
             }
             message = tokio::time::timeout(Duration::from_secs(45), socket.next()) => {
                 let message = message.map_err(|_| Error::unavailable("Relay heartbeat lost."))?;
                 match message {
                     Some(Ok(Message::Text(message))) => {
                         let request = match serde_json::from_str::<Frame>(&message)? {
-                            Frame::DirectKey { public_key } if version >= leo_relay_protocol::direct::DIRECT_VERSION => {
+                            Frame::DirectKey { public_key } if direct_supported => {
                                 direct.set_key(&identity.installation_id, &public_key)?;
                                 continue;
                             }
-                            Frame::DirectAuthorize { id, authorization } if version >= leo_relay_protocol::direct::DIRECT_VERSION => {
+                            Frame::DirectAuthorize { id, authorization } if direct_supported => {
                                 let accepted = direct.authorize(authorization, false);
                                 let acknowledgement = Frame::DirectAuthorized { id, accepted };
-                                socket.send(Message::Text(serde_json::to_string(&acknowledgement)?.into()))
-                                    .await.map_err(Error::internal)?;
+                                let message = serde_json::to_string(&acknowledgement)?;
+                                socket
+                                    .send(Message::Text(message.into()))
+                                    .await
+                                    .map_err(Error::internal)?;
                                 continue;
                             }
-                            Frame::DirectRenew { id, authorization } if version >= leo_relay_protocol::direct::DIRECT_VERSION => {
+                            Frame::DirectRenew { id, authorization } if direct_supported => {
                                 let accepted = direct.authorize(authorization, true);
                                 let acknowledgement = Frame::DirectAuthorized { id, accepted };
-                                socket.send(Message::Text(serde_json::to_string(&acknowledgement)?.into()))
-                                    .await.map_err(Error::internal)?;
+                                let message = serde_json::to_string(&acknowledgement)?;
+                                socket
+                                    .send(Message::Text(message.into()))
+                                    .await
+                                    .map_err(Error::internal)?;
                                 continue;
                             }
-                            Frame::DirectRevoke { scope } if version >= leo_relay_protocol::direct::DIRECT_VERSION => {
+                            Frame::DirectRevoke { scope } if direct_supported => {
                                 direct.revoke(scope);
                                 continue;
                             }
-                            Frame::DirectSignal { id, signal, request_id } if version >= leo_relay_protocol::direct::DIRECT_VERSION => {
+                            Frame::DirectSignal { id, signal, request_id } if direct_supported => {
                                 let accepted = direct.receive_signal(id, signal);
                                 if let Some(id) = request_id {
                                     let acknowledgement = Frame::DirectSignalAck { id, accepted };
                                     let message = serde_json::to_string(&acknowledgement)?;
-                                    socket.send(Message::Text(message.into()))
-                                        .await.map_err(Error::internal)?;
+                                    socket
+                                        .send(Message::Text(message.into()))
+                                        .await
+                                        .map_err(Error::internal)?;
                                 }
                                 continue;
                             }
