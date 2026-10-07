@@ -157,7 +157,7 @@ class Network:
                 if scenario == "symmetric-nat":
                     for port in [49001, 49002]:
                         self.exec(router, "iptables", "-t", "nat", "-A", "POSTROUTING",
-                                  "-o", external, "-p", "udp", "--dport", str(port),
+                                  "-o", external, "-d", "198.18.102.1", "-p", "udp", "--dport", str(port),
                                   "-j", "SNAT", "--to-source", f"{external_ip}:{port + 2000}")
                     # Every other UDP destination also gets a separate per-flow
                     # allocation, rather than endpoint-independent port reuse.
