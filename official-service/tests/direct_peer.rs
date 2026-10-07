@@ -876,3 +876,76 @@ async fn cancelling_then_reusing_a_request_id_keeps_new_stream_credit_and_tracki
     peer.close().await.unwrap();
     relay.close().await;
 }
+
+#[tokio::test]
+async fn signal_lag_keeps_the_peer_running_and_new_connections_work() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let stop = tokio_util::sync::CancellationToken::new();
+    let running = leo_agent_manager::direct::peer::run(
+        relay.router.clone(),
+        relay.direct.clone(),
+        leo_agent_manager::direct::peer::PeerConfig::default(),
+        stop.clone(),
+    );
+    tokio::pin!(running);
+    // Subscribe, then pause only the peer while the real tunnel delivers a burst.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut running)
+            .await
+            .is_err()
+    );
+    let fingerprint = format!("sha-256 {}", vec!["AB"; 32].join(":"));
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let grant: serde_json::Value = relay
+        .app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            &format!("/api/installations/{id}/direct/authorize"),
+        )
+        .json(&json!({ "fingerprint": fingerprint, "versions": [4] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let grant: DirectAuthorization = serde_json::from_value(grant["grant"].clone()).unwrap();
+    for _ in 0..70 {
+        signal_as(
+            &relay,
+            &relay.cookie,
+            &relay.session,
+            &grant,
+            &DirectSignal::Candidate {
+                candidate: String::new(),
+                sdp_mid: None,
+                sdp_m_line_index: None,
+            },
+        )
+        .await;
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut running)
+            .await
+            .is_err(),
+        "lag must not stop the installation peer"
+    );
+    tokio::select! {
+        () = &mut running => panic!("peer stopped after lag"),
+        () = async {
+            let (peer, channel, _) = client(&relay).await;
+            send_frame(channel.as_ref(), 1, &request("after-lag", "/api/chats")).await;
+            assert!(matches!(response(channel.as_ref()).await, Frame::Response(reply) if reply.status == 200));
+            peer.close().await.unwrap();
+        } => {}
+    }
+    stop.cancel();
+    running.await;
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    relay.close().await;
+}

@@ -211,7 +211,10 @@ pub async fn run(
                     }
                 }
                 Ok(DirectEvent::Revoked(_)) => {}
-                Err(_) => break,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    tracing::warn!("Direct signaling lagged; retaining installation peer");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             },
         }
     }
