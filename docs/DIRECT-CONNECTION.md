@@ -163,6 +163,6 @@ the configured origin and CSRF token:
 
 The installation receives its public verification key only from the authenticated
 tunnel. Ed25519 signatures cover the protocol context and every claim. Keys are
-per tunnel, so a reconnect cannot restore an old authorization. Nonces, leases,
-signal queues and access generations are bounded in-memory control state, not
-conversation storage. See [Version 4 limits and installation integration](INSTALLATION-RELAY.md#version-4-direct-authorization-and-signaling-100).
+per tunnel, so a reconnect cannot restore an old authorization. Nonces, leases and
+signal queues are bounded in-memory control state. Access generations also remain
+in memory for the lifetime of the tunnel; none of these are conversation storage. See [Version 4 limits and installation integration](INSTALLATION-RELAY.md#version-4-direct-authorization-and-signaling-100).
