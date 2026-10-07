@@ -1411,9 +1411,12 @@ async fn leaving_or_deleting_the_author_account_stops_their_schedules() {
             &format!("/api/installations/{id}/api/tasks"),
         )
         .json(&json!({
-            "name": "Member commitment", "prompt": "Scheduled work",
+            "name": "Member commitment",
+            "prompt": "Scheduled work",
             "agentId": leo_agent_manager::config::MAIN_AGENT_ID,
-            "cron": "0 9 * * *", "timezone": "UTC", "enabled": true,
+            "cron": "0 9 * * *",
+                "timezone": "UTC",
+                "enabled": true,
         }))
         .send()
         .await
@@ -1468,9 +1471,12 @@ async fn temporary_authority_outage_defers_schedules_without_disabling_them() {
         .installation
         .task(
             json!({
-                "name": "Owner commitment", "prompt": "Scheduled work",
+                "name": "Owner commitment",
+                "prompt": "Scheduled work",
                 "agentId": leo_agent_manager::config::MAIN_AGENT_ID,
-                "cron": "0 9 * * *", "timezone": "UTC", "enabled": true,
+                "cron": "0 9 * * *",
+                "timezone": "UTC",
+                "enabled": true,
             }),
             None,
         )
@@ -1644,5 +1650,111 @@ async fn author_policy_requires_the_current_machine_identity_and_never_browser_c
             .status(),
         StatusCode::UNAUTHORIZED
     );
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn author_removal_during_slow_preparation_prevents_late_scheduled_admission() {
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
+
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let (cookie, session) = member(&relay, "slow-author@example.test").await;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let mut task: Value = request(
+        &relay,
+        &cookie,
+        &session,
+        Method::POST,
+        &format!("/api/installations/{id}/api/tasks"),
+    )
+    .json(&json!({
+        "name": "Slow preparation",
+        "prompt": "Scheduled work",
+        "agentId": leo_agent_manager::config::MAIN_AGENT_ID,
+        "cron": "0 9 * * *",
+        "timezone": "UTC",
+        "enabled": true,
+    }))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    task["nextRun"] = 1.into();
+    relay
+        .installation
+        .store
+        .save("tasks", task, "fixture.time")
+        .await
+        .unwrap();
+    let directory = relay.installation.config.home.join(".agents/skills/block");
+    tokio::fs::create_dir_all(&directory).await.unwrap();
+    let fifo = directory.join("SKILL.md");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let installation = relay.installation.clone();
+    let scheduled = tokio::spawn(async move { installation.schedule().await });
+    // Writer open is a deterministic barrier: snapshot opened the real skill,
+    // but its read cannot finish until the writer closes after the withdrawal.
+    let mut writer = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::fs::OpenOptions::new().write(true).open(&fifo),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let removed = request(
+        &relay,
+        &relay.cookie,
+        &relay.session,
+        Method::DELETE,
+        &format!(
+            "/api/installations/{id}/sharing/members/{}",
+            session["account"]["id"].as_str().unwrap()
+        ),
+    )
+    .send()
+    .await
+    .unwrap();
+    writer
+        .write_all(b"---\nname: block\ndescription: Regression fixture.\n---\nScheduled work.\n")
+        .await
+        .unwrap();
+    drop(writer);
+    assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+    tokio::time::timeout(Duration::from_secs(5), scheduled)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let runs: Value = relay
+        .get("/runs")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        runs,
+        json!([]),
+        "A prepared snapshot is not work already admitted before removal"
+    );
+    let tasks: Vec<Value> = relay
+        .get("/tasks")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(tasks[0]["enabled"], false);
     relay.close().await;
 }

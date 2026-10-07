@@ -385,6 +385,24 @@ impl Service {
             .snapshot(self.get("tasks", task_id).await?, trigger)
             .await?;
         crate::nodes::require_node(&run["snapshot"]["agent"])?;
+
+        if trigger == "schedule" {
+            // Preparation may wait on filesystem I/O. It is not an admission:
+            // recheck the author's current commitment after all preparation.
+            let policy = self.synchronize_task_authors_locked().await?;
+            let task = &run["snapshot"]["task"];
+            let eligible = match policy {
+                Some(policy) => policy
+                    .grant(text(task, "authorId"))
+                    .is_some_and(|grant| task["authorAccessId"] == grant.access_id),
+                None => !task["authorId"].is_string(),
+            };
+
+            if !eligible {
+                return Err(Error::conflict("The task author's access ended."));
+            }
+        }
+
         let result = self
             .store
             .transaction(move |db| {
@@ -424,13 +442,18 @@ impl Service {
                     Some(format!("{}:{}", text(&task, "id"), task["nextRun"])),
                 )
                 .await
-                && error.status != 409
             {
-                let detail = json!({
-                    "taskId": task["id"],
-                    "error": error.message
-                });
-                self.store.audit("schedule.failed", detail).await?;
+                if error.status == 503 {
+                    return Ok(());
+                }
+
+                if error.status != 409 {
+                    let detail = json!({
+                        "taskId": task["id"],
+                        "error": error.message
+                    });
+                    self.store.audit("schedule.failed", detail).await?;
+                }
             }
             let next = next_occurrences(text(&task, "cron"), text(&task, "timezone"), now(), 1)?[0];
             self.store

@@ -15,6 +15,7 @@ impl Service {
         identity: Option<&InstallationIdentity>,
     ) -> Result<Value> {
         let _guard = self.task_author_lock.lock().await;
+
         let policy = self.synchronize_task_authors_locked().await?;
         let author = if let Some(policy) = &policy {
             let account = identity.map_or(policy.owner.account_id.as_str(), |identity| {
@@ -26,6 +27,7 @@ impl Service {
         } else {
             None
         };
+
         self.save_task(input, existing, author).await
     }
 
@@ -59,13 +61,16 @@ async fn apply(
         .transaction(move |db| {
             for mut task in db.list("tasks")? {
                 let previous = task.clone();
+
                 if !task["authorId"].is_string() {
                     task["authorId"] = owner.account_id.clone().into();
                     task["authorAccessId"] = owner.access_id.clone().into();
                 }
+
                 let current_access = grants.get(task["authorId"].as_str().unwrap());
                 let eligible =
                     current_access.is_some_and(|access| task["authorAccessId"] == access.as_str());
+
                 if !eligible {
                     task["authorRemoved"] = true.into();
                     if task["cron"].is_string() {
@@ -73,6 +78,7 @@ async fn apply(
                         task["nextRun"] = Value::Null;
                     }
                 }
+
                 if task != previous {
                     db.put("tasks", &task)?;
                     db.audit("task.author_reconciled", &json!({ "taskId": task["id"] }))?;
