@@ -1,5 +1,6 @@
 package dev.leo.manager.data
 
+import android.app.Notification
 import android.app.NotificationManager
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
@@ -68,8 +69,8 @@ abstract class NativePushCases {
             assertTrue(receiver.receive(message(first, 'a')))
             assertTrue(receiver.receive(message(second, 'b')))
             awaitNotificationCount(manager, 2)
-            assertEquals(2, manager.activeNotifications.size)
-            manager.activeNotifications.forEach {
+            assertEquals(2, deliveredNotifications(manager).size)
+            deliveredNotifications(manager).forEach {
                 assertEquals(
                     "Leo attend votre réponse",
                     it.notification.extras.getString("android.title"),
@@ -85,18 +86,27 @@ abstract class NativePushCases {
             awaitNotificationCount(manager, 3)
             accessible.set(listOf(first))
             assertFalse(receiver.receive(message(second, 'c')))
-            assertEquals(3, manager.activeNotifications.size)
+            assertEquals(3, deliveredNotifications(manager).size)
             vault.write(origin, null)
             assertFalse(receiver.receive(message(first, 'd')))
+            assertEquals(3, deliveredNotifications(manager).size)
             preferences.setEnabled(false)
         }
         manager.cancelAll()
     }
 
+    // Android may add a group summary after the third message; it is not another delivery.
+    private fun deliveredNotifications(manager: NotificationManager) =
+        manager.activeNotifications.filter {
+            it.notification.flags and Notification.FLAG_GROUP_SUMMARY == 0
+        }
+
     private suspend fun awaitNotificationCount(manager: NotificationManager, expected: Int) {
         try {
             kotlinx.coroutines.withTimeout(5000) {
-                while (manager.activeNotifications.size != expected) kotlinx.coroutines.delay(25)
+                while (deliveredNotifications(manager).size != expected) kotlinx.coroutines.delay(
+                    25
+                )
             }
         } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {
             val observed =
