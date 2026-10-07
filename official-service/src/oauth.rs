@@ -1,6 +1,6 @@
 use super::*;
 use axum::{
-    extract::{Path, Query},
+    extract::{Form, Path, Query},
     response::Redirect,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -305,22 +305,16 @@ async fn complete_callback(
         (subject, email)
     };
 
-    let session_response = complete_identity(
-        service,
-        name,
-        headers,
-        VerifiedIdentity {
-            subject,
-            email,
-            profile: identity,
-        },
-        link_account,
-        state.native.then_some(input.state.as_str()),
-    )
-    .await?;
+    let identity = VerifiedIdentity {
+        subject,
+        email,
+        profile: identity,
+    };
     if state.native {
-        return Ok(session_response);
+        return native_confirmation(service, name, &input.state, identity).await;
     }
+    let session_response =
+        complete_identity(service, name, headers, identity, link_account, None).await?;
 
     // Provider tokens are deliberately discarded: GitHub identification grants no agent access.
     let mut response = Redirect::to("/").into_response();
@@ -332,10 +326,110 @@ async fn complete_callback(
     Ok(response)
 }
 
+#[derive(Serialize, Deserialize)]
 struct VerifiedIdentity {
     subject: String,
     email: String,
     profile: Value,
+}
+
+// The browser which proved the GitHub identity must explicitly authorize the
+// Android handover. Possession of a launcher URL and polling secret is not consent.
+async fn native_confirmation(
+    service: &Service,
+    name: &str,
+    challenge: &str,
+    mut identity: VerifiedIdentity,
+) -> Result<Response, ApiError> {
+    identity.email = normalized_email(&identity.email).map_err(|_| rejected())?;
+    let displayed_email = identity
+        .email
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;");
+
+    // GitHub's public profile is unnecessary for its verified-email policy.
+    identity.profile = Value::Null;
+    let proof = random_token();
+    let browser = random_token();
+    let updated = query("UPDATE native_oauth_handovers SET pending_identity = $3, confirmation_digest = $4, confirmation_browser_digest = $5 WHERE id = $1 AND provider = $2 AND expires_at > clock_timestamp()")
+        .bind(challenge).bind(name)
+        .bind(serde_json::to_string(&identity).map_err(|_| unavailable())?)
+        .bind(digest(&proof)).bind(digest(&browser)).execute(&service.pool).await?;
+    if updated.rows_affected() != 1 {
+        return Err(rejected());
+    }
+    let html = format!(
+        "<!doctype html><html lang=fr><meta charset=utf-8><meta name=viewport content='width=device-width'>\
+         <title>Autoriser Leo pour Android</title>\
+         <h1>Autoriser l’application Leo pour Android</h1>\
+         <p>Compte GitHub vérifié : <strong>{displayed_email}</strong></p>\
+         <p>Cette autorisation connectera ou liera ce compte à l’application Leo pour Android qui a demandé la connexion.</p>\
+         <p role=alert>Ne confirmez pas un lien reçu d’une autre personne. Continuez uniquement si vous venez de demander cette connexion dans Leo sur votre appareil.</p>\
+         <form method=post action='/api/account/oauth/github/native/confirm'>\
+         <input type=hidden name=challenge value='{challenge}'>\
+         <input type=hidden name=proof value='{proof}'>\
+         <button type=submit>Autoriser sur cet appareil</button></form>\
+         <p>Pour annuler, fermez cet onglet sans autoriser.</p></html>"
+    );
+    Ok((
+        [
+            (
+                header::SET_COOKIE,
+                browser_cookie(service, "leo_native_confirmation", &browser, 300),
+            ),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+                    .into(),
+            ),
+            // Browser form POSTs need a non-null Origin for the exact-origin
+            // check. Send only the public origin, never the callback's query.
+            (header::REFERRER_POLICY, "strict-origin".into()),
+        ],
+        axum::response::Html(html),
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+pub(super) struct NativeConfirmation {
+    challenge: String,
+    proof: String,
+}
+
+pub(super) async fn native_confirm(
+    State(service): State<Service>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Form(input): Form<NativeConfirmation>,
+) -> Result<Response, ApiError> {
+    // The proof is in the page only; its independent HttpOnly cookie binds it
+    // to the browser that authenticated. Origin checking is provided by the router.
+    let row: Option<(String, Option<String>)> = query_as("UPDATE native_oauth_handovers SET confirmation_digest = NULL, confirmation_browser_digest = NULL WHERE id = $1 AND provider = $2 AND confirmation_digest = $3 AND confirmation_browser_digest = $4 AND pending_identity IS NOT NULL AND expires_at > clock_timestamp() RETURNING pending_identity, link_account")
+        .bind(&input.challenge).bind(&name).bind(digest(&input.proof))
+        .bind(digest(cookie_token(&headers, "leo_native_confirmation")))
+        .fetch_optional(&service.pool).await?;
+    let (identity, link_account) = row.ok_or_else(rejected)?;
+    let identity = serde_json::from_str(&identity).map_err(|_| rejected())?;
+    let mut response = complete_identity(
+        &service,
+        &name,
+        &headers,
+        identity,
+        link_account,
+        Some(&input.challenge),
+    )
+    .await?;
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        browser_cookie(&service, "leo_native_confirmation", "", 0)
+            .parse()
+            .map_err(|_| unavailable())?,
+    );
+    Ok(response)
 }
 
 // Both transports apply exactly the same verified-email and removed-method policy.
@@ -419,7 +513,7 @@ async fn complete_identity(
     }
 
     if let Some(id) = native {
-        let updated = query("UPDATE native_oauth_handovers SET ready_account = $2, method_subject = $3 WHERE id = $1 AND provider = $4 AND expires_at > now()")
+        let updated = query("UPDATE native_oauth_handovers SET ready_account = $2, method_subject = $3, pending_identity = NULL WHERE id = $1 AND provider = $4 AND expires_at > now()")
             .bind(id).bind(&account_id).bind(&subject).bind(name).execute(&mut *transaction).await?;
         if updated.rows_affected() != 1 {
             return Err(rejected());

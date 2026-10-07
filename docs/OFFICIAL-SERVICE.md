@@ -507,11 +507,23 @@ GitHub uses a Custom Tab because Credential Manager has no GitHub provider.
 `POST /api/account/oauth/github/start` with `{"native":true}` returns an official
 launcher URL and an exchange secret. The launcher sets the browser challenge
 cookie, then uses the existing PKCE authorization-code callback and `user:email`
-scope. Android polls `POST /api/account/oauth/github/native/finish` with the
+scope. The callback shows an explicit confirmation naming the verified account
+and **Leo for Android**, warning against links received from another person.
+Opening the launcher and completing GitHub authorization alone neither links
+the identity nor makes a Leo session available to the initiating device.
+`POST /api/account/oauth/github/native/confirm` consumes the form's one-use proof,
+bound to a separate HttpOnly browser cookie and protected by the exact official
+origin. Only confirmation applies the shared linking policy and releases the
+handover. The page forbids framing, scripts and foreign form destinations.
+This is explicit consent, not a cryptographic device attestation; only approve
+a flow you just initiated in Leo on your own device.
+Android polls `POST /api/account/oauth/github/native/finish` with the
 challenge and secret: 202 means pending; success creates the ordinary Leo session.
 The launcher and completed exchange are each one-use and expire in five minutes.
 The handover stores no session or provider access tokens, and authenticated linking
-remains bound to the original Leo session. Never log handover URLs or secrets.
+remains bound to the original Leo session, rechecked after consent. The additive
+consent migration invalidates older in-flight handovers. Never log handover URLs,
+confirmation proofs or secrets.
 
 Set `LEO_OFFICIAL_ANDROID_CERTIFICATES` to comma-separated SHA-256 fingerprints
 of approved APK signing certificates (colon-separated hex is accepted). Only
@@ -536,5 +548,6 @@ same registration; the current account receives events from every accessible
 installation. The existing recipient locks and membership checks also govern
 native sends, so member removal stops subsequent sends immediately. Android
 checks current access again before displaying delayed messages. FCM authorization
-errors and outages never delete device registrations; invalid/expired device
-tokens do.
+errors, outages and `INVALID_ARGUMENT` never delete device registrations: that
+error can indicate our payload rather than the device token. Only a 400/404 with
+the FCM-specific `UNREGISTERED` code removes an expired registration.

@@ -330,7 +330,10 @@ Google sign-in and passkey creation, sign-in and confirmation use Android
 Credential Manager. Passkeys require API 28 or later; email and Google remain
 available on API 26. The service supplies the Google client ID and one-use nonce.
 GitHub uses a Custom Tab because Credential Manager has no GitHub provider. Its
-one-use handover returns to the initiating app session; the browser receives no
+one-use handover requires an explicit browser confirmation naming the verified
+account and Leo for Android before returning to the initiating app session.
+Only approve a connection you just requested in Leo on your own device; opening
+a link sent by someone else must never authorize their app. The browser receives no
 Leo session or repository access. The official `user:email` scope, verified-email
 linking policy and passkey store are shared with the web client.
 

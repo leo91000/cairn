@@ -609,12 +609,45 @@ async fn native_github_handover_links_with_the_original_session_and_is_one_use()
         .split('\'')
         .next()
         .unwrap();
+    let confirmation_url = format!("{}/api/account/oauth/github/native/confirm", app.url);
+    for (supplied_cookie, supplied_proof) in [
+        (cookie.as_str(), proof),
+        ("leo_native_confirmation=another-browser", proof),
+        (confirmation_cookie.as_str(), "wrong-proof"),
+    ] {
+        let response = browser_client
+            .post(&confirmation_url)
+            .header("origin", &app.url)
+            .header("cookie", supplied_cookie)
+            .form(&[
+                ("challenge", start["challenge"].as_str().unwrap()),
+                ("proof", supplied_proof),
+            ])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    let foreign = browser_client
+        .post(&confirmation_url)
+        .header("origin", "https://attacker.example")
+        .header("cookie", &confirmation_cookie)
+        .form(&[
+            ("challenge", start["challenge"].as_str().unwrap()),
+            ("proof", proof),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        exchange().send().await.unwrap().status(),
+        StatusCode::ACCEPTED
+    );
+
     let confirm = || {
         browser_client
-            .post(format!(
-                "{}/api/account/oauth/github/native/confirm",
-                app.url
-            ))
+            .post(&confirmation_url)
             .header("origin", &app.url)
             .header("cookie", &confirmation_cookie)
             .form(&[

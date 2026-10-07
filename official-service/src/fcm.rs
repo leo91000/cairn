@@ -175,10 +175,7 @@ impl PushSender for FcmPushSender {
         let expired = body["error"]["details"].as_array().is_some_and(|details| {
             details.iter().any(|detail| {
                 detail["@type"] == "type.googleapis.com/google.firebase.fcm.v1.FcmError"
-                    && matches!(
-                        detail["errorCode"].as_str(),
-                        Some("UNREGISTERED" | "INVALID_ARGUMENT")
-                    )
+                    && detail["errorCode"] == "UNREGISTERED"
             })
         });
         Err(if device_error && expired {

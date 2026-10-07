@@ -240,6 +240,10 @@ pub async fn router_with_network_and_push(
             post(oauth::native_finish),
         )
         .route(
+            "/api/account/oauth/{name}/native/confirm",
+            post(oauth::native_confirm),
+        )
+        .route(
             "/api/account/passkeys/register/start",
             post(passkeys::register_start),
         )
