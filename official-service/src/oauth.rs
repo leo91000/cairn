@@ -211,11 +211,7 @@ pub(super) async fn start(
 
     let mut transaction = service.pool.begin().await?;
     if let Some(account) = &account_id {
-        query("SELECT id FROM leo_accounts WHERE id = $1 FOR NO KEY UPDATE")
-            .bind(account)
-            .execute(&mut *transaction)
-            .await?;
-        account::confirmed_session_on(&mut transaction, &headers).await?;
+        lock_and_confirm_linking_session(&mut transaction, &headers, account).await?;
     }
 
     query("INSERT INTO sign_in_challenges (id, kind, browser_digest, account_id, session_digest, state) VALUES ($1, $2, $3, $4, $5, $6)")
@@ -658,6 +654,20 @@ pub(super) struct NativeStart {
     native: bool,
 }
 
+async fn lock_and_confirm_linking_session(
+    connection: &mut sqlx_postgres::PgConnection,
+    headers: &HeaderMap,
+    account_id: &str,
+) -> Result<(), ApiError> {
+    query("SELECT id FROM leo_accounts WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(account_id)
+        .execute(&mut *connection)
+        .await?;
+    account::confirmed_session_on(connection, headers).await?;
+
+    Ok(())
+}
+
 async fn google_start(
     service: &Service,
     peer: SocketAddr,
@@ -676,11 +686,7 @@ async fn google_start(
     let nonce = random_token();
     let mut transaction = service.pool.begin().await?;
     if let Some(account_id) = &account {
-        query("SELECT id FROM leo_accounts WHERE id = $1 FOR NO KEY UPDATE")
-            .bind(account_id)
-            .execute(&mut *transaction)
-            .await?;
-        account::confirmed_session_on(&mut transaction, headers).await?;
+        lock_and_confirm_linking_session(&mut transaction, headers, account_id).await?;
     }
 
     query("INSERT INTO sign_in_challenges (id, kind, browser_digest, account_id, session_digest, state) VALUES ($1, 'google-native', $2, $3, $4, $5)")
