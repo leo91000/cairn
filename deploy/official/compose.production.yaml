@@ -39,6 +39,8 @@ services:
       LEO_OFFICIAL_DATABASE_URL: ${LEO_OFFICIAL_DATABASE_URL:?Set the private Postgres URL}
       LEO_OFFICIAL_ORIGIN: https://cairn.build
       LEO_OFFICIAL_LISTEN: 0.0.0.0:4311
+      LEO_OFFICIAL_STUN_LISTEN: 0.0.0.0:3478
+      LEO_OFFICIAL_STUN_URL: stun:cairn.build:3478
       LEO_OFFICIAL_WEB_DIR: /app/dist
       LEO_OFFICIAL_TRUSTED_PROXIES: ${LEO_OFFICIAL_TRUSTED_PROXIES:?Trust only the controlled proxy hops}
       LEO_INSTALLATION_IMAGE: ${LEO_INSTALLATION_IMAGE:?Set the paired installation digest}
@@ -53,6 +55,7 @@ services:
       LEO_OFFICIAL_ANDROID_CERTIFICATES: ${LEO_OFFICIAL_ANDROID_CERTIFICATES:-}
       LEO_OFFICIAL_FCM_SERVICE_ACCOUNT_JSON: ${LEO_OFFICIAL_FCM_SERVICE_ACCOUNT_JSON:-}
     expose: ['4311']
+    ports: ['3478:3478/udp']
     networks: [database, coolify]
     labels:
       traefik.enable: 'true'

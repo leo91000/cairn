@@ -56,6 +56,7 @@ web-push = { version = "0.11", default-features = false, features = [ "hyper-cli
 p256 = { version = "0.13", features = [ "pem" ] }
 jwt-simple = { version = "=0.12.17", default-features = false, features = [ "pure-rust" ] }
 ring = "0.17"
+crc32fast = "=1.5.1"
 
 [dev-dependencies]
 scrypt = "0.11"
@@ -64,3 +65,8 @@ webauthn-authenticator-rs = { version = "0.5.4", features = [ "softpasskey" ] }
 leo-agent-manager = { path = "../backend" }
 tempfile = "3"
 tokio-util = { version = "0.7", features = [ "rt" ] }
+webrtc = { version = "=0.21.0", default-features = false, features = [
+  "runtime-tokio",
+  "crypto-aws-lc-rs"
+] }
+bytes = "1"

@@ -1,5 +1,7 @@
 //! Direct authorization and signaling over the existing authenticated tunnel.
 //! The WebRTC peer consumes this interface; no anonymous local listener is added.
+pub mod peer;
+
 use crate::{
     auth::{InstallationIdentity, InstallationRole},
     error::{Error, Result},
@@ -54,6 +56,8 @@ struct State {
     authorizations: HashMap<String, Authorized>,
     output: Option<mpsc::Sender<Frame>>,
     signals: SignalBudget,
+    disabled: bool,
+    stun_url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -72,6 +76,46 @@ impl Default for DirectConnections {
 }
 
 impl DirectConnections {
+    pub(crate) fn configure_stun(&self, url: Option<String>) -> Result<()> {
+        if url
+            .as_ref()
+            .is_some_and(|value| !value.starts_with("stun:") || value.len() > 256)
+        {
+            return Err(Error::bad("Invalid official STUN configuration."));
+        }
+        self.state.lock().unwrap().stun_url = url;
+        Ok(())
+    }
+
+    pub(crate) fn stun_urls(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .stun_url
+            .clone()
+            .into_iter()
+            .collect()
+    }
+
+    pub(crate) fn set_enabled(&self, enabled: bool) {
+        self.state.lock().unwrap().disabled = !enabled;
+    }
+
+    pub(crate) fn pending_peer(
+        &self,
+        id: &str,
+    ) -> Option<(DirectAuthorization, CancellationToken)> {
+        let state = self.state.lock().unwrap();
+        let peer = state.authorizations.get(id)?;
+        (!peer.closed.is_cancelled()).then(|| (peer.authorization.clone(), peer.closed.clone()))
+    }
+
+    pub(crate) fn release_peer(&self, id: &str) {
+        if let Some(peer) = self.state.lock().unwrap().authorizations.remove(id) {
+            peer.closed.cancel();
+        }
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<DirectEvent> {
         self.events.subscribe()
     }
@@ -103,6 +147,9 @@ impl DirectConnections {
 
     pub(crate) fn authorize(&self, authorization: DirectAuthorization, renewal: bool) -> bool {
         let mut state = self.state.lock().unwrap();
+        if state.disabled {
+            return false;
+        }
         let Some(verifier) = state.verifier.as_mut() else {
             return false;
         };

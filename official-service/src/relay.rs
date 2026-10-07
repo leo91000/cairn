@@ -28,9 +28,7 @@ use std::{
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 
 // Keep ordinary API capacity available even when browsers hold idle SSE bodies.
-const RESERVED_API_SLOTS: usize = 8;
 const MAX_MCP_PER_GRANT: usize = 4;
-const MAX_STREAMS_PER_ACCOUNT: usize = 8;
 const MCP_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Pending {
@@ -85,6 +83,7 @@ impl Tunnel {
 
 #[derive(Clone, Default)]
 pub struct Relay {
+    stun_url: Arc<Mutex<Option<String>>>,
     connections: Arc<Mutex<HashMap<String, Arc<Tunnel>>>>,
     closing: Arc<AtomicBool>,
     mcp_slots: Arc<Mutex<HashMap<String, Weak<Semaphore>>>>,
@@ -107,6 +106,22 @@ struct StreamAccess {
 }
 
 impl Relay {
+    pub fn set_stun_url(&self, value: String) -> Result<(), &'static str> {
+        if !value.starts_with("stun:") || value.len() > 256 {
+            return Err("Invalid official STUN URL");
+        }
+        *self.stun_url.lock().unwrap() = Some(value);
+        Ok(())
+    }
+
+    fn stun_url(&self, origin: &str) -> String {
+        self.stun_url
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| crate::stun::url(origin).expect("validated official origin"))
+    }
+
     /// Close only this browser session; other devices keep their access.
     pub(super) fn revoke_session(&self, session: &str) {
         for tunnel in self.connections.lock().unwrap().values() {
@@ -332,7 +347,7 @@ async fn serve_socket(
         signaling_window: Mutex::new(SignalBudget::default()),
         signal_replies: Mutex::new(HashMap::new()),
         slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
-        stream_slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT - RESERVED_API_SLOTS)),
+        stream_slots: Arc::new(Semaphore::new(leo_relay_protocol::MAX_STREAMS)),
         public_slots: Arc::new(Semaphore::new(MAX_PUBLIC_IN_FLIGHT)),
         stop,
         installation_revoked: AtomicBool::new(false),
@@ -340,6 +355,7 @@ async fn serve_socket(
     if version >= DIRECT_VERSION {
         let frame = Frame::DirectKey {
             public_key: direct::public_key(&tunnel),
+            stun_url: Some(service.relay.stun_url(&service.origin)),
         };
         if socket
             .send(Message::Text(serde_json::to_string(&frame).unwrap().into()))
@@ -646,6 +662,11 @@ async fn serve_socket(
                     }
                     _ => false,
                 };
+                if !current
+                    && let Frame::DirectSignal { request_id: Some(id), .. } = &frame
+                    && let Some(reply) = tunnel.signal_replies.lock().unwrap().remove(id) {
+                    let _ = reply.send(false);
+                }
                 if current {
                     let message = serde_json::to_string(&frame).unwrap();
                     if socket.send(Message::Text(message.into())).await.is_err() {
@@ -1030,7 +1051,7 @@ async fn send(
             active_slots(
                 &service.relay.account_stream_slots,
                 &account,
-                MAX_STREAMS_PER_ACCOUNT,
+                leo_relay_protocol::MAX_STREAMS_PER_ACCOUNT,
             )
             .try_acquire_owned()
             .map_err(|_| {
@@ -1238,6 +1259,10 @@ async fn send(
             output.headers_mut().append(name, value);
         }
     }
+
+    output
+        .headers_mut()
+        .insert("x-leo-transport", HeaderValue::from_static("relay"));
 
     // Apply this even to JSON: peers can send ambiguous content types that
     // browsers interpret differently. Fetching API data is unaffected by CSP.

@@ -1,5 +1,6 @@
 //! Versioned frames for the authenticated, installation-initiated tunnel.
 //! Requests are independent: future streaming frames can share their request ID.
+pub mod data_channel;
 pub mod direct;
 
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,8 @@ pub const MAX_BODY: usize = 8_000_000;
 // Base64 expands by four bytes per three body bytes, plus envelope metadata.
 pub const MAX_FRAME: usize = MAX_BODY.div_ceil(3) * 4 + 65_536;
 pub const MAX_IN_FLIGHT: usize = 32;
+pub const MAX_STREAMS: usize = 24;
+pub const MAX_STREAMS_PER_ACCOUNT: usize = 8;
 // Public files never borrow authenticated API or live-stream capacity.
 pub const MAX_PUBLIC_IN_FLIGHT: usize = 4;
 pub const MAX_NOTIFICATION_IN_FLIGHT: usize = 4;
@@ -111,6 +114,8 @@ pub enum Frame {
     // Version 4: control plane only, on the authenticated installation tunnel.
     DirectKey {
         public_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stun_url: Option<String>,
     },
     DirectAuthorize {
         id: String,

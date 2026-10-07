@@ -22,7 +22,12 @@ test('authenticated browser and Rust client keep using the observed route under 
   const evidence: { route: string, operation: string, elapsedMs: number }[] = []
 
   async function rustRequest(path: string, cookie: string, status: number, marker?: string) {
-    const child = spawn(process.env.LEO_NETWORK_RUST_CLIENT!, ['http', '127.0.0.1:4398', path, String(status), ...(marker ? [marker] : [])], { stdio: ['pipe', 'pipe', 'pipe'] })
+    const directRead = status === 200 && marker !== undefined
+    const executable = directRead ? process.env.LEO_NETWORK_DIRECT_CLIENT! : process.env.LEO_NETWORK_RUST_CLIENT!
+    const args = directRead
+      ? ['http://localhost:4398', path.split('/')[3]!, path.slice(path.indexOf('/api/', 5)), marker]
+      : ['http', '127.0.0.1:4398', path, String(status), ...(marker ? [marker] : [])]
+    const child = spawn(executable, args, { stdio: ['pipe', 'pipe', 'pipe'] })
     let output = ''
     let diagnostic = ''
     child.stdout.on('data', chunk => output += chunk)
@@ -75,10 +80,11 @@ test('authenticated browser and Rust client keep using the observed route under 
     const sent = page.waitForResponse(response => response.url().includes(`/api/installations/${installationId}/api/`) && response.request().method() === 'POST' && response.url().endsWith('/messages'))
     const started = performance.now()
     await page.getByRole('button', { name: /^(Send|Queue)$/, exact: true }).click()
-    expect((await sent).status()).toBe(200)
+    const sentResponse = await sent
+    expect(sentResponse.status()).toBe(200)
     await expect(page.getByRole('heading', { name: marker, exact: true })).toBeVisible()
     // The real browser POST went through the official installation relay endpoint.
-    evidence.push({ route: 'relay', operation: 'browser-send', elapsedMs: performance.now() - started })
+    evidence.push({ route: (await sentResponse.headerValue('x-leo-transport'))!, operation: 'browser-send', elapsedMs: performance.now() - started })
     const cookies = await page.context().cookies()
     const cookie = cookies.map(value => `${value.name}=${value.value}`).join('; ')
     evidence.push({ ...await rustRequest(chatsPath, cookie, 200, marker), operation: 'rust-read' })
@@ -102,23 +108,33 @@ test('authenticated browser and Rust client keep using the observed route under 
         data: { id: randomUUID(), text: fresh },
       })
       expect(published.status()).toBe(200)
-      await resumed
+      const resumedResponse = await resumed
       await expect(page.getByText(fresh, { exact: true })).toBeVisible({ timeout: 30000 })
-      evidence.push({ route: 'relay', operation: 'stream-resume', elapsedMs: performance.now() - changed })
+      evidence.push({ route: (await resumedResponse.headerValue('x-leo-transport'))!, operation: 'stream-resume', elapsedMs: performance.now() - changed })
       expect(evidence.at(-1)!.elapsedMs).toBeLessThan(30000)
       evidence.push({ ...await rustRequest(chatsPath, cookie, 200, marker), operation: 'rust-after-change' })
       await expect(page.getByRole('heading', { name: marker, exact: true })).toBeVisible()
     }
 
-    for (const observation of evidence)
-      expect(observation.route, `${observation.operation}: actual route`).toBe(process.env.LEO_NETWORK_EXPECT_ROUTE || 'relay')
+    const output = process.env.LEO_NETWORK_OUTPUT!
+    const report = JSON.parse(await readFile(output, 'utf8'))
+    await writeFile(output, `${JSON.stringify({
+      ...report,
+      expectedRoute: process.env.LEO_NETWORK_EXPECT_ROUTE || 'relay',
+      expectedRustRoute: process.env.LEO_NETWORK_EXPECT_RUST_ROUTE,
+      observations: evidence,
+    })}\n`)
+
+    for (const observation of evidence) {
+      const expectedRoute = observation.operation.startsWith('rust-')
+        ? process.env.LEO_NETWORK_EXPECT_RUST_ROUTE
+        : process.env.LEO_NETWORK_EXPECT_ROUTE || 'relay'
+      expect(observation.route, `${observation.operation}: actual route`).toBe(expectedRoute)
+    }
 
     const logout = await page.request.post(`${url}/api/account/logout`, { headers: { 'origin': url, 'x-csrf-token': session.csrf }, data: {} })
     expect(logout.ok()).toBe(true)
     await rustRequest(chatsPath, cookie, 401)
-    const output = process.env.LEO_NETWORK_OUTPUT!
-    const report = JSON.parse(await readFile(output, 'utf8'))
-    await writeFile(output, `${JSON.stringify({ ...report, expectedRoute: process.env.LEO_NETWORK_EXPECT_ROUTE || 'relay', observations: evidence })}\n`)
   }
   finally {
     await browser?.close()

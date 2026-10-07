@@ -22,6 +22,21 @@ pub const SIGNING_CONTEXT: &[u8] = b"leo-direct-authorization-v4\0";
 pub const MAX_SIGNALS_PER_ACCOUNT: usize = 120;
 pub const MAX_SIGNALS_PER_TUNNEL: usize = 960;
 
+/// Keep outgoing SDK fingerprints in the control plane's canonical uppercase form.
+pub fn uppercase_sdp_fingerprints(sdp: &str) -> String {
+    sdp.lines()
+        .map(|line| {
+            if let Some(fingerprint) = line.strip_prefix("a=fingerprint:sha-256 ") {
+                format!("a=fingerprint:sha-256 {}", fingerprint.to_ascii_uppercase())
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n")
+        + "\r\n"
+}
+
 /// Account quotas use only verified claims. The global ceiling reserves owner capacity.
 pub struct SignalBudget {
     started: std::time::Instant,
@@ -308,10 +323,13 @@ fn sdp_line(line: &str) -> bool {
             | "t=0 0"
             | "a=ice-options:trickle"
             | "a=end-of-candidates"
+            | "a=extmap-allow-mixed"
             | "a=setup:actpass"
             | "a=setup:active"
             | "a=setup:passive"
             | "a=sendrecv"
+            | "a=msid-semantic:WMS"
+            | "a=msid-semantic:WMS *"
             | "a=msid-semantic: WMS"
             | "a=msid-semantic: WMS *"
     ) {

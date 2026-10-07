@@ -273,6 +273,21 @@ async fn run() -> Result<(), String> {
             None
         };
     let relay = Relay::default();
+    relay.set_stun_url(
+        env::var("LEO_OFFICIAL_STUN_URL")
+            .unwrap_or(leo_official_service::stun::url(&origin)?.to_owned()),
+    )?;
+    let stun_address = env::var("LEO_OFFICIAL_STUN_LISTEN").unwrap_or_else(|_| {
+        if loopback {
+            "127.0.0.1:0".into()
+        } else {
+            "0.0.0.0:3478".into()
+        }
+    });
+    let stun_socket = tokio::net::UdpSocket::bind(&stun_address)
+        .await
+        .map_err(|_| "Could not bind official STUN listener")?;
+    let stun = tokio::spawn(leo_official_service::stun::serve(stun_socket));
     let health_pool = pool.clone();
     let readiness = Arc::new(AtomicBool::new(false));
     let health_readiness = readiness.clone();
@@ -390,6 +405,7 @@ async fn run() -> Result<(), String> {
     .map_err(|_| "Official HTTP server stopped unexpectedly".to_owned());
     readiness_probe.abort();
     maintenance.abort();
+    stun.abort();
     result
 }
 

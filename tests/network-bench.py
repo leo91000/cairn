@@ -16,7 +16,7 @@ import uuid
 from pathlib import Path
 
 SCENARIOS = ["same-lan", "nat-client", "nat-installation", "nat-both",
-             "udp-blocked", "symmetric-nat", "network-change", "packet-loss"]
+             "udp-blocked", "symmetric-nat", "symmetric-client", "same-server", "network-change", "packet-loss"]
 
 
 def run(*args):
@@ -91,36 +91,59 @@ class Network:
         run("ip", "-n", namespace, "link", "set", name, "up")
 
     def close(self):
-        # The Playwright worker and official fixture are outside the namespaces.
-        # Terminate the whole group even if its pnpm parent has already exited.
-        for group in self.groups:
+        errors = []
+
+        def signal_group(group, selected):
             try:
-                os.killpg(group, signal.SIGTERM)
+                os.killpg(group, selected)
             except ProcessLookupError:
                 pass
-        for child in self.children:
-            if child.poll() is None:
-                child.terminate()
+            except OSError:
+                errors.append("process group " + str(group))
+
+        def cleanup_command(*command):
+            try:
+                return subprocess.run(["sudo", "-n", *command], capture_output=True, text=True)
+            except OSError:
+                errors.append("cleanup command " + command[0])
+                return None
+
+        # Always attempt every resource, including partial setup and failed kills.
+        for group in self.groups:
+            signal_group(group, signal.SIGTERM)
         for child in self.children:
             try:
+                if child.poll() is None:
+                    child.terminate()
                 child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait()
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    child.kill()
+                    child.wait(timeout=2)
+                except (OSError, subprocess.TimeoutExpired):
+                    errors.append("child process " + str(child.pid))
         for group in self.groups:
-            try:
-                os.killpg(group, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            signal_group(group, signal.SIGKILL)
         for namespace in reversed(self.namespaces):
-            for pid in run("ip", "netns", "pids", namespace).split():
-                subprocess.run(["sudo", "-n", "kill", "-KILL", pid],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            run("ip", "netns", "del", namespace)
+            pids = cleanup_command("ip", "netns", "pids", namespace)
+            if pids:
+                for pid in pids.stdout.split():
+                    cleanup_command("kill", "-KILL", pid)
+            cleanup_command("ip", "netns", "del", namespace)
         for link in reversed(self.links):
-            # A veth moved into a deleted namespace has already disappeared.
-            subprocess.run(["sudo", "-n", "ip", "link", "del", link],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # Moved veth links may already have disappeared with their namespace.
+            cleanup_command("ip", "link", "del", link)
+        namespaces = cleanup_command("ip", "netns", "list")
+        links = cleanup_command("ip", "-j", "link", "show")
+        if namespaces is None or namespaces.returncode or links is None or links.returncode:
+            errors.append("could not verify resource cleanup")
+        else:
+            remaining = {line.split()[0] for line in namespaces.stdout.splitlines()}
+            errors.extend(name for name in self.namespaces if name in remaining)
+            remaining_links = {link["ifname"] for link in json.loads(links.stdout)}
+            errors.extend(name for name in self.links if name in remaining_links)
+        if errors:
+            raise RuntimeError("Network cleanup incomplete: " + ", ".join(errors))
 
     def setup(self, scenario):
         internet = self.namespace("internet")
@@ -151,10 +174,14 @@ class Network:
             address = f"10.102.{index}.2"
             self.address(participant, endpoint, address + "/24")
             run("ip", "-n", participant, "route", "add", "default", "via", f"10.102.{index}.1")
-            run("ip", "-n", internet, "route", "add", f"10.102.{index}.0/24", "via", external_ip)
-            nat = scenario in {"nat-both", "symmetric-nat"} or scenario == "nat-" + role
+            nat = scenario in {"nat-both", "symmetric-nat", "symmetric-client", "same-server"} or scenario == "nat-" + role
+            # Private host candidates behind NAT are not internet-routable.
+            # Routing them here would create inbound conntrack entries before
+            # hole punching and falsely classify the reverse flow as a reply.
+            if not nat:
+                run("ip", "-n", internet, "route", "add", f"10.102.{index}.0/24", "via", external_ip)
             if nat:
-                if scenario == "symmetric-nat":
+                if scenario == "symmetric-nat" or scenario == "symmetric-client" and role == "client":
                     for port in [49001, 49002]:
                         self.exec(router, "iptables", "-t", "nat", "-A", "POSTROUTING",
                                   "-o", external, "-d", "198.18.102.1", "-p", "udp", "--dport", str(port),
@@ -165,6 +192,8 @@ class Network:
                               "-o", external, "-p", "udp", "-j", "MASQUERADE", "--random-fully")
                 self.exec(router, "iptables", "-t", "nat", "-A", "POSTROUTING",
                           "-o", external, "-j", "MASQUERADE")
+                self.exec(router, "iptables", "-A", "INPUT", "-i", external, "-p", "udp",
+                          "-m", "conntrack", "--ctstate", "NEW", "-j", "DROP")
                 self.exec(router, "iptables", "-A", "FORWARD", "-i", external,
                           "-m", "conntrack", "--ctstate", "NEW", "-j", "DROP")
             if scenario == "udp-blocked":
@@ -242,8 +271,11 @@ def main():
     parser.add_argument("scenario", choices=SCENARIOS)
     parser.add_argument("--probe-only", action="store_true")
     parser.add_argument("--expect-route", choices=["direct", "relay"], default="relay")
+    parser.add_argument("--expect-rust-route", choices=["direct", "relay"])
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.expect_rust_route is None:
+        args.expect_rust_route = "relay" if args.scenario in {"udp-blocked", "symmetric-nat", "symmetric-client"} else "direct"
     def interrupted(_signal, _frame):
         raise SystemExit("Network bench interrupted")
     signal.signal(signal.SIGTERM, interrupted)
@@ -265,15 +297,41 @@ def main():
             network.setup(args.scenario)
             for port in [49001, 49002]:
                 network.listen(binary, network.internet, "198.18.102.1", port)
+            network.stun_address = "198.18.102.1:3478"
+            stun_namespace = network.internet
+            listen_address = network.stun_address
+            if args.scenario == "same-server":
+                # Official STUN is a second container on the installation host.
+                router = network.participants["installation"]["router"]
+                stun_namespace = network.namespace("official-stun")
+                local, remote = network.pair(router, stun_namespace, "s")
+                run("ip", "-n", router, "link", "set", local, "master", "lan")
+                network.address(stun_namespace, remote, "10.102.2.3/24")
+                run("ip", "-n", stun_namespace, "route", "add", "default", "via", "10.102.2.1")
+                network.exec(router, "iptables", "-t", "nat", "-A", "PREROUTING", "-d", "198.18.102.3", "-p", "udp", "--dport", "3478", "-j", "DNAT", "--to-destination", "10.102.2.3:3478")
+                network.exec(router, "iptables", "-t", "nat", "-A", "POSTROUTING", "-o", "lan", "-s", "10.102.2.0/24", "-d", "10.102.2.3", "-p", "udp", "--dport", "3478", "-j", "SNAT", "--to-source", "10.102.2.1")
+                network.exec(router, "iptables", "-I", "FORWARD", "1", "-d", "10.102.2.3", "-p", "udp", "--dport", "3478", "-j", "ACCEPT")
+                network.stun_address = "198.18.102.3:3478"
+                listen_address = "10.102.2.3:3478"
+            ready = Path(directory) / "stun-ready"
+            stun = network.spawn(stun_namespace, os.sys.executable, str(Path(__file__).resolve()),
+                                 "stun-server", listen_address, str(ready))
+            wait_ready(ready, stun, "STUN listener before host masquerading")
             report = {"scenario": args.scenario, "probe": network.probe(binary, "client"),
                       "installationProbe": network.probe(binary, "installation")}
             expected_received = 0 if args.scenario == "udp-blocked" else 8 if args.scenario == "packet-loss" else 10
             for role, probe in [("client", report["probe"]), ("installation", report["installationProbe"])]:
-                expected_nat = args.scenario in {"nat-both", "symmetric-nat"} or args.scenario == "nat-" + role
+                expected_nat = args.scenario in {"nat-both", "symmetric-nat", "symmetric-client", "same-server"} or args.scenario == "nat-" + role
                 if probe["received"] != expected_received or probe["translated"] != expected_nat:
                     raise RuntimeError(f"{role}: the observed packets do not match {args.scenario}: {probe}")
-                if args.scenario == "symmetric-nat" and probe["mappings"] != 2:
+                if (args.scenario == "symmetric-nat" or args.scenario == "symmetric-client" and role == "client") and probe["mappings"] != 2:
                     raise RuntimeError(f"{role}: destination-specific NAT mappings were not observed")
+            if args.scenario != "udp-blocked":
+                report["stun"] = {
+                    role: json.loads(network.exec(network.participants[role]["namespace"], os.sys.executable,
+                        str(Path(__file__).resolve()), "stun-probe", network.stun_address))
+                    for role in ["client", "installation"]
+                }
             if args.scenario in {"same-lan", "udp-blocked"}:
                 installation = network.participants["installation"]
                 for port in [49011, 49012]:
@@ -320,9 +378,16 @@ def browser(network, binary, directory, args, report):
         path.chmod(0o700)
         return str(path)
 
+    env["LEO_OFFICIAL_STUN_URL"] = "stun:" + network.stun_address
+    if args.scenario == "same-server":
+        env["LEO_DIRECT_PUBLIC_IP"] = "198.18.102.3"
+    # The real official Binding responder is independently tested on UDP. This
+    # address-discovery fixture belongs before the host-facing masquerade.
+    env["LEO_NETWORK_DIRECT_CLIENT"] = wrapper(
+        "direct-client", "client", str(Path("target/debug/examples/network_direct_client").resolve()), "")
     env["LEO_NETWORK_INSTALLATION_BINARY"] = wrapper(
         "installation", "installation", str(Path("target/debug/leo").resolve()),
-        "DATA_DIR,AGENT_HOME,WORKSPACE_ROOTS,NODE_ENV,WORKER_ENABLED,HOST,PORT,LEO_OFFICIAL_ORIGIN,LEO_INSTALLATION_CLAIM_CODE,LEO_INSTALLATION_NAME")
+        "DATA_DIR,AGENT_HOME,WORKSPACE_ROOTS,NODE_ENV,WORKER_ENABLED,HOST,PORT,LEO_OFFICIAL_ORIGIN,LEO_INSTALLATION_CLAIM_CODE,LEO_INSTALLATION_NAME,LEO_DIRECT_ENABLED,LEO_DIRECT_STUN_URLS,LEO_DIRECT_PUBLIC_IP")
     # sudo closes inherited descriptors, including Playwright's CDP pipes (3/4).
     # Transfer those descriptors over a private Unix socket after entering the
     # namespace; browser traffic still traverses the real network topology.
@@ -335,6 +400,7 @@ def browser(network, binary, directory, args, report):
     env["LEO_NETWORK_LOCAL_CLIENT"] = wrapper("local-client", "installation", binary)
     env["LEO_NETWORK_SCENARIO"] = args.scenario
     env["LEO_NETWORK_EXPECT_ROUTE"] = args.expect_route
+    env["LEO_NETWORK_EXPECT_RUST_ROUTE"] = args.expect_rust_route
     env["LEO_NETWORK_OUTPUT"] = str(args.output.resolve())
     env["LEO_NETWORK_FIXTURE_DIRECTORY"] = str(directory)
     env["LEO_NETWORK_PLAYWRIGHT_OUTPUT"] = str(args.output.parent.resolve() / (args.scenario + "-playwright"))
@@ -349,6 +415,48 @@ def browser(network, binary, directory, args, report):
     network.groups.append(process.pid)
     if process.wait():
         raise RuntimeError("Authenticated network scenario failed; see Playwright diagnostics")
+
+
+def stun_server(address, ready):
+    host, port = address.split(":")
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as listener:
+        listener.bind((host, int(port)))
+        Path(ready).touch()
+        while True:
+            packet, peer = listener.recvfrom(2048)
+            if len(packet) < 20 or packet[:2] != b"\x00\x01" or packet[4:8] != b"\x21\x12\xa4\x42":
+                continue
+            mapped = struct.pack("!BBHI", 0, 1, peer[1] ^ 0x2112,
+                                 int.from_bytes(socket.inet_aton(peer[0]), "big") ^ 0x2112A442)
+            attribute = struct.pack("!HH", 0x0020, len(mapped)) + mapped
+            response = struct.pack("!HH", 0x0101, len(attribute)) + packet[4:20] + attribute
+            listener.sendto(response, peer)
+
+
+def stun_probe(address):
+    host, port = address.split(":")
+    transaction = os.urandom(12)
+    request = struct.pack("!HHI", 1, 0, 0x2112A442) + transaction
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+        client.settimeout(0.3)
+        for _ in range(10):
+            client.sendto(request, (host, int(port)))
+            try:
+                response, source = client.recvfrom(2048)
+            except TimeoutError:
+                continue
+            if source != (host, int(port)) or response[8:20] != transaction:
+                continue
+            kind, length = struct.unpack("!HH", response[20:24])
+            if kind != 0x0020 or length != 8:
+                raise RuntimeError("STUN XOR-MAPPED-ADDRESS missing")
+            _, family, mapped_port, mapped_ip = struct.unpack("!BBHI", response[24:32])
+            if family != 1:
+                raise RuntimeError("IPv4 STUN mapping expected")
+            print(json.dumps({"address": socket.inet_ntoa((mapped_ip ^ 0x2112A442).to_bytes(4, "big")),
+                              "port": mapped_port ^ 0x2112, "localPort": client.getsockname()[1]}))
+            return
+    raise RuntimeError("STUN mapping unavailable")
 
 
 def loss_router(external, ready):
@@ -431,7 +539,11 @@ def change_network(namespace, link, ready_file):
 
 
 if __name__ == "__main__":
-    if len(os.sys.argv) in {4, 5} and os.sys.argv[1] == "forward":
+    if len(os.sys.argv) == 4 and os.sys.argv[1] == "stun-server":
+        stun_server(*os.sys.argv[2:4])
+    elif len(os.sys.argv) == 3 and os.sys.argv[1] == "stun-probe":
+        stun_probe(os.sys.argv[2])
+    elif len(os.sys.argv) in {4, 5} and os.sys.argv[1] == "forward":
         asyncio.run(forward(int(os.sys.argv[2]), os.sys.argv[3], os.sys.argv[4] if len(os.sys.argv) == 5 else None))
     elif len(os.sys.argv) == 4 and os.sys.argv[1] == "loss-router":
         loss_router(os.sys.argv[2], os.sys.argv[3])

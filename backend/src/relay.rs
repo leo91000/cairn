@@ -1,4 +1,6 @@
 //! The installation owns the outbound connection and dispatches through its real HTTP router.
+pub(crate) mod application;
+
 use crate::{
     auth::{InstallationIdentity, InstallationRole},
     error::{Error, Result},
@@ -421,14 +423,37 @@ pub async fn connect(
     service: std::sync::Arc<crate::service::Service>,
     stop: CancellationToken,
 ) -> Result<()> {
-    connect_with_direct(
-        directory,
-        router,
-        service,
-        stop,
-        crate::direct::DirectConnections::default(),
-    )
-    .await
+    let config = crate::direct::peer::PeerConfig::load().unwrap_or_else(|_| {
+        tracing::warn!("Invalid direct configuration; retaining relay with direct disabled");
+        crate::direct::peer::PeerConfig {
+            enabled: false,
+            stun_urls: Vec::new(),
+            public_ip: None,
+        }
+    });
+    connect_with_peer(directory, router, service, stop, config).await
+}
+
+pub async fn connect_with_peer(
+    directory: PathBuf,
+    router: Router,
+    service: std::sync::Arc<crate::service::Service>,
+    stop: CancellationToken,
+    config: crate::direct::peer::PeerConfig,
+) -> Result<()> {
+    let direct = crate::direct::DirectConnections::default();
+    direct.set_enabled(config.enabled);
+    let peer_stop = stop.child_token();
+    let peers = tokio::spawn(crate::direct::peer::run(
+        router.clone(),
+        direct.clone(),
+        config,
+        peer_stop.clone(),
+    ));
+    let result = connect_with_direct(directory, router, service, stop, direct).await;
+    peer_stop.cancel();
+    let _ = peers.await;
+    result
 }
 
 pub async fn connect_with_direct(
@@ -656,7 +681,8 @@ async fn connected(
                 match message {
                     Some(Ok(Message::Text(message))) => {
                         let request = match serde_json::from_str::<Frame>(&message)? {
-                            Frame::DirectKey { public_key } if direct_supported => {
+                            Frame::DirectKey { public_key, stun_url } if direct_supported => {
+                                direct.configure_stun(stun_url)?;
                                 direct.set_key(&identity.installation_id, &public_key)?;
                                 continue;
                             }

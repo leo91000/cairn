@@ -78,7 +78,7 @@ jobs:
           restore-keys: rust-${{ runner.os }}-1.97.1-debug0-
       - name: Build the browser-test backend and frontend
         run: |
-          cargo build --locked --bin leo --example browser_fixture --features ublk
+          cargo build --locked --bin leo --example browser_fixture --example network_direct_client --features ublk
           cargo build --locked -p leo-official-service --bin leo-official
           pnpm exec vite build
       - uses: actions/upload-artifact@v7.0.1
@@ -88,6 +88,7 @@ jobs:
             target/debug/leo
             target/debug/leo-official
             target/debug/examples/browser_fixture
+            target/debug/examples/network_direct_client
           retention-days: 1
       - uses: actions/upload-artifact@v7.0.1
         with:
@@ -144,7 +145,7 @@ jobs:
           cargo clippy --locked --workspace --all-targets --features ublk-prototype -- -D warnings
           node scripts/test-backend.mjs --features ublk-prototype
           # Also compile the browser-test binaries into the cache that later build jobs restore.
-          cargo build --locked --bin leo --example browser_fixture --features ublk
+          cargo build --locked --bin leo --example browser_fixture --example network_direct_client --features ublk
           cargo build --locked -p leo-official-service --bin leo-official
       - name: Validate node supervisor and S3 recovery
         run: |
@@ -228,7 +229,7 @@ jobs:
         with:
           name: browser-backend
           path: target/debug/
-      - run: chmod +x target/debug/leo target/debug/leo-official target/debug/examples/browser_fixture
+      - run: chmod +x target/debug/leo target/debug/leo-official target/debug/examples/network_direct_client target/debug/examples/browser_fixture
       - name: Install Postgres client for official account fixtures
         if: startsWith(matrix.group, 'journeys')
         run: apt-get update -qq && apt-get install -y --no-install-recommends postgresql-client
@@ -288,18 +289,20 @@ jobs:
         with:
           name: browser-backend
           path: target/debug/
-      - run: chmod +x target/debug/leo target/debug/leo-official
+      - run: chmod +x target/debug/leo target/debug/leo-official target/debug/examples/network_direct_client
       - name: Validate real network topology and authenticated sessions
         run: |
+          python3 tests/network_probe_test.py
           python3 tests/network_bench_test.py
-          for scenario in same-lan nat-client nat-installation nat-both udp-blocked symmetric-nat network-change packet-loss; do
+          python3 tests/stun_docker_test.py
+          for scenario in same-lan nat-client nat-installation nat-both udp-blocked symmetric-nat symmetric-client same-server network-change packet-loss; do
             python3 tests/network-bench.py "$scenario" --output "test-results/network/$scenario.json"
           done
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
           name: direct-relay-network-evidence
-          path: test-results/network/*.json
+          path: test-results/network/
           retention-days: 14
   image:
     # The exact-image smoke test uses the official binary and frontend from the

@@ -251,7 +251,11 @@ async fn issue(
             "Installation access revoked",
         ));
     }
-    Ok(Json(json!({ "available": true, "grant": authorization })))
+    Ok(Json(json!({
+        "available": true,
+        "grant": authorization,
+        "iceServers": [{ "urls": [service.relay.stun_url(&service.origin)] }],
+    })))
 }
 
 fn failed_authorization(tunnel: &Tunnel, id: &str, renewal: bool) {

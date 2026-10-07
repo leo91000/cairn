@@ -1,5 +1,6 @@
 """Public CLI contract: packets cross the actual simulated network (no KVM)."""
 import json
+import importlib.util
 import subprocess
 import tempfile
 import unittest
@@ -15,6 +16,21 @@ class NetworkBenchTest(unittest.TestCase):
                  "--probe-only", "--output", str(output)], check=True,
             )
             return json.loads(output.read_text())
+
+    def test_cleanup_continues_after_a_namespace_has_disappeared(self):
+        spec = importlib.util.spec_from_file_location("network_bench", "tests/network-bench.py")
+        bench = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bench)
+        network = bench.Network()
+        try:
+            first = network.namespace("first")
+            second = network.namespace("second")
+            bench.run("ip", "netns", "del", second)
+            network.close()
+            self.assertNotIn(first, bench.run("ip", "netns", "list"))
+        finally:
+            for namespace in network.namespaces:
+                subprocess.run(["sudo", "-n", "ip", "netns", "del", namespace], capture_output=True)
 
     def test_same_lan_delivers_udp_between_participants(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -40,6 +56,8 @@ class NetworkBenchTest(unittest.TestCase):
                 self.assertEqual(report["probe"]["received"], 10)
                 self.assertEqual(report["probe"]["translated"], client)
                 self.assertEqual(report["installationProbe"]["translated"], installation)
+                self.assertEqual(report["stun"]["client"]["address"], "198.18.102.2" if client else "10.102.1.2")
+                self.assertEqual(report["stun"]["installation"]["address"], "198.18.102.3" if installation else "10.102.2.2")
 
     def test_udp_blocked_cannot_deliver_a_datagram(self):
         report = self.probe("udp-blocked")
@@ -53,6 +71,11 @@ class NetworkBenchTest(unittest.TestCase):
             self.assertEqual(probe["received"], 10)
             self.assertTrue(probe["translated"])
             self.assertEqual(probe["mappings"], 2)
+
+    def test_same_server_stun_preserves_external_client_but_detects_hairpin_gateway(self):
+        report = self.probe("same-server")
+        self.assertEqual(report["stun"]["client"]["address"], "198.18.102.2")
+        self.assertEqual(report["stun"]["installation"]["address"], "10.102.2.1")
 
     def test_packet_loss_is_deterministic(self):
         for _ in range(2):
