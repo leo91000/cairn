@@ -46,21 +46,45 @@ impl SignalBudget {
         if self.started.elapsed() >= std::time::Duration::from_secs(60) {
             *self = Self::default();
         }
-        let count = self.accounts.get(&claims.account_id).copied().unwrap_or(0);
-        if count >= MAX_SIGNALS_PER_ACCOUNT
+
+        let account_count = self.accounts.get(&claims.account_id).copied().unwrap_or(0);
+        let member_capacity_reached = claims.role == Role::Member
+            && self.members >= MAX_SIGNALS_PER_TUNNEL - MAX_SIGNALS_PER_ACCOUNT;
+        if account_count >= MAX_SIGNALS_PER_ACCOUNT
             || self.total >= MAX_SIGNALS_PER_TUNNEL
-            || claims.role == Role::Member
-                && self.members >= MAX_SIGNALS_PER_TUNNEL - MAX_SIGNALS_PER_ACCOUNT
+            || member_capacity_reached
         {
             return false;
         }
+
         *self.accounts.entry(claims.account_id.clone()).or_default() += 1;
         self.total += 1;
         if claims.role == Role::Member {
             self.members += 1;
         }
+
         true
     }
+}
+
+/// Both peers enforce this policy independently using their verified authorizations.
+pub fn has_direct_capacity<'a>(
+    candidate: &DirectClaims,
+    existing: impl Iterator<Item = &'a DirectClaims>,
+) -> bool {
+    let mut connection_count = 0;
+    let mut member_count = 0;
+    let mut account_count = 0;
+
+    for claims in existing {
+        connection_count += 1;
+        member_count += usize::from(claims.role == Role::Member);
+        account_count += usize::from(claims.account_id == candidate.account_id);
+    }
+
+    connection_count < MAX_DIRECT_CONNECTIONS
+        && account_count < MAX_DIRECT_PER_ACCOUNT
+        && (candidate.role == Role::Owner || member_count < MAX_DIRECT_MEMBER_CONNECTIONS)
 }
 
 pub fn until_expiry(deadline: u64) -> std::time::Duration {

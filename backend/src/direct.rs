@@ -8,8 +8,7 @@ use leo_relay_protocol::{
     Frame, Role,
     direct::{
         DirectAuthorization, DirectClaims, DirectRevocation, DirectSignal, DirectVerifier,
-        MAX_DIRECT_CONNECTIONS, MAX_DIRECT_MEMBER_CONNECTIONS, MAX_DIRECT_PER_ACCOUNT,
-        SignalBudget, unix_time,
+        SignalBudget, has_direct_capacity, unix_time,
     },
 };
 use std::{
@@ -107,12 +106,14 @@ impl DirectConnections {
         let Ok(claims) = verifier.verify(&authorization) else {
             return false;
         };
+
         state.authorizations.retain(|_, lease| {
             if lease.authorization.claims.expires_at <= unix_time() {
                 lease.closed.cancel();
             }
             !lease.closed.is_cancelled()
         });
+
         let existing = state.authorizations.get(&claims.connection_id);
         let (closed, connected) = if renewal {
             let Some(existing) = existing else {
@@ -129,26 +130,20 @@ impl DirectConnections {
             }
             (existing.closed.clone(), existing.connected)
         } else {
-            if existing.is_some()
-                || state.authorizations.len() >= MAX_DIRECT_CONNECTIONS
-                || claims.role == Role::Member
-                    && state
-                        .authorizations
-                        .values()
-                        .filter(|lease| lease.authorization.claims.role == Role::Member)
-                        .count()
-                        >= MAX_DIRECT_MEMBER_CONNECTIONS
-                || state
+            let capacity_available = has_direct_capacity(
+                &claims,
+                state
                     .authorizations
                     .values()
-                    .filter(|lease| lease.authorization.claims.account_id == claims.account_id)
-                    .count()
-                    >= MAX_DIRECT_PER_ACCOUNT
-            {
+                    .map(|lease| &lease.authorization.claims),
+            );
+            if existing.is_some() || !capacity_available {
                 return false;
             }
+
             (CancellationToken::new(), false)
         };
+
         let id = claims.connection_id.clone();
         let nonce = claims.nonce.clone();
         let deadline = claims.expires_at;

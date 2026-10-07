@@ -7,8 +7,7 @@ use axum::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use leo_relay_protocol::direct::{
     DIRECT_TTL, DIRECT_VERSION, DirectAuthorization, DirectClaims, DirectSignal,
-    MAX_DIRECT_CONNECTIONS, MAX_DIRECT_MEMBER_CONNECTIONS, MAX_DIRECT_PER_ACCOUNT, signing_bytes,
-    unix_time, valid_fingerprint,
+    has_direct_capacity, signing_bytes, unix_time, valid_fingerprint,
 };
 use ring::signature::KeyPair;
 use serde::Deserialize;
@@ -69,6 +68,7 @@ async fn issue(
         30,
     )
     .await?;
+
     let tunnel = service
         .relay
         .connections
@@ -85,6 +85,7 @@ async fn issue(
             .get(&account)
             .unwrap_or(&0)
     });
+
     let role = installations::role(service, installation, &account).await?;
     if input.versions.len() > 4 || !valid_fingerprint(&input.fingerprint) {
         return Err(ApiError::Http(
@@ -98,12 +99,14 @@ async fn issue(
     if tunnel.version < DIRECT_VERSION || !input.versions.contains(&DIRECT_VERSION) {
         return Ok(Json(json!({ "available": false })));
     }
+
     let session_digest = digest(super::super::session_token(headers));
     let row: Option<(String, i64)> = query_as("SELECT id, floor(extract(epoch FROM expires_at))::bigint FROM web_sessions WHERE digest = $1 AND expires_at > clock_timestamp()")
         .bind(&session_digest).fetch_optional(&service.pool).await?;
     let Some((session_id, expires_at)) = row else {
         return Err(ApiError::Http(StatusCode::UNAUTHORIZED, "Session expired"));
     };
+
     let claims = DirectClaims {
         connection_id: renew
             .map(str::to_owned)
@@ -120,10 +123,12 @@ async fn issue(
     if claims.expires_at <= unix_time() {
         return Err(ApiError::Http(StatusCode::UNAUTHORIZED, "Session expired"));
     }
+
     let authorization = DirectAuthorization {
         signature: URL_SAFE_NO_PAD.encode(tunnel.signing.sign(&signing_bytes(&claims)).as_ref()),
         claims,
     };
+
     let id = authorization.claims.connection_id.clone();
     let (reply, accepted) = oneshot::channel();
     {
@@ -160,26 +165,20 @@ async fn issue(
             connection.authorization = authorization.clone();
             connection.reply = Some(reply);
         } else {
-            if access.direct.len() >= MAX_DIRECT_CONNECTIONS
-                || role == Role::Member
-                    && access
-                        .direct
-                        .values()
-                        .filter(|connection| connection.authorization.claims.role == Role::Member)
-                        .count()
-                        >= MAX_DIRECT_MEMBER_CONNECTIONS
-                || access
+            let capacity_available = has_direct_capacity(
+                &authorization.claims,
+                access
                     .direct
                     .values()
-                    .filter(|connection| connection.authorization.claims.account_id == account)
-                    .count()
-                    >= MAX_DIRECT_PER_ACCOUNT
-            {
+                    .map(|connection| &connection.authorization.claims),
+            );
+            if !capacity_available {
                 return Err(ApiError::Http(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "Direct connection capacity reached",
                 ));
             }
+
             let (signals, signals_reader) = broadcast::channel(16);
             access.direct.insert(
                 id.clone(),
@@ -197,6 +196,7 @@ async fn issue(
             );
         }
     }
+
     tunnel.access_changed.notify_one();
     // Register before rechecking persisted access. Concurrent logout/removal either
     // sees this connection, or these reads deny it before the tunnel dispatches it.
