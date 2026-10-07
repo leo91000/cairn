@@ -866,6 +866,87 @@ fn assert_oauth_signed_in(response: &reqwest::Response) {
 }
 
 #[tokio::test]
+async fn oauth_linking_requires_recent_proof_in_the_calling_session_before_spending_quota() {
+    let provider = OAuthMock::new().await;
+    let app = Fixture::with_oauth(provider.providers()).await;
+    let (cookie, session) = common::login(&app, "alice@example.test").await;
+    query("UPDATE web_sessions SET last_proof_at = NULL")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+
+    for name in ["google", "github"] {
+        for _ in 0..31 {
+            let refused = app
+                .authenticated(
+                    &cookie,
+                    &session,
+                    reqwest::Method::POST,
+                    &format!("/api/account/oauth/{name}/start"),
+                )
+                .json(&json!({}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+            assert!(refused.headers().get("set-cookie").is_none());
+        }
+    }
+
+    query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key LIKE 'email:%'")
+        .execute(&app.pool).await.unwrap();
+    let (_, other) = common::login(&app, "alice@example.test").await;
+    assert_ne!(other["csrf"], session["csrf"]);
+    assert_eq!(
+        app.authenticated(
+            &cookie,
+            &session,
+            reqwest::Method::POST,
+            "/api/account/oauth/github/start"
+        )
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::FORBIDDEN,
+        "a proof on another device cannot confirm this cookie"
+    );
+
+    query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key LIKE 'email:%'")
+        .execute(&app.pool).await.unwrap();
+    let (challenge, code) = app.code("alice@example.test").await;
+    assert_eq!(
+        app.authenticated(
+            &cookie,
+            &session,
+            reqwest::Method::POST,
+            "/api/account/reauth/email"
+        )
+        .json(&json!({ "challenge": challenge, "code": code }))
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+
+    for name in ["google", "github"] {
+        let linked = provider
+            .attempt(
+                &app,
+                name,
+                Some((&cookie, session["csrf"].as_str().unwrap())),
+            )
+            .await;
+        assert_oauth_signed_in(&linked);
+        assert_oauth_signed_in(&provider.attempt(&app, name, None).await);
+    }
+    app.close().await;
+    provider.server.abort();
+}
+
+#[tokio::test]
 async fn verified_google_and_github_emails_attach_to_the_same_leo_account() {
     let provider = OAuthMock::new().await;
     let app = Fixture::with_oauth(provider.providers()).await;
