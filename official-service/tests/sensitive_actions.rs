@@ -16,18 +16,22 @@ async fn invitations_require_recent_proof_before_sending_mail_or_granting_access
         .await
         .unwrap();
 
-    let rejected = app
-        .authenticated(
-            &relay.cookie,
-            &relay.session,
-            Method::POST,
-            &format!("/api/installations/{id}/sharing/invitations"),
-        )
-        .json(&json!({ "email": "unconfirmed-invite@example.test" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    // Refusals without proof must not spend the invitation budget.
+    for _ in 0..11 {
+        let rejected = app
+            .authenticated(
+                &relay.cookie,
+                &relay.session,
+                Method::POST,
+                &format!("/api/installations/{id}/sharing/invitations"),
+            )
+            .json(&json!({ "email": "unconfirmed-invite@example.test" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    }
+
     assert!(app.mail.1.lock().unwrap().is_empty());
     let sharing: Value = app
         .authenticated(
@@ -47,7 +51,52 @@ async fn invitations_require_recent_proof_before_sending_mail_or_granting_access
         relay.get("/chats").send().await.unwrap().status(),
         StatusCode::OK
     );
+
+    confirm_owner(&relay).await;
+    let invited = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            &format!("/api/installations/{id}/sharing/invitations"),
+        )
+        .json(&json!({ "email": "unconfirmed-invite@example.test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invited.status(), StatusCode::CREATED);
+    assert_eq!(app.mail.1.lock().unwrap().len(), 1);
     relay.close().await;
+}
+
+async fn confirm_owner(relay: &RelayedInstallation) {
+    let app = &relay.app;
+    query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key LIKE 'email:%'")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let challenge: Value = app
+        .post(
+            "/api/account/email-code",
+            json!({ "email": "relay-owner@example.test" }),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+    let code = app.mail.0.lock().unwrap().last().unwrap().1.clone();
+    let confirmed = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            "/api/account/reauth/email",
+        )
+        .json(&json!({ "challenge": challenge["challenge"], "code": code }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(confirmed.status(), StatusCode::NO_CONTENT);
 }
 
 #[tokio::test]

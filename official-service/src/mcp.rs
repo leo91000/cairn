@@ -101,7 +101,7 @@ pub(super) async fn personal(
     headers: HeaderMap,
     Json(input): Json<Personal>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let account = installations::account(&service, &headers, &Method::POST).await?;
+    let (account, _) = super::account::confirmed_session(&service, &headers).await?;
     valid_scopes(&input.scopes)?;
 
     let label = input.label.trim();
@@ -115,18 +115,8 @@ pub(super) async fn personal(
     let id = random_token();
     let token = random_token();
     let mut transaction = service.pool.begin().await?;
-    let owned: Option<(String,)> =
-        query_as("SELECT id FROM installations WHERE id = $1 AND owner_id = $2 FOR SHARE")
-            .bind(&installation)
-            .bind(&account)
-            .fetch_optional(&mut *transaction)
-            .await?;
-    if owned.is_none() {
-        return Err(ApiError::Http(
-            StatusCode::NOT_FOUND,
-            "Installation not found",
-        ));
-    }
+    installations::lock_confirmed_owner(&mut transaction, &headers, &installation, &account)
+        .await?;
 
     query("INSERT INTO mcp_grants (id, account_id, installation_id, label, scopes, expires_at) VALUES ($1, $2, $3, $4, $5, now() + interval '30 days')")
         .bind(&id).bind(&account).bind(&installation).bind(label).bind(&input.scopes)

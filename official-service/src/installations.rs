@@ -188,7 +188,7 @@ pub(super) async fn forget(
     }
     consume_limit(&service.pool, &format!("installation-forget:{owner}"), 10).await?;
     let mut transaction = service.pool.begin().await?;
-    lock_removal(&mut transaction, &headers, &installation, &owner).await?;
+    lock_confirmed_owner(&mut transaction, &headers, &installation, &owner).await?;
     let forgotten = query("DELETE FROM installations WHERE id = $1 AND owner_id = $2")
         .bind(&installation)
         .bind(&owner)
@@ -232,7 +232,7 @@ pub(super) async fn detach(
         account_security::require_recent_proof(&mut connection, &headers).await?;
     }
     let mut transaction = service.pool.begin().await?;
-    lock_removal(&mut transaction, &headers, &installation, &owner).await?;
+    lock_confirmed_owner(&mut transaction, &headers, &installation, &owner).await?;
     detach_on(&mut transaction, &installation, &owner).await?;
     transaction.commit().await?;
 
@@ -242,7 +242,7 @@ pub(super) async fn detach(
 
 // Match account deletion's lock order. Revalidate after both locks, before any
 // access mutation, since a session or its independent proof can expire waiting.
-async fn lock_removal(
+pub(super) async fn lock_confirmed_owner(
     connection: &mut sqlx_postgres::PgConnection,
     headers: &HeaderMap,
     installation: &str,
@@ -259,8 +259,7 @@ async fn lock_removal(
             .fetch_optional(&mut *connection)
             .await?;
 
-    methods::authenticated_on(connection, headers, true).await?;
-    account_security::require_recent_proof(connection, headers).await?;
+    account_security::confirmed_session_on(connection, headers).await?;
     if owned.is_none() {
         return Err(ApiError::Http(
             StatusCode::NOT_FOUND,

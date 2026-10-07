@@ -70,10 +70,12 @@ pub(super) async fn invite(
     headers: HeaderMap,
     Json(input): Json<EmailRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let account = installations::account(&service, &headers, &Method::POST).await?;
+    let (account, _) = super::account::confirmed_session(&service, &headers).await?;
     consume_limit(&service.pool, &format!("invitation:{account}"), 10).await?;
     let email = normalized_email(&input.email)?;
-    let mut transaction = owner_transaction(&service, &installation, &account).await?;
+    let mut transaction = service.pool.begin().await?;
+    installations::lock_confirmed_owner(&mut transaction, &headers, &installation, &account)
+        .await?;
     let existing: Option<(String,)> = query_as("SELECT a.id FROM leo_accounts a WHERE a.email = $1 AND (a.id = $2 OR EXISTS (SELECT 1 FROM installation_members WHERE installation_id = $3 AND account_id = a.id))")
         .bind(&email).bind(&account).bind(&installation).fetch_optional(&mut *transaction).await?;
     if existing.is_some() {
@@ -287,9 +289,11 @@ pub(super) async fn remove(
     Path((installation, member)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
-    let account = installations::account(&service, &headers, &Method::DELETE).await?;
+    let (account, _) = super::account::confirmed_session(&service, &headers).await?;
     consume_limit(&service.pool, &format!("sharing:{account}"), 30).await?;
-    let mut transaction = owner_transaction(&service, &installation, &account).await?;
+    let mut transaction = service.pool.begin().await?;
+    installations::lock_confirmed_owner(&mut transaction, &headers, &installation, &account)
+        .await?;
     super::audit::record(
         &mut transaction,
         super::audit::Event {
