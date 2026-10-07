@@ -2,7 +2,8 @@
 
 This is a **preparation runbook, not authorization to deploy**. Léo must approve
 production changes after #105's direct-connection qualification and review of
-ticket 110. No DNS, Coolify, tag or production changes are made by implementing #110.
+tickets #110 and #113. No DNS, Coolify, tag or production changes are made by
+implementing these tickets.
 The initial deployment is a **fresh installation**. There is no migration of
 existing conversations, local accounts or volumes.
 
@@ -20,7 +21,10 @@ two independently chosen releases. A reused PR image reports its tested merge
 commit, whose Git tree matches the release, rather than a later tag commit.
 The official image contains `leo-official` and the matching `pnpm build` output;
 it has no worker CLI or VM layers. `/health` returns no-store JSON with `status`,
-`commit` and `runtimeId`, and returns 503 when Postgres is unavailable.
+`commit` and `runtimeId`. Readiness is sampled every five seconds with a
+one-second query timeout; HTTP probes read the cached result without querying
+Postgres. Database loss is reported within six seconds, and recovery at the next
+successful sample. It is unavailable until the first sample succeeds.
 
 Reserve capacity for Coolify/Traefik, the official process, Postgres and Garage
 before assigning VM budgets. The official Compose caps each of official and
@@ -48,8 +52,9 @@ new release: replace the GitHub `production` environment's
 `COOLIFY_SERVICE_UUID` with the **new official** service UUID in step 5.
 Disable `leo-cli-update.timer` and any other old host dispatch/update timers
 while dismantling the old installation. The historical **Update agent tools**
-workflow's Coolify deploy job is disabled in code for this cutover; do not reuse
-it with the official service UUID. New installation updates use their own timer.
+workflow is entirely disabled in code for this cutover: manual dispatch only
+explains the release path and never reads production configuration. Do not reuse
+its host timer with the official service UUID. New installation updates use their own timer.
 
 Stop and remove the old Leo manager/runner Coolify service and its public domain
 route. Remove **only that service's identified** data, agent-home, workspaces,
@@ -145,8 +150,8 @@ healthchecks, rotated logs, explicit budgets and **one official process**.
 Keep stop-first replacement; never run old and new official processes together
 or add a second application replica (ADR-0032).
 
-Connect only official to the existing external proxy Docker network (default
-`coolify`, override `COOLIFY_PROXY_NETWORK` if needed). Check the actual Traefik
+Connect only official to the dedicated external proxy Docker network configured
+below, using `COOLIFY_PROXY_NETWORK`. Check the actual Traefik
 configuration before using the labels: defaults are HTTPS entrypoint `https`
 and resolver `letsencrypt`, overridable with `LEO_PROXY_HTTPS_ENTRYPOINT` and
 `LEO_PROXY_CERT_RESOLVER`. The supplied labels route the apex to HTTP port 4311.
@@ -162,18 +167,74 @@ Set these values in the service environment, without committing an `.env` file:
 | `LEO_INSTALLATION_IMAGE` | Paired installation digest from the same evidence |
 | `LEO_OFFICIAL_POSTGRES_PASSWORD` | Strong generated private password |
 | `LEO_OFFICIAL_DATABASE_URL` | `postgres://leo:<URL-encoded same password>@postgres:5432/leo_official` |
-| `LEO_OFFICIAL_TRUSTED_PROXIES` | Actual controlled Traefik peer IP (`/32` or `/128`), plus only necessary controlled proxy hops |
+| `COOLIFY_PROXY_NETWORK` | Dedicated external bridge with persisted static proxy IP, configured below |
+| `LEO_OFFICIAL_TRUSTED_PROXIES` | The persisted static Traefik peer IP (`/32` or `/128`), plus only necessary controlled proxy hops |
 | `LEO_OFFICIAL_EMAIL_FROM`, `LEO_OFFICIAL_EMAIL_KEY` | Verified sender and private Resend key |
 | Optional OAuth/VAPID pairs and Android/FCM | Step 4, or leave empty |
 
 The official browser origin is fixed to `https://cairn.build` by Compose.
 Postgres is on a separate internal network, with no published port. Official has
-only `expose: 4311`, no host port. Inspect the actual proxy peer address/network
-privately; `LEO_OFFICIAL_TRUSTED_PROXIES` must match the TCP peer seen by official.
-Prefer a stable specific proxy address. If a CIDR is necessary, restrict who can
-join it; never trust a whole shared Docker network containing arbitrary workers.
-Recheck after proxy/network recreation. Traefik must append the real client peer
-to `X-Forwarded-For`; client-supplied headers alone must not choose quotas.
+only `expose: 4311`, no host port.
+
+### Persist a fixed Traefik peer across recreation
+
+Do not copy today's dynamic IP from the shared `coolify` network into trust.
+Use a dedicated external bridge for the official/proxy connection, and persist
+Traefik's static address in its **saved main proxy Compose configuration**
+(`/data/coolify/proxy/docker-compose.yml`, editable in Coolify's server Proxy
+configuration). Keep its existing networks, ports, command, labels and volumes.
+Do not use only `docker network connect --ip`: that attachment is lost on
+recreation. Do not put this setting in a Traefik dynamic-routing file.
+
+The following subnet is an **example**. Choose a nonoverlapping private subnet
+on the actual server; check Docker IPAM and host/VPN routes first. Reserve the
+static address outside the automatic allocation range:
+
+```sh
+docker network create --driver bridge --subnet 172.30.113.0/24 \
+  --ip-range 172.30.113.128/25 --gateway 172.30.113.1 leo-official-proxy
+```
+
+Merge this into the existing proxy Compose (the actual service key may differ):
+
+```yaml
+services:
+  traefik:
+    networks:
+      coolify: {} # retain every existing attachment too
+      leo-official-proxy:
+        ipv4_address: 172.30.113.2
+networks:
+  # retain the existing coolify declaration and all other declarations
+  leo-official-proxy:
+    external: true
+    name: leo-official-proxy
+```
+
+In the official service set `COOLIFY_PROXY_NETWORK=leo-official-proxy` and
+`LEO_OFFICIAL_TRUSTED_PROXIES=172.30.113.2/32` (adapt both to the selected network).
+The Compose's network label selects this exact network for backend traffic.
+Never trust `172.30.113.0/24`, the entire shared `coolify` network, or workers.
+Only official and the controlled proxy should join the dedicated bridge;
+Postgres stays on its internal database network. Leave Traefik's incoming
+forwarded-header trust at its secure default for this DNS-only deployment.
+
+After Léo approves proxy changes, save and recreate it through Coolify, then
+verify its address survived, with the actual proxy container name:
+
+```sh
+proxy_container=coolify-proxy
+docker inspect --format '{{with index .NetworkSettings.Networks "leo-official-proxy"}}{{.IPAddress}}{{end}}' "$proxy_container"
+```
+
+The output must equal the saved host address (`172.30.113.2` in this example).
+Verify the official container is on that bridge and its network label selects
+it. Verify sign-in and rate limits through HTTPS. Repeat this check after every
+proxy recreation, network change or Coolify update; if Coolify regenerates its
+main proxy configuration, reapply the saved static attachment **before** Leo
+traffic resumes. Never widen trust to fix a mismatch. Sources:
+[Coolify main proxy configuration](https://coolify.io/docs/core/networking/proxy/traefik/overview),
+[Compose static network addresses](https://docs.docker.com/reference/compose-file/services/#ipv4_address-ipv6_address).
 
 Start the new service only after Léo's approval. Verify `/health` reports the
 expected tested commit, `/install/release` reports the paired digest, `/` and
@@ -185,7 +246,7 @@ Configure GitHub's **production** environment:
 
 | Setting | Kind | Value |
 | --- | --- | --- |
-| `COOLIFY_TOKEN` | Secret | Dedicated API token with read/write/deploy abilities |
+| `COOLIFY_TOKEN` | Secret | Dedicated API token with read, read:sensitive, write and deploy abilities |
 | `COOLIFY_URL` | Variable | Existing Coolify HTTPS origin |
 | `COOLIFY_SERVICE_UUID` | Variable | **New official Compose service** UUID |
 | `LEO_OFFICIAL_ORIGIN` | Variable | `https://cairn.build` |
@@ -193,8 +254,12 @@ Configure GitHub's **production** environment:
 Protect this environment with Léo as required reviewer so a future `v*` tag
 cannot deploy without approval. Remove the obsolete `LEO_PUBLIC_URL` deployment
 variable; the CLI no longer deploys a standalone public manager. Main/PR builds
-never deploy. A tag promotes both tested digests, sets `LEO_OFFICIAL_IMAGE` and
-`LEO_INSTALLATION_IMAGE`, restarts only the official service, then verifies both
+never deploy. A tag promotes both tested digests, updates `LEO_OFFICIAL_IMAGE` and
+`LEO_INSTALLATION_IMAGE` through the bulk endpoint, reads both literal values
+back, and repairs partial updates before restart. Failed repair restores the
+previous pair without restart; if even restoration fails, freeze all manual
+restarts and repair both values to one validated pair before retrying. The script
+then verifies both
 its build identity and approved installation release. No automatic official
 rollback is attempted after a failed rollout; use step 7.
 
@@ -235,17 +300,43 @@ restart the installation. Do not start a second old installation on these mounts
 ## 7. Backups and rollback
 
 Before **each** official upgrade, record the current official **and approved
-installation** digests and health commit, then stop official (short downtime).
-Take a private Postgres custom-format backup and keep it with that release:
+installation** digests and health commit. Back up Postgres while official is
+stopped (short downtime). Use the actual Coolify service UUID to list containers,
+then select the current official and Postgres container IDs by role and image:
+
+```sh
+service_uuid='the-official-coolify-service-uuid'
+docker ps -a --filter "label=com.docker.compose.project=$service_uuid" \
+  --format '{{.ID}}  {{.Names}}  {{.Image}}  {{.Label "com.docker.compose.service"}}'
+```
+
+Coolify can suffix service/container names; do not assume `leo-official-postgres-1`
+or the checkout's Compose project. If the installed Coolify version uses a
+different project label, find the IDs in its service Containers screen and
+confirm the project, role and image with the same listing. Select only this
+service's current containers, never the installation or Coolify's own database.
+Do not print `docker inspect` environment values or `docker compose config`.
+
+Run from a trusted checkout containing the helper; no Compose interpolation or
+operator `.env` file is needed. The database commands use the container's local
+operator connection and never pass a password through shell arguments:
 
 ```sh
 umask 077
-# Run from the official service's operator checkout using its protected environment.
-docker compose -f deploy/official/compose.production.yaml stop official
-docker compose -f deploy/official/compose.production.yaml exec -T postgres \
-  pg_dump -U leo -d leo_official -Fc > /private/backup/official-before-release.dump
-docker compose -f deploy/official/compose.production.yaml start official
+official_container='selected-official-container-id'
+postgres_container='selected-postgres-container-id'
+backup_path='/private/backup/official-before-release.dump'
+# Each step runs only if its predecessor succeeded; on error investigate.
+docker stop --time 60 "$official_container" && \
+  bash deploy/official/postgres-backup.sh backup "$postgres_container" "$backup_path" && \
+  docker start "$official_container"
 ```
+
+The helper writes a private custom-format dump to a temporary adjacent file,
+then publishes it atomically only after `pg_dump` succeeds. An existing backup
+is never overwritten; the directory must support hard links. Failure removes
+the partial file.
+Use a new filename for each release and retain the release/digest record privately.
 
 Check the backup can be restored on a disposable Postgres 17 instance; encrypt it
 and copy it off the server. It contains account/session material and must never
@@ -264,13 +355,60 @@ For official, startup migrations can be incompatible with the older binary.
 Restore the **matching pre-release Postgres backup** into an empty database while
 official is stopped; preserve the failed database privately for investigation.
 Use a fresh isolated volume/database, or explicitly recreate `leo_official` only
-after retaining a backup, and restore with `pg_restore -U leo -d leo_official
---exit-on-error` through the protected container connection. This loses account,
+after retaining a backup of the failed database. Rediscover the current container
+IDs after a failed deployment; never restart a stale container from before it.
+Set the **previous paired digests** in Coolify while stopped. For the explicitly
+chosen database container, with every official process stopped:
+
+```sh
+# Destructive recovery: only after preserving the failed database privately.
+docker exec "$postgres_container" dropdb -U leo --force leo_official && \
+  docker exec "$postgres_container" createdb -U leo -O leo leo_official && \
+  bash deploy/official/postgres-backup.sh restore "$postgres_container" "$backup_path"
+```
+
+The helper invokes `pg_restore --exit-on-error --no-owner --no-privileges` into
+that empty database. The schema/data are owned by the current `leo` operator
+role; database roles and grants must be provisioned separately if that changes.
+A failed restore keeps official stopped; recreate the empty recovery database
+before retrying rather than continuing on a partial schema. This loses account,
 claim and sharing changes made after the backup; reconcile installation identities
 using [claim recovery](INSTALLATION-RELAY.md) if necessary. Never start the older
 binary against a newer schema or reuse a backup from an unrelated release.
+
+`node tests/official-postgres-backup.mjs` exercises this exact helper against
+pinned, disposable Postgres, including a renamed container, file permissions,
+known-data round trip, refusal to overwrite a previous backup, rejection of a
+nonempty target/invalid dump, and cleanup
+of a failed backup. It uses synthetic data and never connects to production.
 
 Restart the single official process, verify `/health`'s previous commit,
 `/install/release`'s previous digest, email sign-in, claim/relay reconnection and
 conversation access. TLS/DNS do not need changing for this rollback. Keep the
 failed release, backups and previous digests until recovery is confirmed.
+
+
+## 8. Manual release checklist (required before approving a tag deployment)
+
+The GitHub runner has no host Docker access. Automatically wiring a database
+backup would add privileged host access and secret backup storage to CI, so #113
+keeps the backup **manual and mandatory**, behind Léo's production environment
+approval. Do not approve that deployment until:
+
+- [ ] [#105](https://github.com/leo91000/leo-agent-manager/issues/105) is qualified
+      and the independent review of #113 has passed.
+- [ ] The exact Git tree has complete green CI and one schema-3 evidence pair;
+      record both candidate and previous image digests privately.
+- [ ] Verify the saved proxy static IP and actual peer still match the exact
+      `/32` or `/128` trusted address; no shared Docker CIDR is trusted.
+- [ ] Stop official, take the pre-release Postgres backup using step 7, restore
+      it on isolated Postgres 17, encrypt/copy it off-host and record its release.
+      Never publish this production dump as a CI artifact.
+- [ ] Check installation schema rollback compatibility; otherwise retain a
+      matching stopped backup of the entire installation, including Garage.
+- [ ] Resume the previous single official process, verify health/sign-in, then
+      explicitly approve the tag's `production` job. This preparation task
+      creates no tag and performs no deployment.
+- [ ] After rollout, verify the exact health identity, paired installer digest,
+      email sign-in, relay reconnection, and conversation access. On failure,
+      freeze releases and follow step 7 before approving another pair.

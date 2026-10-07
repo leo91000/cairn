@@ -71,7 +71,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && groupadd --gid 1000 leo && useradd --uid 1000 --gid leo leo
 WORKDIR /app
 COPY --from=official-backend /usr/local/bin/leo-official /usr/local/bin/leo-official
-COPY --from=build --chown=leo:leo /app/dist ./dist
+COPY --from=build /app/dist ./dist
 ARG VCS_REF=development
 ENV APP_COMMIT=$VCS_REF APP_RUNTIME_ID=$VCS_REF LEO_OFFICIAL_LISTEN=0.0.0.0:4311 LEO_OFFICIAL_WEB_DIR=/app/dist
 USER leo

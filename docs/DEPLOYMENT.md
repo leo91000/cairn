@@ -322,8 +322,12 @@ and `LEO_OFFICIAL_ORIGIN=https://cairn.build`. Require Léo’s environment appr
 The obsolete `LEO_PUBLIC_URL` and standalone-manager deployment target are no
 longer used by the CLI. The script refuses a manager/runner Compose target.
 
-The deployment sets `LEO_OFFICIAL_IMAGE` and `LEO_INSTALLATION_IMAGE` to the
-paired digests, then restarts only official. It waits up to ten minutes for
+The deployment sends `LEO_OFFICIAL_IMAGE` and `LEO_INSTALLATION_IMAGE` together
+to Coolify’s bulk environment endpoint, re-reads both literal values, and repairs
+a partial write before restarting. If repair fails, it restores the previous
+pair and fails without restart; an unrecoverable API failure requires freezing
+manual restarts and repairing both values. The token needs `read:sensitive` to
+verify the pair. Only official is restarted. It waits up to ten minutes for
 `/health` to report the tested image's commit/runtime identity and
 `/install/release` to approve the paired installation image. Reused PR images
 report the tested merge commit with the released tree. Existing installations
@@ -370,11 +374,11 @@ and [Codex authentication](https://learn.chatgpt.com/docs/auth) for the underlyi
 
 ## Automatic CLI updates
 
-[Daily CLI updates](CLI-UPDATES.md) build and test new Codex/GitHub CLI versions,
-then replace both services, pausing and recovering active work, with runtime
-verification and rollback. CI application images also resolve current stable
+The historical [standalone CLI update workflow](CLI-UPDATES.md) is explicitly
+disabled. Installations update tools through fully validated paired image
+releases and their host timer, with runtime verification and rollback. CI
+application images also resolve current stable
 Codex/GitHub CLI versions before building and validating them.
-The VPS timer runs independently of your computer and does not change app versions.
 
 Codex `initialize` and retained-session `thread/resume` get separate, bounded
 two-minute deadlines for cold executable loading and native context recovery.

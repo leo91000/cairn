@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { generateKeyPairSync, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
+import { readFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
@@ -15,6 +16,7 @@ const commit = process.env.SMOKE_COMMIT || process.env.GITHUB_SHA
 assert.ok(image, 'Pass the exact official image under test')
 assert.match(commit || '', /^[a-f0-9]{40}$/, 'Set SMOKE_COMMIT to the image build commit')
 const name = `leo-official-image-${randomUUID().slice(0, 8)}`
+const postgresImage = readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8').match(/image: (postgres:17-alpine(?:@sha256:[a-f0-9]{64})?)/)[1]
 const installationImage = process.env.SMOKE_INSTALLATION_IMAGE || `ghcr.io/leo91000/leo-agent-manager@sha256:${'a'.repeat(64)}`
 
 async function docker(...args) {
@@ -40,11 +42,13 @@ const mail = createServer(async (request, response) => {
   response.writeHead(200).end('{}')
 })
 const reservation = createServer()
+const databaseReservation = createServer()
 let origin
 
 async function ready() {
-  for (let attempt = 0; attempt < 150; attempt++) {
-    const response = await fetch(`${origin}/health`).catch(() => null)
+  const deadline = Date.now() + 30000
+  while (Date.now() < deadline) {
+    const response = await fetch(`${origin}/health`, { signal: AbortSignal.timeout(1000) }).catch(() => null)
     if (response?.ok)
       return response
     await response?.body?.cancel()
@@ -58,11 +62,16 @@ async function main() {
   try {
     mail.listen(0, '127.0.0.1')
     reservation.listen(0, '127.0.0.1')
-    await Promise.all([once(mail, 'listening'), once(reservation, 'listening')])
+    databaseReservation.listen(0, '127.0.0.1')
+    await Promise.all([once(mail, 'listening'), once(reservation, 'listening'), once(databaseReservation, 'listening')])
     const port = reservation.address().port
-    await new Promise(resolve => reservation.close(resolve))
+    const databasePort = databaseReservation.address().port
+    await Promise.all([
+      new Promise(resolve => reservation.close(resolve)),
+      new Promise(resolve => databaseReservation.close(resolve)),
+    ])
     origin = `http://localhost:${port}`
-    await docker('run', '-d', '--name', `${name}-db`, '-p', '127.0.0.1::5432', '-e', 'POSTGRES_USER=leo', '-e', 'POSTGRES_PASSWORD=fixture-only', '-e', 'POSTGRES_DB=leo_official', '-v', `${name}-data:/var/lib/postgresql/data`, '--health-cmd', 'pg_isready -h 127.0.0.1 -U leo -d leo_official', '--health-interval', '1s', '--health-retries', '30', 'postgres:17-alpine')
+    await docker('run', '-d', '--name', `${name}-db`, '-p', `127.0.0.1:${databasePort}:5432`, '-e', 'POSTGRES_USER=leo', '-e', 'POSTGRES_PASSWORD=fixture-only', '-e', 'POSTGRES_DB=leo_official', '-v', `${name}-data:/var/lib/postgresql/data`, '--health-cmd', 'pg_isready -h 127.0.0.1 -U leo -d leo_official', '--health-interval', '1s', '--health-retries', '30', postgresImage, '-c', 'shared_preload_libraries=pg_stat_statements')
     for (let attempt = 0; ; attempt++) {
       assert.ok(attempt < 60, 'Disposable Postgres did not become ready')
       const result = await docker('inspect', '--format', '{{.State.Health.Status}}', `${name}-db`)
@@ -71,14 +80,27 @@ async function main() {
       await setTimeout(500)
     }
 
-    const binding = JSON.parse((await docker('inspect', '--format', '{{json .NetworkSettings.Ports}}', `${name}-db`)).stdout)
-    const databasePort = binding['5432/tcp'][0].HostPort
     await docker('run', '-d', '--name', name, '--network', 'host', '-e', `LEO_OFFICIAL_DATABASE_URL=postgres://leo:fixture-only@127.0.0.1:${databasePort}/leo_official`, '-e', `LEO_OFFICIAL_ORIGIN=${origin}`, '-e', `LEO_OFFICIAL_LISTEN=127.0.0.1:${port}`, '-e', `LEO_OFFICIAL_EMAIL_ENDPOINT=http://127.0.0.1:${mail.address().port}/emails`, '-e', 'LEO_OFFICIAL_EMAIL_KEY=fixture-only', '-e', 'LEO_OFFICIAL_EMAIL_FROM=leo@example.test', '-e', `LEO_INSTALLATION_IMAGE=${installationImage}`, '-e', `LEO_OFFICIAL_FCM_SERVICE_ACCOUNT_JSON=${fcmAccount}`, image)
     const healthResponse = await ready()
     assert.match(healthResponse.headers.get('cache-control'), /no-store/)
     assert.deepEqual(await healthResponse.json(), { status: 'ok', commit, runtimeId: commit })
     const user = (await docker('exec', name, 'id', '-u')).stdout.trim()
     assert.equal(user, '1000', 'Official process must run unprivileged')
+    const databaseSql = sql => docker('exec', `${name}-db`, 'psql', '-U', 'leo', '-d', 'leo_official', '-v', 'ON_ERROR_STOP=1', '-Atc', sql)
+    await databaseSql('CREATE EXTENSION pg_stat_statements; SELECT pg_stat_statements_reset();')
+    for (let request = 0; request < 100; request++) {
+      const probe = await fetch(`${origin}/health`)
+      assert.equal(probe.status, 200)
+      await probe.body.cancel()
+    }
+
+    const healthQueries = Number((await databaseSql('SELECT COALESCE(SUM(calls), 0) FROM pg_stat_statements;')).stdout.trim())
+    assert.ok(healthQueries > 0, 'The disposable database statement counter must be active')
+    // Include reset/setup and any maintenance, so a changed probe SQL cannot
+    // evade the assertion. Public requests must not scale database work.
+    assert.ok(healthQueries <= 5, `100 public probes must use cached readiness, observed ${healthQueries} database queries`)
+    assert.equal((await docker('exec', name, 'stat', '-c', '%u:%g', '/app/dist/official.html')).stdout.trim(), '0:0', 'Bundled web assets must be root-owned')
+    await docker('exec', name, 'sh', '-c', 'test ! -w /app/dist && test ! -w /app/dist/official.html')
     const root = await fetch(origin)
     assert.equal(root.status, 200)
     assert.equal(root.headers.get('x-frame-options'), 'DENY')
@@ -117,7 +139,19 @@ async function main() {
     assert.equal(nativePush.status, 200)
     assert.deepEqual(await nativePush.json(), { enabled: true }, 'FCM configuration must accept environment-only credentials')
     await docker('stop', `${name}-db`)
-    assert.equal((await fetch(`${origin}/health`)).status, 503, 'Readiness must detect database loss')
+    let unavailable = false
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const probe = await fetch(`${origin}/health`)
+      unavailable = probe.status === 503
+      await probe.body.cancel()
+      if (unavailable)
+        break
+      await setTimeout(200)
+    }
+
+    assert.ok(unavailable, 'Cached readiness must detect database loss within eight seconds')
+    await docker('start', `${name}-db`)
+    await ready()
     console.warn(`Official exact-image smoke passed: ${image}; commit ${commit}; SPA, migrations, sign-in, restart and database readiness`)
   }
   finally {
@@ -127,6 +161,8 @@ async function main() {
     await new Promise(resolve => mail.close(resolve))
     if (reservation.listening)
       await new Promise(resolve => reservation.close(resolve))
+    if (databaseReservation.listening)
+      await new Promise(resolve => databaseReservation.close(resolve))
   }
 }
 

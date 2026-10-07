@@ -97,7 +97,7 @@ jobs:
   quality:
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
         env:
           POSTGRES_USER: leo
           POSTGRES_PASSWORD: test-only
@@ -161,7 +161,7 @@ jobs:
   browser:
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
         env:
           POSTGRES_USER: leo
           POSTGRES_PASSWORD: test-only
@@ -259,7 +259,7 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
         env:
           POSTGRES_USER: leo
           POSTGRES_PASSWORD: test-only
@@ -443,7 +443,7 @@ jobs:
             --env POSTGRES_DB=leo_official_test \
             --health-cmd "pg_isready -h 127.0.0.1 -U leo -d leo_official_test" \
             --health-interval 1s --health-timeout 5s --health-retries 30 \
-            postgres:17-alpine postgres -c listen_addresses=127.0.0.1
+            postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 postgres -c listen_addresses=127.0.0.1
           for attempt in $(seq 1 30); do
             if test "$(docker inspect --format '{{.State.Health.Status}}' leo-official-smoke-db)" = healthy; then
               break
@@ -539,6 +539,7 @@ jobs:
             image=leo-official:test
           fi
           node tests/official-container-smoke.mjs "$image"
+          node tests/official-postgres-backup.mjs
   image-cache:
     # Main reuses a pull request image without building it; refresh the shared
     # layer cache for later pull requests. This never gates a release.
@@ -570,6 +571,18 @@ jobs:
           cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true
           secrets: github_token=${{ github.token }}
           provenance: false
+      - name: Refresh the official cache when main reuses validated images
+        if: always() && !cancelled()
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          target: official
+          outputs: type=cacheonly
+          build-args: VCS_REF=${{ github.sha }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}-official:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}-official:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true
+          provenance: false
+
   publish:
     # The Intel nested Android test needs hardware GitHub does not provide; it runs locally
     # before releases when Android or runner changes need it (docs/DEPLOYMENT.md) and does not gate CI.
