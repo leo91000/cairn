@@ -1,3 +1,5 @@
+pub(crate) mod direct;
+
 use super::{ApiError, Service, digest, installations};
 use axum::{
     body::{Body, to_bytes},
@@ -9,13 +11,14 @@ use axum::{
     response::{Html, IntoResponse, Response},
 };
 use futures_util::{SinkExt, StreamExt};
+use leo_relay_protocol::direct::{DIRECT_VERSION, DirectRevocation, unix_time};
 use leo_relay_protocol::{
     ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_NOTIFICATION_IN_FLIGHT,
     MAX_PUBLIC_IN_FLIGHT, MAX_STREAM_CHUNK, REQUEST_TIMEOUT, Role,
 };
 use sqlx_core::query_as::query_as;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
@@ -54,6 +57,8 @@ struct Tunnel {
     version: u16,
     access: Mutex<Access>,
     access_changed: Notify,
+    signing: ring::signature::Ed25519KeyPair,
+    signaling_window: Mutex<(tokio::time::Instant, usize)>,
     slots: Arc<Semaphore>,
     stream_slots: Arc<Semaphore>,
     public_slots: Arc<Semaphore>,
@@ -87,6 +92,8 @@ pub struct Relay {
 struct Access {
     generations: HashMap<String, u64>,
     streams: HashMap<String, StreamAccess>,
+    direct: HashMap<String, direct::Connection>,
+    direct_revocations: VecDeque<DirectRevocation>,
 }
 
 struct StreamAccess {
@@ -103,6 +110,29 @@ impl Relay {
             for stream in tunnel.access.lock().unwrap().streams.values() {
                 if stream.session.as_deref() == Some(session) {
                     stream.revoked.send_replace(true);
+                }
+            }
+            {
+                let mut access = tunnel.access.lock().unwrap();
+                let affected: Vec<_> = access
+                    .direct
+                    .iter()
+                    .filter(|(_, connection)| connection.session_digest == session)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                let public_id = affected
+                    .first()
+                    .and_then(|id| access.direct.get(id))
+                    .map(|connection| connection.authorization.claims.session_id.clone());
+                for id in affected {
+                    if let Some(connection) = access.direct.remove(&id) {
+                        connection.revoked.send_replace(true);
+                    }
+                }
+                if let Some(session_id) = public_id {
+                    access
+                        .direct_revocations
+                        .push_back(DirectRevocation::Session { session_id });
                 }
             }
             tunnel.access_changed.notify_one();
@@ -135,6 +165,23 @@ impl Relay {
         if let Some(account) = account {
             let mut access = tunnel.access.lock().unwrap();
             *access.generations.entry(account.to_owned()).or_default() += 1;
+            let generation = access.generations[account];
+            access.direct.retain(|_, connection| {
+                if connection.authorization.claims.account_id == account {
+                    connection.revoked.send_replace(true);
+                    false
+                } else {
+                    true
+                }
+            });
+            if tunnel.version >= DIRECT_VERSION {
+                access
+                    .direct_revocations
+                    .push_back(DirectRevocation::Account {
+                        account_id: account.to_owned(),
+                        generation,
+                    });
+            }
             for stream in access
                 .streams
                 .values()
@@ -261,17 +308,38 @@ async fn serve_socket(
     let (stop, mut stopped) = watch::channel(false);
     let (control, mut controls) =
         mpsc::channel::<Frame>((MAX_IN_FLIGHT + MAX_PUBLIC_IN_FLIGHT) * 2);
+    let Ok(key) = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+    else {
+        return;
+    };
+    let Ok(signing) = ring::signature::Ed25519KeyPair::from_pkcs8(key.as_ref()) else {
+        return;
+    };
     let tunnel = Arc::new(Tunnel {
         commands,
         control,
         version,
         access: Mutex::new(Access::default()),
         access_changed: Notify::new(),
+        signing,
+        signaling_window: Mutex::new((tokio::time::Instant::now(), 0)),
         slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
         stream_slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT - RESERVED_API_SLOTS)),
         public_slots: Arc::new(Semaphore::new(MAX_PUBLIC_IN_FLIGHT)),
         stop,
     });
+    if version >= DIRECT_VERSION {
+        let frame = Frame::DirectKey {
+            public_key: direct::public_key(&tunnel),
+        };
+        if socket
+            .send(Message::Text(serde_json::to_string(&frame).unwrap().into()))
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
     {
         let mut tunnels = relay.connections.lock().unwrap();
         if relay.closing.load(Ordering::SeqCst) {
@@ -343,20 +411,34 @@ async fn serve_socket(
     let mut notification_jobs = tokio::task::JoinSet::new();
     let mut notification_ids = HashMap::new();
     'connection: loop {
-        let expiry = tunnel
-            .access
-            .lock()
-            .unwrap()
-            .streams
-            .values()
-            .filter(|stream| !*stream.revoked.borrow())
-            .filter_map(|stream| stream.expires_at)
-            .min();
+        let expiry = {
+            let access = tunnel.access.lock().unwrap();
+            access
+                .streams
+                .values()
+                .filter(|stream| !*stream.revoked.borrow())
+                .filter_map(|stream| stream.expires_at)
+                .chain(
+                    access
+                        .direct
+                        .values()
+                        .map(|connection| connection.session_deadline),
+                )
+                .min()
+        };
 
         tokio::select! {
             biased;
 
-            _ = stopped.changed() => break,
+            _ = stopped.changed() => {
+                if version >= DIRECT_VERSION {
+                    let frame = Frame::DirectRevoke {
+                        scope: DirectRevocation::Installation,
+                    };
+                    let _ = socket.send(Message::Text(serde_json::to_string(&frame).unwrap().into())).await;
+                }
+                break;
+            },
             _ = async {
                 match expiry {
                     Some(deadline) => tokio::time::sleep_until(deadline).await,
@@ -367,6 +449,24 @@ async fn serve_socket(
                 for stream in tunnel.access.lock().unwrap().streams.values() {
                     if stream.expires_at.is_some_and(|deadline| deadline <= now) {
                         stream.revoked.send_replace(true);
+                    }
+                }
+                {
+                    let mut access = tunnel.access.lock().unwrap();
+                    let sessions: std::collections::HashSet<_> = access.direct.values()
+                        .filter(|connection| connection.session_deadline <= now)
+                        .map(|connection| connection.authorization.claims.session_id.clone())
+                        .collect();
+                    access.direct.retain(|_, connection| {
+                        if sessions.contains(&connection.authorization.claims.session_id) {
+                            connection.revoked.send_replace(true);
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    for session_id in sessions {
+                        access.direct_revocations.push_back(DirectRevocation::Session { session_id });
                     }
                 }
                 tunnel.access_changed.notify_one();
@@ -392,6 +492,15 @@ async fn serve_socket(
                 }
             }
             _ = tunnel.access_changed.notified() => {
+                let revocations: Vec<_> = tunnel.access.lock().unwrap().direct_revocations.drain(..).collect();
+                for scope in revocations {
+                    if version >= DIRECT_VERSION {
+                        let frame = Frame::DirectRevoke { scope };
+                        if socket.send(Message::Text(serde_json::to_string(&frame).unwrap().into())).await.is_err() {
+                            break 'connection;
+                        }
+                    }
+                }
                 let revoked = {
                     let mut access = tunnel.access.lock().unwrap();
                     let ids: Vec<_> = access.streams.iter()
@@ -416,6 +525,14 @@ async fn serve_socket(
                 }
             }
             _ = public_expiry.tick() => {
+                tunnel.access.lock().unwrap().direct.retain(|_, connection| {
+                    if connection.authorization.claims.expires_at <= unix_time() {
+                        connection.revoked.send_replace(true);
+                        false
+                    } else {
+                        true
+                    }
+                });
                 // Expire public bodies independently of downstream polling,
                 // including readers that stopped granting stream credit.
                 let expired: Vec<_> = pending.iter()
@@ -480,6 +597,21 @@ async fn serve_socket(
                 }
             }
             Some(frame) = controls.recv(), if version >= 2 => {
+                if version >= DIRECT_VERSION {
+                    let direct_frame = match &frame {
+                        Frame::DirectAuthorize { authorization, .. } | Frame::DirectRenew { authorization, .. } => {
+                            tunnel.access.lock().unwrap().direct.get(&authorization.claims.connection_id).is_some_and(|connection| connection.authorization == *authorization && connection.reply.is_some())
+                        }
+                        Frame::DirectSignal { id, .. } => tunnel.access.lock().unwrap().direct.get(id).is_some_and(|connection| connection.accepted),
+                        _ => false,
+                    };
+                    if direct_frame {
+                        if socket.send(Message::Text(serde_json::to_string(&frame).unwrap().into())).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                }
                 let id = match &frame {
                     Frame::Cancel { id } | Frame::StreamCredit { id } => id,
                     _ => continue,
@@ -525,6 +657,14 @@ async fn serve_socket(
                                     });
                                     notification_ids.insert(task.id(), id);
                                 }
+                                None
+                            }
+                            Frame::DirectAuthorized { id, accepted } if version >= DIRECT_VERSION => {
+                                direct::acknowledge(&tunnel, &id, accepted);
+                                None
+                            }
+                            Frame::DirectSignal { id, signal } if version >= DIRECT_VERSION => {
+                                direct::receive_signal(&tunnel, &id, signal);
                                 None
                             }
                             Frame::Response(response) => {

@@ -230,6 +230,7 @@ pub struct RelayedInstallation {
     pub base: String,
     pub stop: tokio_util::sync::CancellationToken,
     pub connector: JoinHandle<leo_agent_manager::error::Result<()>>,
+    pub direct: leo_agent_manager::direct::DirectConnections,
     pub root: tempfile::TempDir,
 }
 
@@ -336,11 +337,13 @@ impl RelayedInstallation {
             .unwrap();
         let id = session["installations"][0]["id"].as_str().unwrap();
         let stop = CancellationToken::new();
-        let connector = tokio::spawn(leo_agent_manager::relay::connect(
+        let direct = leo_agent_manager::direct::DirectConnections::default();
+        let connector = tokio::spawn(leo_agent_manager::relay::connect_with_direct(
             identity_dir,
             router,
             installation.clone(),
             stop.clone(),
+            direct.clone(),
         ));
         let base = format!("{}/api/installations/{id}/api", app.url);
         let fixture = Self {
@@ -351,6 +354,7 @@ impl RelayedInstallation {
             base,
             stop,
             connector,
+            direct,
             root,
         };
         tokio::time::timeout(Duration::from_secs(10), async {

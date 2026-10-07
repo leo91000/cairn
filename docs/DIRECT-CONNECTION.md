@@ -132,3 +132,37 @@ emulator through simulated networks:
 - an old installation or client: relay only;
 - the official tunnel down: no new direct connection, existing ones end at
   grant expiry, agent executions continue.
+
+## Delivered control plane (#100)
+
+The authorization/signaling contract is implemented in protocol v4; the WebRTC
+peer and web/Android data transports remain #101/#103/#104. No inbound local
+browser access or local password is introduced. The current shipped data path
+continues to use the relay.
+
+All routes use the official session and installation access checks (foreign,
+unknown, detached or removed-member installations return 404). POST also requires
+the configured origin and CSRF token:
+
+- `POST /api/installations/{id}/direct/authorize` with
+  `{ "fingerprint": "sha-256 AA:…", "versions": [4] }` returns
+  `{ "available": true, "grant": { "claims": { … }, "signature": "…" } }`
+  after installation verification, or `{ "available": false }` for an older
+  client/tunnel or an offline installation. The relay stays usable in all cases.
+- `POST /api/installations/{id}/direct/{connection}/renew` uses the same input,
+  rechecks session and role, and returns a fresh signed grant for that connection.
+  Another session cannot renew it, even for the same account.
+- `POST /api/installations/{id}/direct/{connection}/signal` accepts
+  `{ "kind": "offer" | "answer", "sdp": "…" }`, or
+  `{ "kind": "candidate", "candidate": "candidate:…", "sdp_mid": "0",
+  "sdp_m_line_index": 0 }`. An empty candidate marks end-of-candidates.
+- `GET /api/installations/{id}/direct/{connection}/events` returns SSE `signal`
+  events containing the same metadata from the installation. It is bound to the
+  issuing account/session, permits one reader and closes on expiry or revocation.
+  A lagging reader closes instead of accumulating unbounded signals.
+
+The installation receives its public verification key only from the authenticated
+tunnel. Ed25519 signatures cover the protocol context and every claim. Keys are
+per tunnel, so a reconnect cannot restore an old authorization. Nonces, leases,
+signal queues and access generations are bounded in-memory control state, not
+conversation storage. See [Version 4 limits and installation integration](INSTALLATION-RELAY.md#version-4-direct-authorization-and-signaling-100).

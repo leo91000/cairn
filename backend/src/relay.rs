@@ -421,6 +421,23 @@ pub async fn connect(
     service: std::sync::Arc<crate::service::Service>,
     stop: CancellationToken,
 ) -> Result<()> {
+    connect_with_direct(
+        directory,
+        router,
+        service,
+        stop,
+        crate::direct::DirectConnections::default(),
+    )
+    .await
+}
+
+pub async fn connect_with_direct(
+    directory: PathBuf,
+    router: Router,
+    service: std::sync::Arc<crate::service::Service>,
+    stop: CancellationToken,
+    direct: crate::direct::DirectConnections,
+) -> Result<()> {
     let identity = read_identity(&directory)
         .await?
         .ok_or_else(|| Error::bad("Run leo claim before starting the relay."))?;
@@ -429,8 +446,12 @@ pub async fn connect(
     loop {
         let started = tokio::time::Instant::now();
         tokio::select! {
-            () = stop.cancelled() => return Ok(()),
-            result = connected(&identity, &official, router.clone(), &service) => {
+            () = stop.cancelled() => {
+                direct.detach();
+                return Ok(());
+            },
+            result = connected(&identity, &official, router.clone(), &service, direct.clone()) => {
+                direct.detach();
                 if let Err(error) = result {
                     if error.status == 401 {
                         tracing::warn!("Installation identity revoked; run leo claim, then restart the manager");
@@ -464,6 +485,7 @@ async fn connected(
     official: &url::Url,
     router: Router,
     service: &crate::service::Service,
+    direct: crate::direct::DirectConnections,
 ) -> Result<()> {
     let mut url = official
         .join(&format!("api/relay/{}/connect", identity.installation_id))
@@ -536,6 +558,9 @@ async fn connected(
         poll: true,
         ..NotificationSchedule::default()
     };
+    if version >= leo_relay_protocol::direct::DIRECT_VERSION {
+        direct.attach(output.clone());
+    }
     loop {
         if version >= 3 && notification_schedule.poll {
             notification_schedule.poll = false;
@@ -618,6 +643,32 @@ async fn connected(
                 match message {
                     Some(Ok(Message::Text(message))) => {
                         let request = match serde_json::from_str::<Frame>(&message)? {
+                            Frame::DirectKey { public_key } if version >= leo_relay_protocol::direct::DIRECT_VERSION => {
+                                direct.set_key(&identity.installation_id, &public_key)?;
+                                continue;
+                            }
+                            Frame::DirectAuthorize { id, authorization } if version >= leo_relay_protocol::direct::DIRECT_VERSION => {
+                                let accepted = direct.authorize(authorization, false);
+                                let acknowledgement = Frame::DirectAuthorized { id, accepted };
+                                socket.send(Message::Text(serde_json::to_string(&acknowledgement)?.into()))
+                                    .await.map_err(Error::internal)?;
+                                continue;
+                            }
+                            Frame::DirectRenew { id, authorization } if version >= leo_relay_protocol::direct::DIRECT_VERSION => {
+                                let accepted = direct.authorize(authorization, true);
+                                let acknowledgement = Frame::DirectAuthorized { id, accepted };
+                                socket.send(Message::Text(serde_json::to_string(&acknowledgement)?.into()))
+                                    .await.map_err(Error::internal)?;
+                                continue;
+                            }
+                            Frame::DirectRevoke { scope } if version >= leo_relay_protocol::direct::DIRECT_VERSION => {
+                                direct.revoke(scope);
+                                continue;
+                            }
+                            Frame::DirectSignal { id, signal } if version >= leo_relay_protocol::direct::DIRECT_VERSION => {
+                                direct.receive_signal(id, signal);
+                                continue;
+                            }
                             Frame::Request(request) => request,
                             Frame::StreamCredit { id } if version >= 2 => {
                                 if let Some((_, credit)) = active.get(&id)
