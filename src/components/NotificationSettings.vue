@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { accountApi, state } from '../api'
 import { BellRing } from '../icons'
+import AccountConfirmation from './AccountConfirmation.vue'
 import Icon from './Icon.vue'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
@@ -14,6 +15,7 @@ const busy = ref(false)
 const loading = ref(true)
 const error = ref('')
 const denied = ref(supported && Notification.permission === 'denied')
+const confirmingIdentity = ref(false)
 const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
 const installed = window.matchMedia('(display-mode: standalone)').matches || (navigator as Navigator & { standalone?: boolean }).standalone
 let registration: ServiceWorkerRegistration | undefined
@@ -69,7 +71,16 @@ async function toggle() {
     }
 
     subscription ??= await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key })
-    const { id } = await accountApi<{ id: string }>('/notifications/subscriptions', { method: 'POST', body: JSON.stringify(subscription.toJSON()) })
+    let id: string
+    try {
+      ({ id } = await accountApi<{ id: string }>('/notifications/subscriptions', { method: 'POST', body: JSON.stringify(subscription.toJSON()) }))
+    }
+    catch (cause) {
+      await subscription.unsubscribe()
+      localStorage.removeItem(deviceKey)
+      throw cause
+    }
+
     localStorage.setItem(deviceKey, id)
     enabled.value = true
   }
@@ -79,7 +90,14 @@ async function toggle() {
 </script>
 
 <template>
-  <div class="space-y-3">
+  <AccountConfirmation
+    v-if="confirmingIdentity"
+    title="Confirm identity before enabling notifications"
+    return-label="Back to notifications"
+    @close="confirmingIdentity = false"
+    @confirmed="confirmingIdentity = false; error = ''"
+  />
+  <div v-show="!confirmingIdentity" class="space-y-3">
     <div class="flex items-start gap-3">
       <span class="grid size-10 shrink-0 place-items-center rounded-xl bg-accent/10 text-accent"><Icon :name="BellRing" :size="20" /></span>
       <div>
@@ -105,6 +123,14 @@ async function toggle() {
     </p>
     <div v-else class="flex items-center gap-3">
       <UiButton
+        v-if="!enabled"
+        size="small"
+        :disabled="busy || loading"
+        @click="confirmingIdentity = true"
+      >
+        Confirm identity
+      </UiButton>
+      <UiButton
         size="small"
         :variant="enabled ? 'default' : 'primary'"
         :disabled="busy || loading"
@@ -113,6 +139,9 @@ async function toggle() {
         {{ busy ? 'Updating…' : enabled ? 'Disable on this device' : 'Enable on this device' }}
       </UiButton><span v-if="enabled" class="text-[11px] text-accent" role="status">Notifications on</span>
     </div>
+    <p v-if="signedIn && supported && !enabled" class="text-xs text-muted">
+      Confirm with an email code or passkey before enabling notifications. Google or GitHub sign-in alone doesn’t confirm this action.
+    </p>
     <UiAlert v-if="error">
       {{ error }}
     </UiAlert>

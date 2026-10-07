@@ -1,4 +1,4 @@
-use super::{ApiError, Service, digest, installations};
+use super::{ApiError, Service, account, digest, installations, methods};
 use axum::{
     Json,
     extract::{Path, State},
@@ -187,7 +187,7 @@ pub(super) async fn subscribe(
     headers: HeaderMap,
     Json(input): Json<PushSubscription>,
 ) -> Result<Json<Value>, ApiError> {
-    let account = installations::account(&service, &headers, &Method::POST).await?;
+    let (account, _) = account::confirmed_session(&service, &headers).await?;
 
     if !valid_subscription(&input) {
         return Err(ApiError::Http(
@@ -197,7 +197,7 @@ pub(super) async fn subscribe(
     }
 
     let id = digest(&input.endpoint);
-    register_device(&service, &account, &id, input).await?;
+    register_device(&service, &headers, &account, &id, input).await?;
     Ok(Json(json!({ "id": id })))
 }
 
@@ -213,20 +213,26 @@ pub(super) async fn subscribe_android(
     headers: HeaderMap,
     Json(input): Json<AndroidDevice>,
 ) -> Result<Json<Value>, ApiError> {
-    let account = installations::account(&service, &headers, &Method::POST).await?;
+    installations::account(&service, &headers, &Method::POST).await?;
     let device = uuid::Uuid::parse_str(&input.device_id).map_err(|_| {
         ApiError::Http(
             StatusCode::BAD_REQUEST,
             "Invalid Android device registration",
         )
     })?;
+
+    let id = digest(&format!("android:{device}"));
+    let (account, _) = {
+        let mut connection = service.pool.acquire().await?;
+        registration_session(&mut connection, &headers, &id, true).await?
+    };
+
     if !valid_native_token(&input.token) {
         return Err(ApiError::Http(
             StatusCode::BAD_REQUEST,
             "Invalid Android device registration",
         ));
     }
-    let id = digest(&format!("android:{device}"));
     let subscription = PushSubscription {
         endpoint: format!("fcm:{}", input.token),
         keys: PushKeys {
@@ -234,7 +240,7 @@ pub(super) async fn subscribe_android(
             auth: String::new(),
         },
     };
-    register_device(&service, &account, &id, subscription).await?;
+    register_device(&service, &headers, &account, &id, subscription).await?;
     Ok(Json(json!({ "id": id })))
 }
 
@@ -242,18 +248,59 @@ fn valid_native_token(token: &str) -> bool {
     !token.is_empty() && token.len() <= 4096 && token.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
+async fn registration_session(
+    connection: &mut sqlx_postgres::PgConnection,
+    headers: &HeaderMap,
+    id: &str,
+    native: bool,
+) -> Result<(String, bool), ApiError> {
+    let account = methods::authenticated_on(connection, headers, true).await?;
+    let rotating_owned_device = if native {
+        let (owned,): (bool,) = query_as(
+            "SELECT EXISTS(SELECT 1 FROM notification_devices
+             WHERE id = $1 AND account_id = $2 AND endpoint LIKE 'fcm:%')",
+        )
+        .bind(id)
+        .bind(&account.0)
+        .fetch_one(&mut *connection)
+        .await?;
+        owned
+    } else {
+        false
+    };
+
+    if !rotating_owned_device {
+        account::require_recent_proof(connection, headers).await?;
+    }
+
+    Ok((account.0, rotating_owned_device))
+}
+
 async fn register_device(
     service: &Service,
+    headers: &HeaderMap,
     account: &str,
     id: &str,
     input: PushSubscription,
 ) -> Result<(), ApiError> {
     let mut transaction = service.pool.begin().await?;
     // Serialize additions for this account so concurrent devices cannot exceed its limit.
-    query("SELECT id FROM leo_accounts WHERE id = $1 FOR UPDATE")
+    query("SELECT id FROM leo_accounts WHERE id = $1 FOR NO KEY UPDATE")
         .bind(account)
         .execute(&mut *transaction)
         .await?;
+
+    let native = input.endpoint.starts_with("fcm:");
+    if native {
+        // Keep ownership stable until commit: a concurrent account switch or
+        // removal must not invalidate the token-rotation exception mid-write.
+        query("SELECT id FROM notification_devices WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+    }
+
+    registration_session(&mut transaction, headers, id, native).await?;
 
     let (count,): (i64,) =
         query_as("SELECT count(*) FROM notification_devices WHERE account_id = $1 AND id <> $2 AND endpoint <> $3")
@@ -276,6 +323,10 @@ async fn register_device(
         .bind(&input.endpoint)
         .execute(&mut *transaction)
         .await?;
+
+    let (_, rotating_owned_device) =
+        registration_session(&mut transaction, headers, id, native).await?;
+
     query("DELETE FROM notification_devices WHERE endpoint = $1 AND id <> $2")
         .bind(&input.endpoint)
         .bind(id)
@@ -299,6 +350,14 @@ async fn register_device(
     .bind(input.keys.auth)
     .execute(&mut *transaction)
     .await?;
+
+    // DELETE/UPSERT can still wait on an invisible insertion or another device's
+    // delivery lock. Recheck before commit using the exemption decided before
+    // mutation, so a new registration cannot authorize its own renewal.
+    methods::authenticated_on(&mut transaction, headers, true).await?;
+    if !rotating_owned_device {
+        account::require_recent_proof(&mut transaction, headers).await?;
+    }
 
     transaction.commit().await?;
     Ok(())

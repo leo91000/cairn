@@ -611,8 +611,17 @@ onMounted(async () => {
   catch {}
 
   await loadSession()
-  if (url.searchParams.get('sign_in_error') === 'oauth') {
-    error.value = 'Sign-in was cancelled or could not be verified. Try another method.'
+  const signInError = url.searchParams.get('sign_in_error')
+  const oauthErrors: Record<string, string> = {
+    oauth: 'Sign-in was cancelled or could not be verified. Try another method.',
+    oauth_link_required: 'A Leo account already uses this email. Sign in with an email code, then link Google or GitHub from Sign-in methods.',
+    oauth_proof: 'Confirm your identity with an email code or passkey before linking a sign-in method. Then try linking again.',
+    oauth_unavailable: 'Sign-in provider unavailable. Please try again or use another sign-in method.',
+  }
+  if (signInError && Object.hasOwn(oauthErrors, signInError)) {
+    if (signInError === 'oauth_proof' && session.value?.authenticated)
+      await openMethods()
+    error.value = oauthErrors[signInError]!
     url.searchParams.delete('sign_in_error')
     window.history.replaceState(null, '', url)
   }
@@ -840,7 +849,7 @@ onMounted(async () => {
           </li>
         </ul>
         <p class="text-muted mb-3">
-          Adding a passkey or removing a sign-in method requires an email code or existing passkey confirmed in the last five minutes.
+          Adding or removing a sign-in method requires an email code or existing passkey confirmed in the last five minutes.
         </p>
         <UiButton
           class="mb-3"

@@ -453,6 +453,9 @@ async fn the_last_sign_in_method_cannot_be_removed() {
 struct OAuthMockState {
     authorizations: Arc<Mutex<std::collections::HashMap<String, (String, String)>>>,
     profiles: Arc<Mutex<Value>>,
+    revocations: Arc<std::sync::atomic::AtomicUsize>,
+    fail_revocation: Arc<std::sync::atomic::AtomicBool>,
+    fail_token: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct OAuthMock {
@@ -463,215 +466,361 @@ struct OAuthMock {
 
 #[tokio::test]
 async fn native_github_handover_links_with_the_original_session_and_is_one_use() {
-    let provider = OAuthMock::new().await;
-    let app = Fixture::with_oauth(provider.providers()).await;
-    let (cookie, session) = common::login(&app, "alice@example.test").await;
-    let response = app
-        .client
-        .post(format!("{}/api/account/oauth/github/start", app.url))
-        .header("origin", &app.url)
-        .header("cookie", &cookie)
-        .header("x-csrf-token", session["csrf"].as_str().unwrap())
-        .json(&json!({"native": true}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let start: Value = response.json().await.unwrap();
-    assert!(start["url"].as_str().unwrap().starts_with(&app.url));
-    let exchange = || {
-        app.client
-            .post(format!(
-                "{}/api/account/oauth/github/native/finish",
-                app.url
-            ))
+    for expire_at in [
+        "never",
+        "callback",
+        "consent",
+        "finish",
+        "consent_locked",
+        "session_locked",
+    ] {
+        let provider = OAuthMock::new().await;
+        let app = Fixture::with_oauth(provider.providers()).await;
+        let (cookie, session) = common::login(&app, "alice@example.test").await;
+        let response = app
+            .client
+            .post(format!("{}/api/account/oauth/github/start", app.url))
             .header("origin", &app.url)
             .header("cookie", &cookie)
             .header("x-csrf-token", session["csrf"].as_str().unwrap())
-            .json(&json!({
-                "challenge": start["challenge"],
-                "secret": start["secret"],
-            }))
-    };
-    assert_eq!(
-        exchange().send().await.unwrap().status(),
-        StatusCode::ACCEPTED
-    );
-    let browser_client = Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap();
-    let launch = browser_client
-        .get(start["url"].as_str().unwrap())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(launch.status(), StatusCode::SEE_OTHER);
-    assert_eq!(
-        browser_client
-            .get(start["url"].as_str().unwrap())
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::UNAUTHORIZED
-    );
-    let browser_cookie = launch.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap();
-    let authorization = url::Url::parse(launch.headers()["location"].to_str().unwrap()).unwrap();
-    provider.expect_authorization(
-        &authorization,
-        format!("{}/api/account/oauth/github/callback", app.url),
-    );
-    assert_eq!(
-        authorization
-            .query_pairs()
-            .find(|(key, _)| key == "scope")
-            .unwrap()
-            .1,
-        "user:email"
-    );
-    let state = authorization
-        .query_pairs()
-        .find(|(key, _)| key == "state")
-        .unwrap()
-        .1
-        .to_string();
-    let callback = browser_client
-        .get(format!(
-            "{}/api/account/oauth/github/callback?state={state}&code=verified",
-            app.url
-        ))
-        .header("cookie", browser_cookie)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(callback.status(), StatusCode::OK);
-    assert!(
-        callback
-            .headers()
-            .get_all("set-cookie")
-            .iter()
-            .all(|value| !value.to_str().unwrap().starts_with("leo_session="))
-    );
-    // Opening an official URL received from someone else must not authorize
-    // their Android session, even after GitHub silently authenticates us.
-    assert_eq!(
-        exchange().send().await.unwrap().status(),
-        StatusCode::ACCEPTED
-    );
-    let methods: Value = app
-        .client
-        .get(format!("{}/api/account/methods", app.url))
-        .header("cookie", &cookie)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert!(
-        methods["methods"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|method| method["kind"] != "github")
-    );
-
-    let confirmation_cookie = callback
-        .headers()
-        .get_all("set-cookie")
-        .iter()
-        .find(|value| {
-            value
-                .to_str()
-                .unwrap()
-                .starts_with("leo_native_confirmation=")
-        })
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_owned();
-    let html = callback.text().await.unwrap();
-    assert!(html.contains("application Leo pour Android"));
-    assert!(html.contains("alice@example.test"));
-    let proof = html
-        .split("name=proof value='")
-        .nth(1)
-        .unwrap()
-        .split('\'')
-        .next()
-        .unwrap();
-    let confirmation_url = format!("{}/api/account/oauth/github/native/confirm", app.url);
-    for (supplied_cookie, supplied_proof) in [
-        (cookie.as_str(), proof),
-        ("leo_native_confirmation=another-browser", proof),
-        (confirmation_cookie.as_str(), "wrong-proof"),
-    ] {
-        let response = browser_client
-            .post(&confirmation_url)
-            .header("origin", &app.url)
-            .header("cookie", supplied_cookie)
-            .form(&[
-                ("challenge", start["challenge"].as_str().unwrap()),
-                ("proof", supplied_proof),
-            ])
+            .json(&json!({"native": true}))
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-    let foreign = browser_client
-        .post(&confirmation_url)
-        .header("origin", "https://attacker.example")
-        .header("cookie", &confirmation_cookie)
-        .form(&[
-            ("challenge", start["challenge"].as_str().unwrap()),
-            ("proof", proof),
-        ])
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(foreign.status(), StatusCode::FORBIDDEN);
-    assert_eq!(
-        exchange().send().await.unwrap().status(),
-        StatusCode::ACCEPTED
-    );
+        assert_eq!(response.status(), StatusCode::OK);
+        let start: Value = response.json().await.unwrap();
+        assert!(start["url"].as_str().unwrap().starts_with(&app.url));
+        let exchange = || {
+            app.client
+                .post(format!(
+                    "{}/api/account/oauth/github/native/finish",
+                    app.url
+                ))
+                .header("origin", &app.url)
+                .header("cookie", &cookie)
+                .header("x-csrf-token", session["csrf"].as_str().unwrap())
+                .json(&json!({
+                    "challenge": start["challenge"],
+                    "secret": start["secret"],
+                }))
+        };
+        assert_eq!(
+            exchange().send().await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        let browser_client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let launch = browser_client
+            .get(start["url"].as_str().unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(launch.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            browser_client
+                .get(start["url"].as_str().unwrap())
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let browser_cookie = launch.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let authorization =
+            url::Url::parse(launch.headers()["location"].to_str().unwrap()).unwrap();
+        provider.expect_authorization(
+            &authorization,
+            format!("{}/api/account/oauth/github/callback", app.url),
+        );
+        assert_eq!(
+            authorization
+                .query_pairs()
+                .find(|(key, _)| key == "scope")
+                .unwrap()
+                .1,
+            "user:email"
+        );
+        let state = authorization
+            .query_pairs()
+            .find(|(key, _)| key == "state")
+            .unwrap()
+            .1
+            .to_string();
+        if expire_at == "callback" {
+            query("UPDATE web_sessions SET last_proof_at = NULL")
+                .execute(&app.pool)
+                .await
+                .unwrap();
+        }
 
-    let confirm = || {
-        browser_client
+        let callback = browser_client
+            .get(format!(
+                "{}/api/account/oauth/github/callback?state={state}&code=verified",
+                app.url
+            ))
+            .header("cookie", browser_cookie)
+            .send()
+            .await
+            .unwrap();
+        if expire_at == "callback" {
+            assert_oauth_rejected(&callback);
+            assert_eq!(
+                callback.headers()["location"],
+                "/?sign_in_error=oauth_proof"
+            );
+            assert_eq!(
+                provider
+                    .state
+                    .revocations
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                0
+            );
+            let methods: Value = app
+                .authenticated(
+                    &cookie,
+                    &session,
+                    reqwest::Method::GET,
+                    "/api/account/methods",
+                )
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert!(
+                methods["methods"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|method| method["kind"] != "github")
+            );
+            provider.server.abort();
+            app.close().await;
+            continue;
+        }
+
+        assert_eq!(callback.status(), StatusCode::OK);
+        assert!(
+            callback
+                .headers()
+                .get_all("set-cookie")
+                .iter()
+                .all(|value| !value.to_str().unwrap().starts_with("leo_session="))
+        );
+        // Opening an official URL received from someone else must not authorize
+        // their Android session, even after GitHub silently authenticates us.
+        assert_eq!(
+            exchange().send().await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        let methods: Value = app
+            .client
+            .get(format!("{}/api/account/methods", app.url))
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(
+            methods["methods"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|method| method["kind"] != "github")
+        );
+
+        let confirmation_cookie = callback
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .find(|value| {
+                value
+                    .to_str()
+                    .unwrap()
+                    .starts_with("leo_native_confirmation=")
+            })
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let html = callback.text().await.unwrap();
+        assert!(html.contains("application Leo pour Android"));
+        assert!(html.contains("alice@example.test"));
+        let proof = html
+            .split("name=proof value='")
+            .nth(1)
+            .unwrap()
+            .split('\'')
+            .next()
+            .unwrap();
+        let confirmation_url = format!("{}/api/account/oauth/github/native/confirm", app.url);
+        for (supplied_cookie, supplied_proof) in [
+            (cookie.as_str(), proof),
+            ("leo_native_confirmation=another-browser", proof),
+            (confirmation_cookie.as_str(), "wrong-proof"),
+        ] {
+            let response = browser_client
+                .post(&confirmation_url)
+                .header("origin", &app.url)
+                .header("cookie", supplied_cookie)
+                .form(&[
+                    ("challenge", start["challenge"].as_str().unwrap()),
+                    ("proof", supplied_proof),
+                ])
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let foreign = browser_client
             .post(&confirmation_url)
-            .header("origin", &app.url)
+            .header("origin", "https://attacker.example")
             .header("cookie", &confirmation_cookie)
             .form(&[
                 ("challenge", start["challenge"].as_str().unwrap()),
                 ("proof", proof),
             ])
-    };
-    assert_eq!(confirm().send().await.unwrap().status(), StatusCode::OK);
-    assert_eq!(
-        confirm().send().await.unwrap().status(),
-        StatusCode::UNAUTHORIZED
-    );
-    let response = exchange().send().await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.json::<Value>().await.unwrap()["account"]["id"],
-        session["account"]["id"]
-    );
-    assert_eq!(
-        exchange().send().await.unwrap().status(),
-        StatusCode::UNAUTHORIZED
-    );
-    provider.server.abort();
-    app.close().await;
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(foreign.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            exchange().send().await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+
+        if expire_at == "consent" {
+            query("UPDATE web_sessions SET last_proof_at = NULL")
+                .execute(&app.pool)
+                .await
+                .unwrap();
+        }
+
+        let confirm = || {
+            browser_client
+                .post(&confirmation_url)
+                .header("origin", &app.url)
+                .header("cookie", &confirmation_cookie)
+                .form(&[
+                    ("challenge", start["challenge"].as_str().unwrap()),
+                    ("proof", proof),
+                ])
+        };
+        if matches!(expire_at, "consent_locked" | "session_locked") {
+            let mut barrier = app.pool.begin().await.unwrap();
+            let (pid,): (i32,) = sqlx_core::query_as::query_as("SELECT pg_backend_pid()")
+                .fetch_one(&mut *barrier)
+                .await
+                .unwrap();
+            query("SELECT id FROM leo_accounts FOR UPDATE")
+                .execute(&mut *barrier)
+                .await
+                .unwrap();
+            let pending_request = confirm();
+            let pending = tokio::spawn(async move { pending_request.send().await.unwrap() });
+            app.wait_for_blocked_request(pid).await;
+            assert_eq!(
+                exchange().send().await.unwrap().status(),
+                StatusCode::ACCEPTED
+            );
+
+            let expiry = if expire_at == "session_locked" {
+                "UPDATE web_sessions SET expires_at = clock_timestamp() - interval '1 millisecond'"
+            } else {
+                "UPDATE web_sessions SET last_proof_at = NULL"
+            };
+            query(expiry).execute(&app.pool).await.unwrap();
+            barrier.commit().await.unwrap();
+
+            let refused = pending.await.unwrap();
+            assert_eq!(
+                refused.status(),
+                if expire_at == "session_locked" {
+                    StatusCode::UNAUTHORIZED
+                } else {
+                    StatusCode::FORBIDDEN
+                }
+            );
+            assert!(refused.headers().get("set-cookie").is_none());
+            provider.server.abort();
+            app.close().await;
+            continue;
+        }
+
+        if expire_at == "consent" {
+            assert_eq!(
+                confirm().send().await.unwrap().status(),
+                StatusCode::FORBIDDEN
+            );
+            let methods: Value = app
+                .authenticated(
+                    &cookie,
+                    &session,
+                    reqwest::Method::GET,
+                    "/api/account/methods",
+                )
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert!(
+                methods["methods"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|method| method["kind"] != "github")
+            );
+            provider.server.abort();
+            app.close().await;
+            continue;
+        }
+
+        assert_eq!(confirm().send().await.unwrap().status(), StatusCode::OK);
+        assert_eq!(
+            confirm().send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        if expire_at == "finish" {
+            query("UPDATE web_sessions SET last_proof_at = NULL")
+                .execute(&app.pool)
+                .await
+                .unwrap();
+            let refused = exchange().send().await.unwrap();
+            assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+            assert!(refused.headers().get("set-cookie").is_none());
+            provider.server.abort();
+            app.close().await;
+            continue;
+        }
+
+        let response = exchange().send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["account"]["id"],
+            session["account"]["id"]
+        );
+        assert_eq!(
+            exchange().send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        provider.server.abort();
+        app.close().await;
+    }
 }
 
 impl OAuthMock {
@@ -682,6 +831,9 @@ impl OAuthMock {
             routing::{get, post},
         };
         let state = OAuthMockState {
+            revocations: Arc::default(),
+            fail_revocation: Arc::default(),
+            fail_token: Arc::default(),
             authorizations: Arc::new(Mutex::new(std::collections::HashMap::new())),
             profiles: Arc::new(Mutex::new(json!({
                 "google": {
@@ -709,7 +861,20 @@ impl OAuthMock {
             }))),
         };
         let app = Router::new()
+            .route("/github/applications/github-test/token", axum::routing::delete(
+                |State(state): State<OAuthMockState>, headers: axum::http::HeaderMap, Json(body): Json<Value>| async move {
+                    use base64::{Engine, engine::general_purpose::STANDARD};
+                    assert_eq!(headers["authorization"], format!("Basic {}", STANDARD.encode("github-test:test-only")));
+                    assert!(matches!(body["access_token"].as_str(), Some("verified" | "unverified")));
+                    state.revocations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if state.fail_revocation.load(std::sync::atomic::Ordering::SeqCst) {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    } else {
+                        StatusCode::from_u16(state.profiles.lock().unwrap()["revocation_status"].as_u64().unwrap_or(204) as u16).unwrap()
+                    }
+                }))
             .route("/token", post(|State(state): State<OAuthMockState>, axum::Form(body): axum::Form<std::collections::HashMap<String, String>>| async move {
+                use axum::response::IntoResponse;
                 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
                 use sha2::{Digest, Sha256};
                 assert_eq!(body["grant_type"], "authorization_code");
@@ -719,10 +884,14 @@ impl OAuthMock {
                 assert_eq!(body["client_id"], client_id);
                 assert_eq!(body["redirect_uri"], redirect);
 
+                if state.fail_token.load(std::sync::atomic::Ordering::SeqCst) {
+                    return (StatusCode::SERVICE_UNAVAILABLE, "private-provider-body").into_response();
+                }
+
                 Json(json!({
                     "access_token": body["code"],
                     "token_type": "Bearer",
-                }))
+                })).into_response()
             }))
             .route("/google/userinfo", get(|State(state): State<OAuthMockState>, headers: axum::http::HeaderMap| async move {
                 let mut profile = state.profiles.lock().unwrap()["google"].clone();
@@ -778,12 +947,12 @@ impl OAuthMock {
         );
     }
 
-    async fn attempt(
+    async fn begin(
         &self,
         app: &Fixture,
         name: &str,
         session: Option<(&str, &str)>,
-    ) -> reqwest::Response {
+    ) -> reqwest::RequestBuilder {
         let mut request = app
             .client
             .post(format!("{}/api/account/oauth/{name}/start", app.url))
@@ -827,16 +996,27 @@ impl OAuthMock {
                 app.url
             ))
             .header("cookie", cookie)
-            .send()
-            .await
-            .unwrap()
+    }
+
+    async fn attempt(
+        &self,
+        app: &Fixture,
+        name: &str,
+        session: Option<(&str, &str)>,
+    ) -> reqwest::Response {
+        self.begin(app, name, session).await.send().await.unwrap()
     }
 }
 
 #[track_caller]
 fn assert_oauth_rejected(response: &reqwest::Response) {
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    assert_eq!(response.headers()["location"], "/?sign_in_error=oauth");
+    assert!(matches!(
+        response.headers()["location"].to_str().unwrap(),
+        "/?sign_in_error=oauth"
+            | "/?sign_in_error=oauth_link_required"
+            | "/?sign_in_error=oauth_proof"
+    ));
     assert!(
         response
             .headers()
@@ -863,6 +1043,400 @@ fn assert_oauth_signed_in(response: &reqwest::Response) {
             .iter()
             .any(|value| value.to_str().unwrap().starts_with("leo_session="))
     );
+}
+
+#[tokio::test]
+async fn oauth_linking_requires_recent_proof_in_the_calling_session_before_spending_quota() {
+    let provider = OAuthMock::new().await;
+    let app = Fixture::with_oauth(provider.providers()).await;
+    let (cookie, session) = common::login(&app, "alice@example.test").await;
+    query("UPDATE web_sessions SET last_proof_at = NULL")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+
+    for native in [false, true] {
+        for name in ["google", "github"] {
+            for _ in 0..31 {
+                let refused = app
+                    .authenticated(
+                        &cookie,
+                        &session,
+                        reqwest::Method::POST,
+                        &format!("/api/account/oauth/{name}/start"),
+                    )
+                    .json(&json!({ "native": native }))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+                assert!(refused.headers().get("set-cookie").is_none());
+            }
+        }
+    }
+
+    query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key LIKE 'email:%'")
+        .execute(&app.pool).await.unwrap();
+    let (_, other) = common::login(&app, "alice@example.test").await;
+    assert_ne!(other["csrf"], session["csrf"]);
+    assert_eq!(
+        app.authenticated(
+            &cookie,
+            &session,
+            reqwest::Method::POST,
+            "/api/account/oauth/github/start"
+        )
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::FORBIDDEN,
+        "a proof on another device cannot confirm this cookie"
+    );
+
+    query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key LIKE 'email:%'")
+        .execute(&app.pool).await.unwrap();
+    let (challenge, code) = app.code("alice@example.test").await;
+    assert_eq!(
+        app.authenticated(
+            &cookie,
+            &session,
+            reqwest::Method::POST,
+            "/api/account/reauth/email"
+        )
+        .json(&json!({ "challenge": challenge, "code": code }))
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+
+    for name in ["google", "github"] {
+        let linked = provider
+            .attempt(
+                &app,
+                name,
+                Some((&cookie, session["csrf"].as_str().unwrap())),
+            )
+            .await;
+        assert_oauth_signed_in(&linked);
+        assert_oauth_signed_in(&provider.attempt(&app, name, None).await);
+    }
+    app.close().await;
+    provider.server.abort();
+}
+
+#[tokio::test]
+async fn native_google_linking_requires_recent_proof_before_reading_the_credential() {
+    let provider = OAuthMock::new().await;
+    let relay = common::RelayedInstallation::with_oauth(provider.providers()).await;
+    let app = &relay.app;
+    let started = app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            reqwest::Method::POST,
+            "/api/account/oauth/google/start",
+        )
+        .json(&json!({ "native": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(started.status(), StatusCode::OK);
+    let browser = started.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let challenge: Value = started.json().await.unwrap();
+
+    query("UPDATE web_sessions SET last_proof_at = NULL")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let refused = app
+        .authenticated(
+            &format!("{}; {browser}", relay.cookie),
+            &relay.session,
+            reqwest::Method::POST,
+            "/api/account/oauth/google/callback",
+        )
+        .json(&json!({
+            "challenge": challenge["challenge"],
+            "credential": "fixture-not-a-jwt",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    assert!(refused.headers().get("set-cookie").is_none());
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    relay.close().await;
+    provider.server.abort();
+}
+
+#[tokio::test]
+async fn oauth_linking_rechecks_proof_and_session_after_waiting_for_the_account_lock() {
+    for phase in ["start", "callback", "native_start"] {
+        for expire_session in [false, true] {
+            let provider = OAuthMock::new().await;
+            provider.state.profiles.lock().unwrap()["google"]["email"] =
+                json!("relay-owner@example.test");
+            let relay = common::RelayedInstallation::with_oauth(provider.providers()).await;
+            let app = &relay.app;
+            let request = if phase == "callback" {
+                provider
+                    .begin(
+                        app,
+                        "google",
+                        Some((&relay.cookie, relay.session["csrf"].as_str().unwrap())),
+                    )
+                    .await
+            } else {
+                app.authenticated(
+                    &relay.cookie,
+                    &relay.session,
+                    reqwest::Method::POST,
+                    "/api/account/oauth/google/start",
+                )
+                .json(&json!({ "native": phase == "native_start" }))
+            };
+
+            let mut barrier = app.pool.begin().await.unwrap();
+            let (pid,): (i32,) = sqlx_core::query_as::query_as("SELECT pg_backend_pid()")
+                .fetch_one(&mut *barrier)
+                .await
+                .unwrap();
+            query("SELECT id FROM leo_accounts FOR UPDATE")
+                .execute(&mut *barrier)
+                .await
+                .unwrap();
+            let pending = tokio::spawn(async move { request.send().await.unwrap() });
+            app.wait_for_blocked_request(pid).await;
+
+            let expiry = if expire_session {
+                "UPDATE web_sessions SET expires_at = clock_timestamp() - interval '1 millisecond'"
+            } else {
+                "UPDATE web_sessions SET last_proof_at = clock_timestamp() - interval '5 minutes'"
+            };
+            query(expiry).execute(&app.pool).await.unwrap();
+
+            barrier.commit().await.unwrap();
+
+            let response = pending.await.unwrap();
+            if phase == "callback" {
+                assert_oauth_rejected(&response);
+            } else {
+                assert_eq!(
+                    response.status(),
+                    if expire_session {
+                        StatusCode::UNAUTHORIZED
+                    } else {
+                        StatusCode::FORBIDDEN
+                    }
+                );
+                assert!(response.headers().get("set-cookie").is_none());
+            }
+            if !expire_session {
+                assert_eq!(
+                    relay.get("/chats").send().await.unwrap().status(),
+                    StatusCode::OK
+                );
+                let methods: Value = app
+                    .authenticated(
+                        &relay.cookie,
+                        &relay.session,
+                        reqwest::Method::GET,
+                        "/api/account/methods",
+                    )
+                    .send()
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                assert_eq!(methods["methods"].as_array().unwrap().len(), 1);
+            }
+            relay.close().await;
+            provider.server.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_linked_oauth_identity_keeps_its_leo_account_when_the_provider_email_changes() {
+    let provider = OAuthMock::new().await;
+    provider.state.profiles.lock().unwrap()["google"]["email"] = json!("relay-owner@example.test");
+    provider.state.profiles.lock().unwrap()["emails"][1]["email"] =
+        json!("relay-owner@example.test");
+    let relay = common::RelayedInstallation::with_oauth(provider.providers()).await;
+    let app = &relay.app;
+    for name in ["google", "github"] {
+        assert_oauth_signed_in(
+            &provider
+                .attempt(
+                    app,
+                    name,
+                    Some((&relay.cookie, relay.session["csrf"].as_str().unwrap())),
+                )
+                .await,
+        );
+    }
+    let (_, other_session) = common::login(app, "changed@example.test").await;
+    assert_ne!(other_session["account"], relay.session["account"]);
+    provider.state.profiles.lock().unwrap()["google"]["email"] = json!("changed@example.test");
+    provider.state.profiles.lock().unwrap()["emails"][1]["email"] = json!("changed@example.test");
+
+    for name in ["google", "github"] {
+        let response = provider.attempt(app, name, None).await;
+        assert_oauth_signed_in(&response);
+        let cookie = response.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let session: Value = app
+            .client
+            .get(format!("{}/api/account/session", app.url))
+            .header("cookie", cookie)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(session["account"], relay.session["account"]);
+        assert_eq!(
+            app.client
+                .get(format!("{}/chats", relay.base))
+                .header("cookie", cookie)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+    relay.close().await;
+    provider.server.abort();
+}
+
+#[tokio::test]
+async fn github_tokens_are_revoked_after_identity_reads_including_rejected_identities() {
+    use std::sync::atomic::Ordering;
+    let provider = OAuthMock::new().await;
+    let app = Fixture::with_oauth(provider.providers()).await;
+    assert_oauth_signed_in(&provider.attempt(&app, "github", None).await);
+    assert_eq!(provider.state.revocations.load(Ordering::SeqCst), 1);
+    assert_oauth_signed_in(&provider.attempt(&app, "google", None).await);
+    assert_eq!(provider.state.revocations.load(Ordering::SeqCst), 1);
+
+    provider.state.profiles.lock().unwrap()["emails"][1]["verified"] = json!(false);
+    assert_oauth_rejected(&provider.attempt(&app, "github", None).await);
+    assert_eq!(provider.state.revocations.load(Ordering::SeqCst), 2);
+
+    provider.state.profiles.lock().unwrap()["emails"][1]["verified"] = json!(true);
+    provider.state.fail_revocation.store(true, Ordering::SeqCst);
+    let unavailable = provider.attempt(&app, "github", None).await;
+    assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        unavailable
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .all(|value| !value.to_str().unwrap().starts_with("leo_session="))
+    );
+    assert_eq!(provider.state.revocations.load(Ordering::SeqCst), 3);
+
+    provider.state.profiles.lock().unwrap()["emails"][1]["verified"] = json!(false);
+    let unavailable = provider.attempt(&app, "github", None).await;
+    assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(provider.state.revocations.load(Ordering::SeqCst), 4);
+
+    app.close().await;
+    provider.server.abort();
+}
+
+#[tokio::test]
+async fn oauth_distinguishes_required_linking_expired_proof_and_provider_outages() {
+    let provider = OAuthMock::new().await;
+    provider.state.profiles.lock().unwrap()["google"]["hd"] = Value::Null;
+    let app = Fixture::with_oauth(provider.providers()).await;
+    let (cookie, session) = common::login(&app, "alice@example.test").await;
+    for name in ["google", "github"] {
+        let refused = provider.attempt(&app, name, None).await;
+        assert_eq!(
+            refused.headers()["location"],
+            "/?sign_in_error=oauth_link_required"
+        );
+        assert!(
+            refused
+                .headers()
+                .get_all("set-cookie")
+                .iter()
+                .all(|value| !value.to_str().unwrap().starts_with("leo_session="))
+        );
+    }
+
+    let callback = provider
+        .begin(
+            &app,
+            "google",
+            Some((&cookie, session["csrf"].as_str().unwrap())),
+        )
+        .await;
+    query("UPDATE web_sessions SET last_proof_at = NULL")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let refused = callback.send().await.unwrap();
+    assert_eq!(refused.headers()["location"], "/?sign_in_error=oauth_proof");
+
+    provider
+        .state
+        .fail_token
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let unavailable = provider.attempt(&app, "google", None).await;
+    assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        unavailable
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .all(|value| !value.to_str().unwrap().starts_with("leo_session="))
+    );
+    let text = unavailable.text().await.unwrap();
+    assert!(text.contains("Sign-in provider unavailable"));
+    assert!(!text.contains("private-provider-body"));
+    app.close().await;
+    provider.server.abort();
+}
+
+#[tokio::test]
+async fn github_sign_in_requires_an_acknowledged_revocation_not_a_redirect() {
+    let provider = OAuthMock::new().await;
+    provider.state.profiles.lock().unwrap()["revocation_status"] = json!(302);
+    let app = Fixture::with_oauth(provider.providers()).await;
+    let response = provider.attempt(&app, "github", None).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        response
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .all(|value| !value.to_str().unwrap().starts_with("leo_session="))
+    );
+    app.close().await;
+    provider.server.abort();
 }
 
 #[tokio::test]

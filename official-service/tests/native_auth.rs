@@ -349,124 +349,137 @@ async fn native_passkeys_accept_only_configured_certificate_origins_and_reuse_th
 }
 
 #[tokio::test]
-async fn revoking_the_leo_session_during_google_verification_prevents_account_linking() {
-    use std::sync::Arc;
-    let key = RS256KeyPair::generate(2048)
-        .unwrap()
-        .with_key_id("fixture-key");
-    let components = key.public_key().to_components();
-    let keys = json!({
-        "keys": [{
-            "kid": "fixture-key",
-            "kty": "RSA",
-            "alg": "RS256",
-            "n": URL_SAFE_NO_PAD.encode(components.n),
-            "e": URL_SAFE_NO_PAD.encode(components.e),
-        }],
-    });
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let jwks = format!("http://{}/keys", listener.local_addr().unwrap());
-    let entered_server = entered.clone();
-    let release_server = release.clone();
-    let server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            Router::new().route(
-                "/keys",
-                get(move || {
-                    let entered = entered_server.clone();
-                    let release = release_server.clone();
-                    let keys = keys.clone();
-                    async move {
-                        entered.notify_one();
-                        release.notified().await;
-                        Json(keys)
-                    }
-                }),
-            ),
-        )
-        .await
-        .unwrap();
-    });
-    let app = Fixture::with_oauth(leo_official_service::OAuthProviders {
-        google: Some(leo_official_service::OAuthProvider {
-            client_id: "fixture-client".into(),
-            client_secret: "fixture-secret".into(),
-            authorization_url: "https://accounts.google.com/o/oauth2/v2/auth".into(),
-            token_url: "https://oauth2.googleapis.com/token".into(),
-            userinfo_url: "https://openidconnect.googleapis.com/v1/userinfo".into(),
-            emails_url: None,
-        }),
-        google_jwks_url: Some(jwks),
-        ..Default::default()
-    })
-    .await;
-    let (cookie, session) = login(&app, "link@example.test").await;
-    let start = app
-        .authenticated(
-            &cookie,
-            &session,
-            reqwest::Method::POST,
-            "/api/account/oauth/google/start",
-        )
-        .json(&json!({ "native": true }))
-        .send()
-        .await
-        .unwrap();
-    let browser = start.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_owned();
-    let challenge: Value = start.json().await.unwrap();
-    let token = key
-        .sign(
-            Claims::with_custom_claims(
-                json!({
-                    "email": "link@example.test",
-                    "email_verified": true,
-                }),
-                Duration::from_secs(300),
+async fn native_google_linking_rechecks_proof_and_session_after_identity_verification() {
+    for revoke_session in [false, true] {
+        use std::sync::Arc;
+        let key = RS256KeyPair::generate(2048)
+            .unwrap()
+            .with_key_id("fixture-key");
+        let components = key.public_key().to_components();
+        let keys = json!({
+            "keys": [{
+                "kid": "fixture-key",
+                "kty": "RSA",
+                "alg": "RS256",
+                "n": URL_SAFE_NO_PAD.encode(components.n),
+                "e": URL_SAFE_NO_PAD.encode(components.e),
+            }],
+        });
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let jwks = format!("http://{}/keys", listener.local_addr().unwrap());
+        let entered_server = entered.clone();
+        let release_server = release.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/keys",
+                    get(move || {
+                        let entered = entered_server.clone();
+                        let release = release_server.clone();
+                        let keys = keys.clone();
+                        async move {
+                            entered.notify_one();
+                            release.notified().await;
+                            Json(keys)
+                        }
+                    }),
+                ),
             )
-            .with_subject("linked-google")
-            .with_issuer("https://accounts.google.com")
-            .with_audience("fixture-client")
-            .with_nonce(challenge["nonce"].as_str().unwrap()),
-        )
-        .unwrap();
-    let exchange = app
-        .authenticated(
-            &format!("{cookie}; {browser}"),
-            &session,
-            reqwest::Method::POST,
-            "/api/account/oauth/google/callback",
-        )
-        .json(&json!({
-            "challenge": challenge["challenge"],
-            "credential": token,
-        }));
-    let exchange = tokio::spawn(async move { exchange.send().await.unwrap() });
-    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
-        .await
-        .unwrap();
-    let logout = app
-        .authenticated(
-            &cookie,
-            &session,
-            reqwest::Method::POST,
-            "/api/account/logout",
-        )
-        .json(&json!({}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(logout.status(), 204);
-    release.notify_one();
-    assert_eq!(exchange.await.unwrap().status(), 401);
-    app.close().await;
-    server.abort();
+            .await
+            .unwrap();
+        });
+        let app = Fixture::with_oauth(leo_official_service::OAuthProviders {
+            google: Some(leo_official_service::OAuthProvider {
+                client_id: "fixture-client".into(),
+                client_secret: "fixture-secret".into(),
+                authorization_url: "https://accounts.google.com/o/oauth2/v2/auth".into(),
+                token_url: "https://oauth2.googleapis.com/token".into(),
+                userinfo_url: "https://openidconnect.googleapis.com/v1/userinfo".into(),
+                emails_url: None,
+            }),
+            google_jwks_url: Some(jwks),
+            ..Default::default()
+        })
+        .await;
+        let (cookie, session) = login(&app, "link@example.test").await;
+        let start = app
+            .authenticated(
+                &cookie,
+                &session,
+                reqwest::Method::POST,
+                "/api/account/oauth/google/start",
+            )
+            .json(&json!({ "native": true }))
+            .send()
+            .await
+            .unwrap();
+        let browser = start.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let challenge: Value = start.json().await.unwrap();
+        let token = key
+            .sign(
+                Claims::with_custom_claims(
+                    json!({
+                        "email": "link@example.test",
+                        "email_verified": true,
+                    }),
+                    Duration::from_secs(300),
+                )
+                .with_subject("linked-google")
+                .with_issuer("https://accounts.google.com")
+                .with_audience("fixture-client")
+                .with_nonce(challenge["nonce"].as_str().unwrap()),
+            )
+            .unwrap();
+        let exchange = app
+            .authenticated(
+                &format!("{cookie}; {browser}"),
+                &session,
+                reqwest::Method::POST,
+                "/api/account/oauth/google/callback",
+            )
+            .json(&json!({
+                "challenge": challenge["challenge"],
+                "credential": token,
+            }));
+        let exchange = tokio::spawn(async move { exchange.send().await.unwrap() });
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        if revoke_session {
+            let logout = app
+                .authenticated(
+                    &cookie,
+                    &session,
+                    reqwest::Method::POST,
+                    "/api/account/logout",
+                )
+                .json(&json!({}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(logout.status(), 204);
+        } else {
+            sqlx_core::query::query("UPDATE web_sessions SET last_proof_at = NULL")
+                .execute(&app.pool)
+                .await
+                .unwrap();
+        }
+
+        release.notify_one();
+        assert_eq!(
+            exchange.await.unwrap().status(),
+            if revoke_session { 401 } else { 403 }
+        );
+        app.close().await;
+        server.abort();
+    }
 }

@@ -139,8 +139,17 @@ Configure both client credentials for each enabled provider. An incomplete pair
 fails startup; unconfigured providers are hidden on the sign-in screen. The
 Compose development setup reads the four optional credential variables from the
 operator's environment. Credentials and provider tokens are never returned to
-the browser or forwarded to installations. Provider access tokens are discarded
-after fetching identity; no refresh tokens are requested or stored.
+the browser or forwarded to installations. Provider access tokens are never
+stored; no refresh tokens are requested. After reading a GitHub identity,
+including a rejected identity, the provider module calls
+[Delete an app token](https://docs.github.com/en/rest/apps/oauth-applications#delete-an-app-token)
+with the application's HTTP Basic credentials. It requires the documented 204
+acknowledgement before issuing a Leo session; redirects and other responses fail
+closed. The endpoint uses the API prefix of the configured GitHub `/user` URL,
+followed by `/applications/{client_id}/token`. Loopback provider fixtures use the
+same rule. Google identification tokens are discarded locally. A failed GitHub
+revocation blocks sign-in and discards the local token; it cannot guarantee that
+the unreachable provider has invalidated it. No token is retained for retries.
 
 Google uses `openid email` and the
 [verified email from UserInfo](https://developers.google.com/identity/openid-connect/openid-connect).
@@ -152,10 +161,15 @@ can create a new Leo account. For an existing account, a new Google identity is
 automatically attached only when Google is
 [authoritative for the email](https://developers.google.com/identity/sign-in/web/backend-auth):
 `@gmail.com`, or a verified Workspace `hd` matching the email's domain. Other
-Google emails and GitHub require a current Leo session to link. Once linked,
-the identity remains a normal sign-in method. An identity already attached to
-a different account is rejected; linking while signed in must match the current
-account's verified email. Concurrent first sign-ins reuse the same account and
+Google emails and GitHub require a confirmed Leo session to link. Once linked,
+the identity remains a normal sign-in method. Lookups use `(kind, subject)` before
+the provider's mutable email, so an email change preserves the original Leo
+account and installation access even if that new email belongs to another Leo
+account. Removed methods remain unusable until explicitly re-linked. An identity
+already attached to a different account is rejected; a new identity linked while
+signed in must match the current account's verified email. Re-linking an identity
+already belonging to that account does not move it or change its verified email.
+Concurrent first sign-ins reuse the same account and
 method without a uniqueness error.
 
 Default endpoints are the official Google and GitHub endpoints. Tests replace
@@ -164,8 +178,20 @@ only their HTTP endpoints. Operators can override
 `LEO_OFFICIAL_GITHUB_EMAILS_URL`; endpoints require HTTPS, except HTTP loopback
 endpoints when the official origin is also loopback. OAuth uses authorization
 codes, S256 PKCE and a five-minute, single-use state bound to an HttpOnly browser
-cookie. Explicit linking also checks the initiating session and CSRF token. OAuth
-cancellation or rejection returns to the sign-in screen with a generic message.
+cookie. Explicit linking checks the initiating session and CSRF token and requires
+an independent email/passkey proof from the last five minutes in that session.
+The proof is checked before spending the start quota and again under the account
+lock before creating the challenge. The callback checks its bound session and
+proof before contacting the provider and again after waiting for the account
+lock, immediately before linking. A session alone cannot add a durable OAuth
+sign-in method. Confirm identity from Sign-in methods, then explicitly retry the
+link; confirmation never starts provider navigation automatically.
+OAuth cancellation or invalid identity returns a generic sign-in error. An
+existing email that needs explicit linking instead directs the user to email
+sign-in and Sign-in methods. An expired linking proof returns to Sign-in methods
+to reconfirm. Provider outages return HTTP 503 with a safe retry page and no
+provider response body or new Leo session. The retry returns to the app with a
+distinct unavailable message.
 OAuth and passkey browser cookies are cleared after completion or rejection.
 
 Passkeys use [webauthn-rs](https://docs.rs/webauthn-rs/latest/webauthn_rs/)
@@ -463,7 +489,14 @@ The official routes are `GET /api/account/notifications`,
 `POST /api/account/notifications/subscriptions`, and
 `GET` / `DELETE /api/account/notifications/subscriptions/{id}`. They require the
 official session; writes also require the official origin and CSRF token.
-Registration is idempotent, limited to 50 devices per account, and a browser
+Registration requires a recent independent email/passkey proof in the calling
+session, rechecked after waiting for both the account and endpoint locks. Notifications offers the
+existing Confirm identity flow and returns to the panel without automatically
+enabling push. Google/GitHub sign-in alone does not count as this proof:
+confirm with an email code or an existing passkey before enabling notifications.
+A refused registration unsubscribes the browser subscription, so the panel does
+not leave an unregistered push endpoint behind. Disabling a device needs no new proof. Registration is idempotent,
+limited to 50 devices per account, and a browser
 endpoint has one current account. Registering it after switching accounts moves
 it to the new account. A foreign account cannot inspect or remove a device.
 Only supported HTTPS browser push endpoints are accepted.
@@ -545,7 +578,11 @@ Android polls `POST /api/account/oauth/github/native/finish` with the
 challenge and secret: 202 means pending; success creates the ordinary Leo session.
 The launcher and completed exchange are each one-use and expire in five minutes.
 The handover stores no session or provider access tokens, and authenticated linking
-remains bound to the original Leo session, rechecked after consent. The additive
+requires the original Leo session's recent independent email/passkey proof.
+The app session is checked before the provider callback and again under the
+account lock at consent, then at the final exchange. Browser consent does not
+replace this proof. Google native linking applies the same checks before its
+quota, before JWT/JWKS verification and after the account lock. The additive
 consent migration invalidates older in-flight handovers. Never log handover URLs,
 confirmation proofs or secrets.
 
@@ -572,7 +609,21 @@ An authenticated Android client checks `GET /api/account/notifications/android`
 and registers its stable device UUID and current FCM token with
 `POST /api/account/notifications/android` (`deviceId`, `token`). The returned `id`
 uses the existing subscription lookup/removal routes. Token rotation updates the
-same registration; the current account receives events from every accessible
+same registration. Creating a registration or moving a device to another account
+requires a recent independent email/passkey proof in the calling session,
+checked before the account lock and again after the registration locks. A
+Google/GitHub sign-in alone does not count as this proof. Android's existing
+account settings can confirm identity by email or passkey; the user then enables
+push explicitly.
+
+Firebase also rotates tokens in the background, after the enabling proof has
+expired. An active session with valid CSRF can renew an existing native
+registration for the same device UUID and account without a new proof. The
+service checks that ownership under the device row lock and rechecks the session
+after waiting for all locks. A new UUID, a removed registration or a different
+account still needs proof. Treat the locally persisted random device UUID as a
+device credential; it is not listed by the service. The public registration ID
+alone cannot be used to renew a token. Disabling a device requires no new proof. The current account receives events from every accessible
 installation. The existing recipient locks and membership checks also govern
 native sends, so member removal stops subsequent sends immediately. Android
 checks current access again before displaying delayed messages. FCM authorization
