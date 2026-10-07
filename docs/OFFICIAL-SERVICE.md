@@ -20,6 +20,17 @@ logs codes. Both ports are bound to loopback. The first Rust compilation takes
 a few minutes. `docker compose -f deploy/official/compose.yaml down` stops it;
 add `-v` to discard the development database and build caches.
 
+## Production
+
+Use the `official` target in `Dockerfile` and
+`deploy/official/compose.production.yaml`. The image bundles the official binary
+and matching web output, runs as UID 1000, and requires environment-only secrets.
+The existing `deploy/official/compose.yaml` remains development-only.
+Follow [the cairn.build runbook](PRODUCTION-CAIRN.md) for the fresh same-server
+installation, proxy trust, email, OAuth, approval gates and Postgres rollback.
+`/health` returns no-store JSON (`status`, `commit`, `runtimeId`) and verifies
+Postgres availability; deployment checks its exact validated build identity.
+
 ## Configuration
 
 Production runs `cargo build --locked --release --bin leo-official`, then the

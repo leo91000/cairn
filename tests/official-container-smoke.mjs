@@ -79,7 +79,7 @@ async function main() {
     assert.equal(root.status, 200)
     assert.equal(root.headers.get('x-frame-options'), 'DENY')
     const html = await root.text()
-    assert.match(html, /<div id="app">/)
+    assert.match(html, /<div id="app"(?:\s|>)/)
     const script = html.match(/src="([^"]+\.js)"/)[1]
     const asset = await fetch(new URL(script, origin))
     assert.equal(asset.status, 200)

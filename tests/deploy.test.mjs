@@ -108,6 +108,36 @@ describe('coolify deployment over HTTP', () => {
     expect(requests.some(request => request.path === '/install/release')).toBe(true)
   })
 
+  it.each(['old-manager', 'two-replicas', 'start-first'])('refuses unsafe official target %s before any mutation', async (target) => {
+    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
+    if (target !== 'old-manager') {
+      const document = parse(readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8'))
+      if (target === 'two-replicas')
+        document.services.official.deploy.replicas = 2
+      else
+        document.services.official.deploy.update_config.order = 'start-first'
+      compose = stringify(document)
+    }
+
+    await expect(deploy(config, { intervalMs: 0, timeoutMs: 1000 })).rejects.toThrow('single-process official')
+    expect(requests.every(request => request.method === 'GET')).toBe(true)
+  })
+
+  it('fails when official health is current but installation approval is stale', async () => {
+    compose = readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
+    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
+    releaseImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'c'.repeat(64)}`
+    await expect(deploy(config, { intervalMs: 0, timeoutMs: 25 })).rejects.toThrow('installation image')
+  })
+
+  it('fails on an official environment update without restarting or leaking API bodies', async () => {
+    compose = readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
+    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
+    patchStatus = 401
+    await expect(deploy(config)).rejects.toThrow('HTTP 401')
+    expect(requests.some(request => request.method === 'POST')).toBe(false)
+  })
+
   it('pins the image, restarts and waits through stale health and proxy errors', async () => {
     healthResponses = [{ status: 'ok', commit: 'old-commit' }, null, { status: 'ok', commit: config.commit }]
     await deploy(config, { intervalMs: 0, timeoutMs: 1000 })

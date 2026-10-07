@@ -5,6 +5,21 @@ Sections are dated; the release measurements below used the v0.1.5 workflow on
 package mirrors, cache state, and registry transfers vary. Elapsed time includes
 job scheduling; runner time sums job durations.
 
+## Paired production images, 2026-10-07
+
+The `official-image` job builds the `official` Dockerfile target separately from
+VM/kernel layers and smoke-tests the exact published digest with disposable
+Postgres. It also verifies the bundled SPA/assets, installer release, sign-in,
+session persistence after restart and database readiness. Existing installation,
+runner, retention, browser, network and quality checks still gate publication.
+Both images use immutable digests, SBOM and provenance; one schema-3 artifact
+records both digests for the same Git tree and run. Single-image evidence is
+ineligible, so its first release falls back to complete validation. Promotion
+accepts a repository parameter and tags both digests; deployment verifies official
+health and the paired installation approval. Main/PR/manual runs never deploy.
+The official job has its own registry cache and no KVM dependency. No elapsed-time
+improvement is claimed for this additional job before hosted measurements.
+
 ## Pull request to release, 2026-10-04
 
 By October a release paid for the same validation twice:
@@ -113,7 +128,7 @@ took **8m53s** (528 aggregate runner seconds), without deployment.
   must have that tree too. The validating workflow is then part of the released
   code, and a pull request qualifies only if its branch contained main's tip. The
   `validated-image-<tree>` artifact must match the repository, tree, run ID,
-  schema, SHA-256 digest, and Codex/GitHub CLI versions freshly resolved for main
+  schema (now 3), both SHA-256 digests, and Codex/GitHub CLI versions freshly resolved for main
   or the release. Fork pull requests and manual runs cannot supply release proof.
   Missing proof, an outdated branch or older tool versions runs full CI with a new
   image.

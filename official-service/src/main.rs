@@ -2,6 +2,7 @@ use std::{env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use axum::{
+    Json,
     http::{HeaderValue, StatusCode, header},
     routing::{any, get},
 };
@@ -254,6 +255,9 @@ async fn run() -> Result<(), String> {
             None
         };
     let relay = Relay::default();
+    let health_pool = pool.clone();
+    let commit = env::var("APP_COMMIT").unwrap_or_else(|_| "development".into());
+    let runtime_id = env::var("APP_RUNTIME_ID").unwrap_or_else(|_| commit.clone());
     let mut app = router_with_network_and_push(
         pool.clone(),
         Arc::new(sender),
@@ -268,7 +272,34 @@ async fn run() -> Result<(), String> {
     .merge(leo_official_service::installer::release_router(
         env::var("LEO_INSTALLATION_IMAGE").ok(),
     )?)
-    .route("/health", get(|| async { StatusCode::OK }))
+    .route(
+        "/health",
+        get(move || {
+            let pool = health_pool.clone();
+            let commit = commit.clone();
+            let runtime_id = runtime_id.clone();
+            async move {
+                let ready = sqlx_core::query::query("SELECT 1")
+                    .execute(&pool)
+                    .await
+                    .is_ok();
+                let status = if ready {
+                    StatusCode::OK
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                };
+                (
+                    status,
+                    [(header::CACHE_CONTROL, "no-store")],
+                    Json(json!({
+                        "status": if ready { "ok" } else { "unavailable" },
+                        "commit": commit,
+                        "runtimeId": runtime_id,
+                    })),
+                )
+            }
+        }),
+    )
     .route("/api/{*path}", any(|| async { StatusCode::NOT_FOUND }))
     .route_service("/", ServeFile::new(web.join("official.html")))
     .route_service("/index.html", ServeFile::new(web.join("official.html")))

@@ -1,5 +1,9 @@
 # One-command installation
 
+For an installation sharing the official `https://cairn.build` production server,
+follow the [same-server runbook](PRODUCTION-CAIRN.md). Reserve memory/disk for the
+official process, Postgres and proxy before assigning installation VM budgets.
+
 Sign in to the official service and choose **Add an installation**. Copy the
 complete `curl … | sudo bash` command onto a trusted Linux x86-64 machine. Its
 single-use code lasts ten minutes and is passed by the launcher through a private
