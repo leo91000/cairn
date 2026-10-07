@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { api } from '../api'
+import { accountApi, state } from '../api'
 import { BellRing } from '../icons'
 import Icon from './Icon.vue'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
 
+const deviceKey = `leo-push-device:${state.accountId}`
+const signedIn = !!state.accountId
 const supported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window && window.isSecureContext
 const enabled = ref(false)
 const busy = ref(false)
@@ -17,12 +19,12 @@ const installed = window.matchMedia('(display-mode: standalone)').matches || (na
 let registration: ServiceWorkerRegistration | undefined
 onMounted(async () => {
   try {
-    if (!supported)
+    if (!supported || !signedIn)
       return
     registration = await navigator.serviceWorker.getRegistration()
     const subscription = await registration?.pushManager.getSubscription()
-    const id = localStorage.getItem('leo-push-device')
-    enabled.value = !!subscription && !!id && (await api(`/notifications/subscriptions/${id}`)).registered
+    const id = localStorage.getItem(deviceKey)
+    enabled.value = !!subscription && !!id && (await accountApi(`/notifications/subscriptions/${id}`)).registered
   }
   catch (e) { error.value = (e as Error).message }
   finally { loading.value = false }
@@ -44,20 +46,31 @@ async function toggle() {
     await navigator.serviceWorker.ready
     let subscription = await registration.pushManager.getSubscription()
     if (enabled.value) {
-      const id = localStorage.getItem('leo-push-device')
+      const id = localStorage.getItem(deviceKey)
       if (id)
-        await api(`/notifications/subscriptions/${id}`, { method: 'DELETE' })
+        await accountApi(`/notifications/subscriptions/${id}`, { method: 'DELETE' })
       await subscription?.unsubscribe()
-      localStorage.removeItem('leo-push-device')
+      localStorage.removeItem(deviceKey)
       enabled.value = false
       return
     }
 
-    const { publicKey } = await api<{ publicKey: string }>('/notifications')
+    const { publicKey } = await accountApi<{ publicKey: string }>('/notifications')
     const key = Uint8Array.from(atob(publicKey.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0))
+    const currentKey = subscription?.options.applicationServerKey
+    const currentKeyBytes = currentKey ? new Uint8Array(currentKey) : undefined
+    const usesOfficialKey = !!currentKeyBytes
+      && currentKeyBytes.length === key.length
+      && currentKeyBytes.every((byte, index) => byte === key[index])
+
+    if (subscription && !usesOfficialKey) {
+      await subscription.unsubscribe()
+      subscription = null
+    }
+
     subscription ??= await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key })
-    const { id } = await api<{ id: string }>('/notifications/subscriptions', { method: 'POST', body: JSON.stringify(subscription.toJSON()) })
-    localStorage.setItem('leo-push-device', id)
+    const { id } = await accountApi<{ id: string }>('/notifications/subscriptions', { method: 'POST', body: JSON.stringify(subscription.toJSON()) })
+    localStorage.setItem(deviceKey, id)
     enabled.value = true
   }
   catch (e) { error.value = (e as Error).message }
@@ -74,11 +87,14 @@ async function toggle() {
           Question notifications
         </h3>
         <p class="mt-1! mb-0! text-xs leading-relaxed text-muted">
-          Know when your agent needs your input, even with the app closed. Question content stays private.
+          Know when your agent needs your input, across all your installations, even with the app closed. Question content stays private.
         </p>
       </div>
     </div>
-    <p v-if="ios && !installed" class="text-xs text-muted">
+    <p v-if="!signedIn" class="text-xs text-muted">
+      Sign in to your Leo account to manage push notifications on this device.
+    </p>
+    <p v-else-if="ios && !installed" class="text-xs text-muted">
       On iPhone or iPad, add Leo to your Home Screen from Safari’s Share menu, then enable notifications in that app.
     </p>
     <p v-else-if="!supported" class="text-xs text-muted">

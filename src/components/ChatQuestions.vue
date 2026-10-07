@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { ChatQuestion } from '../../shared/chats'
 import { computed, ref, watch } from 'vue'
-import { api } from '../api'
+import { api, state } from '../api'
 import { ChevronDown, MessageCircleQuestion, Send } from '../icons'
 import Icon from './Icon.vue'
 import Modal from './Modal.vue'
@@ -48,7 +48,7 @@ async function send() {
     if (submission?.serialized !== serialized)
       submission = { id: crypto.randomUUID(), serialized }
     await api(`/chats/${current.chatId}/questions/${current.id}/answer`, { method: 'POST', body: JSON.stringify({ id: submission.id, answers: values }) })
-    navigator.serviceWorker?.controller?.postMessage({ type: 'question-answered', questionId: current.id })
+    navigator.serviceWorker?.controller?.postMessage({ type: 'question-answered', installationId: state.installationId, questionId: current.id })
     delete answers.value[current.id]
     delete custom.value[current.id]
     submission = undefined

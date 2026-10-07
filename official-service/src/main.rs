@@ -6,7 +6,8 @@ use axum::{
     routing::{any, get},
 };
 use leo_official_service::{
-    EmailSender, OAuthProvider, OAuthProviders, Relay, TrustedProxies, router_with_network,
+    EmailSender, OAuthProvider, OAuthProviders, Relay, TrustedProxies, WebPushSender,
+    router_with_network_and_push,
 };
 use reqwest::Client;
 use serde_json::json;
@@ -206,14 +207,31 @@ async fn run() -> Result<(), String> {
         .unwrap_or_default()
         .parse()
         .map_err(str::to_owned)?;
+    let push: Option<Arc<dyn leo_official_service::PushSender>> = match (
+        env::var("LEO_OFFICIAL_VAPID_PRIVATE_KEY")
+            .ok()
+            .filter(|value| !value.is_empty()),
+        env::var("LEO_OFFICIAL_VAPID_SUBJECT")
+            .ok()
+            .filter(|value| !value.is_empty()),
+    ) {
+        (None, None) => None,
+        (Some(private), Some(subject)) => Some(Arc::new(WebPushSender::new(private, subject)?)),
+        _ => {
+            return Err(
+                "Set both LEO_OFFICIAL_VAPID_PRIVATE_KEY and LEO_OFFICIAL_VAPID_SUBJECT".into(),
+            );
+        }
+    };
     let relay = Relay::default();
-    let mut app = router_with_network(
+    let mut app = router_with_network_and_push(
         pool.clone(),
         Arc::new(sender),
         origin,
         oauth,
         relay.clone(),
         proxies,
+        push,
     )
     .await
     .map_err(|_| "Official database migration failed")?

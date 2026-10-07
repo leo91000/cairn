@@ -6,7 +6,7 @@ globalThis.addEventListener('push', (event) => {
   }
   catch { return }
 
-  if (!/^[\da-f-]{36}$/.test(data.chatId))
+  if (!/^[\da-f-]{36}$/.test(data.installationId) || !/^[\da-f-]{36}$/.test(data.chatId))
     return
   // Execution alerts (node unavailable, failover, backup failure) carry their own short text.
   if (/^[\da-f-]{36}$/.test(data.alertId) && typeof data.title === 'string' && typeof data.body === 'string') {
@@ -14,8 +14,8 @@ globalThis.addEventListener('push', (event) => {
       body: data.body.slice(0, 300),
       icon: '/icons/icon-192.png',
       badge: '/icons/icon-192.png',
-      tag: `node-${data.alertId}`,
-      data: { url: `/chats/${data.chatId}` },
+      tag: `${data.installationId}:node-${data.alertId}`,
+      data: { url: `/installations/${data.installationId}/chats/${data.chatId}` },
     }))
     return
   }
@@ -26,8 +26,8 @@ globalThis.addEventListener('push', (event) => {
     body: 'Open the chat to answer.',
     icon: '/icons/icon-192.png',
     badge: '/icons/icon-192.png',
-    tag: `question-${data.questionId}`,
-    data: { url: `/chats/${data.chatId}?question=${data.questionId}` },
+    tag: `${data.installationId}:question-${data.questionId}`,
+    data: { url: `/installations/${data.installationId}/chats/${data.chatId}?question=${data.questionId}` },
   }))
 })
 globalThis.addEventListener('notificationclick', (event) => {
@@ -48,10 +48,10 @@ globalThis.addEventListener('notificationclick', (event) => {
   })())
 })
 globalThis.addEventListener('message', (event) => {
-  if (event.data?.type !== 'question-answered')
+  if (event.data?.type !== 'question-answered' || !/^[\da-f-]{36}$/.test(event.data.installationId))
     return
   event.waitUntil((async () => {
-    const notifications = await globalThis.registration.getNotifications({ tag: `question-${event.data.questionId}` })
+    const notifications = await globalThis.registration.getNotifications({ tag: `${event.data.installationId}:question-${event.data.questionId}` })
     for (const notification of notifications)
       notification.close()
   })())

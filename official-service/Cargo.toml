@@ -52,6 +52,8 @@ webauthn-rs = { version = "0.5.4", features = [
 webauthn-rs-proto = "0.5.4"
 base64 = "0.22"
 futures-util = "0.3"
+web-push = { version = "0.11", default-features = false, features = [ "hyper-client" ] }
+p256 = { version = "0.13", features = [ "pem" ] }
 
 [dev-dependencies]
 scrypt = "0.11"

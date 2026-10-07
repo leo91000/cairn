@@ -30,7 +30,6 @@ pub struct Service {
     pub accounts: Arc<crate::accounts::Accounts>,
     pub models: Arc<crate::models::Models>,
     pub connections: Arc<crate::connections::Connections>,
-    pub notifications: crate::notifications::Notifications,
     pub conversation_storage_lock: Arc<tokio::sync::Mutex<()>>,
     pub attachment_upload: Arc<tokio::sync::Mutex<()>>,
     pub config: Config,
@@ -73,7 +72,6 @@ impl Service {
             accounts: Arc::default(),
             models: Arc::default(),
             connections: Arc::default(),
-            notifications: crate::notifications::Notifications::default(),
             conversation_storage_lock: Arc::default(),
             attachment_upload: Arc::default(),
             skills: Skills {
@@ -99,6 +97,10 @@ impl Service {
         });
         service.migrate_agents().await?;
         service.store.transaction(crate::accounts::migrate).await?;
+        service
+            .store
+            .transaction(crate::notifications::remove_local_registrations)
+            .await?;
         service.avatars.recover(&service).await?;
         tokio::spawn(crate::artifacts::preview::recover(service.clone()));
         Ok(service)

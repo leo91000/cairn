@@ -2909,7 +2909,6 @@ dependencies = [
  "libc",
  "libublk",
  "lru",
- "p256",
  "rand 0.9.5",
  "regex",
  "reqwest",
@@ -2938,7 +2937,6 @@ dependencies = [
  "virtio-queue",
  "vm-memory",
  "vmm-sys-util",
- "web-push",
 ]
 
 [[package]]
@@ -2954,6 +2952,7 @@ dependencies = [
  "ipnet",
  "leo-agent-manager",
  "leo-relay-protocol",
+ "p256",
  "rand 0.9.5",
  "reqwest",
  "scrypt",
@@ -2973,6 +2972,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "web-push",
  "webauthn-authenticator-rs",
  "webauthn-rs",
  "webauthn-rs-proto",

@@ -426,3 +426,70 @@ release the allowance together with the remote subscription. Extra streams retur
 503 and use the client's existing retry behavior. MCP grants and public downloads
 retain their independent allowances. Filling one member's eight streams leaves
 installation slots for the owner's live views and ordinary requests.
+
+## Web push notifications
+
+Devices belong to a Leo account, not an installation. Open **Notifications** in
+the official account screen or the installation options menu to enable or
+disable this browser once for all owned and shared installations. Installation
+settings no longer contain device registration. Android native push is handled
+separately in #58.
+
+The official routes are `GET /api/account/notifications`,
+`POST /api/account/notifications/subscriptions`, and
+`GET` / `DELETE /api/account/notifications/subscriptions/{id}`. They require the
+official session; writes also require the official origin and CSRF token.
+Registration is idempotent, limited to 50 devices per account, and a browser
+endpoint has one current account. Registering it after switching accounts moves
+it to the new account. A foreign account cannot inspect or remove a device.
+Only supported HTTPS browser push endpoints are accepted.
+
+Configure `LEO_OFFICIAL_VAPID_PRIVATE_KEY` (the base64url P-256 private key) and
+`LEO_OFFICIAL_VAPID_SUBJECT` (an operator contact, `mailto:…` or an HTTPS URL) in
+the official service's private operator environment. The public key is derived
+from that private key and is the only VAPID material returned to browsers. Keys
+are never generated or stored by an installation. With no VAPID configuration,
+the notification panel reports that push is unavailable. Keep the same operator
+key across restarts and processes; changing it requires browser re-enrollment.
+
+Events arrive through the authenticated installation relay. Recipients are the
+current owner and members, rechecked before each provider request. Removal,
+departure and detachment serialize with an already admitted send, whose timeout
+is five seconds, and prevent subsequent sends. Account devices remain available
+for other installations; there is no installation-specific subscription to
+preserve accidentally after removal. Deleted accounts lose their devices via
+the account foreign key. Provider 4xx responses other than 429 remove the
+registration, including stale VAPID credentials (401/403). Rate limits (429),
+server errors and transport failures remain retryable.
+
+The official service keeps event content and delivery work only in bounded
+memory. The installation retains events for up to one hour until acknowledged;
+transient failures or tunnel loss retry without interrupting agent execution.
+Delivery is at least once: interruption after a provider accepted a push can
+repeat it. Notification tags include the installation and event identifiers.
+Question payloads contain generic text and identifiers, never question fields.
+
+Successful deliveries are remembered per event and current device registration
+in process memory, across tunnel reconnects. An unavailable device therefore
+does not repeat pushes to healthy devices. Receipts include the installation
+credential generation, account and subscription keys, expire after one hour,
+and have a limit of 20,000 per process. At capacity, new attempts stay in the
+installation outbox. Cancelled or failed attempts release their reservation.
+A service restart can repeat an already accepted push; this remains at-least-once
+delivery, with the existing notification tags.
+
+Push delivery uses a separate Postgres pool of four connections per process,
+so provider waits cannot occupy the account/session API pool. Sharing locks
+remain held through each admitted provider attempt to serialize with revocation.
+
+Treat a subscription endpoint and its encryption keys as device credentials.
+Account authentication authorizes registration but does not prove physical
+ownership of the browser: someone holding the complete subscription can
+explicitly register it on another account and move its endpoint. Avoid logging
+or sharing subscription values. Endpoint transfer supports explicit account
+switching; it is not performed on sign-in or session changes.
+
+When explicitly enabling notifications, the web app replaces any browser subscription
+whose application server key differs from the official public key (including old
+installation VAPID subscriptions). Re-enrollment after an operator key rotation uses
+the same flow.

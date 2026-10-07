@@ -76,6 +76,7 @@ async fn rotating_a_machine_token_closes_old_streams_and_can_retry_a_lost_respon
         leo_agent_manager::http::router(relay.installation.clone())
             .await
             .unwrap(),
+        relay.installation.clone(),
         relay.stop.clone(),
     ));
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -224,6 +225,7 @@ async fn the_machine_resumes_rotation_after_the_official_response_is_lost() {
         leo_agent_manager::http::router(relay.installation.clone())
             .await
             .unwrap(),
+        relay.installation.clone(),
         relay.stop.clone(),
     ));
     tokio::time::timeout(Duration::from_secs(5), async {

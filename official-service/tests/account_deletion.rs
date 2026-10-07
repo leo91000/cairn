@@ -215,6 +215,7 @@ async fn deleting_an_owner_detaches_sharing_and_preserves_data_for_a_new_claim()
     relay.connector = tokio::spawn(leo_agent_manager::relay::connect(
         directory,
         router,
+        relay.installation.clone(),
         relay.stop.clone(),
     ));
     relay.cookie = new_cookie;

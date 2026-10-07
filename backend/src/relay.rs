@@ -12,13 +12,13 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use leo_relay_protocol::{
-    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_PUBLIC_IN_FLIGHT,
-    MAX_STREAM_CHUNK, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, REQUEST_TIMEOUT, Role,
-    SUPPORTED_VERSIONS,
+    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_NOTIFICATION_IN_FLIGHT,
+    MAX_PUBLIC_IN_FLIGHT, MAX_STREAM_CHUNK, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    REQUEST_TIMEOUT, Role, SUPPORTED_VERSIONS,
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::SocketAddr,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -415,7 +415,12 @@ pub async fn device_claim(
 }
 
 /// Reconnect until shutdown; failed in-flight writes are never automatically replayed.
-pub async fn connect(directory: PathBuf, router: Router, stop: CancellationToken) -> Result<()> {
+pub async fn connect(
+    directory: PathBuf,
+    router: Router,
+    service: std::sync::Arc<crate::service::Service>,
+    stop: CancellationToken,
+) -> Result<()> {
     let identity = read_identity(&directory)
         .await?
         .ok_or_else(|| Error::bad("Run leo claim before starting the relay."))?;
@@ -425,7 +430,7 @@ pub async fn connect(directory: PathBuf, router: Router, stop: CancellationToken
         let started = tokio::time::Instant::now();
         tokio::select! {
             () = stop.cancelled() => return Ok(()),
-            result = connected(&identity, &official, router.clone()) => {
+            result = connected(&identity, &official, router.clone(), &service) => {
                 if let Err(error) = result {
                     if error.status == 401 {
                         tracing::warn!("Installation identity revoked; run leo claim, then restart the manager");
@@ -446,7 +451,20 @@ pub async fn connect(directory: PathBuf, router: Router, stop: CancellationToken
     }
 }
 
-async fn connected(identity: &Identity, official: &url::Url, router: Router) -> Result<()> {
+#[derive(Default)]
+struct NotificationSchedule {
+    recently_sent: HashMap<String, tokio::time::Instant>,
+    in_flight: HashSet<String>,
+    cursor: String,
+    poll: bool,
+}
+
+async fn connected(
+    identity: &Identity,
+    official: &url::Url,
+    router: Router,
+    service: &crate::service::Service,
+) -> Result<()> {
     let mut url = official
         .join(&format!("api/relay/{}/connect", identity.installation_id))
         .map_err(Error::internal)?;
@@ -512,8 +530,59 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
     let slots = std::sync::Arc::new(Semaphore::new(MAX_IN_FLIGHT));
     let public_slots = std::sync::Arc::new(Semaphore::new(MAX_PUBLIC_IN_FLIGHT));
     let (output, mut frames) = mpsc::channel::<Frame>(MAX_IN_FLIGHT + MAX_PUBLIC_IN_FLIGHT);
+    let mut notifications = tokio::time::interval(Duration::from_secs(1));
+    notifications.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut notification_schedule = NotificationSchedule {
+        poll: true,
+        ..NotificationSchedule::default()
+    };
     loop {
+        if version >= 3 && notification_schedule.poll {
+            notification_schedule.poll = false;
+            let available = MAX_NOTIFICATION_IN_FLIGHT - notification_schedule.in_flight.len();
+            if available > 0 {
+                let recently_sent = notification_schedule
+                    .recently_sent
+                    .iter()
+                    .filter(|(id, at)| {
+                        notification_schedule.in_flight.contains(*id)
+                            || at.elapsed() < Duration::from_secs(10)
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                let events = crate::notifications::pending(
+                    service,
+                    recently_sent,
+                    notification_schedule.cursor.clone(),
+                    available,
+                )
+                .await?;
+
+                for event in events {
+                    let id = event.id.clone();
+                    socket
+                        .send(Message::Text(
+                            serde_json::to_string(&Frame::Notification(event))?.into(),
+                        ))
+                        .await
+                        .map_err(Error::internal)?;
+                    notification_schedule.cursor = id.clone();
+                    notification_schedule.in_flight.insert(id.clone());
+                    notification_schedule
+                        .recently_sent
+                        .insert(id, tokio::time::Instant::now());
+                }
+                notification_schedule.recently_sent.retain(|id, at| {
+                    notification_schedule.in_flight.contains(id)
+                        || at.elapsed() < Duration::from_secs(60)
+                });
+            }
+        }
+
         tokio::select! {
+            _ = notifications.tick(), if version >= 3 => {
+                notification_schedule.poll = true;
+            }
             result = requests.join_next_with_id(), if !requests.is_empty() => {
                 let completed = result
                     .ok_or_else(|| Error::unavailable("Relay request stopped."))?;
@@ -560,6 +629,24 @@ async fn connected(identity: &Identity, official: &url::Url, router: Router) -> 
                             Frame::Cancel { id } if version >= 2 => {
                                 if let Some((task, _)) = active.remove(&id) {
                                     task.abort();
+                                }
+                                continue;
+                            }
+                            Frame::NotificationAck {
+                                id,
+                                delivered: outbox_complete,
+                            } if version >= 3 => {
+                                if notification_schedule.in_flight.remove(&id) {
+                                    if outbox_complete {
+                                        notification_schedule.recently_sent.remove(&id);
+                                        crate::notifications::acknowledge(service, &id).await?;
+                                    } else {
+                                        notification_schedule.recently_sent.insert(
+                                            id,
+                                            tokio::time::Instant::now(),
+                                        );
+                                    }
+                                    notification_schedule.poll = true;
                                 }
                                 continue;
                             }

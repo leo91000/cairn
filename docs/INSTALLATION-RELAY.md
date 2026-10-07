@@ -164,7 +164,7 @@ routing is implemented; sticky routing per installation is insufficient for
 immediate session revocation across installations.
 
 Version 2 adds SSE response headers, binary chunks, completion, credit and
-cancellation frames using the same request IDs. Hello offers `[2, 1]`; Welcome
+cancellation frames using the same request IDs. Hello offers `[3, 2, 1]`; Welcome
 selects the highest shared version. The claim HTTP request declares the minimum
 supported version (1), so a new installation can still claim against a v1 service;
 the WebSocket handshake remains authoritative for the actual tunnel version.
@@ -198,9 +198,9 @@ The same list and account session expose `updateRequired`. An incompatible Hello
 persists this state even after the refused socket closes or the official process
 restarts; a compatible authenticated Hello clears it. The web displays
 **Mise à jour nécessaire** and replaces the inaccessible workspace with that
-explanation. The selector and account actions remain available. Protocols 2 and 1
-are the current and previous supported versions; v1 keeps the finite snapshot
-path while the live stream remains unavailable during deployment.
+explanation. The selector and account actions remain available. Protocols 3 and 2
+are the current and previous supported versions. Version 1 remains compatible
+with the finite snapshot path; live streams and push events require newer versions.
 
 Access management uses the same `Relay` handle supplied to `router_with_relay`.
 After committing a detachment, call `revoke_access(installation, None)`; after
@@ -304,3 +304,39 @@ revocation before reserving a tunnel slot. A slow MCP upload cannot consume the
 32 private request slots; an excess upload receives 429. Once dispatched, its
 grant permit follows the pending installation request until completion, like
 its tunnel permit. The per-grant HTTP rate limit is persisted in Postgres.
+
+## Notification events (version 3)
+
+Hello now offers `[3, 2, 1]`. Version 3 adds installation-to-official
+`notification` frames and official-to-installation `notification_ack` frames.
+Versions 1 and 2 retain their finite API and SSE contracts and never receive
+notification frames.
+
+Questions and node alerts enter a single installation outbox independently of
+registered browsers. The connector keeps at most four notification events in
+flight, independently of API requests. Completion acknowledges whether delivery
+succeeded: success removes the installation event, while failure releases its
+slot and retries after ten seconds. Events expire after one hour; questions
+answered or cancelled before forwarding are dropped. Chat deletion retains its existing outbox cleanup.
+
+The event carries its chat and question or alert identifier; the authenticated
+tunnel supplies the installation identity. It never supplies account IDs or a
+recipient list. The official service selects current access holders itself and
+sends through its operator-configured web push adapter. Push delivery jobs have
+bounded concurrency and run separately from API traffic and heartbeat handling.
+The official service does not persist event payloads or recipient queues.
+
+The connector reads only as many pending events as there are free push slots.
+It rotates its cursor after each successful frame send, then applies
+retry cooldowns before selecting a bounded notification batch. Completion refills
+available slots immediately. Even a backlog larger than the cooldown window
+cannot keep newer events behind persistently failing deliveries or overflow the
+official service’s notification concurrency.
+
+Every finished push task acknowledges its event, including a task failure.
+A negative acknowledgement releases the connector's slot without deleting its
+outbox event. Excess or duplicate in-flight notification frames also receive a
+negative acknowledgement instead of leaving the sender's window occupied.
+The existing `delivered` wire field means the event can leave the outbox; an
+invalid event or revoked installation can therefore receive a positive ack
+without calling the provider.

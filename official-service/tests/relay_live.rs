@@ -156,6 +156,7 @@ async fn relay_disconnect_replays_activity_and_does_not_stop_the_run() {
         leo_agent_manager::http::router(relay.installation.clone())
             .await
             .unwrap(),
+        relay.installation.clone(),
         relay.stop.clone(),
     ));
     tokio::time::timeout(Duration::from_secs(5), async {

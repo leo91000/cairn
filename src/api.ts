@@ -21,6 +21,7 @@ export const state = reactive({
   setupRequired: false,
   csrf: '',
   installationId,
+  accountId: '',
   installationRole: 'owner' as 'owner' | 'member',
   agents: [] as Agent[],
   projects: [] as Project[],
@@ -63,11 +64,11 @@ export function redirect(url: string) {
   }
 }
 
-export async function api<T = any>(
+async function requestApi<T = any>(
   url: string,
   options: RequestInit = {},
 ): Promise<T> {
-  const response = await fetch(apiUrl(url), {
+  const response = await fetch(url, {
     ...options,
     headers: {
       ...(options.body === undefined
@@ -85,6 +86,14 @@ export async function api<T = any>(
   }
 
   return data
+}
+
+export function api<T = any>(url: string, options: RequestInit = {}): Promise<T> {
+  return requestApi<T>(apiUrl(url), options)
+}
+
+export function accountApi<T = any>(url: string, options: RequestInit = {}): Promise<T> {
+  return requestApi<T>(`/api/account${url}`, options)
 }
 
 export function apiUrl(path: string) {

@@ -231,19 +231,6 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
         ("POST", ["chats", id, "questions", question, "answer"]) => {
             s.question_answer(id, question, input.body.clone()).await?
         }
-        ("GET", ["notifications"]) => s.notifications.configuration(s).await?,
-        ("POST", ["notifications", "subscriptions"]) => {
-            s.notifications.subscribe(s, input.body.clone()).await?
-        }
-        ("GET", ["notifications", "subscriptions", id]) => {
-            hash(id)?;
-            let registered = s.store.kv(&format!("push-device:{id}")).await?.is_some();
-            json!({ "registered": registered })
-        }
-        ("DELETE", ["notifications", "subscriptions", id]) => {
-            hash(id)?;
-            s.notifications.unsubscribe(s, id).await?
-        }
         _ => return Ok(None),
     };
     Ok(Some(result))
@@ -446,15 +433,4 @@ async fn skill_project(s: &Service, scope: &str) -> Result<Option<PathBuf>> {
         &s.get("projects", scope).await?,
         "path",
     ))))
-}
-
-fn hash(value: &str) -> Result<()> {
-    if value.len() != 64
-        || !value
-            .bytes()
-            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
-    {
-        return Err(Error::bad("Invalid identifier."));
-    }
-    Ok(())
 }

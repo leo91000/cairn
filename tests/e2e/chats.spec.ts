@@ -542,50 +542,15 @@ test('answers in-flight questions with choices or free text on desktop and mobil
   await page.screenshot({ path: test.info().outputPath('notifications-mobile.png'), animations: 'disabled' })
 })
 
-test('opts into device notifications and can revoke that device', async ({
-  page,
-  context,
-  browserName,
-  workspace,
-}) => {
-  test.skip(browserName !== 'chromium', 'Permission automation uses Chromium; WebKit renders the same settings in the chat journey.')
-  // This independent journey must not inherit the chat tests' request budget.
+test('installation push registration is removed in favor of the official account', async ({ page, workspace }) => {
   await workspace.restart()
-  const { createECDH, randomBytes } = await import('node:crypto')
-  const curve = createECDH('prime256v1')
-  curve.generateKeys()
-  const subscription = { endpoint: 'https://fcm.googleapis.com/fcm/send/browser-fixture', keys: { p256dh: curve.getPublicKey().toString('base64url'), auth: randomBytes(16).toString('base64url') } }
-  await context.grantPermissions(['notifications'], { origin: workspace.url })
-  await page.addInitScript((data) => {
-    // Keep native service worker registration, but replace the OS permission
-    // prompt and push provider so this test does not contact an external service.
-    Object.defineProperty(Notification, 'permission', { get: () => 'default' })
-    Notification.requestPermission = async () => 'granted'
-    let current: object | null = null
-    PushManager.prototype.getSubscription = async () => current as PushSubscription | null
-    PushManager.prototype.subscribe = async () => {
-      current = {
-        toJSON: () => data,
-        unsubscribe: async () => {
-          current = null
-          return true
-        },
-      }
-      return current as PushSubscription
-    }
-  }, subscription)
-  await page.goto('/tasks')
+  await page.goto('/chats')
   await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
   await page.getByRole('button', { name: 'Sign in', exact: true }).click()
-  await expect(page.locator('.task-focus-detail')).toBeVisible()
-  await page.goto('/chats')
   await page.getByRole('button', { name: 'Question notifications' }).click()
-  await page.getByRole('button', { name: 'Enable on this device' }).click()
-  await expect(page.getByText('Notifications on', { exact: true })).toBeVisible()
-  expect(workspace.service.store.keys('push-device:')).toHaveLength(1)
-  await page.getByRole('button', { name: 'Disable on this device' }).click()
-  await expect(page.getByRole('button', { name: 'Enable on this device' })).toBeEnabled()
-  expect(workspace.service.store.keys('push-device:')).toHaveLength(0)
+  await expect(page.getByText('Sign in to your Leo account to manage push notifications on this device.')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Enable on this device' })).toHaveCount(0)
+  expect((await page.request.get(`${workspace.url}/api/notifications`)).status()).toBe(404)
 })
 
 test('long words and URLs wrap inside messages without widening the conversation', async ({ page, workspace }) => {
