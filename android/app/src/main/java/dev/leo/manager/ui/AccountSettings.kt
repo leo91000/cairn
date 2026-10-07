@@ -32,9 +32,10 @@ fun ProviderButtons(vm: LeoViewModel, state: Workspace, linking: Boolean = false
             }
     }
     listOf(
-            "Google" to options.google,
-            "GitHub" to options.github,
-            "une passkey" to (options.passkeys && Build.VERSION.SDK_INT >= 28 && !linking),
+            AccountProvider.Google to options.google,
+            AccountProvider.GitHub to options.github,
+            AccountProvider.Passkey to
+                (options.passkeys && Build.VERSION.SDK_INT >= 28 && !linking),
         )
         .forEach { (provider, available) ->
             if (available)
@@ -43,7 +44,10 @@ fun ProviderButtons(vm: LeoViewModel, state: Workspace, linking: Boolean = false
                     enabled = !state.busy,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text(if (linking) "Associer $provider" else "Continuer avec $provider")
+                    Text(
+                        if (linking) "Associer ${provider.label}"
+                        else "Continuer avec ${provider.label}"
+                    )
                 }
         }
     if (state.signingIn) TextButton(onClick = vm::cancelSignIn) { Text("Annuler la connexion") }

@@ -142,7 +142,7 @@ abstract class LeoAccountCases {
             compose.onNodeWithText("Apparence").performScrollTo().assertIsDisplayed()
             compose.onNodeWithText("Mises à jour").performScrollTo().assertIsDisplayed()
             compose.onNodeWithText("Notifications").performScrollTo().assertIsDisplayed()
-            compose.onNodeWithText("Vérifier en arrière-plan").assertExists()
+            compose.onNodeWithText("Notifications push").assertExists()
             compose.onNodeWithText("Connecter un assistant").assertDoesNotExist()
             compose.onNodeWithText("Clients et jetons d’accès").assertDoesNotExist()
             compose.onNodeWithText("Journal d’audit").assertDoesNotExist()

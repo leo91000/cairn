@@ -155,7 +155,10 @@ abstract class NativeAccountCases {
             val vm = LeoViewModel(application, vault, origin)
             compose.setContent { LeoTheme { LeoApp(vm = vm) } }
             compose.waitUntil(10_000) {
-                vm.state.value.ready && vm.state.value.installation != null && !vm.state.value.busy
+                compose
+                    .onAllNodesWithText("Maison · Hors ligne")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty() && !vm.state.value.busy
             }
             kotlinx.coroutines.runBlocking {
                 assertTrue(vm.openNotification(origin + "native-work", "native-person"))

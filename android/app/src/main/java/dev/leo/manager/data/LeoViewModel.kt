@@ -255,7 +255,7 @@ constructor(
     suspend fun accountMethods(): AccountMethods =
         checkNotNull(accountConnection).get("/account/methods")
 
-    suspend fun signIn(provider: String, credentials: LeoCredentials) {
+    suspend fun signIn(provider: AccountProvider, credentials: LeoCredentials) {
         val job = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
         signInJob = job
         mutable.update { it.copy(signingIn = true) }
@@ -263,10 +263,9 @@ constructor(
             val signIn = LeoAccountSignIn(checkNotNull(accountConnection), credentials)
             val session =
                 when (provider) {
-                    "Google" -> signIn.google()
-                    "GitHub" -> signIn.github()
-                    "une passkey" -> signIn.passkey()
-                    else -> error("Méthode de connexion inconnue.")
+                    AccountProvider.Google -> signIn.google()
+                    AccountProvider.GitHub -> signIn.github()
+                    AccountProvider.Passkey -> signIn.passkey()
                 }
             openAccount(session)
         } finally {

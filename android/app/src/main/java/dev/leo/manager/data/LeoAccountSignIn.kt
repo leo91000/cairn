@@ -167,3 +167,9 @@ data class AccountOptions(
 @Serializable data class AccountMethod(val id: String, val kind: String, val label: String)
 
 @Serializable data class AccountMethods(val methods: List<AccountMethod> = emptyList())
+
+enum class AccountProvider(val label: String) {
+    Google("Google"),
+    GitHub("GitHub"),
+    Passkey("une passkey"),
+}
