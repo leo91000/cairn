@@ -18,6 +18,21 @@ val releaseCode =
     100_000_000 + versionParts[0] * 1_000_000 + versionParts[1] * 1000 + versionParts[2]
 val releaseKeystore = providers.environmentVariable("LEO_ANDROID_KEYSTORE").orNull
 val officialOrigin = providers.environmentVariable("LEO_OFFICIAL_ORIGIN").orElse("").get()
+val firebaseConfiguration =
+    listOf("APP_ID", "PROJECT_ID", "API_KEY", "SENDER_ID").associateWith {
+        providers.environmentVariable("LEO_ANDROID_FIREBASE_$it").orElse("").get()
+    }
+
+require(
+    firebaseConfiguration.values.all { it.isEmpty() } ||
+        firebaseConfiguration.values.all { it.isNotBlank() }
+) {
+    "Configure all four public LEO_ANDROID_FIREBASE_* values, or none."
+}
+
+require(firebaseConfiguration.values.all { Regex("[A-Za-z0-9_:.\\-]*").matches(it) }) {
+    "Invalid public Firebase configuration."
+}
 
 if (officialOrigin.isNotEmpty()) {
     val origin = URI(officialOrigin)
@@ -53,6 +68,9 @@ android {
             "OFFICIAL_SERVICE_ORIGIN",
             "\"${officialOrigin.removeSuffix("/")}\"",
         )
+        firebaseConfiguration.forEach { (name, value) ->
+            buildConfigField("String", "FIREBASE_$name", "\"$value\"")
+        }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildFeatures {
@@ -105,6 +123,10 @@ dependencies {
     implementation("androidx.work:work-runtime:2.11.2")
     implementation("androidx.datastore:datastore-preferences:1.2.1")
     implementation("androidx.browser:browser:1.10.0")
+    implementation("androidx.credentials:credentials:1.6.0")
+    implementation("androidx.credentials:credentials-play-services-auth:1.6.0")
+    implementation("com.google.android.libraries.identity.googleid:googleid:1.2.1")
+    implementation("com.google.firebase:firebase-messaging:25.1.3")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.10.0")
     implementation("com.squareup.okhttp3:okhttp:5.3.2")
     implementation("io.noties.markwon:core:4.6.2")

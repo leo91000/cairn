@@ -21,18 +21,18 @@ fun NotificationSettings(vm: LeoViewModel) {
     val permission =
         rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             allowed = granted && notificationsAllowed(context)
-            if (allowed) vm.perform { notifications.setEnabled(true) }
+            if (allowed) vm.perform { setNativeNotifications(true) }
         }
     Panel {
         Text("Notifications", style = MaterialTheme.typography.titleLarge)
         Text("Être prévenu lorsqu’un agent attend une réponse.")
-        Toggle("Vérifier en arrière-plan", enabled) { next ->
+        Toggle("Notifications push", enabled) { next ->
             if (next && Build.VERSION.SDK_INT >= 33 && !allowed)
                 permission.launch(Manifest.permission.POST_NOTIFICATIONS)
-            else vm.perform { notifications.setEnabled(next) }
+            else vm.perform { setNativeNotifications(next) }
         }
         Text(
-            "Sans Firebase. Vérification environ toutes les 15 minutes lorsque le réseau est disponible. Android peut retarder les alertes pour économiser la batterie.",
+            "Recevez les notifications de toutes vos installations accessibles avec un seul enregistrement de cet appareil. Android peut retarder leur réception pour économiser la batterie.",
             style = MaterialTheme.typography.bodySmall,
         )
         if (!allowed) Text("Les notifications sont actuellement désactivées dans Android.")

@@ -5,7 +5,7 @@ import { createServer } from 'node:http'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
 
-test('Google and GitHub reuse an account, manage sign-in methods and preserve claim navigation', async ({ page }) => {
+test('Google and GitHub reuse an account, manage sign-in methods and preserve claim navigation', async ({ page, request }) => {
   test.setTimeout(90000)
   const messages: string[] = []
   let denyNextAuthorization = false
@@ -258,6 +258,29 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
     await expect(page.getByText('Claude Desktop', { exact: true })).toBeVisible()
     await expect(page.getByText('evil.example', { exact: true })).toBeVisible()
     await expect(page.getByRole('alert')).toContainText('Unverified client')
+
+    // A separate initiator receives the URL and polling secret, but opening it
+    // in the victim's browser must not silently give that initiator a session.
+    const native = await (await request.post(`${url}/api/account/oauth/github/start`, {
+      headers: { origin: url },
+      data: { native: true },
+    })).json()
+    await page.goto(native.url)
+    await expect(page.getByRole('heading', { name: 'Autoriser l’application Leo pour Android' })).toBeVisible()
+    await expect(page.getByText(email, { exact: true })).toBeVisible()
+    await expect(page.getByRole('alert')).toContainText('Ne confirmez pas un lien reçu')
+    const finish = () => request.post(`${url}/api/account/oauth/github/native/finish`, {
+      headers: { origin: url },
+      data: { challenge: native.challenge, secret: native.secret },
+    })
+    expect((await finish()).status()).toBe(202)
+    expect((await request.get(`${url}/api/account/session`).then(response => response.json())).authenticated).toBe(false)
+    await page.getByRole('button', { name: 'Autoriser sur cet appareil', exact: true }).click()
+    await expect(page.getByText('Connexion réussie. Revenez dans l’application Leo.')).toBeVisible()
+    const nativeSession = await finish()
+    expect(nativeSession.status()).toBe(200)
+    expect((await nativeSession.json()).account).toEqual(first.account)
+    expect((await finish()).status()).toBe(401)
   }
   finally {
     child.kill('SIGTERM')

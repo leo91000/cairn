@@ -54,6 +54,31 @@ fun LeoApp(
     targetChat: String = "",
     targetCacheScope: String = "",
     consumedTarget: () -> Unit = {},
+    credentials: LeoCredentials? = null,
+    targetAccount: String = "",
+) {
+    CompositionLocalProvider(LocalLeoCredentials provides credentials) {
+        LeoAppContent(
+            sharedUrl,
+            consumedShare,
+            vm,
+            targetChat,
+            targetCacheScope,
+            consumedTarget,
+            targetAccount,
+        )
+    }
+}
+
+@Composable
+private fun LeoAppContent(
+    sharedUrl: String,
+    consumedShare: () -> Unit,
+    vm: LeoViewModel,
+    targetChat: String,
+    targetCacheScope: String,
+    consumedTarget: () -> Unit,
+    targetAccount: String,
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
@@ -87,6 +112,24 @@ fun LeoApp(
         LoginScreen(vm, state)
         return
     }
+    var approvedTarget by
+        remember(targetChat, targetCacheScope, targetAccount) { mutableStateOf(false) }
+    LaunchedEffect(targetChat, targetCacheScope, targetAccount, state.session.account?.id) {
+        if (targetChat.isNotBlank()) {
+            try {
+                approvedTarget = vm.openNotification(targetCacheScope, targetAccount)
+                if (!approvedTarget) {
+                    vm.notify(
+                        "Cette notification ne correspond plus à une installation accessible."
+                    )
+                    consumedTarget()
+                }
+            } catch (error: Exception) {
+                vm.report(error)
+                consumedTarget()
+            }
+        }
+    }
     Poll(state.session.account?.id, 30_000) {
         if (!state.busy) {
             try {
@@ -113,6 +156,8 @@ fun LeoApp(
                 Text("Ajouter une installation")
             }
             TextButton(onClick = { vm.perform { refreshInstallations() } }) { Text("Actualiser") }
+            AccountSettings(vm, state)
+            NotificationSettings(vm)
             TextButton(onClick = { vm.perform { logout() } }) { Text("Se déconnecter") }
             state.error?.let { ErrorNotice(it, vm::clearMessage) }
         }
@@ -171,7 +216,7 @@ fun LeoApp(
                         snackbar,
                         sharedUrl,
                         consumedShare,
-                        targetChat,
+                        if (approvedTarget) targetChat else "",
                         targetCacheScope,
                         consumedTarget,
                     )
@@ -512,6 +557,8 @@ private fun LoginScreen(vm: LeoViewModel, state: Workspace) {
                                 Text("Changer d’adresse e-mail")
                             }
                         }
+                        if (state.emailForCode == null && state.origin.isNotBlank())
+                            ProviderButtons(vm, state)
                         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                         state.error?.let { ErrorNotice(it, vm::clearMessage) }
                     }

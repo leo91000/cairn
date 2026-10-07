@@ -15,9 +15,43 @@ fn webauthn(service: &Service) -> Result<Webauthn, ApiError> {
         StatusCode::BAD_REQUEST,
         "Passkeys require a hostname or localhost",
     ))?;
-    WebauthnBuilder::new(host, &origin)
-        .and_then(|builder| builder.rp_name("Leo").build())
-        .map_err(|_| rejected())
+    let mut builder = WebauthnBuilder::new(host, &origin).map_err(|_| rejected())?;
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    for certificate in &service.oauth.android_certificates {
+        let native_origin = Url::parse(&format!(
+            "android:apk-key-hash:{}",
+            URL_SAFE_NO_PAD.encode(certificate)
+        ))
+        .map_err(|_| rejected())?;
+        builder = builder.append_allowed_origin(&native_origin);
+    }
+    builder.rp_name("Leo").build().map_err(|_| rejected())
+}
+
+pub(super) async fn assetlinks(State(service): State<Service>) -> Json<Value> {
+    let fingerprints: Vec<String> = service
+        .oauth
+        .android_certificates
+        .iter()
+        .map(|certificate| {
+            certificate
+                .iter()
+                .map(|byte| format!("{byte:02X}"))
+                .collect::<Vec<_>>()
+                .join(":")
+        })
+        .collect();
+    if fingerprints.is_empty() {
+        return Json(json!([]));
+    }
+    Json(json!([{
+        "relation": ["delegate_permission/common.get_login_creds"],
+        "target": {
+            "namespace": "android_app",
+            "package_name": "dev.leo.manager",
+            "sha256_cert_fingerprints": fingerprints,
+        },
+    }]))
 }
 
 pub(super) fn available(service: &Service) -> bool {

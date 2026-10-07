@@ -48,6 +48,7 @@ fun SettingsScreen(vm: LeoViewModel, state: Workspace) {
             )
         }
         AppUpdateSettings()
+        AccountSettings(vm, state)
         NotificationSettings(vm)
         if (state.isOwner) {
             settings?.let { info ->

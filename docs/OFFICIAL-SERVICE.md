@@ -503,3 +503,61 @@ When explicitly enabling notifications, the web app replaces any browser subscri
 whose application server key differs from the official public key (including old
 installation VAPID subscriptions). Re-enrollment after an operator key rotation uses
 the same flow.
+## Android sign-in and native notifications
+
+Android uses the same account identity, verified-email linking policy and passkey
+store as the web. Google Credential Manager starts with
+`POST /api/account/oauth/google/start` and `{"native":true}`, receiving a one-use
+challenge, nonce and the existing Google web client ID. Its ID token is exchanged
+at `POST /api/account/oauth/google/callback`; the service validates Google's
+signature, issuer, audience, expiration, nonce and verified email before applying
+the existing account policy. Provider tokens never become coding-agent grants.
+
+GitHub uses a Custom Tab because Credential Manager has no GitHub provider.
+`POST /api/account/oauth/github/start` with `{"native":true}` returns an official
+launcher URL and an exchange secret. The launcher sets the browser challenge
+cookie, then uses the existing PKCE authorization-code callback and `user:email`
+scope. The callback shows an explicit confirmation naming the verified account
+and **Leo for Android**, warning against links received from another person.
+Opening the launcher and completing GitHub authorization alone neither links
+the identity nor makes a Leo session available to the initiating device.
+`POST /api/account/oauth/github/native/confirm` consumes the form's one-use proof,
+bound to a separate HttpOnly browser cookie and protected by the exact official
+origin. Only confirmation applies the shared linking policy and releases the
+handover. The page forbids framing, scripts and foreign form destinations.
+This is explicit consent, not a cryptographic device attestation; only approve
+a flow you just initiated in Leo on your own device.
+Android polls `POST /api/account/oauth/github/native/finish` with the
+challenge and secret: 202 means pending; success creates the ordinary Leo session.
+The launcher and completed exchange are each one-use and expire in five minutes.
+The handover stores no session or provider access tokens, and authenticated linking
+remains bound to the original Leo session, rechecked after consent. The additive
+consent migration invalidates older in-flight handovers. Never log handover URLs,
+confirmation proofs or secrets.
+
+Set `LEO_OFFICIAL_ANDROID_CERTIFICATES` to comma-separated SHA-256 fingerprints
+of approved APK signing certificates (colon-separated hex is accepted). Only
+these exact native passkey origins are trusted. The same RP publishes
+`/.well-known/assetlinks.json` for `dev.leo.manager`; without certificates it
+advertises no Android association. Registration, login, reauthentication and
+method removal keep their existing start/finish contracts and proof requirements.
+
+Set `LEO_OFFICIAL_FCM_SERVICE_ACCOUNT` to a private service-account JSON **file
+path** on the official server. The file must contain `project_id`, `client_email`
+and the signing `private_key`; never distribute it to Android or installations.
+The sender uses FCM HTTP v1, caches a short-lived OAuth access token and sends
+data-only messages containing account/installation/conversation/event IDs.
+No question fields, titles, answers or provider credentials enter FCM messages.
+VAPID remains separately configurable for web devices.
+
+An authenticated Android client checks `GET /api/account/notifications/android`
+and registers its stable device UUID and current FCM token with
+`POST /api/account/notifications/android` (`deviceId`, `token`). The returned `id`
+uses the existing subscription lookup/removal routes. Token rotation updates the
+same registration; the current account receives events from every accessible
+installation. The existing recipient locks and membership checks also govern
+native sends, so member removal stops subsequent sends immediately. Android
+checks current access again before displaying delayed messages. FCM authorization
+errors, outages and `INVALID_ARGUMENT` never delete device registrations: that
+error can indicate our payload rather than the device token. Only a 400/404 with
+the FCM-specific `UNREGISTERED` code removes an expired registration.

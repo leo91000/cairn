@@ -9,6 +9,10 @@ on:
   workflow_dispatch:
 env:
   LEO_OFFICIAL_ORIGIN: ${{ vars.LEO_OFFICIAL_ORIGIN }}
+  LEO_ANDROID_FIREBASE_APP_ID: ${{ vars.LEO_ANDROID_FIREBASE_APP_ID }}
+  LEO_ANDROID_FIREBASE_PROJECT_ID: ${{ vars.LEO_ANDROID_FIREBASE_PROJECT_ID }}
+  LEO_ANDROID_FIREBASE_API_KEY: ${{ vars.LEO_ANDROID_FIREBASE_API_KEY }}
+  LEO_ANDROID_FIREBASE_SENDER_ID: ${{ vars.LEO_ANDROID_FIREBASE_SENDER_ID }}
 permissions:
   contents: read
 concurrency:
@@ -60,7 +64,7 @@ jobs:
         run: printf 'LEO_ANDROID_VERSION=%s\n' "${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
       - name: Test, lint and build debug
         working-directory: android
-        run: ./gradlew testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest --no-daemon
+        run: ./gradlew testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest --no-daemon --stacktrace
       - name: Enable emulator acceleration
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -127,7 +131,7 @@ jobs:
         run: printf 'LEO_ANDROID_VERSION=%s\n' "${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
       - name: Build debug and instrumentation APKs
         working-directory: android
-        run: ./gradlew assembleDebug assembleDebugAndroidTest --no-daemon
+        run: ./gradlew assembleDebug assembleDebugAndroidTest --no-daemon --stacktrace
       - name: Enable emulator acceleration
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -143,7 +147,7 @@ jobs:
           profile: pixel_6
           disable-animations: false
           script: |
-            cd android && ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=dev.leo.manager.ui.LeoAccountDeviceTest,dev.leo.manager.ui.LeoAccountRestorationDeviceTest,dev.leo.manager.ui.ModelPickerDeviceTest,dev.leo.manager.ui.AccountsDeviceTest,dev.leo.manager.ui.ModelCatalogDeviceTest,dev.leo.manager.ui.ChatProviderDeviceTest,dev.leo.manager.ui.SkillMentionDeviceTest,dev.leo.manager.ui.ConversationLifecycleDeviceTest,dev.leo.manager.ui.ImagePasteDeviceTest,dev.leo.manager.ui.QueueStripDeviceTest,dev.leo.manager.ui.NodePlacementDeviceTest,dev.leo.manager.ui.MissionBackDeviceTest --no-daemon
+            cd android && ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=dev.leo.manager.ui.NativeAccountDeviceTest,dev.leo.manager.data.NativePushDeviceTest,dev.leo.manager.ui.LeoAccountDeviceTest,dev.leo.manager.ui.LeoAccountRestorationDeviceTest,dev.leo.manager.ui.ModelPickerDeviceTest,dev.leo.manager.ui.AccountsDeviceTest,dev.leo.manager.ui.ModelCatalogDeviceTest,dev.leo.manager.ui.ChatProviderDeviceTest,dev.leo.manager.ui.SkillMentionDeviceTest,dev.leo.manager.ui.ConversationLifecycleDeviceTest,dev.leo.manager.ui.ImagePasteDeviceTest,dev.leo.manager.ui.QueueStripDeviceTest,dev.leo.manager.ui.NodePlacementDeviceTest,dev.leo.manager.ui.MissionBackDeviceTest --no-daemon
             adb install -r android/app/build/outputs/apk/debug/app-debug.apk
             adb install -r -t android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
             adb shell am instrument -w -e class dev.leo.manager.ui.NodePlacementDeviceTest dev.leo.manager.test/androidx.test.runner.AndroidJUnitRunner > android/app/build/reports/node-captures.txt
