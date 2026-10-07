@@ -69,16 +69,7 @@ class LeoAccountSignIn(private val api: LeoApi, private val credentials: LeoCred
                         )
                         .jsonObject
                 if (response["pending"]?.jsonPrimitive?.content != "true") {
-                    val session = wireJson.decodeFromJsonElement<Session>(response)
-                    require(
-                        session.authenticated &&
-                            session.account != null &&
-                            !session.csrf.isNullOrBlank()
-                    ) {
-                        "La session du compte Leo est invalide."
-                    }
-                    api.csrf = session.csrf
-                    result = session
+                    result = acceptSession(wireJson.decodeFromJsonElement<Session>(response))
                 }
                 if (result == null) delay(1000)
             }
@@ -114,11 +105,7 @@ class LeoAccountSignIn(private val api: LeoApi, private val credentials: LeoCred
                     put("credential", wireJson.parseToJsonElement(credential))
                 },
             )
-        require(session.authenticated && session.account != null && !session.csrf.isNullOrBlank()) {
-            "La session du compte Leo est invalide."
-        }
-        api.csrf = session.csrf
-        return session
+        return acceptSession(session)
     }
 
     suspend fun confirmPasskey() {
@@ -149,6 +136,10 @@ class LeoAccountSignIn(private val api: LeoApi, private val credentials: LeoCred
                 "/account/oauth/google/callback",
                 body("challenge" to challenge.challenge, "credential" to token),
             )
+        return acceptSession(session)
+    }
+
+    private fun acceptSession(session: Session): Session {
         require(session.authenticated && session.account != null && !session.csrf.isNullOrBlank()) {
             "La session du compte Leo est invalide."
         }
