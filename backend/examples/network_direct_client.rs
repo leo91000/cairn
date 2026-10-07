@@ -2,17 +2,13 @@
 use bytes::BytesMut;
 use leo_agent_manager::direct::peer::PeerConfig;
 use leo_relay_protocol::{
-    ApiRequest, Frame, Role,
+    ApiRequest, Frame, REQUEST_TIMEOUT, Role,
     data_channel::{EncodedFrame, FrameDecoder},
     direct::{DirectAuthorization, DirectSignal},
 };
 use reqwest::Client;
 use serde_json::{Value, json};
-use std::{
-    io::Read,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{io::Read, sync::Arc, time::Instant};
 use tokio::sync::mpsc;
 use webrtc::{
     data_channel::DataChannelEvent,
@@ -97,7 +93,7 @@ async fn direct_read(
             .build()
             .await?,
     );
-    let result = tokio::time::timeout(Duration::from_secs(10), async {
+    let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
         let channel = peer.create_data_channel("leo.v4", None).await?;
         let mut offer = peer.create_offer(None).await?;
         offer.sdp = leo_relay_protocol::direct::uppercase_sdp_fingerprints(&offer.sdp);
@@ -300,7 +296,7 @@ async fn main() -> TestResult<()> {
         return Err("Invalid fixture session".into());
     }
     let http = Client::builder()
-        .timeout(Duration::from_secs(15))
+        .timeout(REQUEST_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let started = Instant::now();

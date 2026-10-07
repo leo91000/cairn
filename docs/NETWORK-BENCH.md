@@ -91,6 +91,8 @@ Rust first verifies the same conversation marker through that endpoint, then
 requests a signed grant and negotiates with the real installation DataChannel.
 It records `direct` only after receiving the API response on that channel and
 observing its selected UDP ICE pair (`candidatePair.local` / `.remote`).
+The Rust negotiation uses the protocol's 30-second request deadline, matching
+the installation peer and allowing ICE/DTLS retransmissions under packet loss.
 Relay evidence reads the official response's `x-leo-transport` header; neither
 client uses a fixed route label. Anonymous
 requests fail, anonymous installation loopback access fails, and the old official
@@ -129,7 +131,7 @@ cookies, claim codes, machine credentials or conversation exports.
 
 `python3 tests/stun_docker_test.py` publishes a disposable Binding-only Python
 fixture on a Docker UDP port using a pinned image digest. An external Linux
-namespace at `198.18.104.2` queries the host's `198.18.104.1` address, and the
+namespace at `198.18.104.2` queries the host's `198.18.104.1` address.
 The test waits for the UDP listener before probing; XOR-MAPPED-ADDRESS must
 retain the external client's address and source port (`localPort`). This exercises the
 actual Docker DNAT path; a gateway address from a userland proxy fails the check.
