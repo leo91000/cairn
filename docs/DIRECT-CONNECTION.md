@@ -74,9 +74,14 @@ official service's memory and logs; it is not end-to-end encryption against it.
   logout, session expiry or revocation, member removal, role change, detachment,
   credential rotation and revoke-and-forget; the installation closes matching
   channels immediately, including active streams.
-- Without the tunnel, no new direct connection can start and existing ones close
-  at grant expiry, including on a normal official shutdown. Agent executions
-  are never stopped by transport changes.
+- While the tunnel is down, no new direct connection can start and existing ones
+  close at grant expiry. A normal official shutdown does not itself revoke them.
+  When the tunnel reconnects with a new key (including after an official restart
+  or deployment), the installation closes the old leases immediately: the new
+  official tunnel no longer tracks them for revocation. Clients fall back to the
+  relay and negotiate fresh direct grants, applying the switching rules below
+  to avoid loss or duplication. Agent executions are never stopped by transport
+  changes.
 - The installation never accepts anonymous local access and no local password is
   reintroduced.
 
@@ -133,6 +138,8 @@ emulator through simulated networks:
 - an old installation or client: relay only;
 - the official tunnel down: no new direct connection, existing ones end at
   grant expiry, agent executions continue.
+- official restart and tunnel reconnection: the new key closes old leases before
+  expiry, the relay recovers, fresh grants work and logout still revokes them.
 
 ## Delivered control plane (#100)
 

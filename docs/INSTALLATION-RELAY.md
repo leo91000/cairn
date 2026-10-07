@@ -381,14 +381,20 @@ installation. Existing logout/session-revocation/member-removal/access-change
 hooks send the corresponding scope; expiry is scheduled locally, and detachment,
 rotation and definitive revocation notify the whole installation before
 closing its tunnel. A normal official shutdown closes the tunnel without
-revoking established direct leases. Other accounts/devices and admitted agent work survive
-scoped revocation. Loss of the tunnel denies new direct peers; established leases
-end at their expiry, and reconnection requires a fresh authorization.
+revoking established direct leases at shutdown. While the tunnel is down, new
+direct peers are denied and established leases end at their expiry. Reconnection
+supplies a new key and immediately closes the old leases, including after a normal
+official restart or deployment: the new tunnel no longer tracks the old leases
+for revocation. Clients fall back to the relay and obtain fresh authorizations,
+following the [switching rules](DIRECT-CONNECTION.md#switching-rules) without loss
+or duplication. Other accounts/devices and admitted agent work survive scoped
+revocation; changing transport never stops agent execution.
 
 Limits: 30 authorization/renewal attempts per minute per account; 120 client
 signals per minute per account. The installation budgets 120 signals/minute per
 verified account across both directions, with a 960/minute global ceiling and
-120 signals reserved for the owner. The official installation-to-client budget
+120 signals reserved for the owner (all members share an 840/minute ceiling).
+The official installation-to-client budget
 uses the same per-account/global ceilings. Signals sent by the client carry a
 request ID and receive `DirectSignalAck`: HTTP 204 requires installation acceptance;
 refusal returns 429 and a lost acknowledgement returns 503. At most 32 signal

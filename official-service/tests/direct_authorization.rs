@@ -1551,7 +1551,7 @@ async fn installation_signaling_has_a_separate_bounded_budget() {
 }
 
 #[tokio::test]
-async fn official_shutdown_keeps_established_peers_until_the_grant_expires() {
+async fn tunnel_loss_without_reconnection_keeps_established_peers_until_grant_expiry() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     sqlx_core::query::query(
         "UPDATE web_sessions SET expires_at = clock_timestamp() + interval '4 seconds'",
@@ -1594,6 +1594,132 @@ async fn official_shutdown_keeps_established_peers_until_the_grant_expires() {
     tokio::time::timeout(Duration::from_secs(1), lease.closed.cancelled())
         .await
         .unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn official_restart_closes_old_leases_and_new_grants_remain_revocable() {
+    use leo_agent_manager::direct::DirectEvent;
+    use leo_relay_protocol::direct::DirectRevocation;
+
+    let mut relay = RelayedInstallation::new(axum::Router::new()).await;
+    let grant = authorization(&relay, &relay.cookie, &relay.session).await;
+    let waiting = authorization(&relay, &relay.cookie, &relay.session).await;
+    let lease = relay
+        .direct
+        .accept_peer(&grant, &grant.claims.session_id, &fingerprint())
+        .unwrap();
+    let mut events = relay.direct.subscribe();
+
+    relay.app.relay.shutdown();
+    relay.app.server.abort();
+    assert!((&mut relay.app.server).await.unwrap_err().is_cancelled());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!lease.closed.is_cancelled());
+    assert!(events.try_recv().is_err());
+    assert!(
+        relay
+            .direct
+            .accept_peer(&waiting, &waiting.claims.session_id, &fingerprint())
+            .is_err()
+    );
+
+    // Keep the persisted accounts, sessions and machine credential, but recreate
+    // the official process's relay state at the same origin. The real connector
+    // must reconnect without restarting the installation or replacing its leases.
+    let port = reqwest::Url::parse(&relay.app.url).unwrap().port().unwrap();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .unwrap();
+    relay.app.relay = leo_official_service::Relay::default();
+    let app = leo_official_service::router_with_relay(
+        relay.app.pool.clone(),
+        relay.app.mail.clone(),
+        relay.app.url.clone(),
+        leo_official_service::OAuthProviders::default(),
+        relay.app.relay.clone(),
+    )
+    .await
+    .unwrap();
+    relay.app.server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), lease.closed.cancelled())
+        .await
+        .expect("the new signing key must close peers authorized by the old process");
+    assert!(grant.claims.expires_at > leo_relay_protocol::direct::unix_time());
+    assert!(events.try_recv().is_err(), "key replacement is not logout");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while relay.get("/chats").send().await.unwrap().status() != StatusCode::OK {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the fallback relay must recover after the official restart");
+    assert!(
+        relay
+            .direct
+            .accept_peer(&waiting, &waiting.claims.session_id, &fingerprint())
+            .is_err(),
+        "the old pending grant must not survive key replacement"
+    );
+
+    let renewed = relay
+        .app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            &format!(
+                "/api/installations/{}/direct/{}/renew",
+                grant.claims.installation_id, grant.claims.connection_id
+            ),
+        )
+        .json(&json!({ "fingerprint": fingerprint(), "versions": [4] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(renewed.status(), StatusCode::NOT_FOUND);
+
+    let fresh = authorization(&relay, &relay.cookie, &relay.session).await;
+    assert_eq!(fresh.claims.session_id, grant.claims.session_id);
+    let fresh_lease = relay
+        .direct
+        .accept_peer(&fresh, &fresh.claims.session_id, &fingerprint())
+        .expect("a fresh grant must be verified under the new tunnel key");
+    let response = relay
+        .app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            "/api/account/logout",
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    tokio::time::timeout(Duration::from_secs(1), fresh_lease.closed.cancelled())
+        .await
+        .expect("logout after restart must still revoke the new peer immediately");
+    match tokio::time::timeout(Duration::from_secs(1), events.recv())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        DirectEvent::Revoked(DirectRevocation::Session { session_id }) => {
+            assert_eq!(session_id, fresh.claims.session_id);
+        }
+        _ => panic!("logout must revoke only its public session identifier"),
+    }
+    assert!(events.try_recv().is_err());
+    assert!(!relay.installation.shutdown.is_cancelled());
     relay.close().await;
 }
 

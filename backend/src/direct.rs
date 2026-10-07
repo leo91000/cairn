@@ -85,12 +85,15 @@ impl DirectConnections {
         state.output = None;
         state.verifier = None;
         // Established peers retain only their finite lease while the tunnel is down.
+        // A reconnect's new key closes them in set_key, even after normal shutdown.
     }
 
     pub(crate) fn set_key(&self, installation: &str, public_key: &str) -> Result<()> {
         let verifier =
             DirectVerifier::new(installation.to_owned(), public_key).map_err(Error::bad)?;
         let mut state = self.state.lock().unwrap();
+        // The new official tunnel no longer tracks the old leases for revocation.
+        // Close them so clients fall back to the relay and obtain fresh grants.
         for (_, authorization) in state.authorizations.drain() {
             authorization.closed.cancel();
         }
