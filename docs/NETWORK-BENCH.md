@@ -6,8 +6,9 @@ Ticket [#102](https://github.com/leo91000/leo-agent-manager/issues/102),
 ## Run locally
 
 Linux, `iproute2` (including `ss`), `iptables`, `util-linux`, Python 3, `/dev/net/tun`, the pinned
-Rust/Node/pnpm runtimes and passwordless sudo are required. No KVM, Docker network,
-VM, real email provider or agent credentials are needed. Use an empty disposable
+Rust/Node/pnpm runtimes and passwordless sudo are required. No KVM,
+VM, real email provider or agent credentials are needed. Docker is needed only
+for disposable Postgres and the published STUN-port check. Use an empty disposable
 Postgres database, never a deployed service. The usual browser fixture launches
 both real binaries and uses an in-memory email adapter. Agent workers are disabled.
 
@@ -20,6 +21,7 @@ docker run -d --name leo-network-postgres -e POSTGRES_USER=leo -e POSTGRES_PASSW
 export LEO_OFFICIAL_TEST_DATABASE_URL=postgres://leo:test-only@127.0.0.1:5432/leo_official_test
 python3 tests/network_probe_test.py
 python3 tests/network_bench_test.py
+python3 tests/stun_docker_test.py
 ```
 
 Each command launches a complete authenticated Chromium session and a Rust client:
@@ -31,6 +33,8 @@ python3 tests/network-bench.py nat-installation --output test-results/network/na
 python3 tests/network-bench.py nat-both --output test-results/network/nat-both.json
 python3 tests/network-bench.py udp-blocked --output test-results/network/udp-blocked.json
 python3 tests/network-bench.py symmetric-nat --output test-results/network/symmetric-nat.json
+python3 tests/network-bench.py symmetric-client --output test-results/network/symmetric-client.json
+python3 tests/network-bench.py same-server --output test-results/network/same-server.json
 python3 tests/network-bench.py network-change --output test-results/network/network-change.json
 python3 tests/network-bench.py packet-loss --output test-results/network/packet-loss.json
 ```
@@ -58,6 +62,8 @@ only the standard library and never serves installation data.
 | nat-both | Independent NAT/filtering on both sides. |
 | udp-blocked | Every forwarded UDP datagram is dropped on both routers; TCP remains usable. |
 | symmetric-nat | Both routers allocate UDP source ports per flow/destination and deny unsolicited inbound packets. The two probe destinations have distinct fixed mappings; arbitrary UDP destinations use fresh random port allocation. |
+| symmetric-client | Destination-dependent client NAT faces an installation with ordinary Docker-like NAT/filtering; relay expected, no installation port published. |
+| same-server | Official STUN behind a directly published DNAT port on the installation host; external client source preserved, installation hairpin reports a gateway; explicit public-IP alias restores the authorized direct route. |
 | network-change | The client moves to a new source address during a live stream; old-address sockets are closed. |
 | packet-loss | A userspace TUN router drops every fifth outgoing IPv4 packet on both sides, including TCP; no random seed or optional netfilter/netem module. |
 
@@ -67,7 +73,10 @@ mappings on both sides. The UDP probe discards delayed replies from earlier
 sequences until the current reply or its deadline. A STUN fixture listens at
 198.18.102.1:3478, before the host-facing masquerade; mapped addresses therefore
 identify each actual NAT router (198.18.102.2/.3), rather than a shared host
-address. Tests assert these reflexive addresses. The CLI tests assert these effects, including repeated
+address. Tests assert these reflexive addresses. NAT routers drop unsolicited UDP to their own ports as well as forwarded UDP,
+and private host candidates behind NAT have no internet route; otherwise
+conntrack can create artificial reverse-flow mappings before hole punching.
+The CLI tests assert these effects, including repeated
 exact packet-loss counts. These diagnostic listeners cannot access installation
 content and are not a WebRTC peer or an anonymous local installation interface.
 
@@ -93,7 +102,7 @@ on kernels without socket-destroy support. The browser and session stay alive.
 
 The browser stays on **relay** until #103. The installation peer (#101) and real
 Rust DataChannel client expect **direct** for LAN, ordinary NAT, network change
-and packet loss; UDP blocked and symmetric NAT expect **relay**. The Rust read
+and packet loss; UDP blocked, symmetric NAT and symmetric client expect **relay**. The Rust read
 falls back only to its already successful safe HTTPS read; it never retries a
 mutation. `--expect-rust-route` can specify a scenario's expectation;
 `--expect-route` controls the browser expectation. A route mismatch fails the
@@ -110,8 +119,23 @@ change these contracts, local authentication, storage or central persistence.
 ## CI
 
 The separate **direct-relay network bench (no KVM)** job downloads the same real
-binaries/frontend as browser journeys, checks network effects, then runs all eight
+binaries/frontend as browser journeys, checks network effects, then runs all ten
 scenarios sequentially without retries. JSON reports and Playwright failure diagnostics are retained as
 `direct-relay-network-evidence`.
 Evidence contains no
 cookies, claim codes, machine credentials or conversation exports.
+
+## Published official STUN port
+
+`python3 tests/stun_docker_test.py` publishes a disposable Binding-only Python
+fixture on a Docker UDP port using a pinned image digest. An external Linux
+namespace at `198.18.104.2` queries the host's `198.18.104.1` address, and the
+XOR-MAPPED-ADDRESS must retain the external client's address. This exercises the
+actual Docker DNAT path; a gateway address from a userland proxy fails the check.
+The fixture mounts only the diagnostic script read-only, removes its container
+and namespace in `finally`, and saves `test-results/network/docker-stun.json`.
+The official Rust responder is separately covered by real UDP integration tests.
+The production host must repeat source-preservation and firewall validation
+before release (#113/#105); this ticket performs no deployment or host firewall
+change. Hairpin behavior and the optional port-preserving public-IP alias are
+covered by the authenticated `same-server` scenario above.

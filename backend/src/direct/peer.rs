@@ -11,7 +11,7 @@ use rtc::{
     peer_connection::configuration::setting_engine::{SctpMaxMessageSize, SettingEngineBuilder},
 };
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, net::IpAddr, sync::Arc};
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 use webrtc::{
@@ -27,6 +27,7 @@ use webrtc::{
 pub struct PeerConfig {
     pub enabled: bool,
     pub stun_urls: Vec<String>,
+    pub public_ip: Option<IpAddr>,
 }
 
 impl Default for PeerConfig {
@@ -34,6 +35,7 @@ impl Default for PeerConfig {
         Self {
             enabled: true,
             stun_urls: Vec::new(),
+            public_ip: None,
         }
     }
 }
@@ -58,7 +60,23 @@ impl PeerConfig {
                 "LEO_DIRECT_STUN_URLS requires at most four STUN URLs; TURN is deferred.",
             ));
         }
-        Ok(Self { enabled, stun_urls })
+        let public_ip = std::env::var("LEO_DIRECT_PUBLIC_IP")
+            .ok()
+            .map(|value| {
+                value
+                    .parse::<IpAddr>()
+                    .map_err(|_| Error::bad("Invalid direct public IP."))
+            })
+            .transpose()?;
+        if public_ip.is_some_and(|ip| ip.is_unspecified() || ip.is_loopback() || ip.is_multicast())
+        {
+            return Err(Error::bad("A unicast direct public IP is required."));
+        }
+        Ok(Self {
+            enabled,
+            stun_urls,
+            public_ip,
+        })
     }
 }
 
@@ -67,6 +85,7 @@ struct PeerEvents {
     direct: DirectConnections,
     channels: mpsc::Sender<Arc<dyn DataChannel>>,
     failed: CancellationToken,
+    public_ip: Option<IpAddr>,
 }
 
 #[async_trait::async_trait]
@@ -86,7 +105,24 @@ impl PeerConnectionEventHandler for PeerEvents {
                     },
                 )
             });
-        if result.is_err() {
+        let public = if let Some(public) = self.public_ip
+            && event.candidate.typ == webrtc::peer_connection::RTCIceCandidateType::Host
+            && let Ok(local) = event.candidate.address.parse::<IpAddr>()
+            && local.is_ipv4() == public.is_ipv4()
+            && !local.is_unspecified()
+            && !local.is_loopback()
+        {
+            // Only an explicit, port-preserving NAT mapping. Keep the bound
+            // host candidate inside ICE; announce its public alias to the peer.
+            self.direct.send_signal(&self.id, DirectSignal::Candidate {
+                candidate: format!("candidate:leo-public 1 udp 1694498815 {public} {} typ srflx raddr {local} rport {}", event.candidate.port, event.candidate.port),
+                sdp_mid: Some("0".into()),
+                sdp_m_line_index: Some(0),
+            })
+        } else {
+            Ok(())
+        };
+        if result.is_err() || public.is_err() {
             self.failed.cancel();
         }
     }
@@ -191,6 +227,7 @@ async fn serve_peer(
         direct: direct.clone(),
         channels,
         failed: failed.clone(),
+        public_ip: config.public_ip,
     });
     let peer: Arc<dyn PeerConnection> = Arc::new(
         PeerConnectionBuilder::new()

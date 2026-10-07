@@ -116,6 +116,15 @@ test('authenticated browser and Rust client keep using the observed route under 
       await expect(page.getByRole('heading', { name: marker, exact: true })).toBeVisible()
     }
 
+    const output = process.env.LEO_NETWORK_OUTPUT!
+    const report = JSON.parse(await readFile(output, 'utf8'))
+    await writeFile(output, `${JSON.stringify({
+      ...report,
+      expectedRoute: process.env.LEO_NETWORK_EXPECT_ROUTE || 'relay',
+      expectedRustRoute: process.env.LEO_NETWORK_EXPECT_RUST_ROUTE,
+      observations: evidence,
+    })}\n`)
+
     for (const observation of evidence) {
       const expectedRoute = observation.operation.startsWith('rust-')
         ? process.env.LEO_NETWORK_EXPECT_RUST_ROUTE
@@ -126,14 +135,6 @@ test('authenticated browser and Rust client keep using the observed route under 
     const logout = await page.request.post(`${url}/api/account/logout`, { headers: { 'origin': url, 'x-csrf-token': session.csrf }, data: {} })
     expect(logout.ok()).toBe(true)
     await rustRequest(chatsPath, cookie, 401)
-    const output = process.env.LEO_NETWORK_OUTPUT!
-    const report = JSON.parse(await readFile(output, 'utf8'))
-    await writeFile(output, `${JSON.stringify({
-      ...report,
-      expectedRoute: process.env.LEO_NETWORK_EXPECT_ROUTE || 'relay',
-      expectedRustRoute: process.env.LEO_NETWORK_EXPECT_RUST_ROUTE,
-      observations: evidence,
-    })}\n`)
   }
   finally {
     await browser?.close()

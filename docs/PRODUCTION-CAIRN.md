@@ -412,3 +412,51 @@ approval. Do not approve that deployment until:
 - [ ] After rollout, verify the exact health identity, paired installer digest,
       email sign-in, relay reconnection, and conversation access. On failure,
       freeze releases and follow step 7 before approving another pair.
+
+## STUN and direct installation connectivity (#101)
+
+The single `leo-official` process serves STUN **Binding only** on UDP 3478. It
+never relays TURN, authenticates an installation or transports application data.
+The Compose definition publishes `3478:3478/udp` directly; Traefik continues to
+serve HTTPS. `LEO_OFFICIAL_STUN_URL` defaults to
+`stun:<LEO_OFFICIAL_ORIGIN host>:3478`; production pins `stun:cairn.build:3478`.
+The public DNS address must reach the host directly for UDP (the documented DNS
+only configuration does this). `LEO_OFFICIAL_STUN_LISTEN` controls the bind address.
+Authorize/renew responses and the authenticated installation tunnel supply this
+URL to clients and installations. TURN and public third-party STUN remain deferred.
+
+Before an authorized deployment, allow inbound UDP 3478 in the host firewall and
+cloud security group (for example `ufw allow 3478/udp`), retaining HTTPS 443.
+Docker's published UDP port must use iptables/nftables DNAT, preserving the
+**external client's source IP and port**. A userland docker-proxy or intervening
+UDP proxy can instead report its own address. Verify from a separate host with
+a Binding probe and compare XOR-MAPPED-ADDRESS with that host's public address;
+never accept a gateway or the server's own address as evidence. The reproducible
+namespace bench checks an equivalent DNAT path. A disposable Docker published
+port check is described in NETWORK-BENCH.md; deployment-specific firewall and
+source preservation verification stays a pre-release gate in #113/#105. No
+production firewall, Docker-daemon setting or deployment is changed by this PR.
+
+The installation still publishes **no UDP port**. Its Compose NAT generally
+preserves outgoing ports and permits matching reply tuples. A host firewall or
+security group denying unsolicited UDP can prevent peer-reflexive discovery,
+especially against a symmetric-NAT client; HTTPS relay fallback is expected.
+`symmetric-client` in the bench models this installation NAT against a client
+with destination-dependent mappings. No host-network or fixed-port opt-in is
+introduced, preserving ADR-0028's no-incoming-port decision.
+
+When installation and official STUN share a host, the installation's query to
+`cairn.build:3478` may hairpin through Docker and expose a Docker gateway as its
+reflexive address. `same-server` reproduces that error: the external client sees
+its actual NAT address, while the installation sees `10.102.2.1`. For an explicitly
+verified, **port-preserving** installation NAT, set `LEO_DIRECT_PUBLIC_IP` to the
+host's public unicast IP in the installation environment. The peer retains its
+bound host candidate and additionally advertises that public alias with the same
+ephemeral port through authenticated signaling. This opens no listener or port
+mapping. The bench verifies a successful authorized DataChannel with this setting.
+It cannot repair a NAT that changes the public port; leave direct disabled or use
+the relay on such a host until qualification establishes a supported mapping.
+A wrong setting only makes direct fail; it never relaxes grant or DTLS validation.
+`LEO_DIRECT_STUN_URLS` can also select a dedicated official STUN endpoint, useful
+where a distinct reachable official address avoids hairpinning. It must remain
+operator-controlled; no automatic third-party fallback is configured.

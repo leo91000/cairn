@@ -428,6 +428,7 @@ pub async fn connect(
         crate::direct::peer::PeerConfig {
             enabled: false,
             stun_urls: Vec::new(),
+            public_ip: None,
         }
     });
     connect_with_peer(directory, router, service, stop, config).await

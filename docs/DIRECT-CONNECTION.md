@@ -215,6 +215,10 @@ the official Compose definition; Traefik routes HTTPS only.
   The default is `true`; the authenticated tunnel and relay keep working.
 - `LEO_DIRECT_STUN_URLS=stun:host:port[,stun:host:port]` overrides the official STUN
   source, at most four URLs of 256 bytes each. TURN URLs are rejected.
+- `LEO_DIRECT_PUBLIC_IP` optionally announces the installation host's public
+  unicast address for an explicitly verified port-preserving NAT. It avoids the
+  same-host STUN hairpin trap without publishing any installation port; see the
+  [production runbook](PRODUCTION-CAIRN.md#stun-and-direct-installation-connectivity-101).
 - Invalid configuration disables the direct peer and logs a fixed warning while
   retaining the relay. No configuration value or signaling payload is logged.
 - The peer uses ephemeral UDP sockets for ICE; it requires no forwarded inbound

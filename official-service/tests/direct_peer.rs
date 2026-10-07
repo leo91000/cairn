@@ -34,10 +34,21 @@ impl PeerConnectionEventHandler for ClientEvents {
 }
 
 async fn production_connector(relay: &mut RelayedInstallation) {
+    configured_connector(
+        relay,
+        leo_agent_manager::direct::peer::PeerConfig::default(),
+    )
+    .await;
+}
+
+async fn configured_connector(
+    relay: &mut RelayedInstallation,
+    config: leo_agent_manager::direct::peer::PeerConfig,
+) {
     relay.stop.cancel();
     (&mut relay.connector).await.unwrap().unwrap();
     relay.stop = tokio_util::sync::CancellationToken::new();
-    relay.connector = tokio::spawn(leo_agent_manager::relay::connect(
+    relay.connector = tokio::spawn(leo_agent_manager::relay::connect_with_peer(
         relay
             .installation
             .config
@@ -46,6 +57,7 @@ async fn production_connector(relay: &mut RelayedInstallation) {
         relay.router.clone(),
         relay.installation.clone(),
         relay.stop.clone(),
+        config,
     ));
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -59,14 +71,20 @@ async fn production_connector(relay: &mut RelayedInstallation) {
     .unwrap();
 }
 
-async fn signal(relay: &RelayedInstallation, grant: &DirectAuthorization, signal: &DirectSignal) {
+async fn signal_as(
+    relay: &RelayedInstallation,
+    cookie: &str,
+    session: &serde_json::Value,
+    grant: &DirectAuthorization,
+    signal: &DirectSignal,
+) {
     let path = format!(
         "/api/installations/{}/direct/{}/signal",
         grant.claims.installation_id, grant.claims.connection_id
     );
     let response = relay
         .app
-        .authenticated(&relay.cookie, &relay.session, Method::POST, &path)
+        .authenticated(cookie, session, Method::POST, &path)
         .json(signal)
         .send()
         .await
@@ -76,6 +94,19 @@ async fn signal(relay: &RelayedInstallation, grant: &DirectAuthorization, signal
 
 async fn client(
     relay: &RelayedInstallation,
+) -> (
+    Arc<dyn PeerConnection>,
+    Arc<dyn DataChannel>,
+    DirectAuthorization,
+) {
+    client_with_fingerprint(relay, &relay.cookie, &relay.session, false).await
+}
+
+async fn client_with_fingerprint(
+    relay: &RelayedInstallation,
+    cookie: &str,
+    session: &serde_json::Value,
+    mismatched: bool,
 ) -> (
     Arc<dyn PeerConnection>,
     Arc<dyn DataChannel>,
@@ -92,12 +123,20 @@ async fn client(
     );
     let channel = peer.create_data_channel("leo.v4", None).await.unwrap();
     let mut offer = peer.create_offer(None).await.unwrap();
+    let local_offer = offer.clone();
     offer.sdp = offer
         .sdp
         .lines()
         .map(|line| {
             if let Some(fingerprint) = line.strip_prefix("a=fingerprint:sha-256 ") {
-                format!("a=fingerprint:sha-256 {}", fingerprint.to_ascii_uppercase())
+                format!(
+                    "a=fingerprint:sha-256 {}",
+                    if mismatched {
+                        vec!["AB"; 32].join(":")
+                    } else {
+                        fingerprint.to_ascii_uppercase()
+                    }
+                )
             } else {
                 line.to_owned()
             }
@@ -116,7 +155,7 @@ async fn client(
     );
     let response = relay
         .app
-        .authenticated(&relay.cookie, &relay.session, Method::POST, &path)
+        .authenticated(cookie, session, Method::POST, &path)
         .json(&json!({ "fingerprint": fingerprint, "versions": [4] }))
         .send()
         .await
@@ -124,8 +163,15 @@ async fn client(
     assert_eq!(response.status(), StatusCode::OK);
     let value: serde_json::Value = response.json().await.unwrap();
     let grant: DirectAuthorization = serde_json::from_value(value["grant"].clone()).unwrap();
-    peer.set_local_description(offer.clone()).await.unwrap();
-    signal(relay, &grant, &DirectSignal::Offer { sdp: offer.sdp }).await;
+    peer.set_local_description(local_offer).await.unwrap();
+    signal_as(
+        relay,
+        cookie,
+        session,
+        &grant,
+        &DirectSignal::Offer { sdp: offer.sdp },
+    )
+    .await;
     let path = format!(
         "{}/api/installations/{}/direct/{}/events",
         relay.app.url, grant.claims.installation_id, grant.claims.connection_id
@@ -134,16 +180,16 @@ async fn client(
         .app
         .client
         .get(path)
-        .header("cookie", &relay.cookie)
+        .header("cookie", cookie)
         .send()
         .await
         .unwrap();
     assert_eq!(events.status(), StatusCode::OK);
-    tokio::time::timeout(Duration::from_secs(5), async {
+    let negotiated = tokio::time::timeout(Duration::from_secs(3), async {
         let mut buffered = String::new();
         loop {
             tokio::select! {
-                Some(candidate) = candidates.recv() => signal(relay, &grant, &candidate).await,
+                Some(candidate) = candidates.recv() => signal_as(relay, cookie, session, &grant, &candidate).await,
                 chunk = events.chunk() => {
                     buffered.push_str(std::str::from_utf8(&chunk.unwrap().expect("signaling remains open")).unwrap());
                     while let Some(end) = buffered.find("\n\n") {
@@ -164,11 +210,23 @@ async fn client(
                     }
                 }
                 event = channel.poll() => {
-                    if matches!(event, Some(DataChannelEvent::OnOpen)) { break; }
+                    if matches!(event, Some(DataChannelEvent::OnOpen)) { return true; }
+                    if matches!(event, None | Some(DataChannelEvent::OnClose | DataChannelEvent::OnError)) { return false; }
                 }
             }
         }
-    }).await.expect("authorized real DataChannel must open");
+    }).await;
+    if mismatched {
+        assert!(
+            !matches!(negotiated, Ok(true)),
+            "observed DTLS certificate must match the signed fingerprint"
+        );
+    } else {
+        assert!(
+            matches!(negotiated, Ok(true)),
+            "authorized real DataChannel must open"
+        );
+    }
     (peer, channel, grant)
 }
 
@@ -498,5 +556,220 @@ async fn excessive_fragment_declaration_closes_only_direct_and_relay_remains_usa
     );
     peer.close().await.unwrap();
     fresh.close().await.unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn disabling_direct_refuses_authorization_and_preserves_the_relay() {
+    let mut relay = RelayedInstallation::new(axum::Router::new()).await;
+    configured_connector(
+        &mut relay,
+        leo_agent_manager::direct::peer::PeerConfig {
+            enabled: false,
+            ..Default::default()
+        },
+    )
+    .await;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let response = relay.app.authenticated(&relay.cookie, &relay.session, Method::POST, &format!("/api/installations/{id}/direct/authorize"))
+        .json(&json!({ "fingerprint": format!("sha-256 {}", vec!["AB"; 32].join(":")), "versions": [4] })).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn grant_expiry_closes_an_actual_stream_when_the_official_tunnel_is_down() {
+    let mut relay = RelayedInstallation::new(stream_router()).await;
+    production_connector(&mut relay).await;
+    sqlx_core::query::query(
+        "UPDATE web_sessions SET expires_at = clock_timestamp() + interval '5 seconds'",
+    )
+    .execute(&relay.app.pool)
+    .await
+    .unwrap();
+    let (peer, channel, _) = client(&relay).await;
+    send_frame(
+        channel.as_ref(),
+        1,
+        &request("stream", "/api/fixture/stream"),
+    )
+    .await;
+    assert!(matches!(
+        response(channel.as_ref()).await,
+        Frame::StreamStart(_)
+    ));
+    relay.app.relay.shutdown();
+    relay.app.server.abort();
+    tokio::time::timeout(Duration::from_secs(6), async {
+        while !matches!(
+            channel.poll().await,
+            None | Some(DataChannelEvent::OnClose | DataChannelEvent::OnError)
+        ) {}
+    })
+    .await
+    .expect("local expiry closes the real channel without a live official tunnel");
+    assert!(!relay.installation.shutdown.is_cancelled());
+    peer.close().await.unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn a_new_official_key_closes_real_peers_and_a_fresh_peer_still_works() {
+    let mut relay = RelayedInstallation::new(stream_router()).await;
+    production_connector(&mut relay).await;
+    let (old_peer, old_channel, grant) = client(&relay).await;
+    send_frame(
+        old_channel.as_ref(),
+        1,
+        &request("stream", "/api/fixture/stream"),
+    )
+    .await;
+    assert!(matches!(
+        response(old_channel.as_ref()).await,
+        Frame::StreamStart(_)
+    ));
+    // Recreate the official process, retaining accounts and the live installation.
+    relay.app.relay.shutdown();
+    relay.app.server.abort();
+    let _ = (&mut relay.app.server).await;
+    let port = reqwest::Url::parse(&relay.app.url).unwrap().port().unwrap();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .unwrap();
+    relay.app.relay = leo_official_service::Relay::default();
+    let router = leo_official_service::router_with_relay(
+        relay.app.pool.clone(),
+        relay.app.mail.clone(),
+        relay.app.url.clone(),
+        leo_official_service::OAuthProviders::default(),
+        relay.app.relay.clone(),
+    )
+    .await
+    .unwrap();
+    relay.app.server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    closed(old_channel.as_ref()).await;
+    assert!(grant.claims.expires_at > leo_relay_protocol::direct::unix_time());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while relay.get("/chats").send().await.unwrap().status() != StatusCode::OK {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let (fresh_peer, fresh_channel, _) = client(&relay).await;
+    send_frame(fresh_channel.as_ref(), 1, &request("fresh", "/api/chats")).await;
+    assert!(
+        matches!(response(fresh_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+    assert!(!relay.installation.shutdown.is_cancelled());
+    old_peer.close().await.unwrap();
+    fresh_peer.close().await.unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn a_grant_and_sdp_for_a_different_certificate_cannot_open_the_real_data_channel() {
+    let mut relay = RelayedInstallation::new(axum::Router::new()).await;
+    production_connector(&mut relay).await;
+    let (peer, _, _) = client_with_fingerprint(&relay, &relay.cookie, &relay.session, true).await;
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    peer.close().await.unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn installation_stream_and_request_limits_span_real_peers_and_release_on_close() {
+    let router = stream_router().route(
+        "/api/fixture/wait",
+        axum::routing::get(|| async {
+            std::future::pending::<()>().await;
+            "never"
+        }),
+    );
+    let mut relay = RelayedInstallation::new(router).await;
+    production_connector(&mut relay).await;
+    let cookies = common::stream_accounts_with_members(&relay, 3).await;
+    let mut peers = Vec::new();
+    for (account, cookie) in cookies.into_iter().enumerate() {
+        let session = relay
+            .app
+            .client
+            .get(format!("{}/api/account/session", relay.app.url))
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let (peer, channel, _) = client_with_fingerprint(&relay, &cookie, &session, false).await;
+        for index in 0..if account < 3 { 8 } else { 0 } {
+            send_frame(
+                channel.as_ref(),
+                index + 1,
+                &request(&format!("stream-{index}"), "/api/fixture/stream"),
+            )
+            .await;
+            assert!(
+                matches!(response(channel.as_ref()).await, Frame::StreamStart(reply) if reply.status == 200)
+            );
+        }
+        peers.push((peer, channel));
+    }
+    let owner = peers[0].1.as_ref();
+    let extra = peers[3].1.as_ref();
+    send_frame(extra, 1, &request("over-streams", "/api/fixture/stream")).await;
+    assert!(matches!(response(extra).await, Frame::Response(reply) if reply.status == 503));
+    for index in 0..8 {
+        send_frame(
+            owner,
+            100 + index,
+            &request(&format!("pending-{index}"), "/api/fixture/wait"),
+        )
+        .await;
+    }
+    send_frame(owner, 110, &request("over-requests", "/api/chats")).await;
+    assert!(matches!(response(owner).await, Frame::Response(reply) if reply.status == 503));
+    // Closing a member peer frees both its eight stream slots and request slots.
+    peers[2].1.close().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        for transfer in 111.. {
+            send_frame(owner, transfer, &request("after-peer-close", "/api/chats")).await;
+            if matches!(response(owner).await, Frame::Response(reply) if reply.status == 200) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("closing the DataChannel releases request and stream capacity");
+    send_frame(
+        extra,
+        2,
+        &request("stream-after-close", "/api/fixture/stream"),
+    )
+    .await;
+    assert!(matches!(response(extra).await, Frame::StreamStart(reply) if reply.status == 200));
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    for (peer, _) in peers {
+        peer.close().await.unwrap();
+    }
     relay.close().await;
 }

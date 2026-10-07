@@ -40,6 +40,37 @@ async fn binding_reports_the_actual_udp_source_and_never_relays_turn_or_invalid_
             .await
             .is_err()
     );
+    // Malformed optional TLV and a forged FINGERPRINT must not get replies.
+    let mut malformed = request.to_vec();
+    malformed[3] = 4;
+    malformed.extend([0x80, 0x22, 0, 8]);
+    client.send_to(&malformed, destination).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), client.recv_from(&mut reply))
+            .await
+            .is_err()
+    );
+    let mut forged = request.to_vec();
+    forged[3] = 8;
+    forged.extend([0x80, 0x28, 0, 4, 0, 0, 0, 0]);
+    client.send_to(&forged, destination).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), client.recv_from(&mut reply))
+            .await
+            .is_err()
+    );
+    // Known-good CRC computed independently with zlib (RFC 8489 section 14.7).
+    let mut checked = request.to_vec();
+    checked[3] = 8;
+    checked.extend([0x80, 0x28, 0, 4]);
+    checked.extend(0x5b20f9cc_u32.to_be_bytes());
+    client.send_to(&checked, destination).await.unwrap();
+    let (length, _) = tokio::time::timeout(Duration::from_secs(1), client.recv_from(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(length, 40);
+    assert_eq!(&reply[32..36], &[0x80, 0x28, 0, 4]);
     task.abort();
     let _ = task.await;
 }

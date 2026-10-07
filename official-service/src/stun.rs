@@ -34,6 +34,37 @@ pub async fn serve(socket: UdpSocket) -> io::Result<()> {
         {
             continue;
         }
+        let mut offset = 20;
+        let mut fingerprint = false;
+        let mut valid = true;
+        while offset < length {
+            let kind = u16::from_be_bytes([input[offset], input[offset + 1]]);
+            let size = usize::from(u16::from_be_bytes([input[offset + 2], input[offset + 3]]));
+            let end = offset + 4 + size.next_multiple_of(4);
+            if end > length {
+                valid = false;
+                break;
+            }
+            if kind == 0x8028 {
+                if size != 4
+                    || end != length
+                    || u32::from_be_bytes(input[offset + 4..end].try_into().unwrap())
+                        != crc32fast::hash(&input[..offset]) ^ 0x5354554e
+                {
+                    valid = false;
+                    break;
+                }
+                fingerprint = true;
+            } else if kind < 0x8000 {
+                // This address-discovery usage supports no authenticated/ICE/TURN extensions.
+                valid = false;
+                break;
+            }
+            offset = end;
+        }
+        if !valid {
+            continue;
+        }
         // No unbounded IP tracking, tasks, retransmissions or amplification loop.
         if !counts.contains_key(&source.ip()) && counts.len() >= 1000 {
             continue;
@@ -67,7 +98,13 @@ pub async fn serve(socket: UdpSocket) -> io::Result<()> {
                     .map(|(byte, mask)| byte ^ mask),
             ),
         }
-        response[2..4].copy_from_slice(&(address_length + 4).to_be_bytes());
+        let message_length = address_length + 4 + if fingerprint { 8 } else { 0 };
+        response[2..4].copy_from_slice(&message_length.to_be_bytes());
+        if fingerprint {
+            let crc = crc32fast::hash(&response) ^ 0x5354554e;
+            response.extend([0x80, 0x28, 0, 4]);
+            response.extend(crc.to_be_bytes());
+        }
         let _ = socket.send_to(&response, source).await;
     }
 }

@@ -72,6 +72,11 @@ class NetworkBenchTest(unittest.TestCase):
             self.assertTrue(probe["translated"])
             self.assertEqual(probe["mappings"], 2)
 
+    def test_same_server_stun_preserves_external_client_but_detects_hairpin_gateway(self):
+        report = self.probe("same-server")
+        self.assertEqual(report["stun"]["client"]["address"], "198.18.102.2")
+        self.assertEqual(report["stun"]["installation"]["address"], "10.102.2.1")
+
     def test_packet_loss_is_deterministic(self):
         for _ in range(2):
             report = self.probe("packet-loss")

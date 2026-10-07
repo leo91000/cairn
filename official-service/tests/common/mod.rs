@@ -462,9 +462,16 @@ impl RelayedInstallation {
 /// respecting the eight-stream allowance per account. Reuse across cancellation
 /// cycles so the tests still exercise the full tunnel capacity, not only one quota.
 pub async fn stream_accounts(relay: &RelayedInstallation) -> Vec<String> {
+    stream_accounts_with_members(relay, 2).await
+}
+
+pub async fn stream_accounts_with_members(
+    relay: &RelayedInstallation,
+    members: usize,
+) -> Vec<String> {
     let id = relay.session["installations"][0]["id"].as_str().unwrap();
     let mut cookies = vec![relay.cookie.clone()];
-    for number in 0..2 {
+    for number in 0..members {
         let email = format!("stream-member-{number}@example.test");
         let (cookie, session) = login(&relay.app, &email).await;
         let response = relay
