@@ -5,6 +5,8 @@ use crate::{
     service::Service,
     storage::metrics::Counter,
 };
+use base64::Engine as _;
+use md5::{Digest, Md5};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -21,7 +23,7 @@ type PendingRead = OnceCell<Result<bytes::Bytes>>;
 
 type ReadKey = (String, String, u64, Option<String>, String);
 
-// Shared by all publications; each slot includes full read-back verification.
+// Shared by all publications; each slot includes the checksum-validated PUT.
 pub(crate) const HOT_WRITE_CONCURRENCY: usize = 16;
 const HOT_READ_CONCURRENCY: usize = 16;
 
@@ -115,8 +117,8 @@ impl HotS3 {
             .load()
             .await;
         let mut builder = aws_sdk_s3::config::Builder::from(&config);
-        // Read-back verification already checks the stored bytes. Avoid optional
-        // checksum headers that some S3-compatible providers do not implement.
+        // Every PUT carries Content-MD5. Avoid additional optional checksum headers
+        // that some S3-compatible providers do not implement.
         builder = builder.request_checksum_calculation(
             aws_sdk_s3::config::RequestChecksumCalculation::WhenRequired,
         );
@@ -337,9 +339,19 @@ impl Storage {
 
     pub async fn probe(&self) -> Result<()> {
         let key = format!("installation-check/{}", uuid::Uuid::new_v4());
-        let uploaded = self.upload_bytes(b"Leo storage check".to_vec(), &key).await;
+        // Configuration probes still test read access; ordinary block uploads do not.
+        let checked = async {
+            let bytes = b"Leo storage check";
+            self.upload_bytes(bytes.to_vec(), &key).await?;
+            let remote = self.download_bytes(&key, bytes.len() as u64).await?;
+            if remote != bytes {
+                return Err(Error::bad("Remote backup checksum mismatch."));
+            }
+            Ok(())
+        }
+        .await;
         let cleanup = self.purge_key(&key).await;
-        uploaded?;
+        checked?;
         cleanup
     }
 
@@ -602,8 +614,12 @@ impl Storage {
             )
             .await;
         let bytes = bytes::Bytes::from(bytes);
+        // MD5 detects transfer corruption; block identity and encryption retain
+        // their existing cryptographic checks on recovery reads.
+        let checksum = base64::engine::general_purpose::STANDARD.encode(Md5::digest(&bytes));
         client
             .put_object()
+            .content_md5(checksum)
             .bucket(&self.bucket)
             .key(key)
             .set_server_side_encryption(self.server_side_encryption.clone())
@@ -614,18 +630,10 @@ impl Storage {
                 Error::unavailable("Recovery block upload failed; local data is retained.")
             })?;
         sample.finish(bytes.len());
-        self.verify_bytes(key, &bytes).await
-    }
-
-    async fn verify_bytes(&self, key: &str, bytes: &[u8]) -> Result<()> {
-        let remote = self.download_bytes(key, bytes.len() as u64).await?;
-        if remote != bytes {
-            return Err(Error::bad("Remote backup checksum mismatch."));
-        }
         Ok(())
     }
 
-    /// Verify a cached block or manifest before publishing its recovery point.
+    /// Upload a cached block or manifest with a provider-validated transfer checksum.
     pub async fn upload_file_verified(&self, path: &Path, key: &str) -> Result<()> {
         let bytes = tokio::fs::read(path).await?;
         self.upload_bytes(bytes, key).await
@@ -951,7 +959,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn optional_sse_header_preserves_exact_readback_and_provider_defaults() {
+    async fn optional_sse_header_preserves_checksum_uploads_and_provider_defaults() {
         use axum::{
             Router,
             body::{Bytes, to_bytes},
@@ -1019,43 +1027,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn uploads_share_sixteen_slots_until_readback_and_release_them_after_corruption() {
+    async fn uploads_validate_checksums_without_reads_and_share_sixteen_slots() {
         use axum::{
             Router,
-            body::{Bytes, to_bytes},
+            body::to_bytes,
             extract::Request,
-            http::Method,
+            http::{Method, StatusCode},
+            response::IntoResponse,
         };
         use tokio::task::JoinSet;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
-        let objects = Arc::new(Mutex::new(HashMap::<String, Bytes>::new()));
+        let requests = Arc::new(Mutex::new(Vec::new()));
         let put_started = Arc::new(Semaphore::new(0));
-        let verify_gate = Arc::new(Semaphore::new(0));
+        let put_release = Arc::new(Semaphore::new(0));
         let app = Router::new().fallback({
-            let objects = objects.clone();
+            let requests = requests.clone();
             let put_started = put_started.clone();
-            let verify_gate = verify_gate.clone();
+            let put_release = put_release.clone();
             move |request: Request| {
-                let objects = objects.clone();
+                let requests = requests.clone();
                 let put_started = put_started.clone();
-                let verify_gate = verify_gate.clone();
+                let put_release = put_release.clone();
                 async move {
-                    let key = request.uri().path().to_owned();
-                    if request.method() == Method::PUT {
-                        let bytes = to_bytes(request.into_body(), 64).await.unwrap();
-                        objects.lock().await.insert(key, bytes);
-                        put_started.add_permits(1);
-                        return Bytes::new();
+                    requests.lock().await.push(request.method().clone());
+                    if request.method() != Method::PUT {
+                        return StatusCode::METHOD_NOT_ALLOWED.into_response();
                     }
-
-                    assert_eq!(request.method(), Method::GET);
-                    verify_gate.acquire().await.unwrap().forget();
-                    if key.ends_with("/corrupt") {
-                        return Bytes::from_static(b"broken");
+                    let corrupt = request.uri().path().ends_with("/corrupt");
+                    let checksum = request.headers().get("content-md5").cloned();
+                    let bytes = to_bytes(request.into_body(), 64).await.unwrap();
+                    assert_eq!(bytes.as_ref(), b"backup");
+                    put_started.add_permits(1);
+                    put_release.acquire().await.unwrap().forget();
+                    if checksum.as_ref().map(axum::http::HeaderValue::as_bytes)
+                        != Some(b"QCBR9L4Mw6rTO886w9ZTKw==".as_slice())
+                        || corrupt
+                    {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            [("content-type", "application/xml")],
+                            "<Error><Code>BadDigest</Code><Message>Checksum mismatch</Message></Error>",
+                        )
+                            .into_response();
                     }
-                    objects.lock().await.get(&key).unwrap().clone()
+                    StatusCode::OK.into_response()
                 }
             }
         });
@@ -1063,6 +1080,8 @@ mod tests {
         let hot = Arc::new(HotS3::new());
         let first = fixture_storage(&endpoint, "first", hot.clone()).await;
         let second = fixture_storage(&endpoint, "second", hot.clone()).await;
+        // Reads may already be occupied by restores. Publishing must not need them.
+        let _reads = hot.reads.acquire_many(16).await.unwrap();
         let mut uploads = JoinSet::new();
         for index in 0..17 {
             let storage = if index % 2 == 0 {
@@ -1082,25 +1101,28 @@ mod tests {
             .expect("sixteen uploads must start across both storage instances")
             .unwrap()
             .forget();
-        assert_eq!(objects.lock().await.len(), 16);
+        assert_eq!(requests.lock().await.len(), 16);
         assert_eq!(hot.writes.available_permits(), 0);
-        assert!(
-            uploads.try_join_next().is_none(),
-            "uploads must wait for readback"
-        );
+        assert!(uploads.try_join_next().is_none());
 
-        verify_gate.add_permits(18);
-        while let Some(upload) = uploads.join_next().await {
-            upload.unwrap().unwrap();
-        }
-        assert_eq!(objects.lock().await.len(), 17);
+        put_release.add_permits(18);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(upload) = uploads.join_next().await {
+                upload.unwrap().unwrap();
+            }
+        })
+        .await
+        .expect("uploads must complete while every read slot is occupied");
+        assert_eq!(hot.writes.available_permits(), 16);
 
         let error = first
             .upload_bytes(b"backup".to_vec(), "corrupt")
             .await
             .unwrap_err();
-        assert_eq!(error.message, "Remote backup checksum mismatch.");
+        assert_eq!(error.status, 503);
+        assert!(error.message.contains("local data is retained"));
         assert_eq!(hot.writes.available_permits(), 16);
+        assert_eq!(*requests.lock().await, vec![Method::PUT; 18]);
         server.abort();
     }
 

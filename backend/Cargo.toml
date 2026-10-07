@@ -58,6 +58,7 @@ uuid = { version = "1", features = [
 ] }
 rand = "0.9"
 sha2 = "0.10"
+md-5 = "0.11"
 aws-lc-rs = { version = "1.18.1", default-features = false, features = [
   "non-fips",
   "alloc"
