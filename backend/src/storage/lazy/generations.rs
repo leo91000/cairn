@@ -2,6 +2,8 @@
 use super::*;
 use rusqlite::OptionalExtension;
 
+const RECONSTRUCTION_CONCURRENCY: usize = 16;
+
 impl LazyDisk {
     /// Seal a durable journal prefix while later writes enter the next generation.
     /// Guest filesystem flushing, when required, belongs to the capture caller.
@@ -112,28 +114,56 @@ impl LazyDisk {
         changed.sort_by_key(|index| foreground.get(index).map_or(0, |rank| rank + 1));
         let changed_blocks = changed.len();
         let mut retained_blocks = 0;
-        for index in changed {
+        let reconstruct = |index: u64| -> io::Result<_> {
             let offset = index * BLOCK;
             let mut bytes = vec![0; (self.size - offset).min(BLOCK) as usize];
             self.read_generation(generation, offset, &mut bytes)?;
-            if bytes.iter().all(|b| *b == 0) {
-                manifest["blocks"][index as usize]["hash"] = Value::Null;
-                continue;
-            }
-            let hash = block_digest(&bytes);
-            manifest["blocks"][index as usize]["hash"] = hash.clone().into();
-            // The next native startup may read databases created only by writes
-            // in this turn. Keep their published bytes locally without admitting
-            // a background scan into the shared foreground RAM cache.
-            let _ = self.cache_block(&hash, &bytes);
-            if foreground.contains_key(&index) {
-                // These exact bytes produced the immutable identity. Retain its
-                // new version before publication retires the local journal.
-                // Existing hits remain unpromoted by this background scan.
-                let mut cache = self.blocks.bytes.lock().map_err(failure)?;
-                if cache.get(&hash, false).is_none() {
-                    cache.insert(&hash, bytes, true);
-                    retained_blocks += 1;
+            let hash = (!bytes.iter().all(|byte| *byte == 0)).then(|| block_digest(&bytes));
+            Ok((index, bytes, hash))
+        };
+        for batch in changed.chunks(RECONSTRUCTION_CONCURRENCY) {
+            let blocks = if batch.len() == 1 {
+                vec![reconstruct(batch[0])?]
+            } else {
+                // A sealed generation is immutable. Overlap its independent base
+                // reads; apply cache admission in the original working-set order.
+                std::thread::scope(|scope| -> io::Result<Vec<_>> {
+                    let mut workers = Vec::with_capacity(batch.len());
+                    for &index in batch {
+                        let reconstruct = &reconstruct;
+                        workers.push(
+                            std::thread::Builder::new()
+                                .name("leo-journal-rebuild".into())
+                                .spawn_scoped(scope, move || reconstruct(index))
+                                .map_err(failure)?,
+                        );
+                    }
+                    let outcomes = workers
+                        .into_iter()
+                        .map(|worker| {
+                            worker
+                                .join()
+                                .map_err(|_| failure("Journal reconstruction worker panicked"))
+                                .and_then(|outcome| outcome)
+                        })
+                        .collect::<Vec<_>>();
+                    outcomes.into_iter().collect()
+                })?
+            };
+            for (index, bytes, hash) in blocks {
+                let Some(hash) = hash else {
+                    manifest["blocks"][index as usize]["hash"] = Value::Null;
+                    continue;
+                };
+                manifest["blocks"][index as usize]["hash"] = hash.clone().into();
+                // Persist published bytes without promoting a background scan.
+                let _ = self.cache_block(&hash, &bytes);
+                if foreground.contains_key(&index) {
+                    let mut cache = self.blocks.bytes.lock().map_err(failure)?;
+                    if cache.get(&hash, false).is_none() {
+                        cache.insert(&hash, bytes, true);
+                        retained_blocks += 1;
+                    }
                 }
             }
         }

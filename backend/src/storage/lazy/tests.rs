@@ -862,3 +862,137 @@ fn distinct_cold_blocks_still_download_concurrently() {
         );
     });
 }
+
+#[test]
+fn sealed_reconstruction_overlaps_cold_base_reads_and_keeps_exact_bytes() {
+    use std::collections::HashMap;
+    use std::sync::{Condvar, Mutex};
+    use std::time::{Duration, Instant};
+    struct Cold {
+        blocks: HashMap<String, Vec<u8>>,
+        arrived: Mutex<usize>,
+        release: Condvar,
+        serialized: std::sync::atomic::AtomicBool,
+    }
+    impl BlockSource for Cold {
+        fn fetch(&self, hash: &str) -> io::Result<Vec<u8>> {
+            let mut arrived = self.arrived.lock().unwrap();
+            *arrived += 1;
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while *arrived < 16 && !self.serialized.load(Ordering::SeqCst) {
+                let (guard, timeout) = self
+                    .release
+                    .wait_timeout(arrived, deadline.saturating_duration_since(Instant::now()))
+                    .unwrap();
+                arrived = guard;
+                if timeout.timed_out() {
+                    self.serialized.store(true, Ordering::SeqCst);
+                    break;
+                }
+            }
+            self.release.notify_all();
+            drop(arrived);
+            Ok(self.blocks[hash].clone())
+        }
+    }
+    let mut blocks = HashMap::new();
+    let mut extents = Vec::new();
+    for index in 0..16 {
+        let bytes = vec![index as u8 + 1; BLOCK as usize];
+        let hash = block_digest(&bytes);
+        extents.push(serde_json::json!({"offset": index * BLOCK, "size": BLOCK, "hash": hash}));
+        blocks.insert(hash, bytes);
+    }
+    let source = Arc::new(Cold {
+        blocks,
+        arrived: Mutex::new(0),
+        release: Condvar::new(),
+        serialized: std::sync::atomic::AtomicBool::new(false),
+    });
+    let root = tempfile::tempdir().unwrap();
+    let disk = LazyDisk::create(
+        root.path(),
+        &serde_json::json!({"version":1,"size":16*BLOCK,"blockSize":BLOCK,"blocks":extents}),
+        source.clone(),
+    )
+    .unwrap();
+    for index in 0..16 {
+        disk.write_at(index * BLOCK + 17, b"new").unwrap();
+    }
+    let generation = disk.seal().unwrap();
+    let captured = disk.capture(generation).unwrap();
+    assert!(
+        !source.serialized.load(Ordering::SeqCst),
+        "sealed capture serialized its cold base reads"
+    );
+    for index in 0..16 {
+        let mut expected = vec![index as u8 + 1; BLOCK as usize];
+        expected[17..20].copy_from_slice(b"new");
+        assert_eq!(captured["blocks"][index]["hash"], block_digest(&expected));
+        assert_eq!(
+            disk.captured_block(
+                generation,
+                captured["blocks"][index]["hash"].as_str().unwrap()
+            )
+            .unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn failed_parallel_reconstruction_never_commits_a_manifest_and_can_retry() {
+    struct Flaky {
+        bytes: Vec<u8>,
+        fail: std::sync::atomic::AtomicBool,
+        panic: bool,
+    }
+    impl BlockSource for Flaky {
+        fn fetch(&self, _: &str) -> io::Result<Vec<u8>> {
+            if self.fail.swap(false, Ordering::SeqCst) {
+                assert!(!self.panic, "Injected reconstruction worker panic");
+                return Err(io::Error::other("Injected base read failure"));
+            }
+            Ok(self.bytes.clone())
+        }
+    }
+    for panic in [false, true] {
+        let bytes = vec![1; BLOCK as usize];
+        let hash = block_digest(&bytes);
+        let source = Arc::new(Flaky {
+            bytes,
+            fail: std::sync::atomic::AtomicBool::new(true),
+            panic,
+        });
+        let root = tempfile::tempdir().unwrap();
+        let manifest = serde_json::json!({"version":1,"size":2*BLOCK,"blockSize":BLOCK,"blocks":[{"offset":0,"size":BLOCK,"hash":hash},{"offset":BLOCK,"size":BLOCK,"hash":hash}]});
+        let disk = LazyDisk::create(root.path(), &manifest, source).unwrap();
+        for index in 0..2u64 {
+            disk.write_at(index * BLOCK + 17, &[index as u8 + 2])
+                .unwrap();
+        }
+        let generation = disk.seal().unwrap();
+        assert!(disk.capture(generation).is_err());
+        let committed: Option<String> = disk
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT manifest FROM sealed WHERE generation=?1",
+                [generation],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            committed.is_none(),
+            "a failed reconstruction committed its manifest"
+        );
+        let captured = disk.capture(generation).unwrap();
+        for index in 0..2u64 {
+            let mut expected = vec![1; BLOCK as usize];
+            expected[17] = index as u8 + 2;
+            let hash = captured["blocks"][index as usize]["hash"].as_str().unwrap();
+            assert_eq!(disk.captured_block(generation, hash).unwrap(), expected);
+        }
+    }
+}
