@@ -1,0 +1,80 @@
+name: leo-official
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: leo
+      POSTGRES_DB: leo_official
+      POSTGRES_PASSWORD: ${LEO_OFFICIAL_POSTGRES_PASSWORD:?Set the private database password}
+    volumes:
+      - official-postgres:/var/lib/postgresql/data
+    networks: [database]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -h 127.0.0.1 -U leo -d leo_official]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    mem_limit: 1g
+    cpus: 1
+    logging: &logs
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+  official:
+    image: ${LEO_OFFICIAL_IMAGE:?Set the validated official image digest}
+    user: '1000:1000'
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 60s
+    deploy:
+      replicas: 1
+      update_config:
+        order: stop-first
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      LEO_OFFICIAL_DATABASE_URL: ${LEO_OFFICIAL_DATABASE_URL:?Set the private Postgres URL}
+      LEO_OFFICIAL_ORIGIN: https://cairn.build
+      LEO_OFFICIAL_LISTEN: 0.0.0.0:4311
+      LEO_OFFICIAL_WEB_DIR: /app/dist
+      LEO_OFFICIAL_TRUSTED_PROXIES: ${LEO_OFFICIAL_TRUSTED_PROXIES:?Trust only the controlled proxy hops}
+      LEO_INSTALLATION_IMAGE: ${LEO_INSTALLATION_IMAGE:?Set the paired installation digest}
+      LEO_OFFICIAL_EMAIL_FROM: ${LEO_OFFICIAL_EMAIL_FROM:?Set the verified Resend sender}
+      LEO_OFFICIAL_EMAIL_KEY: ${LEO_OFFICIAL_EMAIL_KEY:?Set the private Resend API key}
+      LEO_OFFICIAL_GOOGLE_CLIENT_ID: ${LEO_OFFICIAL_GOOGLE_CLIENT_ID:-}
+      LEO_OFFICIAL_GOOGLE_CLIENT_SECRET: ${LEO_OFFICIAL_GOOGLE_CLIENT_SECRET:-}
+      LEO_OFFICIAL_GITHUB_CLIENT_ID: ${LEO_OFFICIAL_GITHUB_CLIENT_ID:-}
+      LEO_OFFICIAL_GITHUB_CLIENT_SECRET: ${LEO_OFFICIAL_GITHUB_CLIENT_SECRET:-}
+      LEO_OFFICIAL_VAPID_PRIVATE_KEY: ${LEO_OFFICIAL_VAPID_PRIVATE_KEY:-}
+      LEO_OFFICIAL_VAPID_SUBJECT: ${LEO_OFFICIAL_VAPID_SUBJECT:-}
+    expose: ['4311']
+    networks: [database, coolify]
+    labels:
+      traefik.enable: 'true'
+      traefik.docker.network: ${COOLIFY_PROXY_NETWORK:-coolify}
+      traefik.http.routers.cairn-official.rule: Host(`cairn.build`)
+      traefik.http.routers.cairn-official.entrypoints: ${LEO_PROXY_HTTPS_ENTRYPOINT:-https}
+      traefik.http.routers.cairn-official.tls: 'true'
+      traefik.http.routers.cairn-official.tls.certresolver: ${LEO_PROXY_CERT_RESOLVER:-letsencrypt}
+      traefik.http.routers.cairn-official.service: cairn-official
+      traefik.http.services.cairn-official.loadbalancer.server.port: '4311'
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, --output, /dev/null, http://127.0.0.1:4311/health]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      start_interval: 1s
+    mem_limit: 1g
+    cpus: 1
+    logging: *logs
+volumes:
+  official-postgres:
+networks:
+  database:
+    internal: true
+  coolify:
+    external: true
+    name: ${COOLIFY_PROXY_NETWORK:-coolify}

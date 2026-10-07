@@ -64,6 +64,11 @@ describe('coolify deployment over HTTP', () => {
         return
       }
 
+      if (request.url === '/install/release') {
+        response.end(JSON.stringify({ image: releaseImage ?? config.installationImage }))
+        return
+      }
+
       if (request.url === '/internal/nodes/release') {
         response.end(JSON.stringify({ protocol: 2, commit: config.commit, image: releaseImage ?? config.image }))
         return
@@ -87,6 +92,20 @@ describe('coolify deployment over HTTP', () => {
   afterEach(async () => {
     server.closeAllConnections()
     await new Promise(resolve => server.close(resolve))
+  })
+
+  it('deploys the official image and approves the paired installation without touching a runner', async () => {
+    compose = readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
+    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
+    healthResponses = [{ status: 'ok', commit: 'old-commit' }, { status: 'ok', commit: config.commit }]
+    await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
+    expect(requests.filter(request => request.method !== 'GET').map(request => [request.method, request.path, request.body])).toEqual([
+      ['PATCH', '/api/v1/services/leo-service/envs', { key: 'LEO_OFFICIAL_IMAGE', value: config.image, is_literal: true }],
+      ['PATCH', '/api/v1/services/leo-service/envs', { key: 'LEO_INSTALLATION_IMAGE', value: config.installationImage, is_literal: true }],
+      ['POST', '/api/v1/services/leo-service/restart', undefined],
+    ])
+    expect(requests.some(request => request.path === '/internal/nodes/release')).toBe(false)
+    expect(requests.some(request => request.path === '/install/release')).toBe(true)
   })
 
   it('pins the image, restarts and waits through stale health and proxy errors', async () => {
