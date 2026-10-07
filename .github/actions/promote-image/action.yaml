@@ -1,6 +1,9 @@
 name: Promote a validated image
 description: Tag an already validated image digest for this commit, main or a release without rebuilding it.
 inputs:
+  image:
+    description: Image repository to promote (defaults to the installation image).
+    required: false
   digest:
     description: Immutable digest of the validated image.
     required: true
@@ -21,7 +24,7 @@ runs:
     - uses: docker/metadata-action@v6.2.0
       id: meta
       with:
-        images: ghcr.io/${{ github.repository }}
+        images: ${{ inputs.image || format('ghcr.io/{0}', github.repository) }}
         tags: |
           type=sha,format=long
           type=raw,value=latest,enable={{is_default_branch}}
@@ -29,6 +32,7 @@ runs:
     - name: Promote the tested digest
       shell: bash
       env:
+        IMAGE_REPOSITORY: ${{ inputs.image || format('ghcr.io/{0}', github.repository) }}
         IMAGE_DIGEST: ${{ inputs.digest }}
         IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
       run: |
@@ -37,4 +41,4 @@ runs:
         while IFS= read -r tag; do
           args+=(--tag "$tag")
         done <<< "$IMAGE_TAGS"
-        docker buildx imagetools create "${args[@]}" "ghcr.io/${GITHUB_REPOSITORY}@${IMAGE_DIGEST}"
+        docker buildx imagetools create "${args[@]}" "${IMAGE_REPOSITORY}@${IMAGE_DIGEST}"

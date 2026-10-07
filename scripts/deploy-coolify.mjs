@@ -2,6 +2,7 @@ import { Buffer } from 'node:buffer'
 import { appendFileSync } from 'node:fs'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
+import { parse } from 'yaml'
 import { firecrackerRunnerCompose } from './runner-compose.mjs'
 
 export async function deploy(config, { timeoutMs = 600000, intervalMs = 2000 } = {}) {
@@ -36,7 +37,21 @@ export async function deploy(config, { timeoutMs = 600000, intervalMs = 2000 } =
 
   const started = Date.now()
   const service = await api(servicePath, 'GET', undefined, true)
-  const compose = firecrackerRunnerCompose(service.docker_compose_raw)
+  const official = !!config.installationImage
+  if (official) {
+    const document = parse(service.docker_compose_raw)
+    const officialService = document?.services?.official
+    // Reject the old manager target before changing any environment values.
+    // eslint-disable-next-line no-template-curly-in-string -- Coolify must retain these Compose expressions.
+    if (!officialService || document.services.manager || document.services.runner || officialService.image !== '${LEO_OFFICIAL_IMAGE:?Set the validated official image digest}'
+      || Number(officialService.deploy?.replicas) !== 1 || officialService.deploy?.update_config?.order !== 'stop-first'
+      // eslint-disable-next-line no-template-curly-in-string -- This must be operator-configured, not baked into Compose.
+      || officialService.environment?.LEO_INSTALLATION_IMAGE !== '${LEO_INSTALLATION_IMAGE:?Set the paired installation digest}') {
+      throw new Error('Coolify must target the single-process official production Compose, not the old manager')
+    }
+  }
+
+  const compose = official ? service.docker_compose_raw : firecrackerRunnerCompose(service.docker_compose_raw)
   if (compose !== service.docker_compose_raw) {
     await api(servicePath, 'PATCH', { docker_compose_raw: Buffer.from(compose).toString('base64') })
     const updatedService = await api(servicePath, 'GET', undefined, true)
@@ -45,10 +60,18 @@ export async function deploy(config, { timeoutMs = 600000, intervalMs = 2000 } =
   }
 
   await api(`${servicePath}/envs`, 'PATCH', {
-    key: 'LEO_IMAGE',
+    key: official ? 'LEO_OFFICIAL_IMAGE' : 'LEO_IMAGE',
     value: image,
     is_literal: true,
   })
+  if (official) {
+    await api(`${servicePath}/envs`, 'PATCH', {
+      key: 'LEO_INSTALLATION_IMAGE',
+      value: config.installationImage,
+      is_literal: true,
+    })
+  }
+
   const updated = Date.now()
   await api(`${servicePath}/restart`, 'POST')
   const restarted = Date.now()
@@ -66,14 +89,14 @@ export async function deploy(config, { timeoutMs = 600000, intervalMs = 2000 } =
       if (response.ok) {
         const health = await response.json()
         if (health.status === 'ok' && health.commit === commit && (!config.runtimeId || health.runtimeId === config.runtimeId)) {
-          const releaseResponse = await fetch(new URL('/internal/nodes/release', publicUrl), {
+          const releaseResponse = await fetch(new URL(official ? '/install/release' : '/internal/nodes/release', publicUrl), {
             cache: 'no-store',
             redirect: 'error',
             signal: AbortSignal.timeout(10000),
           })
           if (releaseResponse.ok) {
             const release = await releaseResponse.json()
-            if (release.protocol === 2 && release.commit === commit && release.image === image) {
+            if (official ? release.image === config.installationImage : release.protocol === 2 && release.commit === commit && release.image === image) {
               return {
                 updateMs: updated - started,
                 restartMs: restarted - updated,
@@ -99,24 +122,27 @@ export async function deploy(config, { timeoutMs = 600000, intervalMs = 2000 } =
     await setTimeout(intervalMs)
   }
 
-  throw new Error(`Deployment did not serve commit ${commit} with node image ${image} before the timeout`)
+  throw new Error(`Deployment did not serve commit ${commit} with ${official ? 'installation' : 'node'} image ${config.installationImage || image} before the timeout`)
 }
 
 function configuration() {
-  const names = ['COOLIFY_URL', 'COOLIFY_SERVICE_UUID', 'COOLIFY_TOKEN', 'LEO_PUBLIC_URL', 'DEPLOY_IMAGE', 'DEPLOY_COMMIT']
+  const names = ['COOLIFY_URL', 'COOLIFY_SERVICE_UUID', 'COOLIFY_TOKEN', 'LEO_OFFICIAL_ORIGIN', 'DEPLOY_IMAGE', 'DEPLOY_INSTALLATION_IMAGE', 'DEPLOY_COMMIT']
   for (const name of names) {
     if (!process.env[name])
       throw new Error(`Missing ${name}`)
   }
 
-  for (const name of ['COOLIFY_URL', 'LEO_PUBLIC_URL']) {
+  for (const name of ['COOLIFY_URL', 'LEO_OFFICIAL_ORIGIN']) {
     const url = new URL(process.env[name])
     if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash)
       throw new Error(`${name} must be an HTTPS origin`)
   }
 
-  if (!/^ghcr\.io\/[a-z0-9_.\-/]+@sha256:[a-f0-9]{64}$/.test(process.env.DEPLOY_IMAGE))
-    throw new Error('DEPLOY_IMAGE must be an immutable GHCR digest')
+  for (const name of ['DEPLOY_IMAGE', 'DEPLOY_INSTALLATION_IMAGE']) {
+    if (!/^ghcr\.io\/[a-z0-9_.\-/]+@sha256:[a-f0-9]{64}$/.test(process.env[name]))
+      throw new Error(`${name} must be an immutable GHCR digest`)
+  }
+
   if (!/^[a-f0-9]{40}$/.test(process.env.DEPLOY_COMMIT))
     throw new Error('DEPLOY_COMMIT must be a full Git commit SHA')
   return {
@@ -126,7 +152,8 @@ function configuration() {
     image: process.env.DEPLOY_IMAGE,
     commit: process.env.DEPLOY_COMMIT,
     runtimeId: process.env.DEPLOY_COMMIT,
-    publicUrl: process.env.LEO_PUBLIC_URL,
+    installationImage: process.env.DEPLOY_INSTALLATION_IMAGE,
+    publicUrl: process.env.LEO_OFFICIAL_ORIGIN,
   }
 }
 

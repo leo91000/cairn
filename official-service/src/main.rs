@@ -2,6 +2,7 @@ use std::{env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use axum::{
+    Json,
     http::{HeaderValue, StatusCode, header},
     routing::{any, get},
 };
@@ -235,15 +236,24 @@ async fn run() -> Result<(), String> {
             );
         }
     };
-    let android_push = env::var("LEO_OFFICIAL_FCM_SERVICE_ACCOUNT")
+    let fcm_json = env::var("LEO_OFFICIAL_FCM_SERVICE_ACCOUNT_JSON")
         .ok()
-        .filter(|value| !value.is_empty())
-        .map(|path| {
+        .filter(|value| !value.is_empty());
+    let fcm_file = env::var("LEO_OFFICIAL_FCM_SERVICE_ACCOUNT")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let android_push = match (fcm_json, fcm_file) {
+        (None, None) => None,
+        (Some(account), None) => Some(FcmPushSender::new(&account)?),
+        (None, Some(path)) => {
             let account = std::fs::read_to_string(path)
                 .map_err(|_| "Could not read FCM service account file")?;
-            FcmPushSender::new(&account)
-        })
-        .transpose()?;
+            Some(FcmPushSender::new(&account)?)
+        }
+        (Some(_), Some(_)) => {
+            return Err("Configure only one FCM service account source".into());
+        }
+    };
     let push: Option<Arc<dyn leo_official_service::PushSender>> =
         if web_push.is_some() || android_push.is_some() {
             Some(Arc::new(AccountPushSender {
@@ -254,6 +264,9 @@ async fn run() -> Result<(), String> {
             None
         };
     let relay = Relay::default();
+    let health_pool = pool.clone();
+    let commit = env::var("APP_COMMIT").unwrap_or_else(|_| "development".into());
+    let runtime_id = env::var("APP_RUNTIME_ID").unwrap_or_else(|_| commit.clone());
     let mut app = router_with_network_and_push(
         pool.clone(),
         Arc::new(sender),
@@ -268,7 +281,34 @@ async fn run() -> Result<(), String> {
     .merge(leo_official_service::installer::release_router(
         env::var("LEO_INSTALLATION_IMAGE").ok(),
     )?)
-    .route("/health", get(|| async { StatusCode::OK }))
+    .route(
+        "/health",
+        get(move || {
+            let pool = health_pool.clone();
+            let commit = commit.clone();
+            let runtime_id = runtime_id.clone();
+            async move {
+                let ready = sqlx_core::query::query("SELECT 1")
+                    .execute(&pool)
+                    .await
+                    .is_ok();
+                let status = if ready {
+                    StatusCode::OK
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                };
+                (
+                    status,
+                    [(header::CACHE_CONTROL, "no-store")],
+                    Json(json!({
+                        "status": if ready { "ok" } else { "unavailable" },
+                        "commit": commit,
+                        "runtimeId": runtime_id,
+                    })),
+                )
+            }
+        }),
+    )
     .route("/api/{*path}", any(|| async { StatusCode::NOT_FOUND }))
     .route_service("/", ServeFile::new(web.join("official.html")))
     .route_service("/index.html", ServeFile::new(web.join("official.html")))

@@ -1,5 +1,9 @@
 # Deployment and recovery
 
+For the production target **https://cairn.build** and a fresh installation on the
+same Coolify/Traefik server, follow [the production runbook](PRODUCTION-CAIRN.md).
+Deployment requires Léo’s explicit go-ahead.
+
 For the official-service installation flow (one machine, integrated S3, no
 incoming ports), see [One-command installation](INSTALLATION.md).
 
@@ -292,90 +296,44 @@ period. Use `/health` only for the private readiness check. Do not configure a
 public browser domain for the installation; serve the official application on its
 own HTTPS origin. Additional nodes still need a direct private route to port 4310.
 
-The historical tag deployment below targets the old publicly exposed manager.
-Before the first upgrade to this release, reconfigure its readiness target to a
-private route and migrate browser access to the official service. Do not expect
-bootstrap/login or MCP discovery on the installation to keep working.
-
 ### Deploy version tags through GitHub Actions
 
-The `Quality and container` workflow deploys pushes of `v*` tags after quality,
-browser, and container smoke tests pass. Main branch pushes validate and publish
-images without deploying. A tag at a successful main commit promotes that exact
-image digest without rebuilding or repeating the tests. If main CI is still
-running, the tag waits for it; missing, failed, expired, or mismatched validation
-falls back to the full pipeline. Deployment jobs are serialized.
-The wait covers the main image job's time limit. If validation is still pending
-after 40 minutes, rerun the tag workflow after main finishes; it does not start a
-second full build at that deadline.
+The production workflow targets the **official Compose service**, never the old
+public installation manager. The full [cairn.build runbook](PRODUCTION-CAIRN.md)
+lists environment setup, DNS, Resend, OAuth, co-location and rollback steps.
 
-For the shortest tag-to-live time, tag a commit whose main CI has already passed.
-Pushing main and its tag together also works and shares the validation work.
-See [CI performance](CI-PERFORMANCE.md) for measurements and the evidence checks.
+Main and same-repository PRs build both installation and official images. All
+existing quality, browser, network and installation/VM smoke checks remain
+publication prerequisites, alongside the exact official-image smoke with
+Postgres, bundled SPA, sign-in, persistence and readiness checks. Both images
+carry SBOM/provenance and share schema-3 evidence for one validated Git tree.
+Older single-image evidence cannot be reused. Fork images remain local.
 
-The GitHub `production` environment needs:
+A `v*` tag promotes both immutable digests without rebuilding if a trusted run
+validated that exact tree and current installation CLI versions. Otherwise the
+full pipeline runs. A tag waits for concurrent main validation for up to 40
+minutes; if validation is still pending, retry after it completes. No second
+build starts at that deadline. Production deployment jobs remain serialized.
+Main, PR and manual workflows never deploy.
 
-| Setting | Kind | Value |
-| --- | --- | --- |
-| `COOLIFY_TOKEN` | Secret | Dedicated Coolify API token with `read`, `write`, and `deploy` abilities |
-| `COOLIFY_URL` | Variable | `https://coolify.leo-coletta.fr` |
-| `COOLIFY_SERVICE_UUID` | Variable | UUID of the Leo Compose service |
-| `LEO_PUBLIC_URL` | Variable | Installation readiness origin reachable from the deployment runner (historical name; never the official app origin) |
+The GitHub `production` environment requires the secret `COOLIFY_TOKEN` and
+variables `COOLIFY_URL`, `COOLIFY_SERVICE_UUID` (**new official service UUID**)
+and `LEO_OFFICIAL_ORIGIN=https://cairn.build`. Require Léo’s environment approval.
+The obsolete `LEO_PUBLIC_URL` and standalone-manager deployment target are no
+longer used by the CLI. The script refuses a manager/runner Compose target.
 
-In the Coolify service's raw Compose, set both `services.manager.image` and `services.runner.image` to
-`${LEO_IMAGE}` and create the `LEO_IMAGE` environment variable with the currently
-deployed image reference. The workflow updates only that variable to the image's
-immutable GHCR digest, requests a service restart, then waits up to ten minutes
-for the installation’s `/health` to return the tagged commit. Give that runner
-a private network/VPN route to the manager and set `LEO_PUBLIC_URL` to that
-readiness origin before upgrading. The official app’s `/health` cannot validate
-an installation image. It fails if the previous version is still running, even
-when that version is healthy. Persistent volumes and agent CLI credentials
-survive deployments; old local browser access does not.
+The deployment sets `LEO_OFFICIAL_IMAGE` and `LEO_INSTALLATION_IMAGE` to the
+paired digests, then restarts only official. It waits up to ten minutes for
+`/health` to report the tested image's commit/runtime identity and
+`/install/release` to approve the paired installation image. Reused PR images
+report the tested merge commit with the released tree. Existing installations
+update through their host timer; the check does not wait for every installation.
+A failed official rollout needs operator rollback of the previous digest and
+matching Postgres backup; see [rollback](PRODUCTION-CAIRN.md#7-backups-and-rollback).
 
-The deployment script also adds the persistent `runner-state` volume to older
-service Compose definitions before restarting, then verifies it was saved. The
-manager data mount remains read-only in the runner. Unsupported custom Compose
-layouts stop deployment with an error instead of silently losing stop markers.
-For an existing Firecracker runner, deployments preserve the configured memory,
-CPU and process budgets, along with the manager's global concurrency setting.
-It also sets the manager's `LEO_NODE_IMAGE` from `LEO_IMAGE` in older Compose
-definitions and checks that the new master advertises the deployed digest to
-remote nodes. Each remote supervisor then downloads that image, drains its runs,
-and updates independently; the deployment check does not wait for every remote
-node to finish. Production still needs working S3 credentials and `/dev/fuse`
-on each node host.
-
-Retained VM disks keep their original kernel, guest OS and installed toolchains.
-At each attempt the controller imports its current Leo runner into guest `/run`
-and launches that program, so chat adapter fixes also reach old conversations.
-This does not replace the saved filesystem or provider session. Custom probe
-commands remain unchanged. The controller and retained guest must use compatible
-binary dependencies; the published images share the Debian Bookworm runtime.
-
-Automatic placement can move a queued conversation when its original node lacks
-CPU or memory and another authorized node has room. The destination is reserved,
-the source execution is fenced, and its current disk is published before restore.
-Failure retains the source disk; a fixed placement waits for its chosen node.
-
-To release the current main commit, choose an unused version tag:
-
-```sh
-git switch main
-git pull --ff-only
-git tag -a v0.1.1 -m 'Release v0.1.1'
-git push origin v0.1.1
-```
-
-When the tagged tree was already validated, the tag only promotes and deploys that
-image. That validation can come from main or from a pull request of this repository
-whose branch contained main's tip when its CI passed. Such an image reports the
-pull request's tested merge commit, whose tree is identical to the tag's.
-The workflow run's deployment summary records the exact image and verified commit.
-If deployment fails, inspect that run and the Coolify service logs; there is no
-automatic rollback. For recovery, set `LEO_IMAGE` back to the previous verified
-digest in Coolify and restart, accounting for any database migration as described
-below. A successful tag run can also be rerun to deploy that version again.
+Retained VM disks keep their original guest OS and tools. Only approve an
+installation image if the previous release can still read its database, or
+prepare matching stopped backups before approving it.
 
 ## Backups
 

@@ -20,6 +20,17 @@ logs codes. Both ports are bound to loopback. The first Rust compilation takes
 a few minutes. `docker compose -f deploy/official/compose.yaml down` stops it;
 add `-v` to discard the development database and build caches.
 
+## Production
+
+Use the `official` target in `Dockerfile` and
+`deploy/official/compose.production.yaml`. The image bundles the official binary
+and matching web output, runs as UID 1000, and requires environment-only secrets.
+The existing `deploy/official/compose.yaml` remains development-only.
+Follow [the cairn.build runbook](PRODUCTION-CAIRN.md) for the fresh same-server
+installation, proxy trust, email, OAuth, approval gates and Postgres rollback.
+`/health` returns no-store JSON (`status`, `commit`, `runtimeId`) and verifies
+Postgres availability; deployment checks its exact validated build identity.
+
 ## Configuration
 
 Production runs `cargo build --locked --release --bin leo-official`, then the
@@ -542,7 +553,11 @@ these exact native passkey origins are trusted. The same RP publishes
 advertises no Android association. Registration, login, reauthentication and
 method removal keep their existing start/finish contracts and proof requirements.
 
-Set `LEO_OFFICIAL_FCM_SERVICE_ACCOUNT` to a private service-account JSON **file
+Production Compose uses `LEO_OFFICIAL_FCM_SERVICE_ACCOUNT_JSON`, the complete
+private service-account JSON supplied through the operator's secret environment,
+so it needs no credential file mount. Never configure both JSON and file sources.
+The existing file configuration remains supported for other deployments:
+set `LEO_OFFICIAL_FCM_SERVICE_ACCOUNT` to a private service-account JSON **file
 path** on the official server. The file must contain `project_id`, `client_email`
 and the signing `private_key`; never distribute it to Android or installations.
 The sender uses FCM HTTP v1, caches a short-lived OAuth access token and sends

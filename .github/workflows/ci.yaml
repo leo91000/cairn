@@ -26,6 +26,7 @@ jobs:
     outputs:
       reuse: ${{ steps.resolve.outputs.reuse }}
       digest: ${{ steps.resolve.outputs.digest }}
+      official-digest: ${{ steps.resolve.outputs.official-digest }}
       commit: ${{ steps.resolve.outputs.commit }}
       tree: ${{ steps.resolve.outputs.tree }}
       artifact: ${{ steps.resolve.outputs.artifact }}
@@ -473,6 +474,71 @@ jobs:
       - name: Report remaining disk space
         if: always()
         run: df -h /
+  official-image:
+    needs: resolve
+    if: needs.resolve.outputs.reuse != 'true'
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      published: ${{ env.PUBLISH }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env:
+      PUBLISH: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: docker/setup-buildx-action@v4.3.0
+      - uses: docker/login-action@v4.6.0
+        if: env.PUBLISH == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Read package version
+        id: package
+        run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, `version=${require("./package.json").version}\n`)'
+      - uses: docker/metadata-action@v6.2.0
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}-official
+          labels: org.opencontainers.image.version=${{ steps.package.outputs.version }}
+      - name: Choose the official image destination
+        id: target
+        run: |
+          if [[ "$PUBLISH" == true ]]; then
+            echo "destination=type=image,name=ghcr.io/${GITHUB_REPOSITORY}-official,push-by-digest=true,name-canonical=true,push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "destination=type=docker,name=leo-official:test" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: docker/build-push-action@v7.3.0
+        id: build
+        with:
+          context: .
+          target: official
+          outputs: ${{ steps.target.outputs.destination }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: VCS_REF=${{ github.sha }}
+          cache-from: |
+            type=registry,ref=ghcr.io/${{ github.repository }}-official:buildcache
+            type=gha,scope=official
+          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}-official:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true', github.repository) || '' }}
+          provenance: ${{ env.PUBLISH == 'true' && 'mode=max' || 'false' }}
+          sbom: ${{ env.PUBLISH == 'true' }}
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          install: false
+      - name: Smoke-test the exact official image with disposable Postgres
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          if [[ "$PUBLISH" == true ]]; then
+            image="ghcr.io/${GITHUB_REPOSITORY}-official@${IMAGE_DIGEST}"
+          else
+            image=leo-official:test
+          fi
+          node tests/official-container-smoke.mjs "$image"
   image-cache:
     # Main reuses a pull request image without building it; refresh the shared
     # layer cache for later pull requests. This never gates a release.
@@ -507,8 +573,8 @@ jobs:
   publish:
     # The Intel nested Android test needs hardware GitHub does not provide; it runs locally
     # before releases when Android or runner changes need it (docs/DEPLOYMENT.md) and does not gate CI.
-    needs: [resolve, quality, browser, network-bench, image]
-    if: always() && !cancelled() && needs.resolve.outputs.reuse != 'true' && needs.quality.result == 'success' && needs.browser.result == 'success' && needs.network-bench.result == 'success' && needs.image.result == 'success' && needs.image.outputs.published == 'true'
+    needs: [resolve, quality, browser, network-bench, image, official-image]
+    if: always() && !cancelled() && needs.resolve.outputs.reuse != 'true' && needs.quality.result == 'success' && needs.browser.result == 'success' && needs.network-bench.result == 'success' && needs.image.result == 'success' && needs.image.outputs.published == 'true' && needs.official-image.result == 'success' && needs.official-image.outputs.published == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -523,10 +589,17 @@ jobs:
         with:
           digest: ${{ needs.image.outputs.digest }}
           token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: ./.github/actions/promote-image
+        if: github.event_name != 'pull_request'
+        with:
+          image: ghcr.io/${{ github.repository }}-official
+          digest: ${{ needs.official-image.outputs.digest }}
+          token: ${{ secrets.GITHUB_TOKEN }}
       - name: Record the validated image
         if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
         env:
           IMAGE_DIGEST: ${{ needs.image.outputs.digest }}
+          OFFICIAL_IMAGE_DIGEST: ${{ needs.official-image.outputs.digest }}
           GIT_TREE: ${{ needs.resolve.outputs.tree }}
           CODEX_VERSION: ${{ needs.resolve.outputs.codex }}
           GH_VERSION: ${{ needs.resolve.outputs.gh }}
@@ -534,7 +607,7 @@ jobs:
           mkdir -p release-evidence
           node --input-type=module <<'JS'
           import { writeFileSync } from 'node:fs'
-          writeFileSync('release-evidence/image.json', JSON.stringify({ schema: 2, repository: process.env.GITHUB_REPOSITORY.toLowerCase(), tree: process.env.GIT_TREE, commit: process.env.GITHUB_SHA, digest: process.env.IMAGE_DIGEST, runId: Number(process.env.GITHUB_RUN_ID), tools: { codex: process.env.CODEX_VERSION, gh: process.env.GH_VERSION } }))
+          writeFileSync('release-evidence/image.json', JSON.stringify({ schema: 3, officialDigest: process.env.OFFICIAL_IMAGE_DIGEST, repository: process.env.GITHUB_REPOSITORY.toLowerCase(), tree: process.env.GIT_TREE, commit: process.env.GITHUB_SHA, digest: process.env.IMAGE_DIGEST, runId: Number(process.env.GITHUB_RUN_ID), tools: { codex: process.env.CODEX_VERSION, gh: process.env.GH_VERSION } }))
           JS
       - uses: actions/upload-artifact@v7.0.1
         if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
@@ -557,16 +630,21 @@ jobs:
         with:
           digest: ${{ needs.resolve.outputs.digest }}
           token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: ./.github/actions/promote-image
+        with:
+          image: ghcr.io/${{ github.repository }}-official
+          digest: ${{ needs.resolve.outputs.official-digest }}
+          token: ${{ secrets.GITHUB_TOKEN }}
   deploy:
     if: always() && !cancelled() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && (needs.publish.result == 'success' || needs.promote.result == 'success')
-    needs: [resolve, image, publish, promote]
+    needs: [resolve, image, official-image, publish, promote]
     permissions:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment:
       name: production
-      url: ${{ vars.LEO_PUBLIC_URL }}
+      url: ${{ vars.LEO_OFFICIAL_ORIGIN }}
     concurrency:
       group: coolify-production
       cancel-in-progress: false
@@ -580,8 +658,9 @@ jobs:
           COOLIFY_URL: ${{ vars.COOLIFY_URL }}
           COOLIFY_SERVICE_UUID: ${{ vars.COOLIFY_SERVICE_UUID }}
           COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-          LEO_PUBLIC_URL: ${{ vars.LEO_PUBLIC_URL }}
-          DEPLOY_IMAGE: ghcr.io/${{ github.repository }}@${{ needs.resolve.outputs.digest || needs.image.outputs.digest }}
+          LEO_OFFICIAL_ORIGIN: ${{ vars.LEO_OFFICIAL_ORIGIN }}
+          DEPLOY_IMAGE: ghcr.io/${{ github.repository }}-official@${{ needs.resolve.outputs.official-digest || needs.official-image.outputs.digest }}
+          DEPLOY_INSTALLATION_IMAGE: ghcr.io/${{ github.repository }}@${{ needs.resolve.outputs.digest || needs.image.outputs.digest }}
           # A reused image reports the commit it was validated at, with this tag's tree.
           DEPLOY_COMMIT: ${{ needs.resolve.outputs.commit }}
         run: node scripts/deploy-coolify.mjs

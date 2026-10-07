@@ -64,6 +64,11 @@ describe('coolify deployment over HTTP', () => {
         return
       }
 
+      if (request.url === '/install/release') {
+        response.end(JSON.stringify({ image: releaseImage ?? config.installationImage }))
+        return
+      }
+
       if (request.url === '/internal/nodes/release') {
         response.end(JSON.stringify({ protocol: 2, commit: config.commit, image: releaseImage ?? config.image }))
         return
@@ -87,6 +92,50 @@ describe('coolify deployment over HTTP', () => {
   afterEach(async () => {
     server.closeAllConnections()
     await new Promise(resolve => server.close(resolve))
+  })
+
+  it('deploys the official image and approves the paired installation without touching a runner', async () => {
+    compose = readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
+    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
+    healthResponses = [{ status: 'ok', commit: 'old-commit' }, { status: 'ok', commit: config.commit }]
+    await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
+    expect(requests.filter(request => request.method !== 'GET').map(request => [request.method, request.path, request.body])).toEqual([
+      ['PATCH', '/api/v1/services/leo-service/envs', { key: 'LEO_OFFICIAL_IMAGE', value: config.image, is_literal: true }],
+      ['PATCH', '/api/v1/services/leo-service/envs', { key: 'LEO_INSTALLATION_IMAGE', value: config.installationImage, is_literal: true }],
+      ['POST', '/api/v1/services/leo-service/restart', undefined],
+    ])
+    expect(requests.some(request => request.path === '/internal/nodes/release')).toBe(false)
+    expect(requests.some(request => request.path === '/install/release')).toBe(true)
+  })
+
+  it.each(['old-manager', 'two-replicas', 'start-first'])('refuses unsafe official target %s before any mutation', async (target) => {
+    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
+    if (target !== 'old-manager') {
+      const document = parse(readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8'))
+      if (target === 'two-replicas')
+        document.services.official.deploy.replicas = 2
+      else
+        document.services.official.deploy.update_config.order = 'start-first'
+      compose = stringify(document)
+    }
+
+    await expect(deploy(config, { intervalMs: 0, timeoutMs: 1000 })).rejects.toThrow('single-process official')
+    expect(requests.every(request => request.method === 'GET')).toBe(true)
+  })
+
+  it('fails when official health is current but installation approval is stale', async () => {
+    compose = readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
+    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
+    releaseImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'c'.repeat(64)}`
+    await expect(deploy(config, { intervalMs: 0, timeoutMs: 25 })).rejects.toThrow('installation image')
+  })
+
+  it('fails on an official environment update without restarting or leaking API bodies', async () => {
+    compose = readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
+    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
+    patchStatus = 401
+    await expect(deploy(config)).rejects.toThrow('HTTP 401')
+    expect(requests.some(request => request.method === 'POST')).toBe(false)
   })
 
   it('pins the image, restarts and waits through stale health and proxy errors', async () => {

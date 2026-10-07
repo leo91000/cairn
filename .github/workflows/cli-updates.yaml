@@ -118,6 +118,9 @@ jobs:
           node tests/runner-smoke.mjs "$SMOKE_IMAGE"
           LEO_RETENTION_MEMORY_GIB=4 node tests/runner-retention-smoke.mjs "$SMOKE_IMAGE"
   deploy:
+    # Disabled for the official-service cutover (#110): this legacy job restarts
+    # a public installation manager. Approved installations use their host timer.
+    if: false
     needs: [check, image]
     runs-on: ubuntu-latest
     timeout-minutes: 18

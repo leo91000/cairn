@@ -39,6 +39,46 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     touch backend/src/main.rs backend/src/lib.rs relay-protocol/src/lib.rs && \
     cargo build --locked --release --bin leo --features ublk && cp target/release/leo /usr/local/bin/leo
 
+# Official service builds independently: no worker CLI, VM or kernel layers.
+FROM rust:1.97.1-bookworm AS official-backend
+ENV CARGO_BUILD_JOBS=4
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY backend/Cargo.toml ./backend/Cargo.toml
+COPY official-service/Cargo.toml ./official-service/Cargo.toml
+COPY relay-protocol/Cargo.toml ./relay-protocol/Cargo.toml
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+    mkdir -p backend/src backend/examples official-service/src relay-protocol/src \
+    && printf 'fn main() {}\n' > backend/src/main.rs \
+    && printf '' > backend/src/lib.rs \
+    && printf 'fn main() {}\n' > backend/examples/ublk_probe.rs \
+    && printf 'fn main() {}\n' > official-service/src/main.rs \
+    && printf '' > official-service/src/lib.rs \
+    && printf '' > relay-protocol/src/lib.rs \
+    && cargo build --locked --release --bin leo-official
+COPY official-service ./official-service
+COPY relay-protocol ./relay-protocol
+COPY deploy/installations ./deploy/installations
+COPY deploy/nodes ./deploy/nodes
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+    touch official-service/src/main.rs official-service/src/lib.rs relay-protocol/src/lib.rs \
+    && cargo build --locked --release --bin leo-official \
+    && cp target/release/leo-official /usr/local/bin/leo-official
+
+FROM debian:bookworm-slim AS official
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 1000 leo && useradd --uid 1000 --gid leo leo
+WORKDIR /app
+COPY --from=official-backend /usr/local/bin/leo-official /usr/local/bin/leo-official
+COPY --from=build --chown=leo:leo /app/dist ./dist
+ARG VCS_REF=development
+ENV APP_COMMIT=$VCS_REF APP_RUNTIME_ID=$VCS_REF LEO_OFFICIAL_LISTEN=0.0.0.0:4311 LEO_OFFICIAL_WEB_DIR=/app/dist
+USER leo
+EXPOSE 4311
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --start-interval=1s CMD curl --fail --silent --output /dev/null http://127.0.0.1:4311/health
+CMD ["/usr/local/bin/leo-official"]
+
 # The direct block backend shares guest RAM with Firecracker. Upstream 1.17.0
 # does not reclaim MAP_SHARED memfd pages on balloon/free-page reporting.
 # Keep the patch narrow, pinned and tested; retain the upstream seccomp policy.

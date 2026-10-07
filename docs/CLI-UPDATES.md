@@ -1,5 +1,13 @@
 # Automatic Codex and GitHub CLI updates
 
+**Historical standalone-manager workflow:** its Coolify deployment job is disabled
+for the official-service cutover (#110). Do not enable its host dispatch timer on
+the new deployment or reuse the official service UUID for it. New installations
+follow the approved immutable image through `leo-installation-update.timer`;
+application CI resolves stable CLI versions before validating those images.
+See [the production runbook](PRODUCTION-CAIRN.md). The setup below describes the
+previous deployment and is retained for recovery context.
+
 The VPS checks daily at 04:23 UTC, with up to five minutes of jitter. It dispatches
 the **Update agent tools** workflow using the manager's existing GitHub
 login. The computer used to configure it can be off. A systemd timer is used
