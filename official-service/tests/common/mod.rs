@@ -185,6 +185,28 @@ impl Fixture {
             .header("x-csrf-token", session["csrf"].as_str().unwrap())
     }
 
+    pub async fn wait_for_blocked_request(&self, barrier_pid: i32) {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let (waiting,): (bool,) = sqlx_core::query_as::query_as(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))",
+                )
+                .bind(barrier_pid)
+                .fetch_one(&self.pool)
+                .await
+                .unwrap();
+
+                if waiting {
+                    break;
+                }
+
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the HTTP request must reach the held database lock");
+    }
+
     pub async fn close(self) {
         self.server.abort();
         self.pool.close().await;

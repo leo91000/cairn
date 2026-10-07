@@ -158,22 +158,17 @@ async fn push_registration_rechecks_proof_and_session_after_waiting_for_the_acco
             "https://fcm.googleapis.com/expired-proof-device",
         ));
         let pending = tokio::spawn(async move { pending_request.send().await.unwrap() });
-        tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                let (waiting,): (bool,) = sqlx_core::query_as::query_as(
-                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))")
-                    .bind(pid).fetch_one(&app.pool).await.unwrap();
-                if waiting { break; }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        }).await.expect("push registration must reach the account lock");
+        app.wait_for_blocked_request(pid).await;
+
         let expiry = if expire_session {
             "UPDATE web_sessions SET expires_at = clock_timestamp() - interval '1 millisecond'"
         } else {
             "UPDATE web_sessions SET last_proof_at = clock_timestamp() - interval '5 minutes'"
         };
         query(expiry).execute(&app.pool).await.unwrap();
+
         barrier.commit().await.unwrap();
+
         let response = pending.await.unwrap();
         assert_eq!(
             response.status(),

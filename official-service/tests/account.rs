@@ -1017,21 +1017,15 @@ async fn oauth_linking_rechecks_proof_and_session_after_waiting_for_the_account_
                 .await
                 .unwrap();
             let pending = tokio::spawn(async move { request.send().await.unwrap() });
-            tokio::time::timeout(std::time::Duration::from_secs(3), async {
-                loop {
-                    let (waiting,): (bool,) = sqlx_core::query_as::query_as(
-                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))")
-                        .bind(pid).fetch_one(&app.pool).await.unwrap();
-                    if waiting { break; }
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                }
-            }).await.expect("the OAuth HTTP request must reach the account lock");
+            app.wait_for_blocked_request(pid).await;
+
             let expiry = if expire_session {
                 "UPDATE web_sessions SET expires_at = clock_timestamp() - interval '1 millisecond'"
             } else {
                 "UPDATE web_sessions SET last_proof_at = clock_timestamp() - interval '5 minutes'"
             };
             query(expiry).execute(&app.pool).await.unwrap();
+
             barrier.commit().await.unwrap();
 
             let response = pending.await.unwrap();
@@ -1159,6 +1153,12 @@ async fn github_tokens_are_revoked_after_identity_reads_including_rejected_ident
             .all(|value| !value.to_str().unwrap().starts_with("leo_session="))
     );
     assert_eq!(provider.state.revocations.load(Ordering::SeqCst), 3);
+
+    provider.state.profiles.lock().unwrap()["emails"][1]["verified"] = json!(false);
+    let unavailable = provider.attempt(&app, "github", None).await;
+    assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(provider.state.revocations.load(Ordering::SeqCst), 4);
+
     app.close().await;
     provider.server.abort();
 }

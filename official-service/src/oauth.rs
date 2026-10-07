@@ -106,6 +106,7 @@ impl OAuthProvider {
             .push("applications")
             .push(&self.client_id)
             .push("token");
+
         let response = client
             .delete(url)
             .basic_auth(&self.client_id, Some(&self.client_secret))
@@ -114,9 +115,11 @@ impl OAuthProvider {
             .send()
             .await
             .map_err(|_| unavailable())?;
+
         if response.status() != StatusCode::NO_CONTENT {
             return Err(unavailable());
         }
+
         Ok(())
     }
 }
@@ -381,9 +384,9 @@ async fn complete_callback(
     let identity = provider.identity(&client, access_token).await;
     // Attempt cleanup even if identity verification failed. Never create a Leo
     // session when GitHub refuses to revoke the identification token.
-    let revoked = provider.revoke_token(&client, access_token).await;
+    provider.revoke_token(&client, access_token).await?;
+
     let identity = identity?;
-    revoked?;
 
     if state.native {
         return native_confirmation(service, name, &input.state, identity).await;
