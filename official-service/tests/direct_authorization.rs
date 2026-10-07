@@ -5,12 +5,20 @@ use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 
-type FrameFilter = Arc<dyn Fn(leo_relay_protocol::Frame, bool) -> Option<leo_relay_protocol::Frame> + Send + Sync>;
+type FrameFilter =
+    Arc<dyn Fn(leo_relay_protocol::Frame, bool) -> Option<leo_relay_protocol::Frame> + Send + Sync>;
 
 // Perturb only the wire between both real peers, as packet loss or an old
 // service would. Authorization still crosses the official HTTP interface.
-async fn filter_tunnel(relay: &mut RelayedInstallation, filter: FrameFilter) -> tokio::task::JoinHandle<()> {
-    use axum::{extract::{Path, WebSocketUpgrade, ws::Message}, http::HeaderMap, routing::get};
+async fn filter_tunnel(
+    relay: &mut RelayedInstallation,
+    filter: FrameFilter,
+) -> tokio::task::JoinHandle<()> {
+    use axum::{
+        extract::{Path, WebSocketUpgrade, ws::Message},
+        http::HeaderMap,
+        routing::get,
+    };
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::{Message as UpstreamMessage, client::IntoClientRequest};
 
@@ -28,32 +36,44 @@ async fn filter_tunnel(relay: &mut RelayedInstallation, filter: FrameFilter) -> 
                 loop {
                     tokio::select! {
                         message = installation.recv() => {
-                            let Some(Ok(message)) = message else { break };
+                            let Some(Ok(message)) = message else {
+                                break;
+                            };
                             let message = match message {
                                 Message::Text(text) => {
                                     let frame = serde_json::from_str(&text).unwrap();
-                                    let Some(frame) = filter(frame, false) else { continue };
+                                    let Some(frame) = filter(frame, false) else {
+                                        continue;
+                                    };
                                     UpstreamMessage::Text(serde_json::to_string(&frame).unwrap().into())
                                 },
                                 Message::Ping(bytes) => UpstreamMessage::Ping(bytes),
                                 Message::Pong(bytes) => UpstreamMessage::Pong(bytes),
                                 _ => break,
                             };
-                            if upstream.send(message).await.is_err() { break }
+                            if upstream.send(message).await.is_err() {
+                                break;
+                            }
                         },
                         message = upstream.next() => {
-                            let Some(Ok(message)) = message else { break };
+                            let Some(Ok(message)) = message else {
+                                break;
+                            };
                             let message = match message {
                                 UpstreamMessage::Text(text) => {
                                     let frame = serde_json::from_str(&text).unwrap();
-                                    let Some(frame) = filter(frame, true) else { continue };
+                                    let Some(frame) = filter(frame, true) else {
+                                        continue;
+                                    };
                                     Message::Text(serde_json::to_string(&frame).unwrap().into())
                                 },
                                 UpstreamMessage::Ping(bytes) => Message::Ping(bytes),
                                 UpstreamMessage::Pong(bytes) => Message::Pong(bytes),
                                 _ => break,
                             };
-                            if installation.send(message).await.is_err() { break }
+                            if installation.send(message).await.is_err() {
+                                break;
+                            }
                         },
                     }
                 }
@@ -62,16 +82,27 @@ async fn filter_tunnel(relay: &mut RelayedInstallation, filter: FrameFilter) -> 
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://localhost:{}", listener.local_addr().unwrap().port());
-    let server = tokio::spawn(async move { axum::serve(listener, routes).await.unwrap(); });
-    let directory = relay.installation.config.data_dir.join("installation-relay");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, routes).await.unwrap();
+    });
+    let directory = relay
+        .installation
+        .config
+        .data_dir
+        .join("installation-relay");
     let identity_path = directory.join("identity.json");
-    let mut identity: Value = serde_json::from_slice(&tokio::fs::read(&identity_path).await.unwrap()).unwrap();
+    let mut identity: Value =
+        serde_json::from_slice(&tokio::fs::read(&identity_path).await.unwrap()).unwrap();
     identity["origin"] = json!(origin);
-    tokio::fs::write(identity_path, serde_json::to_vec(&identity).unwrap()).await.unwrap();
+    tokio::fs::write(identity_path, serde_json::to_vec(&identity).unwrap())
+        .await
+        .unwrap();
     relay.stop = tokio_util::sync::CancellationToken::new();
     relay.connector = tokio::spawn(leo_agent_manager::relay::connect_with_direct(
         directory,
-        leo_agent_manager::http::router(relay.installation.clone()).await.unwrap(),
+        leo_agent_manager::http::router(relay.installation.clone())
+            .await
+            .unwrap(),
         relay.installation.clone(),
         relay.stop.clone(),
         relay.direct.clone(),
@@ -80,12 +111,91 @@ async fn filter_tunnel(relay: &mut RelayedInstallation, filter: FrameFilter) -> 
         while relay.get("/chats").send().await.unwrap().status() != StatusCode::OK {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     server
 }
 
 fn fingerprint() -> String {
     format!("sha-256 {}", vec!["AB"; 32].join(":"))
+}
+
+#[tokio::test]
+async fn signaling_keeps_early_answers_and_admits_only_one_reader_per_connection() {
+    use leo_relay_protocol::{Frame, direct::DirectSignal};
+    let mut relay = RelayedInstallation::new(axum::Router::new()).await;
+    let sent = Arc::new(tokio::sync::Notify::new());
+    let observed = sent.clone();
+    let proxy = filter_tunnel(
+        &mut relay,
+        Arc::new(move |frame, official| {
+            if !official && matches!(&frame, Frame::DirectSignal { .. }) {
+                observed.notify_one();
+            }
+            Some(frame)
+        }),
+    )
+    .await;
+    let grant = authorization(&relay, &relay.cookie, &relay.session).await;
+    let answer = DirectSignal::Answer {
+        sdp: format!(
+            "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=fingerprint:{}\r\na=sctp-port:5000\r\n",
+            fingerprint().replace("AB", "CD")
+        ),
+    };
+    relay
+        .direct
+        .send_signal(&grant.claims.connection_id, answer.clone())
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), sent.notified())
+        .await
+        .unwrap();
+    // Its acknowledgement crosses the same ordered socket after the answer,
+    // proving the official peer received the answer before an SSE reader opens.
+    authorization(&relay, &relay.cookie, &relay.session).await;
+    let route = format!(
+        "{}/api/installations/{}/direct/{}/events",
+        relay.app.url, grant.claims.installation_id, grant.claims.connection_id
+    );
+    let request = || relay.app.client.get(&route).header("cookie", &relay.cookie);
+    let mut reader = request().send().await.unwrap();
+    assert_eq!(reader.status(), StatusCode::OK);
+    let chunk = tokio::time::timeout(Duration::from_secs(1), reader.chunk())
+        .await
+        .expect("answer sent before subscription must remain queued")
+        .unwrap()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&chunk).contains("answer"));
+    assert_eq!(
+        request().send().await.unwrap().status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    drop(reader);
+    let mut reopened = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let response = request().send().await.unwrap();
+            if response.status() == StatusCode::OK {
+                break response;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    relay
+        .direct
+        .send_signal(&grant.claims.connection_id, answer)
+        .unwrap();
+    let chunk = tokio::time::timeout(Duration::from_secs(1), reopened.chunk())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&chunk).contains("answer"));
+    drop(reopened);
+    relay.close().await;
+    proxy.abort();
 }
 
 #[tokio::test]
@@ -193,6 +303,69 @@ async fn authorization(
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     serde_json::from_value(response.json::<Value>().await.unwrap()["grant"].clone()).unwrap()
+}
+
+#[tokio::test]
+async fn a_refused_renewal_preserves_the_peer_and_allows_a_verified_retry() {
+    use leo_relay_protocol::Frame;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let mut relay = RelayedInstallation::new(axum::Router::new()).await;
+    let refuse_once = AtomicBool::new(true);
+    let proxy = filter_tunnel(
+        &mut relay,
+        Arc::new(move |frame, _| {
+            if let Frame::DirectRenew {
+                id,
+                mut authorization,
+            } = frame
+            {
+                if refuse_once.swap(false, Ordering::SeqCst) {
+                    authorization.signature.push('a');
+                }
+                Some(Frame::DirectRenew { id, authorization })
+            } else {
+                Some(frame)
+            }
+        }),
+    )
+    .await;
+    let grant = authorization(&relay, &relay.cookie, &relay.session).await;
+    let lease = relay
+        .direct
+        .accept_peer(&grant, &grant.claims.session_id, &fingerprint())
+        .unwrap();
+    let route = format!(
+        "/api/installations/{}/direct/{}/renew",
+        grant.claims.installation_id, grant.claims.connection_id
+    );
+    let request = || {
+        relay
+            .app
+            .authenticated(&relay.cookie, &relay.session, Method::POST, &route)
+            .json(&json!({ "fingerprint": fingerprint(), "versions": [4] }))
+    };
+    assert_eq!(
+        request().send().await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    assert!(!lease.closed.is_cancelled());
+    let response = request().send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let renewed: leo_relay_protocol::direct::DirectAuthorization =
+        serde_json::from_value(response.json::<Value>().await.unwrap()["grant"].clone()).unwrap();
+    assert_ne!(renewed.claims.nonce, grant.claims.nonce);
+    assert_eq!(renewed.claims.connection_id, grant.claims.connection_id);
+    assert_eq!(renewed.claims.role, grant.claims.role);
+    assert!(!lease.closed.is_cancelled());
+    assert!(
+        relay
+            .direct
+            .accept_peer(&renewed, &renewed.claims.session_id, &fingerprint())
+            .is_err(),
+        "renewal must not admit a second peer"
+    );
+    relay.close().await;
+    proxy.abort();
 }
 
 #[tokio::test]
@@ -421,4 +594,206 @@ async fn session_expiration_closes_the_lease_and_sends_only_session_revocation()
     );
     assert!(!relay.installation.shutdown.is_cancelled());
     relay.close().await;
+}
+
+#[tokio::test]
+async fn session_revocation_preserves_other_devices_and_denies_further_grants_or_renewal() {
+    use common::login;
+    use leo_agent_manager::direct::DirectEvent;
+    use leo_relay_protocol::direct::DirectRevocation;
+    for revoke_others in [false, true] {
+        let relay = RelayedInstallation::new(axum::Router::new()).await;
+        sqlx_core::query::query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key LIKE 'email:%'")
+            .execute(&relay.app.pool).await.unwrap();
+        let (other_cookie, other_session) = login(&relay.app, "relay-owner@example.test").await;
+        let grant = authorization(&relay, &other_cookie, &other_session).await;
+        let lease = relay
+            .direct
+            .accept_peer(&grant, &grant.claims.session_id, &fingerprint())
+            .unwrap();
+        let owner_grant = authorization(&relay, &relay.cookie, &relay.session).await;
+        let owner_lease = relay
+            .direct
+            .accept_peer(&owner_grant, &owner_grant.claims.session_id, &fingerprint())
+            .unwrap();
+        let renew_route = format!(
+            "/api/installations/{}/direct/{}/renew",
+            grant.claims.installation_id, grant.claims.connection_id
+        );
+        let foreign_renewal = relay
+            .app
+            .authenticated(&relay.cookie, &relay.session, Method::POST, &renew_route)
+            .json(&json!({ "fingerprint": fingerprint(), "versions": [4] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            foreign_renewal.status(),
+            StatusCode::NOT_FOUND,
+            "even another session of the same account cannot renew this peer"
+        );
+        let mut events = relay.direct.subscribe();
+        let (method, route) = if revoke_others {
+            (
+                Method::POST,
+                "/api/account/sessions/revoke-others".to_owned(),
+            )
+        } else {
+            (
+                Method::DELETE,
+                format!("/api/account/sessions/{}", grant.claims.session_id),
+            )
+        };
+        let response = relay
+            .app
+            .authenticated(&relay.cookie, &relay.session, method, &route)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        tokio::time::timeout(Duration::from_secs(1), lease.closed.cancelled())
+            .await
+            .unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match event {
+            DirectEvent::Revoked(DirectRevocation::Session { session_id }) => {
+                assert_eq!(session_id, grant.claims.session_id)
+            }
+            _ => panic!("session revocation must send only the targeted public session"),
+        }
+        assert!(events.try_recv().is_err());
+        assert!(!owner_lease.closed.is_cancelled());
+        for route in [
+            renew_route,
+            format!(
+                "/api/installations/{}/direct/authorize",
+                grant.claims.installation_id
+            ),
+        ] {
+            let response = relay
+                .app
+                .authenticated(&other_cookie, &other_session, Method::POST, &route)
+                .json(&json!({ "fingerprint": fingerprint(), "versions": [4] }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        assert_eq!(
+            relay.get("/chats").send().await.unwrap().status(),
+            StatusCode::OK
+        );
+        relay.close().await;
+    }
+}
+
+#[tokio::test]
+async fn installation_removal_rotation_and_owner_deletion_send_only_installation_revocation() {
+    use leo_agent_manager::direct::DirectEvent;
+    use leo_relay_protocol::direct::DirectRevocation;
+    for action in ["detach", "rotate", "forget", "delete-owner"] {
+        let relay = RelayedInstallation::new(axum::Router::new()).await;
+        let grant = authorization(&relay, &relay.cookie, &relay.session).await;
+        let lease = relay
+            .direct
+            .accept_peer(&grant, &grant.claims.session_id, &fingerprint())
+            .unwrap();
+        let mut events = relay.direct.subscribe();
+        let id = &grant.claims.installation_id;
+        let response = match action {
+            "rotate" => {
+                let directory = relay
+                    .installation
+                    .config
+                    .data_dir
+                    .join("installation-relay");
+                leo_agent_manager::relay::rotate_token(&directory)
+                    .await
+                    .unwrap();
+                None
+            }
+            "detach" => Some(
+                relay
+                    .app
+                    .authenticated(
+                        &relay.cookie,
+                        &relay.session,
+                        Method::POST,
+                        &format!("/api/installations/{id}/detach"),
+                    )
+                    .send()
+                    .await
+                    .unwrap(),
+            ),
+            "forget" => Some(
+                relay
+                    .app
+                    .authenticated(
+                        &relay.cookie,
+                        &relay.session,
+                        Method::DELETE,
+                        &format!("/api/installations/{id}"),
+                    )
+                    .send()
+                    .await
+                    .unwrap(),
+            ),
+            "delete-owner" => Some(
+                relay
+                    .app
+                    .authenticated(
+                        &relay.cookie,
+                        &relay.session,
+                        Method::POST,
+                        "/api/account/delete",
+                    )
+                    .json(&json!({ "email": "relay-owner@example.test" }))
+                    .send()
+                    .await
+                    .unwrap(),
+            ),
+            _ => unreachable!(),
+        };
+        if let Some(response) = response {
+            assert_eq!(response.status(), StatusCode::NO_CONTENT, "{action}");
+        }
+        tokio::time::timeout(Duration::from_secs(1), lease.closed.cancelled())
+            .await
+            .expect(action);
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(event, DirectEvent::Revoked(DirectRevocation::Installation)),
+            "{action} must revoke the entire installation"
+        );
+        assert!(events.try_recv().is_err());
+        assert!(!relay.installation.shutdown.is_cancelled());
+        assert!(
+            relay
+                .direct
+                .accept_peer(&grant, &grant.claims.session_id, &fingerprint())
+                .is_err()
+        );
+        if action == "detach" {
+            let response = relay
+                .app
+                .authenticated(
+                    &relay.cookie,
+                    &relay.session,
+                    Method::POST,
+                    &format!("/api/installations/{id}/direct/authorize"),
+                )
+                .json(&json!({ "fingerprint": fingerprint(), "versions": [4] }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+        relay.close().await;
+    }
 }

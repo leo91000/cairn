@@ -21,6 +21,7 @@ pub(super) struct Connection {
     pub reply: Option<oneshot::Sender<bool>>,
     pub accepted: bool,
     pub signals: broadcast::Sender<DirectSignal>,
+    signals_reader: Arc<tokio::sync::Mutex<broadcast::Receiver<DirectSignal>>>,
     pub revoked: watch::Sender<bool>,
 }
 
@@ -168,6 +169,7 @@ async fn issue(
                     "Direct connection capacity reached",
                 ));
             }
+            let (signals, signals_reader) = broadcast::channel(16);
             access.direct.insert(
                 id.clone(),
                 Connection {
@@ -177,7 +179,8 @@ async fn issue(
                         + leo_relay_protocol::direct::until_expiry(expires_at as u64),
                     reply: Some(reply),
                     accepted: false,
-                    signals: broadcast::channel(16).0,
+                    signals,
+                    signals_reader: Arc::new(tokio::sync::Mutex::new(signals_reader)),
                     revoked: watch::channel(false).0,
                 },
             );
@@ -348,7 +351,16 @@ pub(crate) async fn events(
             "Direct connection not found",
         ))?;
         (
-            connection.signals.subscribe(),
+            connection
+                .signals_reader
+                .clone()
+                .try_lock_owned()
+                .map_err(|_| {
+                    ApiError::Http(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Signaling reader already open",
+                    )
+                })?,
             connection.revoked.subscribe(),
         )
     };
@@ -385,7 +397,9 @@ pub(super) fn acknowledge(tunnel: &Tunnel, id: &str, accepted: bool) {
         .values_mut()
         .find(|connection| connection.authorization.claims.nonce == id)
     {
-        connection.accepted = accepted;
+        // Refusing a renewal leaves the previously verified lease in force.
+        // Keep tracking it so a retry and scoped revocation remain possible.
+        connection.accepted |= accepted;
         if let Some(reply) = connection.reply.take() {
             let _ = reply.send(accepted);
         }

@@ -600,9 +600,17 @@ async fn serve_socket(
                 if version >= DIRECT_VERSION {
                     let direct_frame = match &frame {
                         Frame::DirectAuthorize { authorization, .. } | Frame::DirectRenew { authorization, .. } => {
-                            tunnel.access.lock().unwrap().direct.get(&authorization.claims.connection_id).is_some_and(|connection| connection.authorization == *authorization && connection.reply.is_some())
+                            let access = tunnel.access.lock().unwrap();
+                            access.direct.get(&authorization.claims.connection_id)
+                                .is_some_and(|connection| {
+                                    connection.authorization == *authorization
+                                        && connection.reply.is_some()
+                                })
                         }
-                        Frame::DirectSignal { id, .. } => tunnel.access.lock().unwrap().direct.get(id).is_some_and(|connection| connection.accepted),
+                        Frame::DirectSignal { id, .. } => {
+                            let access = tunnel.access.lock().unwrap();
+                            access.direct.get(id).is_some_and(|connection| connection.accepted)
+                        },
                         _ => false,
                     };
                     if direct_frame {

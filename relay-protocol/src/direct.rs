@@ -104,10 +104,7 @@ impl DirectSignal {
                 sdp_mid,
                 sdp_m_line_index,
             } => {
-                (candidate.is_empty()
-                    || (candidate.starts_with("candidate:")
-                        && candidate.len() <= 1024
-                        && candidate.bytes().all(|b| b.is_ascii_graphic() || b == b' ')))
+                valid_candidate(candidate)
                     && sdp_mid.as_ref().is_none_or(|mid| {
                         mid.len() <= 32
                             && mid.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')

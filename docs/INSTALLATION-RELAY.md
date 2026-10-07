@@ -343,7 +343,7 @@ without calling the provider.
 
 ## Version 4: direct authorization and signaling (#100)
 
-Hello now offers `[4, 3, 2, 1]`. A v1/v2/v4 tunnel receives no direct-control frames
+Hello now offers `[4, 3, 2, 1]`. A v1/v2/v3 tunnel receives no direct-control frames
 and retains its existing API/stream behavior. Clients that do not advertise v4
 receive `available: false` and keep using the relay.
 

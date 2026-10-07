@@ -162,7 +162,9 @@ impl DirectConnections {
                 () = tokio::time::sleep(leo_relay_protocol::direct::until_expiry(deadline)) => {
                     if let Some(state) = state.upgrade() {
                         let mut state = state.lock().unwrap();
-                        if state.authorizations.get(&id).is_some_and(|lease| lease.authorization.claims.nonce == nonce) {
+                        let current_nonce = state.authorizations.get(&id)
+                            .map(|lease| &lease.authorization.claims.nonce);
+                        if current_nonce == Some(&nonce) {
                             closed.cancel();
                             state.authorizations.remove(&id);
                         }
