@@ -326,10 +326,10 @@ umask 077
 official_container='selected-official-container-id'
 postgres_container='selected-postgres-container-id'
 backup_path='/private/backup/official-before-release.dump'
-docker stop --time 60 "$official_container"
-bash deploy/official/postgres-backup.sh backup "$postgres_container" "$backup_path"
-# Only resume after backup succeeds; on error keep stopped and investigate.
-docker start "$official_container"
+# Each step runs only if its predecessor succeeded; on error investigate.
+docker stop --time 60 "$official_container" && \
+  bash deploy/official/postgres-backup.sh backup "$postgres_container" "$backup_path" && \
+  docker start "$official_container"
 ```
 
 The helper writes a private custom-format dump to a temporary adjacent file,
@@ -362,9 +362,9 @@ chosen database container, with every official process stopped:
 
 ```sh
 # Destructive recovery: only after preserving the failed database privately.
-docker exec "$postgres_container" dropdb -U leo --force leo_official
-docker exec "$postgres_container" createdb -U leo -O leo leo_official
-bash deploy/official/postgres-backup.sh restore "$postgres_container" "$backup_path"
+docker exec "$postgres_container" dropdb -U leo --force leo_official && \
+  docker exec "$postgres_container" createdb -U leo -O leo leo_official && \
+  bash deploy/official/postgres-backup.sh restore "$postgres_container" "$backup_path"
 ```
 
 The helper invokes `pg_restore --exit-on-error --no-owner --no-privileges` into
