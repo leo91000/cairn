@@ -2,9 +2,9 @@
 
 Decision: [ADR-0033](adr/0033-direct-connection-with-relay-fallback.md). This
 document describes the data path, what the official service observes, the
-switching rules and the validation plan. Status: planned (parent issue
+switching rules and the validation plan. Status: installation peer and control plane delivered; web/Android route selection remains planned (parent issue
 [#98](https://github.com/leo91000/leo-agent-manager/issues/98)); the existing relay ([INSTALLATION-RELAY.md](INSTALLATION-RELAY.md))
-remains the shipped transport and the fallback.
+remains the interface transport and the fallback.
 
 ## Data path
 
@@ -122,7 +122,7 @@ Sources and library options: [DIRECT-TRANSPORT-RESEARCH.md](DIRECT-TRANSPORT-RES
 
 ## Validation plan
 
-The reproducible Linux bench, commands and current relay-only evidence are in
+The reproducible Linux bench, commands and current direct/relay evidence are in
 [NETWORK-BENCH.md](NETWORK-BENCH.md). It runs without KVM; Android device
 qualification remains part of #105.
 
@@ -144,7 +144,7 @@ emulator through simulated networks:
 ## Delivered control plane (#100)
 
 The authorization/signaling contract is implemented in protocol v4; the WebRTC
-peer and web/Android data transports remain #101/#103/#104. No inbound local
+peer is delivered by #101; web/Android data transports remain #103/#104. No inbound local
 browser access or local password is introduced. The current shipped data path
 continues to use the relay.
 
@@ -182,3 +182,67 @@ signal gets HTTP 204 only after installation acknowledgement (429 on refusal,
 503 on saturation or acknowledgement timeout). Per-account quotas and reserved
 owner capacity prevent member bursts from exhausting the owner's allowance;
 see the version-4 limits in INSTALLATION-RELAY.md.
+
+## Delivered installation peer (#101)
+
+The production installation connector runs a UDP-only WebRTC peer alongside its
+existing authenticated tunnel. It answers only verified v4 grants, compares the
+**observed DTLS certificate** with the signed fingerprint before dispatch, and
+uses the existing installation dispatcher for requests and credited streams.
+Account and role come from the verified lease; identity/capability fields in
+client frames cannot grant MCP or anonymous-artifact access. Renewal and
+revocation use the #100 verifier and cancellation tokens. Disconnecting a
+transport cancels that transport's requests, never agent execution.
+
+The peer requires exactly one reliable, ordered DataChannel named `leo.v4`.
+Trickle candidates use the existing authenticated signal routes. A failed peer,
+malformed frame, saturated ingress or duplicate channel closes only that direct
+connection; the HTTPS relay remains available. Clients negotiate a fresh grant
+after a closed connection; safe retry and route selection remain #103/#104.
+
+### STUN and configuration
+
+The official service hosts a Binding-only STUN responder in its single process.
+The source defaults to `stun:<official-origin-host>:3478`, or the dedicated
+`LEO_OFFICIAL_STUN_URL`. Authorize/renew responses expose `iceServers`; the
+installation receives the same URL in the authenticated `DirectKey` frame.
+No public third-party STUN dependency or additional IP disclosure is introduced.
+STUN carries address-discovery metadata only, never account credentials or
+application content. TURN remains deferred. UDP 3478 is published directly by
+the official Compose definition; Traefik routes HTTPS only.
+
+- `LEO_DIRECT_ENABLED=false` disables installation direct authorization and peers.
+  The default is `true`; the authenticated tunnel and relay keep working.
+- `LEO_DIRECT_STUN_URLS=stun:host:port[,stun:host:port]` overrides the official STUN
+  source, at most four URLs of 256 bytes each. TURN URLs are rejected.
+- Invalid configuration disables the direct peer and logs a fixed warning while
+  retaining the relay. No configuration value or signaling payload is logged.
+- The peer uses ephemeral UDP sockets for ICE; it requires no forwarded inbound
+  port, public certificate, local password or anonymous listener.
+
+### DataChannel framing contract
+
+Binary messages contain a 13-byte envelope followed by JSON-frame bytes:
+`version:u8=1`, `transfer:u32`, `total:u32`, `offset:u32`; integers are network
+byte order. Transfer IDs are nonzero. `total` is the UTF-8 JSON byte count for
+one existing relay `Frame`; body bytes retain the protocol's base64 encoding.
+Each message is at most 16,384 bytes, leaving 16,371 bytes per fragment. Offsets
+must be contiguous within a transfer, although separate transfers (including
+credits/cancellation) can interleave. `total=offset=0` with no payload abandons
+an incomplete transfer without dispatch. Unknown versions, duplicate starts,
+invalid offsets, text messages or excessive sizes close the direct connection.
+
+Reassembly retains at most 32 incomplete transfers, an aggregate `MAX_FRAME`
+byte budget and a 30-second assembly deadline. Buffers grow only for received
+bytes. Application limits remain 32 requests, 24 streams globally, 8 streams per
+account, 8 MB bodies, 64 KiB credited chunks and the existing 30-second response
+deadline. SCTP send/receive buffers are bounded to 64 KiB; application ingress and
+egress are bounded separately. Cancellation and revocation stop dispatch
+immediately; a bounded 500 ms transport-close grace sends the SCTP stream reset
+before shutting down UDP sockets.
+
+The Rust network client records `direct` only after an authenticated API response
+arrives over this DataChannel and a selected UDP ICE candidate pair is observed.
+Relay observations come from the official response's `x-leo-transport: relay`
+header. Browsers still use the relay until #103; this distinction prevents the
+bench from mistaking UDP probe reachability for an authorized direct connection.

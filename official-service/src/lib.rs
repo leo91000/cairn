@@ -15,6 +15,7 @@ mod oauth;
 mod passkeys;
 mod relay;
 mod sharing;
+pub mod stun;
 
 pub use fcm::{AccountPushSender, FcmPushSender};
 pub use network::TrustedProxies;

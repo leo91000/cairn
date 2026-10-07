@@ -107,8 +107,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             {
                 return Err("Expected conversation marker missing".into());
             }
+            let route = response
+                .split("\r\n\r\n")
+                .next()
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.eq_ignore_ascii_case("x-leo-transport"))
+                .map_or("unavailable", |(_, value)| value.trim());
+            if status == 200 && !matches!(route, "relay" | "direct") {
+                return Err("Successful response is missing its observed transport".into());
+            }
             println!(
-                "{{\"route\":\"relay\",\"status\":{status},\"elapsedMs\":{}}}",
+                "{{\"route\":\"{route}\",\"status\":{status},\"elapsedMs\":{}}}",
                 started.elapsed().as_millis()
             );
         }

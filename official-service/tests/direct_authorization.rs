@@ -1748,6 +1748,7 @@ async fn installation_accepts_bounded_signing_clock_skew_but_rejects_long_lived_
             match frame {
                 Frame::DirectKey { .. } => Some(Frame::DirectKey {
                     public_key: URL_SAFE_NO_PAD.encode(key.public_key().as_ref()),
+                    stun_url: None,
                 }),
                 Frame::DirectAuthorize {
                     id,

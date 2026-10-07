@@ -308,10 +308,13 @@ fn sdp_line(line: &str) -> bool {
             | "t=0 0"
             | "a=ice-options:trickle"
             | "a=end-of-candidates"
+            | "a=extmap-allow-mixed"
             | "a=setup:actpass"
             | "a=setup:active"
             | "a=setup:passive"
             | "a=sendrecv"
+            | "a=msid-semantic:WMS"
+            | "a=msid-semantic:WMS *"
             | "a=msid-semantic: WMS"
             | "a=msid-semantic: WMS *"
     ) {

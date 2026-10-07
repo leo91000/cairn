@@ -13,11 +13,12 @@ both real binaries and uses an in-memory email adapter. Agent workers are disabl
 
 ```sh
 pnpm install --frozen-lockfile
-CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=4 cargo build --locked --workspace --bin leo --bin leo-official
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=4 cargo build --locked --workspace --bin leo --bin leo-official --example network_direct_client
 pnpm build
 pnpm exec playwright install --with-deps chromium
 docker run -d --name leo-network-postgres -e POSTGRES_USER=leo -e POSTGRES_PASSWORD=test-only -e POSTGRES_DB=leo_official_test -p 127.0.0.1:5432:5432 postgres:17-alpine
 export LEO_OFFICIAL_TEST_DATABASE_URL=postgres://leo:test-only@127.0.0.1:5432/leo_official_test
+python3 tests/network_probe_test.py
 python3 tests/network_bench_test.py
 ```
 
@@ -62,7 +63,11 @@ only the standard library and never serves installation data.
 
 UDP probes send fixed sequence markers to two diagnostic listeners. Reports show
 sent/received counts, whether the source was translated and the number of observed
-mappings on both sides. The CLI tests assert these effects, including repeated
+mappings on both sides. The UDP probe discards delayed replies from earlier
+sequences until the current reply or its deadline. A STUN fixture listens at
+198.18.102.1:3478, before the host-facing masquerade; mapped addresses therefore
+identify each actual NAT router (198.18.102.2/.3), rather than a shared host
+address. Tests assert these reflexive addresses. The CLI tests assert these effects, including repeated
 exact packet-loss counts. These diagnostic listeners cannot access installation
 content and are not a WebRTC peer or an anonymous local installation interface.
 
@@ -73,7 +78,12 @@ application observations: browser send, Rust read, and stream resume after a
 network change. Each includes `route`, `operation` and monotonic `elapsedMs`.
 Browser evidence comes from successful requests to the actual official
 `/api/installations/{id}/api/...` endpoint, followed by visible conversation data;
-Rust verifies the same conversation marker through that endpoint. Anonymous
+Rust first verifies the same conversation marker through that endpoint, then
+requests a signed grant and negotiates with the real installation DataChannel.
+It records `direct` only after receiving the API response on that channel and
+observing its selected UDP ICE pair (`candidatePair.local` / `.remote`).
+Relay evidence reads the official response's `x-leo-transport` header; neither
+client uses a fixed route label. Anonymous
 requests fail, anonymous installation loopback access fails, and the old official
 cookie fails after logout. The network-change scenario measures from the address
 change to a fresh message observed through the resumed stream, with a 30-second
@@ -81,14 +91,15 @@ upper bound, then checks a Rust read and the retained conversation. The address
 really changes; restarting only the test TCP forwarder closes old sockets even
 on kernels without socket-destroy support. The browser and session stay alive.
 
-The shipped transport is currently **relay in every scenario**. #100/#101/#103
-provide signaling, the installation WebRTC peer and web route selection. This
-bench does not implement those tickets or claim that UDP reachability proves an
-authorized direct session. `--expect-route direct` fails against the current
-binaries; it never silently accepts a relay result or skips a test. Qualification
-of real direct sessions and direct-to-relay timing must use observations of the
-real DataChannel once those transports exist. Today's network-change duration is
-**relay stream recovery**, not a direct-to-relay measurement.
+The browser stays on **relay** until #103. The installation peer (#101) and real
+Rust DataChannel client expect **direct** for LAN, ordinary NAT, network change
+and packet loss; UDP blocked and symmetric NAT expect **relay**. The Rust read
+falls back only to its already successful safe HTTPS read; it never retries a
+mutation. `--expect-rust-route` can specify a scenario's expectation;
+`--expect-route` controls the browser expectation. A route mismatch fails the
+bench. Network-change duration remains **browser relay stream recovery**, not a
+direct-to-relay measurement; the subsequent Rust read negotiates a fresh peer.
+Client route switching and direct stream recovery qualification remain #103–#105.
 
 `udp-blocked` demonstrates that the existing relay remains usable even when every
 UDP probe fails. The existing `journeys-official-relay` and Rust relay/security
@@ -100,7 +111,7 @@ change these contracts, local authentication, storage or central persistence.
 
 The separate **direct-relay network bench (no KVM)** job downloads the same real
 binaries/frontend as browser journeys, checks network effects, then runs all eight
-scenarios sequentially without retries. JSON reports are retained as
-`direct-relay-network-evidence`; Playwright diagnostics remain in the job log.
+scenarios sequentially without retries. JSON reports and Playwright failure diagnostics are retained as
+`direct-relay-network-evidence`.
 Evidence contains no
 cookies, claim codes, machine credentials or conversation exports.

@@ -367,8 +367,8 @@ clock skew in the maximum remaining lifetime; expiry is still strict on the
 installation clock. Revoked-session records cover that tolerance too. Session bearer digests and CSRF credentials never
 leave the official service. The installation's `DirectConnections::accept_peer`
 checks the observed DTLS fingerprint and session, accepts that grant once, and
-returns the trusted installation identity and a cancellation token. The WebRTC
-peer (#101) must stop all traffic when that token is cancelled. Expiry cancels it
+returns the trusted installation identity and a cancellation token. The production
+WebRTC peer (#101) stops application traffic when that token is cancelled. Expiry cancels it
 independently of tunnel/HTTP polling. Only an official `DirectRenew` can extend
 it; renewal preserves the original connection identity, role and fingerprint.
 
@@ -407,3 +407,12 @@ and official JSON control bodies at most 32 KiB. Direct-control frames use a ded
 from relay responses and credits. Saturation returns a signaling error without
 closing fallback streams. None consumes or changes the
 existing relay request, credited-stream or public-download allowances.
+
+The installation WebRTC peer is described in
+[DIRECT-CONNECTION.md](DIRECT-CONNECTION.md#delivered-installation-peer-101),
+including its reliable ordered channel, 16 KiB envelopes, bounded reassembly,
+STUN source and disable setting. `DirectKey` carries an optional `stun_url`
+(backward-compatible metadata), derived from the official origin or configured by
+the official service. Authorize/renew responses expose the same `iceServers`.
+A signal dequeued before its authorization was accepted is refused immediately,
+releasing its acknowledgement slot instead of waiting the five-second deadline.
