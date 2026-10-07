@@ -234,6 +234,15 @@ pub struct RelayedInstallation {
 }
 
 impl RelayedInstallation {
+    pub async fn with_oauth(oauth: leo_official_service::OAuthProviders) -> Self {
+        Self::with_app(
+            axum::Router::new(),
+            String::new(),
+            Fixture::with_oauth(oauth).await,
+        )
+        .await
+    }
+
     pub async fn new(extra_routes: axum::Router) -> Self {
         Self::with_runner_url(extra_routes, String::new()).await
     }

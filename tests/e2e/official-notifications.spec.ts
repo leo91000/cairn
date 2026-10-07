@@ -12,6 +12,7 @@ import { expect, test } from '@playwright/test'
 import { config as loadConfig } from '../legacy/server/config'
 import { Service as SeedService } from '../legacy/server/service'
 import { Store } from '../legacy/server/store'
+import { expireAccountProof } from './official-relay-fixture'
 
 test('a browser registers once for all Leo installations and can disable account push', async ({ page, context }) => {
   test.setTimeout(120000)
@@ -19,6 +20,7 @@ test('a browser registers once for all Leo installations and can disable account
   const children: ChildProcess[] = []
   const diagnostics: string[] = []
   const messages: Array<{ to: string[], text: string }> = []
+  const email = `owner-${Date.now()}@example.test`
   const mail = createServer(async (request, response) => {
     let body = ''
     for await (const chunk of request)
@@ -116,7 +118,7 @@ test('a browser registers once for all Leo installations and can disable account
         throw new Error(diagnostics.join('') || `Official service exited: ${official.exitCode}`)
       return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
     }, { timeout: 30000 }).toBe(true)
-    await signIn(page, `owner-${Date.now()}@example.test`)
+    await signIn(page, email)
     await expect(page.getByRole('heading', { name: 'No installations yet' })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Notifications', exact: true })).toBeVisible()
     expect(await (await page.request.get(`${url}/api/account/notifications`)).json()).toEqual({ publicKey: curve.getPublicKey().toString('base64url') })
@@ -152,9 +154,22 @@ test('a browser registers once for all Leo installations and can disable account
     await expect(page).toHaveURL(/\/installations\/[^/]+\/$/)
     await page.getByText('Installation options', { exact: true }).click()
     await page.getByRole('button', { name: 'Notifications', exact: true }).click()
+    expireAccountProof(new URL(process.env.LEO_OFFICIAL_TEST_DATABASE_URL!), email)
+    await page.getByRole('button', { name: 'Enable on this device' }).click()
+    await expect(page.getByRole('alert')).toContainText('Confirm your identity')
+    await page.getByRole('button', { name: 'Confirm identity', exact: true }).click()
+    const messagesBeforeProof = messages.length
+    await page.getByRole('button', { name: 'Send confirmation code', exact: true }).click()
+    await expect.poll(() => messages.slice(messagesBeforeProof).findLast(message => message.to.includes(email) && /\b\d{8}\b/.test(message.text))?.text).toBeTruthy()
+    const proof = messages.slice(messagesBeforeProof).findLast(message => message.to.includes(email) && /\b\d{8}\b/.test(message.text))!
+    await page.getByLabel('Confirmation code', { exact: true }).fill(proof.text.match(/\b\d{8}\b/)![0])
+    await page.getByRole('button', { name: 'Verify confirmation code', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Enable on this device' })).toBeVisible()
+    await expect(page.getByText('Notifications on', { exact: true })).toHaveCount(0)
+    expect(registrations).toHaveLength(1)
     await page.getByRole('button', { name: 'Enable on this device' }).click()
     await expect(page.getByText('Notifications on', { exact: true })).toBeVisible()
-    expect(registrations).toHaveLength(1)
+    expect(registrations).toHaveLength(2)
     expect(await page.evaluate(() => JSON.parse(localStorage.getItem('fixture-push-key')!))).toEqual(Array.from(curve.getPublicKey()))
     const firstInstallation = page.url()
     await page.getByRole('button', { name: 'Close dialog', exact: true }).click()
@@ -181,7 +196,7 @@ test('a browser registers once for all Leo installations and can disable account
     await page.getByText('Installation options', { exact: true }).click()
     await page.getByRole('button', { name: 'Notifications', exact: true }).click()
     await expect(page.getByText('Notifications on', { exact: true })).toBeVisible()
-    expect(registrations).toHaveLength(1)
+    expect(registrations).toHaveLength(2)
     const id = (await page.evaluate(() => Object.entries(localStorage).find(([key]) => key.startsWith('leo-push-device:'))?.[1]))!
     expect(id).toMatch(/^[a-f0-9]{64}$/)
     const session = await (await page.request.get(`${url}/api/account/session`)).json()

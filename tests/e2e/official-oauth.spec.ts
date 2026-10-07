@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { once } from 'node:events'
@@ -9,6 +10,7 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
   test.setTimeout(90000)
   const messages: string[] = []
   let denyNextAuthorization = false
+  let failNextToken = false
   const githubId = Date.now()
   const email = `oauth-browser-${Date.now()}@example.test`
   const provider = createServer(async (request, response) => {
@@ -36,7 +38,21 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
       const body = new URLSearchParams(text)
       expect(body.get('client_secret')).toBe('test-only')
       expect(body.get('code_verifier')!.length).toBeGreaterThanOrEqual(43)
+      if (failNextToken) {
+        failNextToken = false
+        response.writeHead(503).end(JSON.stringify({ error: 'private-provider-body' }))
+        return
+      }
+
       response.end(JSON.stringify({ access_token: 'test-token', token_type: 'Bearer' }))
+    }
+    else if (url.pathname === '/github/applications/github-test/token' && request.method === 'DELETE') {
+      expect(request.headers.authorization).toBe(`Basic ${Buffer.from('github-test:test-only').toString('base64')}`)
+      let text = ''
+      for await (const chunk of request)
+        text += chunk
+      expect(JSON.parse(text)).toEqual({ access_token: 'test-token' })
+      response.writeHead(204).end()
     }
     else if (url.pathname === '/google/userinfo') {
       response.end(JSON.stringify({ sub: email, email, email_verified: true }))
@@ -104,6 +120,12 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
     await page.getByRole('button', { name: 'Continue with Google' }).click()
     await expect(page.getByRole('alert')).toContainText('Sign-in was cancelled')
     expect((await page.context().cookies(url)).some(cookie => cookie.name === 'leo_oauth')).toBe(false)
+    failNextToken = true
+    await page.getByRole('button', { name: 'Continue with Google' }).click()
+    await expect(page.getByRole('heading', { name: 'Sign-in provider unavailable' })).toBeVisible()
+    await expect(page.locator('body')).not.toContainText('private-provider-body')
+    await page.getByRole('link', { name: 'Try again', exact: true }).click()
+    await expect(page.getByRole('alert')).toContainText('Sign-in provider unavailable')
     await page.getByRole('button', { name: 'Continue with Google' }).click()
     await expect(page.getByRole('heading', { name: 'No installations yet' })).toBeVisible()
     await expect(page.getByText(`You’re signed in as ${email}.`)).toBeVisible()
@@ -114,6 +136,9 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
     })
     expect(unconfirmed.status()).toBe(403)
     await page.getByRole('button', { name: 'Sign-in methods', exact: true }).click()
+    await page.getByRole('button', { name: 'Add GitHub', exact: true }).click()
+    await expect(page.getByRole('alert')).toContainText('Confirm your identity')
+    await expect(page.getByRole('heading', { name: 'Sign-in methods', exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Add passkey', exact: true }).click()
     await expect(page.getByRole('alert')).toContainText('Confirm your identity')
     await page.getByRole('button', { name: 'Confirm identity', exact: true }).click()

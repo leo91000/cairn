@@ -1,4 +1,4 @@
-use super::{ApiError, Service, digest, installations};
+use super::{ApiError, Service, account, digest, installations};
 use axum::{
     Json,
     extract::{Path, State},
@@ -187,7 +187,7 @@ pub(super) async fn subscribe(
     headers: HeaderMap,
     Json(input): Json<PushSubscription>,
 ) -> Result<Json<Value>, ApiError> {
-    let account = installations::account(&service, &headers, &Method::POST).await?;
+    let (account, _) = account::confirmed_session(&service, &headers).await?;
 
     if !valid_subscription(&input) {
         return Err(ApiError::Http(
@@ -197,7 +197,7 @@ pub(super) async fn subscribe(
     }
 
     let id = digest(&input.endpoint);
-    register_device(&service, &account, &id, input).await?;
+    register_device(&service, &headers, &account, &id, input).await?;
     Ok(Json(json!({ "id": id })))
 }
 
@@ -234,7 +234,7 @@ pub(super) async fn subscribe_android(
             auth: String::new(),
         },
     };
-    register_device(&service, &account, &id, subscription).await?;
+    register_device(&service, &headers, &account, &id, subscription).await?;
     Ok(Json(json!({ "id": id })))
 }
 
@@ -244,16 +244,18 @@ fn valid_native_token(token: &str) -> bool {
 
 async fn register_device(
     service: &Service,
+    headers: &HeaderMap,
     account: &str,
     id: &str,
     input: PushSubscription,
 ) -> Result<(), ApiError> {
     let mut transaction = service.pool.begin().await?;
     // Serialize additions for this account so concurrent devices cannot exceed its limit.
-    query("SELECT id FROM leo_accounts WHERE id = $1 FOR UPDATE")
+    query("SELECT id FROM leo_accounts WHERE id = $1 FOR NO KEY UPDATE")
         .bind(account)
         .execute(&mut *transaction)
         .await?;
+    account::confirmed_session_on(&mut transaction, headers).await?;
 
     let (count,): (i64,) =
         query_as("SELECT count(*) FROM notification_devices WHERE account_id = $1 AND id <> $2 AND endpoint <> $3")

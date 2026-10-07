@@ -65,7 +65,7 @@ async fn revoke(
 
     let mut transaction = service.pool.begin().await?;
     // Serialize competing session revocations, then revalidate the caller.
-    query("SELECT id FROM leo_accounts WHERE id = $1 FOR UPDATE")
+    query("SELECT id FROM leo_accounts WHERE id = $1 FOR NO KEY UPDATE")
         .bind(&account)
         .execute(&mut *transaction)
         .await?;

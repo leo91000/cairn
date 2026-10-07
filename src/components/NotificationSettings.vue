@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { accountApi, state } from '../api'
 import { BellRing } from '../icons'
+import AccountConfirmation from './AccountConfirmation.vue'
 import Icon from './Icon.vue'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
@@ -14,6 +15,7 @@ const busy = ref(false)
 const loading = ref(true)
 const error = ref('')
 const denied = ref(supported && Notification.permission === 'denied')
+const confirmingIdentity = ref(false)
 const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
 const installed = window.matchMedia('(display-mode: standalone)').matches || (navigator as Navigator & { standalone?: boolean }).standalone
 let registration: ServiceWorkerRegistration | undefined
@@ -79,7 +81,14 @@ async function toggle() {
 </script>
 
 <template>
-  <div class="space-y-3">
+  <AccountConfirmation
+    v-if="confirmingIdentity"
+    title="Confirm identity before enabling notifications"
+    return-label="Back to notifications"
+    @close="confirmingIdentity = false"
+    @confirmed="confirmingIdentity = false; error = ''"
+  />
+  <div v-show="!confirmingIdentity" class="space-y-3">
     <div class="flex items-start gap-3">
       <span class="grid size-10 shrink-0 place-items-center rounded-xl bg-accent/10 text-accent"><Icon :name="BellRing" :size="20" /></span>
       <div>
@@ -104,6 +113,14 @@ async function toggle() {
       Notifications are blocked. Allow them in this site’s browser settings, then reopen this panel.
     </p>
     <div v-else class="flex items-center gap-3">
+      <UiButton
+        v-if="!enabled"
+        size="small"
+        :disabled="busy || loading"
+        @click="confirmingIdentity = true"
+      >
+        Confirm identity
+      </UiButton>
       <UiButton
         size="small"
         :variant="enabled ? 'default' : 'primary'"
