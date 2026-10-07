@@ -23,7 +23,9 @@ manager. The guest virtqueue also batches independent reads through sixteen shar
 workers, bounded to 8 MiB per batch. Single requests stay on the existing direct
 path; reads drain before a following write or flush. An upload slot remains held until full read-back verification succeeds.
 This bounds memory while allowing independent block transfers to overlap; an
-individual missing block still waits for its own transfer. R2 requires a private
+individual missing block still waits for its own transfer. Sealed journals also
+reconstruct up to sixteen independent blocks together, preserving generation
+fences and the existing foreground cache admission order. R2 requires a private
 dedicated bucket without public domains, locks or enabled lifecycle rules, with
 `STORAGE_S3_PRIVATE_BUCKET_CONFIRMED=true` after those provider controls are checked.
 
