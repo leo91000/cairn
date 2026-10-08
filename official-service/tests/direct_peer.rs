@@ -6,6 +6,9 @@ use leo_relay_protocol::{
     direct::{DirectAuthorization, DirectSignal},
 };
 use reqwest::{Method, StatusCode};
+use rtc::peer_connection::configuration::setting_engine::{
+    SctpMaxMessageSize, SettingEngineBuilder,
+};
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc;
@@ -130,6 +133,12 @@ async fn client_with_offer_candidates(
     let peer: Arc<dyn PeerConnection> = Arc::new(
         PeerConnectionBuilder::new()
             .with_handler(Arc::new(ClientEvents(events)))
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_sctp_max_message_size(SctpMaxMessageSize::Bounded(16_384))
+                    .with_sctp_max_receive_buffer_size(65_536)
+                    .build(),
+            )
             .with_udp_addrs(vec!["0.0.0.0:0"])
             .build()
             .await
@@ -315,25 +324,28 @@ async fn send_frame(channel: &dyn DataChannel, id: u32, frame: &leo_relay_protoc
     }
 }
 
-async fn response(channel: &dyn DataChannel) -> leo_relay_protocol::Frame {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        let mut frame = Vec::new();
-        loop {
-            if let Some(DataChannelEvent::OnMessage(message)) = channel.poll().await {
-                assert!(message.data.len() <= 16_384);
-                assert_eq!(message.data[0], 1);
-                let total = u32::from_be_bytes(message.data[5..9].try_into().unwrap()) as usize;
-                let offset = u32::from_be_bytes(message.data[9..13].try_into().unwrap()) as usize;
-                assert_eq!(offset, frame.len());
-                frame.extend(&message.data[13..]);
-                if frame.len() == total {
-                    return serde_json::from_slice(&frame).unwrap();
+async fn receive_frame(channel: &dyn DataChannel) -> Frame {
+    let mut decoder = leo_relay_protocol::data_channel::FrameDecoder::default();
+    loop {
+        match channel.poll().await {
+            Some(DataChannelEvent::OnMessage(message)) => {
+                assert!(!message.is_string);
+                if let Some(frame) = decoder.push(&message.data).unwrap() {
+                    return frame;
                 }
             }
+            None | Some(DataChannelEvent::OnClose | DataChannelEvent::OnError) => {
+                panic!("DataChannel application response must remain accessible");
+            }
+            _ => {}
         }
-    })
-    .await
-    .expect("DataChannel application response")
+    }
+}
+
+async fn response(channel: &dyn DataChannel) -> Frame {
+    tokio::time::timeout(Duration::from_secs(3), receive_frame(channel))
+        .await
+        .expect("DataChannel application response")
 }
 
 fn request(id: &str, path: &str) -> leo_relay_protocol::Frame {
@@ -1151,8 +1163,16 @@ async fn concurrent_large_uploads_share_account_capacity_without_closing_either_
     );
 
     let second_upload = async {
-        send_frame(second_channel.as_ref(), 1, &upload("second-upload")).await;
-        response(second_channel.as_ref()).await
+        let frame = upload("second-upload");
+        let (_, reply) = tokio::time::timeout(leo_relay_protocol::REQUEST_TIMEOUT, async {
+            tokio::join!(
+                send_frame(second_channel.as_ref(), 1, &frame),
+                receive_frame(second_channel.as_ref()),
+            )
+        })
+        .await
+        .expect("second upload must finish within its request deadline");
+        reply
     };
     tokio::pin!(second_upload);
     assert!(
@@ -1163,13 +1183,20 @@ async fn concurrent_large_uploads_share_account_capacity_without_closing_either_
     );
 
     let first_upload = async {
-        for packet in packets {
-            first_channel
-                .send(bytes::BytesMut::from(packet.as_slice()))
-                .await
-                .unwrap();
-        }
-        response(first_channel.as_ref()).await
+        let send_remaining = async {
+            for packet in packets {
+                first_channel
+                    .send(bytes::BytesMut::from(packet.as_slice()))
+                    .await
+                    .unwrap();
+            }
+        };
+        let (_, reply) = tokio::time::timeout(leo_relay_protocol::REQUEST_TIMEOUT, async {
+            tokio::join!(send_remaining, receive_frame(first_channel.as_ref()))
+        })
+        .await
+        .expect("first upload must finish within its request deadline");
+        reply
     };
     let (first_reply, second_reply) = tokio::join!(first_upload, second_upload);
     for reply in [first_reply, second_reply] {
@@ -1244,18 +1271,27 @@ async fn interleaved_uploads_on_one_peer_reject_only_the_excess_transfer() {
     assert!(
         matches!(rejected, Frame::Response(reply) if reply.id == "excess-upload" && reply.status == 503)
     );
-    for (first_packet, second_packet) in first_packets.zip(second_packets) {
-        channel
-            .send(bytes::BytesMut::from(first_packet.as_slice()))
-            .await
-            .unwrap();
-        channel
-            .send(bytes::BytesMut::from(second_packet.as_slice()))
-            .await
-            .unwrap();
-    }
+    // Poll the public channel while sending: its bounded event queue also
+    // carries buffered-amount notifications and must keep being consumed.
+    let send_remaining = async {
+        for (first_packet, second_packet) in first_packets.zip(second_packets) {
+            channel
+                .send(bytes::BytesMut::from(first_packet.as_slice()))
+                .await
+                .unwrap();
+            channel
+                .send(bytes::BytesMut::from(second_packet.as_slice()))
+                .await
+                .unwrap();
+        }
+    };
+    let (_, reply) = tokio::time::timeout(leo_relay_protocol::REQUEST_TIMEOUT, async {
+        tokio::join!(send_remaining, receive_frame(channel.as_ref()))
+    })
+    .await
+    .expect("accepted upload must finish within its request deadline");
     assert!(
-        matches!(response(channel.as_ref()).await, Frame::Response(reply) if reply.id == "first-upload" && reply.status == 200 && reply.body == b"4194304")
+        matches!(reply, Frame::Response(reply) if reply.id == "first-upload" && reply.status == 200 && reply.body == b"4194304")
     );
     send_frame(
         channel.as_ref(),
@@ -1272,6 +1308,81 @@ async fn interleaved_uploads_on_one_peer_reject_only_the_excess_transfer() {
     );
     assert!(!relay.installation.shutdown.is_cancelled());
     peer.close().await.unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn reservations_expire_even_when_the_peer_stops_reading_rejections() {
+    let router = axum::Router::new()
+        .route(
+            "/api/fixture/large-response",
+            axum::routing::get(|| async { vec![0xAB; 6 * 1024 * 1024] }),
+        )
+        .route(
+            "/api/fixture/upload",
+            axum::routing::post(|bytes: axum::body::Bytes| async move { bytes.len().to_string() }),
+        );
+    let mut relay = RelayedInstallation::new(router).await;
+    production_connector(&mut relay).await;
+    let (holder, holder_channel, _) = client(&relay).await;
+    let (waiter, waiter_channel, _) = client(&relay).await;
+    partial_transfer(
+        holder_channel.as_ref(),
+        1,
+        leo_relay_protocol::MAX_FRAME - 1024,
+    )
+    .await;
+    send_frame(
+        holder_channel.as_ref(),
+        2,
+        &request("barrier", "/api/chats"),
+    )
+    .await;
+    assert!(
+        matches!(response(holder_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+    // A large response fills SCTP and the bounded output queue while the
+    // client deliberately stops reading. Short rejected frames need no tail.
+    send_frame(
+        holder_channel.as_ref(),
+        3,
+        &request("large-response", "/api/fixture/large-response"),
+    )
+    .await;
+    let flood_channel = holder_channel.clone();
+    let flood = tokio::spawn(async move {
+        for id in 4..4100 {
+            let Frame::Request(mut input) = request(&format!("rejected-{id}"), "/api/chats") else {
+                unreachable!()
+            };
+            input.body = vec![0xAB; 2048];
+            send_frame(flood_channel.as_ref(), id, &Frame::Request(input)).await;
+        }
+    });
+    let Frame::Request(mut waiting) = request("waiter", "/api/fixture/upload") else {
+        unreachable!()
+    };
+    waiting.method = "POST".into();
+    waiting.body = vec![0xCD; 2048];
+    send_frame(waiter_channel.as_ref(), 1, &Frame::Request(waiting)).await;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            response(waiter_channel.as_ref())
+        )
+        .await
+        .is_err(),
+        "the holder's reservation must actually block the other account peer"
+    );
+    tokio::time::sleep(leo_relay_protocol::REQUEST_TIMEOUT + Duration::from_secs(1)).await;
+    assert!(
+        matches!(response(waiter_channel.as_ref()).await, Frame::Response(reply) if reply.id == "waiter" && reply.status == 200 && reply.body == b"2048")
+    );
+    assert!(!relay.installation.shutdown.is_cancelled());
+    flood.abort();
+    let _ = flood.await;
+    holder.close().await.unwrap();
+    waiter.close().await.unwrap();
     relay.close().await;
 }
 
@@ -1524,6 +1635,10 @@ async fn a_panicking_peer_task_releases_its_authorization_and_preserves_other_pe
         .direct
         .accept_peer(&grant, &grant.claims.session_id, &fingerprint)
         .unwrap();
+    // Parallel tests may first register this shared callsite with no default
+    // subscriber. Rebuild its interest on this thread after the survivor has
+    // reached serve_peer, so the injected fault cannot silently be skipped.
+    tracing::callsite::rebuild_interest_cache();
     panic_next.store(true, std::sync::atomic::Ordering::SeqCst);
     signal_as(&relay, &relay.cookie, &relay.session, &grant, &DirectSignal::Offer {
         sdp: format!("v=0\r\ns=-\r\nt=0 0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=fingerprint:{fingerprint}\r\na=sctp-port:5000\r\n"),

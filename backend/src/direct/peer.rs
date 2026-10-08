@@ -412,10 +412,19 @@ async fn serve_peer(
                                                     body: b"Direct reassembly busy.".to_vec(),
                                                 },
                                             );
-                                            rejected
-                                                .send(response)
-                                                .await
-                                                .map_err(|_| Error::unavailable("Direct response queue closed."))?;
+                                            let send = rejected.send(response);
+                                            tokio::pin!(send);
+                                            loop {
+                                                tokio::select! {
+                                                    result = &mut send => {
+                                                        result.map_err(|_| Error::unavailable("Direct response queue closed."))?;
+                                                        break;
+                                                    }
+                                                    _ = timeout.tick() => {
+                                                        decoder.expire();
+                                                    }
+                                                }
+                                            }
                                         }
                                         break None;
                                     }
