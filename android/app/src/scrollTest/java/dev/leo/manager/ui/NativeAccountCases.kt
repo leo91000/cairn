@@ -139,6 +139,7 @@ abstract class NativeAccountCases {
         val installations = java.util.concurrent.atomic.AtomicReference("[]")
         val recoveryNotice =
             "Les notifications push ont été désactivées. Confirmez votre identité par e-mail ou passkey dans les réglages du compte, puis réactivez-les."
+        val pushToggle = hasText("Notifications push")
         val tokens =
             object : PushTokens {
                 override val available = true
@@ -193,7 +194,7 @@ abstract class NativeAccountCases {
                 }
             }
             compose.waitUntil(10_000) {
-                compose.onAllNodes(isToggleable()).fetchSemanticsNodes().isNotEmpty()
+                compose.onAllNodes(pushToggle and isOn()).fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithText("Notifications push").assertIsOn()
 
@@ -211,7 +212,8 @@ abstract class NativeAccountCases {
             }
             assertEquals(2, registrationAttempts.get())
             compose.waitUntil(10_000) {
-                compose.onAllNodesWithText(recoveryNotice).fetchSemanticsNodes().isNotEmpty()
+                compose.onAllNodesWithText(recoveryNotice).fetchSemanticsNodes().isNotEmpty() &&
+                    compose.onAllNodes(pushToggle and isOff()).fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithText("Notifications push").assertIsOff()
             compose.onNodeWithText(recoveryNotice).assertIsDisplayed()
@@ -225,15 +227,23 @@ abstract class NativeAccountCases {
                 showingHome.value = true
             }
             compose.waitUntil(10_000) {
-                compose.onAllNodesWithText("Maison · Hors ligne").fetchSemanticsNodes().isNotEmpty()
+                compose
+                    .onAllNodesWithText("Maison · Hors ligne")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty() &&
+                    compose.onAllNodesWithText(recoveryNotice).fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithText(recoveryNotice).assertIsDisplayed()
             compose.runOnIdle { showingHome.value = false }
 
             registered.set(true)
-            kotlinx.coroutines.runBlocking { registrar.enable() }
+            kotlinx.coroutines.runBlocking {
+                registrar.enable()
+                assertTrue(preferences.enabled.first())
+            }
             compose.waitUntil(10_000) {
-                compose.onAllNodesWithText(recoveryNotice).fetchSemanticsNodes().isEmpty()
+                compose.onAllNodesWithText(recoveryNotice).fetchSemanticsNodes().isEmpty() &&
+                    compose.onAllNodes(pushToggle and isOn()).fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithText("Notifications push").assertIsOn()
             assertEquals(3, registrationAttempts.get())
