@@ -104,6 +104,7 @@ watch(session, (value) => {
 
   const requested = state.installationId
   installation.value = value.installations.find(item => item.id === requested) || null
+  state.installationOnline = installation.value?.online
   if (requested && !installation.value) {
     error.value = 'This installation is unavailable or no longer accessible to your Leo account.'
     return
@@ -541,12 +542,15 @@ async function refreshAvailability() {
       item.updateRequired = status?.updateRequired ?? false
     }
 
+    state.installationOnline = current.installations.find(item => item.id === state.installationId)?.online
+
     availabilityFailures = 0
   }
   catch {
     if (session.value === current) {
       for (const item of current.installations)
         item.online = false
+      state.installationOnline = false
     }
 
     availabilityFailures++

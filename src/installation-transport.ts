@@ -84,11 +84,21 @@ export class InstallationTransport {
   private blocked = false
   private failures = 0
   private networkTimer?: ReturnType<typeof setTimeout>
+  private online?: boolean
 
   constructor(private readonly context: Context) {}
 
   private get base() {
     return `/api/installations/${encodeURIComponent(this.context.installationId)}/direct`
+  }
+
+  availabilityChanged(online?: boolean) {
+    const recovered = this.online === false && online === true
+    this.online = online
+    if (online === false && this.started)
+      this.fallback()
+    else if (recovered)
+      this.networkChanged()
   }
 
   private async control(path: string, body: unknown) {
@@ -197,7 +207,7 @@ export class InstallationTransport {
   }
 
   private async connect(iceRestart: boolean) {
-    if (this.stopped || this.blocked || !this.context.authenticated || !navigator.onLine || document.hidden)
+    if (this.stopped || this.blocked || this.online === false || !this.context.authenticated || !navigator.onLine || document.hidden)
       return
     this.fallback()
     this.controlAbort = new AbortController()
@@ -381,9 +391,13 @@ export class InstallationTransport {
           this.scheduleHeartbeat(current)
         }
       }
-      catch {
-        if (current())
-          this.failed()
+      catch (error) {
+        if (current()) {
+          if (error instanceof TransportNotSent)
+            this.scheduleHeartbeat(current)
+          else
+            this.failed(error)
+        }
       }
       finally { clearTimeout(deadline) }
     }, 10000)
@@ -414,8 +428,12 @@ export class InstallationTransport {
         const grant = await this.control(`${path}/renew`, authorization) as GrantResponse
         if (!current())
           return
-        if (!grant.available)
-          throw new Error('Renewal unavailable')
+        if (!grant.available) {
+          this.blocked = true
+          this.fallback()
+          return
+        }
+
         const previousExpiry = this.grant!.grant.claims.expires_at
         this.grant = grant
         clearTimeout(this.expiry)

@@ -261,13 +261,32 @@ individual successful API responses and accepted live batches emit a
 The bench observes these application events, never infers a route from ICE state.
 Binary resource URLs and non-JSON uploads continue through the relay.
 
-Grant renewal runs 30 seconds before the signed deadline; the local expiry timer
-remains armed until renewal is accepted. A 30-second negotiation deadline,
+Grant renewal runs 30 seconds before the signed deadline, with a minimum
+10-second delay; the local expiry timer remains armed until renewal is accepted.
+If renewal does not extend a session-capped deadline, no further renewal is
+attempted for that lease. A 30-second negotiation deadline,
 10-second application heartbeat (a protocol HEAD request, with a
 5-second deadline), channel closure, ICE failure and signaling-reader loss all
 return traffic to the relay. Unsupported clients/installations and refused local
-network permission cause no visible connection error. Failed attempts retry after
-30 seconds; offline documents wait for the network to return.
+network permission cause no visible connection error. Temporary failures retry
+with exponential backoff from 30 seconds to five minutes. `available: false`,
+403 and permission denial stop direct attempts until the session or network
+changes; a capacity 503 backs off while the relay remains usable. A recovery
+observed by the existing installation availability check also resumes
+negotiation, covering official restart/tunnel reconnection without polling
+incompatible installations through the direct endpoints. Offline and
+hidden documents do not negotiate. An established peer in a hidden document
+closes after a 30-second grace period, stopping signaling, renewal and heartbeat;
+visibility restores negotiation. Network-information changes are debounced by
+one second, while online/offline events act immediately.
+
+A local closing channel or exhausted direct slots cannot dispatch a request:
+the operation uses fallback capacity, including mutations and live subscriptions.
+Once a complete request frame has been sent, the switching rules above apply.
+The client response deadline is 35 seconds, allowing the dispatcher's 30-second
+504 to arrive first; expiration cancels only that request, preserving other
+requests and streams on the peer. A locally saturated heartbeat waits for its
+next interval instead of closing a healthy peer.
 
 Network Information `change` and browser `online` events restart ICE through a
 **fresh peer and fresh authorization**, with `iceRestart: true`, while the relay
@@ -296,5 +315,10 @@ the existing zero-length abandonment envelope before cancellation.
 Following the decision recorded in #117, the web ignores mDNS `.local` candidates
 before signaling or passing them to the WebRTC implementation. Numeric host and
 server-reflexive candidates use the existing authenticated verifier and official
-STUN module. If no usable numeric path exists, the relay remains available. The
+STUN module. Loopback, unspecified, link-local, multicast and broadcast
+destinations are filtered too, including their IPv4-mapped IPv6 forms; private
+unicast remains useful on authenticated LAN/VPN paths. The filter applies to
+offer/answer candidate lines and trickle in both directions. A single 400/429
+candidate refusal does not abandon negotiation with other usable candidates.
+If no usable numeric path exists, the relay remains available. The
 installation resolver/listener hardening belongs to #117.

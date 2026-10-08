@@ -23,6 +23,7 @@ export const state = reactive({
   setupRequired: false,
   csrf: '',
   installationId,
+  installationOnline: undefined as boolean | undefined,
   accountId: '',
   installationRole: 'owner' as 'owner' | 'member',
   agents: [] as Agent[],
@@ -38,7 +39,8 @@ watch(() => state.signingOut || (state.ready && !state.authenticated), (clear) =
     void clearHistoryCache()
 }, { flush: 'sync' })
 export const installationTransport = new InstallationTransport(state)
-watch(() => [state.ready, state.authenticated, state.installationId, state.signingOut], () => {
+watch(() => [state.ready, state.authenticated, state.installationId, state.signingOut, state.installationOnline], () => {
+  installationTransport.availabilityChanged(state.installationOnline)
   if (officialEntry && state.ready && state.authenticated && !state.signingOut)
     installationTransport.start()
   else if (typeof window !== 'undefined')

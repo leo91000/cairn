@@ -114,6 +114,17 @@ Both policies and actual operation routes are recorded in the same bench report.
 The mDNS-only case also records and asserts that every real browser ICE candidate
 is a `.local` host candidate, with no numeric reflexive alternative.
 
+Same-LAN also exercises a browser-facing local-network permission denial:
+CDP denies Chromium's `local-network-access` permission, and an init script
+injects `NotAllowedError` at `RTCPeerConnection.createOffer`. The real
+installation, relay, API reads and live stream remain active; observations must
+show relay and the page must have no unhandled error. This checks the web's
+refusal path, not an actual native permission prompt: the fixture's origin is
+loopback, outside the public-to-local origin transition described by
+[Chrome's LNA guidance](https://developer.chrome.com/blog/local-network-access).
+That guidance also still lists WebRTC gating as a limitation. Native prompt
+qualification on a public HTTPS origin remains #105.
+
 The network-change scenario measures the real direct-to-relay stream recovery,
 then checks reestablishment of direct and a Rust read. Same-LAN also blocks all
 client UDP during a browser message send: the message must arrive once, the

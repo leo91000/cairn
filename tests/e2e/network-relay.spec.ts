@@ -195,6 +195,35 @@ test('authenticated browser and Rust client keep using the observed route under 
     }
 
     if (process.env.LEO_NETWORK_SCENARIO === 'same-lan') {
+      // Browser-facing denial seam: Chromium's LNA permission is denied too,
+      // but this loopback fixture is not a public-to-local origin. Inject only
+      // the WebRTC NotAllowedError, leaving all application/relay traffic real.
+      const denied = await browser.newContext({ storageState: await page.context().storageState() })
+      const deniedPage = await denied.newPage()
+      const errors: string[] = []
+      deniedPage.on('pageerror', error => errors.push(error.name))
+      await capture(deniedPage)
+      await deniedPage.addInitScript(() => {
+        RTCPeerConnection.prototype.createOffer = () => Promise.reject<never>(new DOMException('Local network access denied', 'NotAllowedError'))
+      })
+      const permission = await denied.newCDPSession(deniedPage)
+      await permission.send('Browser.setPermission', {
+        permission: { name: 'local-network-access' },
+        setting: 'denied',
+        origin: url,
+        browserContextId: (await permission.send('Target.getTargetInfo')).targetInfo.browserContextId,
+      })
+      const deniedStarted = performance.now()
+      await deniedPage.goto(page.url())
+      await expect(deniedPage.getByRole('heading', { name: marker, exact: true })).toBeVisible()
+      await expect(deniedPage.getByRole('status', { name: 'Connection route' })).toHaveAttribute('data-transport-route', 'relay')
+      await activeStream(deniedPage, 'relay')
+      const deniedRead = await deniedPage.evaluate(() => (window as typeof window & { transportObservations: Observation[] }).transportObservations.find(item => item.method === 'GET'))
+      expect(deniedRead?.route).toBe('relay')
+      evidence.push({ route: deniedRead!.route, operation: 'permission-denied-read', elapsedMs: performance.now() - deniedStarted })
+      expect(errors).toEqual([])
+      await denied.close()
+
       const beforeCut = (await observations()).length
       const cut = performance.now()
       execFileSync(process.env.LEO_NETWORK_CUT_DIRECT!, [], { stdio: 'ignore' })
@@ -326,7 +355,7 @@ test('authenticated browser and Rust client keep using the observed route under 
       const expectedRoute = observation.operation.startsWith('rust-')
         ? process.env.LEO_NETWORK_EXPECT_RUST_ROUTE
         : process.env.LEO_NETWORK_EXPECT_ROUTE || 'relay'
-      const route = ['bootstrap-read', 'stream-resume', 'fallback-send', 'fallback-stream'].includes(observation.operation) ? 'relay' : expectedRoute
+      const route = ['bootstrap-read', 'stream-resume', 'fallback-send', 'fallback-stream', 'permission-denied-read'].includes(observation.operation) ? 'relay' : expectedRoute
       expect(observation.route, `${observation.operation}: actual route`).toBe(route)
     }
 

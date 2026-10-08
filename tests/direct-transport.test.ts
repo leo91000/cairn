@@ -195,7 +195,7 @@ it('sends an unsent mutation through relay when the channel is closing', async (
 })
 
 it('uses fallback capacity for unsent mutations and live streams when direct slots are full', async () => {
-  const { api, channel } = await direct()
+  const { api, channel, state } = await direct()
   const occupied = Array.from({ length: 32 }, () => api('/chats'))
   await vi.waitFor(() => expect(channel.packets.length).toBe(32))
   expect(await api('/chats/c', { method: 'DELETE' })).toEqual({ marker: 'relay' })
@@ -215,6 +215,9 @@ it('uses fallback capacity for unsent mutations and live streams when direct slo
   }))
   expect(accept).toHaveBeenCalledTimes(1)
   live.close()
+  await vi.advanceTimersByTimeAsync(10000)
+  expect(state.transportRoute).toBe('direct')
+  expect(channel.readyState).toBe('open')
   channel.dispatchEvent(new Event('close'))
   await Promise.all(occupied)
 })
@@ -416,6 +419,20 @@ it('backs off capacity failures exponentially while relay requests remain usable
   await vi.advanceTimersByTimeAsync(119999)
   expect(attempts()).toBe(3)
   expect(await api('/chats')).toEqual({ marker: 'relay' })
+})
+
+it('renegotiates after the existing availability check observes installation recovery', async () => {
+  const { state, channel } = await direct()
+  Object.assign(state, { installationOnline: false })
+  await vi.advanceTimersByTimeAsync(0)
+  expect(state.transportRoute).toBe('relay')
+  expect(channel.readyState).toBe('closed')
+  const peers = Peer.all.length
+  await vi.advanceTimersByTimeAsync(300000)
+  expect(Peer.all).toHaveLength(peers)
+  Object.assign(state, { installationOnline: true })
+  await vi.advanceTimersByTimeAsync(0)
+  expect(Peer.all).toHaveLength(peers + 1)
 })
 
 it('ignores mDNS candidates, signals numeric candidates and keeps binary resources on the relay', async () => {
