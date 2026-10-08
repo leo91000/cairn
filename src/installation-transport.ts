@@ -1,4 +1,4 @@
-import { DirectChannel, TransportLost } from './direct-channel'
+import { DirectChannel, TransportLost, TransportNotSent } from './direct-channel'
 import { DirectSource } from './direct-source'
 import { observeTransport } from './transport-observation'
 
@@ -25,9 +25,43 @@ interface GrantResponse {
   iceServers: RTCIceServer[]
 }
 
-// #117: no hostname resolution. Unusable mDNS candidates keep the relay available.
-function mdnsCandidate(candidate: string) {
-  return candidate.trim().split(/\s+/)[4]?.toLowerCase().endsWith('.local') || false
+class SignalingError extends Error {
+  constructor(readonly status: number) { super('Direct signaling unavailable') }
+}
+
+// Mirror #117's destination policy before signaling/SDK use. The authenticated
+// Rust validator remains authoritative; no hostname resolution is introduced.
+function usableCandidate(candidate: string) {
+  if (!candidate)
+    return true // End of candidates.
+  const address = candidate.trim().split(/\s+/)[4]
+  if (!address)
+    return false
+  const unicastV4 = (octets: number[]) => octets.length === 4 && octets.every(value => Number.isInteger(value) && value >= 0 && value <= 255)
+    && octets[0] !== 127 && octets.some(value => value !== 0)
+    && !(octets[0] === 169 && octets[1] === 254)
+    && !(octets[0] >= 224 && octets[0] <= 239)
+    && !octets.every(value => value === 255)
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(address))
+    return unicastV4(address.split('.').map(Number))
+  if (!address.includes(':'))
+    return false
+  try {
+    const normalized = new URL(`http://[${address}]/`).hostname.slice(1, -1)
+    const mapped = /^::ffff:([\da-f]+):([\da-f]+)$/.exec(normalized)
+    if (mapped) {
+      const high = Number.parseInt(mapped[1], 16)
+      const low = Number.parseInt(mapped[2], 16)
+      return unicastV4([high >> 8, high & 255, low >> 8, low & 255])
+    }
+
+    return normalized !== '::' && normalized !== '::1' && !/^(?:ff|fe[89ab])/i.test(normalized)
+  }
+  catch { return false }
+}
+
+function usableSdp(sdp: string) {
+  return sdp.split('\r\n').filter(line => !line.startsWith('a=candidate:') || usableCandidate(line.slice(2))).join('\r\n')
 }
 
 // One transport per document/current installation. Signaling always uses HTTPS.
@@ -46,6 +80,10 @@ export class InstallationTransport {
   private handshake?: ReturnType<typeof setTimeout>
   private heartbeat?: ReturnType<typeof setTimeout>
   private controlAbort?: AbortController
+  private hidden?: ReturnType<typeof setTimeout>
+  private blocked = false
+  private failures = 0
+  private networkTimer?: ReturnType<typeof setTimeout>
 
   constructor(private readonly context: Context) {}
 
@@ -63,7 +101,7 @@ export class InstallationTransport {
     if (response.status === 401)
       this.context.authenticated = false
     if (!response.ok)
-      throw new Error('Direct signaling unavailable')
+      throw new SignalingError(response.status)
     return response.status === 204 ? undefined : response.json()
   }
 
@@ -72,17 +110,38 @@ export class InstallationTransport {
       return
     this.started = true
     this.stopped = false
+    this.blocked = false
+    this.failures = 0
     window.addEventListener('online', this.networkChanged)
     window.addEventListener('offline', this.networkChanged)
     const network = (navigator as Navigator & { connection?: EventTarget }).connection
-    network?.addEventListener('change', this.networkChanged)
+    network?.addEventListener('change', this.networkEstimateChanged)
+    document.addEventListener('visibilitychange', this.visibilityChanged)
     void this.connect(false)
   }
 
+  private visibilityChanged = () => {
+    clearTimeout(this.hidden)
+    if (document.hidden) {
+      this.hidden = setTimeout(() => this.fallback(), 30000)
+    }
+    else if (!this.peer) {
+      void this.connect(false)
+    }
+  }
+
   private networkChanged = () => {
+    clearTimeout(this.networkTimer)
+    this.blocked = false
+    this.failures = 0
     this.fallback()
     if (navigator.onLine)
       void this.connect(true)
+  }
+
+  private networkEstimateChanged = () => {
+    clearTimeout(this.networkTimer)
+    this.networkTimer = setTimeout(this.networkChanged, 1000)
   }
 
   private route(route: TransportRoute) {
@@ -112,24 +171,33 @@ export class InstallationTransport {
     this.grant = undefined
   }
 
-  private failed() {
+  private failed(error?: unknown) {
+    if (error instanceof SignalingError && [401, 403].includes(error.status))
+      this.blocked = true
+    if (error instanceof DOMException && error.name === 'NotAllowedError')
+      this.blocked = true
     this.fallback()
-    if (!this.stopped && navigator.onLine)
-      this.retry = setTimeout(() => void this.connect(false), 30000)
+    if (!this.stopped && !this.blocked && navigator.onLine && !document.hidden) {
+      const delay = Math.min(300000, 30000 * 2 ** Math.min(this.failures++, 4))
+      this.retry = setTimeout(() => void this.connect(false), delay)
+    }
   }
 
   stop() {
     this.stopped = true
     this.started = false
     this.fallback()
+    clearTimeout(this.hidden)
+    clearTimeout(this.networkTimer)
+    document.removeEventListener('visibilitychange', this.visibilityChanged)
     window.removeEventListener('online', this.networkChanged)
     window.removeEventListener('offline', this.networkChanged)
     const network = (navigator as Navigator & { connection?: EventTarget }).connection
-    network?.removeEventListener('change', this.networkChanged)
+    network?.removeEventListener('change', this.networkEstimateChanged)
   }
 
   private async connect(iceRestart: boolean) {
-    if (this.stopped || !navigator.onLine)
+    if (this.stopped || this.blocked || !this.context.authenticated || !navigator.onLine || document.hidden)
       return
     this.fallback()
     this.controlAbort = new AbortController()
@@ -178,7 +246,8 @@ export class InstallationTransport {
       if (!current())
         return
       if (!grant.available) {
-        this.failed()
+        this.blocked = true
+        this.fallback()
         return
       }
 
@@ -196,12 +265,12 @@ export class InstallationTransport {
             return
           const signal = JSON.parse((event as MessageEvent).data)
           if (signal.kind === 'answer') {
-            await peer.setRemoteDescription({ type: 'answer', sdp: signal.sdp })
+            await peer.setRemoteDescription({ type: 'answer', sdp: usableSdp(signal.sdp) })
             remoteReady = true
             for (const candidate of candidates.splice(0))
               await peer.addIceCandidate(candidate)
           }
-          else if (signal.kind === 'candidate' && signal.candidate && !mdnsCandidate(signal.candidate)) {
+          else if (signal.kind === 'candidate' && signal.candidate && usableCandidate(signal.candidate)) {
             const candidate = { candidate: signal.candidate, sdpMid: signal.sdp_mid, sdpMLineIndex: signal.sdp_m_line_index }
             if (remoteReady)
               await peer.addIceCandidate(candidate)
@@ -224,7 +293,7 @@ export class InstallationTransport {
       let outgoing = new Promise<void>(resolve => offerAccepted = resolve)
       peer.onicecandidate = (event) => {
         const candidate = event.candidate
-        if (candidate && mdnsCandidate(candidate.candidate))
+        if (candidate && !usableCandidate(candidate.candidate))
           return
         outgoing = outgoing.then(async () => {
           if (current()) {
@@ -235,14 +304,16 @@ export class InstallationTransport {
               sdp_m_line_index: candidate?.sdpMLineIndex ?? 0,
             })
           }
-        }).catch(() => {
-          if (current())
-            this.failed()
+        }).catch((error) => {
+          // A single refused candidate does not invalidate usable ICE paths.
+          const refusedCandidate = error instanceof SignalingError && [400, 429].includes(error.status)
+          if (current() && !refusedCandidate)
+            this.failed(error)
         })
       }
 
       // Send the offer before trickled candidates, using the certificate above.
-      const numericOffer = (offer.sdp || '').split('\r\n').filter(line => !line.startsWith('a=candidate:') || !mdnsCandidate(line.slice(2))).join('\r\n')
+      const numericOffer = usableSdp(offer.sdp || '')
       const sdp = numericOffer.replace(/a=fingerprint:sha-256 (.*)/g, (_, digest: string) => `a=fingerprint:sha-256 ${digest.toUpperCase()}`)
       await peer.setLocalDescription({ type: 'offer', sdp })
       if (!current())
@@ -253,9 +324,9 @@ export class InstallationTransport {
         return
       this.scheduleRenewal(authorization, path, current)
     }
-    catch {
+    catch (error) {
       if (current())
-        this.failed()
+        this.failed(error)
     }
   }
 
@@ -268,7 +339,8 @@ export class InstallationTransport {
       catch (error) {
         const method = (options.method || 'GET').toUpperCase()
         const message = method === 'POST' && /^\/chats\/[^/]+\/messages$/.test(path) && typeof options.body === 'string' && typeof JSON.parse(options.body).id === 'string'
-        if (!(error instanceof TransportLost) || (method !== 'GET' && method !== 'HEAD' && !message))
+        const replayable = error instanceof TransportNotSent || (error instanceof TransportLost && (method === 'GET' || method === 'HEAD' || message))
+        if (!replayable)
           throw error
         const response = await fetch(url, options)
         if (message && response.status === 409) {
@@ -304,8 +376,10 @@ export class InstallationTransport {
       const deadline = setTimeout(() => abort.abort(), 5000)
       try {
         await traffic.request('/api/chats', { method: 'HEAD', signal: abort.signal })
-        if (current())
+        if (current()) {
+          this.failures = 0
           this.scheduleHeartbeat(current)
+        }
       }
       catch {
         if (current())
@@ -319,15 +393,22 @@ export class InstallationTransport {
     const traffic = this.context.transportRoute === 'direct' ? this.traffic : undefined
     if (!traffic)
       return Object.assign(new EventSource(url), { transportRoute: 'relay' as const })
-    return new DirectSource(signal => traffic.request(`/api${path}`, { signal, headers: { accept: 'text/event-stream' } })) as unknown as EventSource
+    return new DirectSource(
+      signal => traffic.request(`/api${path}`, { signal, headers: { accept: 'text/event-stream' } }),
+      () => new EventSource(url),
+    ) as unknown as EventSource
   }
 
-  private scheduleRenewal(authorization: unknown, path: string, current: () => boolean) {
+  private scheduleRenewal(authorization: unknown, path: string, current: () => boolean, extended = true) {
     const remaining = this.grant!.grant.claims.expires_at * 1000 - Date.now()
     this.expiry = setTimeout(() => {
       if (current())
         this.failed()
     }, Math.max(0, remaining))
+    // A session-capped grant cannot be extended. Keep its strict expiry, without
+    // spending authorization quota on repeated renewals of the same deadline.
+    if (!extended)
+      return
     this.timer = setTimeout(async () => {
       try {
         const grant = await this.control(`${path}/renew`, authorization) as GrantResponse
@@ -335,14 +416,15 @@ export class InstallationTransport {
           return
         if (!grant.available)
           throw new Error('Renewal unavailable')
+        const previousExpiry = this.grant!.grant.claims.expires_at
         this.grant = grant
         clearTimeout(this.expiry)
-        this.scheduleRenewal(authorization, path, current)
+        this.scheduleRenewal(authorization, path, current, grant.grant.claims.expires_at > previousExpiry)
       }
-      catch {
+      catch (error) {
         if (current())
-          this.failed()
+          this.failed(error)
       }
-    }, Math.max(1000, remaining - 30000))
+    }, Math.max(10000, remaining - 30000))
   }
 }

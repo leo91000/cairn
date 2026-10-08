@@ -1,15 +1,21 @@
+import { TransportNotSent } from './direct-channel'
+
 // Adapt the existing credited SSE body to the live client's EventSource seam.
 export class DirectSource extends EventTarget {
-  readonly transportRoute = 'direct'
+  transportRoute: 'direct' | 'relay' = 'direct'
   onerror: (() => void) | null = null
   private abort = new AbortController()
+  private relay?: EventSource
 
-  constructor(request: (signal: AbortSignal) => Promise<Response>) {
+  constructor(request: (signal: AbortSignal) => Promise<Response>, private fallback?: () => EventSource) {
     super()
     void this.read(request)
   }
 
-  close() { this.abort.abort() }
+  close() {
+    this.abort.abort()
+    this.relay?.close()
+  }
 
   private async read(request: (signal: AbortSignal) => Promise<Response>) {
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
@@ -64,9 +70,24 @@ export class DirectSource extends EventTarget {
         }
       }
     }
-    catch {
-      if (!this.abort.signal.aborted)
-        this.onerror?.()
+    catch (error) {
+      if (!this.abort.signal.aborted) {
+        if (error instanceof TransportNotSent && this.fallback) {
+          this.transportRoute = 'relay'
+          const relay = this.relay = this.fallback()
+          for (const type of ['batch', 'ping', 'message']) {
+            relay.addEventListener(type, (event) => {
+              if (!this.abort.signal.aborted)
+                this.dispatchEvent(new MessageEvent(type, { data: event.data, lastEventId: event.lastEventId }))
+            })
+          }
+
+          relay.onerror = () => this.onerror?.()
+        }
+        else {
+          this.onerror?.()
+        }
+      }
     }
     finally { await reader?.cancel().catch(() => {}) }
   }

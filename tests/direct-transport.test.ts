@@ -136,6 +136,7 @@ function reply(channel: Channel, frame: object) {
 }
 
 async function direct() {
+  const expiresAt = Date.now() / 1000 + 180
   vi.stubGlobal('fetch', vi.fn((url: string) => Promise.resolve(url.endsWith('/authorize')
     ? Response.json({
         available: true,
@@ -144,7 +145,7 @@ async function direct() {
             connection_id: 'connection',
             account_id: 'account',
             role: 'owner',
-            expires_at: Date.now() / 1000 + 180,
+            expires_at: expiresAt,
           },
         },
         iceServers: [],
@@ -155,7 +156,7 @@ async function direct() {
   await vi.waitFor(() => expect(Source.all.length).toBe(1))
   Source.all[0].dispatchEvent(new MessageEvent('signal', { data: JSON.stringify({ kind: 'answer', sdp: 'answer' }) }))
   await vi.waitFor(() => expect(module.state.transportRoute).toBe('direct'))
-  return { ...module, channel: Peer.all[0].channel }
+  return { ...module, channel: Peer.all[0].channel, expiresAt }
 }
 
 it('reads JSON from the actual direct response instead of relaying its payload', async () => {
@@ -184,6 +185,63 @@ it('retries interrupted reads on relay but leaves other mutations visibly failed
   expect(await read).toEqual({ marker: 'relay' })
   await failed
   expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith('/api/chats/c'))).toHaveLength(0)
+})
+
+it('sends an unsent mutation through relay when the channel is closing', async () => {
+  const { api, channel, state } = await direct()
+  channel.readyState = 'closing'
+  expect(await api('/chats/c', { method: 'DELETE' })).toEqual({ marker: 'relay' })
+  expect(state.error).toBe('')
+})
+
+it('uses fallback capacity for unsent mutations and live streams when direct slots are full', async () => {
+  const { api, channel } = await direct()
+  const occupied = Array.from({ length: 32 }, () => api('/chats'))
+  await vi.waitFor(() => expect(channel.packets.length).toBe(32))
+  expect(await api('/chats/c', { method: 'DELETE' })).toEqual({ marker: 'relay' })
+  const { liveConnection } = await import('../src/live-connection')
+  const accept = vi.fn()
+  const live = liveConnection('/chats/c/stream', accept, vi.fn(), { cursor: 7, history: 'v1' })
+  await vi.waitFor(() => expect(Source.all.some(source => source.url.includes('after=7&history=v1'))).toBe(true))
+  const stream = Source.all.find(source => source.url.includes('after=7&history=v1'))!
+  stream.dispatchEvent(new MessageEvent('batch', {
+    lastEventId: '8',
+    data: JSON.stringify({
+      history: 'v1',
+      events: [],
+      reset: false,
+      more: false,
+    }),
+  }))
+  expect(accept).toHaveBeenCalledTimes(1)
+  live.close()
+  channel.dispatchEvent(new Event('close'))
+  await Promise.all(occupied)
+})
+
+it('expires only a slow request after allowing the server deadline to respond', async () => {
+  const { api, channel, state } = await direct()
+  const slow = api('/chats/c', { method: 'DELETE' })
+  const rejected = expect(slow).rejects.toThrow('Request timed out')
+  await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+  await vi.advanceTimersByTimeAsync(30000)
+  expect(state.transportRoute).toBe('direct')
+  expect(channel.readyState).toBe('open')
+  await vi.advanceTimersByTimeAsync(5000)
+  await rejected
+  expect(state.transportRoute).toBe('direct')
+  const next = api('/chats')
+  await vi.advanceTimersByTimeAsync(0)
+  const frames = channel.packets.map(packet => JSON.parse(new TextDecoder().decode(packet.subarray(13))))
+  const request = frames.findLast(frame => frame.method === 'GET')!
+  reply(channel, {
+    type: 'response',
+    id: request.id,
+    status: 200,
+    headers: [],
+    body: btoa('{"marker":"still direct"}'),
+  })
+  expect(await next).toEqual({ marker: 'still direct' })
 })
 
 it('moves live streams between routes using only the accepted cursor and history', async () => {
@@ -303,6 +361,63 @@ it('starts a fresh authorized ICE negotiation on a network change while continui
   await vi.waitFor(() => expect(offer).toHaveBeenLastCalledWith({ iceRestart: true }))
 })
 
+it('releases direct capacity after a hidden-tab grace period and reconnects when visible', async () => {
+  const { api, channel, state } = await direct()
+  Object.defineProperty(document, 'hidden', { value: true, configurable: true })
+  document.dispatchEvent(new Event('visibilitychange'))
+  await vi.advanceTimersByTimeAsync(29999)
+  expect(state.transportRoute).toBe('direct')
+  await vi.advanceTimersByTimeAsync(1)
+  expect(channel.readyState).toBe('closed')
+  expect(state.transportRoute).toBe('relay')
+  const attempts = Peer.all.length
+  await vi.advanceTimersByTimeAsync(300000)
+  expect(Peer.all).toHaveLength(attempts)
+  expect(await api('/chats')).toEqual({ marker: 'relay' })
+  Object.defineProperty(document, 'hidden', { value: false, configurable: true })
+  document.dispatchEvent(new Event('visibilitychange'))
+  await vi.waitFor(() => expect(Peer.all).toHaveLength(attempts + 1))
+})
+
+it.each([
+  ['unsupported installation', () => Response.json({ available: false })],
+  ['refused authorization', () => Response.json({ error: 'Refused' }, { status: 403 })],
+] as const)('stops direct retries for %s until the network changes', async (_, response) => {
+  const fetch = vi.fn(() => Promise.resolve(response()))
+  vi.stubGlobal('fetch', fetch)
+  const { state } = await import('../src/api')
+  Object.assign(state, { authenticated: true, ready: true })
+  await vi.advanceTimersByTimeAsync(600000)
+  expect(fetch).toHaveBeenCalledTimes(1)
+  document.dispatchEvent(new Event('visibilitychange'))
+  await vi.advanceTimersByTimeAsync(0)
+  expect(fetch).toHaveBeenCalledTimes(1)
+  window.dispatchEvent(new Event('online'))
+  await vi.advanceTimersByTimeAsync(0)
+  expect(fetch).toHaveBeenCalledTimes(2)
+})
+
+it('backs off capacity failures exponentially while relay requests remain usable', async () => {
+  const fetch = vi.fn((url: string) => Promise.resolve(url.endsWith('/authorize')
+    ? Response.json({ error: 'Direct connection capacity reached' }, { status: 503 })
+    : Response.json({ marker: 'relay' })))
+  vi.stubGlobal('fetch', fetch)
+  const { api, state } = await import('../src/api')
+  Object.assign(state, { authenticated: true, ready: true })
+  await vi.advanceTimersByTimeAsync(0)
+  const attempts = () => fetch.mock.calls.filter(([url]) => url.endsWith('/authorize')).length
+  expect(attempts()).toBe(1)
+  await vi.advanceTimersByTimeAsync(30000)
+  expect(attempts()).toBe(2)
+  await vi.advanceTimersByTimeAsync(59999)
+  expect(attempts()).toBe(2)
+  await vi.advanceTimersByTimeAsync(1)
+  expect(attempts()).toBe(3)
+  await vi.advanceTimersByTimeAsync(119999)
+  expect(attempts()).toBe(3)
+  expect(await api('/chats')).toEqual({ marker: 'relay' })
+})
+
 it('ignores mDNS candidates, signals numeric candidates and keeps binary resources on the relay', async () => {
   const { api, apiResourceUrl } = await direct()
   const candidate = 'candidate:1 1 udp 2122260223 browser.local 1234 typ host'
@@ -329,6 +444,63 @@ it('ignores mDNS candidates, signals numeric candidates and keeps binary resourc
   expect(apiResourceUrl('/api/chats/c/attachments/file')).toBe('/api/installations/install/api/chats/c/attachments/file')
   await api('/chats/c/attachments', { method: 'POST', body: new Blob(['binary']) })
   expect(fetch).toHaveBeenLastCalledWith('/api/installations/install/api/chats/c/attachments', expect.objectContaining({ body: expect.any(Blob) }))
+})
+
+it('filters special ICE destinations from offers and trickle on both directions', async () => {
+  const addresses = ['127.0.0.1', '169.254.1.2', '224.1.2.3', '255.255.255.255', '0.0.0.0', '::', '::1', 'fe80::1', 'ff02::1', '::ffff:127.0.0.1', 'browser.local']
+  const candidates = addresses.map(address => `candidate:1 1 udp 2122260223 ${address} 1234 typ host`)
+  const numeric = 'candidate:1 1 udp 2122260223 192.168.1.10 1234 typ host'
+  vi.spyOn(Peer.prototype, 'createOffer').mockImplementation(async function (this: Peer) {
+    return { sdp: this.localDescription.sdp + [...candidates, numeric].map(candidate => `a=${candidate}\r\n`).join('') }
+  })
+  const { state } = await direct()
+  const offered = vi.mocked(fetch).mock.calls.find(([url]) => String(url).endsWith('/signal'))!
+  expect(JSON.parse(String(offered[1]?.body)).sdp).toContain(numeric)
+  for (const candidate of candidates)
+    expect(JSON.parse(String(offered[1]?.body)).sdp).not.toContain(candidate)
+  const addCandidate = vi.spyOn(Peer.prototype, 'addIceCandidate')
+  for (const candidate of candidates) {
+    Peer.all[0].onicecandidate({ candidate: { candidate, sdpMid: '0', sdpMLineIndex: 0 } })
+    Source.all[0].dispatchEvent(new MessageEvent('signal', {
+      data: JSON.stringify({
+        kind: 'candidate',
+        candidate,
+        sdp_mid: '0',
+        sdp_m_line_index: 0,
+      }),
+    }))
+  }
+
+  await vi.advanceTimersByTimeAsync(0)
+  expect(addCandidate).not.toHaveBeenCalled()
+  expect(vi.mocked(fetch).mock.calls.filter(([url, options]) => String(url).endsWith('/signal') && JSON.parse(String(options?.body)).kind === 'candidate')).toHaveLength(0)
+  expect(state.transportRoute).toBe('direct')
+})
+
+it('continues candidate signaling after one signal is refused', async () => {
+  const { state } = await direct()
+  vi.mocked(fetch).mockResolvedValueOnce(Response.json({ error: 'Installation refused direct signal' }, { status: 429 }))
+  const candidate = (address: string) => ({ candidate: `candidate:1 1 udp 2122260223 ${address} 1234 typ host`, sdpMid: '0', sdpMLineIndex: 0 })
+  Peer.all[0].onicecandidate({ candidate: candidate('192.168.1.10') })
+  Peer.all[0].onicecandidate({ candidate: candidate('192.168.1.11') })
+  await vi.advanceTimersByTimeAsync(0)
+  expect(state.transportRoute).toBe('direct')
+  const signaled = vi.mocked(fetch).mock.calls.filter(([url, options]) => String(url).endsWith('/signal') && JSON.parse(String(options?.body)).kind === 'candidate')
+  expect(signaled).toHaveLength(2)
+})
+
+it('debounces connection estimate changes instead of restarting ICE for each event', async () => {
+  const network = new EventTarget()
+  Object.assign(navigator, { connection: network })
+  const { state } = await direct()
+  const peers = Peer.all.length
+  for (let i = 0; i < 10; i++)
+    network.dispatchEvent(new Event('change'))
+  await vi.advanceTimersByTimeAsync(999)
+  expect(Peer.all).toHaveLength(peers)
+  expect(state.transportRoute).toBe('direct')
+  await vi.advanceTimersByTimeAsync(1)
+  expect(Peer.all).toHaveLength(peers + 1)
 })
 
 it('reassembles fragmented UTF-8 responses and discards an abandoned partial response', async () => {
@@ -376,5 +548,26 @@ it('closes immediately when renewal is refused and ignores late signals from the
   expect(state.authenticated).toBe(false)
   expect(channel.readyState).toBe('closed')
   source.dispatchEvent(new MessageEvent('signal', { data: JSON.stringify({ kind: 'answer', sdp: 'stale' }) }))
+  expect(state.transportRoute).toBe('relay')
+})
+
+it('keeps a session-capped renewal until expiry without issuing one-second renewals', async () => {
+  const { state, expiresAt: expiry } = await direct()
+  vi.mocked(fetch).mockImplementation(() => Promise.resolve(Response.json({
+    available: true,
+    grant: {
+      claims: {
+        connection_id: 'connection',
+        account_id: 'account',
+        role: 'owner',
+        expires_at: expiry,
+      },
+    },
+    iceServers: [],
+  })))
+  await vi.advanceTimersByTimeAsync(expiry * 1000 - Date.now() - 1)
+  expect(state.transportRoute).toBe('direct')
+  expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith('/renew'))).toHaveLength(1)
+  await vi.advanceTimersByTimeAsync(1)
   expect(state.transportRoute).toBe('relay')
 })

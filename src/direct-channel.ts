@@ -10,6 +10,11 @@ export class TransportLost extends Error {
   constructor() { super('Connection interrupted. Please check the result before trying again.') }
 }
 
+// No complete request frame reached the peer: even mutations are safe on relay.
+export class TransportNotSent extends Error {
+  constructor() { super('Direct request was not sent.') }
+}
+
 interface Frame {
   type: string
   id: string
@@ -27,6 +32,7 @@ interface Pending {
   started: boolean
   credited: boolean
   streaming: boolean
+  sent: boolean
   cleanup: () => void
 }
 
@@ -81,7 +87,7 @@ export class DirectChannel {
       if (pending.started)
         pending.stream?.error(new TransportLost())
       else
-        pending.reject(new TransportLost())
+        pending.reject(pending.sent ? new TransportLost() : new TransportNotSent())
     }
 
     this.assemblies.clear()
@@ -129,7 +135,7 @@ export class DirectChannel {
     return this.capacity()
   }
 
-  private send(frame: object, valid = () => true) {
+  private send(frame: object, valid = () => true, sent = () => {}) {
     const payload = encoder.encode(JSON.stringify(frame))
     if (payload.length > MAX_FRAME)
       return Promise.reject(new Error('Direct frame too large'))
@@ -160,6 +166,8 @@ export class DirectChannel {
         packet.set(payload.subarray(offset, offset + length), HEADER)
         this.channel.send(packet)
         offset += length
+        if (offset === payload.length)
+          sent()
         // Yield between fragments so aborts/credits can make progress.
         await Promise.resolve()
       }
@@ -169,12 +177,12 @@ export class DirectChannel {
   }
 
   request(path: string, options: RequestInit = {}) {
-    if (this.closed)
-      return Promise.reject(new TransportLost())
+    if (this.closed || this.channel.readyState !== 'open')
+      return Promise.reject(new TransportNotSent())
     const streaming = path.split('?')[0].endsWith('/stream')
     const streams = [...this.pending.values()].filter(value => value.streaming).length
     if (this.pending.size >= 32 || (streaming && streams >= 8))
-      return Promise.resolve(Response.json({ error: 'Installation busy.' }, { status: 503 }))
+      return Promise.reject(new TransportNotSent())
     const body = typeof options.body === 'string' ? encoder.encode(options.body) : new Uint8Array()
     if (body.length > MAX_BODY)
       return Promise.resolve(Response.json({ error: 'Request body too large.' }, { status: 413 }))
@@ -194,14 +202,16 @@ export class DirectChannel {
         resolve,
         reject,
         streaming,
+        sent: false,
         started: false,
         credited: false,
         cleanup: () => options.signal?.removeEventListener('abort', abort),
         timer: setTimeout(() => {
+          const pending = this.pending.get(id)
           this.release(id)
-          reject(new TransportLost())
-          this.failed()
-        }, 30000),
+          reject(pending?.sent ? new Error('Request timed out. Please check the result before trying again.') : new TransportNotSent())
+          void this.send({ type: 'cancel', id }).catch(() => {})
+        }, 35000),
       })
       options.signal?.addEventListener('abort', abort, { once: true })
       if (options.signal?.aborted) {
@@ -221,7 +231,11 @@ export class DirectChannel {
         path,
         headers: forwarded,
         body: base64(body),
-      }, () => this.pending.has(id)).catch(() => {})
+      }, () => this.pending.has(id), () => {
+        const pending = this.pending.get(id)
+        if (pending)
+          pending.sent = true
+      }).catch(() => {})
     })
   }
 
