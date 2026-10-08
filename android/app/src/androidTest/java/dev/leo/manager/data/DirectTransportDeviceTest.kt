@@ -295,7 +295,11 @@ class DirectTransportDeviceTest {
                         )
                     }
                         .exceptionOrNull()
-                    assertTrue(largeRequest is ApiException && largeRequest.status == 404)
+                    assertEquals(
+                        "The real router retains its 150 kB JSON body limit",
+                        413,
+                        (largeRequest as? ApiException)?.status,
+                    )
                     assertEquals("direct", api.transport.route.value)
                     read()
                     assertEquals("direct", api.transport.route.value)

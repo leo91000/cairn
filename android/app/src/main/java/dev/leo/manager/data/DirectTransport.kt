@@ -14,8 +14,10 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.json.*
+import okhttp3.Call
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
@@ -30,6 +32,9 @@ import okio.source
 /** Owns the current installation route; account operations and binaries stay on HTTPS. */
 class DirectTransport(private val installationId: String?, private val switched: () -> Unit = {}) :
     Interceptor {
+    private class Selection(val channel: DirectChannel?)
+
+    private val prefix = "/api/installations/${installationId?.let(::segment)}/api/"
     private val current = AtomicReference<DirectChannel?>()
     private val observed = MutableStateFlow("relay")
     val route = observed.asStateFlow()
@@ -50,17 +55,36 @@ class DirectTransport(private val installationId: String?, private val switched:
         observed.value = "relay"
     }
 
+    private fun channelFor(request: Request): DirectChannel? =
+        current.get().takeIf {
+            installationId != null &&
+                request.url.encodedPath.startsWith(prefix) &&
+                request.header("Accept") in setOf("application/json", "text/event-stream")
+        }
+
+    internal fun newCall(
+        client: OkHttpClient,
+        request: Request,
+        forceRelay: Boolean = false,
+    ): Call {
+        val channel = if (forceRelay) null else channelFor(request)
+        // Bind routing before enqueue so the deadline and the selected peer cannot disagree.
+        val prepared = request.newBuilder().tag(Selection::class.java, Selection(channel)).build()
+        return client.newCall(prepared).also { call ->
+            if (channel != null && client.callTimeoutMillis == 30000)
+                call.timeout().timeout(65, TimeUnit.SECONDS)
+        }
+    }
+
+    internal fun wasDirect(response: Response) =
+        response.request.tag(DirectChannel::class.java) != null
+
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        val prefix = "/api/installations/${installationId?.let(::segment)}/api/"
         val acceptsApplication =
             request.header("Accept") in setOf("application/json", "text/event-stream")
-        val channel =
-            current.get().takeIf {
-                installationId != null &&
-                    request.url.encodedPath.startsWith(prefix) &&
-                    acceptsApplication
-            }
+        val selection = request.tag(Selection::class.java)
+        val channel = if (selection != null) selection.channel else channelFor(request)
         val clientMessage = hasClientMessageId(request, prefix)
         var replayedMessage = false
         if (channel != null) {
@@ -140,6 +164,8 @@ internal class DirectLost(message: String, cause: Throwable? = null) : IOExcepti
 internal class DirectNotSent(message: String) : IOException(message)
 
 internal class DirectRequestTimeout : IOException("Délai de réponse directe dépassé")
+
+internal class DirectStreamLost(cause: IOException) : IOException(cause.message, cause)
 
 /** Adapter for the existing v4 binary envelope; native ownership stays with its caller. */
 class DirectChannel(
@@ -365,7 +391,7 @@ class DirectChannel(
             val bytes = decodeBody(response, MAX_BODY)
             val builder =
                 Response.Builder()
-                    .request(request)
+                    .request(request.newBuilder().tag(DirectChannel::class.java, this).build())
                     .protocol(Protocol.HTTP_1_1)
                     .code(response["status"]!!.jsonPrimitive.int)
                     .message("Direct")

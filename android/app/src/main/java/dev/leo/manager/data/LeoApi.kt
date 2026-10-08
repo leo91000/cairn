@@ -117,8 +117,7 @@ class LeoApi(
             .retryOnConnectionFailure(false)
             .followRedirects(false)
             .followSslRedirects(false)
-            // Leave a complete relay request deadline after the optional direct attempt.
-            .callTimeout(java.time.Duration.ofSeconds(65))
+            .callTimeout(java.time.Duration.ofSeconds(30))
             .build()
     internal val streaming =
         http
@@ -292,7 +291,7 @@ class LeoApi(
         client: OkHttpClient = http,
         consume: (Response) -> T,
     ): T = suspendCancellableCoroutine { continuation ->
-        val call = client.newCall(request)
+        val call = transport.newCall(client, request)
         continuation.invokeOnCancellation { call.cancel() }
         call.enqueue(
             object : Callback {

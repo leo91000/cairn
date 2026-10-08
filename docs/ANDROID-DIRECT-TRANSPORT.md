@@ -164,8 +164,10 @@ body sizes.
 A locally full request table or a channel closed before any packet is accepted
 uses the relay even for a mutation. Once a request may have been delivered, only
 reads and messages with client identifiers may recover automatically. The
-ordinary OkHttp call permits 65 seconds overall, leaving time for a relay
-request after the 30-second direct attempt. Binary transfers retain their
+ordinary call retains its 30-second deadline. Only a call bound to an available
+direct peer before enqueue permits 65 seconds overall, leaving time for a relay
+request after the direct attempt. A failed direct subscription resumes once on
+the relay at its accepted cursor without closing the peer. Binary transfers retain their
 existing relay clients and deadlines.
 
 The existing Android network bench also checks foreground/background ownership

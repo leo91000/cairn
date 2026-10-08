@@ -20,6 +20,40 @@ import org.junit.Test
 
 class DirectTransportTest {
     @Test
+    fun `relay account and direct attempts keep their respective call deadlines`() = runBlocking {
+        MockWebServer().use { server ->
+            repeat(3) { server.enqueue(MockResponse().setBody("{}")) }
+            server.start()
+            val deadlines = java.util.concurrent.CopyOnWriteArrayList<Long>()
+            val client =
+                okhttp3.OkHttpClient.Builder()
+                    .eventListener(
+                        object : okhttp3.EventListener() {
+                            override fun callStart(call: okhttp3.Call) {
+                                deadlines.add(call.timeout().timeoutNanos())
+                            }
+                        }
+                    )
+                    .build()
+            val api = LeoApi(server.url("/"), MemoryVault(), client, "test")
+            try {
+                api.request("GET", "/chats")
+                api.transport.attach(
+                    DirectChannel({ _, _, _ -> throw IOException("direct unavailable") }, {})
+                )
+                api.request("GET", "/account/session")
+                api.request("GET", "/chats")
+                assertEquals(
+                    listOf(30L, 30L, 65L).map(java.util.concurrent.TimeUnit.SECONDS::toNanos),
+                    deadlines,
+                )
+            } finally {
+                api.closeStreams()
+            }
+        }
+    }
+
+    @Test
     fun `bounded write pressure recovers a read on relay without destroying the peer`() =
         runBlocking {
             MockWebServer().use { server ->
@@ -480,7 +514,7 @@ class DirectTransportTest {
     @Test
     fun `direct stream falls back at accepted cursor without missing or duplicate events`() =
         runBlocking {
-            for (failure in listOf("closed", "corrupt", "credit", "end")) {
+            for (failure in listOf("closed", "corrupt", "credit", "end", "timeout")) {
                 MockWebServer().use { server ->
                     fun sse(cursor: Long, events: List<RunEvent>) =
                         "event: batch\nid: $cursor\ndata: ${wireJson.encodeToString(LiveBatch(events, LiveState(run = Run("r1", status = "running")), false, false, history = "h1"))}\n\n"
@@ -496,6 +530,7 @@ class DirectTransportTest {
                     lateinit var channel: DirectChannel
                     var id = ""
                     var credits = 0
+                    var disposed = false
                     fun deliver(frame: JsonObject) {
                         val bytes = frame.toString().toByteArray()
                         channel.receive(singleFramePacket(bytes))
@@ -552,6 +587,7 @@ class DirectTransportTest {
                                     frame["type"]!!.jsonPrimitive.content == "stream_credit" &&
                                         credits == 2
                                 ) {
+                                    if (failure == "timeout") throw DirectRequestTimeout()
                                     if (failure == "credit") throw IOException("credit send failed")
                                     if (failure == "end")
                                         deliver(
@@ -571,7 +607,7 @@ class DirectTransportTest {
                                         )
                                 }
                             },
-                            {},
+                            { disposed = true },
                         )
                     api.transport.attach(channel)
                     val final =
@@ -590,6 +626,7 @@ class DirectTransportTest {
                     )
                     assertEquals("relay", api.transport.route.value)
                     assertTrue(credits >= 1)
+                    if (failure == "timeout") assertFalse(disposed)
                     assertTrue(api.streamCalls.isEmpty())
                 }
             }
