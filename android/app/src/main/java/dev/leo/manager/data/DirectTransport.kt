@@ -11,6 +11,8 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.json.*
@@ -199,6 +201,26 @@ class DirectChannel(
 
     private val assemblies = mutableMapOf<Int, Assembly>()
     private var buffered = 0
+    // Four owned packets add at most 64 KiB to the existing assembly budget.
+    private val incoming = Channel<ByteArray>(4)
+    private val decoder = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    init {
+        decoder.launch {
+            try {
+                for (packet in incoming) {
+                    if (!valid()) close()
+                    if (closed.get()) break
+                    receiveFrame(packet)
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                // Malformed wire data keeps the existing connection-loss recovery rules.
+                close()
+            }
+        }
+    }
 
     fun close() {
         if (!closed.compareAndSet(false, true)) return
@@ -206,6 +228,8 @@ class DirectChannel(
             it.failure = DirectLost("Connexion directe interrompue")
         }
         pending.clear()
+        incoming.cancel()
+        decoder.cancel()
         synchronized(assemblies) {
             assemblies.clear()
             buffered = 0
@@ -221,9 +245,13 @@ class DirectChannel(
         }
         if (closed.get()) return
         try {
-            receiveFrame(packet)
+            require(packet.size in HEADER..MAX_PACKET)
+            if (!incoming.trySend(packet).isSuccess) {
+                // Backpressure a burst rather than dropping a response or killing a healthy peer.
+                // The decoder never waits on NativeDirect's JNI write/disposal lock.
+                runBlocking { incoming.send(packet) }
+            }
         } catch (_: Exception) {
-            // Invalid wire data is a transport failure; callers resume at their accepted cursor.
             close()
         }
     }
@@ -301,6 +329,11 @@ class DirectChannel(
             }
         }
 
+        if (closed.get()) return
+        if (!valid()) {
+            close()
+            return
+        }
         val exchange = pending[id.content] ?: return
         if (type == "response") require(!exchange.stream)
         if (type == "stream_start") {
@@ -385,7 +418,7 @@ class DirectChannel(
         }
         var streaming = false
         try {
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(35)
             emit(frame, canceled, deadline)
             val response = await(exchange, canceled, deadline)
             val bytes = decodeBody(response, MAX_BODY)

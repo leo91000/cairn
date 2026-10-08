@@ -20,6 +20,81 @@ import org.junit.Test
 
 class DirectTransportTest {
     @Test
+    fun `response parsing and base64 validation leave the callback thread`() {
+        for (bytes in
+            listOf(
+                "{".toByteArray(),
+                """{"type":"response","id":"r","status":200,"headers":[],"body":"not-base64!"}"""
+                    .toByteArray(),
+            )) {
+            val disposed = java.util.concurrent.CountDownLatch(1)
+            val decoderThread = java.util.concurrent.atomic.AtomicReference<Thread>()
+            val callbackThread = Thread.currentThread()
+            val channel =
+                DirectChannel(
+                    { _, _, _ -> },
+                    {
+                        decoderThread.set(Thread.currentThread())
+                        disposed.countDown()
+                    },
+                )
+            try {
+                channel.receive(singleFramePacket(bytes))
+                assertTrue(disposed.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                assertNotSame(
+                    "Invalid response must be decoded by the worker",
+                    callbackThread,
+                    decoderThread.get(),
+                )
+            } finally {
+                channel.close()
+            }
+        }
+    }
+
+    @Test
+    fun `direct deadline leaves five seconds for the server timeout response`() {
+        lateinit var channel: DirectChannel
+        channel =
+            DirectChannel(
+                { packet, _, deadline ->
+                    val remaining =
+                        java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                            deadline - System.nanoTime()
+                        )
+                    assertTrue(
+                        "Server's 30 s response must precede the client deadline: $remaining",
+                        remaining in 34000..35000,
+                    )
+                    val request =
+                        wireJson
+                            .parseToJsonElement(String(packet.copyOfRange(13, packet.size)))
+                            .jsonObject
+                    channel.receive(
+                        singleFramePacket(
+                            buildJsonObject {
+                                put("type", "response")
+                                put("id", request["id"]!!)
+                                put("status", 504)
+                                put("headers", buildJsonArray {})
+                                put("body", "e30=")
+                            }
+                                .toString()
+                                .toByteArray()
+                        )
+                    )
+                },
+                {},
+            )
+        val request =
+            Request.Builder().url("https://example.test/api/installations/test/api/chats").build()
+        channel.request(request, "/api/installations/test/api/", { false }).use {
+            assertEquals(504, it.code)
+        }
+        channel.close()
+    }
+
+    @Test
     fun `relay account and direct attempts keep their respective call deadlines`() = runBlocking {
         MockWebServer().use { server ->
             repeat(3) { server.enqueue(MockResponse().setBody("{}")) }
@@ -715,7 +790,7 @@ class DirectTransportTest {
         MockWebServer().use { server ->
             server.start()
             val api = LeoApi(server.url("/"), MemoryVault(), installationId = "test")
-            val expected = "{\"text\":\"${"é".repeat(18000)}\"}"
+            val expected = "{\"text\":\"${"é".repeat(3_900_000)}\"}"
             lateinit var channel: DirectChannel
             channel =
                 DirectChannel(
