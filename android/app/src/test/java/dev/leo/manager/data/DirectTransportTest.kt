@@ -121,98 +121,118 @@ class DirectTransportTest {
     @Test
     fun `direct stream falls back at accepted cursor without missing or duplicate events`() =
         runBlocking {
-            MockWebServer().use { server ->
-                fun sse(cursor: Long, events: List<RunEvent>) =
-                    "event: batch\nid: $cursor\ndata: ${wireJson.encodeToString(LiveBatch(events, LiveState(run = Run("r1", status = "running")), false, false, history = "h1"))}\n\n"
-                val first = RunEvent(7, 7, "output", "direct")
-                val next = RunEvent(8, 8, "output", "relay")
-                server.enqueue(
-                    MockResponse()
-                        .setHeader("Content-Type", "text/event-stream")
-                        .setBody(sse(8, listOf(first, next)))
-                )
-                server.start()
-                val api = LeoApi(server.url("/"), MemoryVault(), installationId = "test")
-                lateinit var channel: DirectChannel
-                var id = ""
-                var credits = 0
-                fun deliver(frame: JsonObject) {
-                    val bytes = frame.toString().toByteArray()
-                    channel.receive(
-                        ByteBuffer.allocate(13 + bytes.size)
-                            .put(1)
-                            .putInt(99)
-                            .putInt(bytes.size)
-                            .putInt(0)
-                            .put(bytes)
-                            .array()
+            for (failure in listOf("closed", "corrupt", "credit")) {
+                MockWebServer().use { server ->
+                    fun sse(cursor: Long, events: List<RunEvent>) =
+                        "event: batch\nid: $cursor\ndata: ${wireJson.encodeToString(LiveBatch(events, LiveState(run = Run("r1", status = "running")), false, false, history = "h1"))}\n\n"
+                    val first = RunEvent(7, 7, "output", "direct")
+                    val next = RunEvent(8, 8, "output", "relay")
+                    server.enqueue(
+                        MockResponse()
+                            .setHeader("Content-Type", "text/event-stream")
+                            .setBody(sse(8, listOf(first, next)))
                     )
-                }
-                channel =
-                    DirectChannel(
-                        { packet ->
-                            val frame =
-                                wireJson
-                                    .parseToJsonElement(String(packet.copyOfRange(13, packet.size)))
-                                    .jsonObject
-                            when (frame["type"]!!.jsonPrimitive.content) {
-                                "request" -> {
-                                    id = frame["id"]!!.jsonPrimitive.content
-                                    deliver(
-                                        buildJsonObject {
-                                            put("type", "stream_start")
-                                            put("id", id)
-                                            put("status", 200)
-                                            put("body", "")
-                                            put(
-                                                "headers",
-                                                buildJsonArray {
-                                                    add(
-                                                        buildJsonArray {
-                                                            add("content-type")
-                                                            add("text/event-stream")
-                                                        }
+                    server.start()
+                    val api = LeoApi(server.url("/"), MemoryVault(), installationId = "test")
+                    lateinit var channel: DirectChannel
+                    var id = ""
+                    var credits = 0
+                    fun deliver(frame: JsonObject) {
+                        val bytes = frame.toString().toByteArray()
+                        channel.receive(
+                            ByteBuffer.allocate(13 + bytes.size)
+                                .put(1)
+                                .putInt(99)
+                                .putInt(bytes.size)
+                                .putInt(0)
+                                .put(bytes)
+                                .array()
+                        )
+                    }
+                    channel =
+                        DirectChannel(
+                            { packet ->
+                                val frame =
+                                    wireJson
+                                        .parseToJsonElement(
+                                            String(packet.copyOfRange(13, packet.size))
+                                        )
+                                        .jsonObject
+                                when (frame["type"]!!.jsonPrimitive.content) {
+                                    "request" -> {
+                                        id = frame["id"]!!.jsonPrimitive.content
+                                        deliver(
+                                            buildJsonObject {
+                                                put("type", "stream_start")
+                                                put("id", id)
+                                                put("status", 200)
+                                                put("body", "")
+                                                put(
+                                                    "headers",
+                                                    buildJsonArray {
+                                                        add(
+                                                            buildJsonArray {
+                                                                add("content-type")
+                                                                add("text/event-stream")
+                                                            }
+                                                        )
+                                                    },
+                                                )
+                                            }
+                                        )
+                                    }
+                                    "stream_credit" ->
+                                        if (++credits == 1)
+                                            deliver(
+                                                buildJsonObject {
+                                                    put("type", "stream_chunk")
+                                                    put("id", id)
+                                                    put(
+                                                        "body",
+                                                        Base64.getEncoder()
+                                                            .encodeToString(
+                                                                sse(7, listOf(first)).toByteArray()
+                                                            ),
                                                     )
-                                                },
+                                                }
                                             )
-                                        }
-                                    )
                                 }
-                                "stream_credit" ->
-                                    if (++credits == 1)
+                                if (
+                                    frame["type"]!!.jsonPrimitive.content == "stream_credit" &&
+                                        credits == 2
+                                ) {
+                                    if (failure == "credit") throw IOException("credit send failed")
+                                    if (failure == "corrupt")
                                         deliver(
                                             buildJsonObject {
                                                 put("type", "stream_chunk")
                                                 put("id", id)
-                                                put(
-                                                    "body",
-                                                    Base64.getEncoder()
-                                                        .encodeToString(
-                                                            sse(7, listOf(first)).toByteArray()
-                                                        ),
-                                                )
+                                                put("body", "not-base64!")
                                             }
                                         )
-                            }
-                        },
-                        {},
+                                }
+                            },
+                            {},
+                        )
+                    api.transport.attach(channel)
+                    val final =
+                        withTimeout(10000) {
+                            api.live("/runs/r1/stream")
+                                .onEach {
+                                    if (it.cursor == 7L && failure == "closed") channel.close()
+                                }
+                                .first { it.cursor == 8L }
+                        }
+                    assertEquals(listOf(7L, 8L), final.events.map { it.id })
+                    assertEquals(listOf("direct", "relay"), final.events.map { it.text })
+                    assertEquals(
+                        "/api/installations/test/api/runs/r1/stream?after=7&history=h1&window=1",
+                        server.takeRequest().path,
                     )
-                api.transport.attach(channel)
-                val final =
-                    withTimeout(10000) {
-                        api.live("/runs/r1/stream")
-                            .onEach { if (it.cursor == 7L) channel.close() }
-                            .first { it.cursor == 8L }
-                    }
-                assertEquals(listOf(7L, 8L), final.events.map { it.id })
-                assertEquals(listOf("direct", "relay"), final.events.map { it.text })
-                assertEquals(
-                    "/api/installations/test/api/runs/r1/stream?after=7&history=h1&window=1",
-                    server.takeRequest().path,
-                )
-                assertEquals("relay", api.transport.route.value)
-                assertTrue(credits >= 1)
-                assertTrue(api.streamCalls.isEmpty())
+                    assertEquals("relay", api.transport.route.value)
+                    assertTrue(credits >= 1)
+                    assertTrue(api.streamCalls.isEmpty())
+                }
             }
         }
 

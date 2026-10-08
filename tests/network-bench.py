@@ -38,8 +38,8 @@ def namespace_command(namespace, *args):
             "--clear-groups", *args]
 
 
-def wait_ready(path, child, description):
-    deadline = time.monotonic() + 5
+def wait_ready(path, child, description, seconds=5):
+    deadline = time.monotonic() + seconds
     while not path.exists():
         if child.poll() is not None or time.monotonic() > deadline:
             raise RuntimeError(description + " did not start")
@@ -277,6 +277,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("scenario", choices=SCENARIOS)
     parser.add_argument("--probe-only", action="store_true")
+    parser.add_argument("--android", action="store_true", help="Run the real native Android adapter on an already booted emulator")
     parser.add_argument("--expect-route", choices=["direct", "relay"])
     parser.add_argument("--expect-rust-route", choices=["direct", "relay"])
     parser.add_argument("--output", type=Path, required=True)
@@ -285,6 +286,8 @@ def main():
         args.expect_route = "relay" if args.scenario in {"mdns-only-client", "udp-blocked", "symmetric-nat", "symmetric-client"} else "direct"
     if args.expect_rust_route is None:
         args.expect_rust_route = "relay" if args.scenario in {"udp-blocked", "symmetric-nat", "symmetric-client"} else "direct"
+    if args.android and args.scenario not in {"same-lan", "udp-blocked", "network-change"}:
+        parser.error("Android delivery covers same-lan, udp-blocked and network-change")
     def interrupted(_signal, _frame):
         raise SystemExit("Network bench interrupted")
     signal.signal(signal.SIGTERM, interrupted)
@@ -355,9 +358,80 @@ def main():
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(report) + "\n")
             if not args.probe_only:
-                browser(network, binary, Path(directory), args, report)
+                if args.android:
+                    android(network, Path(directory), args, report)
+                else:
+                    browser(network, binary, Path(directory), args, report)
     finally:
         network.close()
+
+
+def android(network, directory, args, report):
+    if not os.environ.get("LEO_OFFICIAL_TEST_DATABASE_URL"):
+        raise RuntimeError("Set LEO_OFFICIAL_TEST_DATABASE_URL to a disposable Postgres database")
+    devices = [line.split()[0] for line in run("adb", "devices").splitlines()[1:] if line.endswith("\tdevice")]
+    serial = os.environ.get("ANDROID_SERIAL")
+    if not serial:
+        if len(devices) != 1:
+            raise RuntimeError("Set ANDROID_SERIAL to one booted emulator")
+        serial = devices[0]
+
+    def adb(*arguments, **options):
+        return subprocess.run(["adb", "-s", serial, *arguments], check=True, capture_output=True, **options)
+
+    # The real emulator lives outside the client namespace. Route it into the
+    # same installation topology, preserving the advertised host-candidate source.
+    # These routes disappear with our host veth; host firewall policy is untouched.
+    for destination in ["198.18.102.0/24", "10.102.1.0/24", "10.102.2.0/24"]:
+        run("ip", "route", "add", destination, "via", "198.18.103.2")
+    network.exec(network.internet, "iptables", "-t", "nat", "-I", "POSTROUTING", "1",
+                 "-d", "198.18.103.1", "-j", "RETURN")
+    installation = network.participants["installation"]
+    ready = directory / "installation-proxy"
+    proxy = network.spawn(installation["namespace"], os.sys.executable, str(Path(__file__).resolve()),
+                          "forward", "4398", "198.18.103.1", str(ready))
+    wait_ready(ready, proxy, "Android installation TCP forwarder")
+    proxy = subprocess.Popen([os.sys.executable, str(Path(__file__).resolve()), "forward", "4398", "198.18.103.1"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    network.children.append(proxy)
+    wrapper = directory / "installation"
+    command = namespace_command(installation["namespace"], str(Path("target/debug/leo").resolve()))
+    command.insert(2, "--preserve-env=DATA_DIR,AGENT_HOME,WORKSPACE_ROOTS,NODE_ENV,WORKER_ENABLED,HOST,PORT,LEO_OFFICIAL_ORIGIN,LEO_INSTALLATION_CLAIM_CODE,LEO_INSTALLATION_NAME,LEO_DIRECT_STUN_URLS,LEO_DIRECT_PUBLIC_IP")
+    wrapper.write_text("#!/bin/sh\nexec " + shlex.join(command) + ' "$@"\n')
+    wrapper.chmod(0o700)
+    env = os.environ.copy()
+    env.update(LEO_NETWORK_INSTALLATION_BINARY=str(wrapper), LEO_NETWORK_ANDROID="true",
+               LEO_OFFICIAL_STUN_URL="stun:" + network.stun_address)
+    private = directory / "direct-fixture.json"
+    fixture_log = directory / "fixture.log"
+    with fixture_log.open("w") as output:
+        fixture = subprocess.Popen(["node", "--import", "tsx", "scripts/android-direct-fixture.mjs", str(private)],
+                                   env=env, stdout=output, stderr=output, start_new_session=True)
+    network.children.append(fixture)
+    network.groups.append(fixture.pid)
+    wait_ready(private, fixture, "Authenticated Android installation fixture", seconds=60)
+    adb("reverse", "tcp:4398", "tcp:4398")
+    for path in ["android/app/build/outputs/apk/debug/app-debug.apk",
+                 "android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"]:
+        adb("install", "-r", "-t", path)
+    adb("shell", "run-as", "dev.leo.manager", "mkdir", "-p", "files")
+    try:
+        adb("shell", "run-as", "dev.leo.manager", "sh", "-c", "'cat > files/direct-fixture.json'", input=private.read_bytes())
+        result = adb("shell", "am", "instrument", "-w", "-e", "class", "dev.leo.manager.data.DirectTransportDeviceTest",
+                     "-e", "leoDirectScenario", args.scenario, "dev.leo.manager.test/androidx.test.runner.AndroidJUnitRunner", text=True, timeout=360)
+        args.output.with_suffix(".instrumentation.txt").write_text(result.stdout)
+        if "OK (1 test)" not in result.stdout:
+            raise RuntimeError("Native Android transport scenario failed; see instrumentation result")
+        evidence = json.loads(adb("exec-out", "run-as", "dev.leo.manager", "cat", "files/direct-evidence.json", text=True).stdout)
+        expected = "relay" if args.scenario == "udp-blocked" else "direct"
+        if evidence["route"] != expected:
+            raise RuntimeError("Android's observed application response used the wrong route")
+        report["android"] = evidence
+        args.output.write_text(json.dumps(report) + "\n")
+    finally:
+        adb("shell", "am", "force-stop", "dev.leo.manager")
+        adb("shell", "run-as", "dev.leo.manager", "rm", "-f", "files/direct-fixture.json")
+        adb("reverse", "--remove", "tcp:4398")
 
 
 def browser(network, binary, directory, args, report):

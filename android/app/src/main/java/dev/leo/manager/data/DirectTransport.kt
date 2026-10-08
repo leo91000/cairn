@@ -187,9 +187,9 @@ class DirectChannel(
         if (closed.get()) return
         try {
             receiveFrame(packet)
-        } catch (error: IllegalArgumentException) {
+        } catch (_: Exception) {
+            // Invalid wire data is a transport failure; callers resume at their accepted cursor.
             close()
-            throw error
         }
     }
 
@@ -240,6 +240,7 @@ class DirectChannel(
             }
         val type = frame["type"]!!.jsonPrimitive.content
         require(type in setOf("response", "stream_start", "stream_chunk", "stream_end"))
+        if (type == "stream_chunk") decodeBody(frame, 65536)
         val exchange = pending[frame["id"]!!.jsonPrimitive.content] ?: return
         if (type == "stream_start") {
             synchronized(pending) {
@@ -352,6 +353,7 @@ class DirectChannel(
 
                         override fun read(target: ByteArray, start: Int, length: Int): Int {
                             if (length == 0) return 0
+                            if (!valid()) this@DirectChannel.close()
                             while (offset == chunk.size) {
                                 if (ended) return -1
                                 if (needsCredit) {
@@ -436,7 +438,10 @@ class DirectChannel(
             if (canceled()) throw IOException("Requête annulée")
             if (!valid()) close()
             exchange.failure?.let { throw it }
-            if (System.nanoTime() >= deadline) throw DirectLost("Connexion directe expirée")
+            if (System.nanoTime() >= deadline) {
+                close()
+                throw DirectLost("Connexion directe expirée")
+            }
             exchange.frames.poll(50, TimeUnit.MILLISECONDS)?.let {
                 return it
             }
@@ -491,6 +496,7 @@ class DirectChannel(
                             .array()
                     )
                 }
+            if (error is DirectLost) close()
             throw error
         }
     }
