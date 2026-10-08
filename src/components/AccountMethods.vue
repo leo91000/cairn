@@ -1,5 +1,11 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import {
+  computed,
+  onMounted,
+  onScopeDispose,
+  ref,
+  watch,
+} from 'vue'
 import AccountSecurity from './AccountSecurity.vue'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
@@ -15,19 +21,24 @@ const props = defineProps<{
   options: { google: boolean, github: boolean, passkeys: boolean }
   request: (route: string, body?: unknown) => Promise<any>
   embedded?: boolean
+  busy?: boolean
+  externalError?: string
 }>()
 const emit = defineEmits<{
   close: []
   oauth: [provider: 'google' | 'github']
   sessionUpdated: [session: any]
   signedOut: []
+  busy: [value: boolean]
+  clearError: []
 }>()
 const accountRequest = props.request
 const methods = ref<SignInMethod[]>([])
 const passkeyName = ref('My passkey')
 const challenge = ref('')
 const code = ref('')
-const busy = ref(false)
+const localBusy = ref(false)
+const busy = computed(() => localBusy.value || props.busy)
 const error = ref('')
 const confirmingIdentity = ref(false)
 const methodNames = {
@@ -38,8 +49,11 @@ const methodNames = {
 }
 const oauth = (provider: 'google' | 'github') => emit('oauth', provider)
 
+watch(localBusy, value => emit('busy', value), { flush: 'sync' })
+onScopeDispose(() => emit('busy', false))
+
 onMounted(async () => {
-  busy.value = true
+  localBusy.value = true
   try {
     methods.value = (await accountRequest('methods')).methods
   }
@@ -47,13 +61,14 @@ onMounted(async () => {
     error.value = cause instanceof Error ? cause.message : 'Unable to load sign-in methods.'
   }
   finally {
-    busy.value = false
+    localBusy.value = false
   }
 })
 
 async function removeMethod(id: string) {
-  busy.value = true
+  localBusy.value = true
   error.value = ''
+  emit('clearError')
   try {
     await accountRequest('methods/remove', { id })
     methods.value = (await accountRequest('methods')).methods
@@ -62,13 +77,14 @@ async function removeMethod(id: string) {
     error.value = cause instanceof Error ? cause.message : 'Unable to remove sign-in method.'
   }
   finally {
-    busy.value = false
+    localBusy.value = false
   }
 }
 
 async function registerPasskey() {
-  busy.value = true
+  localBusy.value = true
   error.value = ''
+  emit('clearError')
   try {
     if (!window.PublicKeyCredential?.parseCreationOptionsFromJSON || !PublicKeyCredential.parseRequestOptionsFromJSON)
       throw new Error('Passkeys are unavailable in this browser. Use another sign-in method.')
@@ -90,13 +106,14 @@ async function registerPasskey() {
       : cause instanceof Error ? cause.message : 'Unable to use this passkey.'
   }
   finally {
-    busy.value = false
+    localBusy.value = false
   }
 }
 
 async function enableEmail() {
-  busy.value = true
+  localBusy.value = true
   error.value = ''
+  emit('clearError')
   try {
     if (challenge.value) {
       emit('sessionUpdated', await accountRequest('verify', { challenge: challenge.value, code: code.value }))
@@ -113,7 +130,7 @@ async function enableEmail() {
     error.value = cause instanceof Error ? cause.message : 'Unable to enable email sign-in.'
   }
   finally {
-    busy.value = false
+    localBusy.value = false
   }
 }
 </script>
@@ -128,7 +145,7 @@ async function enableEmail() {
       confirmation-title="Confirm identity before changing sign-in methods"
       return-label="Back to sign-in methods"
       @close="confirmingIdentity = false"
-      @confirmed="confirmingIdentity = false; error = ''"
+      @confirmed="confirmingIdentity = false; error = ''; emit('clearError')"
       @signed-out="emit('signedOut')"
     />
     <template v-else>
@@ -138,8 +155,8 @@ async function enableEmail() {
       <p class="text-muted mb-4">
         {{ email }} · Keep at least one sign-in method.
       </p>
-      <UiAlert v-if="error">
-        {{ error }}
+      <UiAlert v-if="error || externalError">
+        {{ error || externalError }}
       </UiAlert>
       <ul class="grid gap-4 mb-6">
         <li v-for="method in methods" :key="method.id" class="border border-line rounded-xl p-4 grid gap-2 min-w-0">

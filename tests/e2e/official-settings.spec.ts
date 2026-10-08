@@ -21,12 +21,14 @@ test('the header and settings sections support keyboard navigation, deep links a
   await account.press('ArrowDown')
   const menu = page.getByRole('menu', { name: 'Account', exact: true })
   await expect(menu.getByRole('menuitem', { name: 'Account settings', exact: true })).toBeFocused()
+  await page.keyboard.press('c')
   await page.keyboard.press('End')
   await expect(menu.getByRole('menuitem', { name: 'Sign out', exact: true })).toBeFocused()
   await page.keyboard.press('Home')
   await page.keyboard.press('Escape')
   await expect(menu).not.toBeVisible()
   await expect(account).toBeFocused()
+  await expect(page).toHaveURL(/\/settings\/installation$/)
   await account.click()
   await page.getByRole('heading', { name: 'Settings', exact: true }).click()
   await expect(menu).not.toBeVisible()
@@ -128,4 +130,64 @@ test('the installation picker offers adding an installation after the options, a
   await expect(picker).toHaveAttribute('aria-expanded', 'false')
   await expect(page.getByLabel('Installation claim code', { exact: true })).not.toHaveValue('')
   await expect(page.getByLabel('Installation command', { exact: true })).toHaveValue(/--claim-code/)
+})
+
+test('an installation awaiting an update still permits account and installation settings', async ({ page }) => {
+  await useRelayForHttpMocks(page)
+  await page.goto(workspacePath('/'))
+  await signIn(page)
+  await page.route('**/api/account/session', async (route) => {
+    const response = await route.fetch()
+    const session = await response.json()
+    session.installations = session.installations.map((installation: object) => ({ ...installation, updateRequired: true }))
+    await route.fulfill({ json: session })
+  })
+  await page.route('**/api/installations', async (route) => {
+    const response = await route.fetch()
+    const installations = await response.json()
+    await route.fulfill({ json: installations.map((installation: object) => ({ ...installation, updateRequired: true })) })
+  })
+  await page.reload()
+  await expect(page.getByRole('alert')).toContainText('Mise à jour nécessaire')
+  await page.getByRole('button', { name: 'Installation settings', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'General', exact: true })).toBeVisible()
+  await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'Sensitive zone', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Detach installation', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Account', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Account settings', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Profile', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Account security', exact: true })).toBeVisible()
+})
+
+test('account method changes keep header actions disabled while the request is pending', async ({ page }) => {
+  await useRelayForHttpMocks(page)
+  await page.goto(workspacePath('/'))
+  await signIn(page)
+  await page.route('**/api/account/methods', route => route.fulfill({
+    json: {
+      methods: [
+        { id: 'email-fixture', kind: 'email', label: 'fixture@example.test' },
+        { id: 'passkey-fixture', kind: 'passkey', label: 'Backup key' },
+      ],
+    },
+  }))
+  let finish = () => {}
+  const pending = new Promise<void>(resolve => finish = resolve)
+  await page.route('**/api/account/methods/remove', async (route) => {
+    await pending
+    await route.fulfill({ status: 204 })
+  })
+  try {
+    await page.goto(workspacePath('/settings/account'))
+    const header = page.getByRole('banner', { name: 'Current installation' })
+    await expect(header.getByRole('combobox', { name: 'Current installation', exact: true })).toHaveCount(0)
+    await page.getByRole('button', { name: 'Remove Backup key', exact: true }).click()
+    await expect(header.getByRole('button', { name: 'Installation settings', exact: true })).toBeDisabled()
+    await expect(header.getByRole('button', { name: 'Account', exact: true })).toBeDisabled()
+    finish()
+    await expect(header.getByRole('button', { name: 'Installation settings', exact: true })).toBeEnabled()
+  }
+  finally {
+    finish()
+  }
 })

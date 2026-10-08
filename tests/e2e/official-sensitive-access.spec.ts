@@ -62,8 +62,7 @@ function expireProof(installation: InstallationFixture) {
   expireAccountProof(new URL(installation.databaseUrl), installation.email)
 }
 
-async function confirmIdentity(page: Page, installation: InstallationFixture) {
-  const confirm = page.getByRole('region', { name: 'Account security', exact: true }).getByRole('button', { name: 'Confirm identity', exact: true }).or(page.getByRole('dialog').getByRole('button', { name: 'Confirm identity', exact: true }))
+async function confirmIdentity(page: Page, installation: InstallationFixture, confirm = page.getByRole('button', { name: 'Confirm identity', exact: true })) {
   await expect(confirm).toBeVisible()
   await confirm.click()
   const previousEmails = installation.messages.length
@@ -163,7 +162,7 @@ test('confirming identity keeps other devices signed in until explicit revocatio
     await expect(page.getByRole('alert')).toContainText('Confirm your identity')
     await expect(page.getByText('Lost phone browser', { exact: true })).toBeVisible()
     expireProof(installation)
-    await confirmIdentity(page, installation)
+    await confirmIdentity(page, installation, page.getByRole('region', { name: 'Account security', exact: true }).getByRole('button', { name: 'Confirm identity', exact: true }))
     await expect(page.getByRole('heading', { name: 'Active sessions' })).toBeVisible()
     await expect(page.getByText('Lost phone browser', { exact: true })).toBeVisible()
     await other.reload()

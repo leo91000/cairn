@@ -50,6 +50,7 @@ const email = ref('')
 const code = ref('')
 const challenge = ref('')
 const busy = ref(false)
+const methodBusy = ref(false)
 const error = ref('')
 const claimCode = ref('')
 const installationCommand = computed(() => {
@@ -599,7 +600,7 @@ onMounted(async () => {
         :model-value="installation.id"
         label="Current installation"
         :options="installationOptions"
-        :disabled="busy || state.redirecting"
+        :disabled="busy || methodBusy || state.redirecting"
         compact
         hide-label
         action-label="Add an installation"
@@ -627,14 +628,14 @@ onMounted(async () => {
         class="size-11 p-0"
         aria-label="Installation settings"
         title="Installation settings"
-        :disabled="busy || state.redirecting"
+        :disabled="busy || methodBusy || state.redirecting"
         @click="router.push('/settings/installation')"
       >
         <Icon :name="Settings" :size="18" />
       </UiButton>
       <AccountMenu
         :email="session.account?.email || ''"
-        :disabled="busy || state.redirecting"
+        :disabled="busy || methodBusy || state.redirecting"
         @settings="router.push('/settings/account')"
         @sign-out="signOut"
       />
@@ -665,7 +666,7 @@ onMounted(async () => {
     <UiAlert v-if="installation.updateRequired" class="mx-4 my-2">
       Mise à jour nécessaire. This installation must finish updating before it can be used here.
     </UiAlert>
-    <App v-else>
+    <App v-if="!installation.updateRequired || router.currentRoute.value.path.startsWith('/settings')">
       <template #settings-account>
         <section aria-label="Profile" class="border-b border-line py-6">
           <h2>Profile</h2>
@@ -684,7 +685,10 @@ onMounted(async () => {
             :email="session.account?.email || ''"
             :options="options"
             :request="accountRequest"
+            :busy="busy"
             embedded
+            @busy="methodBusy = $event"
+            @clear-error="error = ''"
             @oauth="oauth"
             @session-updated="session = $event"
             @signed-out="redirect('/')"
@@ -751,18 +755,20 @@ onMounted(async () => {
           <h2 class="mb-4">
             Members &amp; invitations
           </h2>
-          <UiButton
-            v-if="installation.role === 'owner'"
-            size="small"
-            :disabled="busy"
-            @click="showSharing = !showSharing"
-          >
-            Share installation
-          </UiButton>
+          <div class="flex flex-wrap gap-3">
+            <UiButton
+              v-if="installation.role === 'owner'"
+              size="small"
+              :disabled="busy"
+              @click="showSharing = !showSharing"
+            >
+              Share installation
+            </UiButton>
+            <UiButton size="small" :disabled="busy" @click="showInvitations = !showInvitations">
+              Invitations
+            </UiButton>
+          </div>
           <InstallationSharing v-if="showSharing && installation.role === 'owner'" :installation-id="installation.id" @close="showSharing = false" />
-          <UiButton size="small" :disabled="busy" @click="showInvitations = !showInvitations">
-            Invitations
-          </UiButton>
           <PendingInvitations v-if="showInvitations" @accepted="id => openInstallation({ id, name: '' })" />
         </section>
       </template>
@@ -882,9 +888,13 @@ onMounted(async () => {
       />
       <AccountMethods
         v-else-if="session?.authenticated && showMethods"
+        :external-error="error"
         :email="session.account?.email || ''"
         :options="options"
         :request="accountRequest"
+        :busy="busy"
+        @busy="methodBusy = $event"
+        @clear-error="error = ''"
         @oauth="oauth"
         @session-updated="session = $event"
         @signed-out="redirect('/')"

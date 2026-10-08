@@ -48,6 +48,8 @@ async function show(last = false) {
 }
 
 function navigate(event: KeyboardEvent) {
+  if (!event.metaKey && !event.ctrlKey && !event.altKey)
+    event.stopPropagation()
   if (event.key === 'Escape') {
     event.preventDefault()
     event.stopPropagation()
