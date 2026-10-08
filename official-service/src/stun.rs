@@ -86,6 +86,7 @@ pub async fn serve_with_status(socket: UdpSocket, status: Status) -> io::Result<
                 continue;
             }
         };
+
         if window.elapsed() >= Duration::from_secs(1) {
             window = Instant::now();
             counts.clear();

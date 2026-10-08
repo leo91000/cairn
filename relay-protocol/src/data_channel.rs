@@ -57,7 +57,9 @@ impl ReassemblyBudget {
         if *reserved + bytes > MAX_FRAME {
             return Err("Installation reassembly limit exceeded");
         }
+
         *reserved += bytes;
+
         Ok(Reservation {
             budget: self.clone(),
             bytes,

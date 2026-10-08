@@ -106,9 +106,11 @@ impl PeerConnectionEventHandler for PeerEvents {
                     sdp_mid: Some("0".into()),
                     sdp_m_line_index: Some(0),
                 };
+
                 if !signal.valid() {
                     return Ok(());
                 }
+
                 self.direct.send_signal(&self.id, signal)
             });
         let public = if let Some(public) = self.public_ip
@@ -177,6 +179,7 @@ pub async fn run(
                     Ok((task, ())) => task,
                     Err(error) => error.id(),
                 };
+
                 if let Some(id) = peer_tasks.remove(&task) {
                     peers.remove(&id);
                     direct.release_peer(&id);
