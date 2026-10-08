@@ -6,8 +6,8 @@ import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
+import androidx.activity.compose.LocalActivity
 import androidx.compose.runtime.*
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -129,7 +129,7 @@ class DirectTransportDeviceTest {
         lateinit var activity: Activity
         var selectedVm by mutableStateOf<LeoViewModel?>(null)
         compose.setContent {
-            activity = LocalContext.current as Activity
+            activity = checkNotNull(LocalActivity.current)
             selectedVm?.let { vm -> LeoTheme { LeoApp(vm = vm) } }
         }
 
