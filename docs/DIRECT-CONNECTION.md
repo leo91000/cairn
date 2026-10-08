@@ -278,8 +278,11 @@ negotiation, covering official restart/tunnel reconnection without polling
 incompatible installations through the direct endpoints. Offline and
 hidden documents do not negotiate. An established peer in a hidden document
 closes after a 30-second grace period, stopping signaling, renewal and heartbeat;
-visibility restores negotiation. Network-information changes are debounced by
-one second, while online/offline events act immediately.
+visibility restores negotiation after any pending backoff deadline. A retry whose
+deadline elapsed while hidden resumes when visible, without negotiating in the
+background. Network-information changes restart negotiation only when `type` or
+`effectiveType` changes, debounced by one second; rtt/downlink estimates leave the
+peer, refusal state and backoff intact. Online/offline events act immediately.
 
 A local closing channel or exhausted direct slots cannot dispatch a request:
 the operation uses fallback capacity, including mutations and live subscriptions.
@@ -292,7 +295,7 @@ next interval instead of closing a healthy peer. Outgoing frames interleave one
 heartbeats; conservative payload reservations preserve the peer's aggregate
 reassembly limits.
 
-Network Information `change` and browser `online` events restart ICE through a
+Actual Network Information identity changes and browser `online` events restart ICE through a
 **fresh peer and fresh authorization**, with `iceRestart: true`, while the relay
 serves traffic. This deliberately preserves #101's refusal of renegotiation and
 second channels instead of extending the installation peer in the web ticket.
