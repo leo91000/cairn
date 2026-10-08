@@ -190,7 +190,12 @@ pub(super) async fn start(
         Some(account::confirmed_session(&service, &headers).await?.0)
     };
 
-    consume_limit(&service.pool, &format!("oauth:{}", peer.ip()), 30).await?;
+    consume_limit(
+        &service.pool,
+        &format!("oauth:{}", super::network::rate_limit_address(peer.ip())),
+        30,
+    )
+    .await?;
 
     let state = random_token();
     let browser = random_token();
@@ -679,7 +684,12 @@ async fn google_start(
     } else {
         Some(account::confirmed_session(service, headers).await?.0)
     };
-    consume_limit(&service.pool, &format!("oauth:{}", peer.ip()), 30).await?;
+    consume_limit(
+        &service.pool,
+        &format!("oauth:{}", super::network::rate_limit_address(peer.ip())),
+        30,
+    )
+    .await?;
 
     let challenge = random_token();
     let browser = random_token();

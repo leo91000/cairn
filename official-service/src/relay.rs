@@ -962,7 +962,15 @@ pub(super) async fn public_artifact(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     request: Request,
 ) -> Result<Response, ApiError> {
-    super::consume_limit(&service.pool, &format!("public-file:{}", peer.ip()), 30).await?;
+    super::consume_limit(
+        &service.pool,
+        &format!(
+            "public-file:{}",
+            super::network::rate_limit_address(peer.ip())
+        ),
+        30,
+    )
+    .await?;
     if uuid::Uuid::parse_str(&installation).is_err() || uuid::Uuid::parse_str(&token).is_err() {
         return Err(ApiError::Http(
             StatusCode::NOT_FOUND,
