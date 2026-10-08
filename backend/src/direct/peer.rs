@@ -358,6 +358,7 @@ async fn serve_peer(
 
         let (requests, input) = mpsc::channel(leo_relay_protocol::MAX_IN_FLIGHT);
         let (output, mut frames) = mpsc::channel(2);
+        let rejected = output.clone();
         let dispatcher = traffic.serve(router, lease.clone(), input, output);
 
         let writer = async {
@@ -392,14 +393,31 @@ async fn serve_peer(
                     }
                     event = channel.poll() => match event {
                         Some(DataChannelEvent::OnMessage(message)) if !message.is_string => {
-                            // Keep at most one packet while the bounded SCTP buffer
-                            // applies backpressure. Reservations held by this peer
-                            // still expire, allowing interleaved transfers to recover.
+                            // Keep at most one packet while another peer holds capacity.
+                            // Self-blocking transfers are rejected so this ordered
+                            // channel can finish its already reserved assemblies.
                             let frame = loop {
                                 match decoder.push(&message.data) {
                                     Ok(frame) => break frame,
                                     Err(DecodeError::Busy) => {
                                         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                                    }
+                                    Err(DecodeError::Rejected(id)) => {
+                                        if let Some(id) = id {
+                                            let response = leo_relay_protocol::Frame::Response(
+                                                leo_relay_protocol::ApiResponse {
+                                                    id,
+                                                    status: 503,
+                                                    headers: Vec::new(),
+                                                    body: b"Direct reassembly busy.".to_vec(),
+                                                },
+                                            );
+                                            rejected
+                                                .send(response)
+                                                .await
+                                                .map_err(|_| Error::unavailable("Direct response queue closed."))?;
+                                        }
+                                        break None;
                                     }
                                     Err(DecodeError::Invalid(message)) => return Err(Error::bad(message)),
                                 }

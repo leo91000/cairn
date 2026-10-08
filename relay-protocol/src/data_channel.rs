@@ -65,6 +65,7 @@ struct Reservation {
 #[derive(Debug, PartialEq, Eq)]
 pub enum DecodeError {
     Busy,
+    Rejected(Option<String>),
     Invalid(&'static str),
 }
 
@@ -72,6 +73,7 @@ impl std::fmt::Display for DecodeError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Busy => formatter.write_str("Reassembly capacity busy"),
+            Self::Rejected(_) => formatter.write_str("Reassembly transfer rejected"),
             Self::Invalid(message) => formatter.write_str(message),
         }
     }
@@ -134,7 +136,7 @@ impl Drop for Reservation {
     }
 }
 
-// Retain only sequence metadata after expiry, so late fragments are drained
+// Retain only sequence metadata after expiry or rejection, so fragments are drained
 // without allocating or dispatching an expired request, and without closing ICE.
 struct Discarded {
     total: usize,
@@ -206,7 +208,7 @@ impl FrameDecoder {
         }
         if let Some(frame) = self.discarded.get_mut(&id) {
             if frame.total != total || frame.received != offset {
-                return Err("Invalid expired fragment sequence".into());
+                return Err("Invalid discarded fragment sequence".into());
             }
             frame.received += payload.len();
             if frame.received == total {
@@ -221,13 +223,33 @@ impl FrameDecoder {
                 return Err("Too many incomplete transfers".into());
             }
             let reserved: usize = self.pending.values().map(|frame| frame.total).sum();
-            if reserved + total > MAX_FRAME {
-                return Err(DecodeError::Busy);
-            }
+            let reservation = if reserved + total > MAX_FRAME {
+                Err(DecodeError::Busy)
+            } else {
+                self.budget.reserve(total)
+            };
+            let reservation = match reservation {
+                Ok(reservation) => reservation,
+                Err(DecodeError::Busy) if !self.pending.is_empty() => {
+                    // Backpressure here would prevent this ordered channel from
+                    // delivering the fragments that release its own reservation.
+                    if payload.len() < total {
+                        self.discarded.insert(
+                            id,
+                            Discarded {
+                                total,
+                                received: payload.len(),
+                            },
+                        );
+                    }
+                    return Err(DecodeError::Rejected(request_id_prefix(payload)));
+                }
+                Err(error) => return Err(error),
+            };
             self.pending.insert(
                 id,
                 Assembly {
-                    _reservation: self.budget.reserve(total)?,
+                    _reservation: reservation,
                     total,
                     bytes: Vec::new(),
                     started: Instant::now(),
@@ -255,4 +277,50 @@ impl FrameDecoder {
             .map(Some)
             .map_err(|_| DecodeError::Invalid("Invalid application frame"))
     }
+}
+
+// Canonical request frames put type and id before their body. Read that bounded
+// prefix solely to report a rejected request; never dispatch a partial frame.
+fn request_id_prefix(packet: &[u8]) -> Option<String> {
+    struct Prefix<'a>(&'a mut Option<String>);
+
+    impl<'de> serde::de::Visitor<'de> for Prefix<'_> {
+        type Value = ();
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a request frame prefix")
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut kind = None;
+            let mut id: Option<String> = None;
+            while let Some(key) = map.next_key::<String>()? {
+                match key.as_str() {
+                    "type" => kind = Some(map.next_value::<String>()?),
+                    "id" => id = Some(map.next_value::<String>()?),
+                    _ => {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                    }
+                }
+                if let (Some(kind), Some(id)) = (&kind, &id) {
+                    *self.0 = (kind == "request" && !id.is_empty() && id.len() <= 128)
+                        .then(|| id.clone());
+                    return Ok(());
+                }
+            }
+            Ok(())
+        }
+    }
+
+    let mut id = None;
+    // deserialize_map checks the closing brace after the visitor returns. The
+    // fragment need not contain it; only the identity already read is retained.
+    let _ = serde::de::Deserializer::deserialize_map(
+        &mut serde_json::Deserializer::from_slice(packet),
+        Prefix(&mut id),
+    );
+    id
 }

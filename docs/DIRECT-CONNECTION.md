@@ -246,12 +246,18 @@ budget** (about 21.5 MB). One `MAX_FRAME` is reserved for the owner; all members
 share the other. Each verified account can reserve at most `MAX_FRAME` across
 its peers, and each peer has the same declared-size cap. Each transfer reserves
 its declared total before buffering; completion, abandonment, timeout,
-connection closure or panic releases that reservation. A shortage applies
-backpressure rather than closing the waiting peer: it retains one packet of at
-most 16 KiB while its bounded SCTP receive buffer pauses input. Expiry still
+connection closure or panic releases that reservation. A shortage on a peer
+without incomplete assemblies applies backpressure: it retains one packet of
+at most 16 KiB while its bounded SCTP receive buffer pauses input. Expiry still
 runs during this wait and releases the holder's reservation after 30 seconds.
-Expired transfers are discarded without dispatch, retaining only bounded
-sequence metadata to drain late fragments. The peer stays alive; the affected
+If the waiting channel already holds assemblies, blocking its ordered input
+would prevent their completion. Instead, only the new transfer is rejected:
+a request receives a 503 using its initial fragment's bounded request ID.
+Canonical request frames serialize `type` and `id` before the body. If that
+identity is absent from the initial fragment, the transfer is drained without
+dispatch and the caller's existing response deadline applies. Rejected and
+expired transfers retain only bounded sequence metadata to drain fragments,
+counted with pending assemblies toward the 32-transfer limit. The peer stays alive; the affected
 request uses its existing response deadline and safe retry rules. Buffers grow only as bytes
 arrive and their capacity is bounded by the reservation. Sparse declarations
 therefore cannot build up 32 independent maximum-frame buffers. Application limits remain 32 requests, 24 streams globally, 8 streams per

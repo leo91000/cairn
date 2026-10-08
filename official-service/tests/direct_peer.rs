@@ -1196,6 +1196,86 @@ async fn concurrent_large_uploads_share_account_capacity_without_closing_either_
 }
 
 #[tokio::test]
+async fn interleaved_uploads_on_one_peer_reject_only_the_excess_transfer() {
+    use leo_relay_protocol::data_channel::EncodedFrame;
+    let router = axum::Router::new()
+        .route(
+            "/api/fixture/upload",
+            axum::routing::post(|bytes: axum::body::Bytes| async move { bytes.len().to_string() }),
+        )
+        .layer(axum::extract::DefaultBodyLimit::max(
+            leo_relay_protocol::MAX_BODY,
+        ));
+    let mut relay = RelayedInstallation::new(router).await;
+    production_connector(&mut relay).await;
+    let (peer, channel, _) = client(&relay).await;
+    let upload = |id| {
+        let Frame::Request(mut input) = request(id, "/api/fixture/upload") else {
+            unreachable!()
+        };
+        input.method = "POST".into();
+        input.body = vec![0xAB; 4 * 1024 * 1024];
+        Frame::Request(input)
+    };
+    let first = EncodedFrame::new(1, &upload("first-upload")).unwrap();
+    let mut first_packets = first.packets();
+    channel
+        .send(bytes::BytesMut::from(
+            first_packets.next().unwrap().as_slice(),
+        ))
+        .await
+        .unwrap();
+    send_frame(channel.as_ref(), 2, &request("barrier", "/api/chats")).await;
+    assert!(
+        matches!(response(channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+
+    let second = EncodedFrame::new(3, &upload("excess-upload")).unwrap();
+    let mut second_packets = second.packets();
+    channel
+        .send(bytes::BytesMut::from(
+            second_packets.next().unwrap().as_slice(),
+        ))
+        .await
+        .unwrap();
+    let rejected = tokio::time::timeout(Duration::from_secs(2), response(channel.as_ref()))
+        .await
+        .expect("excess transfer must be rejected without blocking the first upload");
+    assert!(
+        matches!(rejected, Frame::Response(reply) if reply.id == "excess-upload" && reply.status == 503)
+    );
+    for (first_packet, second_packet) in first_packets.zip(second_packets) {
+        channel
+            .send(bytes::BytesMut::from(first_packet.as_slice()))
+            .await
+            .unwrap();
+        channel
+            .send(bytes::BytesMut::from(second_packet.as_slice()))
+            .await
+            .unwrap();
+    }
+    assert!(
+        matches!(response(channel.as_ref()).await, Frame::Response(reply) if reply.id == "first-upload" && reply.status == 200 && reply.body == b"4194304")
+    );
+    send_frame(
+        channel.as_ref(),
+        4,
+        &request("after-interleaving", "/api/chats"),
+    )
+    .await;
+    assert!(
+        matches!(response(channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    assert!(!relay.installation.shutdown.is_cancelled());
+    peer.close().await.unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
 async fn reassembly_waiters_survive_abort_close_and_expiry_of_the_holder() {
     let mut relay = RelayedInstallation::new(axum::Router::new()).await;
     production_connector(&mut relay).await;
