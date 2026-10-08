@@ -174,12 +174,13 @@ private fun LeoAppContent(
                     modifier =
                         Modifier.semantics { contentDescription = "Choisir une installation" },
                 ) {
-                    InstallationLabel(installation)
+                    InstallationLabel(installation, route = state.transportRoute)
                 }
             else
                 InstallationLabel(
                     installation,
                     Modifier.padding(horizontal = 8.dp, vertical = 12.dp),
+                    route = state.transportRoute,
                 )
             DropdownMenu(expanded = choosing, onDismissRequest = { choosing = false }) {
                 state.session.installations.forEach { choice ->
@@ -226,10 +227,26 @@ private fun LeoAppContent(
 }
 
 @Composable
-private fun InstallationLabel(installation: Installation, modifier: Modifier = Modifier) {
+private fun InstallationLabel(
+    installation: Installation,
+    modifier: Modifier = Modifier,
+    route: String? = null,
+) {
     Column(modifier) {
         Text("${installation.name} · ${if (installation.online) "En ligne" else "Hors ligne"}")
-        Text(installation.role.label, style = MaterialTheme.typography.labelSmall)
+        Row {
+            Text(installation.role.label, style = MaterialTheme.typography.labelSmall)
+            if (installation.online && route != null)
+                Text(
+                    " · ${if (route == "direct") "Direct" else "Relais"}",
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier =
+                        Modifier.semantics {
+                            contentDescription =
+                                "Transport : ${if (route == "direct") "Direct" else "Relais"}"
+                        },
+                )
+        }
     }
 }
 

@@ -39,7 +39,7 @@ The publisher provides a consolidated
 including WebRTC's BSD notice and bundled dependencies' notices. Preserve that
 notice in distribution materials; the established Android packaging location is
 `android/app/src/main/assets/licenses/`, alongside existing font notices. Use
-`webrtc-150.7871.01-NOTICES.md` there, sourced from this exact release tag.
+`webrtc-150.7871.01-NOTICES.txt` there, sourced from this exact release tag.
 The downloaded notice is 788,358 bytes, SHA-256
 `d1f9382c6878ac024155fd6d44a5977329108bb8b0a01cea40e4a2f1d7de252e`.
 

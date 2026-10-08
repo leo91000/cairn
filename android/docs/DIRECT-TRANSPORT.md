@@ -24,3 +24,23 @@ service. No TURN, local password, anonymous local access or deployment is added.
 
 Library selection, measured APK impact and validation evidence will be recorded
 here and in the implementation PR before it becomes ready for review.
+
+## Native interoperability decisions
+
+The pinned SDK advertises the optional `renomination` ICE extension. The delivered
+v4 verifier deliberately accepts `trickle` only. Android removes exactly that
+optional advertisement from its offer (including the native local description),
+while preserving its DTLS fingerprint and ICE credentials; unknown future
+attributes still fail verification and fall back to the relay. Replaying the
+captured private offer through the existing `DirectSignal::valid` verifier went
+from false to true with this single change. No verifier policy is widened.
+
+The upstream [transport options](https://webrtc.googlesource.com/src/+/8990f2a572516b5ca0eba08b2982044d7a47e215/p2p/base/transport_description_factory.h)
+define renomination as requiring both peers' support. The native dependency and
+third-party notices are described in [the artifact research](../../docs/ANDROID-DIRECT-TRANSPORT.md).
+
+On a default-network change, Android immediately closes the current traffic
+adapter, resumes reads/subscriptions over the relay, then creates a new ICE peer
+and authorization. The delivered installation accepts an offer for a fresh peer,
+not renegotiation on an established peer; Android calls native `restartIce()` and
+requests an ICE restart for the replacement. No agent execution is stopped.
