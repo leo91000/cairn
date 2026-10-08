@@ -113,6 +113,16 @@ also drops handshake packets and ICE retains its strict 30-second limit.
 Other failures and all other scenario route expectations remain strict. Every
 sample's actual route stays in the report, including successful fallback reads.
 
+Packet-loss reports also include `directNegotiations`: `attempts`, `direct`,
+`relay`, and `ratio` (direct responses divided by attempts, from 0 to 1). These
+counts describe only the three independent Rust negotiations, using their actual
+application-response routes; browser bootstrap and stream observations are
+excluded. The summary is written before qualification assertions, so an all-relay
+failure still records its zero direct ratio. Compare this field in
+`direct-relay-network-evidence/packet-loss.json` across CI runs. The requirement
+for at least one direct read and the exact ICE-timeout diagnostic for relay reads
+are unchanged. Explicit relay expectations also remain strict.
+
 The numeric qualification browser is launched with Chromium's
 `--disable-features=WebRtcHideLocalIpsWithMdns` option so that host-candidate ICE
 paths can be tested explicitly. The production web does not set this option or

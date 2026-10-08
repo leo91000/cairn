@@ -25,6 +25,11 @@ interface GrantResponse {
   iceServers: RTCIceServer[]
 }
 
+interface NetworkInformation extends EventTarget {
+  type?: string
+  effectiveType?: string
+}
+
 class SignalingError extends Error {
   constructor(readonly status: number) { super('Direct signaling unavailable') }
 }
@@ -72,6 +77,7 @@ export class InstallationTransport {
   private timer?: ReturnType<typeof setTimeout>
   private expiry?: ReturnType<typeof setTimeout>
   private retry?: ReturnType<typeof setTimeout>
+  private retryAt = 0
   private generation = 0
   private started = false
   private stopped = true
@@ -84,6 +90,9 @@ export class InstallationTransport {
   private blocked = false
   private failures = 0
   private networkTimer?: ReturnType<typeof setTimeout>
+  private network?: NetworkInformation
+  private networkType?: string
+  private effectiveType?: string
   private online?: boolean
 
   constructor(private readonly context: Context) {}
@@ -124,8 +133,10 @@ export class InstallationTransport {
     this.failures = 0
     window.addEventListener('online', this.networkChanged)
     window.addEventListener('offline', this.networkChanged)
-    const network = (navigator as Navigator & { connection?: EventTarget }).connection
-    network?.addEventListener('change', this.networkEstimateChanged)
+    this.network = (navigator as Navigator & { connection?: NetworkInformation }).connection
+    this.networkType = this.network?.type
+    this.effectiveType = this.network?.effectiveType
+    this.network?.addEventListener('change', this.networkEstimateChanged)
     document.addEventListener('visibilitychange', this.visibilityChanged)
     void this.connect(false)
   }
@@ -133,7 +144,7 @@ export class InstallationTransport {
   private visibilityChanged = () => {
     clearTimeout(this.hidden)
     if (document.hidden) {
-      this.hidden = setTimeout(() => this.fallback(), 30000)
+      this.hidden = setTimeout(() => this.fallback(true), 30000)
     }
     else if (!this.peer) {
       void this.connect(false)
@@ -142,6 +153,8 @@ export class InstallationTransport {
 
   private networkChanged = () => {
     clearTimeout(this.networkTimer)
+    this.networkType = this.network?.type
+    this.effectiveType = this.network?.effectiveType
     this.blocked = false
     this.failures = 0
     this.fallback()
@@ -151,7 +164,8 @@ export class InstallationTransport {
 
   private networkEstimateChanged = () => {
     clearTimeout(this.networkTimer)
-    this.networkTimer = setTimeout(this.networkChanged, 1000)
+    if (this.network?.type !== this.networkType || this.network?.effectiveType !== this.effectiveType)
+      this.networkTimer = setTimeout(this.networkChanged, 1000)
   }
 
   private route(route: TransportRoute) {
@@ -161,7 +175,7 @@ export class InstallationTransport {
     window.dispatchEvent(new Event('leo-transport-change'))
   }
 
-  private fallback() {
+  private fallback(preserveRetry = false) {
     this.generation++
     this.controlAbort?.abort()
     clearTimeout(this.handshake)
@@ -171,7 +185,12 @@ export class InstallationTransport {
     this.route('relay')
     clearTimeout(this.timer)
     clearTimeout(this.expiry)
-    clearTimeout(this.retry)
+    if (!preserveRetry) {
+      clearTimeout(this.retry)
+      this.retry = undefined
+      this.retryAt = 0
+    }
+
     this.signals?.close()
     this.signals = undefined
     this.channel?.close()
@@ -187,9 +206,13 @@ export class InstallationTransport {
     if (error instanceof DOMException && error.name === 'NotAllowedError')
       this.blocked = true
     this.fallback()
-    if (!this.stopped && !this.blocked && navigator.onLine && !document.hidden) {
+    if (!this.stopped && !this.blocked && navigator.onLine) {
       const delay = Math.min(300000, 30000 * 2 ** Math.min(this.failures++, 4))
-      this.retry = setTimeout(() => void this.connect(false), delay)
+      this.retryAt = Date.now() + delay
+      this.retry = setTimeout(() => {
+        this.retry = undefined
+        void this.connect(false)
+      }, delay)
     }
   }
 
@@ -202,12 +225,15 @@ export class InstallationTransport {
     document.removeEventListener('visibilitychange', this.visibilityChanged)
     window.removeEventListener('online', this.networkChanged)
     window.removeEventListener('offline', this.networkChanged)
-    const network = (navigator as Navigator & { connection?: EventTarget }).connection
-    network?.removeEventListener('change', this.networkEstimateChanged)
+    this.network?.removeEventListener('change', this.networkEstimateChanged)
+    this.network = undefined
   }
 
   private async connect(iceRestart: boolean) {
     if (this.stopped || this.blocked || this.online === false || !this.context.authenticated || !navigator.onLine || document.hidden)
+      return
+    // Visibility resumes an expired retry, but never shortens its deadline.
+    if (Date.now() < this.retryAt)
       return
     this.fallback()
     this.controlAbort = new AbortController()

@@ -450,10 +450,21 @@ it.each([
   ['unsupported installation', () => Response.json({ available: false })],
   ['refused authorization', () => Response.json({ error: 'Refused' }, { status: 403 })],
 ] as const)('stops direct retries for %s until the network changes', async (_, response) => {
+  const network = Object.assign(new EventTarget(), {
+    type: 'wifi',
+    effectiveType: '4g',
+    rtt: 50,
+    downlink: 10,
+  })
+  Object.assign(navigator, { connection: network })
   const fetch = vi.fn(() => Promise.resolve(response()))
   vi.stubGlobal('fetch', fetch)
   const { state } = await import('../src/api')
   Object.assign(state, { authenticated: true, ready: true })
+  await vi.advanceTimersByTimeAsync(600000)
+  expect(fetch).toHaveBeenCalledTimes(1)
+  Object.assign(network, { rtt: 100, downlink: 5 })
+  network.dispatchEvent(new Event('change'))
   await vi.advanceTimersByTimeAsync(600000)
   expect(fetch).toHaveBeenCalledTimes(1)
   document.dispatchEvent(new Event('visibilitychange'))
@@ -465,6 +476,8 @@ it.each([
 })
 
 it('backs off capacity failures exponentially while relay requests remain usable', async () => {
+  const network = Object.assign(new EventTarget(), { effectiveType: '4g', rtt: 50, downlink: 10 })
+  Object.assign(navigator, { connection: network })
   const fetch = vi.fn((url: string) => Promise.resolve(url.endsWith('/authorize')
     ? Response.json({ error: 'Direct connection capacity reached' }, { status: 503 })
     : Response.json({ marker: 'relay' })))
@@ -476,6 +489,8 @@ it('backs off capacity failures exponentially while relay requests remain usable
   expect(attempts()).toBe(1)
   await vi.advanceTimersByTimeAsync(30000)
   expect(attempts()).toBe(2)
+  Object.assign(network, { rtt: 100, downlink: 5 })
+  network.dispatchEvent(new Event('change'))
   await vi.advanceTimersByTimeAsync(59999)
   expect(attempts()).toBe(2)
   await vi.advanceTimersByTimeAsync(1)
@@ -483,6 +498,60 @@ it('backs off capacity failures exponentially while relay requests remain usable
   await vi.advanceTimersByTimeAsync(119999)
   expect(attempts()).toBe(3)
   expect(await api('/chats')).toEqual({ marker: 'relay' })
+})
+
+it('keeps the capacity backoff deadline when a hidden tab becomes visible', async () => {
+  vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(Response.json({ error: 'Direct connection capacity reached' }, { status: 503 }))))
+  const { state } = await import('../src/api')
+  Object.assign(state, { authenticated: true, ready: true })
+  await vi.advanceTimersByTimeAsync(30000)
+  expect(fetch).toHaveBeenCalledTimes(2)
+  Object.defineProperty(document, 'hidden', { value: true, configurable: true })
+  document.dispatchEvent(new Event('visibilitychange'))
+  await vi.advanceTimersByTimeAsync(40000)
+  Object.defineProperty(document, 'hidden', { value: false, configurable: true })
+  document.dispatchEvent(new Event('visibilitychange'))
+  await vi.advanceTimersByTimeAsync(19999)
+  expect(fetch).toHaveBeenCalledTimes(2)
+  await vi.advanceTimersByTimeAsync(1)
+  expect(fetch).toHaveBeenCalledTimes(3)
+  await vi.advanceTimersByTimeAsync(119999)
+  expect(fetch).toHaveBeenCalledTimes(3)
+  await vi.advanceTimersByTimeAsync(1)
+  expect(fetch).toHaveBeenCalledTimes(4)
+})
+
+it('resumes an elapsed backoff once visible without negotiating in the hidden tab', async () => {
+  vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(Response.json({ error: 'Direct connection capacity reached' }, { status: 503 }))))
+  const { state } = await import('../src/api')
+  Object.assign(state, { authenticated: true, ready: true })
+  await vi.advanceTimersByTimeAsync(0)
+  Object.defineProperty(document, 'hidden', { value: true, configurable: true })
+  document.dispatchEvent(new Event('visibilitychange'))
+  await vi.advanceTimersByTimeAsync(60000)
+  expect(fetch).toHaveBeenCalledTimes(1)
+  Object.defineProperty(document, 'hidden', { value: false, configurable: true })
+  document.dispatchEvent(new Event('visibilitychange'))
+  await vi.advanceTimersByTimeAsync(0)
+  expect(fetch).toHaveBeenCalledTimes(2)
+  await vi.advanceTimersByTimeAsync(59999)
+  expect(fetch).toHaveBeenCalledTimes(2)
+  await vi.advanceTimersByTimeAsync(1)
+  expect(fetch).toHaveBeenCalledTimes(3)
+})
+
+it('waits for the retry deadline after a direct failure in a hidden tab', async () => {
+  const { channel } = await direct()
+  Object.defineProperty(document, 'hidden', { value: true, configurable: true })
+  document.dispatchEvent(new Event('visibilitychange'))
+  channel.dispatchEvent(new Event('close'))
+  await vi.advanceTimersByTimeAsync(10000)
+  Object.defineProperty(document, 'hidden', { value: false, configurable: true })
+  document.dispatchEvent(new Event('visibilitychange'))
+  await vi.advanceTimersByTimeAsync(19999)
+  expect(Peer.all).toHaveLength(1)
+  await vi.advanceTimersByTimeAsync(1)
+  expect(Peer.all).toHaveLength(2)
 })
 
 it('renegotiates after the existing availability check observes installation recovery', async () => {
@@ -570,11 +639,40 @@ it('continues candidate signaling after one signal is refused', async () => {
   expect(signaled).toHaveLength(2)
 })
 
-it('debounces connection estimate changes instead of restarting ICE for each event', async () => {
-  const network = new EventTarget()
+it('keeps a working direct peer when only network estimates change', async () => {
+  const network = Object.assign(new EventTarget(), {
+    type: 'wifi',
+    effectiveType: '4g',
+    rtt: 50,
+    downlink: 10,
+  })
+  Object.assign(navigator, { connection: network })
+  const { api, channel, state } = await direct()
+  Object.assign(network, { rtt: 100, downlink: 5 })
+  network.dispatchEvent(new Event('change'))
+  await vi.advanceTimersByTimeAsync(1000)
+  expect(state.transportRoute).toBe('direct')
+  expect(channel.readyState).toBe('open')
+  expect(Peer.all).toHaveLength(1)
+  const read = api('/chats')
+  await vi.advanceTimersByTimeAsync(0)
+  const request = JSON.parse(new TextDecoder().decode(channel.packets.at(-1)!.subarray(13)))
+  reply(channel, {
+    type: 'response',
+    id: request.id,
+    status: 200,
+    headers: [],
+    body: btoa('{"marker":"direct"}'),
+  })
+  expect(await read).toEqual({ marker: 'direct' })
+})
+
+it.each(['type', 'effectiveType'] as const)('debounces actual network %s changes before restarting ICE', async (field) => {
+  const network = Object.assign(new EventTarget(), { type: 'wifi', effectiveType: '4g' })
   Object.assign(navigator, { connection: network })
   const { state } = await direct()
   const peers = Peer.all.length
+  network[field] = field === 'type' ? 'cellular' : '3g'
   for (let i = 0; i < 10; i++)
     network.dispatchEvent(new Event('change'))
   await vi.advanceTimersByTimeAsync(999)
@@ -582,6 +680,17 @@ it('debounces connection estimate changes instead of restarting ICE for each eve
   expect(state.transportRoute).toBe('direct')
   await vi.advanceTimersByTimeAsync(1)
   expect(Peer.all).toHaveLength(peers + 1)
+})
+
+it('ignores estimate notifications when network identity fields are unavailable', async () => {
+  const network = new EventTarget()
+  Object.assign(navigator, { connection: network })
+  const { channel, state } = await direct()
+  network.dispatchEvent(new Event('change'))
+  await vi.advanceTimersByTimeAsync(1000)
+  expect(state.transportRoute).toBe('direct')
+  expect(channel.readyState).toBe('open')
+  expect(Peer.all).toHaveLength(1)
 })
 
 it('reassembles fragmented UTF-8 responses and discards an abandoned partial response', async () => {

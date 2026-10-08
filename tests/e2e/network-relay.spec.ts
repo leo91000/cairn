@@ -350,19 +350,35 @@ test('authenticated browser and Rust client keep using the observed route under 
 
     const output = process.env.LEO_NETWORK_OUTPUT!
     const report = JSON.parse(await readFile(output, 'utf8'))
+    const rustReads = evidence.filter(item => item.operation.startsWith('rust-read'))
+    const directReads = rustReads.filter(item => item.route === 'direct').length
+    const directNegotiations = process.env.LEO_NETWORK_SCENARIO === 'packet-loss'
+      ? {
+          attempts: rustReads.length,
+          direct: directReads,
+          relay: rustReads.filter(item => item.route === 'relay').length,
+          ratio: directReads / rustReads.length,
+        }
+      : undefined
     await writeFile(output, `${JSON.stringify({
       ...report,
       expectedRoute: process.env.LEO_NETWORK_EXPECT_ROUTE || 'relay',
       expectedRustRoute: process.env.LEO_NETWORK_EXPECT_RUST_ROUTE,
       observations: evidence,
+      directNegotiations,
       revocations,
       mdnsCandidates,
     })}\n`)
 
     const packetLossReads = process.env.LEO_NETWORK_SCENARIO === 'packet-loss' && process.env.LEO_NETWORK_EXPECT_RUST_ROUTE === 'direct'
-      ? evidence.filter(item => item.operation.startsWith('rust-read'))
+      ? rustReads
       : []
     if (packetLossReads.length) {
+      const saved = JSON.parse(await readFile(output, 'utf8'))
+      expect(saved).toHaveProperty('directNegotiations')
+      expect(saved.directNegotiations.attempts).toBe(3)
+      expect(saved.directNegotiations.direct + saved.directNegotiations.relay).toBe(3)
+      expect([1 / 3, 2 / 3, 1]).toContain(saved.directNegotiations.ratio)
       expect(packetLossReads).toHaveLength(3)
       expect(packetLossReads.some(item => item.route === 'direct'), 'at least one independent Rust negotiation must use direct under packet loss').toBe(true)
     }
