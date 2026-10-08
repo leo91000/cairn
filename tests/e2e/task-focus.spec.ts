@@ -141,7 +141,7 @@ test('mission cards and sheet show the schedule, the brief and the history, as o
   await expect(sheet.getByRole('region', { name: 'Mission brief' })).toContainText('Review upstream changes')
   await page.screenshot({ animations: 'disabled', path: test.info().outputPath('mission-sheet-mobile-dark.png') })
   await sheet.getByRole('list', { name: 'Run history' }).getByRole('link').first().click()
-  await expect(page).toHaveURL(`/runs/${run.id}`)
+  await expect(page).toHaveURL(workspacePath(`/runs/${run.id}`))
   await expect(page.getByRole('heading', { name: 'The upstream review is complete.' })).toBeVisible()
   await page.goBack()
   await page.setViewportSize({ width: 1440, height: 960 })

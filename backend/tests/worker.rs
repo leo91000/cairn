@@ -31,8 +31,8 @@ use tokio::{
     process::{Child, Command},
 };
 
-/// The real manager runtime in a separate process, with the test-only browser
-/// adapter for legacy worker control journeys. Production access is tested
+/// The real manager runtime in a separate process, with the synthetic relay
+/// transport for installation-only worker tests. Browser access is tested
 /// through the official service and real installation relay.
 struct Fixture {
     root: TempDir,

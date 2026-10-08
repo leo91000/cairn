@@ -61,7 +61,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     if (headings[destination])
       await expect(page.getByRole('heading', { name: headings[destination], exact: true }).first()).toBeVisible()
     if (url.startsWith('/runs/')) {
-      await page.locator(`.run-table a[href="${url}"]`).first().click()
+      await page.locator(`.run-table a[href="${workspacePath(url)}"]`).first().click()
       await expect(page.locator('.run-title-meta')).toBeVisible()
     }
   }

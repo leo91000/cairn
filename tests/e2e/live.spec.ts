@@ -154,13 +154,18 @@ test('two independent clients follow deltas, recover offline, refresh mid-answer
     await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:stream' })
     await expect(message(page)).toContainText('005')
     await expect(message(other)).toContainText('005')
+    // The official transport permits one finite read before its first live batch.
+    // Once connected, deltas must arrive without recurring history/metadata reads.
+    requests.length = 0
     await second.setOffline(true)
     await expect(message(page)).toContainText('020')
     await expect(other.getByRole('status').filter({ hasText: /Offline|Reconnecting/ })).toBeVisible()
     await second.setOffline(false)
     await expect(message(other)).toContainText('025')
+    expect(requests.some(url => /\/events\?|\/artifacts$/.test(url))).toBe(false)
     await page.reload()
     await expect(message(page)).toContainText('035')
+    requests.length = 0
     await expect(message(page)).not.toContainText('100')
     await page.setViewportSize({ width: 390, height: 844 })
     await page.emulateMedia({ colorScheme: 'dark' })

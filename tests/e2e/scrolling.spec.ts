@@ -104,7 +104,7 @@ test('a tab click survives completion of the cached run refresh', async ({ page,
     await route.continue()
   })
   try {
-    await page.locator(`.run-table a[href="/runs/${run.id}"]`).first().click()
+    await page.locator(`.run-table a[href="${workspacePath(`/runs/${run.id}`)}"]`).first().click()
     const updating = page.getByRole('status').filter({ hasText: 'Updating…' })
     await expect(updating).toBeVisible()
     const tab = page.getByRole('button', { name: 'Result', exact: true })
