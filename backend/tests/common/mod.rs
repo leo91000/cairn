@@ -160,51 +160,44 @@ pub async fn read_text(response: Response) -> String {
     String::from_utf8(read_bytes(response).await.to_vec()).unwrap()
 }
 
-/// The cookie and CSRF token of an owner session.
+/// A synthetic authenticated relay context, confined to handler tests.
 #[derive(Clone)]
-pub struct Session {
-    pub cookie: String,
-    pub csrf: String,
+pub struct RelayContext {
+    token: String,
 }
 
-impl Session {
-    /// Reads a session returned by `Auth::session` or `Auth::login`.
-    pub fn new(session: &Value) -> Self {
+impl RelayContext {
+    pub fn new(context: &Value) -> Self {
         Self {
-            cookie: format!("leo_session={}", session["value"].as_str().unwrap()),
-            csrf: session["csrf"].as_str().unwrap().to_owned(),
+            token: context["value"].as_str().unwrap().to_owned(),
         }
     }
 
-    /// Authenticates `request` with the session cookie and its CSRF token.
+    /// The test adapter verifies this token before attaching trusted identity.
     pub fn authorize(&self, request: Builder) -> Builder {
-        request
-            .header("cookie", &self.cookie)
-            .header("x-csrf-token", &self.csrf)
+        request.header("x-test-relay-token", &self.token)
     }
 }
 
-/// How much of a session a browser request presents.
 #[derive(Clone, Copy)]
 pub enum Credentials<'a> {
     Anonymous,
-    /// The cookie alone, as a cross-site form would send it.
-    Cookie(&'a Session),
-    /// The cookie and its CSRF token, as the application sends it.
-    Owner(&'a Session),
+    /// Obsolete local cookies must never authenticate an installation request.
+    Cookie(&'a RelayContext),
+    Owner(&'a RelayContext),
 }
 
 impl Credentials<'_> {
     pub fn apply(self, request: Builder) -> Builder {
         match self {
             Self::Anonymous => request,
-            Self::Cookie(session) => request.header("cookie", &session.cookie),
-            Self::Owner(session) => session.authorize(request),
+            Self::Cookie(context) => {
+                request.header("cookie", format!("leo_session={}", context.token))
+            }
+            Self::Owner(context) => context.authorize(request),
         }
     }
 }
 
-/// Legacy fixture authentication is compiled only into test/example executables.
-/// The real installation router is covered through the official HTTP relay.
-#[path = "../../examples/support/browser_http.rs"]
-pub mod browser_http;
+/// Authenticated relay transport and task-author adapter, confined to tests.
+pub mod relay_fixture;

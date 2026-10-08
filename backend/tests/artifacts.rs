@@ -1,6 +1,6 @@
 mod common;
 
-use common::browser_http::router;
+use common::relay_fixture::router;
 
 use axum::{
     Json, Router,
@@ -9,7 +9,7 @@ use axum::{
     response::IntoResponse,
     routing::post,
 };
-use common::{Credentials, Session, eventually, request, send};
+use common::{Credentials, RelayContext, eventually, request, send};
 use leo_agent_manager::{
     artifacts::{self, file, sharing},
     config::{Config, MAIN_AGENT_ID, id},
@@ -93,7 +93,7 @@ impl Fixture {
         })
         .await
         .unwrap();
-        common::browser_http::claimed(&s).await.unwrap();
+        common::relay_fixture::claimed(&s).await.unwrap();
         let run = start_run(&s, "Artifacts", "Create a report").await;
         let run_id = text(&run, "id").to_owned();
         common::set_checkpoint(&s.store, &run_id, json!({ "runnerId": id() })).await;
@@ -404,13 +404,13 @@ async fn preview_is_prepared_asynchronously_or_reports_missing_optional_tools_wi
     f.server.abort();
 }
 
-/// Makes `item` public through the owner route, which requires the session and its CSRF token.
+/// Makes `item` public through the owner route, which requires the trusted owner context.
 async fn share_from_the_owner_route(app: &Router, s: &Service, item: &Value) {
-    let session = Session::new(&common::browser_http::auth(s).session().await.unwrap());
+    let session = RelayContext::new(&common::relay_fixture::context(s).await);
     let endpoint = format!("{}/visibility", text(item, "url"));
     for (credentials, expected) in [
         (Credentials::Anonymous, StatusCode::UNAUTHORIZED),
-        (Credentials::Cookie(&session), StatusCode::FORBIDDEN),
+        (Credentials::Cookie(&session), StatusCode::UNAUTHORIZED),
         (Credentials::Owner(&session), StatusCode::OK),
     ] {
         let request = credentials

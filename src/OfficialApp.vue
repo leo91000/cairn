@@ -128,7 +128,7 @@ watch(session, (value) => {
 
     openInstallation(value.installations.find(item => item.id === remembered) || value.installations[0]!)
   }
-})
+}, { flush: 'sync' })
 
 watch(() => state.authenticated, (authenticated) => {
   if (!authenticated && session.value?.authenticated) {
@@ -515,16 +515,22 @@ async function renameInstallation() {
 }
 
 let availabilityTimer: ReturnType<typeof setTimeout> | undefined
+let availabilityRequest: AbortController | undefined
 let availabilityFailures = 0
 let availabilityStopped = false
 
 async function refreshAvailability() {
   clearTimeout(availabilityTimer)
-  if (availabilityStopped || !session.value?.authenticated || document.hidden || state.redirecting)
+  if (availabilityStopped || !session.value?.authenticated || document.hidden || state.redirecting || state.signingOut)
     return
+  availabilityRequest?.abort()
+  const controller = new AbortController()
+  availabilityRequest = controller
   const current = session.value
   try {
-    const response = await fetch('/api/installations', { credentials: 'same-origin' })
+    const response = await fetch('/api/installations', { credentials: 'same-origin', signal: controller.signal })
+    if (controller.signal.aborted)
+      return
     if (response.status === 401 && session.value === current && !availabilityStopped) {
       availabilityStopped = true
       redirect(window.location.href)
@@ -547,6 +553,8 @@ async function refreshAvailability() {
     availabilityFailures = 0
   }
   catch {
+    if (controller.signal.aborted)
+      return
     if (session.value === current) {
       for (const item of current.installations)
         item.online = false
@@ -556,12 +564,18 @@ async function refreshAvailability() {
     availabilityFailures++
   }
   finally {
-    if (!availabilityStopped)
+    if (availabilityRequest === controller)
+      availabilityRequest = undefined
+    if (!availabilityStopped && !controller.signal.aborted && !state.signingOut && session.value?.authenticated)
       availabilityTimer = setTimeout(refreshAvailability, Math.min(15000, 3000 * 2 ** Math.min(availabilityFailures, 3)))
   }
 }
 
-watch(() => session.value?.authenticated, () => void refreshAvailability())
+watch(() => [session.value?.authenticated, state.signingOut], () => {
+  if (state.signingOut || !session.value?.authenticated)
+    availabilityRequest?.abort()
+  void refreshAvailability()
+}, { flush: 'sync' })
 
 function visibleAvailability() {
   if (!document.hidden)
@@ -571,6 +585,7 @@ function visibleAvailability() {
 document.addEventListener('visibilitychange', visibleAvailability)
 onScopeDispose(() => {
   availabilityStopped = true
+  availabilityRequest?.abort()
   clearTimeout(availabilityTimer)
   document.removeEventListener('visibilitychange', visibleAvailability)
 })

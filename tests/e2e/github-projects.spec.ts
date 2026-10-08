@@ -1,10 +1,14 @@
-import { expect, test } from './fixtures'
+import {
+  signIn as authenticateWorkspace,
+  expect,
+  test,
+  workspacePath,
+} from './fixtures'
 
 test('GitHub picker handles retry, search, keyboard selection and import on a phone', async ({ page }) => {
   test.setTimeout(90000)
-  await page.goto('/projects')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/projects'))
+  await authenticateWorkspace(page)
   let failed = true
   const requested: string[] = []
   await page.route('**/api/github/repositories?*', async (route) => {

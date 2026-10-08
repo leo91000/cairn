@@ -1,7 +1,13 @@
 import type { Page, TestInfo } from '@playwright/test'
 import type { Workspace } from './fixtures'
 import { randomUUID } from 'node:crypto'
-import { expect, expectSingleScroll, test } from './fixtures'
+import {
+  signIn as authenticateWorkspace,
+  expect,
+  expectSingleScroll,
+  test,
+  workspacePath,
+} from './fixtures'
 
 // A failed mission needs the user; a hanging conversation keeps an agent working.
 async function seed(workspace: Workspace) {
@@ -25,9 +31,8 @@ async function seed(workspace: Workspace) {
 }
 
 async function signIn(page: Page) {
-  await page.goto('/')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/'))
+  await authenticateWorkspace(page)
   // Password verification in the native debug backend can take several seconds.
   await expect(page.getByRole('heading', { name: 'Fil', exact: true }).first()).toBeVisible({ timeout: 30000 })
 }

@@ -54,7 +54,7 @@ impl Fixture {
         };
         let service = Service::new(config).await.unwrap();
         // Keep the fixture authority alive while these journeys stop the worker process.
-        common::browser_http::claimed(&service).await.unwrap();
+        common::relay_fixture::claimed(&service).await.unwrap();
 
         let mut fixture = Self {
             root,
@@ -86,7 +86,7 @@ impl Fixture {
             let binary = std::path::Path::new(env!("CARGO_BIN_EXE_leo"))
                 .parent()
                 .unwrap()
-                .join("examples/browser_fixture");
+                .join("examples/worker_fixture");
             let mut command = Command::new(binary);
             command.arg("serve");
             command
@@ -1339,13 +1339,12 @@ async fn unlimited_runs_can_be_cancelled_and_finite_checkpoints_still_expire() {
         fixture.checkpoint(id).await.get("remainingMs"),
         Some(&Value::Null)
     );
-    let session = common::browser_http::auth(&s).session().await.unwrap();
+    let session = common::relay_fixture::context(&s).await;
     let client = reqwest::Client::new();
     let command = |action: &str| {
         client
             .post(format!("{}/api/runs/{id}/{action}", fixture.url))
-            .header("cookie", format!("leo_session={}", text(&session, "value")))
-            .header("x-csrf-token", text(&session, "csrf"))
+            .header("x-test-relay-token", text(&session, "value"))
             .json(&json!({}))
     };
     command("cancel")

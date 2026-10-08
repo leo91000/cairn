@@ -1,20 +1,24 @@
 import { randomUUID } from 'node:crypto'
-import { expect, test } from './fixtures'
+import {
+  signIn as authenticateWorkspace,
+  expect,
+  test,
+  workspacePath,
+} from './fixtures'
 
 test('registers, configures and revokes a node through the owner interface', async ({ page, workspace }) => {
   test.setTimeout(60000)
-  await page.goto('/')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/'))
+  await authenticateWorkspace(page)
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30000 })
-  await page.goto('/nodes')
+  await page.goto(workspacePath('/nodes'))
   await page.getByRole('button', { name: 'Add a machine', exact: true }).click()
   await page.getByLabel('Machine name').fill('Browser Linux')
   await page.getByLabel('Direct manager address').fill(workspace.url)
   await page.getByRole('button', { name: 'Create enrollment code' }).click()
   const code = await page.getByLabel('Single-use enrollment code').textContent()
   expect(code).toHaveLength(43)
-  const response = await page.request.post(`${workspace.url}/internal/nodes/enroll`, {
+  const response = await page.request.post(`${workspace.installationUrl}/internal/nodes/enroll`, {
     data: {
       code,
       name: 'Browser Linux',
@@ -90,7 +94,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
   const detail = await workspace.api(`/api/chats/${chat.id}`)
   const invitation = await workspace.api('/api/nodes/enrollments', 'POST', { name: 'Recovery server' })
-  const response = await page.request.post(`${workspace.url}/internal/nodes/enroll`, {
+  const response = await page.request.post(`${workspace.installationUrl}/internal/nodes/enroll`, {
     data: {
       code: invitation.code,
       name: 'Recovery server',
@@ -111,7 +115,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   const heartbeat = async () => {
     // Legacy seeds bypass the manager's writer. A node heartbeat supplies a
     // real commit notification instead of relying on an empty scheduler pass.
-    const reply = await page.request.post(`${workspace.url}/internal/nodes/heartbeat`, {
+    const reply = await page.request.post(`${workspace.installationUrl}/internal/nodes/heartbeat`, {
       headers: { authorization: `Bearer ${node.token}` },
       data: {},
     })
@@ -119,7 +123,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   }
 
   const destinationInvitation = await workspace.api('/api/nodes/enrollments', 'POST', { name: 'Destination server' })
-  const destinationResponse = await page.request.post(`${workspace.url}/internal/nodes/enroll`, {
+  const destinationResponse = await page.request.post(`${workspace.installationUrl}/internal/nodes/enroll`, {
     data: {
       code: destinationInvitation.code,
       name: 'Destination server',
@@ -140,9 +144,8 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   const agent = (await workspace.api('/api/agents')).find((agent: { id: string }) => agent.id === detail.run.snapshot.agent.id)
   await workspace.api(`/api/agents/${agent.id}`, 'PUT', { ...agent, access: { ...agent.access, nodes: [node.nodeId, destinationNode.nodeId] } })
   workspace.service.store.updateRun(detail.run.id, { nodeId: node.nodeId, resources: { cpu: 2, memoryMiB: 4096, diskMiB: 32768 }, backup: { capturedAt: Date.now() - 120000, status: 'ready' } } as any)
-  await page.goto(`/chats/${chat.id}`)
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
   const header = page.getByRole('button', { name: 'Execution node', exact: true }).filter({ visible: true })
   await expect(header).toContainText('Recovery server')
   await expect(header).toContainText('Synced 2 min ago', { timeout: 30000 })

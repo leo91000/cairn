@@ -30,7 +30,7 @@ fn main() -> ExitCode {
     main_with_router(leo_agent_manager::http::router)
 }
 
-/// The test example supplies a browser adapter; the shipped binary always uses
+/// The worker test example supplies a synthetic relay transport; the shipped binary always uses
 /// the installation router. This is an in-process seam, never an environment flag.
 pub fn main_with_router<F, Fut>(router: F) -> ExitCode
 where

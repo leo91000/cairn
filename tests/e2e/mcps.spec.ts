@@ -1,6 +1,12 @@
 import { setTimeout } from 'node:timers/promises'
 import { mcpProvider } from '../mcp-provider'
-import { expect, expectSingleScroll, test } from './fixtures'
+import {
+  signIn as authenticateWorkspace,
+  expect,
+  expectSingleScroll,
+  test,
+  workspacePath,
+} from './fixtures'
 
 test('OAuth navigation does not leave background polls running in the departing page', async ({ page, workspace }) => {
   // Keep the cross-origin navigation pending across the shell's initial poll.
@@ -15,9 +21,8 @@ test('OAuth navigation does not leave background polls running in the departing 
       auth: 'oauth',
       allowPrivateNetwork: true,
     })
-    await page.goto('/mcps')
-    await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-    await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+    await page.goto(workspacePath('/mcps'))
+    await authenticateWorkspace(page)
     const card = page.locator('.mcp-card').filter({ hasText: 'Slow OAuth' })
     await card.getByRole('button', { name: 'Connect', exact: true }).click()
     await expect(card.getByText('Connected', { exact: true })).toBeVisible()
@@ -32,9 +37,8 @@ test('manages MCP connections, OAuth consent, tools and agent access on desktop 
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
   try {
-    await page.goto('/mcps')
-    await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-    await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+    await page.goto(workspacePath('/mcps'))
+    await authenticateWorkspace(page)
     await expect(page.getByRole('heading', { name: 'MCPs', exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Add MCP', exact: true }).click()
     const dialog = page.getByRole('dialog')
@@ -75,7 +79,7 @@ test('manages MCP connections, OAuth consent, tools and agent access on desktop 
     await card.getByRole('button', { name: /Browse tools/ }).click()
     await page.screenshot({ path: testInfo.outputPath('dark-mobile-tools.png'), animations: 'disabled' })
     await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
-    await page.goto('/agents')
+    await page.goto(workspacePath('/agents'))
     await page.getByRole('button', { name: 'New agent', exact: true }).click()
     await dialog.getByLabel('Name', { exact: true }).fill('MCP reader')
     await dialog.getByLabel('All MCP connections, including future connections').uncheck()
@@ -86,7 +90,7 @@ test('manages MCP connections, OAuth consent, tools and agent access on desktop 
     await page.screenshot({ path: testInfo.outputPath('dark-mobile-agent-access.png'), animations: 'disabled' })
     await dialog.getByRole('button', { name: 'Save agent', exact: true }).click()
     await expect(dialog).toHaveCount(0)
-    await page.goto('/mcps')
+    await page.goto(workspacePath('/mcps'))
     await page.getByRole('button', { name: 'Add MCP', exact: true }).click()
     await dialog.getByRole('combobox', { name: 'Connection type', exact: true }).click()
     await page.getByRole('option', { name: 'Command in agent VM', exact: true }).click()

@@ -112,15 +112,6 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
         .unwrap_or("")
 }
 
-pub fn cookie(headers: &HeaderMap) -> String {
-    header(headers, "cookie")
-        .split(';')
-        .filter_map(|entry| entry.trim().split_once('='))
-        .find(|(name, _)| *name == "leo_session")
-        .map(|(_, value)| value.to_owned())
-        .unwrap_or_default()
-}
-
 async fn security(State(app): State<App>, mut request: Request, next: Next) -> Response {
     let path = request.uri().path().to_owned();
     let peer = request

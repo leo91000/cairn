@@ -1,20 +1,21 @@
 import { Buffer } from 'node:buffer'
 import { readFileSync } from 'node:fs'
 import {
+  signIn as authenticateWorkspace,
   expect,
   expectChatReady,
   expectSingleScroll,
   initializeRepository,
   test,
+  workspacePath,
 } from './fixtures'
 
 test('uploads images and files, previews them and preserves attachments while editing the queue', async ({ page, workspace }) => {
   initializeRepository(workspace.projectPath)
-  await page.goto('/tasks')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/tasks'))
+  await authenticateWorkspace(page)
   await expect(page.locator('.task-focus-detail')).toBeVisible()
-  await page.goto('/chats')
+  await page.goto(workspacePath('/chats'))
   const image = { name: 'design.png', mimeType: 'image/png', buffer: readFileSync('docs/screenshots/overview-desktop.png') }
   const notes = { name: 'review-notes.md', mimeType: 'text/markdown', buffer: Buffer.from('# Design review\nMake the controls easier to reach on mobile.') }
   await page.getByLabel('Attach files', { exact: true }).setInputFiles([image])

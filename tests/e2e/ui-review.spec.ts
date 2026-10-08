@@ -2,10 +2,12 @@ import { execFileSync } from 'node:child_process'
 import { mkdir } from 'node:fs/promises'
 import path from 'node:path'
 import {
+  signIn as authenticateWorkspace,
   expect,
   expectSingleScroll,
   initializeRepository,
   test,
+  workspacePath,
 } from './fixtures'
 
 test('reviews the open workspace layout and compact chat controls across themes and sizes', async ({ page, workspace }, testInfo) => {
@@ -14,9 +16,8 @@ test('reviews the open workspace layout and compact chat controls across themes 
   page.on('pageerror', error => errors.push(error.message))
   initializeRepository(workspace.projectPath)
   await page.emulateMedia({ reducedMotion: 'reduce' })
-  await page.goto('/chats')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/chats'))
+  await authenticateWorkspace(page)
   await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible()
 
   for (const theme of ['dark', 'light'] as const) {
@@ -69,7 +70,7 @@ test('reviews the open workspace layout and compact chat controls across themes 
   await page.getByRole('button', { name: 'Stop response' }).click()
 
   for (const route of ['/tasks', '/agents', '/projects', '/skills', '/runs', '/mcps', '/connections', '/settings']) {
-    await page.goto(route)
+    await page.goto(workspacePath(route))
     await expect(page.locator('.page h1').first()).toBeVisible()
     for (const theme of ['dark', 'light'] as const) {
       await page.emulateMedia({ colorScheme: theme })
@@ -99,12 +100,11 @@ test('keeps projects compact and agent summaries readable with several resources
   workspace.service.agent({ name: 'UI builder', description: 'Builds interfaces, checks accessibility and reviews the mobile experience.', access: { projects: [projects[0]!.id], github: false } })
   workspace.service.agent({ name: 'Code reviewer', description: 'Reviews changes across repositories and keeps regressions out.', access: { projects: projects.map(project => project.id), github: false } })
   await page.emulateMedia({ reducedMotion: 'reduce' })
-  await page.goto('/projects')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/projects'))
+  await authenticateWorkspace(page)
   await expect(page.getByRole('heading', { name: 'Projects', exact: true })).toBeVisible()
   for (const resource of ['projects', 'agents']) {
-    await page.goto(`/${resource}`)
+    await page.goto(workspacePath(`/${resource}`))
     await expect(page.locator('.resource-card')).toHaveCount(4)
     for (const colorScheme of ['dark', 'light'] as const) {
       await page.emulateMedia({ colorScheme })
@@ -121,7 +121,7 @@ test('keeps projects compact and agent summaries readable with several resources
     }
   }
 
-  await page.goto('/projects')
+  await page.goto(workspacePath('/projects'))
   await page.getByRole('button', { name: 'Web app', exact: true }).click()
   await expect(page.getByRole('dialog').getByLabel('Project directory')).toHaveValue(projects[0]!.path)
   await page.getByRole('button', { name: 'Cancel', exact: true }).click()
@@ -155,9 +155,8 @@ test('reviews workflow permission, fresh project sources and explicit blocked ou
       workflowPermission: false,
     }],
   }))
-  await page.goto('/connections')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/connections'))
+  await authenticateWorkspace(page)
   await expect(page.getByRole('button', { name: 'Enable workflow updates' })).toBeVisible()
   for (const colorScheme of ['dark', 'light'] as const) {
     await page.emulateMedia({ colorScheme })
@@ -166,7 +165,7 @@ test('reviews workflow permission, fresh project sources and explicit blocked ou
     await page.screenshot({ animations: 'disabled', path: testInfo.outputPath(`github-permission-${colorScheme}.png`) })
   }
 
-  await page.goto('/projects')
+  await page.goto(workspacePath('/projects'))
   await page.getByRole('button', { name: 'Design system', exact: true }).click()
   const mode = page.getByRole('combobox', { name: 'New work starts from' })
   await expect(mode).toHaveValue('Latest remote branch')
@@ -179,7 +178,7 @@ test('reviews workflow permission, fresh project sources and explicit blocked ou
   await expect(mode).toHaveValue('Local branch snapshot')
   await page.screenshot({ animations: 'disabled', path: testInfo.outputPath('project-source.png') })
   await page.getByRole('button', { name: 'Cancel', exact: true }).click()
-  await page.goto(`/runs/${run.id}`)
+  await page.goto(workspacePath(`/runs/${run.id}`))
   await expect(page.getByText('Execution finished', { exact: true })).toBeVisible()
   // The run header and the reply's outcome both say it; the header expands the evidence.
   await page.locator('.run-title-meta').getByText('Blocked', { exact: true }).click()
@@ -192,6 +191,6 @@ test('reviews workflow permission, fresh project sources and explicit blocked ou
   }
 
   // The blocked mission says so on its card, as on Android.
-  await page.goto('/tasks')
+  await page.goto(workspacePath('/tasks'))
   await expect(page.locator('.mission-card').filter({ hasText: run.snapshot.task.name })).toContainText('Blocked')
 })

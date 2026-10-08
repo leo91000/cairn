@@ -1,18 +1,19 @@
 import {
+  signIn as authenticateWorkspace,
   expect,
   expectSingleScroll,
   initializeRepository,
   test,
+  workspacePath,
 } from './fixtures'
 
 test('selects live models and supported reasoning for agents and queued chat turns', async ({ page, workspace }, testInfo) => {
   test.setTimeout(60000)
   initializeRepository(workspace.projectPath)
-  await page.goto('/')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/'))
+  await authenticateWorkspace(page)
   await expect(page.locator('.shell')).toBeVisible()
-  await page.goto('/agents')
+  await page.goto(workspacePath('/agents'))
   await page.getByRole('button', { name: 'New agent', exact: true }).click()
   await page.getByLabel('Name', { exact: true }).fill('Model explorer')
   const picker = page.getByRole('button', { name: /^Agent, model and reasoning/ })

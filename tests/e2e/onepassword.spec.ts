@@ -1,10 +1,15 @@
-import { expect, expectSingleScroll, test } from './fixtures'
+import {
+  signIn as authenticateWorkspace,
+  expect,
+  expectSingleScroll,
+  test,
+  workspacePath,
+} from './fixtures'
 
 test('1Password accounts keep tokens private and persist explicit agent grants', async ({ page, workspace }, testInfo) => {
   test.setTimeout(90000)
-  await page.goto('/connections')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/connections'))
+  await authenticateWorkspace(page)
   const panel = page.getByRole('region', { name: '1Password accounts' })
   await panel.getByRole('button', { name: 'Add service account' }).click()
   let dialog = page.getByRole('dialog')

@@ -1,6 +1,6 @@
 mod common;
 
-use common::browser_http::router;
+use common::relay_fixture::router;
 
 use axum::{
     Router,
@@ -8,16 +8,16 @@ use axum::{
     http::{Request, StatusCode, request::Builder},
     response::Response,
 };
-use common::{Credentials, Session, read_bytes, read_json, read_text, request, send};
+use common::{Credentials, RelayContext, read_bytes, read_json, read_text, request, send};
 use http_body_util::BodyExt;
 use leo_agent_manager::{
     attachments::MAX_FILE,
-    auth::{InstallationIdentity, InstallationRole, hex_digest},
-    config::{MAIN_AGENT_ID, id, now},
+    auth::{InstallationIdentity, InstallationRole},
+    config::{MAIN_AGENT_ID, id},
     service::Service,
 };
 use serde_json::{Value, json};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
@@ -43,24 +43,8 @@ fn setup_body() -> Body {
     Body::from(setup.to_string())
 }
 
-/// Reads the owner session that a successful setup response opens.
-async fn setup_session(response: Response) -> Session {
-    let cookie = response.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_owned();
-    let body = read_json(response).await;
-    Session {
-        cookie,
-        csrf: body["csrf"].as_str().unwrap().to_owned(),
-    }
-}
-
-async fn set_up_owner(app: &Router) -> Session {
-    setup_session(send(app, setup_request().body(setup_body()).unwrap()).await).await
+async fn owner_context(service: &Service) -> RelayContext {
+    RelayContext::new(&common::relay_fixture::context(service).await)
 }
 
 async fn health(app: &Router) -> Value {
@@ -80,17 +64,12 @@ async fn installation_http_accepts_only_trusted_context_and_checks_host_and_orig
     let app = leo_agent_manager::http::router(service.clone())
         .await
         .unwrap();
-    let legacy = Session::new(
-        &common::browser_http::auth(&service)
-            .session()
-            .await
-            .unwrap(),
-    );
+    let legacy = RelayContext::new(&common::relay_fixture::context(&service).await);
     for path in ["/api/session", "/api/projects", "/api/chats"] {
         let response = send(
             &app,
-            legacy
-                .authorize(json_request("GET", path))
+            Credentials::Cookie(&legacy)
+                .apply(json_request("GET", path))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -131,8 +110,8 @@ async fn installation_http_accepts_only_trusted_context_and_checks_host_and_orig
 
 #[tokio::test]
 async fn member_identity_can_list_conversations_but_cannot_manage_nodes() {
-    let (_root, app, _service) = app().await;
-    let session = set_up_owner(&app).await;
+    let (_root, app, service) = app().await;
+    let session = owner_context(&service).await;
 
     for (path, expected) in [
         ("/api/chats", StatusCode::OK),
@@ -354,8 +333,12 @@ async fn attachment(
 
 /// A hostile name cannot escape the chat directory, and active content is only
 /// ever served as a sandboxed download.
-async fn assert_hostile_uploads_are_neutralized(app: &Router, session: &Session, chat_id: &str) {
-    let (owner, cookie) = (Credentials::Owner(session), Credentials::Cookie(session));
+async fn assert_hostile_uploads_are_neutralized(
+    app: &Router,
+    session: &RelayContext,
+    chat_id: &str,
+) {
+    let owner = Credentials::Owner(session);
     let evil = format!(
         "/api/chats/{chat_id}/attachments/{}?name=..%2F..%2Ffile.svg",
         id()
@@ -365,7 +348,7 @@ async fn assert_hostile_uploads_are_neutralized(app: &Router, session: &Session,
     assert_eq!(response.status(), StatusCode::OK);
     let data = read_json(response).await;
     assert!(!data["name"].as_str().unwrap().contains('/'));
-    let response = attachment(app, cookie, "GET", &evil, vec![]).await;
+    let response = attachment(app, owner, "GET", &evil, vec![]).await;
     let headers = response.headers();
     assert_eq!(headers["content-type"], "application/octet-stream");
     assert!(
@@ -385,12 +368,7 @@ async fn assert_hostile_uploads_are_neutralized(app: &Router, session: &Session,
 #[tokio::test]
 async fn attachments_are_private_scoped_bounded_and_durable() {
     let (_root, app, service) = app().await;
-    let session = Session::new(
-        &common::browser_http::auth(&service)
-            .session()
-            .await
-            .unwrap(),
-    );
+    let session = RelayContext::new(&common::relay_fixture::context(&service).await);
     let (anonymous, cookie, owner) = (
         Credentials::Anonymous,
         Credentials::Cookie(&session),
@@ -409,7 +387,7 @@ async fn attachments_are_private_scoped_bounded_and_durable() {
             .status()
     };
     assert_eq!(put(anonymous, png.clone()).await, StatusCode::UNAUTHORIZED);
-    assert_eq!(put(cookie, png.clone()).await, StatusCode::FORBIDDEN);
+    assert_eq!(put(cookie, png.clone()).await, StatusCode::UNAUTHORIZED);
     assert_eq!(
         put(owner, vec![0; MAX_FILE + 1]).await,
         StatusCode::PAYLOAD_TOO_LARGE
@@ -431,7 +409,7 @@ async fn attachments_are_private_scoped_bounded_and_durable() {
     );
     let other_url = format!("/api/chats/{other_id}/attachments/{attachment_id}");
     assert_eq!(
-        attachment(&app, cookie, "GET", &other_url, vec![])
+        attachment(&app, owner, "GET", &other_url, vec![])
             .await
             .status(),
         StatusCode::NOT_FOUND
@@ -469,7 +447,7 @@ async fn attachments_are_private_scoped_bounded_and_durable() {
         reopened.chat_detail(chat_id).await.unwrap()["messages"][0]["attachments"][0],
         uploaded
     );
-    let response = attachment(&app, cookie, "GET", &url, vec![]).await;
+    let response = attachment(&app, owner, "GET", &url, vec![]).await;
     assert_eq!(response.headers()["cache-control"], "no-store");
     assert_eq!(response.headers()["content-type"], "image/png");
     assert_eq!(read_bytes(response).await.as_ref(), png);
@@ -477,108 +455,15 @@ async fn attachments_are_private_scoped_bounded_and_durable() {
 }
 
 #[tokio::test]
-async fn native_mcp_callback_requires_the_initiating_session_and_csrf_to_finish() {
+async fn onepassword_management_requires_trusted_owner_context() {
     let (_root, app, service) = app().await;
-    let initiating = common::browser_http::auth(&service)
-        .session()
-        .await
-        .unwrap();
-    let session = Session::new(&initiating);
-    let other = Session::new(
-        &common::browser_http::auth(&service)
-            .session()
-            .await
-            .unwrap(),
-    );
-    let connection = "00000000-0000-4000-8000-000000000099";
-    let nonce = "native-callback-test-nonce";
-    let key = format!("mcp-oauth:{}", hex_digest(nonce));
-    let expires = now() + 600_000;
-    let pending = json!({
-        "native": true,
-        "connectionId": connection,
-        "session": hex_digest(&format!("leo-account:{}", session.csrf)),
-        "nonce": nonce,
-        "expiresAt": expires,
-    });
-    service
-        .store
-        .set(&key, pending, Some(expires))
-        .await
-        .unwrap();
-    let callback = format!("/oauth/mcp/callback?state={nonce}&code=private-code");
-    let response = send(
-        &app,
-        json_request("GET", &callback).body(Body::empty()).unwrap(),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()["referrer-policy"], "no-referrer");
-    assert_eq!(response.headers()["cache-control"], "no-store");
-    let html = read_text(response).await;
-    assert!(html.contains("Revenez dans Leo"));
-    assert!(!html.contains("private-code"));
-    assert!(!html.contains(nonce));
-    let pending = service.store.kv(&key).await.unwrap().unwrap();
-    assert_eq!(pending["callback"]["code"], "private-code");
-    assert_eq!(pending["expiresAt"], expires);
-    let finish = format!("/api/mcps/{connection}/callback");
-    let finish_as = async |credentials: Credentials<'_>| {
-        let request = credentials.apply(json_request("POST", &finish));
-        send(&app, request.body(Body::from("{}")).unwrap()).await
-    };
-    for (credentials, status) in [
-        (Credentials::Anonymous, StatusCode::UNAUTHORIZED),
-        (Credentials::Cookie(&session), StatusCode::FORBIDDEN),
-        (Credentials::Owner(&other), StatusCode::OK),
-    ] {
-        let response = finish_as(credentials).await;
-        assert_eq!(response.status(), status);
-        if status == StatusCode::OK {
-            assert_eq!(
-                read_json(response).await,
-                json!({ "pending": false, "result": "expired" })
-            );
-        }
-        assert!(service.store.kv(&key).await.unwrap().is_some());
-    }
-    common::browser_http::auth(&service)
-        .logout(initiating["value"].as_str().unwrap())
-        .await
-        .unwrap();
-    assert_eq!(
-        finish_as(Credentials::Owner(&session)).await.status(),
-        StatusCode::UNAUTHORIZED
-    );
-    // Expiration is enforced by the store, including capture attempts from the browser.
-    service
-        .store
-        .set(&key, pending, Some(now() - 1))
-        .await
-        .unwrap();
-    let replacement = HashMap::from([
-        ("state".into(), nonce.into()),
-        ("code".into(), "replacement".into()),
-    ]);
-    assert!(
-        !service
-            .mcps
-            .capture_native_callback(&service, &replacement)
-            .await
-            .unwrap()
-    );
-}
-
-#[tokio::test]
-async fn onepassword_management_requires_owner_session_and_csrf() {
-    let (_root, app, _) = app().await;
     for method in ["GET", "POST"] {
         let request = json_request(method, "/api/onepassword")
             .body(Body::from("{}"))
             .unwrap();
         assert_eq!(send(&app, request).await.status(), StatusCode::UNAUTHORIZED);
     }
-    let session = set_up_owner(&app).await;
+    let session = owner_context(&service).await;
     let input = json!({
         "name": "Fixture",
         "token": "ops_http_fixture",
@@ -595,12 +480,12 @@ async fn onepassword_management_requires_owner_session_and_csrf() {
         send(&app, save(Credentials::Cookie(&session)))
             .await
             .status(),
-        StatusCode::FORBIDDEN
+        StatusCode::UNAUTHORIZED
     );
     let response = send(&app, save(Credentials::Owner(&session))).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert!(!read_text(response).await.contains("ops_http_fixture"));
-    let listed = Credentials::Cookie(&session)
+    let listed = Credentials::Owner(&session)
         .apply(json_request("GET", "/api/onepassword"))
         .body(Body::empty())
         .unwrap();
@@ -610,8 +495,8 @@ async fn onepassword_management_requires_owner_session_and_csrf() {
 }
 
 #[tokio::test]
-async fn github_projects_require_owner_session_and_csrf() {
-    let (_root, app, _service) = app().await;
+async fn github_projects_require_trusted_owner_context() {
+    let (_root, app, service) = app().await;
     for (method, path) in [
         ("GET", "/api/github/repositories"),
         ("POST", "/api/projects/github"),
@@ -619,12 +504,12 @@ async fn github_projects_require_owner_session_and_csrf() {
         let request = json_request(method, path).body(Body::from("{}")).unwrap();
         assert_eq!(send(&app, request).await.status(), StatusCode::UNAUTHORIZED);
     }
-    let session = set_up_owner(&app).await;
+    let session = owner_context(&service).await;
     let import = Credentials::Cookie(&session)
         .apply(json_request("POST", "/api/projects/github"))
         .body(Body::from(r#"{"repository":"fixture/repo"}"#))
         .unwrap();
-    assert_eq!(send(&app, import).await.status(), StatusCode::FORBIDDEN);
+    assert_eq!(send(&app, import).await.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

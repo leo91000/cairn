@@ -1,12 +1,17 @@
 import { connectClaude } from './accounts'
-import { expect, expectSingleScroll, test } from './fixtures'
+import {
+  signIn as authenticateWorkspace,
+  expect,
+  expectSingleScroll,
+  test,
+  workspacePath,
+} from './fixtures'
 
 test('Claude agents, chats, questions and scheduled work run on a connected Claude account', async ({ page, workspace }, testInfo) => {
   test.setTimeout(120000)
   expect((await connectClaude(workspace)).state).toBe('complete')
-  await page.goto('/agents')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/agents'))
+  await authenticateWorkspace(page)
   await page.getByRole('button', { name: 'New agent', exact: true }).click()
   await page.getByLabel('Name', { exact: true }).fill('Claude engineer')
   await page.getByRole('button', { name: /^Agent, model and reasoning/ }).click()
@@ -27,7 +32,7 @@ test('Claude agents, chats, questions and scheduled work run on a connected Clau
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text: 'Continue reviewing' })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.resumeCount, { timeout: 20000 }).toBeGreaterThan(0)
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
-  await page.goto(`/chats/${chat.id}`)
+  await page.goto(workspacePath(`/chats/${chat.id}`))
   await expect(page.getByText('Claude fixture completed', { exact: true })).toHaveCount(2)
   await expectSingleScroll(page)
   await page.screenshot({ path: testInfo.outputPath('claude-chat-mobile.png') })
@@ -48,16 +53,15 @@ test('switching coding agents preserves one chat, context and provider selection
   test.setTimeout(120000)
   if (!(await workspace.api('/api/accounts')).accounts.some((a: { provider: string }) => a.provider === 'claude'))
     expect((await connectClaude(workspace)).state).toBe('complete')
-  await page.goto('/connections')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/connections'))
+  await authenticateWorkspace(page)
   // Password verification can be slow in an unoptimized native test build.
   await expect(page.getByRole('region', { name: 'Claude Code accounts' })).toBeVisible({ timeout: 30000 })
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text: 'Preserve the existing design. Work on this conversation.' })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
   const first = await workspace.api(`/api/chats/${chat.id}`)
-  await page.goto(`/chats/${chat.id}`)
+  await page.goto(workspacePath(`/chats/${chat.id}`))
   const picker = page.getByRole('button', { name: /^Agent, model and reasoning/ })
   const menu = page.getByRole('dialog', { name: 'Agent & model' })
   await picker.click()

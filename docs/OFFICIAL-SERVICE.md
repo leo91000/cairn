@@ -20,6 +20,26 @@ logs codes. Both ports are bound to loopback. The first Rust compilation takes
 a few minutes. `docker compose -f deploy/official/compose.yaml down` stops it;
 add `-v` to discard the development database and build caches.
 
+The default `index.html` and the official `official.html` both enter the Leo
+account shell. There is no installation password/setup screen. For hot reload,
+run `pnpm dev` with the official configuration variables below, including
+`LEO_OFFICIAL_ORIGIN=http://localhost:5178`. Vite serves the application at that
+origin and proxies account requests, OAuth callbacks and relay WebSockets to
+`127.0.0.1:4311`. Run the installation separately with `cargo run --bin leo` and
+claim it through the official account; its HTTP listener never hosts the web
+application. `PUBLIC_URL` continues to describe private installation traffic.
+
+Browser tests use the production `leo-official` and `leo` binaries, a separate
+Postgres schema per worker, a real email proof and installation claim, and the
+real authenticated relay. Only email delivery and external agent/provider
+fixtures are synthetic. Set `LEO_OFFICIAL_TEST_DATABASE_URL` to a disposable
+Postgres database and build both binaries plus the web output before
+`pnpm test:e2e`. Handler and worker integration tests retain a test-only relay
+transport and task-author authority (`relay_fixture` / `worker_fixture`); these
+add no local browser login, OAuth issuer or application hosting. Historical
+Node modules under `tests/legacy/` remain reference and SQLite seeding code,
+never a shipped server.
+
 ## Production
 
 Use the `official` target in `Dockerfile` and
