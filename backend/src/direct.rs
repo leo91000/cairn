@@ -13,6 +13,7 @@ use leo_relay_protocol::{
         SignalBudget, has_direct_capacity, unix_time,
     },
 };
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -225,6 +226,26 @@ impl DirectConnections {
             }
         });
         true
+    }
+
+    /// Compare the actual DTLS certificate with the current verified grant.
+    /// This application check is independent of the SDK's SDP fingerprint check.
+    pub fn accept_certificate(&self, id: &str, certificate: &[u8]) -> Result<DirectLease> {
+        if certificate.is_empty() {
+            return Err(Error::unauthorized("No observed DTLS certificate."));
+        }
+        let fingerprint = format!(
+            "sha-256 {}",
+            Sha256::digest(certificate)
+                .iter()
+                .map(|byte| format!("{byte:02X}"))
+                .collect::<Vec<_>>()
+                .join(":"),
+        );
+        let (current, _) = self
+            .pending_peer(id)
+            .ok_or_else(|| Error::unauthorized("Direct authorization closed."))?;
+        self.accept_peer(&current, &current.claims.session_id, &fingerprint)
     }
 
     /// Call once after DTLS using the certificate fingerprint observed by the peer.

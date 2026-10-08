@@ -7,10 +7,9 @@ use crate::{
 use axum::Router;
 use leo_relay_protocol::direct::{DirectAuthorization, DirectSignal};
 use rtc::{
-    ice::network_type::NetworkType,
+    ice::{mdns::MulticastDnsMode, network_type::NetworkType},
     peer_connection::configuration::setting_engine::{SctpMaxMessageSize, SettingEngineBuilder},
 };
-use sha2::{Digest, Sha256};
 use std::{collections::HashMap, net::IpAddr, sync::Arc};
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::sync::CancellationToken;
@@ -49,7 +48,14 @@ impl PeerConfig {
         };
         let stun_urls = std::env::var("LEO_DIRECT_STUN_URLS").map_or_else(
             |_| Self::default().stun_urls,
-            |urls| urls.split(',').map(str::to_owned).collect(),
+            |urls| {
+                if urls.trim().is_empty() {
+                    tracing::info!("Empty LEO_DIRECT_STUN_URLS; using authenticated official STUN");
+                    Vec::new()
+                } else {
+                    urls.split(',').map(str::to_owned).collect()
+                }
+            },
         );
         if stun_urls.len() > 4
             || stun_urls
@@ -68,8 +74,7 @@ impl PeerConfig {
                     .map_err(|_| Error::bad("Invalid direct public IP."))
             })
             .transpose()?;
-        if public_ip.is_some_and(|ip| ip.is_unspecified() || ip.is_loopback() || ip.is_multicast())
-        {
+        if public_ip.is_some_and(|ip| !leo_relay_protocol::direct::usable_candidate_address(ip)) {
             return Err(Error::bad("A unicast direct public IP is required."));
         }
         Ok(Self {
@@ -96,14 +101,15 @@ impl PeerConnectionEventHandler for PeerEvents {
             .to_json()
             .map_err(Error::internal)
             .and_then(|candidate| {
-                self.direct.send_signal(
-                    &self.id,
-                    DirectSignal::Candidate {
-                        candidate: candidate.candidate,
-                        sdp_mid: Some("0".into()),
-                        sdp_m_line_index: Some(0),
-                    },
-                )
+                let signal = DirectSignal::Candidate {
+                    candidate: candidate.candidate,
+                    sdp_mid: Some("0".into()),
+                    sdp_m_line_index: Some(0),
+                };
+                if !signal.valid() {
+                    return Ok(());
+                }
+                self.direct.send_signal(&self.id, signal)
             });
         let public = if let Some(public) = self.public_ip
             && event.candidate.typ == webrtc::peer_connection::RTCIceCandidateType::Host
@@ -159,14 +165,21 @@ pub async fn run(
     let mut events = direct.subscribe();
     let mut peers = HashMap::<String, mpsc::Sender<DirectSignal>>::new();
     let mut jobs = JoinSet::new();
+    let mut peer_tasks = HashMap::<tokio::task::Id, String>::new();
     let traffic = DirectTraffic::default();
+    let reassembly = leo_relay_protocol::data_channel::ReassemblyBudget::default();
     loop {
         tokio::select! {
             biased;
             () = stop.cancelled() => break,
-            Some(completed) = jobs.join_next(), if !jobs.is_empty() => {
-                if let Ok(id) = completed {
+            Some(completed) = jobs.join_next_with_id(), if !jobs.is_empty() => {
+                let task = match completed {
+                    Ok((task, ())) => task,
+                    Err(error) => error.id(),
+                };
+                if let Some(id) = peer_tasks.remove(&task) {
                     peers.remove(&id);
+                    direct.release_peer(&id);
                 }
             }
             event = events.recv() => match event {
@@ -184,7 +197,8 @@ pub async fn run(
                         let config = config.clone();
                         let router = router.clone();
                         let traffic = traffic.clone();
-                        jobs.spawn(async move {
+                        let reassembly = reassembly.clone();
+                        let task = jobs.spawn(async move {
                             let failed = CancellationToken::new();
                             let negotiation = Negotiation {
                                 authorization,
@@ -198,6 +212,7 @@ pub async fn run(
                                 config,
                                 failed.clone(),
                                 traffic,
+                                reassembly,
                             );
                             tokio::select! {
                                 biased;
@@ -205,9 +220,8 @@ pub async fn run(
                                 () = failed.cancelled() => {}
                                 _ = operation => {}
                             }
-                            direct.release_peer(&id);
-                            id
                         });
+                        peer_tasks.insert(task.id(), id);
                     }
                 }
                 Ok(DirectEvent::Revoked(_)) => {}
@@ -239,6 +253,7 @@ async fn serve_peer(
     config: PeerConfig,
     failed: CancellationToken,
     traffic: DirectTraffic,
+    reassembly: leo_relay_protocol::data_channel::ReassemblyBudget,
 ) -> Result<()> {
     let Negotiation {
         authorization,
@@ -270,6 +285,7 @@ async fn serve_peer(
             .with_setting_engine(
                 SettingEngineBuilder::new()
                     .with_network_types(vec![NetworkType::Udp4, NetworkType::Udp6])
+                    .with_multicast_dns_mode(MulticastDnsMode::Disabled)
                     .with_sctp_max_message_size(SctpMaxMessageSize::Bounded(16_384))
                     .with_sctp_max_receive_buffer_size(65_536)
                     .build(),
@@ -287,6 +303,10 @@ async fn serve_peer(
         channel: channel_to_close.clone(),
     };
     let result: Result<()> = async {
+        // No multicast listener or hostname resolution on the installation.
+        let sdp = sdp.lines().filter(|line| {
+            !line.starts_with("a=candidate:") || !mdns_candidate(line)
+        }).collect::<Vec<_>>().join("\r\n") + "\r\n";
         peer.set_remote_description(RTCSessionDescription::offer(sdp).map_err(Error::internal)?)
             .await
             .map_err(Error::internal)?;
@@ -338,18 +358,7 @@ async fn serve_peer(
         let certificate = certificates
             .first()
             .ok_or_else(|| Error::unauthorized("No observed DTLS certificate."))?;
-        let fingerprint = format!(
-            "sha-256 {}",
-            Sha256::digest(certificate)
-                .iter()
-                .map(|byte| format!("{byte:02X}"))
-                .collect::<Vec<_>>()
-                .join(":")
-        );
-        let (current, _) = direct
-            .pending_peer(&authorization.claims.connection_id)
-            .ok_or_else(|| Error::unauthorized("Direct authorization closed."))?;
-        let lease = direct.accept_peer(&current, &current.claims.session_id, &fingerprint)?;
+        let lease = direct.accept_certificate(&authorization.claims.connection_id, certificate)?;
 
         let (requests, input) = mpsc::channel(leo_relay_protocol::MAX_IN_FLIGHT);
         let (output, mut frames) = mpsc::channel(2);
@@ -372,7 +381,7 @@ async fn serve_peer(
         };
 
         let reader = async {
-            let mut decoder = leo_relay_protocol::data_channel::FrameDecoder::default();
+            let mut decoder = leo_relay_protocol::data_channel::FrameDecoder::with_budget(reassembly);
             let mut timeout = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
                 tokio::select! {
@@ -425,6 +434,9 @@ async fn apply_signal(peer: &dyn PeerConnection, signal: Option<DirectSignal>) -
     else {
         return Err(Error::bad("Expected ICE candidate."));
     };
+    if mdns_candidate(&candidate) {
+        return Ok(());
+    }
     peer.add_ice_candidate(RTCIceCandidateInit {
         candidate,
         sdp_mid,
@@ -433,6 +445,13 @@ async fn apply_signal(peer: &dyn PeerConnection, signal: Option<DirectSignal>) -
     })
     .await
     .map_err(Error::internal)
+}
+
+fn mdns_candidate(candidate: &str) -> bool {
+    candidate
+        .split_ascii_whitespace()
+        .nth(4)
+        .is_some_and(|address| address.ends_with(".local"))
 }
 
 struct ClosePeer {

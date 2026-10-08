@@ -323,10 +323,13 @@ def main():
                 network.stun_address = "198.18.102.3:3478"
                 listen_address = "10.102.2.3:3478"
             ready = Path(directory) / "stun-ready"
-            stun = network.spawn(stun_namespace, os.sys.executable, str(Path(__file__).resolve()),
-                                 "stun-server", listen_address, str(ready))
+            stun = network.spawn(stun_namespace,
+                                 str(Path("target/debug/examples/network_stun_server").resolve()),
+                                 listen_address, str(ready))
             wait_ready(ready, stun, "STUN listener before host masquerading")
-            report = {"scenario": args.scenario, "browserHostPolicy": "mdns" if args.scenario == "mdns-only-client" else "numeric", "probe": network.probe(binary, "client"),
+            report = {"scenario": args.scenario, "stunResponder": "official-rust",
+                      "browserHostPolicy": "mdns" if args.scenario == "mdns-only-client" else "numeric",
+                      "probe": network.probe(binary, "client"),
                       "installationProbe": network.probe(binary, "installation")}
             expected_received = 0 if args.scenario == "udp-blocked" else 8 if args.scenario == "packet-loss" else 10
             for role, probe in [("client", report["probe"]), ("installation", report["installationProbe"])]:
@@ -394,10 +397,11 @@ def browser(network, binary, directory, args, report):
         return str(path)
 
     env["LEO_OFFICIAL_STUN_URL"] = "stun:" + network.stun_address
+    # Empty operator override must use authenticated official STUN, not disable direct.
+    env["LEO_DIRECT_STUN_URLS"] = ""
     if args.scenario == "same-server":
         env["LEO_DIRECT_PUBLIC_IP"] = "198.18.102.3"
-    # The real official Binding responder is independently tested on UDP. This
-    # address-discovery fixture belongs before the host-facing masquerade.
+    # The production Rust Binding responder runs before host-facing masquerade.
     env["LEO_NETWORK_DIRECT_CLIENT"] = wrapper(
         "direct-client", "client", str(Path("target/debug/examples/network_direct_client").resolve()), "")
     env["LEO_NETWORK_INSTALLATION_BINARY"] = wrapper(

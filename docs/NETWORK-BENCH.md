@@ -14,7 +14,7 @@ both real binaries and uses an in-memory email adapter. Agent workers are disabl
 
 ```sh
 pnpm install --frozen-lockfile
-CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=4 cargo build --locked --workspace --bin leo --bin leo-official --example network_direct_client
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=4 cargo build --locked --workspace --bin leo --bin leo-official --example network_direct_client --example network_stun_server
 pnpm build
 pnpm exec playwright install --with-deps chromium
 docker run -d --name leo-network-postgres -e POSTGRES_USER=leo -e POSTGRES_PASSWORD=test-only -e POSTGRES_DB=leo_official_test -p 127.0.0.1:5432:5432 postgres:17-alpine
@@ -72,7 +72,7 @@ only the standard library and never serves installation data.
 UDP probes send fixed sequence markers to two diagnostic listeners. Reports show
 sent/received counts, whether the source was translated and the number of observed
 mappings on both sides. The UDP probe discards delayed replies from earlier
-sequences until the current reply or its deadline. A STUN fixture listens at
+sequences until the current reply or its deadline. The official Rust Binding responder (via its diagnostic example launcher) listens at
 198.18.102.1:3478, before the host-facing masquerade; mapped addresses therefore
 identify each actual NAT router (198.18.102.2/.3), rather than a shared host
 address. Tests assert these reflexive addresses. NAT routers drop unsolicited UDP to their own ports as well as forwarded UDP,
@@ -185,8 +185,20 @@ retain the external client's address and source port (`localPort`). This exercis
 actual Docker DNAT path; a gateway address from a userland proxy fails the check.
 The fixture mounts only the diagnostic script read-only, removes its container
 and namespace in `finally`, and saves `test-results/network/docker-stun.json`.
-The official Rust responder is separately covered by real UDP integration tests.
+The namespace bench now uses this same official Rust responder, rather than
+only the Python fixture. Its report identifies `stunResponder: official-rust`.
+Real UDP integration tests also cover receive-error recovery and IPv4/IPv6 mappings.
+The authenticated bench deliberately sets `LEO_DIRECT_STUN_URLS=""` to verify
+that the installation uses the official STUN source and still connects directly.
 The production host must repeat source-preservation and firewall validation
 before release (#113/#105); this ticket performs no deployment or host firewall
 change. Hairpin behavior and the optional port-preserving public-IP alias are
 covered by the authenticated `same-server` scenario above.
+
+
+Qualification #105 must additionally probe UDP 3478 from an **external IPv6**
+host through the production Docker publication, comparing the full IPv6 source
+and source port with XOR-MAPPED-ADDRESS. An IPv6 Docker userland proxy can replace
+the source with a gateway (or translate to IPv4); IPv4 DNAT evidence does not
+prove IPv6 preservation. Do not publish AAAA/STUN IPv6 readiness until this
+separate check succeeds. The local namespace/Docker bench remains IPv4 evidence.

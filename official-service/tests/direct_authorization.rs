@@ -2009,3 +2009,63 @@ async fn saturated_direct_signaling_preserves_credited_fallback_streams() {
     relay.close().await;
     proxy.abort();
 }
+
+#[tokio::test]
+async fn candidate_policy_refuses_local_special_addresses_but_preserves_lan_and_vpn() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let grant = authorization(&relay, &relay.cookie, &relay.session).await;
+    let path = format!(
+        "/api/installations/{}/direct/{}/signal",
+        grant.claims.installation_id, grant.claims.connection_id
+    );
+    for address in [
+        "127.0.0.1",
+        "169.254.1.1",
+        "::1",
+        "::ffff:127.0.0.1",
+        "::ffff:169.254.1.1",
+        "fe80::1",
+        "0.0.0.0",
+        "::",
+        "224.0.0.251",
+        "ff02::fb",
+        "255.255.255.255",
+    ] {
+        let candidate = format!("candidate:1 1 udp 2122260223 {address} 50000 typ host");
+        let response = relay
+            .app
+            .authenticated(&relay.cookie, &relay.session, Method::POST, &path)
+            .json(&json!({
+                "kind": "candidate",
+                "candidate": candidate,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_client_error(),
+            "unsafe remote candidate {address}"
+        );
+    }
+    for address in [
+        "192.168.1.2",
+        "10.8.0.2",
+        "172.16.2.3",
+        "fd00::2",
+        "192.0.2.1",
+    ] {
+        let candidate = format!("candidate:1 1 udp 2122260223 {address} 50000 typ host");
+        let response = relay
+            .app
+            .authenticated(&relay.cookie, &relay.session, Method::POST, &path)
+            .json(&json!({
+                "kind": "candidate",
+                "candidate": candidate,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+    relay.close().await;
+}

@@ -1,6 +1,10 @@
 //! Binary envelopes around the existing JSON frames on a reliable ordered DataChannel.
 use crate::{Frame, MAX_FRAME, MAX_IN_FLIGHT, REQUEST_TIMEOUT};
-use std::{collections::HashMap, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 pub const MAX_PACKET: usize = 16_384;
 pub const HEADER: usize = 13;
@@ -37,7 +41,38 @@ impl EncodedFrame {
     }
 }
 
+/// Shared across an installation's peers. Reserve declared size before buffering;
+/// a sparse malicious transfer cannot grow past the installation allowance.
+#[derive(Clone, Default)]
+pub struct ReassemblyBudget(Arc<Mutex<usize>>);
+
+struct Reservation {
+    budget: ReassemblyBudget,
+    bytes: usize,
+}
+
+impl ReassemblyBudget {
+    fn reserve(&self, bytes: usize) -> Result<Reservation, &'static str> {
+        let mut reserved = self.0.lock().unwrap();
+        if *reserved + bytes > MAX_FRAME {
+            return Err("Installation reassembly limit exceeded");
+        }
+        *reserved += bytes;
+        Ok(Reservation {
+            budget: self.clone(),
+            bytes,
+        })
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        *self.budget.0.lock().unwrap() -= self.bytes;
+    }
+}
+
 struct Assembly {
+    _reservation: Reservation,
     total: usize,
     bytes: Vec<u8>,
     started: Instant,
@@ -47,9 +82,17 @@ struct Assembly {
 pub struct FrameDecoder {
     pending: HashMap<u32, Assembly>,
     buffered: usize,
+    budget: ReassemblyBudget,
 }
 
 impl FrameDecoder {
+    pub fn with_budget(budget: ReassemblyBudget) -> Self {
+        Self {
+            budget,
+            ..Self::default()
+        }
+    }
+
     pub fn expired(&self) -> bool {
         self.pending
             .values()
@@ -86,6 +129,7 @@ impl FrameDecoder {
             self.pending.insert(
                 id,
                 Assembly {
+                    _reservation: self.budget.reserve(total)?,
                     total,
                     bytes: Vec::new(),
                     started: Instant::now(),
@@ -95,6 +139,12 @@ impl FrameDecoder {
         let frame = self.pending.get_mut(&id).ok_or("Unknown transfer")?;
         if frame.total != total || frame.bytes.len() != offset {
             return Err("Invalid fragment sequence");
+        }
+        let received = frame.bytes.len() + payload.len();
+        if received > frame.bytes.capacity() {
+            // Amortized growth, capped by the declared-size reservation.
+            let capacity = (frame.bytes.capacity() * 2).max(received).min(total);
+            frame.bytes.reserve_exact(capacity - frame.bytes.len());
         }
         frame.bytes.extend(payload);
         self.buffered += payload.len();

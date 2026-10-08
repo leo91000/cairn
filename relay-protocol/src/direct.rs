@@ -397,7 +397,13 @@ fn valid_candidate(candidate: &str) -> bool {
                 .strip_suffix(".local")
                 .is_some_and(|name| token(name, 64))
     };
-    token(words[0], 32)
+    let permitted_address = words[4]
+        .parse::<std::net::IpAddr>()
+        .map_or(true, usable_candidate_address);
+    // Private addresses remain useful across authenticated LAN/VPN peers. This
+    // is ICE connectivity metadata, never an HTTP fetch or an application grant.
+    permitted_address
+        && token(words[0], 32)
         && words[1] == "1"
         && matches!(words[2], "udp" | "UDP" | "tcp" | "TCP")
         && words[3].parse::<u32>().is_ok()
@@ -413,4 +419,30 @@ fn valid_candidate(candidate: &str) -> bool {
             ["tcptype", value] => matches!(*value, "active" | "passive" | "so"),
             _ => false,
         })
+}
+
+/// LAN/VPN unicast is intentional; special local destinations are not ICE peers.
+pub fn usable_candidate_address(ip: std::net::IpAddr) -> bool {
+    let ip = match ip {
+        std::net::IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map(std::net::IpAddr::V4)
+            .unwrap_or(std::net::IpAddr::V6(ip)),
+        ip => ip,
+    };
+    match ip {
+        std::net::IpAddr::V4(ip) => {
+            !ip.is_loopback()
+                && !ip.is_link_local()
+                && !ip.is_unspecified()
+                && !ip.is_multicast()
+                && !ip.is_broadcast()
+        }
+        std::net::IpAddr::V6(ip) => {
+            !ip.is_loopback()
+                && !ip.is_unicast_link_local()
+                && !ip.is_unspecified()
+                && !ip.is_multicast()
+        }
+    }
 }

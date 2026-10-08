@@ -79,7 +79,7 @@ jobs:
       - name: Build the browser-test backend and frontend
         run: |
           cargo build --locked --bin leo --example worker_fixture --example network_direct_client --features ublk
-          cargo build --locked -p leo-official-service --bin leo-official
+          cargo build --locked -p leo-official-service --bin leo-official --example network_stun_server
           pnpm exec vite build
       - uses: actions/upload-artifact@v7.0.1
         with:
@@ -89,6 +89,7 @@ jobs:
             target/debug/leo-official
             target/debug/examples/worker_fixture
             target/debug/examples/network_direct_client
+            target/debug/examples/network_stun_server
           retention-days: 1
       - uses: actions/upload-artifact@v7.0.1
         with:
@@ -146,7 +147,7 @@ jobs:
           node scripts/test-backend.mjs --features ublk-prototype
           # Also compile the browser-test binaries into the cache that later build jobs restore.
           cargo build --locked --bin leo --example worker_fixture --example network_direct_client --features ublk
-          cargo build --locked -p leo-official-service --bin leo-official
+          cargo build --locked -p leo-official-service --bin leo-official --example network_stun_server
       - name: Validate node supervisor and S3 recovery
         run: |
           python3 tests/guest_projects_test.py
@@ -288,7 +289,7 @@ jobs:
         with:
           name: browser-backend
           path: target/debug/
-      - run: chmod +x target/debug/leo target/debug/leo-official target/debug/examples/network_direct_client
+      - run: chmod +x target/debug/leo target/debug/leo-official target/debug/examples/network_direct_client target/debug/examples/network_stun_server
       - name: Validate real network topology and authenticated sessions
         run: |
           python3 tests/network_probe_test.py

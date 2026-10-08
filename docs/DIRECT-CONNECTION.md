@@ -93,8 +93,10 @@ official service's memory and logs; it is not end-to-end encryption against it.
   "identifier already used" counts as delivered.
 - Other mutations in flight during a switch are not replayed and fail visibly,
   as a relay disconnection does today.
-- Limits are identical on both routes: 32 requests in flight, 24 streams,
+- Both routes use the same per-pool values: 32 requests in flight, 24 streams,
   8 MB bodies, 64 KiB stream chunks with credits, 30-second response deadline.
+  Application pools are separate, with the scopes and combined ceilings below;
+  saturating direct capacity leaves the relay's fallback capacity available.
 - On the DataChannel, frames are fragmented into messages of at most 16 KiB:
   larger messages are not interoperable without SCTP interleaving, and a large
   message would block every other request on the ordered channel.
@@ -218,8 +220,11 @@ the official Compose definition; Traefik routes HTTPS only.
   unicast address for an explicitly verified port-preserving NAT. It avoids the
   same-host STUN hairpin trap without publishing any installation port; see the
   [production runbook](PRODUCTION-CAIRN.md#stun-and-direct-installation-connectivity-101).
-- Invalid configuration disables the direct peer and logs a fixed warning while
-  retaining the relay. No configuration value or signaling payload is logged.
+- An unset or empty `LEO_DIRECT_STUN_URLS` uses the authenticated official STUN
+  source. An empty override logs this choice explicitly; it does not disable direct.
+- Invalid configuration disables the direct peer and logs a fixed reason naming
+  the setting while retaining the relay. No configuration value or signaling
+  payload is logged.
 - The peer uses ephemeral UDP sockets for ICE; it requires no forwarded inbound
   port, public certificate, local password or anonymous listener.
 
@@ -235,9 +240,13 @@ credits/cancellation) can interleave. `total=offset=0` with no payload abandons
 an incomplete transfer without dispatch. Unknown versions, duplicate starts,
 invalid offsets, text messages or excessive sizes close the direct connection.
 
-Reassembly retains at most 32 incomplete transfers, an aggregate `MAX_FRAME`
-byte budget and a 30-second assembly deadline. Buffers grow only for received
-bytes. Application limits remain 32 requests, 24 streams globally, 8 streams per
+Reassembly retains at most 32 incomplete transfers per channel and a 30-second
+assembly deadline. **All installation peers share one `MAX_FRAME` reservation
+budget** (the existing maximum JSON frame size, about 10.7 MB). Each transfer
+reserves its declared total before buffering; completion, abandonment, timeout,
+connection closure or panic releases that reservation. Buffers grow only as bytes
+arrive and their capacity is bounded by the reservation. Sparse declarations
+therefore cannot build up 32 independent maximum-frame buffers. Application limits remain 32 requests, 24 streams globally, 8 streams per
 account, 8 MB bodies, 64 KiB credited chunks and the existing 30-second response
 deadline. SCTP send/receive buffers are bounded to 64 KiB; application ingress and
 egress are bounded separately. Cancellation and revocation stop dispatch
@@ -249,6 +258,42 @@ arrives over this DataChannel and a selected UDP ICE candidate pair is observed.
 Relay observations come from the official response's `x-leo-transport: relay`
 header. The web reports successful API/stream traffic through its transport observer (#103); this distinction prevents the
 bench from mistaking UDP probe reachability for an authorized direct connection.
+
+### Capacity scopes and candidate policy (#117)
+
+Direct and relay application pools are deliberately **separate**, not one shared
+installation pool. Direct uses 32 requests and 24 streams across all installation
+peers, with eight streams per verified account across those peers. The relay
+retains 32 authenticated requests and 24 streams per installation tunnel, with
+eight browser streams per account across all installations in the official
+process. For one installation the maximum combined allowance is therefore 64
+requests / 48 streams, and at most 16 browser streams for one account (eight on
+each route). Relay public downloads retain their independent four-slot pool;
+MCP and direct authorization/signaling allowances are unchanged. Saturating
+reassembly or direct application capacity never borrows fallback slots. These
+transport limits do not count or cancel agent executions.
+
+Installation mDNS is explicitly disabled (`MulticastDnsMode::Disabled`): it
+binds no multicast listener on UDP 5353 and parses no multicast traffic. Bounded
+`.local` names remain valid signaling metadata but are removed from embedded
+SDP candidates and ignored on trickle before calling the SDK. **#103/#104 must
+use numeric host/reflexive candidates or the HTTPS relay**; an mDNS-only browser
+LAN offer can fall back even on the same LAN. No automatic DNS resolver or new
+installation listener compensates for this choice; #105 must qualify this case.
+
+The existing shared signaling validator rejects loopback, link-local,
+unspecified, multicast and IPv4 broadcast destinations, including IPv4-mapped
+IPv6 forms, for embedded and trickled candidates. The installation also skips
+its own special-address candidates. RFC1918 and IPv6 unique-local unicast
+addresses remain permitted: authorized clients can share a LAN or routed VPN,
+and neither side knows an authenticated list of the other's private subnets.
+These addresses only cause bounded UDP ICE connectivity checks; they never
+fetch an HTTP resource or authorize application access. Signed grants, observed
+DTLS certificate comparison and immediate revocation remain mandatory.
+
+The peer survives broadcast signal lag; a lost negotiation can time out and use
+the relay while later grants still work. Completion is tracked by Tokio task ID,
+so a failed/panicking job releases its authorization and peer registry entry.
 
 ## Delivered web transport (#103)
 

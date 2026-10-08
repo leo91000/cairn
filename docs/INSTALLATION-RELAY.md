@@ -417,6 +417,20 @@ the official service. Authorize/renew responses expose the same `iceServers`.
 A signal dequeued before its authorization was accepted is refused immediately,
 releasing its acknowledgement slot instead of waiting the five-second deadline.
 
+### Direct and fallback capacity (#117)
+
+The direct application pool is separate from the fallback tunnel pool: each has
+32 request slots and 24 stream slots. Direct pools are shared across all peers
+of one installation, with eight streams per verified account there; the relay's
+eight browser streams per account cover all installations in the official
+process. For one installation the combined ceiling is 64 requests / 48 streams,
+and 16 browser streams for one account using both routes. Public downloads keep
+their independent four relay slots. This separation preserves fallback capacity
+when direct is saturated. All direct peers share one `MAX_FRAME` reassembly
+reservation budget, released on completion, abandonment or peer termination.
+See [candidate and mDNS policy](DIRECT-CONNECTION.md#capacity-scopes-and-candidate-policy-117)
+for the numeric-candidate requirement shared with #103/#104.
+
 ## Scheduled task author checks
 
 Before reconnecting, creating/changing a task or admitting due scheduled work, the

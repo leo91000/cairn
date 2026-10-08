@@ -21,7 +21,12 @@ two independently chosen releases. A reused PR image reports its tested merge
 commit, whose Git tree matches the release, rather than a later tag commit.
 The official image contains `leo-official` and the matching `pnpm build` output;
 it has no worker CLI or VM layers. `/health` returns no-store JSON with `status`,
-`commit` and `runtimeId`. Readiness is sampled every five seconds with a
+`commit`, `runtimeId` and `stun` (`status`, `receiveErrors`, `sendErrors`). STUN
+status is independent of HTTP/database readiness: `running`, `retrying` after a
+receive error, or `stopped` after termination. UDP errors are counted and logged
+without addresses or packets; receive errors retry with a bounded pause instead
+of silently ending address discovery. HTTP/relay readiness stays usable during
+STUN loss. Readiness is sampled every five seconds with a
 one-second query timeout; HTTP probes read the cached result without querying
 Postgres. Database loss is reported within six seconds, and recovery at the next
 successful sample. It is unavailable until the first sample succeeds.
@@ -460,3 +465,20 @@ A wrong setting only makes direct fail; it never relaxes grant or DTLS validatio
 `LEO_DIRECT_STUN_URLS` can also select a dedicated official STUN endpoint, useful
 where a distinct reachable official address avoids hairpinning. It must remain
 operator-controlled; no automatic third-party fallback is configured.
+
+
+Before qualification #105 approves IPv6 STUN, repeat the external-source probe
+from a separate IPv6 host through the actual published UDP 3478 port. Check both
+source IPv6 address and source port: Docker's userland proxy may translate IPv6
+to IPv4 or expose a gateway even when IPv4 DNAT preserves the source. Do not
+infer IPv6 support from the IPv4 namespace or Docker test.
+
+The Binding responder accepts standard 20-byte requests for interoperability.
+Its maximum UDP-payload amplification is **32/20 = 1.6× for IPv4** and
+**44/20 = 2.2× for IPv6**. With FINGERPRINT it is 40/28 (about 1.43×) and 52/28
+(about 1.86×); optional attributes only increase request size. It never returns
+more than one response, retransmits, or serves TURN. The existing 20 responses
+per source IP per second and 1000 responses globally per second remain, with
+at most 1000 tracked IPs and 512-byte request parsing. No unbounded state or
+application content enters STUN. Requiring padded requests would break minimal
+standard WebRTC Binding discovery, so #117 documents this bounded ratio instead.

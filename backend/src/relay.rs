@@ -460,8 +460,9 @@ pub async fn connect(
     service: std::sync::Arc<crate::service::Service>,
     stop: CancellationToken,
 ) -> Result<()> {
-    let config = crate::direct::peer::PeerConfig::load().unwrap_or_else(|_| {
-        tracing::warn!("Invalid direct configuration; retaining relay with direct disabled");
+    let config = crate::direct::peer::PeerConfig::load().unwrap_or_else(|error| {
+        // Configuration errors contain fixed messages only, never environment values.
+        tracing::warn!(reason = %error.message, "Invalid direct configuration; retaining relay with direct disabled");
         crate::direct::peer::PeerConfig {
             enabled: false,
             stun_urls: Vec::new(),

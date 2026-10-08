@@ -116,7 +116,7 @@ async fn client_with_fingerprint(
     let peer: Arc<dyn PeerConnection> = Arc::new(
         PeerConnectionBuilder::new()
             .with_handler(Arc::new(ClientEvents(events)))
-            .with_udp_addrs(vec!["127.0.0.1:0"])
+            .with_udp_addrs(vec!["0.0.0.0:0"])
             .build()
             .await
             .unwrap(),
@@ -904,7 +904,10 @@ async fn signal_lag_keeps_the_peer_running_and_new_connections_work() {
             Method::POST,
             &format!("/api/installations/{id}/direct/authorize"),
         )
-        .json(&json!({ "fingerprint": fingerprint, "versions": [4] }))
+        .json(&json!({
+            "fingerprint": fingerprint,
+            "versions": [4],
+        }))
         .send()
         .await
         .unwrap()
@@ -937,7 +940,9 @@ async fn signal_lag_keeps_the_peer_running_and_new_connections_work() {
         () = async {
             let (peer, channel, _) = client(&relay).await;
             send_frame(channel.as_ref(), 1, &request("after-lag", "/api/chats")).await;
-            assert!(matches!(response(channel.as_ref()).await, Frame::Response(reply) if reply.status == 200));
+
+            let reply = response(channel.as_ref()).await;
+            assert!(matches!(reply, Frame::Response(reply) if reply.status == 200));
             peer.close().await.unwrap();
         } => {}
     }
@@ -946,6 +951,132 @@ async fn signal_lag_keeps_the_peer_running_and_new_connections_work() {
     assert_eq!(
         relay.get("/chats").send().await.unwrap().status(),
         StatusCode::OK
+    );
+    relay.close().await;
+}
+
+async fn partial_transfer(channel: &dyn DataChannel, id: u32, total: usize) {
+    let mut packet = vec![1];
+    packet.extend(id.to_be_bytes());
+    packet.extend((total as u32).to_be_bytes());
+    packet.extend(0_u32.to_be_bytes());
+    packet.push(b'{');
+    channel
+        .send(bytes::BytesMut::from(packet.as_slice()))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn reassembly_capacity_is_shared_across_peers_and_released_on_abort_and_close() {
+    let mut relay = RelayedInstallation::new(axum::Router::new()).await;
+    production_connector(&mut relay).await;
+    let (first, first_channel, _) = client(&relay).await;
+    let (second, second_channel, _) = client(&relay).await;
+    let declared = leo_relay_protocol::MAX_FRAME / 2 + 1;
+    partial_transfer(first_channel.as_ref(), 1, declared).await;
+    // A response confirms the first fragment was processed before the next peer.
+    send_frame(first_channel.as_ref(), 2, &request("barrier", "/api/chats")).await;
+    assert!(
+        matches!(response(first_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+    partial_transfer(second_channel.as_ref(), 1, declared).await;
+    closed(second_channel.as_ref()).await;
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let mut abort = vec![1];
+    abort.extend(1_u32.to_be_bytes());
+    abort.extend([0; 8]);
+    first_channel
+        .send(bytes::BytesMut::from(abort.as_slice()))
+        .await
+        .unwrap();
+    send_frame(
+        first_channel.as_ref(),
+        3,
+        &request("abort-barrier", "/api/chats"),
+    )
+    .await;
+    assert!(
+        matches!(response(first_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+    let (third, third_channel, _) = client(&relay).await;
+    partial_transfer(third_channel.as_ref(), 1, declared).await;
+    send_frame(
+        third_channel.as_ref(),
+        2,
+        &request("after-abort", "/api/chats"),
+    )
+    .await;
+    assert!(
+        matches!(response(third_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+    partial_transfer(third_channel.as_ref(), 3, leo_relay_protocol::MAX_FRAME + 1).await;
+    closed(third_channel.as_ref()).await;
+    third.close().await.unwrap();
+    partial_transfer(first_channel.as_ref(), 4, declared).await;
+    send_frame(
+        first_channel.as_ref(),
+        5,
+        &request("after-close", "/api/chats"),
+    )
+    .await;
+    assert!(
+        matches!(response(first_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+    first.close().await.unwrap();
+    second.close().await.unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn observed_certificate_is_compared_with_the_grant_without_an_sdp_check() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    // Public test certificate, generated with OpenSSL; no SDP or DTLS SDK check.
+    // Expected SHA-256 comes from openssl x509 -fingerprint -sha256.
+    let observed = include_bytes!("fixtures/direct-certificate.der");
+    let fingerprint = "sha-256 2E:13:F5:6D:43:F6:75:E6:CA:09:EC:E3:F2:49:8E:47:F0:22:FE:83:FA:95:72:80:33:86:64:D1:6D:25:AF:A2";
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let grant: serde_json::Value = relay
+        .app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            &format!("/api/installations/{id}/direct/authorize"),
+        )
+        .json(&json!({
+            "fingerprint": fingerprint,
+            "versions": [4],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let grant: DirectAuthorization = serde_json::from_value(grant["grant"].clone()).unwrap();
+    let mut substituted = observed.to_vec();
+    substituted[0] ^= 1;
+    assert!(
+        relay
+            .direct
+            .accept_certificate(&grant.claims.connection_id, &substituted)
+            .is_err()
+    );
+    let lease = relay
+        .direct
+        .accept_certificate(&grant.claims.connection_id, observed)
+        .unwrap();
+    assert_eq!(lease.claims, grant.claims);
+    assert!(
+        relay
+            .direct
+            .accept_certificate(&grant.claims.connection_id, observed)
+            .is_err()
     );
     relay.close().await;
 }
