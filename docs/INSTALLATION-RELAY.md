@@ -426,8 +426,12 @@ eight browser streams per account cover all installations in the official
 process. For one installation the combined ceiling is 64 requests / 48 streams,
 and 16 browser streams for one account using both routes. Public downloads keep
 their independent four relay slots. This separation preserves fallback capacity
-when direct is saturated. All direct peers share one `MAX_FRAME` reassembly
-reservation budget, released on completion, abandonment or peer termination.
+when direct is saturated. All direct peers share a `2 * MAX_FRAME` reassembly
+reservation budget: one maximum frame reserved for the owner, one shared by all
+members, and at most one per verified account and per peer. Shortages apply
+backpressure without closing the waiting connection; 30-second expiry frees
+incomplete transfers without dispatching them. Completion, abandonment and peer
+termination also release reservations.
 See [candidate and mDNS policy](DIRECT-CONNECTION.md#capacity-scopes-and-candidate-policy-117)
 for the numeric-candidate requirement shared with #103/#104.
 

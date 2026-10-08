@@ -2077,5 +2077,42 @@ async fn candidate_policy_drops_local_special_addresses_but_preserves_lan_and_vp
             matches!(signals.try_recv().unwrap(), leo_agent_manager::direct::DirectEvent::Signal { signal: leo_relay_protocol::direct::DirectSignal::Candidate { candidate: received, .. }, .. } if received == candidate)
         );
     }
+    let base = format!(
+        "v=0\r\ns=-\r\nt=0 0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=fingerprint:{}\r\na=sctp-port:5000\r\n",
+        grant.claims.fingerprint,
+    );
+    let usable = "a=candidate:1 1 udp 2122260223 192.168.1.2 50000 typ host\r\n";
+    let special = "a=candidate:2 1 udp 2122260223 fe80::1 50001 typ host\r\n";
+    let mdns = "a=candidate:3 1 udp 2122260223 hidden-host.local 50002 typ host\r\n";
+    let response = relay
+        .app
+        .authenticated(&relay.cookie, &relay.session, Method::POST, &path)
+        .json(&json!({
+            "kind": "offer",
+            "sdp": format!("{base}{usable}{special}{mdns}"),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(
+        matches!(signals.try_recv().unwrap(), leo_agent_manager::direct::DirectEvent::Signal {
+        signal: leo_relay_protocol::direct::DirectSignal::Offer { sdp }, ..
+    } if sdp == format!("{base}{usable}"))
+    );
+    for candidates in [special, mdns, "a=candidate:invalid syntax\r\n"] {
+        let response = relay
+            .app
+            .authenticated(&relay.cookie, &relay.session, Method::POST, &path)
+            .json(&json!({
+                "kind": "offer",
+                "sdp": format!("{base}{candidates}"),
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(signals.try_recv().is_err());
+    }
     relay.close().await;
 }

@@ -1,5 +1,5 @@
 //! Binary envelopes around the existing JSON frames on a reliable ordered DataChannel.
-use crate::{Frame, MAX_FRAME, MAX_IN_FLIGHT, REQUEST_TIMEOUT};
+use crate::{Frame, MAX_FRAME, MAX_IN_FLIGHT, REQUEST_TIMEOUT, Role};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -41,24 +41,76 @@ impl EncodedFrame {
     }
 }
 
-/// Shared across an installation's peers. Reserve declared size before buffering;
-/// a sparse malicious transfer cannot grow past the installation allowance.
+/// Two maximum frames per installation, with one reserved for the owner.
+/// Each account can reserve at most one maximum frame across all its peers.
 #[derive(Clone, Default)]
-pub struct ReassemblyBudget(Arc<Mutex<usize>>);
+pub struct ReassemblyBudget {
+    state: Arc<Mutex<Reservations>>,
+    account: String,
+    member: bool,
+}
+
+#[derive(Default)]
+struct Reservations {
+    total: usize,
+    members: usize,
+    accounts: HashMap<String, usize>,
+}
 
 struct Reservation {
     budget: ReassemblyBudget,
     bytes: usize,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum DecodeError {
+    Busy,
+    Invalid(&'static str),
+}
+
+impl std::fmt::Display for DecodeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy => formatter.write_str("Reassembly capacity busy"),
+            Self::Invalid(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
+impl From<&'static str> for DecodeError {
+    fn from(message: &'static str) -> Self {
+        Self::Invalid(message)
+    }
+}
+
 impl ReassemblyBudget {
-    fn reserve(&self, bytes: usize) -> Result<Reservation, &'static str> {
-        let mut reserved = self.0.lock().unwrap();
-        if *reserved + bytes > MAX_FRAME {
-            return Err("Installation reassembly limit exceeded");
+    pub fn for_account(&self, account: &str, role: Role) -> Self {
+        Self {
+            state: self.state.clone(),
+            account: account.to_owned(),
+            member: role == Role::Member,
+        }
+    }
+
+    fn reserve(&self, bytes: usize) -> Result<Reservation, DecodeError> {
+        let mut reserved = self.state.lock().unwrap();
+        let account = reserved.accounts.get(&self.account).copied().unwrap_or(0);
+        if reserved.total + bytes > 2 * MAX_FRAME
+            || account + bytes > MAX_FRAME
+            || (self.member && reserved.members + bytes > MAX_FRAME)
+        {
+            return Err(DecodeError::Busy);
         }
 
-        *reserved += bytes;
+        reserved.total += bytes;
+        if self.member {
+            reserved.members += bytes;
+        }
+        reserved
+            .accounts
+            .insert(self.account.clone(), account + bytes);
 
         Ok(Reservation {
             budget: self.clone(),
@@ -69,8 +121,24 @@ impl ReassemblyBudget {
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        *self.budget.0.lock().unwrap() -= self.bytes;
+        let mut reserved = self.budget.state.lock().unwrap();
+        reserved.total -= self.bytes;
+        if self.budget.member {
+            reserved.members -= self.bytes;
+        }
+        let account = reserved.accounts.get_mut(&self.budget.account).unwrap();
+        *account -= self.bytes;
+        if *account == 0 {
+            reserved.accounts.remove(&self.budget.account);
+        }
     }
+}
+
+// Retain only sequence metadata after expiry, so late fragments are drained
+// without allocating or dispatching an expired request, and without closing ICE.
+struct Discarded {
+    total: usize,
+    received: usize,
 }
 
 struct Assembly {
@@ -83,6 +151,7 @@ struct Assembly {
 #[derive(Default)]
 pub struct FrameDecoder {
     pending: HashMap<u32, Assembly>,
+    discarded: HashMap<u32, Discarded>,
     buffered: usize,
     budget: ReassemblyBudget,
 }
@@ -95,38 +164,65 @@ impl FrameDecoder {
         }
     }
 
-    pub fn expired(&self) -> bool {
-        self.pending
-            .values()
-            .any(|frame| frame.started.elapsed() >= REQUEST_TIMEOUT)
+    pub fn expire(&mut self) {
+        self.pending.retain(|id, frame| {
+            if frame.started.elapsed() < REQUEST_TIMEOUT {
+                return true;
+            }
+
+            self.buffered -= frame.bytes.len();
+            self.discarded.insert(
+                *id,
+                Discarded {
+                    total: frame.total,
+                    received: frame.bytes.len(),
+                },
+            );
+            false
+        });
     }
 
-    pub fn push(&mut self, packet: &[u8]) -> Result<Option<Frame>, &'static str> {
-        if packet.len() < HEADER || packet.len() > MAX_PACKET || packet[0] != 1 || self.expired() {
-            return Err("Invalid or expired DataChannel fragment");
+    pub fn push(&mut self, packet: &[u8]) -> Result<Option<Frame>, DecodeError> {
+        self.expire();
+        if packet.len() < HEADER || packet.len() > MAX_PACKET || packet[0] != 1 {
+            return Err("Invalid DataChannel fragment".into());
         }
         let id = u32::from_be_bytes(packet[1..5].try_into().unwrap());
         let total = u32::from_be_bytes(packet[5..9].try_into().unwrap()) as usize;
         let offset = u32::from_be_bytes(packet[9..13].try_into().unwrap()) as usize;
         let payload = &packet[HEADER..];
         if id == 0 || total > MAX_FRAME {
-            return Err("Invalid transfer size");
+            return Err("Invalid transfer size".into());
         }
         if total == 0 && offset == 0 && payload.is_empty() {
             if let Some(frame) = self.pending.remove(&id) {
                 self.buffered -= frame.bytes.len();
             }
+            self.discarded.remove(&id);
             return Ok(None);
         }
-        if payload.is_empty()
-            || offset + payload.len() > total
-            || self.buffered + payload.len() > MAX_FRAME
-        {
-            return Err("DataChannel reassembly limit exceeded");
+        if payload.is_empty() || offset + payload.len() > total {
+            return Err("DataChannel reassembly limit exceeded".into());
+        }
+        if let Some(frame) = self.discarded.get_mut(&id) {
+            if frame.total != total || frame.received != offset {
+                return Err("Invalid expired fragment sequence".into());
+            }
+            frame.received += payload.len();
+            if frame.received == total {
+                self.discarded.remove(&id);
+            }
+            return Ok(None);
         }
         if offset == 0 {
-            if self.pending.contains_key(&id) || self.pending.len() >= MAX_IN_FLIGHT {
-                return Err("Too many incomplete transfers");
+            if self.pending.contains_key(&id)
+                || self.pending.len() + self.discarded.len() >= MAX_IN_FLIGHT
+            {
+                return Err("Too many incomplete transfers".into());
+            }
+            let reserved: usize = self.pending.values().map(|frame| frame.total).sum();
+            if reserved + total > MAX_FRAME {
+                return Err(DecodeError::Busy);
             }
             self.pending.insert(
                 id,
@@ -140,7 +236,7 @@ impl FrameDecoder {
         }
         let frame = self.pending.get_mut(&id).ok_or("Unknown transfer")?;
         if frame.total != total || frame.bytes.len() != offset {
-            return Err("Invalid fragment sequence");
+            return Err("Invalid fragment sequence".into());
         }
         let received = frame.bytes.len() + payload.len();
         if received > frame.bytes.capacity() {
@@ -157,6 +253,6 @@ impl FrameDecoder {
         self.buffered -= frame.bytes.len();
         serde_json::from_slice(&frame.bytes)
             .map(Some)
-            .map_err(|_| "Invalid application frame")
+            .map_err(|_| DecodeError::Invalid("Invalid application frame"))
     }
 }

@@ -254,6 +254,7 @@ async fn serve_peer(
     traffic: DirectTraffic,
     reassembly: leo_relay_protocol::data_channel::ReassemblyBudget,
 ) -> Result<()> {
+    tracing::debug!("Authorized direct peer task started");
     let Negotiation {
         authorization,
         sdp,
@@ -376,7 +377,9 @@ async fn serve_peer(
         };
 
         let reader = async {
-            let mut decoder = leo_relay_protocol::data_channel::FrameDecoder::with_budget(reassembly);
+            use leo_relay_protocol::data_channel::{DecodeError, FrameDecoder};
+            let budget = reassembly.for_account(&lease.claims.account_id, lease.claims.role);
+            let mut decoder = FrameDecoder::with_budget(budget);
             let mut timeout = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
                 tokio::select! {
@@ -385,13 +388,23 @@ async fn serve_peer(
                     Some(_) = incoming.recv() => return Err(Error::bad("Only one DataChannel is allowed.")),
                     signal = signals.recv() => apply_signal(peer.as_ref(), signal).await?,
                     _ = timeout.tick() => {
-                        if decoder.expired() {
-                            return Err(Error::bad("Incomplete frame expired."));
-                        }
+                        decoder.expire();
                     }
                     event = channel.poll() => match event {
                         Some(DataChannelEvent::OnMessage(message)) if !message.is_string => {
-                            if let Some(frame) = decoder.push(&message.data).map_err(Error::bad)? {
+                            // Keep at most one packet while the bounded SCTP buffer
+                            // applies backpressure. Reservations held by this peer
+                            // still expire, allowing interleaved transfers to recover.
+                            let frame = loop {
+                                match decoder.push(&message.data) {
+                                    Ok(frame) => break frame,
+                                    Err(DecodeError::Busy) => {
+                                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                                    }
+                                    Err(DecodeError::Invalid(message)) => return Err(Error::bad(message)),
+                                }
+                            };
+                            if let Some(frame) = frame {
                                 requests
                                     .try_send(frame)
                                     .map_err(|_| Error::unavailable("Direct ingress busy."))?;

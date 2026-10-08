@@ -241,10 +241,18 @@ an incomplete transfer without dispatch. Unknown versions, duplicate starts,
 invalid offsets, text messages or excessive sizes close the direct connection.
 
 Reassembly retains at most 32 incomplete transfers per channel and a 30-second
-assembly deadline. **All installation peers share one `MAX_FRAME` reservation
-budget** (the existing maximum JSON frame size, about 10.7 MB). Each transfer
-reserves its declared total before buffering; completion, abandonment, timeout,
-connection closure or panic releases that reservation. Buffers grow only as bytes
+assembly deadline. **All installation peers share a `2 * MAX_FRAME` reservation
+budget** (about 21.5 MB). One `MAX_FRAME` is reserved for the owner; all members
+share the other. Each verified account can reserve at most `MAX_FRAME` across
+its peers, and each peer has the same declared-size cap. Each transfer reserves
+its declared total before buffering; completion, abandonment, timeout,
+connection closure or panic releases that reservation. A shortage applies
+backpressure rather than closing the waiting peer: it retains one packet of at
+most 16 KiB while its bounded SCTP receive buffer pauses input. Expiry still
+runs during this wait and releases the holder's reservation after 30 seconds.
+Expired transfers are discarded without dispatch, retaining only bounded
+sequence metadata to drain late fragments. The peer stays alive; the affected
+request uses its existing response deadline and safe retry rules. Buffers grow only as bytes
 arrive and their capacity is bounded by the reservation. Sparse declarations
 therefore cannot build up 32 independent maximum-frame buffers. Application limits remain 32 requests, 24 streams globally, 8 streams per
 account, 8 MB bodies, 64 KiB credited chunks and the existing 30-second response
@@ -275,15 +283,20 @@ transport limits do not count or cancel agent executions.
 
 Installation mDNS is explicitly disabled (`MulticastDnsMode::Disabled`): it
 binds no multicast listener on UDP 5353 and parses no multicast traffic. Bounded
-`.local` names remain valid signaling metadata but are removed from embedded
-SDP candidates and ignored on trickle before calling the SDK. **#103/#104 must
+`.local` names are removed from embedded SDP candidates and ignored on trickle
+before calling the SDK. **#103/#104 must
 use numeric host/reflexive candidates or the HTTPS relay**; an mDNS-only browser
 LAN offer can fall back even on the same LAN. No automatic DNS resolver or new
 installation listener compensates for this choice; #105 must qualify this case.
 
-The existing shared signaling validator rejects loopback, link-local,
+The existing shared signaling validator removes loopback, link-local,
 unspecified, multicast and IPv4 broadcast destinations, including IPv4-mapped
-IPv6 forms, for embedded and trickled candidates. The installation also skips
+IPv6 forms, from embedded and trickled candidates. A mixed offer keeps its usable
+numeric candidates. An offer containing candidates but none usable returns a
+clear 400; a candidate-free offer remains valid for trickle. Ignored trickle
+candidates return 204 without entering ICE, so a browser/Android client can
+continue negotiating with later usable candidates. Syntax, size, authorization
+and DTLS fingerprint checks still apply to all original metadata. The installation also skips
 its own special-address candidates. RFC1918 and IPv6 unique-local unicast
 addresses remain permitted: authorized clients can share a LAN or routed VPN,
 and neither side knows an authenticated list of the other's private subnets.
