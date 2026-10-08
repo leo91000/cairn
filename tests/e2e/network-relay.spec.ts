@@ -19,7 +19,12 @@ test('authenticated browser and Rust client keep using the observed route under 
     official,
   } = fixture
   let browser: Browser | undefined
-  const evidence: { route: string, operation: string, elapsedMs: number }[] = []
+  const evidence: {
+    route: string
+    operation: string
+    elapsedMs: number
+    directFailure?: { phase: string, timedOut: boolean } | null
+  }[] = []
   const revocations: string[] = []
 
   async function rustRequest(path: string, cookie: string, status: number, marker?: string) {
@@ -354,7 +359,23 @@ test('authenticated browser and Rust client keep using the observed route under 
       mdnsCandidates,
     })}\n`)
 
+    const packetLossReads = process.env.LEO_NETWORK_SCENARIO === 'packet-loss' && process.env.LEO_NETWORK_EXPECT_RUST_ROUTE === 'direct'
+      ? evidence.filter(item => item.operation.startsWith('rust-read'))
+      : []
+    if (packetLossReads.length) {
+      expect(packetLossReads).toHaveLength(3)
+      expect(packetLossReads.some(item => item.route === 'direct'), 'at least one independent Rust negotiation must use direct under packet loss').toBe(true)
+    }
+
     for (const observation of evidence) {
+      if (packetLossReads.includes(observation) && observation.route === 'relay') {
+        // Lost handshake packets may exhaust ICE's strict 30 s window. Relay
+        // is valid only for that diagnosed failure; all three relayed reads
+        // still fail the direct-capability assertion above.
+        expect(observation.directFailure).toEqual({ phase: 'ice', timedOut: true })
+        continue
+      }
+
       const expectedRoute = observation.operation.startsWith('rust-')
         ? process.env.LEO_NETWORK_EXPECT_RUST_ROUTE
         : process.env.LEO_NETWORK_EXPECT_ROUTE || 'relay'

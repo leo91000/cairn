@@ -104,6 +104,15 @@ additional mDNS-only client case, the browser expects relay and Rust expects dir
 a fixed route label. `--expect-route` and `--expect-rust-route` override the
 scenario defaults; a mismatch fails the bench.
 
+With Rust direct expected, packet-loss qualification samples three independent
+Rust negotiations. At least
+one must deliver its read directly; all three on relay fail qualification.
+Individual relay reads are accepted only with the fixed diagnostic
+`directFailure: { phase: "ice", timedOut: true }`, since the deterministic router
+also drops handshake packets and ICE retains its strict 30-second limit.
+Other failures and all other scenario route expectations remain strict. Every
+sample's actual route stays in the report, including successful fallback reads.
+
 The numeric qualification browser is launched with Chromium's
 `--disable-features=WebRtcHideLocalIpsWithMdns` option so that host-candidate ICE
 paths can be tested explicitly. The production web does not set this option or
