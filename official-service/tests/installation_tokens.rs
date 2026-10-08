@@ -106,7 +106,13 @@ async fn rotating_a_machine_token_closes_old_streams_and_can_retry_a_lost_respon
 
 #[tokio::test]
 async fn the_machine_resumes_rotation_after_the_official_response_is_lost() {
-    use axum::{Json, extract::State, http::HeaderMap, routing::post};
+    use axum::{
+        Json,
+        extract::State,
+        http::HeaderMap,
+        response::{IntoResponse, Response},
+        routing::{get, post},
+    };
     use std::{
         os::unix::fs::PermissionsExt,
         sync::{
@@ -121,7 +127,7 @@ async fn the_machine_resumes_rotation_after_the_official_response_is_lost() {
         Json(body): Json<Value>,
     ) -> StatusCode {
         let response = reqwest::Client::new()
-            .post(url)
+            .post(format!("{url}/rotate-token"))
             .header("authorization", &headers["authorization"])
             .json(&body)
             .send()
@@ -133,6 +139,22 @@ async fn the_machine_resumes_rotation_after_the_official_response_is_lost() {
         } else {
             StatusCode::NO_CONTENT
         }
+    }
+
+    async fn forward_policy(
+        State((url, _)): State<(String, Arc<AtomicBool>)>,
+        headers: HeaderMap,
+    ) -> Response {
+        let response = reqwest::Client::new()
+            .get(format!("{url}/task-authors"))
+            .header("authorization", &headers["authorization"])
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.json::<Value>().await.unwrap();
+
+        (status, Json(body)).into_response()
     }
 
     let mut relay = RelayedInstallation::new(axum::Router::new()).await;
@@ -149,8 +171,12 @@ async fn the_machine_resumes_rotation_after_the_official_response_is_lost() {
     let proxy = format!("http://localhost:{}", listener.local_addr().unwrap().port());
     let router = axum::Router::new()
         .route("/api/relay/{installation}/rotate-token", post(forward))
+        .route(
+            "/api/relay/{installation}/task-authors",
+            get(forward_policy),
+        )
         .with_state((
-            format!("{}/api/relay/{id}/rotate-token", relay.app.url),
+            format!("{}/api/relay/{id}", relay.app.url),
             Arc::new(AtomicBool::new(true)),
         ));
     let server = tokio::spawn(async move {
