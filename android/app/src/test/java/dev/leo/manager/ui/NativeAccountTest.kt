@@ -15,6 +15,10 @@ import org.robolectric.annotation.GraphicsMode
 class NativeAccountTest : NativeAccountCases() {
     @Before
     fun initializeWork() {
+        org.robolectric.Shadows.shadowOf(
+                ApplicationProvider.getApplicationContext<android.app.Application>()
+            )
+            .grantPermissions(android.Manifest.permission.POST_NOTIFICATIONS)
         androidx.work.testing.WorkManagerTestInitHelper.initializeTestWorkManager(
             ApplicationProvider.getApplicationContext(),
             androidx.work.Configuration.Builder()
@@ -27,6 +31,8 @@ class NativeAccountTest : NativeAccountCases() {
     fun closeWork() {
         androidx.work.testing.WorkManagerTestInitHelper.closeWorkDatabase()
     }
+
+    @Test fun refusedPushRenewal() = refusedPushRenewalTurnsOffAndExplainsRecovery()
 
     @Test fun notificationTarget() = notificationOpensOnlyItsAccessibleInstallation()
 

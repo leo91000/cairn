@@ -669,7 +669,9 @@ push explicitly.
 Firebase also rotates tokens in the background, after the enabling proof has
 expired. An active session with valid CSRF can renew an existing native
 registration for the same device UUID and account without a new proof. The
-service checks that ownership under the device row lock and rechecks the session
+Any active session of that account can perform this renewal when it holds the
+private device UUID; the registration is not bound to its enrolling session.
+The service checks that ownership under the device row lock and rechecks the session
 after waiting for all locks. A new UUID, a removed registration or a different
 account still needs proof. Treat the locally persisted random device UUID as a
 device credential; it is not listed by the service. The public registration ID

@@ -39,6 +39,7 @@ class NativeDeviceTest {
             val removed = mutableListOf<String>()
             val account = UUID.randomUUID().toString()
             var token = "first-token"
+            var registrationStatus = 200
             val tokens =
                 object : PushTokens {
                     override val available = true
@@ -74,7 +75,12 @@ class NativeDeviceTest {
                                             .parseToJsonElement(request.body.readUtf8())
                                             .jsonObject
                                             .mapValues { it.value.jsonPrimitive.content }
-                                    MockResponse().setBody("""{"id":"registered-device"}""")
+                                    if (registrationStatus == 200)
+                                        MockResponse().setBody("""{"id":"registered-device"}""")
+                                    else
+                                        MockResponse()
+                                            .setResponseCode(registrationStatus)
+                                            .setBody("""{"error":"Registration unavailable"}""")
                                 }
                                 request.path ==
                                     "/api/account/notifications/subscriptions/registered-device" &&
@@ -98,6 +104,28 @@ class NativeDeviceTest {
                 assertEquals(2, registrations.size)
                 assertEquals(registrations[0]["deviceId"], registrations[1]["deviceId"])
                 assertEquals("second-token", registrations[1]["token"])
+
+                token = "third-token"
+                registrationStatus = 503
+                try {
+                    registrar.register()
+                    fail("A temporary failure must remain retryable")
+                } catch (error: ApiException) {
+                    assertEquals(503, error.status)
+                }
+                assertTrue(NotificationPreferences(context).enabled.first())
+
+                registrationStatus = 403
+                try {
+                    registrar.register()
+                } catch (error: ApiException) {
+                    assertEquals(403, error.status)
+                }
+                assertFalse(
+                    "Refused re-enrollment must turn push off",
+                    NotificationPreferences(context).enabled.first(),
+                )
+
                 registrar.disable()
                 assertEquals(1, removed.size)
                 assertEquals("deleted", token)
