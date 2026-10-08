@@ -1,10 +1,12 @@
 <script setup lang="ts">
+import type { SelectOption } from '../select'
 import { computed, onMounted, ref } from 'vue'
 import { api, redirect } from '../api'
 import AccountConfirmation from '../components/AccountConfirmation.vue'
 import Icon from '../components/Icon.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
+import VirtualSelect from '../components/VirtualSelect.vue'
 import { ShieldCheck } from '../icons'
 
 const parameters = Object.fromEntries(new URLSearchParams(location.search))
@@ -13,6 +15,11 @@ const redirectHost = computed(() => details.value?.client.redirect_uri ? new URL
 const error = ref('')
 const busy = ref(false)
 const installationId = ref('')
+const installationOptions = computed<SelectOption[]>(() => (details.value?.installations ?? []).map((item: { id: string, name: string, online: boolean }) => ({
+  value: item.id,
+  label: item.name,
+  status: { label: item.online ? 'Online' : 'Offline', tone: item.online ? 'success' : 'muted' },
+})))
 const confirmingIdentity = ref(false)
 const endpoint = '/mcp/oauth'
 onMounted(async () => {
@@ -69,13 +76,12 @@ async function consent(approved: boolean) {
           Unverified client. Its name is supplied by the client and has not been checked by Leo.
           Continue only if you trust this redirect destination.
         </UiAlert>
-        <label>Installation
-          <select v-model="installationId" aria-label="Installation">
-            <option v-for="item in details.installations" :key="item.id" :value="item.id">
-              {{ item.name }} · {{ item.online ? 'Online' : 'Offline' }}
-            </option>
-          </select>
-        </label>
+        <VirtualSelect
+          v-model="installationId"
+          label="Installation"
+          :options="installationOptions"
+          :disabled="busy"
+        />
         <p v-if="!details.installations.length">
           Add an installation before granting access.
         </p>

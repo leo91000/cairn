@@ -2,7 +2,8 @@
 
 `src/components/VirtualSelect.vue` is the single-select combobox used for task
 agents, projects and schedules, agent reasoning, run status, skill scopes, and
-supporting files. New select fields should reuse it.
+supporting files, installations (including MCP consent), execution nodes and
+conversation views. New select fields should reuse it.
 
 ```vue
 <VirtualSelect
@@ -23,12 +24,16 @@ outcomes”; required fields must use a nonempty value.
 The component also accepts `icon`, `searchPlaceholder`, `emptyText`, `disabled`,
 `loading`, `clearable`, `compact`, and `hideLabel`. Clearing emits an empty string.
 Even when the visible label is hidden, `label` supplies the accessible name.
+An optional `status` supplies a label and a semantic `success`, `warning`, or
+`muted` tone. Options show a dot and badge; the closed control shows a dot and
+announces the selected status. Keep status search terms in `keywords` when needed.
+Selected names and option labels are truncated with a full-name tooltip.
 Required fields participate in native form validation and focus the visible
 combobox when missing a selection.
 
 Options are rendered in a virtual window with overscan. Described options are
 62 pixels tall, simple options 44, and group headings 30. Keep these dimensions
-aligned with `src/select.css`; descriptions are single-line and truncated
+aligned with `src/styles/select.css`; descriptions are single-line and truncated
 visually, while the full description remains available to assistive technology.
 
 Arrow keys, Home/End, Page Up/Down, Enter, Escape, and Tab support keyboard use.

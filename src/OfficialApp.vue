@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { SelectOption } from './select'
 import {
   computed,
   onMounted,
@@ -9,6 +10,7 @@ import {
 import { logoutAccount, redirect, state } from './api'
 import App from './App.vue'
 import AccountSecurity from './components/AccountSecurity.vue'
+import Icon from './components/Icon.vue'
 import InstallationSharing from './components/InstallationSharing.vue'
 import Modal from './components/Modal.vue'
 import NotificationSettings from './components/NotificationSettings.vue'
@@ -16,6 +18,8 @@ import PendingInvitations from './components/PendingInvitations.vue'
 import ThemeControl from './components/ThemeControl.vue'
 import UiAlert from './components/UiAlert.vue'
 import UiButton from './components/UiButton.vue'
+import VirtualSelect from './components/VirtualSelect.vue'
+import { MoreHorizontal } from './icons'
 import Authorize from './views/Authorize.vue'
 
 interface AccountSession {
@@ -88,6 +92,16 @@ const installation = ref<{
   role: 'owner' | 'member'
 } | null>(null)
 const installationMenu = ref<HTMLDetailsElement>()
+const installationOptions = computed<SelectOption[]>(() => (session.value?.installations ?? []).map(item => ({
+  value: item.id,
+  label: item.name,
+  description: item.role === 'owner' ? 'Owner' : 'Member',
+  keywords: [installationStatus(item)],
+  status: {
+    label: installationStatus(item),
+    tone: item.updateRequired ? 'warning' : item.online ? 'success' : 'muted',
+  },
+})))
 const officialReturnKey = 'leo-installation-return'
 const authorizePage = window.location.pathname === '/authorize'
 const claimPage = window.location.pathname === '/claim'
@@ -596,8 +610,7 @@ function installationStatus(value: { online: boolean, updateRequired: boolean })
   return value.online ? 'Online' : 'Offline'
 }
 
-function selectInstallation(event: Event) {
-  const id = (event.target as HTMLSelectElement).value
+function selectInstallation(id: string) {
   const selected = session.value?.installations.find(item => item.id === id)
   if (selected)
     openInstallation(selected)
@@ -652,34 +665,38 @@ onMounted(async () => {
     <Authorize />
   </main>
   <div v-else-if="session?.authenticated && installation && !showMethods && !showSecurity && !showIdentityConfirmation" class="flex h-dvh min-h-0 flex-col bg-canvas text-ink">
-    <header class="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2 text-sm" aria-label="Current installation">
-      <label v-if="session.installations.length > 1" class="min-w-0 max-w-full">
-        <span class="sr-only">Current installation</span>
-        <select :value="installation.id" :disabled="busy || state.redirecting" @change="selectInstallation">
-          <option
-            v-for="item in session.installations"
-            :key="item.id"
-            :value="item.id"
-          >
-            {{ item.name }} · {{ installationStatus(item) }}
-          </option>
-        </select>
-      </label>
+    <header class="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2 text-sm phone:gap-2 phone:px-3" aria-label="Current installation">
+      <VirtualSelect
+        v-if="session.installations.length > 1"
+        :model-value="installation.id"
+        label="Current installation"
+        :options="installationOptions"
+        :disabled="busy || state.redirecting"
+        compact
+        hide-label
+        class="min-w-0! max-w-80 flex-1"
+        @update:model-value="selectInstallation"
+      />
       <span v-else class="min-w-0 truncate font-semibold" :title="installation.name">{{ installation.name }}</span>
-      <span role="status" aria-label="Installation availability" class="text-xs text-muted">
-        {{ installationStatus(installation) }}
-      </span>
-      <span
-        role="status"
-        aria-label="Connection route"
-        :data-transport-route="state.transportRoute"
-        class="text-xs text-muted"
-      >
-        {{ state.transportRoute === 'direct' ? 'Direct' : 'Relais' }}
+      <span class="flex shrink-0 items-center gap-2 text-xs text-muted" :title="`${installationStatus(installation)} · ${state.transportRoute === 'direct' ? 'Direct' : 'Relais'}`">
+        <span
+          role="status"
+          aria-label="Installation availability"
+          class="flex items-center gap-1.5"
+          :class="installation.updateRequired ? 'text-warning' : installation.online ? 'text-success' : 'text-muted'"
+        ><span aria-hidden="true" class="size-1.5 shrink-0 rounded-full bg-current" :class="session.installations.length > 1 ? 'phone:hidden' : ''" /><span class="phone:sr-only">{{ installationStatus(installation) }}</span></span>
+        <span aria-hidden="true" class="h-3 w-px bg-line phone:hidden" />
+        <span
+          role="status"
+          aria-label="Connection route"
+          :data-transport-route="state.transportRoute"
+          class="text-xs text-muted"
+        >{{ state.transportRoute === 'direct' ? 'Direct' : 'Relais' }}</span>
       </span>
       <details ref="installationMenu" class="relative ml-auto shrink-0">
-        <summary class="cursor-pointer list-none rounded-lg border border-line px-3 py-2">
-          Installation options
+        <summary class="flex min-h-11 cursor-pointer list-none items-center justify-center rounded-lg border border-line px-3 py-2 phone:px-2.5">
+          <span class="phone:sr-only">Installation options</span>
+          <Icon :name="MoreHorizontal" :size="18" class="hidden phone:block" />
         </summary>
         <div class="absolute right-0 z-50 mt-2 grid w-52 gap-2 rounded-xl border border-line bg-surface p-2 shadow-lg" @click="closeInstallationMenu">
           <UiButton

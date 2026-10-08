@@ -229,7 +229,7 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
       data: { deviceCode: device.deviceCode },
     })
     expect(claimed.status()).toBe(200)
-    const installationId = (await claimed.json()).installationId
+    expect((await claimed.json()).installationId).toBeTruthy()
     const callbackUrl = `${providerUrl}/mcp-test-callback`
     const clientResponse = await page.request.post(`${url}/oauth/register`, {
       data: { client_name: 'Sign-in MCP client', redirect_uris: [callbackUrl] },
@@ -256,14 +256,15 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
       await expect(page.getByRole('heading', { name: 'Connect an assistant', exact: true })).toBeVisible()
       await expect(page).toHaveURL(/\/authorize\?/)
       expect(Object.fromEntries(new URL(page.url()).searchParams)).toEqual(Object.fromEntries(parameters))
-      await page.getByLabel('Installation', { exact: true }).selectOption(installationId)
+      await page.getByRole('combobox', { name: 'Installation', exact: true }).click()
+      await page.getByRole('option', { name: 'OAuth claim machine', exact: true }).click()
       await page.getByRole('button', { name: 'Allow access', exact: true }).click()
       await expect(page.getByRole('alert').filter({ hasText: 'Confirm your identity' })).toBeVisible()
       await page.getByRole('button', { name: 'Confirm identity', exact: true }).click()
       await page.getByRole('button', { name: 'Confirm with a passkey', exact: true }).click()
       await expect(page.getByRole('heading', { name: 'Connect an assistant', exact: true })).toBeVisible()
       expect(Object.fromEntries(new URL(page.url()).searchParams)).toEqual(Object.fromEntries(parameters))
-      await expect(page.getByLabel('Installation', { exact: true })).toHaveValue(installationId)
+      await expect(page.getByLabel('Installation', { exact: true })).toHaveValue('OAuth claim machine')
       await page.getByRole('button', { name: 'Allow access', exact: true }).click()
       await expect(page).toHaveURL(/mcp-test-callback\?state=resume-mcp-consent&code=/)
       expect(new URL(page.url()).origin).toBe(providerUrl)

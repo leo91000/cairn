@@ -57,6 +57,7 @@ const rows = computed(() => visibleRows(layout.value.rows, scrollTop.value, view
 const activeId = computed(() => rows.value.some(row => row.optionIndex === active.value) ? `${id}-option-${active.value}` : undefined)
 const value = computed(() => open.value ? query.value : selected.value?.label ?? '')
 const leadingIcon = computed(() => open.value ? Search : selected.value?.icon || props.icon)
+const statusTones = { success: 'text-success', warning: 'text-warning', muted: 'text-muted' }
 let resize: ResizeObserver | undefined
 
 function positionPopup() {
@@ -253,12 +254,21 @@ onBeforeUnmount(() => {
     <label v-if="!hideLabel" :for="`${id}-input`" class="vs-label block mb-2 text-xs font-medium text-muted">{{ label }}</label>
     <div class="vs-control flex items-center gap-2.5 min-h-12 w-full pr-2.5 pl-[13px] bg-raised border border-control rounded-[10px] [transition:border-color_.15s,_box-shadow_.15s] phone:min-h-12 phone:gap-2 [@media(prefers-reduced-motion:_reduce)]:[transition:none] py-0">
       <span v-if="leadingIcon" class="vs-leading grid place-items-center w-[29px] h-[29px] rounded-lg text-muted bg-surface shrink-0"><Icon :name="leadingIcon" :size="17" /></span>
+      <span
+        v-if="!open && selected?.status"
+        class="size-2 shrink-0 rounded-full bg-current"
+        :class="statusTones[selected.status.tone]"
+        :title="selected.status.label"
+        aria-hidden="true"
+      />
       <input
         :id="`${id}-input`"
         ref="input"
         :value="value"
         role="combobox"
         :aria-label="label"
+        :aria-description="selected?.status?.label"
+        :title="!open ? selected?.label : undefined"
         :aria-expanded="open"
         :aria-controls="`${id}-list`"
         :aria-activedescendant="open && !loading ? activeId : undefined"
@@ -360,7 +370,7 @@ onBeforeUnmount(() => {
               :aria-selected="row.option.value === model"
               :aria-disabled="row.option.disabled || undefined"
               :aria-label="row.option.label"
-              :aria-description="[row.option.group, row.option.description].filter(Boolean).join(' · ')"
+              :aria-description="[row.option.group, row.option.description, row.option.status?.label].filter(Boolean).join(' · ')"
               :class="{ 'is-active': active === row.optionIndex, 'is-selected': row.option.value === model, 'is-disabled': row.option.disabled }"
               :style="{ top: `${row.top}px`, height: `${row.height}px` }"
               @pointermove="!row.option.disabled && (active = row.optionIndex!)"
@@ -368,7 +378,13 @@ onBeforeUnmount(() => {
               @click="choose(row.option)"
             >
               <span v-if="row.option.icon || icon" class="vs-option-icon grid place-items-center w-7.5 h-7.5 shrink-0 rounded-[9px] text-muted bg-surface border border-line"><Icon :name="row.option.icon || icon!" :size="17" /></span>
-              <span class="vs-option-copy min-w-0 flex-1"><strong>{{ row.option.label }}</strong><span v-if="row.option.description">{{ row.option.description }}</span></span>
+              <span class="vs-option-copy min-w-0 flex-1"><strong :title="row.option.label">{{ row.option.label }}</strong><span v-if="row.option.description">{{ row.option.description }}</span></span>
+              <span
+                v-if="row.option.status"
+                class="flex shrink-0 items-center gap-1.5 rounded-md bg-inset px-1.5 py-1 text-micro"
+                :class="statusTones[row.option.status.tone]"
+                aria-hidden="true"
+              ><span class="size-1.5 shrink-0 rounded-full bg-current" />{{ row.option.status.label }}</span>
               <Icon
                 v-if="row.option.value === model"
                 :name="Check"
