@@ -105,6 +105,13 @@ class NativeDeviceTest {
                 assertEquals(registrations[0]["deviceId"], registrations[1]["deviceId"])
                 assertEquals("second-token", registrations[1]["token"])
 
+                registrar.disable()
+                assertEquals(1, removed.size)
+                assertEquals("deleted", token)
+                assertFalse(NotificationPreferences(context).enabled.first())
+
+                token = "reenrolled-token"
+                registrar.enable()
                 token = "third-token"
                 registrationStatus = 503
                 try {
@@ -114,6 +121,7 @@ class NativeDeviceTest {
                     assertEquals(503, error.status)
                 }
                 assertTrue(NotificationPreferences(context).enabled.first())
+                assertFalse(NotificationPreferences(context).nativeReenrollmentRequired.first())
 
                 registrationStatus = 403
                 try {
@@ -126,10 +134,12 @@ class NativeDeviceTest {
                     NotificationPreferences(context).enabled.first(),
                 )
 
+                assertTrue(NotificationPreferences(context).nativeReenrollmentRequired.first())
                 registrar.disable()
                 assertEquals(1, removed.size)
                 assertEquals("deleted", token)
                 assertFalse(NotificationPreferences(context).enabled.first())
+                assertFalse(NotificationPreferences(context).nativeReenrollmentRequired.first())
             }
         }
 }

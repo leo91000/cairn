@@ -1,6 +1,7 @@
 package dev.leo.manager.ui
 
 import android.app.Application
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.test.core.app.ApplicationProvider
@@ -135,6 +136,9 @@ abstract class NativeAccountCases {
         val vault = sessionVault(application)
         val registered = java.util.concurrent.atomic.AtomicBoolean(true)
         val registrationAttempts = java.util.concurrent.atomic.AtomicInteger()
+        val installations = java.util.concurrent.atomic.AtomicReference("[]")
+        val recoveryNotice =
+            "Les notifications push ont été désactivées. Confirmez votre identité par e-mail ou passkey dans les réglages du compte, puis réactivez-les."
         val tokens =
             object : PushTokens {
                 override val available = true
@@ -151,9 +155,10 @@ abstract class NativeAccountCases {
                             request.path == "/api/account/session" ->
                                 MockResponse()
                                     .setBody(
-                                        """{"authenticated":true,"csrf":"csrf","account":{"id":"push-person","email":"alice@example.test"},"installations":[]}"""
+                                        """{"authenticated":true,"csrf":"csrf","account":{"id":"push-person","email":"alice@example.test"},"installations":${installations.get()}}"""
                                     )
-                            request.path == "/api/installations" -> MockResponse().setBody("[]")
+                            request.path == "/api/installations" ->
+                                MockResponse().setBody(installations.get())
                             request.path == "/api/account/notifications/android" &&
                                 request.method == "GET" ->
                                 MockResponse().setBody("""{"enabled":true}""")
@@ -179,7 +184,14 @@ abstract class NativeAccountCases {
             val registrar = NativeDeviceRegistrar(application, vault, origin, tokens)
             kotlinx.coroutines.runBlocking { registrar.enable() }
             val vm = LeoViewModel(application, vault, origin)
-            compose.setContent { LeoTheme { NotificationSettings(vm) } }
+            val currentVm = mutableStateOf(vm)
+            val showingHome = mutableStateOf(false)
+            compose.setContent {
+                LeoTheme {
+                    if (showingHome.value) LeoApp(vm = currentVm.value)
+                    else NotificationSettings(currentVm.value)
+                }
+            }
             compose.waitUntil(10_000) {
                 compose.onAllNodes(isToggleable()).fetchSemanticsNodes().isNotEmpty()
             }
@@ -193,30 +205,35 @@ abstract class NativeAccountCases {
                     assertEquals(403, error.status)
                 }
                 assertFalse(preferences.enabled.first())
+                assertTrue(NotificationPreferences(application).nativeReenrollmentRequired.first())
                 // A later background token callback must not silently re-enroll this device.
                 registrar.register()
             }
             assertEquals(2, registrationAttempts.get())
             compose.waitUntil(10_000) {
-                compose
-                    .onAllNodesWithText(
-                        "Les notifications push ont été désactivées. Confirmez votre identité par e-mail ou passkey dans les réglages du compte, puis réactivez-les."
-                    )
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
+                compose.onAllNodesWithText(recoveryNotice).fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithText("Notifications push").assertIsOff()
+            compose.onNodeWithText(recoveryNotice).assertIsDisplayed()
 
-            // A new preferences reader sees the recovery notice after an app restart.
+            // Reopening the app must explain the disabled push even with an offline installation.
+            installations.set(
+                """[{"id":"push-home","name":"Maison","role":"owner","online":false}]"""
+            )
+            compose.runOnIdle {
+                currentVm.value = LeoViewModel(application, vault, origin)
+                showingHome.value = true
+            }
+            compose.waitUntil(10_000) {
+                compose.onAllNodesWithText("Maison · Hors ligne").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText(recoveryNotice).assertIsDisplayed()
+            compose.runOnIdle { showingHome.value = false }
+
             registered.set(true)
             kotlinx.coroutines.runBlocking { registrar.enable() }
             compose.waitUntil(10_000) {
-                compose
-                    .onAllNodesWithText(
-                        "Les notifications push ont été désactivées. Confirmez votre identité par e-mail ou passkey dans les réglages du compte, puis réactivez-les."
-                    )
-                    .fetchSemanticsNodes()
-                    .isEmpty()
+                compose.onAllNodesWithText(recoveryNotice).fetchSemanticsNodes().isEmpty()
             }
             compose.onNodeWithText("Notifications push").assertIsOn()
             assertEquals(3, registrationAttempts.get())

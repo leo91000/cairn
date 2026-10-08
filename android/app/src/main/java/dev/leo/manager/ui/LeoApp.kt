@@ -81,6 +81,8 @@ private fun LeoAppContent(
     targetAccount: String,
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
+    val pushReenrollmentRequired by
+        vm.notifications.nativeReenrollmentRequired.collectAsStateWithLifecycle(false)
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(state.notice) {
         state.notice?.let {
@@ -165,6 +167,13 @@ private fun LeoAppContent(
     }
     val installation = checkNotNull(state.installation)
     Column(Modifier.fillMaxSize()) {
+        if (pushReenrollmentRequired)
+            Text(
+                NATIVE_PUSH_REENROLLMENT_MESSAGE,
+                modifier = Modifier.statusBarsPadding().padding(12.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
         var choosing by remember { mutableStateOf(false) }
         Box(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 12.dp)) {
             if (state.session.installations.size > 1)

@@ -683,6 +683,15 @@ errors, outages and `INVALID_ARGUMENT` never delete device registrations: that
 error can indicate our payload rather than the device token. Only a 400/404 with
 the FCM-specific `UNREGISTERED` code removes an expired registration.
 
+If that registration has disappeared, background renewal needs a new independent
+proof and may return 403. Android then turns its push preference off and preserves
+a recovery notice for the next app opening and in Notifications. Confirm identity
+by email/passkey in account settings, then explicitly enable push again. Successful
+enrollment or explicit disabling/logout clears the notice. Later token callbacks
+do not re-enroll a disabled device. Temporary server/network failures remain
+retryable and keep the preference on. A refusal from a request belonging to a
+session that has since changed does not disable the current session's preference.
+
 ## Shared task commitments
 
 `GET /api/relay/{installation}/task-authors` authenticates the current installation

@@ -99,11 +99,22 @@ class NativeDeviceRegistrar(
             "La session du compte Leo a changé."
         }
         val registration =
-            api.send<RegisteredDevice>(
-                "POST",
-                "/account/notifications/android",
-                body("deviceId" to deviceId, "token" to token),
-            )
+            try {
+                api.send<RegisteredDevice>(
+                    "POST",
+                    "/account/notifications/android",
+                    body("deviceId" to deviceId, "token" to token),
+                )
+            } catch (error: ApiException) {
+                if (error.status == 403 && vault.read(origin.toString()) == originalCookie) {
+                    NotificationPreferences(context).requireNativeReenrollment()
+                    context.dataStore.edit {
+                        it.remove(nativeRegistrationKey)
+                        it.remove(nativeRegistrationScopeKey)
+                    }
+                }
+                throw error
+            }
         require(vault.read(origin.toString()) == originalCookie) {
             "La session du compte Leo a changé."
         }

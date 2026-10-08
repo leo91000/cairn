@@ -16,6 +16,8 @@ import dev.leo.manager.data.*
 fun NotificationSettings(vm: LeoViewModel) {
     val context = LocalContext.current
     val enabled by vm.notifications.enabled.collectAsStateWithLifecycle(false)
+    val reenrollmentRequired by
+        vm.notifications.nativeReenrollmentRequired.collectAsStateWithLifecycle(false)
     var allowed by remember { mutableStateOf(notificationsAllowed(context)) }
     Poll("notification-permission", 3000) { allowed = notificationsAllowed(context) }
     val permission =
@@ -31,6 +33,7 @@ fun NotificationSettings(vm: LeoViewModel) {
                 permission.launch(Manifest.permission.POST_NOTIFICATIONS)
             else vm.perform { setNativeNotifications(next) }
         }
+        if (reenrollmentRequired) Text(NATIVE_PUSH_REENROLLMENT_MESSAGE)
         Text(
             "Recevez les notifications de toutes vos installations accessibles avec un seul enregistrement de cet appareil. Android peut retarder leur réception pour économiser la batterie.",
             style = MaterialTheme.typography.bodySmall,

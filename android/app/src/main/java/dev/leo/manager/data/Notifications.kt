@@ -27,18 +27,35 @@ import kotlinx.coroutines.flow.map
 
 const val QUESTION_CHANNEL = "leo-questions"
 const val EXECUTION_CHANNEL = "leo-execution"
+const val NATIVE_PUSH_REENROLLMENT_MESSAGE =
+    "Les notifications push ont été désactivées. Confirmez votre identité par e-mail ou passkey dans les réglages du compte, puis réactivez-les."
 private const val QUESTION_WORK = "leo-question-check"
 private val enabledKey = booleanPreferencesKey("notifications")
+private val nativeReenrollmentKey = booleanPreferencesKey("native_push_reenrollment_required")
 private val seenKey = stringSetPreferencesKey("notified_questions")
 private val scopeKey = stringPreferencesKey("notification_installation_scope")
 private val alertsKey = longPreferencesKey("notified_node_alerts_until")
 
 class NotificationPreferences(private val context: Context) {
     val enabled = context.dataStore.data.map { it[enabledKey] ?: false }
+    val nativeReenrollmentRequired =
+        context.dataStore.data.map { it[nativeReenrollmentKey] ?: false }
 
     suspend fun setEnabled(value: Boolean) {
-        context.dataStore.edit { it[enabledKey] = value }
+        context.dataStore.edit {
+            it[enabledKey] = value
+            it.remove(nativeReenrollmentKey)
+        }
         schedule(context, value)
+    }
+
+    internal suspend fun requireNativeReenrollment() {
+        context.dataStore.edit {
+            it[enabledKey] = false
+            it[nativeReenrollmentKey] = true
+        }
+        // Do not cancel the renewal worker itself: it still has to finish handling its 403.
+        NotificationManagerCompat.from(context).cancelAll()
     }
 
     suspend fun selectScope(scope: String): Boolean {
