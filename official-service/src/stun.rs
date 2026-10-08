@@ -72,6 +72,8 @@ pub async fn serve_with_status(socket: UdpSocket, status: Status) -> io::Result<
     let mut window = Instant::now();
     let mut counts = HashMap::<IpAddr, u16>::new();
     let mut total = 0_u16;
+    let mut last_receive_warning: Option<Instant> = None;
+    let mut last_send_warning: Option<Instant> = None;
     loop {
         let (length, source) = match socket.recv_from(&mut input).await {
             Ok(packet) => {
@@ -81,7 +83,11 @@ pub async fn serve_with_status(socket: UdpSocket, status: Status) -> io::Result<
             Err(_) => {
                 status.0.state.store(RETRYING, Ordering::Relaxed);
                 status.0.receive_errors.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!("Official STUN receive failed; retrying");
+                if last_receive_warning.is_none_or(|last| last.elapsed() >= Duration::from_secs(30))
+                {
+                    tracing::warn!("Official STUN receive failed; retrying");
+                    last_receive_warning = Some(Instant::now());
+                }
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
@@ -174,7 +180,10 @@ pub async fn serve_with_status(socket: UdpSocket, status: Status) -> io::Result<
         }
         if socket.send_to(&response, source).await.is_err() {
             status.0.send_errors.fetch_add(1, Ordering::Relaxed);
-            tracing::warn!("Official STUN send failed; continuing");
+            if last_send_warning.is_none_or(|last| last.elapsed() >= Duration::from_secs(30)) {
+                tracing::warn!("Official STUN send failed; continuing");
+                last_send_warning = Some(Instant::now());
+            }
         }
     }
 }

@@ -25,7 +25,9 @@ it has no worker CLI or VM layers. `/health` returns no-store JSON with `status`
 status is independent of HTTP/database readiness: `running`, `retrying` after a
 receive error, or `stopped` after termination. UDP errors are counted and logged
 without addresses or packets; receive errors retry with a bounded pause instead
-of silently ending address discovery. HTTP/relay readiness stays usable during
+of silently ending address discovery. Receive and send warnings are each limited
+to one per 30 seconds, while the health counters record every error.
+HTTP/relay readiness stays usable during
 STUN loss. Readiness is sampled every five seconds with a
 one-second query timeout; HTTP probes read the cached result without querying
 Postgres. Database loss is reported within six seconds, and recovery at the next
