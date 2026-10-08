@@ -1,5 +1,6 @@
 import {
   expect,
+  expectSingleScroll,
   signIn,
   test,
   useRelayForHttpMocks,
@@ -7,6 +8,7 @@ import {
 } from './fixtures'
 
 test('the header and settings sections support keyboard navigation, deep links and mobile back navigation', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' })
   await useRelayForHttpMocks(page)
   await page.goto(workspacePath('/'))
   await signIn(page)
@@ -39,6 +41,7 @@ test('the header and settings sections support keyboard navigation, deep links a
   await expect(page.getByRole('heading', { name: 'Appearance', exact: true })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Account security', exact: true })).toBeVisible()
   await expect(page.getByRole('region', { name: 'Audit log', exact: true }).getByText('installation · claimed', { exact: true })).toBeVisible()
+  await expectSingleScroll(page)
   await page.reload()
   await expect(page).toHaveURL(/\/settings\/account$/)
   await expect(page.getByRole('heading', { name: 'Profile', exact: true })).toBeVisible()
