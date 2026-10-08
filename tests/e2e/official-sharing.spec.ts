@@ -121,7 +121,7 @@ test('owner shares an installation and member works without management controls'
     await page.getByText('Installation options', { exact: true }).click()
     await page.getByRole('button', { name: 'Share installation', exact: true }).click()
     await expect(page.getByText('Members use your coding-agent accounts and secrets.', { exact: true })).toBeVisible()
-    expireAccountProof(new URL(process.env.LEO_OFFICIAL_TEST_DATABASE_URL!), ownerEmail)
+    expireAccountProof(isolatedDatabase, ownerEmail)
     await page.getByLabel('Invite by email', { exact: true }).fill(memberEmail)
     await page.getByRole('button', { name: 'Send invitation', exact: true }).click()
     await expect(page.getByRole('alert')).toContainText('Confirm your identity')
