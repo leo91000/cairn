@@ -287,7 +287,11 @@ async fn run() -> Result<(), String> {
     let stun_socket = tokio::net::UdpSocket::bind(&stun_address)
         .await
         .map_err(|_| "Could not bind official STUN listener")?;
-    let stun = tokio::spawn(leo_official_service::stun::serve(stun_socket));
+    let stun_status = leo_official_service::stun::Status::default();
+    let stun = tokio::spawn(leo_official_service::stun::serve_with_status(
+        stun_socket,
+        stun_status.clone(),
+    ));
     let health_pool = pool.clone();
     let readiness = Arc::new(AtomicBool::new(false));
     let health_readiness = readiness.clone();
@@ -311,6 +315,7 @@ async fn run() -> Result<(), String> {
         "/health",
         get(move || {
             let ready = health_readiness.load(Ordering::Relaxed);
+            let stun = stun_status.snapshot();
             let commit = commit.clone();
             let runtime_id = runtime_id.clone();
             async move {
@@ -326,6 +331,7 @@ async fn run() -> Result<(), String> {
                         "status": if ready { "ok" } else { "unavailable" },
                         "commit": commit,
                         "runtimeId": runtime_id,
+                        "stun": stun,
                     })),
                 )
             }

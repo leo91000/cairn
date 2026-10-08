@@ -120,6 +120,7 @@ test('authenticated browser and Rust client keep using the observed route under 
       expect(service.exitCode, 'official binary must remain running').toBeNull()
       return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
     }).toBe(true)
+    await expect.poll(() => fetch(`${url}/health`).then(response => response.json()).then(health => health.stun.status)).toBe('running')
     await page.goto(url)
     const ownerEmail = `network-${process.env.LEO_NETWORK_SCENARIO}-${Date.now()}@example.test`
     await page.getByLabel('Email address').fill(ownerEmail)

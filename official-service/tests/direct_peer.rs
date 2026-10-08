@@ -6,6 +6,9 @@ use leo_relay_protocol::{
     direct::{DirectAuthorization, DirectSignal},
 };
 use reqwest::{Method, StatusCode};
+use rtc::peer_connection::configuration::setting_engine::{
+    SctpMaxMessageSize, SettingEngineBuilder,
+};
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc;
@@ -112,11 +115,31 @@ async fn client_with_fingerprint(
     Arc<dyn DataChannel>,
     DirectAuthorization,
 ) {
+    client_with_offer_candidates(relay, cookie, session, mismatched, "").await
+}
+
+async fn client_with_offer_candidates(
+    relay: &RelayedInstallation,
+    cookie: &str,
+    session: &serde_json::Value,
+    mismatched: bool,
+    extra_candidates: &str,
+) -> (
+    Arc<dyn PeerConnection>,
+    Arc<dyn DataChannel>,
+    DirectAuthorization,
+) {
     let (events, mut candidates) = mpsc::channel(32);
     let peer: Arc<dyn PeerConnection> = Arc::new(
         PeerConnectionBuilder::new()
             .with_handler(Arc::new(ClientEvents(events)))
-            .with_udp_addrs(vec!["127.0.0.1:0"])
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_sctp_max_message_size(SctpMaxMessageSize::Bounded(16_384))
+                    .with_sctp_max_receive_buffer_size(65_536)
+                    .build(),
+            )
+            .with_udp_addrs(vec!["0.0.0.0:0"])
             .build()
             .await
             .unwrap(),
@@ -156,7 +179,10 @@ async fn client_with_fingerprint(
     let response = relay
         .app
         .authenticated(cookie, session, Method::POST, &path)
-        .json(&json!({ "fingerprint": fingerprint, "versions": [4] }))
+        .json(&json!({
+            "fingerprint": fingerprint,
+            "versions": [4],
+        }))
         .send()
         .await
         .unwrap();
@@ -164,6 +190,7 @@ async fn client_with_fingerprint(
     let value: serde_json::Value = response.json().await.unwrap();
     let grant: DirectAuthorization = serde_json::from_value(value["grant"].clone()).unwrap();
     peer.set_local_description(local_offer).await.unwrap();
+    offer.sdp.push_str(extra_candidates);
     signal_as(
         relay,
         cookie,
@@ -263,6 +290,25 @@ async fn authorized_client_opens_a_real_installation_data_channel() {
     relay.close().await;
 }
 
+#[tokio::test]
+async fn mixed_usable_and_link_local_offer_opens_the_real_data_channel() {
+    let mut relay = RelayedInstallation::new(axum::Router::new()).await;
+    production_connector(&mut relay).await;
+    let candidates = concat!(
+        "a=candidate:1 1 udp 2122260223 192.0.2.1 50000 typ host\r\n",
+        "a=candidate:2 1 udp 2122260223 fe80::1 50001 typ host\r\n",
+    );
+    let (peer, channel, _) =
+        client_with_offer_candidates(&relay, &relay.cookie, &relay.session, false, candidates)
+            .await;
+    send_frame(channel.as_ref(), 1, &request("mixed-offer", "/api/chats")).await;
+    assert!(
+        matches!(response(channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+    peer.close().await.unwrap();
+    relay.close().await;
+}
+
 async fn send_frame(channel: &dyn DataChannel, id: u32, frame: &leo_relay_protocol::Frame) {
     let frame = serde_json::to_vec(frame).unwrap();
     for (index, fragment) in frame.chunks(16_384 - 13).enumerate() {
@@ -278,25 +324,28 @@ async fn send_frame(channel: &dyn DataChannel, id: u32, frame: &leo_relay_protoc
     }
 }
 
-async fn response(channel: &dyn DataChannel) -> leo_relay_protocol::Frame {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        let mut frame = Vec::new();
-        loop {
-            if let Some(DataChannelEvent::OnMessage(message)) = channel.poll().await {
-                assert!(message.data.len() <= 16_384);
-                assert_eq!(message.data[0], 1);
-                let total = u32::from_be_bytes(message.data[5..9].try_into().unwrap()) as usize;
-                let offset = u32::from_be_bytes(message.data[9..13].try_into().unwrap()) as usize;
-                assert_eq!(offset, frame.len());
-                frame.extend(&message.data[13..]);
-                if frame.len() == total {
-                    return serde_json::from_slice(&frame).unwrap();
+async fn receive_frame(channel: &dyn DataChannel) -> Frame {
+    let mut decoder = leo_relay_protocol::data_channel::FrameDecoder::default();
+    loop {
+        match channel.poll().await {
+            Some(DataChannelEvent::OnMessage(message)) => {
+                assert!(!message.is_string);
+                if let Some(frame) = decoder.push(&message.data).unwrap() {
+                    return frame;
                 }
             }
+            None | Some(DataChannelEvent::OnClose | DataChannelEvent::OnError) => {
+                panic!("DataChannel application response must remain accessible");
+            }
+            _ => {}
         }
-    })
-    .await
-    .expect("DataChannel application response")
+    }
+}
+
+async fn response(channel: &dyn DataChannel) -> Frame {
+    tokio::time::timeout(Duration::from_secs(3), receive_frame(channel))
+        .await
+        .expect("DataChannel application response")
 }
 
 fn request(id: &str, path: &str) -> leo_relay_protocol::Frame {
@@ -874,5 +923,822 @@ async fn cancelling_then_reusing_a_request_id_keeps_new_stream_credit_and_tracki
     }
     channel.close().await.unwrap();
     peer.close().await.unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn signal_lag_keeps_the_peer_running_and_new_connections_work() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let stop = tokio_util::sync::CancellationToken::new();
+    let running = leo_agent_manager::direct::peer::run(
+        relay.router.clone(),
+        relay.direct.clone(),
+        leo_agent_manager::direct::peer::PeerConfig::default(),
+        stop.clone(),
+    );
+    tokio::pin!(running);
+    // Subscribe, then pause only the peer while the real tunnel delivers a burst.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut running)
+            .await
+            .is_err()
+    );
+    let fingerprint = format!("sha-256 {}", vec!["AB"; 32].join(":"));
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let grant: serde_json::Value = relay
+        .app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            &format!("/api/installations/{id}/direct/authorize"),
+        )
+        .json(&json!({
+            "fingerprint": fingerprint,
+            "versions": [4],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let grant: DirectAuthorization = serde_json::from_value(grant["grant"].clone()).unwrap();
+    for _ in 0..70 {
+        signal_as(
+            &relay,
+            &relay.cookie,
+            &relay.session,
+            &grant,
+            &DirectSignal::Candidate {
+                candidate: String::new(),
+                sdp_mid: None,
+                sdp_m_line_index: None,
+            },
+        )
+        .await;
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut running)
+            .await
+            .is_err(),
+        "lag must not stop the installation peer"
+    );
+    tokio::select! {
+        () = &mut running => panic!("peer stopped after lag"),
+        () = async {
+            let (peer, channel, _) = client(&relay).await;
+            send_frame(channel.as_ref(), 1, &request("after-lag", "/api/chats")).await;
+
+            let reply = response(channel.as_ref()).await;
+            assert!(matches!(reply, Frame::Response(reply) if reply.status == 200));
+            peer.close().await.unwrap();
+        } => {}
+    }
+    stop.cancel();
+    running.await;
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    relay.close().await;
+}
+
+async fn partial_transfer(channel: &dyn DataChannel, id: u32, total: usize) {
+    let mut packet = vec![1];
+    packet.extend(id.to_be_bytes());
+    packet.extend((total as u32).to_be_bytes());
+    packet.extend(0_u32.to_be_bytes());
+    packet.push(b'{');
+    channel
+        .send(bytes::BytesMut::from(packet.as_slice()))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_member_holding_reassembly_capacity_does_not_disconnect_the_owner() {
+    let router = axum::Router::new().route(
+        "/api/fixture/echo",
+        axum::routing::post(|bytes: axum::body::Bytes| async { bytes }),
+    );
+    let mut relay = RelayedInstallation::new(router).await;
+    production_connector(&mut relay).await;
+    let cookies = common::stream_accounts_with_members(&relay, 2).await;
+    let member_cookie = &cookies[1];
+    let member_session = relay
+        .app
+        .client
+        .get(format!("{}/api/account/session", relay.app.url))
+        .header("cookie", member_cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let (member, member_channel, _) =
+        client_with_fingerprint(&relay, member_cookie, &member_session, false).await;
+    let waiting_cookie = &cookies[2];
+    let waiting_session = relay
+        .app
+        .client
+        .get(format!("{}/api/account/session", relay.app.url))
+        .header("cookie", waiting_cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let (waiting, waiting_channel, _) =
+        client_with_fingerprint(&relay, waiting_cookie, &waiting_session, false).await;
+    let (owner, owner_channel, _) = client(&relay).await;
+    partial_transfer(
+        member_channel.as_ref(),
+        1,
+        leo_relay_protocol::MAX_FRAME - 1024,
+    )
+    .await;
+    send_frame(
+        member_channel.as_ref(),
+        2,
+        &request("barrier", "/api/chats"),
+    )
+    .await;
+    assert!(
+        matches!(response(member_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+    partial_transfer(waiting_channel.as_ref(), 1, 200_000).await;
+    send_frame(
+        waiting_channel.as_ref(),
+        2,
+        &request("waiting-member", "/api/chats"),
+    )
+    .await;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            response(waiting_channel.as_ref())
+        )
+        .await
+        .is_err(),
+        "members share a bounded reservation pool, preserving the owner's capacity"
+    );
+
+    let Frame::Request(mut upload) = request("owner-upload", "/api/fixture/echo") else {
+        unreachable!()
+    };
+    upload.method = "POST".into();
+    upload.body = vec![0xAB; 200_000];
+    send_frame(owner_channel.as_ref(), 1, &Frame::Request(upload)).await;
+    assert!(
+        matches!(response(owner_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200 && reply.body == vec![0xAB; 200_000])
+    );
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    assert!(!relay.installation.shutdown.is_cancelled());
+    let logout = relay
+        .app
+        .authenticated(
+            waiting_cookie,
+            &waiting_session,
+            Method::POST,
+            "/api/account/logout",
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(logout.status().is_success());
+    closed(waiting_channel.as_ref()).await;
+    send_frame(
+        owner_channel.as_ref(),
+        2,
+        &request("after-waiter-revocation", "/api/chats"),
+    )
+    .await;
+    assert!(
+        matches!(response(owner_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+    waiting.close().await.unwrap();
+    member.close().await.unwrap();
+    owner.close().await.unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn concurrent_large_uploads_share_account_capacity_without_closing_either_peer() {
+    use leo_relay_protocol::data_channel::EncodedFrame;
+    let router = axum::Router::new()
+        .route(
+            "/api/fixture/upload",
+            axum::routing::post(|bytes: axum::body::Bytes| async move { bytes.len().to_string() }),
+        )
+        .layer(axum::extract::DefaultBodyLimit::max(
+            leo_relay_protocol::MAX_BODY,
+        ));
+    let mut relay = RelayedInstallation::new(router).await;
+    production_connector(&mut relay).await;
+    let (first, first_channel, _) = client(&relay).await;
+    let (second, second_channel, _) = client(&relay).await;
+    let upload = |id| {
+        let Frame::Request(mut input) = request(id, "/api/fixture/upload") else {
+            unreachable!()
+        };
+        input.method = "POST".into();
+        input.body = vec![0xAB; 4 * 1024 * 1024];
+        Frame::Request(input)
+    };
+    let first_frame = EncodedFrame::new(1, &upload("first-upload")).unwrap();
+    let mut packets = first_frame.packets();
+    first_channel
+        .send(bytes::BytesMut::from(packets.next().unwrap().as_slice()))
+        .await
+        .unwrap();
+    send_frame(first_channel.as_ref(), 2, &request("barrier", "/api/chats")).await;
+    assert!(
+        matches!(response(first_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+
+    let second_upload = async {
+        let frame = upload("second-upload");
+        let (_, reply) = tokio::time::timeout(leo_relay_protocol::REQUEST_TIMEOUT, async {
+            tokio::join!(
+                send_frame(second_channel.as_ref(), 1, &frame),
+                receive_frame(second_channel.as_ref()),
+            )
+        })
+        .await
+        .expect("second upload must finish within its request deadline");
+        reply
+    };
+    tokio::pin!(second_upload);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut second_upload)
+            .await
+            .is_err(),
+        "account reservations must apply backpressure across separate peers"
+    );
+
+    let first_upload = async {
+        let send_remaining = async {
+            for packet in packets {
+                first_channel
+                    .send(bytes::BytesMut::from(packet.as_slice()))
+                    .await
+                    .unwrap();
+            }
+        };
+        let (_, reply) = tokio::time::timeout(leo_relay_protocol::REQUEST_TIMEOUT, async {
+            tokio::join!(send_remaining, receive_frame(first_channel.as_ref()))
+        })
+        .await
+        .expect("first upload must finish within its request deadline");
+        reply
+    };
+    let (first_reply, second_reply) = tokio::join!(first_upload, second_upload);
+    for reply in [first_reply, second_reply] {
+        let Frame::Response(reply) = reply else {
+            panic!("finite upload response expected")
+        };
+        assert_eq!(reply.status, 200);
+        assert_eq!(reply.body, b"4194304");
+    }
+    for (channel, transfer) in [(&first_channel, 3), (&second_channel, 2)] {
+        send_frame(
+            channel.as_ref(),
+            transfer,
+            &request("after-uploads", "/api/chats"),
+        )
+        .await;
+        assert!(
+            matches!(response(channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+        );
+    }
+    first.close().await.unwrap();
+    second.close().await.unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn interleaved_uploads_on_one_peer_reject_only_the_excess_transfer() {
+    use leo_relay_protocol::data_channel::EncodedFrame;
+    let router = axum::Router::new()
+        .route(
+            "/api/fixture/upload",
+            axum::routing::post(|bytes: axum::body::Bytes| async move { bytes.len().to_string() }),
+        )
+        .layer(axum::extract::DefaultBodyLimit::max(
+            leo_relay_protocol::MAX_BODY,
+        ));
+    let mut relay = RelayedInstallation::new(router).await;
+    production_connector(&mut relay).await;
+    let (peer, channel, _) = client(&relay).await;
+    let upload = |id| {
+        let Frame::Request(mut input) = request(id, "/api/fixture/upload") else {
+            unreachable!()
+        };
+        input.method = "POST".into();
+        input.body = vec![0xAB; 4 * 1024 * 1024];
+        Frame::Request(input)
+    };
+    let first = EncodedFrame::new(1, &upload("first-upload")).unwrap();
+    let mut first_packets = first.packets();
+    channel
+        .send(bytes::BytesMut::from(
+            first_packets.next().unwrap().as_slice(),
+        ))
+        .await
+        .unwrap();
+    send_frame(channel.as_ref(), 2, &request("barrier", "/api/chats")).await;
+    assert!(
+        matches!(response(channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+
+    let second = EncodedFrame::new(3, &upload("excess-upload")).unwrap();
+    let mut second_packets = second.packets();
+    channel
+        .send(bytes::BytesMut::from(
+            second_packets.next().unwrap().as_slice(),
+        ))
+        .await
+        .unwrap();
+    let rejected = tokio::time::timeout(Duration::from_secs(2), response(channel.as_ref()))
+        .await
+        .expect("excess transfer must be rejected without blocking the first upload");
+    assert!(
+        matches!(rejected, Frame::Response(reply) if reply.id == "excess-upload" && reply.status == 503)
+    );
+    // Poll the public channel while sending: its bounded event queue also
+    // carries buffered-amount notifications and must keep being consumed.
+    let send_remaining = async {
+        for (first_packet, second_packet) in first_packets.zip(second_packets) {
+            channel
+                .send(bytes::BytesMut::from(first_packet.as_slice()))
+                .await
+                .unwrap();
+            channel
+                .send(bytes::BytesMut::from(second_packet.as_slice()))
+                .await
+                .unwrap();
+        }
+    };
+    let (_, reply) = tokio::time::timeout(leo_relay_protocol::REQUEST_TIMEOUT, async {
+        tokio::join!(send_remaining, receive_frame(channel.as_ref()))
+    })
+    .await
+    .expect("accepted upload must finish within its request deadline");
+    assert!(
+        matches!(reply, Frame::Response(reply) if reply.id == "first-upload" && reply.status == 200 && reply.body == b"4194304")
+    );
+    send_frame(
+        channel.as_ref(),
+        4,
+        &request("after-interleaving", "/api/chats"),
+    )
+    .await;
+    assert!(
+        matches!(response(channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    assert!(!relay.installation.shutdown.is_cancelled());
+    peer.close().await.unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn an_upload_making_progress_survives_beyond_thirty_seconds() {
+    let router = axum::Router::new().route(
+        "/api/fixture/upload",
+        axum::routing::post(|bytes: axum::body::Bytes| async move { bytes.len().to_string() }),
+    );
+    let mut relay = RelayedInstallation::new(router).await;
+    production_connector(&mut relay).await;
+    let (peer, channel, _) = client(&relay).await;
+    let Frame::Request(mut input) = request("progressing-upload", "/api/fixture/upload") else {
+        unreachable!()
+    };
+    input.method = "POST".into();
+    input.body = vec![0xAB; 40_000];
+    let encoded =
+        leo_relay_protocol::data_channel::EncodedFrame::new(1, &Frame::Request(input)).unwrap();
+    let mut packets = encoded.packets();
+    channel
+        .send(bytes::BytesMut::from(packets.next().unwrap().as_slice()))
+        .await
+        .unwrap();
+    send_frame(channel.as_ref(), 2, &request("start-barrier", "/api/chats")).await;
+    assert!(
+        matches!(response(channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+
+    tokio::time::sleep(Duration::from_secs(16)).await;
+    channel
+        .send(bytes::BytesMut::from(packets.next().unwrap().as_slice()))
+        .await
+        .unwrap();
+    send_frame(
+        channel.as_ref(),
+        3,
+        &request("progress-barrier", "/api/chats"),
+    )
+    .await;
+    assert!(
+        matches!(response(channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+
+    // Total age exceeds thirty seconds; valid progress kept each idle gap shorter.
+    tokio::time::sleep(Duration::from_secs(16)).await;
+    for packet in packets {
+        channel
+            .send(bytes::BytesMut::from(packet.as_slice()))
+            .await
+            .unwrap();
+    }
+    assert!(
+        matches!(response(channel.as_ref()).await, Frame::Response(reply) if reply.id == "progressing-upload" && reply.status == 200 && reply.body == b"40000")
+    );
+    send_frame(channel.as_ref(), 4, &request("after-upload", "/api/chats")).await;
+    assert!(
+        matches!(response(channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+    assert!(!relay.installation.shutdown.is_cancelled());
+    peer.close().await.unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn reservations_expire_even_when_the_peer_stops_reading_rejections() {
+    let router = axum::Router::new()
+        .route(
+            "/api/fixture/large-response",
+            axum::routing::get(|| async { vec![0xAB; 6 * 1024 * 1024] }),
+        )
+        .route(
+            "/api/fixture/upload",
+            axum::routing::post(|bytes: axum::body::Bytes| async move { bytes.len().to_string() }),
+        );
+    let mut relay = RelayedInstallation::new(router).await;
+    production_connector(&mut relay).await;
+    let (holder, holder_channel, _) = client(&relay).await;
+    let (waiter, waiter_channel, _) = client(&relay).await;
+    partial_transfer(
+        holder_channel.as_ref(),
+        1,
+        leo_relay_protocol::MAX_FRAME - 1024,
+    )
+    .await;
+    send_frame(
+        holder_channel.as_ref(),
+        2,
+        &request("barrier", "/api/chats"),
+    )
+    .await;
+    assert!(
+        matches!(response(holder_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+    // A large response fills SCTP and the bounded output queue while the
+    // client deliberately stops reading. Short rejected frames need no tail.
+    send_frame(
+        holder_channel.as_ref(),
+        3,
+        &request("large-response", "/api/fixture/large-response"),
+    )
+    .await;
+    let flood_channel = holder_channel.clone();
+    let flood = tokio::spawn(async move {
+        for id in 4..4100 {
+            let Frame::Request(mut input) = request(&format!("rejected-{id}"), "/api/chats") else {
+                unreachable!()
+            };
+            input.body = vec![0xAB; 2048];
+            send_frame(flood_channel.as_ref(), id, &Frame::Request(input)).await;
+        }
+    });
+    let Frame::Request(mut waiting) = request("waiter", "/api/fixture/upload") else {
+        unreachable!()
+    };
+    waiting.method = "POST".into();
+    waiting.body = vec![0xCD; 2048];
+    send_frame(waiter_channel.as_ref(), 1, &Frame::Request(waiting)).await;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            response(waiter_channel.as_ref())
+        )
+        .await
+        .is_err(),
+        "the holder's reservation must actually block the other account peer"
+    );
+    tokio::time::sleep(leo_relay_protocol::REQUEST_TIMEOUT + Duration::from_secs(1)).await;
+    assert!(
+        matches!(response(waiter_channel.as_ref()).await, Frame::Response(reply) if reply.id == "waiter" && reply.status == 200 && reply.body == b"2048")
+    );
+    assert!(!relay.installation.shutdown.is_cancelled());
+    flood.abort();
+    let _ = flood.await;
+    holder.close().await.unwrap();
+    waiter.close().await.unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn reassembly_waiters_survive_abort_close_and_expiry_of_the_holder() {
+    let mut relay = RelayedInstallation::new(axum::Router::new()).await;
+    production_connector(&mut relay).await;
+    let (holder, holder_channel, _) = client(&relay).await;
+    let (waiter, waiter_channel, _) = client(&relay).await;
+    // Both peers belong to the same verified account, so they share its cap.
+    partial_transfer(
+        holder_channel.as_ref(),
+        1,
+        leo_relay_protocol::MAX_FRAME - 1024,
+    )
+    .await;
+    send_frame(
+        holder_channel.as_ref(),
+        2,
+        &request("barrier", "/api/chats"),
+    )
+    .await;
+    assert!(
+        matches!(response(holder_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+    partial_transfer(waiter_channel.as_ref(), 1, 200_000).await;
+    let mut abort = vec![1];
+    abort.extend(1_u32.to_be_bytes());
+    abort.extend([0; 8]);
+    waiter_channel
+        .send(bytes::BytesMut::from(abort.as_slice()))
+        .await
+        .unwrap();
+    send_frame(
+        waiter_channel.as_ref(),
+        2,
+        &request("after-abort", "/api/chats"),
+    )
+    .await;
+    let reply = response(waiter_channel.as_ref());
+    tokio::pin!(reply);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut reply)
+            .await
+            .is_err()
+    );
+    holder_channel
+        .send(bytes::BytesMut::from(abort.as_slice()))
+        .await
+        .unwrap();
+    assert!(matches!(reply.await, Frame::Response(reply) if reply.status == 200));
+
+    partial_transfer(
+        holder_channel.as_ref(),
+        3,
+        leo_relay_protocol::MAX_FRAME - 1024,
+    )
+    .await;
+    send_frame(
+        holder_channel.as_ref(),
+        4,
+        &request("close-barrier", "/api/chats"),
+    )
+    .await;
+    assert!(
+        matches!(response(holder_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+    partial_transfer(waiter_channel.as_ref(), 3, 200_000).await;
+    let mut abort_waiter = abort.clone();
+    abort_waiter[1..5].copy_from_slice(&3_u32.to_be_bytes());
+    waiter_channel
+        .send(bytes::BytesMut::from(abort_waiter.as_slice()))
+        .await
+        .unwrap();
+    send_frame(
+        waiter_channel.as_ref(),
+        4,
+        &request("after-close", "/api/chats"),
+    )
+    .await;
+    holder_channel.close().await.unwrap();
+    assert!(
+        matches!(response(waiter_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+    holder.close().await.unwrap();
+
+    // Expiry releases this peer's own reservation while it is backpressured.
+    // It then drains late fragments and continues serving fresh requests.
+    partial_transfer(
+        waiter_channel.as_ref(),
+        5,
+        leo_relay_protocol::MAX_FRAME - 1024,
+    )
+    .await;
+    send_frame(
+        waiter_channel.as_ref(),
+        6,
+        &request("expiry-barrier", "/api/chats"),
+    )
+    .await;
+    assert!(
+        matches!(response(waiter_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+    partial_transfer(waiter_channel.as_ref(), 7, 200_000).await;
+    abort_waiter[1..5].copy_from_slice(&7_u32.to_be_bytes());
+    waiter_channel
+        .send(bytes::BytesMut::from(abort_waiter.as_slice()))
+        .await
+        .unwrap();
+    send_frame(
+        waiter_channel.as_ref(),
+        8,
+        &request("after-expiry", "/api/chats"),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(31)).await;
+    assert!(
+        matches!(response(waiter_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+    let mut late = vec![1];
+    late.extend(5_u32.to_be_bytes());
+    late.extend(((leo_relay_protocol::MAX_FRAME - 1024) as u32).to_be_bytes());
+    late.extend(1_u32.to_be_bytes());
+    late.push(b'}');
+    waiter_channel
+        .send(bytes::BytesMut::from(late.as_slice()))
+        .await
+        .unwrap();
+    abort_waiter[1..5].copy_from_slice(&5_u32.to_be_bytes());
+    waiter_channel
+        .send(bytes::BytesMut::from(abort_waiter.as_slice()))
+        .await
+        .unwrap();
+    send_frame(
+        waiter_channel.as_ref(),
+        9,
+        &request("after-expired-tail", "/api/chats"),
+    )
+    .await;
+    assert!(
+        matches!(response(waiter_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+    waiter.close().await.unwrap();
+    assert!(!relay.installation.shutdown.is_cancelled());
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn observed_certificate_is_compared_with_the_grant_without_an_sdp_check() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    // Public test certificate, generated with OpenSSL; no SDP or DTLS SDK check.
+    // Expected SHA-256 comes from openssl x509 -fingerprint -sha256.
+    let observed = include_bytes!("fixtures/direct-certificate.der");
+    let fingerprint = "sha-256 2E:13:F5:6D:43:F6:75:E6:CA:09:EC:E3:F2:49:8E:47:F0:22:FE:83:FA:95:72:80:33:86:64:D1:6D:25:AF:A2";
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let grant: serde_json::Value = relay
+        .app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            &format!("/api/installations/{id}/direct/authorize"),
+        )
+        .json(&json!({
+            "fingerprint": fingerprint,
+            "versions": [4],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let grant: DirectAuthorization = serde_json::from_value(grant["grant"].clone()).unwrap();
+    let mut substituted = observed.to_vec();
+    substituted[0] ^= 1;
+    assert!(
+        relay
+            .direct
+            .accept_certificate(&grant.claims.connection_id, &substituted)
+            .is_err()
+    );
+    let lease = relay
+        .direct
+        .accept_certificate(&grant.claims.connection_id, observed)
+        .unwrap();
+    assert_eq!(lease.claims, grant.claims);
+    assert!(
+        relay
+            .direct
+            .accept_certificate(&grant.claims.connection_id, observed)
+            .is_err()
+    );
+    relay.close().await;
+}
+
+struct PanicPeerStart(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PanicPeerStart {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        if event.metadata().target() == "leo_agent_manager::direct::peer"
+            && *event.metadata().level() == tracing::Level::DEBUG
+            && self.0.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            panic!("fixture peer task failure");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_panicking_peer_task_releases_its_authorization_and_preserves_other_peers() {
+    use tracing_subscriber::prelude::*;
+    let panic_next = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let subscriber = tracing_subscriber::registry().with(PanicPeerStart(panic_next.clone()));
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let stop = tokio_util::sync::CancellationToken::new();
+    let running = tokio::spawn(leo_agent_manager::direct::peer::run(
+        relay.router.clone(),
+        relay.direct.clone(),
+        leo_agent_manager::direct::peer::PeerConfig::default(),
+        stop.clone(),
+    ));
+    let (survivor, survivor_channel, _) = client(&relay).await;
+    // Inject a fault through the scoped logging adapter in the actual Tokio peer
+    // job. No production fault flag, alternate peer or SDP-induced SDK panic.
+    let fingerprint = format!("sha-256 {}", vec!["AB"; 32].join(":"));
+    let installation = relay.session["installations"][0]["id"].as_str().unwrap();
+    let value: serde_json::Value = relay
+        .app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            &format!("/api/installations/{installation}/direct/authorize"),
+        )
+        .json(&json!({
+            "fingerprint": fingerprint,
+            "versions": [4],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let grant: DirectAuthorization = serde_json::from_value(value["grant"].clone()).unwrap();
+    // The lease token observes the same authorization cleanup as a live channel.
+    let lease = relay
+        .direct
+        .accept_peer(&grant, &grant.claims.session_id, &fingerprint)
+        .unwrap();
+    // Parallel tests may first register this shared callsite with no default
+    // subscriber. Rebuild its interest on this thread after the survivor has
+    // reached serve_peer, so the injected fault cannot silently be skipped.
+    tracing::callsite::rebuild_interest_cache();
+    panic_next.store(true, std::sync::atomic::Ordering::SeqCst);
+    signal_as(&relay, &relay.cookie, &relay.session, &grant, &DirectSignal::Offer {
+        sdp: format!("v=0\r\ns=-\r\nt=0 0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=fingerprint:{fingerprint}\r\na=sctp-port:5000\r\n"),
+    }).await;
+    tokio::time::timeout(Duration::from_secs(2), lease.closed.cancelled())
+        .await
+        .expect("JoinError cleanup must cancel the panicking job's lease");
+    assert!(
+        !panic_next.load(std::sync::atomic::Ordering::SeqCst),
+        "fault must execute in the peer task"
+    );
+    let error = relay
+        .direct
+        .accept_peer(&grant, &grant.claims.session_id, &grant.claims.fingerprint)
+        .err()
+        .expect("panicking task must release its authorization");
+    assert_eq!(error.message, "Unknown direct authorization.");
+    send_frame(
+        survivor_channel.as_ref(),
+        1,
+        &request("after-panic", "/api/chats"),
+    )
+    .await;
+    assert!(
+        matches!(response(survivor_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+    let (fresh, fresh_channel, _) = client(&relay).await;
+    send_frame(fresh_channel.as_ref(), 1, &request("fresh", "/api/chats")).await;
+    assert!(
+        matches!(response(fresh_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    assert!(!relay.installation.shutdown.is_cancelled());
+    survivor.close().await.unwrap();
+    fresh.close().await.unwrap();
+    stop.cancel();
+    running.await.unwrap();
     relay.close().await;
 }

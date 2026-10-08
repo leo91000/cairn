@@ -3,6 +3,10 @@ use std::{
     collections::HashMap,
     io,
     net::IpAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio::net::UdpSocket;
@@ -13,13 +17,82 @@ pub fn url(origin: &str) -> Result<String, &'static str> {
     Ok(format!("stun:{host}:3478"))
 }
 
+const STOPPED: u8 = 0;
+const RUNNING: u8 = 1;
+const RETRYING: u8 = 2;
+
+#[derive(Clone, Default)]
+pub struct Status(Arc<Counters>);
+
+#[derive(Default)]
+struct Counters {
+    state: AtomicU8,
+    receive_errors: AtomicU64,
+    send_errors: AtomicU64,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Snapshot {
+    pub status: &'static str,
+    pub receive_errors: u64,
+    pub send_errors: u64,
+}
+
+impl Status {
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            status: match self.0.state.load(Ordering::Relaxed) {
+                RUNNING => "running",
+                RETRYING => "retrying",
+                _ => "stopped",
+            },
+            receive_errors: self.0.receive_errors.load(Ordering::Relaxed),
+            send_errors: self.0.send_errors.load(Ordering::Relaxed),
+        }
+    }
+}
+
+struct Running(Status);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.0.state.store(STOPPED, Ordering::Relaxed);
+    }
+}
+
 pub async fn serve(socket: UdpSocket) -> io::Result<()> {
+    serve_with_status(socket, Status::default()).await
+}
+
+pub async fn serve_with_status(socket: UdpSocket, status: Status) -> io::Result<()> {
+    let _running = Running(status.clone());
+    status.0.state.store(RUNNING, Ordering::Relaxed);
     let mut input = [0_u8; 513];
     let mut window = Instant::now();
     let mut counts = HashMap::<IpAddr, u16>::new();
     let mut total = 0_u16;
+    let mut last_receive_warning: Option<Instant> = None;
+    let mut last_send_warning: Option<Instant> = None;
     loop {
-        let (length, source) = socket.recv_from(&mut input).await?;
+        let (length, source) = match socket.recv_from(&mut input).await {
+            Ok(packet) => {
+                status.0.state.store(RUNNING, Ordering::Relaxed);
+                packet
+            }
+            Err(_) => {
+                status.0.state.store(RETRYING, Ordering::Relaxed);
+                status.0.receive_errors.fetch_add(1, Ordering::Relaxed);
+                if last_receive_warning.is_none_or(|last| last.elapsed() >= Duration::from_secs(30))
+                {
+                    tracing::warn!("Official STUN receive failed; retrying");
+                    last_receive_warning = Some(Instant::now());
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+
         if window.elapsed() >= Duration::from_secs(1) {
             window = Instant::now();
             counts.clear();
@@ -105,6 +178,12 @@ pub async fn serve(socket: UdpSocket) -> io::Result<()> {
             response.extend([0x80, 0x28, 0, 4]);
             response.extend(crc.to_be_bytes());
         }
-        let _ = socket.send_to(&response, source).await;
+        if socket.send_to(&response, source).await.is_err() {
+            status.0.send_errors.fetch_add(1, Ordering::Relaxed);
+            if last_send_warning.is_none_or(|last| last.elapsed() >= Duration::from_secs(30)) {
+                tracing::warn!("Official STUN send failed; continuing");
+                last_send_warning = Some(Instant::now());
+            }
+        }
     }
 }

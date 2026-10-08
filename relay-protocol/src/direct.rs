@@ -174,6 +174,65 @@ pub enum DirectSignal {
 }
 
 impl DirectSignal {
+    /// Validate the original bounded metadata before removing unusable destinations.
+    /// Trickle can continue after an ignored candidate; an embedded candidate set
+    /// with no numeric unicast destination fails visibly instead of reaching ICE.
+    pub fn sanitize_candidates(mut self) -> Result<Option<Self>, &'static str> {
+        match &mut self {
+            Self::Offer { sdp } | Self::Answer { sdp } => {
+                if sdp.len() > MAX_SIGNAL || !sdp.starts_with("v=0\r\n") {
+                    return Err("Invalid direct SDP");
+                }
+
+                let mut had_candidates = false;
+                let mut usable = false;
+                let mut lines = Vec::new();
+                for line in sdp.lines() {
+                    if let Some(candidate) = line.strip_prefix("a=")
+                        && candidate.starts_with("candidate:")
+                    {
+                        had_candidates = true;
+                        if !candidate_syntax(candidate) {
+                            return Err("Invalid ICE candidate");
+                        }
+                        if !usable_candidate(candidate) {
+                            continue;
+                        }
+                        usable = true;
+                    }
+                    lines.push(line);
+                }
+                if had_candidates && !usable {
+                    return Err("No usable numeric ICE candidate");
+                }
+
+                *sdp = lines.join("\r\n") + "\r\n";
+            }
+            Self::Candidate {
+                candidate,
+                sdp_mid,
+                sdp_m_line_index,
+            } => {
+                // Validate metadata as well as syntax even for ignored candidates.
+                let metadata = Self::Candidate {
+                    candidate: String::new(),
+                    sdp_mid: sdp_mid.clone(),
+                    sdp_m_line_index: *sdp_m_line_index,
+                };
+                if !candidate_syntax(candidate) || !metadata.valid() {
+                    return Err("Invalid ICE candidate");
+                }
+                if !candidate.is_empty() && !usable_candidate(candidate) {
+                    return Ok(None);
+                }
+            }
+        }
+        if !self.valid() {
+            return Err("Invalid direct signal");
+        }
+        Ok(Some(self))
+    }
+
     pub fn valid(&self) -> bool {
         match self {
             Self::Offer { sdp } | Self::Answer { sdp } => {
@@ -378,6 +437,30 @@ fn valid_address(family: &str, value: &str) -> bool {
 }
 
 fn valid_candidate(candidate: &str) -> bool {
+    candidate_syntax(candidate)
+        && (candidate.is_empty()
+            || candidate
+                .split_ascii_whitespace()
+                .nth(4)
+                .is_some_and(|value| {
+                    value
+                        .parse::<std::net::IpAddr>()
+                        .map_or(true, usable_candidate_address)
+                }))
+}
+
+fn usable_candidate(candidate: &str) -> bool {
+    candidate
+        .split_ascii_whitespace()
+        .nth(4)
+        .is_some_and(|value| {
+            value
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(usable_candidate_address)
+        })
+}
+
+fn candidate_syntax(candidate: &str) -> bool {
     if candidate.is_empty() {
         return true;
     }
@@ -397,6 +480,8 @@ fn valid_candidate(candidate: &str) -> bool {
                 .strip_suffix(".local")
                 .is_some_and(|name| token(name, 64))
     };
+    // Private addresses remain useful across authenticated LAN/VPN peers. This
+    // is ICE connectivity metadata, never an HTTP fetch or an application grant.
     token(words[0], 32)
         && words[1] == "1"
         && matches!(words[2], "udp" | "UDP" | "tcp" | "TCP")
@@ -413,4 +498,30 @@ fn valid_candidate(candidate: &str) -> bool {
             ["tcptype", value] => matches!(*value, "active" | "passive" | "so"),
             _ => false,
         })
+}
+
+/// LAN/VPN unicast is intentional; special local destinations are not ICE peers.
+pub fn usable_candidate_address(ip: std::net::IpAddr) -> bool {
+    let ip = match ip {
+        std::net::IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map(std::net::IpAddr::V4)
+            .unwrap_or(std::net::IpAddr::V6(ip)),
+        ip => ip,
+    };
+    match ip {
+        std::net::IpAddr::V4(ip) => {
+            !ip.is_loopback()
+                && !ip.is_link_local()
+                && !ip.is_unspecified()
+                && !ip.is_multicast()
+                && !ip.is_broadcast()
+        }
+        std::net::IpAddr::V6(ip) => {
+            !ip.is_loopback()
+                && !ip.is_unicast_link_local()
+                && !ip.is_unspecified()
+                && !ip.is_multicast()
+        }
+    }
 }

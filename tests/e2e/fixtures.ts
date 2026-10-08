@@ -184,6 +184,14 @@ export const test = base.extend<object, { workspace: Workspace }>({
     }
 
     const signIn = async (page: Page) => {
+      // Navigation's load event can precede the SPA's first session request.
+      // Settle that view before adding cookies, so its installation redirect
+      // cannot race the reload below.
+      const initialAccountView = page.getByLabel('Email address').or(
+        page.getByRole('button', { name: 'Sign out', exact: true, includeHidden: true }),
+      )
+      await expect(initialAccountView.first()).toBeAttached()
+
       await ensureSession()
       const [name, value] = headers.cookie!.split('=')
       await page.context().addCookies([{

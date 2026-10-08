@@ -83,7 +83,12 @@ async function main() {
     await docker('run', '-d', '--name', name, '--network', 'host', '-e', `LEO_OFFICIAL_DATABASE_URL=postgres://leo:fixture-only@127.0.0.1:${databasePort}/leo_official`, '-e', `LEO_OFFICIAL_ORIGIN=${origin}`, '-e', `LEO_OFFICIAL_LISTEN=127.0.0.1:${port}`, '-e', `LEO_OFFICIAL_EMAIL_ENDPOINT=http://127.0.0.1:${mail.address().port}/emails`, '-e', 'LEO_OFFICIAL_EMAIL_KEY=fixture-only', '-e', 'LEO_OFFICIAL_EMAIL_FROM=leo@example.test', '-e', `LEO_INSTALLATION_IMAGE=${installationImage}`, '-e', `LEO_OFFICIAL_FCM_SERVICE_ACCOUNT_JSON=${fcmAccount}`, image)
     const healthResponse = await ready()
     assert.match(healthResponse.headers.get('cache-control'), /no-store/)
-    assert.deepEqual(await healthResponse.json(), { status: 'ok', commit, runtimeId: commit })
+    assert.deepEqual(await healthResponse.json(), {
+      status: 'ok',
+      commit,
+      runtimeId: commit,
+      stun: { status: 'running', receiveErrors: 0, sendErrors: 0 },
+    })
     const user = (await docker('exec', name, 'id', '-u')).stdout.trim()
     assert.equal(user, '1000', 'Official process must run unprivileged')
     const databaseSql = sql => docker('exec', `${name}-db`, 'psql', '-U', 'leo', '-d', 'leo_official', '-v', 'ON_ERROR_STOP=1', '-Atc', sql)

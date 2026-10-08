@@ -2009,3 +2009,110 @@ async fn saturated_direct_signaling_preserves_credited_fallback_streams() {
     relay.close().await;
     proxy.abort();
 }
+
+#[tokio::test]
+async fn candidate_policy_drops_local_special_addresses_but_preserves_lan_and_vpn() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let grant = authorization(&relay, &relay.cookie, &relay.session).await;
+    let path = format!(
+        "/api/installations/{}/direct/{}/signal",
+        grant.claims.installation_id, grant.claims.connection_id
+    );
+    let mut signals = relay.direct.subscribe();
+    for address in [
+        "127.0.0.1",
+        "169.254.1.1",
+        "::1",
+        "::ffff:127.0.0.1",
+        "::ffff:169.254.1.1",
+        "fe80::1",
+        "0.0.0.0",
+        "::",
+        "224.0.0.251",
+        "ff02::fb",
+        "255.255.255.255",
+        "hidden-host.local",
+    ] {
+        let candidate = format!("candidate:1 1 udp 2122260223 {address} 50000 typ host");
+        let response = relay
+            .app
+            .authenticated(&relay.cookie, &relay.session, Method::POST, &path)
+            .json(&json!({
+                "kind": "candidate",
+                "candidate": candidate,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NO_CONTENT,
+            "ignored candidate {address}"
+        );
+        assert!(
+            signals.try_recv().is_err(),
+            "ignored candidates must never reach ICE"
+        );
+    }
+    for address in [
+        "192.168.1.2",
+        "10.8.0.2",
+        "172.16.2.3",
+        "fd00::2",
+        "192.0.2.1",
+    ] {
+        let candidate = format!("candidate:1 1 udp 2122260223 {address} 50000 typ host");
+        let response = relay
+            .app
+            .authenticated(&relay.cookie, &relay.session, Method::POST, &path)
+            .json(&json!({
+                "kind": "candidate",
+                "candidate": candidate,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(
+            matches!(signals.try_recv().unwrap(), leo_agent_manager::direct::DirectEvent::Signal { signal: leo_relay_protocol::direct::DirectSignal::Candidate { candidate: received, .. }, .. } if received == candidate)
+        );
+    }
+    let base = format!(
+        "v=0\r\ns=-\r\nt=0 0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=fingerprint:{}\r\na=sctp-port:5000\r\n",
+        grant.claims.fingerprint,
+    );
+    let usable = "a=candidate:1 1 udp 2122260223 192.168.1.2 50000 typ host\r\n";
+    let special = "a=candidate:2 1 udp 2122260223 fe80::1 50001 typ host\r\n";
+    let mdns = "a=candidate:3 1 udp 2122260223 hidden-host.local 50002 typ host\r\n";
+    let response = relay
+        .app
+        .authenticated(&relay.cookie, &relay.session, Method::POST, &path)
+        .json(&json!({
+            "kind": "offer",
+            "sdp": format!("{base}{usable}{special}{mdns}"),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(
+        matches!(signals.try_recv().unwrap(), leo_agent_manager::direct::DirectEvent::Signal {
+        signal: leo_relay_protocol::direct::DirectSignal::Offer { sdp }, ..
+    } if sdp == format!("{base}{usable}"))
+    );
+    for candidates in [special, mdns, "a=candidate:invalid syntax\r\n"] {
+        let response = relay
+            .app
+            .authenticated(&relay.cookie, &relay.session, Method::POST, &path)
+            .json(&json!({
+                "kind": "offer",
+                "sdp": format!("{base}{candidates}"),
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(signals.try_recv().is_err());
+    }
+    relay.close().await;
+}

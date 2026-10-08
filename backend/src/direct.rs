@@ -13,6 +13,7 @@ use leo_relay_protocol::{
         SignalBudget, has_direct_capacity, unix_time,
     },
 };
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -227,6 +228,26 @@ impl DirectConnections {
         true
     }
 
+    /// Compare the actual DTLS certificate with the current verified grant.
+    /// This application check is independent of the SDK's SDP fingerprint check.
+    pub fn accept_certificate(&self, id: &str, certificate: &[u8]) -> Result<DirectLease> {
+        if certificate.is_empty() {
+            return Err(Error::unauthorized("No observed DTLS certificate."));
+        }
+        let fingerprint = format!(
+            "sha-256 {}",
+            Sha256::digest(certificate)
+                .iter()
+                .map(|byte| format!("{byte:02X}"))
+                .collect::<Vec<_>>()
+                .join(":"),
+        );
+        let (current, _) = self
+            .pending_peer(id)
+            .ok_or_else(|| Error::unauthorized("Direct authorization closed."))?;
+        self.accept_peer(&current, &current.claims.session_id, &fingerprint)
+    }
+
     /// Call once after DTLS using the certificate fingerprint observed by the peer.
     /// Never use a client-supplied HTTP/header identity to dispatch direct frames.
     pub fn accept_peer(
@@ -282,14 +303,17 @@ impl DirectConnections {
     }
 
     pub(crate) fn receive_signal(&self, id: String, signal: DirectSignal) -> bool {
+        let Ok(signal) = signal.sanitize_candidates() else {
+            return false;
+        };
         let mut state = self.state.lock().unwrap();
-        let allowed = signal.valid()
-            && state.authorizations.get(&id).is_some_and(|lease| {
+        let allowed = state.authorizations.get(&id).is_some_and(|lease| {
+            signal.as_ref().is_none_or(|signal| {
                 signal.matches_client_fingerprint(&lease.authorization.claims.fingerprint)
             })
-            && Self::signal_allowed(&mut state, &id);
+        }) && Self::signal_allowed(&mut state, &id);
         drop(state);
-        if allowed {
+        if allowed && let Some(signal) = signal {
             let _ = self.events.send(DirectEvent::Signal { id, signal });
         }
         allowed
@@ -297,10 +321,14 @@ impl DirectConnections {
 
     /// Return connection metadata to the originating official session via the tunnel.
     pub fn send_signal(&self, id: &str, signal: DirectSignal) -> Result<()> {
+        let signal = signal.sanitize_candidates().map_err(Error::bad)?;
         let mut state = self.state.lock().unwrap();
-        if !signal.valid() || !Self::signal_allowed(&mut state, id) {
+        if !Self::signal_allowed(&mut state, id) {
             return Err(Error::bad("Invalid direct signal."));
         }
+        let Some(signal) = signal else {
+            return Ok(());
+        };
         let output = state
             .output
             .as_ref()
