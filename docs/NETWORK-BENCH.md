@@ -202,3 +202,38 @@ and source port with XOR-MAPPED-ADDRESS. An IPv6 Docker userland proxy can repla
 the source with a gateway (or translate to IPv4); IPv4 DNAT evidence does not
 prove IPv6 preservation. Do not publish AAAA/STUN IPv6 readiness until this
 separate check succeeds. The local namespace/Docker bench remains IPv4 evidence.
+
+## Android native adapter (#104)
+
+`--android` reuses this bench's official service, authenticated installation,
+STUN responder, UDP probes, router filtering and cleanup. It requires a booted
+real emulator, `adb`, built debug/application-test APKs and the same disposable
+Postgres database. The launcher isolates live agent credentials. For example:
+
+```sh
+leo-android emulator start 30 --accept-licenses --aosp
+mise exec -- android/gradlew -p android assembleDebug assembleDebugAndroidTest
+ANDROID_SERIAL=emulator-5580 python3 tests/network-bench.py same-lan --android --output test-results/android-direct/same-lan.json
+ANDROID_SERIAL=emulator-5580 python3 tests/network-bench.py udp-blocked --android --output test-results/android-direct/udp-blocked.json
+ANDROID_SERIAL=emulator-5580 python3 tests/network-bench.py network-change --android --output test-results/android-direct/network-change.json
+leo-android emulator stop
+```
+
+The emulator runs outside the Linux client namespace. Temporary host routes
+connect it to the bench installation topology; they disappear with the owned
+veth. Host firewall policy stays untouched. The LAN case observes a real native
+application response, selected-installation UI indicator, renewal before the
+180-second lease expiry and logout revocation during a live stream. The blocked
+case drops installation UDP and observes continued relay reads throughout the
+30-second ICE deadline. The network case actually disables/enables emulator
+Wi-Fi, observes `ConnectivityManager` move to cellular and back, and requires
+relay fallback followed by fresh authorizations and successful direct responses.
+This qualifies Android switching; it does not claim emulator traffic originated
+inside the client namespace or that the synthetic mobile link is a carrier NAT.
+
+JSON reports contain actual successful response routes and device SDK/ABI.
+Sibling `.instrumentation.txt` files contain JUnit results. Credentials are
+written only to a private fixture file/app storage and removed in cleanup; no
+SDP, cookies, authorization IDs or logcat are uploaded. The **Android direct-relay
+device bench** CI job runs all three cases on API 36, fails on any failed case
+and retains only these sanitized reports.

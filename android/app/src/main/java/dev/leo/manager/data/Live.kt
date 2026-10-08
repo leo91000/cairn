@@ -128,9 +128,11 @@ private fun LeoApi.frames(
     cursor: Long,
     generation: Long,
     history: String?,
+    forceRelay: Boolean,
 ): Flow<StreamFrame> = callbackFlow {
     val call =
-        streaming.newCall(
+        transport.newCall(
+            streaming,
             builder(
                     "$path?after=$cursor" +
                         (history?.let { "&history=${segment(it)}" } ?: "") +
@@ -138,7 +140,8 @@ private fun LeoApi.frames(
                 )
                 .header("Accept", "text/event-stream")
                 .get()
-                .build()
+                .build(),
+            forceRelay,
         )
     synchronized(streamLock) {
         if (generation != streamGeneration.get()) throw CancellationException("Session fermée")
@@ -193,9 +196,17 @@ private fun LeoApi.frames(
                             }
                         }
                     }
-                    close(IOException("Flux interrompu"))
+                    val interrupted = IOException("Flux interrompu")
+                    close(
+                        if (transport.wasDirect(response)) DirectStreamLost(interrupted)
+                        else interrupted
+                    )
                 } catch (e: Exception) {
-                    close(e)
+                    close(
+                        if (e is IOException && e !is ApiException && transport.wasDirect(response))
+                            DirectStreamLost(e)
+                        else e
+                    )
                 } finally {
                     streamCalls.remove(call)
                 }
@@ -254,9 +265,12 @@ fun LeoApi.live(path: String, session: LiveSession = LiveSession()): Flow<LiveSn
         // A collector may have stopped after parsing a frame but before displaying it.
         if (snapshot.state != null || snapshot.events.isNotEmpty()) emit(snapshot)
         var failures = 0
+        var relayRecovery = false
         while (currentCoroutineContext().isActive && generation == streamGeneration.get()) {
             try {
-                frames(path, cursor, generation, snapshot.history).collect { frame ->
+                val forceRelay = relayRecovery
+                relayRecovery = false
+                frames(path, cursor, generation, snapshot.history, forceRelay).collect { frame ->
                     val batch = frame.batch
                     require(snapshot.history == null || batch.history != null) {
                         "Révision indisponible"
@@ -299,6 +313,7 @@ fun LeoApi.live(path: String, session: LiveSession = LiveSession()): Flow<LiveSn
                 throw e
             } catch (e: Exception) {
                 if (generation != streamGeneration.get()) break
+                if (e is DirectStreamLost) relayRecovery = true
                 val terminal = e is ApiException && e.status in setOf(401, 403, 404)
                 if (e !is IOException) {
                     accumulator.clear()

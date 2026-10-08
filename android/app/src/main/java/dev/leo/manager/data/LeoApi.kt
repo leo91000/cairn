@@ -103,6 +103,7 @@ class LeoApi(
     val installationId: String? = null,
 ) {
     val cacheScope = origin.toString() + installationId.orEmpty()
+    val transport = DirectTransport(installationId) { restartSubscriptions() }
 
     private val cookies = SessionCookies(origin, vault)
     val hasSession: Boolean
@@ -112,6 +113,7 @@ class LeoApi(
         client
             .newBuilder()
             .cookieJar(cookies)
+            .addInterceptor(transport)
             .retryOnConnectionFailure(false)
             .followRedirects(false)
             .followSslRedirects(false)
@@ -140,9 +142,22 @@ class LeoApi(
     @Volatile var csrf: String = ""
 
     internal val streamLock = Any()
+    private var nativeDirect: NativeDirect? = null
+
+    fun startDirect(context: android.content.Context) =
+        synchronized(streamLock) {
+            if (installationId != null && nativeDirect == null)
+                nativeDirect = NativeDirect(this, context)
+        }
+
+    internal fun restartSubscriptions() =
+        synchronized(streamLock) { streamCalls.forEach { it.cancel() } }
 
     fun closeStreams() =
         synchronized(streamLock) {
+            nativeDirect?.close()
+            nativeDirect = null
+            transport.close()
             streamGeneration.incrementAndGet()
             streamCalls.forEach { it.cancel() }
             streamCalls.clear()
@@ -276,7 +291,7 @@ class LeoApi(
         client: OkHttpClient = http,
         consume: (Response) -> T,
     ): T = suspendCancellableCoroutine { continuation ->
-        val call = client.newCall(request)
+        val call = transport.newCall(client, request)
         continuation.invokeOnCancellation { call.cancel() }
         call.enqueue(
             object : Callback {

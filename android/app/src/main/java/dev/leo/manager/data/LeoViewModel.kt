@@ -45,6 +45,7 @@ data class Workspace(
     val tasks: List<Task> = emptyList(),
     val skills: List<Skill> = emptyList(),
     val overview: Overview = Overview(),
+    val transportRoute: String = "relay",
 ) {
     val isOwner: Boolean
         get() = installation?.role == InstallationRole.Owner
@@ -98,6 +99,7 @@ constructor(
     private val mutable = MutableStateFlow(Workspace())
     val state = mutable.asStateFlow()
     private var connection: LeoApi? = null
+    private var routeCollection: kotlinx.coroutines.Job? = null
     private var accountConnection: LeoApi? = null
     private var emailChallenge: String? = null
     val api: LeoApi
@@ -138,6 +140,7 @@ constructor(
             connection?.clearSession()
             accountConnection?.clearSession()
             connection = null
+            routeCollection?.cancel()
             schedule(getApplication(), false)
             mutable.update {
                 Workspace(
@@ -233,6 +236,7 @@ constructor(
                 files.clear()
                 next.clearSession()
                 connection = null
+                routeCollection?.cancel()
                 schedule(getApplication(), false)
                 mutable.update {
                     Workspace(busy = true, origin = origin.toString(), session = session)
@@ -373,6 +377,7 @@ constructor(
             schedule(getApplication(), notifications.enabled.first())
 
             connection = null
+            routeCollection?.cancel()
             mutable.update {
                 Workspace(ready = true, busy = it.busy, origin = it.origin, session = session)
             }
@@ -417,6 +422,12 @@ constructor(
                     }
                 }
             connection = next
+            routeCollection?.cancel()
+            routeCollection = viewModelScope.launch {
+                next.transport.route.collect { route ->
+                    if (connection === next) mutable.update { it.copy(transportRoute = route) }
+                }
+            }
             mutable.update {
                 Workspace(
                     ready = true,
@@ -427,7 +438,10 @@ constructor(
                 )
             }
 
-            if (installation.online) refresh()
+            if (installation.online) {
+                refresh()
+                if (connection === next) next.startDirect(getApplication())
+            }
             schedule(getApplication(), notifications.enabled.first())
         } finally {
             mutable.update { it.copy(busy = current.busy) }
@@ -455,7 +469,10 @@ constructor(
             selected == null || selected.role != previous?.role -> openAccount(state.value.session)
             else -> {
                 mutable.update { it.copy(installation = selected) }
-                if (selected.online && !previous.online) refresh()
+                if (selected.online && !previous.online) {
+                    refresh()
+                    if (connection === currentConnection) connection?.startDirect(getApplication())
+                }
                 if (!selected.online) connection?.closeStreams()
             }
         }
@@ -492,6 +509,7 @@ constructor(
                     accountConnection?.clearSession()
                 }
                 connection = null
+                routeCollection?.cancel()
                 mutable.update { Workspace(ready = true, origin = it.origin, busy = it.busy) }
             }
         }
