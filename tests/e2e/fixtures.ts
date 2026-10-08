@@ -190,7 +190,7 @@ export const test = base.extend<object, { workspace: Workspace }>({
       const initialAccountView = page.getByLabel('Email address').or(
         page.getByRole('button', { name: 'Sign out', exact: true, includeHidden: true }),
       )
-      await expect(initialAccountView).toBeAttached()
+      await expect(initialAccountView.first()).toBeAttached()
 
       await ensureSession()
       const [name, value] = headers.cookie!.split('=')

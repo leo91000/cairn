@@ -141,6 +141,9 @@ test('two independent clients follow deltas, recover offline, refresh mid-answer
     await target.goto(workspacePath(workspace.url))
     await authenticateWorkspace(target)
     await expect(target.getByRole('heading', { name: 'Fil', exact: true })).toBeVisible()
+    // Reusing an authenticated page must also settle its account view safely.
+    await authenticateWorkspace(target)
+    await expect(target.getByRole('heading', { name: 'Fil', exact: true })).toBeVisible()
     await target.goto(workspacePath(`${workspace.url}/chats/${chat.id}`))
   }
 
