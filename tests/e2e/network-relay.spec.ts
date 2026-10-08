@@ -42,7 +42,12 @@ test('authenticated browser and Rust client keep using the observed route under 
 
   try {
     let service = official()
-    browser = await chromium.launch({ executablePath: process.env.LEO_NETWORK_CHROMIUM })
+    // Exercise numeric ICE paths deterministically; the separate mDNS-only LAN
+    // case preserves Chromium's default privacy behavior and expects the relay.
+    browser = await chromium.launch({
+      executablePath: process.env.LEO_NETWORK_CHROMIUM,
+      args: process.env.LEO_NETWORK_SCENARIO === 'mdns-only-lan' ? [] : ['--disable-features=WebRtcHideLocalIpsWithMdns'],
+    })
     const page = await browser.newPage()
     const leases: string[] = []
     page.on('response', async (response) => {

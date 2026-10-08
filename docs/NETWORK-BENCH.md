@@ -28,6 +28,7 @@ Each command launches a complete authenticated Chromium session and a Rust clien
 
 ```sh
 python3 tests/network-bench.py same-lan --output test-results/network/same-lan.json
+python3 tests/network-bench.py mdns-only-lan --output test-results/network/mdns-only-lan.json
 python3 tests/network-bench.py nat-client --output test-results/network/nat-client.json
 python3 tests/network-bench.py nat-installation --output test-results/network/nat-installation.json
 python3 tests/network-bench.py nat-both --output test-results/network/nat-both.json
@@ -56,7 +57,8 @@ only the standard library and never serves installation data.
 
 | Scenario | Actual topology / constraint |
 | --- | --- |
-| same-lan | Browser and installation share the same LAN bridge/subnet. |
+| same-lan | Browser and installation share the same LAN bridge/subnet; numeric host candidates. |
+| mdns-only-lan | Same real LAN, Chromium default mDNS host privacy, no translated STUN address; the browser remains on relay and the numeric Rust peer uses direct. |
 | nat-client | Stateful source NAT and unsolicited inbound filtering on the client router. |
 | nat-installation | The same constraint on the installation router. |
 | nat-both | Independent NAT/filtering on both sides. |
@@ -97,9 +99,18 @@ signed grant and negotiates with the real installation DataChannel. It records
 `direct` only after the API response arrives on that channel and a selected UDP
 ICE pair is observed (`candidatePair.local` / `.remote`). Both clients expect
 **direct** for LAN, ordinary NAT, network change, same-server and packet loss;
-UDP blocked, symmetric NAT and symmetric client expect **relay**. Neither uses
+UDP blocked, symmetric NAT and symmetric client expect **relay**. In the
+additional mDNS-only LAN case, the browser expects relay and Rust expects direct. Neither uses
 a fixed route label. `--expect-route` and `--expect-rust-route` override the
 scenario defaults; a mismatch fails the bench.
+
+The numeric qualification browser is launched with Chromium's
+`--disable-features=WebRtcHideLocalIpsWithMdns` option so that host-candidate ICE
+paths can be tested explicitly. The production web does not set this option or
+request media permission. The additional `mdns-only-lan` scenario keeps Chromium's
+default privacy policy; following #117, ignored `.local` candidates and no usable
+numeric alternative must leave application traffic on the authenticated relay.
+Both policies and actual operation routes are recorded in the same bench report.
 
 The network-change scenario measures the real direct-to-relay stream recovery,
 then checks reestablishment of direct and a Rust read. Same-LAN also blocks all

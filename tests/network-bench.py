@@ -15,7 +15,7 @@ import time
 import uuid
 from pathlib import Path
 
-SCENARIOS = ["same-lan", "nat-client", "nat-installation", "nat-both",
+SCENARIOS = ["same-lan", "mdns-only-lan", "nat-client", "nat-installation", "nat-both",
              "udp-blocked", "symmetric-nat", "symmetric-client", "same-server", "network-change", "packet-loss"]
 
 
@@ -211,7 +211,7 @@ class Network:
                 self.exec(router, "ip", "rule", "add", "iif", "lan", "lookup", "102")
             self.participants[role] = {"namespace": participant, "router": router,
                                        "link": endpoint, "address": address}
-        if scenario == "same-lan":
+        if scenario in {"same-lan", "mdns-only-lan"}:
             # Move the installation's LAN end onto the client's LAN bridge.
             installation = self.participants["installation"]
             client = self.participants["client"]
@@ -275,7 +275,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.expect_route is None:
-        args.expect_route = "relay" if args.scenario in {"udp-blocked", "symmetric-nat", "symmetric-client"} else "direct"
+        args.expect_route = "relay" if args.scenario in {"mdns-only-lan", "udp-blocked", "symmetric-nat", "symmetric-client"} else "direct"
     if args.expect_rust_route is None:
         args.expect_rust_route = "relay" if args.scenario in {"udp-blocked", "symmetric-nat", "symmetric-client"} else "direct"
     def interrupted(_signal, _frame):
@@ -319,7 +319,7 @@ def main():
             stun = network.spawn(stun_namespace, os.sys.executable, str(Path(__file__).resolve()),
                                  "stun-server", listen_address, str(ready))
             wait_ready(ready, stun, "STUN listener before host masquerading")
-            report = {"scenario": args.scenario, "probe": network.probe(binary, "client"),
+            report = {"scenario": args.scenario, "browserHostPolicy": "mdns" if args.scenario == "mdns-only-lan" else "numeric", "probe": network.probe(binary, "client"),
                       "installationProbe": network.probe(binary, "installation")}
             expected_received = 0 if args.scenario == "udp-blocked" else 8 if args.scenario == "packet-loss" else 10
             for role, probe in [("client", report["probe"]), ("installation", report["installationProbe"])]:
@@ -334,12 +334,12 @@ def main():
                         str(Path(__file__).resolve()), "stun-probe", network.stun_address))
                     for role in ["client", "installation"]
                 }
-            if args.scenario in {"same-lan", "udp-blocked"}:
+            if args.scenario in {"same-lan", "mdns-only-lan", "udp-blocked"}:
                 installation = network.participants["installation"]
                 for port in [49011, 49012]:
                     network.listen(binary, installation["namespace"], installation["address"], port)
                 report["peerProbe"] = network.probe(binary, "client", tuple(f"{installation['address']}:{port}" for port in [49011, 49012]))
-                peer_received = 10 if args.scenario == "same-lan" else 0
+                peer_received = 10 if args.scenario != "udp-blocked" else 0
                 if report["peerProbe"]["received"] != peer_received:
                     raise RuntimeError("Peer-to-peer diagnostic packets did not match the scenario")
             args.output.parent.mkdir(parents=True, exist_ok=True)
