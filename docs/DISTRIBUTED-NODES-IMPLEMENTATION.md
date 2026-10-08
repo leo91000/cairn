@@ -12,7 +12,8 @@ has not been merged, deployed or released.
 - Single-use registration, node identity/revocation, detected capabilities and
   tags, per-agent grants including Main, and web/Android management.
 - Outbound controller transport, private workspace staging, project/artifact
-  routing, chat/inbox streaming and scoped native-auth relays. Provider account
+  routing (artifact responses preserve the channel’s snapshot `length` in
+  `X-Leo-Artifact-Size` independently of HTTP framing; no node upgrade is needed), chat/inbox streaming and scoped native-auth relays. Provider account
   refresh and 1Password access stay under master control.
 - Atomic slot admission, shared CPU/RAM/disk budgets including retained stale disks,
   resource pressure, preferred/strict placement, bounded capacity waits and
