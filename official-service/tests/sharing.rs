@@ -1978,6 +1978,8 @@ async fn a_task_preparation_error_advances_only_its_occurrence_and_is_audited_on
             .await
             .unwrap();
         task["nextRun"] = 1.into();
+        // Replay the persisted wait status from an earlier authority outage.
+        task["scheduleWaitReason"] = "Task-author check unavailable.".into();
         relay
             .installation
             .store
@@ -2018,6 +2020,12 @@ async fn a_task_preparation_error_advances_only_its_occurrence_and_is_audited_on
             .iter()
             .all(|task| task["nextRun"].as_i64().unwrap() > 1)
     );
+    assert!(
+        tasks
+            .iter()
+            .all(|task| task["scheduleWaitReason"].is_null())
+    );
+
     let audit: Vec<Value> = relay
         .get("/audit")
         .send()

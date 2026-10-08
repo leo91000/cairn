@@ -482,7 +482,11 @@ impl Service {
                     let dedupe = Some(format!("{}:{}", text(&task, "id"), task["nextRun"]));
                     self.queue_run(run, dedupe).await
                 }
-                Err(error) => Err(error),
+                Err(error) => {
+                    // The authority recovered; this task's preparation is now the failure.
+                    self.schedule_wait(&task, None).await?;
+                    Err(error)
+                }
             };
 
             if let Err(error) = admission
