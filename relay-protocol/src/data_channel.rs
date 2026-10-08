@@ -223,6 +223,17 @@ impl FrameDecoder {
             {
                 return Err("Too many incomplete transfers".into());
             }
+
+            // A complete member frame already fits in the bounded SCTP packet.
+            // Decode it without an assembly or a reservation that another
+            // member's trickling upload could keep indefinitely. Fragmented
+            // frames still obey every installation/account/peer allowance.
+            if self.budget.member && payload.len() == total {
+                return serde_json::from_slice(payload)
+                    .map(Some)
+                    .map_err(|_| DecodeError::Invalid("Invalid application frame"));
+            }
+
             let reserved: usize = self.pending.values().map(|frame| frame.total).sum();
             let reservation = if reserved + total > MAX_FRAME {
                 Err(DecodeError::Busy)

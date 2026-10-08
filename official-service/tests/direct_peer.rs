@@ -1017,6 +1017,95 @@ async fn partial_transfer(channel: &dyn DataChannel, id: u32, total: usize) {
 }
 
 #[tokio::test]
+async fn a_member_trickling_every_twenty_nine_seconds_cannot_starve_small_requests() {
+    let router = axum::Router::new().route(
+        "/api/fixture/echo",
+        axum::routing::post(|bytes: axum::body::Bytes| async { bytes }),
+    );
+    let mut relay = RelayedInstallation::new(router).await;
+    production_connector(&mut relay).await;
+    let cookies = common::stream_accounts_with_members(&relay, 2).await;
+    let member_cookie = &cookies[1];
+    let member_session = relay
+        .app
+        .client
+        .get(format!("{}/api/account/session", relay.app.url))
+        .header("cookie", member_cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let (member, member_channel, _) =
+        client_with_fingerprint(&relay, member_cookie, &member_session, false).await;
+    let waiting_cookie = &cookies[2];
+    let waiting_session = relay
+        .app
+        .client
+        .get(format!("{}/api/account/session", relay.app.url))
+        .header("cookie", waiting_cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let (waiting, waiting_channel, _) =
+        client_with_fingerprint(&relay, waiting_cookie, &waiting_session, false).await;
+    let (owner, owner_channel, _) = client(&relay).await;
+    partial_transfer(member_channel.as_ref(), 1, leo_relay_protocol::MAX_FRAME).await;
+    // A successful request on the holder is a barrier: its reservation is live.
+    send_frame(
+        member_channel.as_ref(),
+        2,
+        &request("barrier", "/api/chats"),
+    )
+    .await;
+    assert!(
+        matches!(response(member_channel.as_ref()).await, Frame::Response(reply) if reply.id == "barrier" && reply.status == 200)
+    );
+
+    for offset in 1_u32..=3 {
+        if offset > 1 {
+            tokio::time::sleep(Duration::from_secs(29)).await;
+        }
+        let mut packet = vec![1];
+        packet.extend(1_u32.to_be_bytes());
+        packet.extend((leo_relay_protocol::MAX_FRAME as u32).to_be_bytes());
+        packet.extend(offset.to_be_bytes());
+        packet.push(b' ');
+        member_channel
+            .send(bytes::BytesMut::from(packet.as_slice()))
+            .await
+            .unwrap();
+
+        for channel in [&waiting_channel, &owner_channel, &member_channel] {
+            send_frame(
+                channel.as_ref(),
+                offset + 2,
+                &request("small-request", "/api/chats"),
+            )
+            .await;
+            let reply = tokio::time::timeout(Duration::from_secs(2), response(channel.as_ref()))
+                .await
+                .expect("a trickling member must never delay a small request beyond two seconds");
+            assert!(
+                matches!(reply, Frame::Response(reply) if reply.id == "small-request" && reply.status == 200)
+            );
+        }
+        assert_eq!(
+            relay.get("/chats").send().await.unwrap().status(),
+            StatusCode::OK
+        );
+    }
+    member.close().await.unwrap();
+    waiting.close().await.unwrap();
+    owner.close().await.unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
 async fn a_member_holding_reassembly_capacity_does_not_disconnect_the_owner() {
     let router = axum::Router::new().route(
         "/api/fixture/echo",
@@ -1642,10 +1731,13 @@ async fn observed_certificate_is_compared_with_the_grant_without_an_sdp_check() 
 
 struct PanicPeerStart(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PanicPeerStart {
-    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-        if event.metadata().target() == "leo_agent_manager::direct::peer"
-            && *event.metadata().level() == tracing::Level::DEBUG
+impl<S> tracing_subscriber::Layer<S> for PanicPeerStart
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_enter(&self, id: &tracing::span::Id, context: tracing_subscriber::layer::Context<'_, S>) {
+        let span = context.span(id).unwrap();
+        if span.metadata().name() == "direct_peer_task"
             && self.0.swap(false, std::sync::atomic::Ordering::SeqCst)
         {
             panic!("fixture peer task failure");
@@ -1668,7 +1760,7 @@ async fn a_panicking_peer_task_releases_its_authorization_and_preserves_other_pe
         stop.clone(),
     ));
     let (survivor, survivor_channel, _) = client(&relay).await;
-    // Inject a fault through the scoped logging adapter in the actual Tokio peer
+    // Inject a fault on entering the stable peer-task span in the actual Tokio peer
     // job. No production fault flag, alternate peer or SDP-induced SDK panic.
     let fingerprint = format!("sha-256 {}", vec!["AB"; 32].join(":"));
     let installation = relay.session["installations"][0]["id"].as_str().unwrap();
@@ -1698,7 +1790,7 @@ async fn a_panicking_peer_task_releases_its_authorization_and_preserves_other_pe
         .unwrap();
     // Parallel tests may first register this shared callsite with no default
     // subscriber. Rebuild its interest on this thread after the survivor has
-    // reached serve_peer, so the injected fault cannot silently be skipped.
+    // entered its peer-task span, so the injected fault cannot silently be skipped.
     tracing::callsite::rebuild_interest_cache();
     panic_next.store(true, std::sync::atomic::Ordering::SeqCst);
     signal_as(&relay, &relay.cookie, &relay.session, &grant, &DirectSignal::Offer {

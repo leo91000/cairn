@@ -131,6 +131,36 @@ test('signing out closes live subscriptions before the session is revoked', asyn
   expect(unauthorized).toEqual([])
 })
 
+test('signIn settles an authenticated root redirect before reloading', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  await page.goto(workspace.url)
+  await authenticateWorkspace(page)
+  await expect(page.getByRole('heading', { name: 'Fil', exact: true })).toBeVisible()
+
+  // Pause the destination document while the authenticated root renders its
+  // account view. The fixture must wait for that navigation before reloading.
+  let releaseRedirect: () => void = () => {}
+  const redirectGate = new Promise<void>(resolve => releaseRedirect = resolve)
+  let redirected: () => void = () => {}
+  const redirectRequested = new Promise<void>(resolve => redirected = resolve)
+  await page.route(`**/installations/${workspace.installationId}/`, async (route) => {
+    if (route.request().isNavigationRequest()) {
+      redirected()
+      await redirectGate
+    }
+
+    await route.continue()
+  })
+  await page.goto(workspace.url, { waitUntil: 'commit' })
+  await redirectRequested
+  const authenticated = authenticateWorkspace(page)
+  // Release only after the fixture has started with the root redirect pending.
+  releaseRedirect()
+  await authenticated
+  await expect(page).toHaveURL(new RegExp(`/installations/${workspace.installationId}/$`))
+  await expect(page.getByRole('heading', { name: 'Fil', exact: true })).toBeVisible()
+})
+
 test('two independent clients follow deltas, recover offline, refresh mid-answer and survive a server restart', async ({ page, browser, workspace }) => {
   test.setTimeout(90000)
   initializeRepository(workspace.projectPath)
