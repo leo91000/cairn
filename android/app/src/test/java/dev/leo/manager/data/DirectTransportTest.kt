@@ -20,6 +20,190 @@ import org.junit.Test
 
 class DirectTransportTest {
     @Test
+    fun `bounded write pressure recovers a read on relay without destroying the peer`() =
+        runBlocking {
+            MockWebServer().use { server ->
+                server.enqueue(MockResponse().setBody("[]"))
+                server.start()
+                val api = LeoApi(server.url("/"), MemoryVault(), installationId = "test")
+                var disposed = false
+                var pressured = true
+                lateinit var channel: DirectChannel
+                channel =
+                    DirectChannel(
+                        { packet, _, _ ->
+                            val frame =
+                                wireJson
+                                    .parseToJsonElement(String(packet.copyOfRange(13, packet.size)))
+                                    .jsonObject
+                            if (frame["type"]!!.jsonPrimitive.content == "request") {
+                                if (pressured) throw DirectRequestTimeout()
+                                channel.receive(
+                                    singleFramePacket(
+                                        buildJsonObject {
+                                            put("type", "response")
+                                            put("id", frame["id"]!!)
+                                            put("status", 200)
+                                            put("headers", buildJsonArray {})
+                                            put("body", "e30=")
+                                        }
+                                            .toString()
+                                            .toByteArray()
+                                    )
+                                )
+                            }
+                        },
+                        { disposed = true },
+                    )
+                api.transport.attach(channel)
+                try {
+                    assertEquals("[]", api.request("GET", "/chats"))
+                    assertFalse(disposed)
+                    pressured = false
+                    assertEquals("{}", api.request("GET", "/chats"))
+                    assertEquals("direct", api.transport.route.value)
+                    assertEquals(1, server.requestCount)
+                } finally {
+                    api.closeStreams()
+                }
+            }
+        }
+
+    @Test
+    fun `slow direct read recovers on relay without closing other requests on the peer`() =
+        runBlocking {
+            MockWebServer().use { server ->
+                server.enqueue(MockResponse().setBody("[]"))
+                server.start()
+                val api = LeoApi(server.url("/"), MemoryVault(), installationId = "test")
+                var disposed = false
+                var reads = 0
+                lateinit var channel: DirectChannel
+                channel =
+                    DirectChannel(
+                        { packet, _, _ ->
+                            val frame =
+                                wireJson
+                                    .parseToJsonElement(String(packet.copyOfRange(13, packet.size)))
+                                    .jsonObject
+                            if (frame["type"]!!.jsonPrimitive.content == "request" && ++reads > 1) {
+                                channel.receive(
+                                    singleFramePacket(
+                                        buildJsonObject {
+                                            put("type", "response")
+                                            put("id", frame["id"]!!)
+                                            put("status", 200)
+                                            put("headers", buildJsonArray {})
+                                            put("body", "e30=")
+                                        }
+                                            .toString()
+                                            .toByteArray()
+                                    )
+                                )
+                            }
+                        },
+                        { disposed = true },
+                    )
+                api.transport.attach(channel)
+                try {
+                    assertEquals("[]", withTimeout(40000) { api.request("GET", "/chats") })
+                    assertFalse(disposed)
+                    assertEquals(1, server.requestCount)
+                    assertEquals("{}", api.request("GET", "/chats"))
+                    assertEquals("direct", api.transport.route.value)
+                    assertEquals(1, server.requestCount)
+                } finally {
+                    api.closeStreams()
+                }
+            }
+        }
+
+    @Test
+    fun `local saturation sends a mutation on relay and preserves the healthy peer`() =
+        runBlocking {
+            MockWebServer().use { server ->
+                server.enqueue(MockResponse().setBody("{}"))
+                server.start()
+                val api = LeoApi(server.url("/"), MemoryVault(), installationId = "test")
+                val accepted = java.util.concurrent.CountDownLatch(32)
+                val canceled = java.util.concurrent.atomic.AtomicBoolean()
+                val respond = java.util.concurrent.atomic.AtomicBoolean()
+                var disposed = false
+                lateinit var channel: DirectChannel
+                channel =
+                    DirectChannel(
+                        { packet, _, _ ->
+                            val frame =
+                                wireJson
+                                    .parseToJsonElement(String(packet.copyOfRange(13, packet.size)))
+                                    .jsonObject
+                            if (frame["type"]!!.jsonPrimitive.content == "request") {
+                                if (respond.get()) {
+                                    channel.receive(
+                                        singleFramePacket(
+                                            buildJsonObject {
+                                                put("type", "response")
+                                                put("id", frame["id"]!!)
+                                                put("status", 200)
+                                                put("headers", buildJsonArray {})
+                                                put("body", "e30=")
+                                            }
+                                                .toString()
+                                                .toByteArray()
+                                        )
+                                    )
+                                } else accepted.countDown()
+                            }
+                        },
+                        { disposed = true },
+                    )
+                api.transport.attach(channel)
+                val prefix = "/api/installations/test/api/"
+                val request = Request.Builder().url(server.url(prefix + "chats")).get().build()
+                val workers =
+                    List(32) {
+                        kotlin.concurrent.thread(isDaemon = true) {
+                            runCatching { channel.request(request, prefix, canceled::get).close() }
+                        }
+                    }
+                try {
+                    assertTrue(accepted.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                    assertEquals("{}", api.request("POST", "/chats", body("title" to "New chat")))
+                    assertEquals(1, server.requestCount)
+                    assertFalse(disposed)
+                    canceled.set(true)
+                    workers.forEach { it.join(5000) }
+                    assertTrue(workers.none { it.isAlive })
+                    respond.set(true)
+                    assertEquals("{}", api.request("GET", "/chats"))
+                    assertEquals("direct", api.transport.route.value)
+                } finally {
+                    canceled.set(true)
+                    workers.forEach { it.join(5000) }
+                    api.closeStreams()
+                }
+            }
+        }
+
+    @Test
+    fun `mutation on an already closed channel uses relay without attempting direct`() =
+        runBlocking {
+            MockWebServer().use { server ->
+                server.enqueue(MockResponse().setBody("{}"))
+                server.start()
+                val api = LeoApi(server.url("/"), MemoryVault(), installationId = "test")
+                val channel =
+                    DirectChannel({ _, _, _ -> fail("A closed channel must not send") }, {})
+                channel.close()
+                api.transport.attach(channel)
+
+                assertEquals("{}", api.request("POST", "/chats", body("title" to "New chat")))
+                assertEquals(1, server.requestCount)
+                assertEquals("relay", api.transport.route.value)
+            }
+        }
+
+    @Test
     fun `invalid finite response closes direct and safe read recovers on relay`() = runBlocking {
         for (invalid in listOf("body", "status", "headers")) {
             MockWebServer().use { server ->
@@ -30,7 +214,7 @@ class DirectTransportTest {
                 lateinit var channel: DirectChannel
                 channel =
                     DirectChannel(
-                        { packet ->
+                        { packet, _, _ ->
                             val request =
                                 wireJson
                                     .parseToJsonElement(String(packet.copyOfRange(13, packet.size)))
@@ -83,7 +267,7 @@ class DirectTransportTest {
                     lateinit var channel: DirectChannel
                     channel =
                         DirectChannel(
-                            {
+                            { _, _, _ ->
                                 // Independent protocol literals: frame cap 10,732,204; packet
                                 // 16,384;
                                 // no more than 32 simultaneous incomplete transfers.
@@ -143,7 +327,7 @@ class DirectTransportTest {
                 lateinit var channel: DirectChannel
                 channel =
                     DirectChannel(
-                        { packet ->
+                        { packet, _, _ ->
                             packets.add(packet)
                             if (!respond && packet.size == 16384) canceled = true
                             if (respond) {
@@ -213,7 +397,7 @@ class DirectTransportTest {
                     Triple("DELETE", "/chats/chat", null),
                 )) {
                 api.transport.attach(
-                    DirectChannel({ throw IOException("acknowledgement lost") }, {})
+                    DirectChannel({ _, _, _ -> throw IOException("acknowledgement lost") }, {})
                 )
                 assertTrue(
                     runCatching { api.request(method, path, payload) }.exceptionOrNull()
@@ -232,7 +416,7 @@ class DirectTransportTest {
             server.start()
             val api = LeoApi(server.url("/"), MemoryVault(), installationId = "test")
             var direct = false
-            api.transport.attach(DirectChannel({ direct = true }, {}))
+            api.transport.attach(DirectChannel({ _, _, _ -> direct = true }, {}))
             assertEquals("image", String(api.agentPortrait("agent", "revision")))
             assertFalse(direct)
             assertEquals(
@@ -254,7 +438,7 @@ class DirectTransportTest {
             lateinit var channel: DirectChannel
             channel =
                 DirectChannel(
-                    { packet ->
+                    { packet, _, _ ->
                         val frame =
                             wireJson
                                 .parseToJsonElement(String(packet.copyOfRange(13, packet.size)))
@@ -318,7 +502,7 @@ class DirectTransportTest {
                     }
                     channel =
                         DirectChannel(
-                            { packet ->
+                            { packet, _, _ ->
                                 val frame =
                                     wireJson
                                         .parseToJsonElement(
@@ -420,7 +604,7 @@ class DirectTransportTest {
             lateinit var channel: DirectChannel
             channel =
                 DirectChannel(
-                    { packet ->
+                    { packet, _, _ ->
                         val request =
                             wireJson
                                 .parseToJsonElement(String(packet.copyOfRange(13, packet.size)))
@@ -472,7 +656,7 @@ class DirectTransportTest {
                 var attempted = false
                 api.transport.attach(
                     DirectChannel(
-                        {
+                        { _, _, _ ->
                             attempted = true
                             throw IOException("acknowledgement lost")
                         },
@@ -498,7 +682,7 @@ class DirectTransportTest {
             lateinit var channel: DirectChannel
             channel =
                 DirectChannel(
-                    { packet ->
+                    { packet, _, _ ->
                         val request =
                             wireJson
                                 .parseToJsonElement(String(packet.copyOfRange(13, packet.size)))
@@ -544,7 +728,7 @@ class DirectTransportTest {
             lateinit var channel: DirectChannel
             channel =
                 DirectChannel(
-                    { packet ->
+                    { packet, _, _ ->
                         val request =
                             wireJson
                                 .parseToJsonElement(String(packet.copyOfRange(13, packet.size)))
@@ -597,7 +781,7 @@ class DirectTransportTest {
             var attempted = false
             val channel =
                 DirectChannel(
-                    {
+                    { _, _, _ ->
                         attempted = true
                         throw IOException("UDP lost")
                     },

@@ -68,14 +68,19 @@ class DirectTransport(private val installationId: String?, private val switched:
                 val response = channel.request(request, prefix, chain.call()::isCanceled)
                 if (current.get() === channel) observed.value = "direct"
                 return response
-            } catch (error: DirectLost) {
-                channel.close()
+            } catch (error: IOException) {
+                if (error is DirectLost) channel.close()
+                val transportFailure =
+                    error is DirectLost || error is DirectNotSent || error is DirectRequestTimeout
                 if (
-                    chain.call().isCanceled() ||
-                        (request.method !in setOf("GET", "HEAD") && !clientMessage)
+                    !transportFailure ||
+                        chain.call().isCanceled() ||
+                        (error !is DirectNotSent &&
+                            request.method !in setOf("GET", "HEAD") &&
+                            !clientMessage)
                 )
                     throw error
-                replayedMessage = clientMessage
+                replayedMessage = clientMessage && error !is DirectNotSent
             }
         }
         val response = chain.proceed(request)
@@ -132,9 +137,13 @@ class DirectTransport(private val installationId: String?, private val switched:
 
 internal class DirectLost(message: String, cause: Throwable? = null) : IOException(message, cause)
 
+internal class DirectNotSent(message: String) : IOException(message)
+
+internal class DirectRequestTimeout : IOException("Délai de réponse directe dépassé")
+
 /** Adapter for the existing v4 binary envelope; native ownership stays with its caller. */
 class DirectChannel(
-    private val send: (ByteArray) -> Unit,
+    private val send: (ByteArray, () -> Boolean, Long) -> Unit,
     private val dispose: () -> Unit,
     private val valid: () -> Boolean = { true },
 ) {
@@ -280,7 +289,7 @@ class DirectChannel(
 
     fun request(request: Request, prefix: String, canceled: () -> Boolean): Response {
         if (canceled()) throw IOException("Requête annulée")
-        if (closed.get()) throw DirectLost("Connexion directe interrompue")
+        if (closed.get()) throw DirectNotSent("Connexion directe interrompue")
         val id = java.util.UUID.randomUUID().toString()
         val payload = Buffer()
         val bounded =
@@ -344,14 +353,15 @@ class DirectChannel(
             .toByteArray(Charsets.UTF_8)
         val exchange = Exchange()
         synchronized(pending) {
-            if (closed.get()) throw DirectLost("Connexion directe interrompue")
-            if (pending.size >= 32) throw IOException("Trop de requêtes directes simultanées")
+            if (closed.get()) throw DirectNotSent("Connexion directe interrompue")
+            if (pending.size >= 32) throw DirectNotSent("Trop de requêtes directes simultanées")
             pending[id] = exchange
         }
         var streaming = false
         try {
-            emit(frame, canceled)
-            val response = await(exchange, canceled, 30)
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
+            emit(frame, canceled, deadline)
+            val response = await(exchange, canceled, deadline)
             val bytes = decodeBody(response, MAX_BODY)
             val builder =
                 Response.Builder()
@@ -386,7 +396,12 @@ class DirectChannel(
                                     control("stream_credit", id)
                                     needsCredit = false
                                 }
-                                val next = await(exchange, canceled, 45)
+                                val next =
+                                    await(
+                                        exchange,
+                                        canceled,
+                                        System.nanoTime() + TimeUnit.SECONDS.toNanos(45),
+                                    )
                                 when (next["type"]!!.jsonPrimitive.content) {
                                     "stream_chunk" -> {
                                         chunk = decodeBody(next, 65536)
@@ -463,15 +478,13 @@ class DirectChannel(
         }
     }
 
-    private fun await(exchange: Exchange, canceled: () -> Boolean, seconds: Long): JsonObject {
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(seconds)
+    private fun await(exchange: Exchange, canceled: () -> Boolean, deadline: Long): JsonObject {
         while (true) {
             if (canceled()) throw IOException("Requête annulée")
             if (!valid()) close()
             exchange.failure?.let { throw it }
             if (System.nanoTime() >= deadline) {
-                close()
-                throw DirectLost("Connexion directe expirée")
+                throw DirectRequestTimeout()
             }
             exchange.frames.poll(50, TimeUnit.MILLISECONDS)?.let {
                 return it
@@ -486,11 +499,16 @@ class DirectChannel(
                 put("id", id)
             }
                 .toString()
-                .toByteArray()
+                .toByteArray(),
+            deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(100),
         )
     }
 
-    private fun emit(frame: ByteArray, canceled: () -> Boolean = { false }) {
+    private fun emit(
+        frame: ByteArray,
+        canceled: () -> Boolean = { false },
+        deadline: Long,
+    ) {
         require(frame.size <= MAX_FRAME)
         val transfer = transfers.updateAndGet { if (it == -1) 1 else it + 1 }
         var offset = 0
@@ -498,7 +516,10 @@ class DirectChannel(
             while (offset < frame.size) {
                 if (canceled()) throw IOException("Requête annulée")
                 if (!valid()) close()
-                if (closed.get()) throw DirectLost("Connexion directe interrompue")
+                if (closed.get()) {
+                    if (offset == 0) throw DirectNotSent("Connexion directe interrompue")
+                    throw DirectLost("Connexion directe interrompue")
+                }
                 val length = minOf(MAX_PACKET - HEADER, frame.size - offset)
                 val packet =
                     ByteBuffer.allocate(HEADER + length)
@@ -509,8 +530,13 @@ class DirectChannel(
                         .put(frame, offset, length)
                         .array()
                 try {
-                    send(packet)
+                    send(packet, canceled, deadline)
                 } catch (error: IOException) {
+                    if (canceled()) throw error
+                    if (offset == 0 && error is DirectRequestTimeout)
+                        throw DirectNotSent(error.message!!)
+                    if (error is DirectRequestTimeout || (offset == 0 && error is DirectNotSent))
+                        throw error
                     throw DirectLost("Connexion directe interrompue", error)
                 }
                 offset += length
@@ -524,7 +550,9 @@ class DirectChannel(
                             .putInt(transfer)
                             .putInt(0)
                             .putInt(0)
-                            .array()
+                            .array(),
+                        { false },
+                        System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(100),
                     )
                 }
             if (error is DirectLost) close()

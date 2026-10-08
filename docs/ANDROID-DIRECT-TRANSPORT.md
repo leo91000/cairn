@@ -133,3 +133,45 @@ not installed sizes or an ABI-specific estimate. Source artifacts are the
 and [native Android CI run](https://github.com/leo91000/leo-agent-manager/actions/runs/37715411140).
 The native CI run also built the minified release successfully; no release-size
 comparison is claimed. No ABI filter or split changes are included in #104.
+
+## Foreground ownership and recovery
+
+The installation transport starts on the relay. `ProcessLifecycleOwner` owns
+optional ICE negotiation, signaling and renewal only while the application is
+started. `ON_STOP` closes the peer and signaling stream and unregisters the
+default-network callback. Returning to the foreground creates a fresh peer;
+no change of transport interrupts an installation agent run.
+
+Failed attempts wait 15, 30, 60 seconds and so on, capped at five minutes. A
+default-network change interrupts that wait and starts fresh authorized ICE.
+`available:false` suspends attempts until the network or owning session changes.
+401/403 suspends them until a new session owner is created. A transient ICE
+`DISCONNECTED` gets five seconds to recover; failed ICE, explicit revocation,
+lease expiry and default-network changes still close the peer immediately.
+
+Renewal starts 30 seconds before expiry, with at least ten seconds between
+requests. If renewal cannot advance the deadline, it stops renewing and retains
+the valid peer until expiry; it never loops against a session-capped deadline.
+
+Native writes wait for buffer capacity, with at most 64 KiB queued locally. The
+request's 30-second deadline includes that wait. Cancellation and a request
+timeout do not destroy a healthy peer. JNI writes and disposal are coordinated,
+and the native reference is cleared before disposal. Incoming bounded packets
+are decoded in the native callback; a burst does not overflow a second packet
+queue. The existing protocol still limits assemblies, credited streams and
+body sizes.
+
+A locally full request table or a channel closed before any packet is accepted
+uses the relay even for a mutation. Once a request may have been delivered, only
+reads and messages with client identifiers may recover automatically. The
+ordinary OkHttp call permits 65 seconds overall, leaving time for a relay
+request after the 30-second direct attempt. Binary transfers retain their
+existing relay clients and deadlines.
+
+The existing Android network bench also checks foreground/background ownership
+with concurrent reads, unavailable/401/403 control responses through the HTTP
+seam, a 1 MB fragmented request, and capped renewal scheduling. The main peer,
+normal renewal and in-flight revocation still use the real installation and
+control plane. The capped-renewal check changes only this client's scheduling
+input after a real acknowledged renewal; it does not replace installation
+authorization or the signed grant verifier.

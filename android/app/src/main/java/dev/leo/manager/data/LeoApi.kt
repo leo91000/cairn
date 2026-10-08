@@ -117,7 +117,8 @@ class LeoApi(
             .retryOnConnectionFailure(false)
             .followRedirects(false)
             .followSslRedirects(false)
-            .callTimeout(java.time.Duration.ofSeconds(30))
+            // Leave a complete relay request deadline after the optional direct attempt.
+            .callTimeout(java.time.Duration.ofSeconds(65))
             .build()
     internal val streaming =
         http

@@ -1,9 +1,13 @@
 package dev.leo.manager.data
 
+import android.app.Activity
 import android.app.Application
+import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
+import androidx.compose.runtime.*
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -12,12 +16,17 @@ import dev.leo.manager.ui.LeoApp
 import dev.leo.manager.ui.LeoTheme
 import java.io.File
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.onEach
 import kotlinx.serialization.json.*
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -48,6 +57,7 @@ class DirectTransportDeviceTest {
             }
         // Observe control acknowledgement without retaining SDP, IDs, headers or credentials.
         val control = ConcurrentLinkedQueue<String>()
+        val initialExpiry = AtomicLong()
         val client =
             OkHttpClient.Builder()
                 .addNetworkInterceptor { chain ->
@@ -55,7 +65,52 @@ class DirectTransportDeviceTest {
                     val path = chain.request().url.encodedPath
                     if (path.contains("/direct/"))
                         control.add(path.substringAfterLast('/') + ":" + response.code)
-                    response
+                    if (
+                        scenario == "same-lan" &&
+                            path.endsWith("/authorize") &&
+                            response.isSuccessful
+                    ) {
+                        val grant =
+                            wireJson
+                                .parseToJsonElement(response.peekBody(65536).string())
+                                .jsonObject
+                        initialExpiry.set(
+                            grant["grant"]!!
+                                .jsonObject["claims"]!!
+                                .jsonObject["expires_at"]!!
+                                .jsonPrimitive
+                                .long
+                        )
+                    }
+                    if (
+                        scenario == "same-lan" && path.endsWith("/renew") && response.isSuccessful
+                    ) {
+                        // Model a session-capped renewal through the HTTP seam. The actual
+                        // installation
+                        // still validates the real signed renewal; only this client's scheduling
+                        // input is capped.
+                        val grant = wireJson.parseToJsonElement(response.body.string()).jsonObject
+                        val signed = grant["grant"]!!.jsonObject
+                        val claims = signed["claims"]!!.jsonObject
+                        val capped =
+                            JsonObject(
+                                grant +
+                                    ("grant" to
+                                        JsonObject(
+                                            signed +
+                                                ("claims" to
+                                                    JsonObject(
+                                                        claims +
+                                                            ("expires_at" to
+                                                                JsonPrimitive(initialExpiry.get()))
+                                                    ))
+                                        ))
+                            )
+                        response
+                            .newBuilder()
+                            .body(capped.toString().toResponseBody(response.body.contentType()))
+                            .build()
+                    } else response
                 }
                 .build()
         val api =
@@ -67,7 +122,16 @@ class DirectTransportDeviceTest {
         var revoked = false
         var networkChanges = 0
         var primaryRoute = "relay"
+        var backgroundStopped = false
+        var suspendedControl = false
+        var cappedRenewal = false
         val started = System.nanoTime()
+        lateinit var activity: Activity
+        var selectedVm by mutableStateOf<LeoViewModel?>(null)
+        compose.setContent {
+            activity = LocalContext.current as Activity
+            selectedVm?.let { vm -> LeoTheme { LeoApp(vm = vm) } }
+        }
 
         suspend fun read() {
             assertEquals("[]", api.request("GET", "/chats"))
@@ -148,6 +212,94 @@ class DirectTransportDeviceTest {
                 }
 
                 if (scenario == "same-lan") {
+                    val authorizations = control.count { it == "authorize:200" }
+                    val inFlight =
+                        List(8) {
+                            async(Dispatchers.IO) {
+                                repeat(8) { assertEquals("[]", api.request("GET", "/chats")) }
+                            }
+                        }
+                    instrumentation.runOnMainSync { assertTrue(activity.moveTaskToBack(true)) }
+                    withTimeout(5000) {
+                        while (api.transport.route.value != "relay") delay(100)
+                    }
+                    delay(500)
+                    val stoppedControlCount = control.size
+                    delay(2000)
+                    assertEquals(
+                        "No signaling while the app is stopped",
+                        stoppedControlCount,
+                        control.size,
+                    )
+                    inFlight.awaitAll()
+                    backgroundStopped = true
+                    instrumentation.runOnMainSync {
+                        activity.startActivity(
+                            Intent(activity, activity.javaClass)
+                                .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                        )
+                    }
+                    awaitDirect()
+                    assertTrue(control.count { it == "authorize:200" } > authorizations)
+
+                    for (status in listOf(200, 401, 403)) {
+                        val attempts = AtomicInteger()
+                        val unavailableClient =
+                            client
+                                .newBuilder()
+                                .addInterceptor { chain ->
+                                    if (
+                                        chain
+                                            .request()
+                                            .url
+                                            .encodedPath
+                                            .endsWith("/direct/authorize")
+                                    ) {
+                                        attempts.incrementAndGet()
+                                        Response.Builder()
+                                            .request(chain.request())
+                                            .protocol(Protocol.HTTP_1_1)
+                                            .code(status)
+                                            .message("Control fixture")
+                                            .body("{\"available\":false}".toResponseBody())
+                                            .build()
+                                    } else chain.proceed(chain.request())
+                                }
+                                .build()
+                        val probe = LeoApi(origin, vault, unavailableClient, api.installationId)
+                        probe.csrf = api.csrf
+                        try {
+                            probe.startDirect(context)
+                            withTimeout(10000) { while (attempts.get() == 0) delay(100) }
+                            delay(18000)
+                            assertEquals(
+                                "Control rejection must suspend reconnects: $status",
+                                1,
+                                attempts.get(),
+                            )
+                            assertEquals("[]", probe.request("GET", "/chats"))
+                            assertEquals("relay", probe.transport.route.value)
+                        } finally {
+                            probe.closeStreams()
+                        }
+                    }
+                    suspendedControl = true
+                    val largeRequest = runCatching {
+                        api.request(
+                            "POST",
+                            "/chats/missing/messages",
+                            body(
+                                "id" to java.util.UUID.randomUUID().toString(),
+                                "text" to "x".repeat(1_000_000),
+                            ),
+                        )
+                    }
+                        .exceptionOrNull()
+                    assertTrue(largeRequest is ApiException && largeRequest.status == 404)
+                    assertEquals("direct", api.transport.route.value)
+                    read()
+                    assertEquals("direct", api.transport.route.value)
+
                     // Real selected-installation UI exercises the asynchronous startup/indicator.
                     val vm =
                         withContext(Dispatchers.Main) {
@@ -157,7 +309,7 @@ class DirectTransportDeviceTest {
                                 origin.toString(),
                             )
                         }
-                    compose.setContent { LeoTheme { LeoApp(vm = vm) } }
+                    withContext(Dispatchers.Main) { selectedVm = vm }
                     compose.waitUntil(30000) {
                         compose
                             .onAllNodesWithContentDescription("Transport : Direct")
@@ -177,6 +329,16 @@ class DirectTransportDeviceTest {
                         }
                     }
                     renewed = true
+                    val renewals = control.count { it == "renew:200" }
+                    delay(2000)
+                    assertEquals(
+                        "A capped deadline must not start a renewal loop",
+                        renewals,
+                        control.count { it == "renew:200" },
+                    )
+                    read()
+                    assertEquals("direct", api.transport.route.value)
+                    cappedRenewal = true
                     val streaming = CompletableDeferred<Unit>()
                     val terminal = async {
                         api.live("/chats/stream")
@@ -206,6 +368,9 @@ class DirectTransportDeviceTest {
                         put("renewalAcknowledged", renewed)
                         put("revokedDuringLive", revoked)
                         put("networkChanges", networkChanges)
+                        put("backgroundStopped", backgroundStopped)
+                        put("controlSuspended", suspendedControl)
+                        put("cappedRenewal", cappedRenewal)
                         put("sdk", Build.VERSION.SDK_INT)
                         put("abi", Build.SUPPORTED_ABIS.first())
                         put("elapsedMs", (System.nanoTime() - started) / 1000000)
