@@ -668,7 +668,7 @@ push explicitly.
 
 Firebase also rotates tokens in the background, after the enabling proof has
 expired. An active session with valid CSRF can renew an existing native
-registration for the same device UUID and account without a new proof. The
+registration for the same device UUID and account without a new proof.
 Any active session of that account can perform this renewal when it holds the
 private device UUID; the registration is not bound to its enrolling session.
 The service checks that ownership under the device row lock and rechecks the session
@@ -686,11 +686,13 @@ the FCM-specific `UNREGISTERED` code removes an expired registration.
 If that registration has disappeared, background renewal needs a new independent
 proof and may return 403. Android then turns its push preference off and preserves
 a recovery notice for the next app opening and in Notifications. Confirm identity
-by email/passkey in account settings, then explicitly enable push again. Successful
+by email/passkey in account settings, then explicitly enable push again. Successful explicit
 enrollment or explicit disabling/logout clears the notice. Later token callbacks
 do not re-enroll a disabled device. Temporary server/network failures remain
 retryable and keep the preference on. A refusal from a request belonging to a
 session that has since changed does not disable the current session's preference.
+A delayed refusal also preserves a newer successful registration or explicit
+preference change in the same session.
 
 ## Shared task commitments
 

@@ -21,6 +21,7 @@ import androidx.work.*
 import dev.leo.manager.BuildConfig
 import dev.leo.manager.MainActivity
 import dev.leo.manager.R
+import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -45,17 +46,26 @@ class NotificationPreferences(private val context: Context) {
         context.dataStore.edit {
             it[enabledKey] = value
             it.remove(nativeReenrollmentKey)
+            it[nativeRegistrationRevisionKey] = UUID.randomUUID().toString()
         }
         schedule(context, value)
     }
 
-    internal suspend fun requireNativeReenrollment() {
+    internal suspend fun requireNativeReenrollment(expectedRevision: String?) {
+        var refused = false
         context.dataStore.edit {
+            // A newer registration or explicit preference change wins over an old refusal.
+            if (it[nativeRegistrationRevisionKey] != expectedRevision) return@edit
+
             it[enabledKey] = false
             it[nativeReenrollmentKey] = true
+            it.remove(nativeRegistrationKey)
+            it.remove(nativeRegistrationScopeKey)
+            refused = true
         }
+
         // Do not cancel the renewal worker itself: it still has to finish handling its 403.
-        NotificationManagerCompat.from(context).cancelAll()
+        if (refused) NotificationManagerCompat.from(context).cancelAll()
     }
 
     suspend fun selectScope(scope: String): Boolean {
