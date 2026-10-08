@@ -412,6 +412,7 @@ async fn serve_peer(
                                                     body: b"Direct reassembly busy.".to_vec(),
                                                 },
                                             );
+
                                             let send = rejected.send(response);
                                             tokio::pin!(send);
                                             loop {
@@ -431,6 +432,7 @@ async fn serve_peer(
                                     Err(DecodeError::Invalid(message)) => return Err(Error::bad(message)),
                                 }
                             };
+
                             if let Some(frame) = frame {
                                 requests
                                     .try_send(frame)

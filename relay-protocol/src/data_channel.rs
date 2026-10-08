@@ -210,6 +210,7 @@ impl FrameDecoder {
             if frame.total != total || frame.received != offset {
                 return Err("Invalid discarded fragment sequence".into());
             }
+
             frame.received += payload.len();
             if frame.received == total {
                 self.discarded.remove(&id);
@@ -246,6 +247,7 @@ impl FrameDecoder {
                 }
                 Err(error) => return Err(error),
             };
+
             self.pending.insert(
                 id,
                 Assembly {
@@ -306,6 +308,7 @@ fn request_id_prefix(packet: &[u8]) -> Option<String> {
                         map.next_value::<serde::de::IgnoredAny>()?;
                     }
                 }
+
                 if let (Some(kind), Some(id)) = (&kind, &id) {
                     *self.0 = (kind == "request" && !id.is_empty() && id.len() <= 128)
                         .then(|| id.clone());
