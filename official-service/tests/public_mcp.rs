@@ -200,6 +200,15 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
         StatusCode::BAD_REQUEST
     );
 
+    // An old registration with a pending code must survive maintenance.
+    sqlx_core::query::query("UPDATE mcp_clients SET created_at = now() - interval '31 days'")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    leo_official_service::cleanup_expired(&app.pool)
+        .await
+        .unwrap();
+
     let response = exchange_request(&exchange).send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
@@ -238,6 +247,10 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
         .await
         .unwrap();
     assert_eq!(rotated["scope"], "read");
+    // Preserve active clients and used refresh proofs during rotation.
+    leo_official_service::cleanup_expired(&app.pool)
+        .await
+        .unwrap();
 
     let call = |token: &Value| {
         app.client
@@ -875,6 +888,10 @@ async fn native_loopback_ports_vary_but_other_redirects_and_code_bindings_stay_e
 async fn replaying_an_authorization_code_revokes_its_access_and_rotated_refresh_family() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     let parameters = oauth_parameters(&relay, "https://client.example/callback").await;
+    sqlx_core::query::query("UPDATE mcp_clients SET created_at = now() - interval '31 days'")
+        .execute(&relay.app.pool)
+        .await
+        .unwrap();
     let exchange = approved_code_request(&relay, &parameters).await;
     let endpoint = format!("{}/oauth/token", relay.app.url);
     let response = relay
@@ -907,6 +924,10 @@ async fn replaying_an_authorization_code_revokes_its_access_and_rotated_refresh_
     // alive. This changes test time at its storage seam, not the verdict.
     sqlx_core::query::query("UPDATE mcp_codes SET expires_at = now() - interval '1 second'")
         .execute(&relay.app.pool)
+        .await
+        .unwrap();
+    // Hourly maintenance must retain expired consumed code tombstones as well.
+    leo_official_service::cleanup_expired(&relay.app.pool)
         .await
         .unwrap();
     // Another consent runs expiry cleanup without erasing a live grant's proof.
@@ -1088,5 +1109,239 @@ async fn a_member_cannot_consent_to_mcp_or_create_a_personal_token_for_the_share
         .await
         .unwrap();
     assert_eq!(grants, json!([]));
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn maintenance_forgets_old_unused_clients_but_preserves_recent_registrations() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let old = oauth_parameters(&relay, "https://old.example/callback").await;
+    let recent = oauth_parameters(&relay, "https://recent.example/callback").await;
+    sqlx_core::query::query(
+        "UPDATE mcp_clients SET created_at = now() - interval '31 days' WHERE id = $1",
+    )
+    .bind(old["client_id"].as_str().unwrap())
+    .execute(&relay.app.pool)
+    .await
+    .unwrap();
+
+    leo_official_service::cleanup_expired(&relay.app.pool)
+        .await
+        .unwrap();
+    for (parameters, expected) in [(&old, StatusCode::BAD_REQUEST), (&recent, StatusCode::OK)] {
+        let preview = owner_post(&relay, "/api/mcp/oauth/preview", parameters.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(preview.status(), expected);
+    }
+    // Fresh registrations still complete the same PKCE flow through the relay.
+    let exchange = approved_code_request(&relay, &recent).await;
+    let response = relay
+        .app
+        .client
+        .post(format!("{}/oauth/token", relay.app.url))
+        .form(&exchange)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let tokens: Value = response.json().await.unwrap();
+    let response = relay
+        .app
+        .client
+        .post(format!("{}/mcp", relay.app.url))
+        .bearer_auth(tokens["access_token"].as_str().unwrap())
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn consent_returns_a_client_error_if_maintenance_forgets_it_while_waiting_for_owner() {
+    use sqlx_core::{query::query, query_as::query_as};
+    use std::time::Duration;
+
+    let relay = RelayedInstallation::with_pool_size(axum::Router::new(), 8).await;
+    let parameters = oauth_parameters(&relay, "https://old.example/callback").await;
+    query("UPDATE mcp_clients SET created_at = now() - interval '31 days'")
+        .execute(&relay.app.pool)
+        .await
+        .unwrap();
+
+    let mut owner_lock = relay.app.pool.begin().await.unwrap();
+    let (pid,): (i32,) = query_as("SELECT pg_backend_pid()")
+        .fetch_one(&mut *owner_lock)
+        .await
+        .unwrap();
+    query("SELECT id FROM leo_accounts WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(relay.session["account"]["id"].as_str().unwrap())
+        .execute(&mut *owner_lock)
+        .await
+        .unwrap();
+    let request = owner_post(
+        &relay,
+        "/api/mcp/oauth/consent",
+        json!({
+            "parameters": parameters,
+            "installationId": relay.session["installations"][0]["id"],
+            "approved": true,
+        }),
+    );
+    let consent = tokio::spawn(async move { request.send().await.unwrap() });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let (blocked,): (bool,) = query_as("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))")
+                .bind(pid).fetch_one(&relay.app.pool).await.unwrap();
+            if blocked { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("consent must reach the owner lock after reading client metadata");
+
+    leo_official_service::cleanup_expired(&relay.app.pool)
+        .await
+        .unwrap();
+    owner_lock.commit().await.unwrap();
+    assert_eq!(consent.await.unwrap().status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn expired_grants_and_unused_codes_release_old_registrations_without_touching_the_installation()
+ {
+    use sqlx_core::query::query;
+
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let used = oauth_parameters(&relay, "https://used.example/callback").await;
+    let exchange = approved_code_request(&relay, &used).await;
+    let response = relay
+        .app
+        .client
+        .post(format!("{}/oauth/token", relay.app.url))
+        .form(&exchange)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let tokens: Value = response.json().await.unwrap();
+    let unused = oauth_parameters(&relay, "https://unused.example/callback").await;
+    let _pending = approved_code_request(&relay, &unused).await;
+    query("UPDATE mcp_clients SET created_at = now() - interval '31 days'")
+        .execute(&relay.app.pool)
+        .await
+        .unwrap();
+    query("UPDATE mcp_grants SET expires_at = now() - interval '1 second'")
+        .execute(&relay.app.pool)
+        .await
+        .unwrap();
+    query("UPDATE mcp_codes SET expires_at = now() - interval '1 second' WHERE grant_id IS NULL")
+        .execute(&relay.app.pool)
+        .await
+        .unwrap();
+
+    leo_official_service::cleanup_expired(&relay.app.pool)
+        .await
+        .unwrap();
+    for parameters in [&used, &unused] {
+        assert_eq!(
+            owner_post(&relay, "/api/mcp/oauth/preview", parameters.clone())
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let response = relay
+        .app
+        .client
+        .post(format!("{}/mcp", relay.app.url))
+        .bearer_auth(tokens["access_token"].as_str().unwrap())
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let response = relay
+        .app
+        .client
+        .post(format!("{}/oauth/token", relay.app.url))
+        .form(&json!({
+            "grant_type": "refresh_token",
+            "client_id": used["client_id"],
+            "refresh_token": tokens["refresh_token"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn maintenance_skips_a_busy_old_client_and_retries_after_it_is_released() {
+    use sqlx_core::query::query;
+    use std::time::Duration;
+
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let parameters = oauth_parameters(&relay, "https://busy.example/callback").await;
+    query("UPDATE mcp_clients SET created_at = now() - interval '31 days'")
+        .execute(&relay.app.pool)
+        .await
+        .unwrap();
+    let mut client_lock = relay.app.pool.begin().await.unwrap();
+    query("SELECT id FROM mcp_clients WHERE id = $1 FOR KEY SHARE")
+        .bind(parameters["client_id"].as_str().unwrap())
+        .execute(&mut *client_lock)
+        .await
+        .unwrap();
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        leo_official_service::cleanup_expired(&relay.app.pool),
+    )
+    .await
+    .expect("a busy registration must not stall maintenance")
+    .unwrap();
+    assert_eq!(
+        owner_post(&relay, "/api/mcp/oauth/preview", parameters.clone())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    client_lock.rollback().await.unwrap();
+
+    leo_official_service::cleanup_expired(&relay.app.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        owner_post(&relay, "/api/mcp/oauth/preview", parameters)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
     relay.close().await;
 }

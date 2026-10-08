@@ -455,7 +455,12 @@ async fn request_code(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(input): Json<EmailRequest>,
 ) -> Result<Response, ApiError> {
-    consume_limit(&service.pool, &format!("delivery:{}", peer.ip()), 10).await?;
+    consume_limit(
+        &service.pool,
+        &format!("delivery:{}", network::rate_limit_address(peer.ip())),
+        10,
+    )
+    .await?;
 
     let email = normalized_email(&input.email)?;
 
@@ -596,7 +601,12 @@ async fn verify_email(
     input: Verification,
     purpose: ProofPurpose,
 ) -> Result<Response, ApiError> {
-    consume_limit(&service.pool, &format!("verification:{}", peer.ip()), 30).await?;
+    consume_limit(
+        &service.pool,
+        &format!("verification:{}", network::rate_limit_address(peer.ip())),
+        30,
+    )
+    .await?;
 
     let invalid = || ApiError::Http(StatusCode::UNAUTHORIZED, "Invalid or expired code");
     let mut transaction = service.pool.begin().await?;
@@ -902,6 +912,18 @@ pub async fn cleanup_expired(pool: &PgPool) -> Result<(), sqlx_core::error::Erro
         "DELETE FROM installation_claim_codes WHERE expires_at <= now()",
         "DELETE FROM installation_device_claims WHERE expires_at <= now()",
         "DELETE FROM installation_invitations WHERE expires_at <= now()",
+        // Unexpired used refresh tokens and consumed codes of live grants
+        // must survive maintenance to detect replays.
+        "DELETE FROM mcp_grants WHERE expires_at <= now()",
+        "DELETE FROM mcp_tokens WHERE expires_at <= now()",
+        "DELETE FROM mcp_codes WHERE grant_id IS NULL AND expires_at <= now()",
+        "DELETE FROM mcp_clients WHERE id IN (
+            SELECT client.id FROM mcp_clients client
+            WHERE client.created_at <= now() - interval '30 days'
+                AND NOT EXISTS (SELECT 1 FROM mcp_grants WHERE client_id = client.id)
+                AND NOT EXISTS (SELECT 1 FROM mcp_codes WHERE client_id = client.id)
+            FOR UPDATE OF client SKIP LOCKED
+        )",
     ] {
         query(statement).execute(&mut *transaction).await?;
     }

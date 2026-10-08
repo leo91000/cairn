@@ -220,7 +220,15 @@ pub(super) async fn login_start(
     State(service): State<Service>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
 ) -> Result<Response, ApiError> {
-    consume_limit(&service.pool, &format!("passkey-login:{}", peer.ip()), 30).await?;
+    consume_limit(
+        &service.pool,
+        &format!(
+            "passkey-login:{}",
+            super::network::rate_limit_address(peer.ip())
+        ),
+        30,
+    )
+    .await?;
 
     // Every browser gets the same options, without looking up an email or exposing IDs.
     let (options, state) = webauthn(&service)?
@@ -327,7 +335,15 @@ async fn complete_login(
     input: Authentication,
     purpose: ProofPurpose,
 ) -> Result<Response, ApiError> {
-    consume_limit(&service.pool, &format!("passkey-login:{}", peer.ip()), 30).await?;
+    consume_limit(
+        &service.pool,
+        &format!(
+            "passkey-login:{}",
+            super::network::rate_limit_address(peer.ip())
+        ),
+        30,
+    )
+    .await?;
 
     let (expected_owner, state) = match purpose {
         ProofPurpose::ConfirmSession => {

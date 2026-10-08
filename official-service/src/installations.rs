@@ -132,7 +132,12 @@ pub(super) async fn claim(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(input): Json<Claim>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    consume_limit(&service.pool, &format!("claim:{}", peer.ip()), 30).await?;
+    consume_limit(
+        &service.pool,
+        &format!("claim:{}", super::network::rate_limit_address(peer.ip())),
+        30,
+    )
+    .await?;
     let name = claim_name(&input.name, input.protocol)?;
 
     let mut transaction = service.pool.begin().await?;
@@ -340,7 +345,15 @@ pub(super) async fn rotate_token(
     headers: HeaderMap,
     Json(input): Json<TokenRotation>,
 ) -> Result<StatusCode, ApiError> {
-    consume_limit(&service.pool, &format!("token-rotation:{}", peer.ip()), 30).await?;
+    consume_limit(
+        &service.pool,
+        &format!(
+            "token-rotation:{}",
+            super::network::rate_limit_address(peer.ip())
+        ),
+        30,
+    )
+    .await?;
     let previous = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
@@ -405,7 +418,15 @@ pub(super) async fn start_device(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(input): Json<DeviceStart>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    consume_limit(&service.pool, &format!("device-start:{}", peer.ip()), 30).await?;
+    consume_limit(
+        &service.pool,
+        &format!(
+            "device-start:{}",
+            super::network::rate_limit_address(peer.ip())
+        ),
+        30,
+    )
+    .await?;
     let requested_name = claim_name(&input.name, input.protocol)?;
     let mut transaction = service.pool.begin().await?;
     let recovering = input.identity.is_some();
@@ -481,7 +502,10 @@ pub(super) async fn preview_device(
     consume_limit(&service.pool, &format!("device-review:{account}"), 10).await?;
     consume_limit(
         &service.pool,
-        &format!("device-review-ip:{}", peer.ip()),
+        &format!(
+            "device-review-ip:{}",
+            super::network::rate_limit_address(peer.ip())
+        ),
         30,
     )
     .await?;
@@ -519,7 +543,10 @@ pub(super) async fn approve_device(
     consume_limit(&service.pool, &format!("device-approval:{account}"), 10).await?;
     consume_limit(
         &service.pool,
-        &format!("device-approval-ip:{}", peer.ip()),
+        &format!(
+            "device-approval-ip:{}",
+            super::network::rate_limit_address(peer.ip())
+        ),
         30,
     )
     .await?;
@@ -550,7 +577,15 @@ pub(super) async fn poll_device(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(input): Json<DevicePoll>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    consume_limit(&service.pool, &format!("device-poll:{}", peer.ip()), 120).await?;
+    consume_limit(
+        &service.pool,
+        &format!(
+            "device-poll:{}",
+            super::network::rate_limit_address(peer.ip())
+        ),
+        120,
+    )
+    .await?;
     let device_digest = digest(&input.device_code);
     let mut transaction = service.pool.begin().await?;
     let row: Option<(String, bool)> = query_as("SELECT installation_id, recovering FROM installation_device_claims WHERE device_digest = $1 AND expires_at > now()")

@@ -85,7 +85,13 @@ it matches `LEO_OFFICIAL_TRUSTED_PROXIES`. In that case they use the rightmost
 `X-Forwarded-For` address outside the trusted proxy ranges, across all account
 and machine endpoints. Each trusted proxy must append its actual peer address.
 Trust only your controlled proxy hops; headers from other peers are ignored.
-Missing or malformed trusted suffixes fall back to the TCP peer. Do not expose
+Missing or malformed trusted suffixes fall back to the TCP peer. All official
+IP quotas then group native IPv6 clients by /64. IPv4 clients (including
+IPv4-mapped IPv6) keep their exact address buckets. Addresses in one /64 share
+the allowance, while distinct prefixes remain independent; rotating interface
+identifiers does not create a new budget. This does not group proxy trust ranges
+or account/email/grant quotas. Existing IPv6 address buckets expire normally;
+the first request after this upgrade starts the new prefix bucket. Do not expose
 Postgres or the development mailbox publicly.
 
 The official SPA denies embedding with `frame-ancestors 'none'` and
@@ -322,10 +328,32 @@ from authenticated API and live streams. Idle downloads are cancelled after 30
 seconds without file progress, independently of downstream reads. HTML and SVG
 are always served as attachments, and Content-Length is preserved for downloads,
 byte ranges and HEAD responses.
-The public file route also allows at most 30 requests per minute per TCP peer
-across installations, using the existing persisted rate-limit module. Forwarded
-IP headers supplied by clients are ignored; a reverse proxy shares this limit.
-Authenticated account routes use their own quotas.
+The public file route also allows at most 30 requests per minute per resolved
+client across installations, using the existing persisted rate-limit module.
+Resolution follows the trusted proxy rules above, then the IPv6 /64 grouping;
+untrusted forwarding headers cannot choose a quota. Authenticated account
+routes use their own quotas.
+Dynamic registration permits ten attempts per minute per resolved client
+(IPv6 /64 or exact IPv4). Token exchange permits sixty. Account-level consent
+and per-grant call budgets remain separate. MCP authorization and personal
+tokens stay reserved to installation owners, including the `manage` scope.
+
+The additive `202610080600_mcp_client_retention` migration records `created_at`
+for registrations. Existing rows receive the migration time, giving them thirty
+days of grace rather than guessing their age. Hourly maintenance removes expired
+MCP tokens and grants (cascading their tokens/code tombstones), and expired unused
+codes. Consumed codes of active grants and unexpired used refresh tokens remain
+for replay detection. It then
+deletes registrations at least thirty days old with no remaining grant or code.
+A client with an active grant or pending code is preserved regardless of its
+registration age; refresh rotation can therefore keep its authorization alive.
+After revocation or expiry, an old registration becomes eligible for deletion
+and that client must register again before its next authorization. Fresh
+registrations without grants remain usable throughout their grace period.
+Maintenance skips clients locked by an in-flight consent/exchange and retries
+next hour; consent rechecks the client under a lock before issuing a code.
+No client secret, provider token or installation content is added to Postgres.
+
 Used authorization code digests remain linked to the issued grant. A replay
 with the matching client, redirect and PKCE proof revokes the whole token family,
 including rotated refresh tokens. Revocation removes the consumed code too.

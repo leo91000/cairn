@@ -260,7 +260,16 @@ pub(super) async fn register(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Json(input): Json<Registration>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    super::consume_limit(&service.pool, &format!("mcp-register:{}", peer.ip()), 10).await?;
+    super::consume_limit(
+        &service.pool,
+        &format!(
+            "mcp-register:{}",
+            super::network::rate_limit_address(peer.ip())
+        ),
+        10,
+    )
+    .await?;
+
     let valid_redirect = |uri: &String| {
         url::Url::parse(uri).is_ok_and(|url| {
             let loopback = url.scheme() == "http"
@@ -481,6 +490,23 @@ pub(super) async fn consent(
             &account,
         )
         .await?;
+
+        // Client metadata was read before the owner lock. Maintenance may have
+        // removed an old unreferenced registration while we waited. Hold its
+        // key through code creation so cleanup can skip an admitted consent.
+        let client: Option<(String,)> =
+            query_as("SELECT id FROM mcp_clients WHERE id = $1 FOR KEY SHARE")
+                .bind(&details.client_id)
+                .fetch_optional(&mut *transaction)
+                .await?;
+
+        if client.is_none() {
+            return Err(ApiError::Http(
+                StatusCode::BAD_REQUEST,
+                "Unknown client or redirect URI",
+            ));
+        }
+
         query("DELETE FROM mcp_codes WHERE grant_id IS NULL AND expires_at <= now()")
             .execute(&mut *transaction)
             .await?;
@@ -506,8 +532,15 @@ pub(super) async fn exchange(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     axum::extract::Form(params): axum::extract::Form<std::collections::HashMap<String, String>>,
 ) -> Response {
-    if let Err(error) =
-        super::consume_limit(&service.pool, &format!("mcp-token:{}", peer.ip()), 60).await
+    if let Err(error) = super::consume_limit(
+        &service.pool,
+        &format!(
+            "mcp-token:{}",
+            super::network::rate_limit_address(peer.ip())
+        ),
+        60,
+    )
+    .await
     {
         return error.into_response();
     }

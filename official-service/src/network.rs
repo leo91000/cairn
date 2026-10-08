@@ -58,6 +58,18 @@ impl TrustedProxies {
     }
 }
 
+/// Quota identity after trusted proxy resolution. Rotating IPv6 interface
+/// addresses within the same /64 must not grant fresh anonymous budgets.
+pub(super) fn rate_limit_address(address: IpAddr) -> String {
+    match address.to_canonical() {
+        IpAddr::V4(address) => address.to_string(),
+        IpAddr::V6(address) => ipnet::Ipv6Net::new(address, 64)
+            .expect("IPv6 /64 is a valid prefix")
+            .trunc()
+            .to_string(),
+    }
+}
+
 pub(super) async fn client_peer(
     axum::extract::State(proxies): axum::extract::State<TrustedProxies>,
     mut request: axum::extract::Request,

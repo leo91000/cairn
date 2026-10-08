@@ -381,3 +381,74 @@ async fn renaming_the_proof_timestamp_preserves_existing_session_proofs_and_dead
         .unwrap();
     admin.close().await;
 }
+
+#[tokio::test]
+async fn existing_mcp_registrations_get_a_grace_period_on_startup() {
+    let database = std::env::var("LEO_OFFICIAL_TEST_DATABASE_URL").unwrap();
+    let admin = PgPool::connect(&database).await.unwrap();
+    let schema = format!("migration_{}", Uuid::new_v4().simple());
+    query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let options = PgConnectOptions::from_str(&database)
+        .unwrap()
+        .options([("search_path", schema.as_str())]);
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let migrations = sqlx_macros::migrate!("./migrations");
+    let legacy = Migrator {
+        migrations: Cow::Owned(
+            migrations
+                .iter()
+                .filter(|migration| migration.version < 202610080600)
+                .cloned()
+                .collect(),
+        ),
+        ..Migrator::DEFAULT
+    };
+    legacy.run(&pool).await.unwrap();
+    query("INSERT INTO mcp_clients (id, name, redirect_uris) VALUES ('legacy-client', 'Legacy client', ARRAY['https://legacy.example/callback'])")
+        .execute(&pool).await.unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://localhost:{}", listener.local_addr().unwrap().port());
+    let app =
+        leo_official_service::router(pool.clone(), Arc::new(Mailbox::default()), origin.clone())
+            .await
+            .expect("startup must preserve existing MCP client registrations");
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    leo_official_service::cleanup_expired(&pool).await.unwrap();
+
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let challenge = "a".repeat(43);
+    let mut authorization = url::Url::parse(&format!("{origin}/oauth/authorize")).unwrap();
+    authorization.query_pairs_mut().extend_pairs([
+        ("client_id", "legacy-client"),
+        ("redirect_uri", "https://legacy.example/callback"),
+        ("response_type", "code"),
+        ("code_challenge_method", "S256"),
+        ("code_challenge", challenge.as_str()),
+        ("scope", "read"),
+    ]);
+
+    let response = client.get(authorization).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+
+    server.abort();
+    pool.close().await;
+    query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+}
