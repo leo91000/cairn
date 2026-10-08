@@ -53,6 +53,9 @@ impl Fixture {
             ..common::config(root.path())
         };
         let service = Service::new(config).await.unwrap();
+        // Keep the fixture authority alive while these journeys stop the worker process.
+        common::browser_http::claimed(&service).await.unwrap();
+
         let mut fixture = Self {
             root,
             service,

@@ -10,9 +10,10 @@ pub fn auth(service: &Service) -> legacy_auth::Auth {
 use axum::{
     Json, Router,
     extract::{Request, State},
-    http::{HeaderValue, header},
+    http::{HeaderMap, HeaderValue, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
+    routing::get,
 };
 use leo_agent_manager::{
     auth::{InstallationIdentity, InstallationRole, safe_equal},
@@ -21,6 +22,7 @@ use leo_agent_manager::{
     service::Service,
     validation::text,
 };
+use leo_relay_protocol::{TaskAuthorGrant, TaskAuthorPolicy};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
@@ -29,6 +31,10 @@ use tower_http::services::{ServeDir, ServeFile};
 
 pub async fn router(service: Arc<Service>) -> Result<Router> {
     claimed(&service).await?;
+    installation_router(service).await
+}
+
+async fn installation_router(service: Arc<Service>) -> Result<Router> {
     Ok(leo_agent_manager::http::router(service.clone())
         .await?
         .layer(middleware::from_fn_with_state(service, authenticate)))
@@ -174,10 +180,7 @@ async fn authorize(service: &Service, request: &mut Request) -> Result<Option<Re
         }
         request
             .extensions_mut()
-            .insert(InstallationIdentity::trusted(
-                InstallationRole::Owner,
-                text(&session, "csrf"),
-            ));
+            .insert(fixture_identity(text(&session, "csrf")));
     } else if !path.starts_with("/internal/")
         && path != "/health"
         && (path.starts_with("/oauth/")
@@ -193,12 +196,33 @@ async fn authorize(service: &Service, request: &mut Request) -> Result<Option<Re
             .map_or("fixture-owner", |session| text(session, "csrf"));
         request
             .extensions_mut()
-            .insert(InstallationIdentity::trusted(
-                InstallationRole::Owner,
-                account_id,
-            ));
+            .insert(fixture_identity(account_id));
     }
     Ok(None)
+}
+
+fn fixture_identity(binding: &str) -> InstallationIdentity {
+    let mut identity = InstallationIdentity::trusted(InstallationRole::Owner, binding);
+    identity.account_id = "fixture-owner".to_owned();
+    identity
+}
+
+async fn fixture_task_authors(headers: HeaderMap) -> Result<Json<TaskAuthorPolicy>> {
+    if headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        != Some("Bearer fixture-only")
+    {
+        return Err(Error::unauthorized("Incorrect fixture installation token."));
+    }
+
+    Ok(Json(TaskAuthorPolicy {
+        owner: TaskAuthorGrant {
+            account_id: "fixture-owner".to_owned(),
+            access_id: "fixture-owner".to_owned(),
+        },
+        members: Vec::new(),
+    }))
 }
 
 /// Synthetic identity for historical installation-only browser fixtures.
@@ -206,20 +230,53 @@ pub async fn claimed(service: &Service) -> Result<()> {
     let directory = service.config.data_dir.join("installation-relay");
     tokio::fs::create_dir_all(&directory).await?;
     let path = directory.join("identity.json");
-    if !path.exists() {
-        let identity = serde_json::to_vec(&json!({
-            "origin": service.config.public_url,
-            "installationId": "00000000-0000-4000-8000-000000000055",
-            "token": "fixture-only",
-        }))?;
+    let previous_origin = if path.exists() {
+        if service.synchronize_task_authors().await.is_ok() {
+            return Ok(());
+        }
+        let previous: Value = serde_json::from_slice(&tokio::fs::read(&path).await?)?;
+        Some(text(&previous, "origin").to_owned())
+    } else {
+        None
+    };
+    // Rebind the same fixture origin after a process restart so existing links
+    // remain readable. Another router in the same runtime reuses the live server.
+    let port = previous_origin
+        .as_ref()
+        .and_then(|origin| url::Url::parse(origin).ok())
+        .and_then(|origin| origin.port())
+        .unwrap_or(0);
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+    let origin = format!("http://{}", listener.local_addr()?);
+    // Historical journeys keep their synthetic owner, but exercise the real
+    // installation handlers and the same HTTP policy lookup as production.
+    let app = installation_router(Arc::new(service.clone())).await?.route(
+        "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+        get(fixture_task_authors),
+    );
+    let shutdown = service.shutdown.clone();
 
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)
-            .await?;
-        file.write_all(&identity).await?;
-    }
+    let identity = serde_json::to_vec(&json!({
+        "origin": origin,
+        "installationId": "00000000-0000-4000-8000-000000000055",
+        "token": "fixture-only",
+    }))?;
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .await?;
+    file.write_all(&identity).await?;
+    file.flush().await?;
+
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown.cancelled_owned())
+            .await
+            .unwrap();
+    });
     Ok(())
 }

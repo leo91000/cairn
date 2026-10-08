@@ -46,7 +46,6 @@ impl Worker {
             .cloned()
             .collect::<HashSet<_>>();
         s.chat_tick(&active).await?;
-        s.schedule().await?;
         if s.shutdown.is_cancelled() || s.store.kv("deployment-lease").await?.is_some() {
             return Ok(());
         }

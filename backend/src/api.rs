@@ -97,11 +97,13 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
         ("GET", ["agent-avatars"]) => json!({ "configured": s.avatars.configured(s).await? }),
         ("POST", ["agents", id, "avatar", "generate"]) => s.avatars.generate(s, id).await?,
         ("GET", [kind @ ("agents" | "projects" | "tasks")]) => s.store.list(kind).await?.into(),
-        ("POST", [kind @ ("agents" | "projects" | "tasks")]) => {
-            save(s, kind, input.body.clone(), None).await?
+        ("POST", ["task-authors", "refresh"]) => {
+            s.synchronize_task_authors().await?;
+            json!({ "updated": true })
         }
+        ("POST", [kind @ ("agents" | "projects" | "tasks")]) => save(s, kind, input, None).await?,
         ("PUT", [kind @ ("agents" | "projects" | "tasks"), id]) => {
-            save(s, kind, input.body.clone(), Some(id)).await?
+            save(s, kind, input, Some(id)).await?
         }
         ("DELETE", [kind @ ("agents" | "projects" | "tasks"), id]) => {
             s.remove(kind, id).await?;
@@ -417,11 +419,14 @@ async fn settings_routes(
     Ok(Some(result))
 }
 
-async fn save(s: &Arc<Service>, kind: &str, input: Value, id: Option<&str>) -> Result<Value> {
+async fn save(s: &Arc<Service>, kind: &str, input: &Input, id: Option<&str>) -> Result<Value> {
     match kind {
-        "agents" => s.agent(input, id).await,
-        "projects" => s.project(input, id).await,
-        _ => s.task(input, id).await,
+        "agents" => s.agent(input.body.clone(), id).await,
+        "projects" => s.project(input.body.clone(), id).await,
+        _ => {
+            s.task_as(input.body.clone(), id, input.identity.as_ref())
+                .await
+        }
     }
 }
 

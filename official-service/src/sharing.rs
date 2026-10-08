@@ -11,6 +11,58 @@ use sqlx_core::transaction::Transaction;
 use sqlx_core::{query::query, query_as::query_as};
 use sqlx_postgres::{PgConnection, Postgres};
 
+/// The machine may check scheduling authors, but browser access stays authoritative here.
+pub(super) async fn task_authors(
+    State(service): State<Service>,
+    Path(installation): Path<String>,
+    headers: HeaderMap,
+) -> Result<
+    (
+        [(axum::http::header::HeaderName, &'static str); 1],
+        Json<leo_relay_protocol::TaskAuthorPolicy>,
+    ),
+    ApiError,
+> {
+    let token = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let mut transaction = service.pool.begin().await?;
+    let owner: Option<(String,)> = query_as(
+        "SELECT owner_id FROM installations WHERE id = $1 AND token_digest = $2 AND owner_id IS NOT NULL FOR SHARE",
+    ).bind(&installation).bind(super::digest(token)).fetch_optional(&mut *transaction).await?;
+    let Some((owner,)) = owner else {
+        return Err(ApiError::Http(
+            StatusCode::UNAUTHORIZED,
+            "Invalid installation identity",
+        ));
+    };
+    let members: Vec<(String, String)> = query_as(
+        "SELECT account_id, access_id FROM installation_members WHERE installation_id = $1 ORDER BY account_id",
+    ).bind(&installation).fetch_all(&mut *transaction).await?;
+    let policy = leo_relay_protocol::TaskAuthorPolicy {
+        owner: leo_relay_protocol::TaskAuthorGrant {
+            access_id: format!("owner:{installation}:{owner}"),
+            account_id: owner,
+        },
+        members: members
+            .into_iter()
+            .map(
+                |(account_id, access_id)| leo_relay_protocol::TaskAuthorGrant {
+                    account_id,
+                    access_id,
+                },
+            )
+            .collect(),
+    };
+    transaction.commit().await?;
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(policy),
+    ))
+}
+
 async fn owner_transaction<'a>(
     service: &'a Service,
     installation: &str,
@@ -281,6 +333,7 @@ async fn remove_membership(
 
     transaction.commit().await?;
     service.relay.revoke_access(installation, Some(account));
+    super::relay::refresh_task_authors(service, installation).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

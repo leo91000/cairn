@@ -385,6 +385,10 @@ pub async fn router_with_network_and_push(
                 )
                 .route("/api/relay/claim", post(installations::claim))
                 .route(
+                    "/api/relay/{installation}/task-authors",
+                    get(sharing::task_authors),
+                )
+                .route(
                     "/api/relay/{installation}/rotate-token",
                     post(installations::rotate_token),
                 )

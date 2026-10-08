@@ -2,7 +2,7 @@
 import type { Deliverable } from '../../shared/artifacts'
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { artifactUrl } from '../../shared/artifacts'
-import { api, notify } from '../api'
+import { api, notify, state } from '../api'
 
 const props = defineProps<{ item: Deliverable }>()
 const record = ref(props.item)
@@ -72,7 +72,12 @@ void refresh()
         <button :disabled="busy" class="rounded-lg bg-brand phone:min-h-11 px-3 py-2 text-xs text-white disabled:opacity-50" @click="copy">
           Copy public link
         </button>
-        <button :disabled="busy" class="rounded-lg border border-line phone:min-h-11 px-3 py-2 text-xs disabled:opacity-50" @click="change('private')">
+        <button
+          v-if="state.installationRole === 'owner'"
+          :disabled="busy"
+          class="rounded-lg border border-line phone:min-h-11 px-3 py-2 text-xs disabled:opacity-50"
+          @click="change('private')"
+        >
           Disable public link
         </button>
       </div>
@@ -81,13 +86,16 @@ void refresh()
       </p>
     </template>
     <button
-      v-else
+      v-else-if="state.installationRole === 'owner'"
       :disabled="busy"
       class="rounded-lg border border-line phone:min-h-11 px-3 py-2 text-xs disabled:opacity-50"
       @click="change('public')"
     >
       {{ busy ? 'Loading…' : 'Enable public link' }}
     </button>
+    <p v-if="state.installationRole !== 'owner'" class="m-0! text-xs text-muted">
+      The installation owner controls public links.
+    </p>
     <p v-if="error" role="alert" class="m-0! text-xs text-danger">
       {{ error }}
     </p>

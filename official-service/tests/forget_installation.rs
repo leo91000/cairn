@@ -168,7 +168,17 @@ async fn only_the_owner_can_forget_an_installation_and_its_machine_keeps_its_dat
     .json()
     .await
     .unwrap();
-    let directory = relay.root.path().join("renewed-relay");
+    // Follow the recovery workflow: stop the old connector, back up its private
+    // identity and claim again in the manager's permanent identity directory.
+    relay.stop.cancel();
+    let directory = relay
+        .installation
+        .config
+        .data_dir
+        .join("installation-relay");
+    tokio::fs::rename(&directory, relay.root.path().join("forgotten-relay"))
+        .await
+        .unwrap();
     leo_agent_manager::relay::claim(
         &relay.app.url,
         &directory,

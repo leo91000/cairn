@@ -56,6 +56,7 @@ const occurrences = ref<number[]>([])
 const promptOpen = ref(false)
 const menu = ref(false)
 const agent = computed(() => state.agents.find(agent => agent.id === props.task.agentId))
+const canEdit = computed(() => state.installationRole === 'owner' || props.task.authorId === state.accountId)
 const project = computed(() => state.projects.find(project => project.id === props.task.projectId))
 const wording = computed(() => describeSchedule(props.task))
 const time = computed(() => wording.value.match(/\d{2}:\d{2}$/)?.[0])
@@ -143,7 +144,7 @@ const statusLabels: Record<RunListItem['status'], string> = {
           <button
             class="mission-menu-item"
             role="menuitem"
-            :disabled="busy"
+            :disabled="busy || (task.archived && !canEdit)"
             @click="act('archive')"
           >
             <Icon :name="Archive" :size="15" />{{ task.archived ? 'Restore (paused)' : 'Archive' }}
@@ -156,7 +157,12 @@ const statusLabels: Record<RunListItem['status'], string> = {
           >
             <Icon :name="ArrowUpRight" :size="15" />Open the latest run
           </RouterLink>
-          <button class="mission-menu-item text-danger" role="menuitem" @click="act('remove')">
+          <button
+            v-if="state.installationRole === 'owner'"
+            class="mission-menu-item text-danger"
+            role="menuitem"
+            @click="act('remove')"
+          >
             <Icon :name="Trash2" :size="15" />Delete
           </button>
         </div>
@@ -240,11 +246,20 @@ const statusLabels: Record<RunListItem['status'], string> = {
         </RouterLink>
       </li>
     </ul>
+    <p v-if="task.authorRemoved && task.cron" class="m-0! text-sm text-muted">
+      Schedule stopped because its author's access ended. Duplicate this mission to schedule it again.
+    </p>
+    <p v-if="task.scheduleWaitReason && task.cron && task.enabled && !task.archived" role="status" class="m-0! text-sm text-muted">
+      Schedule waiting: {{ task.scheduleWaitReason }}
+    </p>
+    <p v-if="!canEdit" class="m-0! text-sm text-muted">
+      Only the author or installation owner can edit or resume this mission. Duplicate it to make your own commitment.
+    </p>
     <div class="mt-4 flex items-center gap-2.5">
       <button
         class="mission-round"
         aria-label="Edit mission"
-        :disabled="busy"
+        :disabled="busy || !canEdit"
         @click="emit('edit')"
       >
         <Icon :name="Pencil" :size="18" />
@@ -253,7 +268,7 @@ const statusLabels: Record<RunListItem['status'], string> = {
         v-if="!task.archived && task.cron"
         class="mission-round"
         :aria-label="task.enabled ? 'Pause schedule' : 'Resume schedule'"
-        :disabled="busy"
+        :disabled="busy || task.authorRemoved === true || (!task.enabled && !canEdit)"
         @click="emit('pause')"
       >
         <Icon :name="task.enabled ? Pause : Clock" :size="18" />

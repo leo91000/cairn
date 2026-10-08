@@ -413,9 +413,15 @@ async fn agents_manage_connections_through_the_self_gateway_without_deadlocks_or
         .personal("Self access", vec!["read", "manage", "run"])
         .await
         .unwrap();
+
+    // Self-management uses the advertised authority so the recursive-call guard applies.
+    let (official_origin, _) = leo_agent_manager::relay::official_address(&s.config.data_dir)
+        .await
+        .unwrap()
+        .unwrap();
     let self_connection = json!({
         "name": "Self",
-        "url": format!("{origin}/mcp"),
+        "url": format!("{official_origin}/mcp"),
         "auth": "bearer",
         "token": owner["token"],
         "allowPrivateNetwork": true,

@@ -416,3 +416,29 @@ STUN source and disable setting. `DirectKey` carries an optional `stun_url`
 the official service. Authorize/renew responses expose the same `iceServers`.
 A signal dequeued before its authorization was accepted is refused immediately,
 releasing its acknowledgement slot instead of waiting the five-second deadline.
+
+## Scheduled task author checks
+
+Before reconnecting, creating/changing a task or admitting due scheduled work, the
+installation fetches the current task-author policy using its saved machine
+identity. The HTTP check has a five-second deadline and follows no redirects.
+A revoked machine identity or unavailable authority prevents new scheduled
+admissions; it does not stop work already admitted. Temporary failures preserve
+the schedule so it can resume after recovery. A removed membership permanently
+disables its scheduled tasks, even if the account rejoins; duplicate a task to
+make a new commitment. Legacy tasks without authors are attributed to the owner.
+Only the author or owner can change or resume a task. A member may pause/archive
+another author's task while preserving all other fields. Pausing/archiving alone
+uses the trusted request identity without an official round-trip.
+
+Scheduled admissions run in their own loop, independently of launching queued
+work. A slow official check cannot delay already admitted work. Authority failures
+preserve the due time and expose `scheduleWaitReason` on the affected tasks;
+recovery clears that status. Preparation errors specific to a task are audited
+and advance its next occurrence, allowing other due tasks to proceed.
+
+The official service can request `POST /api/task-authors/refresh` through the
+existing relay request path after changing membership. This path is reserved
+for the owner role and carries no browser session. Author reconciliation and
+scheduled admissions are serialized locally; a lost refresh is recovered by the
+next author check. Direct requests use the same task and owner-permission rules.

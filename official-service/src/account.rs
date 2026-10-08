@@ -137,13 +137,19 @@ pub(super) async fn delete(
         }
     };
 
-    for (installation, owner) in deleted.installations {
+    for (installation, owner) in &deleted.installations {
         service
             .relay
-            .revoke_access(&installation, if owner { None } else { Some(&account) });
+            .revoke_access(installation, if *owner { None } else { Some(&account) });
     }
     for (session,) in deleted.sessions {
         service.relay.revoke_session(&session);
+    }
+    // Access and sessions must be revoked before waiting for any installation.
+    for (installation, owner) in deleted.installations {
+        if !owner {
+            relay::refresh_task_authors(&service, &installation).await;
+        }
     }
 
     Ok(clear_session_cookie(&service))

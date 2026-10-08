@@ -428,3 +428,24 @@ The recorded commit status documents the result; CI does not wait for it.
 
 Image promotion requires the ordinary CI checks. Tag releases reuse the successful
 main pipeline's exact image.
+
+### Task-author security upgrade (#59)
+
+Deploy the official service before upgrading installations for the task-author
+checks. Startup applies the additive `202610072155_task_author_access` migration
+with the existing SQLx migrator; historical migration numbers and checksums stay
+unchanged. Existing memberships receive access identifiers automatically.
+An upgraded manager cannot reconnect to an older official binary that lacks
+`/api/relay/{installation}/task-authors`: its 404 defers scheduled admissions
+and keeps the relay offline. Keep the upgraded official service while rolling
+back an installation. Rolling back the official service requires its matching
+Postgres backup and compatible managers; older managers also restore the previous
+task-author/public-link rules, so suspend shared access during that rollback.
+
+Upgrade every shared installation: older binaries do not enforce the task-author
+policy. Upgraded installations require the official task-author endpoint before
+reconnecting and before admitting scheduled work. During an official outage,
+new scheduled admissions wait and already admitted work continues. On first
+reconciliation, old tasks without authors belong to the current owner. Removed
+members' tasks and admitted runs remain available; re-invitation does not resume
+old schedules. Public links remain owner-managed until explicitly revoked.
