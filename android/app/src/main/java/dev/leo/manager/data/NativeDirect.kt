@@ -7,6 +7,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import java.io.IOException
+import java.net.InetAddress
+import java.net.UnknownHostException
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -16,6 +18,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.selects.select
 import kotlinx.serialization.json.*
 import okhttp3.Call
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.webrtc.*
 
 /** One authorized installation peer. Lifecycle and network changes never stop agent runs. */
@@ -23,6 +26,40 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
     companion object {
         private val initialization = Any()
         private var initialized = false
+
+        // Match the web client's numeric destination policy. The Rust verifier remains
+        // authoritative; validate the literal before InetAddress so no DNS lookup can occur.
+        private fun usableCandidate(candidate: String): Boolean {
+            if (candidate.isEmpty()) return true
+            val address = candidate.trim().split(Regex("\\s+")).getOrNull(4) ?: return false
+            if (Regex("\\d+\\.\\d+\\.\\d+\\.\\d+").matches(address)) {
+                val octets = address.split('.').map { it.toIntOrNull() ?: return false }
+                return octets.all { it in 0..255 } &&
+                    octets[0] != 127 &&
+                    octets.any { it != 0 } &&
+                    !(octets[0] == 169 && octets[1] == 254) &&
+                    octets[0] !in 224..239 &&
+                    !octets.all { it == 255 }
+            }
+            if (!address.contains(':') || !Regex("[0-9a-fA-F:.]+").matches(address)) return false
+            val literal = "http://[$address]/".toHttpUrlOrNull()?.host ?: return false
+            val ip =
+                try {
+                    InetAddress.getByName(literal)
+                } catch (_: UnknownHostException) {
+                    return false
+                }
+            return !ip.isAnyLocalAddress &&
+                !ip.isLoopbackAddress &&
+                !ip.isLinkLocalAddress &&
+                !ip.isMulticastAddress &&
+                !ip.address.all { it.toInt() and 255 == 255 }
+        }
+
+        private fun usableSdp(sdp: String): String =
+            sdp.lineSequence()
+                .filter { !it.startsWith("a=candidate:") || usableCandidate(it.removePrefix("a=")) }
+                .joinToString("\r\n")
     }
 
     private class Unavailable : IOException("Direct indisponible")
@@ -192,6 +229,7 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
                         ) {}
 
                         override fun onIceCandidate(candidate: IceCandidate) {
+                            if (!usableCandidate(candidate.sdp)) return
                             val value = buildJsonObject {
                                 put("kind", "candidate")
                                 put("candidate", candidate.sdp)
@@ -283,7 +321,7 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
                 }
             val offer = requireNotNull(description { peer!!.createOffer(it, constraints) })
             val sdp =
-                offer.description
+                usableSdp(offer.description)
                     .lineSequence()
                     .filter { it.isNotEmpty() }
                     .joinToString("\r\n", postfix = "\r\n") { line ->
@@ -337,7 +375,14 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
             }
             workers.launch {
                 try {
-                    for (candidate in candidates) signal(candidate)
+                    for (candidate in candidates) {
+                        try {
+                            signal(candidate)
+                        } catch (error: ApiException) {
+                            // One refused candidate does not invalidate the other ICE paths.
+                            if (error.status != 400 && error.status != 429) throw error
+                        }
+                    }
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
@@ -451,7 +496,9 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
                                                     it,
                                                     SessionDescription(
                                                         SessionDescription.Type.ANSWER,
-                                                        incoming["sdp"]!!.jsonPrimitive.content,
+                                                        usableSdp(
+                                                            incoming["sdp"]!!.jsonPrimitive.content
+                                                        ),
                                                     ),
                                                 )
                                             }
@@ -460,20 +507,24 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
                                             waiting.clear()
                                         }
                                         "candidate" -> {
-                                            val candidate =
-                                                IceCandidate(
-                                                    incoming["sdp_mid"]!!
-                                                        .jsonPrimitive
-                                                        .contentOrNull,
-                                                    incoming["sdp_m_line_index"]!!
-                                                        .jsonPrimitive
-                                                        .int,
-                                                    incoming["candidate"]!!.jsonPrimitive.content,
-                                                )
-                                            if (answered) require(peer!!.addIceCandidate(candidate))
-                                            else {
-                                                require(waiting.size < 16)
-                                                waiting.add(candidate)
+                                            val sdp = incoming["candidate"]!!.jsonPrimitive.content
+                                            if (sdp.isNotEmpty() && usableCandidate(sdp)) {
+                                                val candidate =
+                                                    IceCandidate(
+                                                        incoming["sdp_mid"]!!
+                                                            .jsonPrimitive
+                                                            .contentOrNull,
+                                                        incoming["sdp_m_line_index"]!!
+                                                            .jsonPrimitive
+                                                            .int,
+                                                        sdp,
+                                                    )
+                                                if (answered)
+                                                    require(peer!!.addIceCandidate(candidate))
+                                                else {
+                                                    require(waiting.size < 16)
+                                                    waiting.add(candidate)
+                                                }
                                             }
                                         }
                                         else -> throw IOException("Signal direct inattendu")

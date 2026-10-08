@@ -15,6 +15,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import dev.leo.manager.ui.LeoApp
 import dev.leo.manager.ui.LeoTheme
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -27,6 +28,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.Buffer
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -58,8 +60,34 @@ class DirectTransportDeviceTest {
         // Observe control acknowledgement without retaining SDP, IDs, headers or credentials.
         val control = ConcurrentLinkedQueue<String>()
         val initialExpiry = AtomicLong()
+        val refusedPeers = ConcurrentHashMap.newKeySet<String>()
+        val refusedCandidates = AtomicInteger()
         val client =
             OkHttpClient.Builder()
+                .addInterceptor { chain ->
+                    val request = chain.request()
+                    if (scenario == "same-lan" && request.url.encodedPath.endsWith("/signal")) {
+                        val body = Buffer().also { request.body!!.writeTo(it) }.readUtf8()
+                        val signal = wireJson.parseToJsonElement(body).jsonObject
+                        if (
+                            signal["kind"]!!.jsonPrimitive.content == "candidate" &&
+                                signal["candidate"]!!.jsonPrimitive.content.contains(" typ host") &&
+                                refusedPeers.add(request.url.encodedPath)
+                        ) {
+                            // Refuse one trickled candidate per real peer, through the control
+                            // HTTP seam. The remaining real STUN candidates must still connect.
+                            val count = refusedCandidates.incrementAndGet()
+                            return@addInterceptor Response.Builder()
+                                .request(request)
+                                .protocol(Protocol.HTTP_1_1)
+                                .code(if (count % 2 == 1) 400 else 429)
+                                .message("Candidate refused")
+                                .body("{}".toResponseBody())
+                                .build()
+                        }
+                    }
+                    chain.proceed(request)
+                }
                 .addNetworkInterceptor { chain ->
                     val response = chain.proceed(chain.request())
                     val path = chain.request().url.encodedPath
@@ -168,6 +196,7 @@ class DirectTransportDeviceTest {
                 assertEquals(0, directReads)
             } else {
                 awaitDirect()
+                if (scenario == "same-lan") assertTrue(refusedCandidates.get() > 0)
                 primaryRoute = api.transport.route.value
                 assertTrue(control.contains("authorize:200"))
                 assertTrue(control.contains("signal:204"))
@@ -375,6 +404,7 @@ class DirectTransportDeviceTest {
                         put("backgroundStopped", backgroundStopped)
                         put("controlSuspended", suspendedControl)
                         put("cappedRenewal", cappedRenewal)
+                        put("refusedCandidates", refusedCandidates.get())
                         put("sdk", Build.VERSION.SDK_INT)
                         put("abi", Build.SUPPORTED_ABIS.first())
                         put("elapsedMs", (System.nanoTime() - started) / 1000000)

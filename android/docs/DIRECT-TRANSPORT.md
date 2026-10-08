@@ -41,6 +41,16 @@ The upstream [transport options](https://webrtc.googlesource.com/src/+/8990f2a57
 define renomination as requiring both peers' support. The native dependency and
 third-party notices are described in [the artifact research](../../docs/ANDROID-DIRECT-TRANSPORT.md).
 
+Android uses the web client's numeric ICE destination policy before signaling and
+before handing received candidates to libwebrtc. Hostnames (including `.local`),
+unspecified, loopback, link-local, multicast and broadcast addresses are removed
+from trickle signals and SDP candidate lines, including IPv4-mapped IPv6 forms
+of those addresses. Private unicast candidates remain usable; no DNS resolution
+is added. An individual candidate refused with HTTP 400 or 429 is skipped while
+other candidates continue negotiating. Authorization failures still stop the
+peer and retain the relay. The same-LAN device case refuses one host candidate
+per real connection and requires a successful direct response afterwards.
+
 On a default-network change, Android immediately closes the current traffic
 adapter, resumes reads/subscriptions over the relay, then creates a new ICE peer
 and authorization. The delivered installation accepts an offer for a fresh peer,
