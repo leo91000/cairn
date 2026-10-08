@@ -2011,13 +2011,14 @@ async fn saturated_direct_signaling_preserves_credited_fallback_streams() {
 }
 
 #[tokio::test]
-async fn candidate_policy_refuses_local_special_addresses_but_preserves_lan_and_vpn() {
+async fn candidate_policy_drops_local_special_addresses_but_preserves_lan_and_vpn() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     let grant = authorization(&relay, &relay.cookie, &relay.session).await;
     let path = format!(
         "/api/installations/{}/direct/{}/signal",
         grant.claims.installation_id, grant.claims.connection_id
     );
+    let mut signals = relay.direct.subscribe();
     for address in [
         "127.0.0.1",
         "169.254.1.1",
@@ -2030,6 +2031,7 @@ async fn candidate_policy_refuses_local_special_addresses_but_preserves_lan_and_
         "224.0.0.251",
         "ff02::fb",
         "255.255.255.255",
+        "hidden-host.local",
     ] {
         let candidate = format!("candidate:1 1 udp 2122260223 {address} 50000 typ host");
         let response = relay
@@ -2042,9 +2044,14 @@ async fn candidate_policy_refuses_local_special_addresses_but_preserves_lan_and_
             .send()
             .await
             .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NO_CONTENT,
+            "ignored candidate {address}"
+        );
         assert!(
-            response.status().is_client_error(),
-            "unsafe remote candidate {address}"
+            signals.try_recv().is_err(),
+            "ignored candidates must never reach ICE"
         );
     }
     for address in [
@@ -2066,6 +2073,9 @@ async fn candidate_policy_refuses_local_special_addresses_but_preserves_lan_and_
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(
+            matches!(signals.try_recv().unwrap(), leo_agent_manager::direct::DirectEvent::Signal { signal: leo_relay_protocol::direct::DirectSignal::Candidate { candidate: received, .. }, .. } if received == candidate)
+        );
     }
     relay.close().await;
 }

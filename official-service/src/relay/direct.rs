@@ -328,11 +328,15 @@ pub(crate) async fn signal(
         &axum::http::Method::POST,
     )
     .await?;
+    let signal = signal
+        .sanitize_candidates()
+        .map_err(|message| ApiError::Http(StatusCode::BAD_REQUEST, message))?;
     {
         let access = tunnel.access.lock().unwrap();
         let valid = access.direct.get(&id).is_some_and(|connection| {
-            signal.valid()
-                && signal.matches_client_fingerprint(&connection.authorization.claims.fingerprint)
+            signal.as_ref().is_none_or(|signal| {
+                signal.matches_client_fingerprint(&connection.authorization.claims.fingerprint)
+            })
         });
         if !valid {
             return Err(ApiError::Http(
@@ -341,6 +345,9 @@ pub(crate) async fn signal(
             ));
         }
     }
+    let Some(signal) = signal else {
+        return Ok(StatusCode::NO_CONTENT);
+    };
     let request_id = uuid::Uuid::new_v4().to_string();
     let (reply, received) = oneshot::channel();
     {
@@ -466,6 +473,9 @@ pub(super) fn acknowledge(tunnel: &Tunnel, id: &str, accepted: bool) {
 }
 
 pub(super) fn receive_signal(tunnel: &Tunnel, id: &str, signal: DirectSignal) {
+    let Ok(Some(signal)) = signal.sanitize_candidates() else {
+        return;
+    };
     let access = tunnel.access.lock().unwrap();
     if let Some(connection) = access.direct.get(id)
         && connection.accepted

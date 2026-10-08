@@ -107,10 +107,6 @@ impl PeerConnectionEventHandler for PeerEvents {
                     sdp_m_line_index: Some(0),
                 };
 
-                if !signal.valid() {
-                    return Ok(());
-                }
-
                 self.direct.send_signal(&self.id, signal)
             });
         let public = if let Some(public) = self.public_ip
@@ -306,10 +302,6 @@ async fn serve_peer(
         channel: channel_to_close.clone(),
     };
     let result: Result<()> = async {
-        // No multicast listener or hostname resolution on the installation.
-        let sdp = sdp.lines().filter(|line| {
-            !line.starts_with("a=candidate:") || !mdns_candidate(line)
-        }).collect::<Vec<_>>().join("\r\n") + "\r\n";
         peer.set_remote_description(RTCSessionDescription::offer(sdp).map_err(Error::internal)?)
             .await
             .map_err(Error::internal)?;
@@ -437,9 +429,6 @@ async fn apply_signal(peer: &dyn PeerConnection, signal: Option<DirectSignal>) -
     else {
         return Err(Error::bad("Expected ICE candidate."));
     };
-    if mdns_candidate(&candidate) {
-        return Ok(());
-    }
     peer.add_ice_candidate(RTCIceCandidateInit {
         candidate,
         sdp_mid,
@@ -448,13 +437,6 @@ async fn apply_signal(peer: &dyn PeerConnection, signal: Option<DirectSignal>) -
     })
     .await
     .map_err(Error::internal)
-}
-
-fn mdns_candidate(candidate: &str) -> bool {
-    candidate
-        .split_ascii_whitespace()
-        .nth(4)
-        .is_some_and(|address| address.ends_with(".local"))
 }
 
 struct ClosePeer {

@@ -112,6 +112,20 @@ async fn client_with_fingerprint(
     Arc<dyn DataChannel>,
     DirectAuthorization,
 ) {
+    client_with_offer_candidates(relay, cookie, session, mismatched, "").await
+}
+
+async fn client_with_offer_candidates(
+    relay: &RelayedInstallation,
+    cookie: &str,
+    session: &serde_json::Value,
+    mismatched: bool,
+    extra_candidates: &str,
+) -> (
+    Arc<dyn PeerConnection>,
+    Arc<dyn DataChannel>,
+    DirectAuthorization,
+) {
     let (events, mut candidates) = mpsc::channel(32);
     let peer: Arc<dyn PeerConnection> = Arc::new(
         PeerConnectionBuilder::new()
@@ -164,6 +178,7 @@ async fn client_with_fingerprint(
     let value: serde_json::Value = response.json().await.unwrap();
     let grant: DirectAuthorization = serde_json::from_value(value["grant"].clone()).unwrap();
     peer.set_local_description(local_offer).await.unwrap();
+    offer.sdp.push_str(extra_candidates);
     signal_as(
         relay,
         cookie,
@@ -259,6 +274,25 @@ async fn authorized_client_opens_a_real_installation_data_channel() {
     let mut relay = RelayedInstallation::new(axum::Router::new()).await;
     production_connector(&mut relay).await;
     let (peer, _channel, _grant) = client(&relay).await;
+    peer.close().await.unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn mixed_usable_and_link_local_offer_opens_the_real_data_channel() {
+    let mut relay = RelayedInstallation::new(axum::Router::new()).await;
+    production_connector(&mut relay).await;
+    let candidates = concat!(
+        "a=candidate:1 1 udp 2122260223 192.0.2.1 50000 typ host\r\n",
+        "a=candidate:2 1 udp 2122260223 fe80::1 50001 typ host\r\n",
+    );
+    let (peer, channel, _) =
+        client_with_offer_candidates(&relay, &relay.cookie, &relay.session, false, candidates)
+            .await;
+    send_frame(channel.as_ref(), 1, &request("mixed-offer", "/api/chats")).await;
+    assert!(
+        matches!(response(channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
     peer.close().await.unwrap();
     relay.close().await;
 }

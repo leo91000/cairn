@@ -303,14 +303,17 @@ impl DirectConnections {
     }
 
     pub(crate) fn receive_signal(&self, id: String, signal: DirectSignal) -> bool {
+        let Ok(signal) = signal.sanitize_candidates() else {
+            return false;
+        };
         let mut state = self.state.lock().unwrap();
-        let allowed = signal.valid()
-            && state.authorizations.get(&id).is_some_and(|lease| {
+        let allowed = state.authorizations.get(&id).is_some_and(|lease| {
+            signal.as_ref().is_none_or(|signal| {
                 signal.matches_client_fingerprint(&lease.authorization.claims.fingerprint)
             })
-            && Self::signal_allowed(&mut state, &id);
+        }) && Self::signal_allowed(&mut state, &id);
         drop(state);
-        if allowed {
+        if allowed && let Some(signal) = signal {
             let _ = self.events.send(DirectEvent::Signal { id, signal });
         }
         allowed
@@ -318,10 +321,14 @@ impl DirectConnections {
 
     /// Return connection metadata to the originating official session via the tunnel.
     pub fn send_signal(&self, id: &str, signal: DirectSignal) -> Result<()> {
+        let signal = signal.sanitize_candidates().map_err(Error::bad)?;
         let mut state = self.state.lock().unwrap();
-        if !signal.valid() || !Self::signal_allowed(&mut state, id) {
+        if !Self::signal_allowed(&mut state, id) {
             return Err(Error::bad("Invalid direct signal."));
         }
+        let Some(signal) = signal else {
+            return Ok(());
+        };
         let output = state
             .output
             .as_ref()
