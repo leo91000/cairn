@@ -352,6 +352,8 @@ and that client must register again before its next authorization. Fresh
 registrations without grants remain usable throughout their grace period.
 Maintenance skips clients locked by an in-flight consent/exchange and retries
 next hour; consent rechecks the client under a lock before issuing a code.
+Cleanup locks its candidates, then rechecks references with a fresh snapshot so
+a concurrent consent cannot abort the maintenance transaction.
 No client secret, provider token or installation content is added to Postgres.
 
 Used authorization code digests remain linked to the issued grant. A replay

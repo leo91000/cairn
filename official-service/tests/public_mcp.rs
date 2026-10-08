@@ -1199,11 +1199,20 @@ async fn consent_returns_a_client_error_if_maintenance_forgets_it_while_waiting_
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let (blocked,): (bool,) = query_as("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))")
-                .bind(pid).fetch_one(&relay.app.pool).await.unwrap();
-            if blocked { break; }
+                .bind(pid)
+                .fetch_one(&relay.app.pool)
+                .await
+                .unwrap();
+
+            if blocked {
+                break;
+            }
+
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await.expect("consent must reach the owner lock after reading client metadata");
+    })
+    .await
+    .expect("consent must reach the owner lock after reading client metadata");
 
     leo_official_service::cleanup_expired(&relay.app.pool)
         .await
@@ -1343,5 +1352,133 @@ async fn maintenance_skips_a_busy_old_client_and_retries_after_it_is_released() 
             .status(),
         StatusCode::BAD_REQUEST
     );
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn maintenance_and_concurrent_consent_have_a_consistent_client_lifetime() {
+    use sqlx_core::{query::query, query_as::query_as};
+    use std::time::Duration;
+
+    let relay = RelayedInstallation::with_pool_size(axum::Router::new(), 8).await;
+    let parameters = oauth_parameters(&relay, "https://concurrent.example/callback").await;
+    query("UPDATE mcp_clients SET created_at = now() - interval '31 days'")
+        .execute(&relay.app.pool)
+        .await
+        .unwrap();
+
+    // Stop DELETE after its snapshot was taken, while another request starts consent.
+    let mut barrier = relay.app.pool.acquire().await.unwrap();
+    let (barrier_pid,): (i32,) = query_as("SELECT pg_backend_pid()")
+        .fetch_one(&mut *barrier)
+        .await
+        .unwrap();
+    query("SELECT pg_advisory_lock($1)")
+        .bind(i64::from(barrier_pid))
+        .execute(&mut *barrier)
+        .await
+        .unwrap();
+    query(&format!(
+        "CREATE FUNCTION pause_client_delete() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN PERFORM pg_advisory_xact_lock({barrier_pid}); RETURN NULL; END $$"
+    ))
+    .execute(&relay.app.pool)
+    .await
+    .unwrap();
+    query("CREATE TRIGGER pause_client_delete BEFORE DELETE ON mcp_clients FOR EACH STATEMENT EXECUTE FUNCTION pause_client_delete()")
+        .execute(&relay.app.pool)
+        .await
+        .unwrap();
+
+    let pool = relay.app.pool.clone();
+    let cleanup = tokio::spawn(async move { leo_official_service::cleanup_expired(&pool).await });
+    let cleanup_pid = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let blocked: Option<(i32,)> =
+                query_as("SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))")
+                    .bind(barrier_pid)
+                    .fetch_optional(&relay.app.pool)
+                    .await
+                    .unwrap();
+
+            if let Some((pid,)) = blocked {
+                break pid;
+            }
+
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("maintenance must reach the DELETE snapshot barrier");
+
+    let request = owner_post(
+        &relay,
+        "/api/mcp/oauth/consent",
+        json!({
+            "parameters": parameters,
+            "installationId": relay.session["installations"][0]["id"],
+            "approved": true,
+        }),
+    );
+    let consent = tokio::spawn(async move { request.send().await.unwrap() });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let (blocked,): (bool,) = query_as("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))")
+                .bind(cleanup_pid)
+                .fetch_one(&relay.app.pool)
+                .await
+                .unwrap();
+
+            if consent.is_finished() || blocked {
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("consent must finish or wait for the maintenance client lock");
+
+    query("SELECT pg_advisory_unlock($1)")
+        .bind(i64::from(barrier_pid))
+        .execute(&mut *barrier)
+        .await
+        .unwrap();
+    cleanup
+        .await
+        .unwrap()
+        .expect("concurrent consent must not abort maintenance");
+    let response = consent.await.unwrap();
+
+    // Either cleanup wins and consent reports a missing client, or consent wins
+    // and its issued code remains usable. Neither outcome may produce a 500.
+    if response.status() == StatusCode::OK {
+        let consent: Value = response.json().await.unwrap();
+        let redirect = url::Url::parse(consent["redirect"].as_str().unwrap()).unwrap();
+        let code = redirect
+            .query_pairs()
+            .find(|(name, _)| name == "code")
+            .unwrap()
+            .1
+            .into_owned();
+        let response = relay
+            .app
+            .client
+            .post(format!("{}/oauth/token", relay.app.url))
+            .form(&json!({
+                "grant_type": "authorization_code",
+                "client_id": parameters["client_id"],
+                "redirect_uri": parameters["redirect_uri"],
+                "code": code,
+                "code_verifier": "a".repeat(43),
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    } else {
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
     relay.close().await;
 }

@@ -917,15 +917,32 @@ pub async fn cleanup_expired(pool: &PgPool) -> Result<(), sqlx_core::error::Erro
         "DELETE FROM mcp_grants WHERE expires_at <= now()",
         "DELETE FROM mcp_tokens WHERE expires_at <= now()",
         "DELETE FROM mcp_codes WHERE grant_id IS NULL AND expires_at <= now()",
-        "DELETE FROM mcp_clients WHERE id IN (
-            SELECT client.id FROM mcp_clients client
-            WHERE client.created_at <= now() - interval '30 days'
-                AND NOT EXISTS (SELECT 1 FROM mcp_grants WHERE client_id = client.id)
-                AND NOT EXISTS (SELECT 1 FROM mcp_codes WHERE client_id = client.id)
-            FOR UPDATE OF client SKIP LOCKED
-        )",
     ] {
         query(statement).execute(&mut *transaction).await?;
     }
+
+    let unused_clients: Vec<(String,)> = query_as(
+        "SELECT client.id FROM mcp_clients client
+        WHERE client.created_at <= now() - interval '30 days'
+            AND NOT EXISTS (SELECT 1 FROM mcp_grants WHERE client_id = client.id)
+            AND NOT EXISTS (SELECT 1 FROM mcp_codes WHERE client_id = client.id)
+        FOR UPDATE OF client SKIP LOCKED",
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
+    let client_ids: Vec<String> = unused_clients.into_iter().map(|(id,)| id).collect();
+
+    // Consent may have committed after the candidate snapshot, before we acquired
+    // its client lock. A separate statement sees those references; the locks
+    // prevent any new consent from adding references between this check and DELETE.
+    query(
+        "DELETE FROM mcp_clients client WHERE client.id = ANY($1)
+        AND NOT EXISTS (SELECT 1 FROM mcp_grants WHERE client_id = client.id)
+        AND NOT EXISTS (SELECT 1 FROM mcp_codes WHERE client_id = client.id)",
+    )
+    .bind(client_ids)
+    .execute(&mut *transaction)
+    .await?;
+
     transaction.commit().await
 }
