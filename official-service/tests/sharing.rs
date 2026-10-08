@@ -1146,6 +1146,98 @@ async fn shared_tasks_record_the_verified_author_and_only_the_owner_can_delete()
 }
 
 #[tokio::test]
+async fn members_cannot_rewrite_or_resume_another_authors_task() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let (cookie, session) = member(&relay, "task-editor@example.test").await;
+    let (other_cookie, other_session) = member(&relay, "other-author@example.test").await;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let tasks = format!("/api/installations/{id}/api/tasks");
+    let input = json!({
+        "name": "Paused commitment",
+        "prompt": "Owner-approved work",
+        "agentId": leo_agent_manager::config::MAIN_AGENT_ID,
+        "cron": "0 9 * * *",
+        "timezone": "UTC",
+        "enabled": false,
+    });
+
+    for (author_cookie, author_session, legacy) in [
+        (&relay.cookie, &relay.session, false),
+        (&relay.cookie, &relay.session, true),
+        (&other_cookie, &other_session, false),
+    ] {
+        let mut task: Value = request(&relay, author_cookie, author_session, Method::POST, &tasks)
+            .json(&input)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if legacy {
+            task.as_object_mut().unwrap().remove("authorId");
+            task.as_object_mut().unwrap().remove("authorAccessId");
+            relay
+                .installation
+                .store
+                .save("tasks", task.clone(), "fixture.legacy_task")
+                .await
+                .unwrap();
+        }
+        let path = format!("{tasks}/{}", task["id"].as_str().unwrap());
+
+        for (field, value) in [
+            ("prompt", json!("Unapproved work")),
+            ("cron", json!("* * * * *")),
+            ("timezone", json!("Europe/Paris")),
+            ("enabled", json!(true)),
+            ("worktree", json!(false)),
+        ] {
+            let mut changed = task.clone();
+            changed[field] = value;
+            let response = request(&relay, &cookie, &session, Method::PUT, &path)
+                .json(&changed)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "member changed {field}"
+            );
+        }
+
+        let stored: Vec<Value> = relay
+            .get("/tasks")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let unchanged = stored
+            .iter()
+            .find(|stored| stored["id"] == task["id"])
+            .unwrap();
+        assert_eq!(unchanged["prompt"], "Owner-approved work");
+        assert_eq!(unchanged["enabled"], false);
+
+        let mut changed = task.clone();
+        changed["prompt"] = "Author's updated work".into();
+        assert_eq!(
+            request(&relay, author_cookie, author_session, Method::PUT, &path)
+                .json(&changed)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+    relay.close().await;
+}
+
+#[tokio::test]
 async fn removing_a_task_author_stops_their_schedules_and_preserves_admitted_work() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     let (cookie, session) = member(&relay, "scheduled-author@example.test").await;
