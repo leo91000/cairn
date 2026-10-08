@@ -50,7 +50,7 @@ export default defineConfig({
     { name: 'layout-webkit-chats', testMatch: 'chats.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
     { name: 'layout-chromium-scrolling', testMatch: 'scrolling.spec.ts' },
     { name: 'layout-webkit-scrolling', testMatch: 'scrolling.spec.ts', use: { browserName: 'webkit' } },
-    { name: 'journeys', testMatch: 'workspace.spec.ts', grepInvert: /appearance follows|dark appearance settings/ },
+    { name: 'journeys', testMatch: ['workspace.spec.ts', 'local-login-retirement.spec.ts'], grepInvert: /appearance follows|dark appearance settings/ },
     { name: 'journeys-appearance', testMatch: 'workspace.spec.ts', grep: /appearance follows|dark appearance settings/ },
     { name: 'journeys-accounts', testMatch: 'accounts.spec.ts' },
     { name: 'layout-webkit-accounts', testMatch: 'accounts.spec.ts', use: { browserName: 'webkit', isMobile: true, hasTouch: true } },
