@@ -153,6 +153,10 @@ impl Transport {
         let mut response = Response::builder().status(status);
         if let Some(length) = length {
             response = response.header("content-length", length);
+            if method == "POST" && path.starts_with("/runs/") && path.ends_with("/artifact") {
+                // Proxies may remove HTTP framing; preserve the runner's snapshot length.
+                response = response.header(crate::artifacts::EXPORT_SIZE_HEADER, length);
+            }
         }
         if !kind.is_empty() {
             response = response.header("content-type", kind);

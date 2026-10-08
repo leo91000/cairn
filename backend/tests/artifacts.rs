@@ -13,6 +13,7 @@ use common::{Credentials, RelayContext, eventually, request, send};
 use leo_agent_manager::{
     artifacts::{self, file, sharing},
     config::{Config, MAIN_AGENT_ID, id},
+    nodes::transport::Transport,
     project_workspaces,
     run_status::RunStatus,
     service::Service,
@@ -37,6 +38,69 @@ struct Fixture {
 fn guest_exports() -> Router {
     Router::new().fallback(post(|Json(value): Json<Value>| async move {
         match text(&value, "path") {
+            path if path.starts_with("/tmp/remote") => {
+                let length = match path {
+                    "/tmp/remote-short.md" => Some(18),
+                    "/tmp/remote-long.md" => Some(16),
+                    "/tmp/remote-too-large.md" => Some(file::MAX_FILE + 1),
+                    "/tmp/remote-unknown.md" => None,
+                    "/tmp/remote-empty.md" => Some(0),
+                    _ => Some(17),
+                };
+                let data = if path == "/tmp/remote-empty.md" {
+                    ""
+                } else {
+                    "IyBGaXJzdCByZXZpc2lvbgo="
+                };
+
+                let transport = Arc::new(Transport::default());
+                let node = id();
+                let replying = transport.clone();
+                let worker_node = node.clone();
+                let worker = tokio::spawn(async move {
+                    let command = replying.poll(&worker_node).await.unwrap();
+                    replying
+                        .reply(
+                            &worker_node,
+                            json!({
+                                "id": command["id"],
+                                "status": 200,
+                                "length": length,
+                                "data": data,
+                                "done": true
+                            }),
+                        )
+                        .await
+                        .unwrap();
+                });
+                let mut response = transport
+                    .request(
+                        &node,
+                        "POST",
+                        &format!("/runs/{}/artifact", id()),
+                        Vec::new(),
+                    )
+                    .await
+                    .unwrap();
+                worker.await.unwrap();
+
+                // A streaming intermediary can remove the HTTP framing length.
+                response.headers_mut().remove("content-length");
+                if path == "/tmp/remote-malformed.md" {
+                    response
+                        .headers_mut()
+                        .insert("x-leo-artifact-size", "unknown".parse().unwrap());
+                }
+                if path == "/tmp/remote-conflicting.md" {
+                    response
+                        .headers_mut()
+                        .insert("content-length", "17".parse().unwrap());
+                    response
+                        .headers_mut()
+                        .insert("x-leo-artifact-size", "16".parse().unwrap());
+                }
+                response
+            }
             "/tmp/second.md" => "# Second revision\n".into_response(),
             "/tmp/preview.png" => include_bytes!("../../tests/fixtures/artifacts/thumbnail.png")
                 .as_slice()
@@ -114,6 +178,103 @@ impl Fixture {
     async fn listed(&self) -> Vec<Value> {
         artifacts::list(&self.s, &self.run).await.unwrap()
     }
+}
+
+#[tokio::test]
+async fn publication_through_node_channel_survives_missing_content_length() {
+    let f = Fixture::new().await;
+    let artifact = f
+        .publish(&json!({
+            "path": "/tmp/remote.md",
+            "title": "Remote report",
+            "key": "remote-report"
+        }))
+        .await
+        .expect("A complete node export must publish without HTTP Content-Length");
+    assert_eq!(artifact["size"], 17);
+    let response = download(&f.s, &f.run, &artifact, None).await;
+    assert_eq!(
+        to_bytes(response.into_body(), 1024).await.unwrap(),
+        "# First revision\n"
+    );
+    f.server.abort();
+}
+
+#[tokio::test]
+async fn node_artifact_size_validation_rejects_invalid_and_incomplete_exports() {
+    let f = Fixture::new().await;
+    for (path, status, message) in [
+        (
+            "/tmp/remote-short.md",
+            503,
+            "Artifact transfer was incomplete. Retry publication.",
+        ),
+        (
+            "/tmp/remote-long.md",
+            400,
+            "Artifact changed during transfer. Finish writing it before publishing.",
+        ),
+        (
+            "/tmp/remote-too-large.md",
+            413,
+            "Artifact exceeds the 512 MiB file limit.",
+        ),
+        (
+            "/tmp/remote-unknown.md",
+            400,
+            "Artifact size is unknown. The export must declare its snapshot size.",
+        ),
+        (
+            "/tmp/remote-malformed.md",
+            400,
+            "Invalid artifact snapshot size header.",
+        ),
+        (
+            "/tmp/remote-conflicting.md",
+            400,
+            "Artifact size headers disagree.",
+        ),
+    ] {
+        let error = f
+            .publish(&json!({
+                "path": path,
+                "title": "Remote report",
+                "key": "remote-report"
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, status, "{path}: {error}");
+        assert_eq!(error.message, message, "{path}");
+        assert!(f.listed().await.is_empty());
+
+        let directory = f.s.config.data_dir.join("artifacts");
+        if directory.is_dir() {
+            assert_eq!(std::fs::read_dir(directory).unwrap().count(), 0, "{path}");
+        }
+    }
+    f.server.abort();
+}
+
+#[tokio::test]
+async fn empty_node_artifact_is_published_without_http_length() {
+    let f = Fixture::new().await;
+    let artifact = f
+        .publish(&json!({
+            "path": "/tmp/remote-empty.md",
+            "title": "Empty report",
+            "key": "empty-report"
+        }))
+        .await
+        .unwrap();
+    assert_eq!(artifact["size"], 0);
+    let response = download(&f.s, &f.run, &artifact, None).await;
+    assert!(
+        to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    f.server.abort();
 }
 
 /// Downloads an artifact of `run` through the authenticated route handler.

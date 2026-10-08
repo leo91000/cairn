@@ -27,6 +27,8 @@ const MAX_VERSIONS: usize = 500;
 const MAX_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Leading bytes kept to classify the file and excerpt text.
 const SAMPLE_BYTES: usize = 8192;
+/// Snapshot length independent of HTTP framing on remote node exports.
+pub(crate) const EXPORT_SIZE_HEADER: &str = "x-leo-artifact-size";
 const TRANSFER_INTERRUPTED: &str = "Artifact transfer was interrupted. Retry publication.";
 
 pub struct Artifacts {
@@ -156,10 +158,32 @@ struct Download {
 }
 
 async fn receive(response: reqwest::Response, directory: &Path) -> Result<Download> {
-    let expected = response
-        .content_length()
-        .filter(|n| *n <= file::MAX_FILE)
-        .ok_or_else(|| Error::bad("Invalid artifact size."))?;
+    let snapshot_size = response
+        .headers()
+        .get(EXPORT_SIZE_HEADER)
+        .map(|value| {
+            value
+                .to_str()
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| Error::bad("Invalid artifact snapshot size header."))
+        })
+        .transpose()?;
+
+    let framing_size = response.content_length();
+    if let (Some(snapshot), Some(framing)) = (snapshot_size, framing_size)
+        && snapshot != framing
+    {
+        return Err(Error::bad("Artifact size headers disagree."));
+    }
+
+    let expected = snapshot_size.or(framing_size).ok_or_else(|| {
+        Error::bad("Artifact size is unknown. The export must declare its snapshot size.")
+    })?;
+    if expected > file::MAX_FILE {
+        return Err(Error::too_large("Artifact exceeds the 512 MiB file limit."));
+    }
+
     crate::skills::private_dir(directory).await?;
     let temporary = tempfile::NamedTempFile::new_in(directory)?;
     let mut output = tokio::fs::File::from_std(temporary.reopen()?);
@@ -170,6 +194,9 @@ async fn receive(response: reqwest::Response, directory: &Path) -> Result<Downlo
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| Error::unavailable(TRANSFER_INTERRUPTED))?;
         size += chunk.len() as u64;
+        if size > file::MAX_FILE {
+            return Err(Error::too_large("Artifact exceeds the 512 MiB file limit."));
+        }
         if size > expected {
             return Err(Error::bad(
                 "Artifact changed during transfer. Finish writing it before publishing.",
