@@ -1,5 +1,6 @@
 import type { LiveBatch } from '../shared/live'
-import { apiUrl } from './api'
+import { apiUrl, installationTransport } from './api'
+import { observeTransport } from './transport-observation'
 
 export type LiveStatus = 'connecting' | 'live' | 'reconnecting' | 'offline'
 
@@ -46,7 +47,8 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
     }
 
     status(failures ? 'reconnecting' : 'connecting')
-    const current = new EventSource(apiUrl(`${path}?after=${cursor}${history ? `&history=${encodeURIComponent(history)}` : ''}${path === '/chats/stream' ? '' : '&window=1'}`))
+    const route = `${path}?after=${cursor}${history ? `&history=${encodeURIComponent(history)}` : ''}${path === '/chats/stream' ? '' : '&window=1'}`
+    const current = installationTransport.source(route, apiUrl(route))
     source = current
     alive()
     current.addEventListener('ping', () => {
@@ -79,6 +81,9 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
           throw error
         }
 
+        const transport = (current as EventSource & { transportRoute?: 'direct' | 'relay' }).transportRoute
+        if (transport)
+          observeTransport(transport, path, 'STREAM', Number(event.lastEventId))
         cursor = event.lastEventId
         history = batch.history
         failures = 0
@@ -103,6 +108,7 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
     status('offline')
   }
 
+  window.addEventListener('leo-transport-change', connect)
   window.addEventListener('online', connect)
   window.addEventListener('offline', offline)
   window.addEventListener('pageshow', visible)
@@ -113,6 +119,7 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
     close() {
       stopped = true
       disconnect()
+      window.removeEventListener('leo-transport-change', connect)
       window.removeEventListener('online', connect)
       window.removeEventListener('offline', offline)
       window.removeEventListener('pageshow', visible)

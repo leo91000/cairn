@@ -7,6 +7,7 @@ import type {
 import type { McpView } from '../shared/mcp'
 import { reactive, watch } from 'vue'
 import { clearHistoryCache } from './history-cache'
+import { InstallationTransport } from './installation-transport'
 
 // Resolve the official context before any shared view reads its local cache.
 // The native entry keeps its existing unprefixed transport and browser state.
@@ -14,6 +15,7 @@ export const officialEntry = typeof document !== 'undefined' && document.getElem
 const installationId = officialEntry ? /^\/installations\/([\w-]+)(?:\/|$)/.exec(window.location.pathname)?.[1] || '' : ''
 
 export const state = reactive({
+  transportRoute: 'relay' as 'direct' | 'relay',
   ready: false,
   authenticated: false,
   signingOut: false,
@@ -21,6 +23,7 @@ export const state = reactive({
   setupRequired: false,
   csrf: '',
   installationId,
+  installationOnline: undefined as boolean | undefined,
   accountId: '',
   installationRole: 'owner' as 'owner' | 'member',
   agents: [] as Agent[],
@@ -35,6 +38,15 @@ watch(() => state.signingOut || (state.ready && !state.authenticated), (clear) =
   if (clear)
     void clearHistoryCache()
 }, { flush: 'sync' })
+export const installationTransport = new InstallationTransport(state)
+watch(() => [state.ready, state.authenticated, state.installationId, state.signingOut, state.installationOnline], () => {
+  installationTransport.availabilityChanged(state.installationOnline)
+  if (officialEntry && state.ready && state.authenticated && !state.signingOut)
+    installationTransport.start()
+  else if (typeof window !== 'undefined')
+    installationTransport.stop()
+}, { flush: 'sync' })
+
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 export function notify(message: string) {
   state.toast = message
@@ -68,7 +80,7 @@ async function requestApi<T = any>(
   url: string,
   options: RequestInit = {},
 ): Promise<T> {
-  const response = await fetch(url, {
+  const requestOptions = {
     ...options,
     headers: {
       ...(options.body === undefined
@@ -77,7 +89,11 @@ async function requestApi<T = any>(
       'X-CSRF-Token': state.csrf,
       ...options.headers,
     },
-  })
+  }
+  const path = state.installationId && url.startsWith(apiUrl('/')) ? url.slice(apiUrl('').length) : undefined
+  const response = path && !/^\/tokens(?:\/|$)/.test(path)
+    ? await installationTransport.request(path, url, requestOptions)
+    : await fetch(url, requestOptions)
   const data = await response.json()
   if (!response.ok) {
     if (response.status === 401)

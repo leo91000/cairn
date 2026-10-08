@@ -15,8 +15,15 @@ import time
 import uuid
 from pathlib import Path
 
-SCENARIOS = ["same-lan", "nat-client", "nat-installation", "nat-both",
+SCENARIOS = ["same-lan", "mdns-only-client", "nat-client", "nat-installation", "nat-both",
              "udp-blocked", "symmetric-nat", "symmetric-client", "same-server", "network-change", "packet-loss"]
+
+
+def participant_uses_nat(scenario, role):
+    shared_nat = scenario in {"nat-both", "symmetric-nat", "symmetric-client", "same-server"}
+    selected_nat = scenario == "nat-" + role
+    mdns_installation = scenario == "mdns-only-client" and role == "installation"
+    return shared_nat or selected_nat or mdns_installation
 
 
 def run(*args):
@@ -174,7 +181,7 @@ class Network:
             address = f"10.102.{index}.2"
             self.address(participant, endpoint, address + "/24")
             run("ip", "-n", participant, "route", "add", "default", "via", f"10.102.{index}.1")
-            nat = scenario in {"nat-both", "symmetric-nat", "symmetric-client", "same-server"} or scenario == "nat-" + role
+            nat = participant_uses_nat(scenario, role)
             # Private host candidates behind NAT are not internet-routable.
             # Routing them here would create inbound conntrack entries before
             # hole punching and falsely classify the reverse flow as a reply.
@@ -270,10 +277,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("scenario", choices=SCENARIOS)
     parser.add_argument("--probe-only", action="store_true")
-    parser.add_argument("--expect-route", choices=["direct", "relay"], default="relay")
+    parser.add_argument("--expect-route", choices=["direct", "relay"])
     parser.add_argument("--expect-rust-route", choices=["direct", "relay"])
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.expect_route is None:
+        args.expect_route = "relay" if args.scenario in {"mdns-only-client", "udp-blocked", "symmetric-nat", "symmetric-client"} else "direct"
     if args.expect_rust_route is None:
         args.expect_rust_route = "relay" if args.scenario in {"udp-blocked", "symmetric-nat", "symmetric-client"} else "direct"
     def interrupted(_signal, _frame):
@@ -317,11 +326,11 @@ def main():
             stun = network.spawn(stun_namespace, os.sys.executable, str(Path(__file__).resolve()),
                                  "stun-server", listen_address, str(ready))
             wait_ready(ready, stun, "STUN listener before host masquerading")
-            report = {"scenario": args.scenario, "probe": network.probe(binary, "client"),
+            report = {"scenario": args.scenario, "browserHostPolicy": "mdns" if args.scenario == "mdns-only-client" else "numeric", "probe": network.probe(binary, "client"),
                       "installationProbe": network.probe(binary, "installation")}
             expected_received = 0 if args.scenario == "udp-blocked" else 8 if args.scenario == "packet-loss" else 10
             for role, probe in [("client", report["probe"]), ("installation", report["installationProbe"])]:
-                expected_nat = args.scenario in {"nat-both", "symmetric-nat", "symmetric-client", "same-server"} or args.scenario == "nat-" + role
+                expected_nat = participant_uses_nat(args.scenario, role)
                 if probe["received"] != expected_received or probe["translated"] != expected_nat:
                     raise RuntimeError(f"{role}: the observed packets do not match {args.scenario}: {probe}")
                 if (args.scenario == "symmetric-nat" or args.scenario == "symmetric-client" and role == "client") and probe["mappings"] != 2:
@@ -337,7 +346,7 @@ def main():
                 for port in [49011, 49012]:
                     network.listen(binary, installation["namespace"], installation["address"], port)
                 report["peerProbe"] = network.probe(binary, "client", tuple(f"{installation['address']}:{port}" for port in [49011, 49012]))
-                peer_received = 10 if args.scenario == "same-lan" else 0
+                peer_received = 10 if args.scenario != "udp-blocked" else 0
                 if report["peerProbe"]["received"] != peer_received:
                     raise RuntimeError("Peer-to-peer diagnostic packets did not match the scenario")
             args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -355,6 +364,12 @@ def browser(network, binary, directory, args, report):
     script = str(Path(__file__).resolve())
     chromium = run("pnpm", "exec", "node", "--input-type=module", "-e",
                    "import {chromium} from '@playwright/test'; console.log(chromium.executablePath())")
+    # Chromium can emit a numeric srflx candidate even when STUN reports its
+    # untranslated host address. Deny STUN for this client only so the mDNS-only
+    # case has no numeric alternative; the installation still discovers its NAT.
+    if args.scenario == "mdns-only-client":
+        network.exec(network.participants["client"]["namespace"], "iptables", "-A", "OUTPUT",
+                     "-p", "udp", "--dport", "3478", "-j", "DROP")
     env = os.environ.copy()
     for key in ["LEO_AUTH_SOCKET", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "LEO_MCP_RUN_TOKEN",
                 "CODEX_HOME", "OPENAI_API_KEY", "CODEX_API_KEY", "CLAUDE_CONFIG_DIR",
@@ -409,6 +424,18 @@ def browser(network, binary, directory, args, report):
     command = [python, script, "change-network", participant["namespace"], participant["link"], str(directory / "client-proxy")]
     change.write_text("#!/bin/sh\nexec " + shlex.join(command) + "\n")
     change.chmod(0o700)
+    cut = directory / "cut-direct"
+    restore = directory / "restore-direct"
+    for path, action in [(cut, "-I"), (restore, "-D")]:
+        commands = []
+        for chain in ["INPUT", "OUTPUT"]:
+            command = ["sudo", "-n", "ip", "netns", "exec", participant["namespace"],
+                       "iptables", action, chain, "-p", "udp", "-j", "DROP"]
+            commands.append(shlex.join(command))
+        path.write_text("#!/bin/sh\nset -e\n" + "\n".join(commands) + "\n")
+        path.chmod(0o700)
+    env["LEO_NETWORK_CUT_DIRECT"] = str(cut)
+    env["LEO_NETWORK_RESTORE_DIRECT"] = str(restore)
     env["LEO_NETWORK_CHANGE"] = str(change)
     process = subprocess.Popen(["pnpm", "exec", "playwright", "test", "--config", "playwright.network.config.ts"], env=env, start_new_session=True)
     network.children.append(process)

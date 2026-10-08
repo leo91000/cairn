@@ -36,6 +36,8 @@ test('claims an installation and sends after relay restarts and official session
       WORKSPACE_ROOTS: root,
       NODE_ENV: 'test',
       WORKER_ENABLED: 'false',
+      // This journey deliberately exercises HTTP relay restart/history contracts.
+      LEO_DIRECT_ENABLED: 'false',
       PORT: '0',
       LEO_OFFICIAL_ORIGIN: url,
       LEO_INSTALLATION_CLAIM_CODE: code,
@@ -71,6 +73,8 @@ test('claims an installation and sends after relay restarts and official session
       WORKSPACE_ROOTS: root,
       NODE_ENV: 'test',
       WORKER_ENABLED: 'false',
+      // This journey deliberately exercises HTTP relay restart/history contracts.
+      LEO_DIRECT_ENABLED: 'false',
       PORT: '0',
     })
     await expect(availability).toHaveText('Online', { timeout: 15000 })

@@ -66,7 +66,9 @@ async fn direct_read(
     installation: &str,
     path: &str,
     config: PeerConfig,
+    phase: &mut &'static str,
 ) -> TestResult<(Vec<u8>, String, String)> {
+    *phase = "session";
     let session: Value = http
         .get(format!("{origin}/api/account/session"))
         .header("cookie", cookie)
@@ -77,6 +79,7 @@ async fn direct_read(
         .await?;
     let csrf = session["csrf"].as_str().ok_or("Fixture session missing")?;
     let (events, mut candidates) = mpsc::channel(32);
+    *phase = "peer";
     let peer: Arc<dyn PeerConnection> = Arc::new(
         PeerConnectionBuilder::new()
             .with_configuration(
@@ -103,6 +106,7 @@ async fn direct_read(
             .find_map(|line| line.strip_prefix("a=fingerprint:"))
             .ok_or("DTLS fingerprint missing")?;
 
+        *phase = "authorize";
         let response: Value = http
             .post(format!(
                 "{origin}/api/installations/{installation}/direct/authorize"
@@ -139,6 +143,7 @@ async fn direct_read(
             "{origin}/api/installations/{installation}/direct/{}",
             grant.claims.connection_id
         );
+        *phase = "offer";
         peer.set_local_description(offer.clone()).await?;
         send_signal(
             http,
@@ -148,6 +153,7 @@ async fn direct_read(
             &DirectSignal::Offer { sdp: offer.sdp },
         )
         .await?;
+        *phase = "signals";
         let mut signals = http
             .get(format!("{base}/events"))
             .header("cookie", cookie)
@@ -158,6 +164,7 @@ async fn direct_read(
         let mut buffered = String::new();
         let mut early = Vec::new();
         let mut answered = false;
+        *phase = "ice";
         loop {
             tokio::select! {
                 Some(candidate) = candidates.recv() => send_signal(http, &base, cookie, csrf, &candidate).await?,
@@ -216,6 +223,7 @@ async fn direct_read(
             }
         }
 
+        *phase = "request";
         let request = Frame::Request(ApiRequest {
             id: "bench-read".into(),
             account_id: String::new(),
@@ -235,6 +243,7 @@ async fn direct_read(
         }
 
         let mut decoder = FrameDecoder::default();
+        *phase = "response";
         loop {
             match channel.poll().await {
                 Some(DataChannelEvent::OnMessage(message)) if !message.is_string => {
@@ -316,6 +325,7 @@ async fn main() -> TestResult<()> {
         .to_str()?
         .to_owned();
     let relay_body = relay.bytes().await?;
+    let mut phase = "initial";
     let direct = direct_read(
         &http,
         &args[1],
@@ -323,8 +333,17 @@ async fn main() -> TestResult<()> {
         &args[2],
         &args[3],
         PeerConfig::load()?,
+        &mut phase,
     )
     .await;
+    // Fixed phase/deadline metadata only. SDK/HTTP error text can contain URLs
+    // or signaling details, so never put it in qualification artifacts.
+    let direct_failure = direct.as_ref().err().map(|error| {
+        json!({
+            "phase": phase,
+            "timedOut": error.to_string() == "Direct negotiation timed out",
+        })
+    });
     let (body, route, candidates) = match direct {
         Ok((body, local, remote)) => (
             body,
@@ -343,6 +362,7 @@ async fn main() -> TestResult<()> {
             "status": 200,
             "elapsedMs": started.elapsed().as_millis(),
             "candidatePair": candidates,
+            "directFailure": direct_failure,
         })
     );
     Ok(())

@@ -28,6 +28,7 @@ Each command launches a complete authenticated Chromium session and a Rust clien
 
 ```sh
 python3 tests/network-bench.py same-lan --output test-results/network/same-lan.json
+python3 tests/network-bench.py mdns-only-client --output test-results/network/mdns-only-client.json
 python3 tests/network-bench.py nat-client --output test-results/network/nat-client.json
 python3 tests/network-bench.py nat-installation --output test-results/network/nat-installation.json
 python3 tests/network-bench.py nat-both --output test-results/network/nat-both.json
@@ -56,7 +57,8 @@ only the standard library and never serves installation data.
 
 | Scenario | Actual topology / constraint |
 | --- | --- |
-| same-lan | Browser and installation share the same LAN bridge/subnet. |
+| same-lan | Browser and installation share the same LAN bridge/subnet; numeric host candidates. |
+| mdns-only-client | Chromium default mDNS privacy on an untranslated client, with client STUN UDP blocked after topology probes; the installation retains STUN, NAT and inbound filtering. Ignored client `.local` candidates leave no usable numeric hole-punch path; the browser uses relay and the numeric Rust client uses direct. |
 | nat-client | Stateful source NAT and unsolicited inbound filtering on the client router. |
 | nat-installation | The same constraint on the installation router. |
 | nat-both | Independent NAT/filtering on both sides. |
@@ -85,32 +87,68 @@ content and are not a WebRTC peer or an anonymous local installation interface.
 The JSON report contains the topology probes, expected route and successful
 application observations: browser send, Rust read, and stream resume after a
 network change. Each includes `route`, `operation` and monotonic `elapsedMs`.
-Browser evidence comes from successful requests to the actual official
-`/api/installations/{id}/api/...` endpoint, followed by visible conversation data;
-Rust first verifies the same conversation marker through that endpoint, then
-requests a signed grant and negotiates with the real installation DataChannel.
-It records `direct` only after receiving the API response on that channel and
-observing its selected UDP ICE pair (`candidatePair.local` / `.remote`).
-The Rust negotiation uses the protocol's 30-second request deadline, matching
-the installation peer and allowing ICE/DTLS retransmissions under packet loss.
-Relay evidence reads the official response's `x-leo-transport` header; neither
-client uses a fixed route label. Anonymous
-requests fail, anonymous installation loopback access fails, and the old official
-cookie fails after logout. The network-change scenario measures from the address
-change to a fresh message observed through the resumed stream, with a 30-second
-upper bound, then checks a Rust read and the retained conversation. The address
-really changes; restarting only the test TCP forwarder closes old sockets even
-on kernels without socket-destroy support. The browser and session stay alive.
+Browser evidence comes from the web transport's `leo-transport-observation`
+events after successful API responses and accepted live batches, followed by
+visible conversation data. Finite relay responses use `x-leo-transport: relay`;
+direct responses arrive through the real authorized DataChannel. The observer
+contains no payload or credentials. The default-route indicator alone is not
+evidence of a successful application request.
 
-The browser stays on **relay** until #103. The installation peer (#101) and real
-Rust DataChannel client expect **direct** for LAN, ordinary NAT, network change
-and packet loss; UDP blocked, symmetric NAT and symmetric client expect **relay**. The Rust read
-falls back only to its already successful safe HTTPS read; it never retries a
-mutation. `--expect-rust-route` can specify a scenario's expectation;
-`--expect-route` controls the browser expectation. A route mismatch fails the
-bench. Network-change duration remains **browser relay stream recovery**, not a
-direct-to-relay measurement; the subsequent Rust read negotiates a fresh peer.
-Client route switching and direct stream recovery qualification remain #103–#105.
+Rust first verifies the same conversation marker through HTTPS, then requests a
+signed grant and negotiates with the real installation DataChannel. It records
+`direct` only after the API response arrives on that channel and a selected UDP
+ICE pair is observed (`candidatePair.local` / `.remote`). Both clients expect
+**direct** for LAN, ordinary NAT, network change, same-server and packet loss;
+UDP blocked, symmetric NAT and symmetric client expect **relay**. In the
+additional mDNS-only client case, the browser expects relay and Rust expects direct. Neither uses
+a fixed route label. `--expect-route` and `--expect-rust-route` override the
+scenario defaults; a mismatch fails the bench.
+
+With Rust direct expected, packet-loss qualification samples three independent
+Rust negotiations. At least
+one must deliver its read directly; all three on relay fail qualification.
+Individual relay reads are accepted only with the fixed diagnostic
+`directFailure: { phase: "ice", timedOut: true }`, since the deterministic router
+also drops handshake packets and ICE retains its strict 30-second limit.
+Other failures and all other scenario route expectations remain strict. Every
+sample's actual route stays in the report, including successful fallback reads.
+
+The numeric qualification browser is launched with Chromium's
+`--disable-features=WebRtcHideLocalIpsWithMdns` option so that host-candidate ICE
+paths can be tested explicitly. The production web does not set this option or
+request media permission. The additional `mdns-only-client` scenario keeps Chromium's
+default privacy policy with client STUN denied against an inbound-filtered installation; following #117,
+ignored `.local` candidates and no usable numeric alternative must leave application traffic on the authenticated relay.
+Both policies and actual operation routes are recorded in the same bench report.
+The mDNS-only case also records and asserts that every real browser ICE candidate
+is a `.local` host candidate, with no numeric reflexive alternative.
+
+Same-LAN also exercises a browser-facing local-network permission denial:
+CDP denies Chromium's `local-network-access` permission, and an init script
+injects `NotAllowedError` at `RTCPeerConnection.createOffer`. The real
+installation, relay, API reads and live stream remain active; observations must
+show relay and the page must have no unhandled error. This checks the web's
+refusal path, not an actual native permission prompt: the fixture's origin is
+loopback, outside the public-to-local origin transition described by
+[Chrome's LNA guidance](https://developer.chrome.com/blog/local-network-access).
+That guidance also still lists WebRTC gating as a limitation. Native prompt
+qualification on a public HTTPS origin remains #105.
+
+The network-change scenario measures the real direct-to-relay stream recovery,
+then checks reestablishment of direct and a Rust read. Same-LAN also blocks all
+client UDP during a browser message send: the message must arrive once, the
+live stream must resume on relay within 25 seconds, and the message list must
+contain one client submission. Restoring UDP must reestablish direct. An official
+restart then replaces the signing key; fresh negotiation and subsequent logout
+revocation are exercised without restarting the browser or installation.
+
+Same-LAN and UDP-blocked exercise member removal, logout (including another tab
+of the same session) and detachment during active browser streams on the selected
+route. The removed member receives no further accepted batches, while the owner's
+stream continues. Access checks deny the removed/detached account immediately;
+logout redirects the session's pages to sign-in. Reports retain the checked
+revocation scopes. Anonymous requests and installation loopback access still
+fail. Qualification across Android and production hosts remains #105.
 
 `udp-blocked` demonstrates that the existing relay remains usable even when every
 UDP probe fails. The existing `journeys-official-relay` and Rust relay/security

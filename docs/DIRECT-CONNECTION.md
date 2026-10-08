@@ -2,9 +2,9 @@
 
 Decision: [ADR-0033](adr/0033-direct-connection-with-relay-fallback.md). This
 document describes the data path, what the official service observes, the
-switching rules and the validation plan. Status: installation peer and control plane delivered; web/Android route selection remains planned (parent issue
+switching rules and the validation plan. Status: installation peer and control plane delivered; web route selection is delivered by #103; Android remains planned (parent issue
 [#98](https://github.com/leo91000/leo-agent-manager/issues/98)); the existing relay ([INSTALLATION-RELAY.md](INSTALLATION-RELAY.md))
-remains the interface transport and the fallback.
+remains the bootstrap transport and the fallback.
 
 ## Data path
 
@@ -144,9 +144,8 @@ emulator through simulated networks:
 ## Delivered control plane (#100)
 
 The authorization/signaling contract is implemented in protocol v4; the WebRTC
-peer is delivered by #101; web/Android data transports remain #103/#104. No inbound local
-browser access or local password is introduced. The current shipped data path
-continues to use the relay.
+peer is delivered by #101; the web transport is delivered by #103; Android remains #104. No inbound local
+browser access or local password is introduced. The web starts on the relay before negotiating direct connectivity.
 
 All routes use the official session and installation access checks (foreign,
 unknown, detached or removed-member installations return 404). POST also requires
@@ -198,7 +197,7 @@ The peer requires exactly one reliable, ordered DataChannel named `leo.v4`.
 Trickle candidates use the existing authenticated signal routes. A failed peer,
 malformed frame, saturated ingress or duplicate channel closes only that direct
 connection; the HTTPS relay remains available. Clients negotiate a fresh grant
-after a closed connection; safe retry and route selection remain #103/#104.
+after a closed connection; the web applies safe retry and route selection (#103); Android remains #104.
 
 ### STUN and configuration
 
@@ -248,5 +247,82 @@ before shutting down UDP sockets.
 The Rust network client records `direct` only after an authenticated API response
 arrives over this DataChannel and a selected UDP ICE candidate pair is observed.
 Relay observations come from the official response's `x-leo-transport: relay`
-header. Browsers still use the relay until #103; this distinction prevents the
+header. The web reports successful API/stream traffic through its transport observer (#103); this distinction prevents the
 bench from mistaking UDP probe reachability for an authorized direct connection.
+
+## Delivered web transport (#103)
+
+The official document starts every request and live subscription on the existing
+HTTPS relay. Native `RTCPeerConnection` establishes one reliable ordered `leo.v4`
+channel in the background, using the official grant, signal routes and STUN URLs.
+A discreet **Direct / Relais** indicator describes the current default route;
+individual successful API responses and accepted live batches emit a
+`leo-transport-observation` event containing only route, method, path and cursor.
+The bench observes these application events, never infers a route from ICE state.
+Binary resource URLs and non-JSON uploads continue through the relay.
+
+Grant renewal runs 30 seconds before the signed deadline, with a minimum
+10-second delay; the local expiry timer remains armed until renewal is accepted.
+If renewal does not extend a session-capped deadline, no further renewal is
+attempted for that lease. A 30-second negotiation deadline,
+10-second application heartbeat (a protocol HEAD request, with a
+5-second response deadline starting after transmission), channel closure, ICE failure and signaling-reader loss all
+return traffic to the relay. Unsupported clients/installations and refused local
+network permission cause no visible connection error. Temporary failures retry
+with exponential backoff from 30 seconds to five minutes, reset when an
+authorized channel opens. `available: false`,
+403 and permission denial stop direct attempts until the session or network
+changes; a capacity 503 backs off while the relay remains usable. A recovery
+observed by the existing installation availability check also resumes
+negotiation, covering official restart/tunnel reconnection without polling
+incompatible installations through the direct endpoints. Offline and
+hidden documents do not negotiate. An established peer in a hidden document
+closes after a 30-second grace period, stopping signaling, renewal and heartbeat;
+visibility restores negotiation. Network-information changes are debounced by
+one second, while online/offline events act immediately.
+
+A local closing channel or exhausted direct slots cannot dispatch a request:
+the operation uses fallback capacity, including mutations and live subscriptions.
+Once a complete request frame has been sent, the switching rules above apply.
+The client response deadline is 35 seconds, allowing the dispatcher's 30-second
+504 to arrive first; expiration cancels only that request, preserving other
+requests and streams on the peer. A locally saturated heartbeat waits for its
+next interval instead of closing a healthy peer. Outgoing frames interleave one
+16 KiB fragment at a time, so large uploads do not monopolize reads, credits or
+heartbeats; conservative payload reservations preserve the peer's aggregate
+reassembly limits.
+
+Network Information `change` and browser `online` events restart ICE through a
+**fresh peer and fresh authorization**, with `iceRestart: true`, while the relay
+serves traffic. This deliberately preserves #101's refusal of renegotiation and
+second channels instead of extending the installation peer in the web ticket.
+The old channel is closed; signals from an older negotiation cannot reactivate it.
+A failed peer detected without a browser network notification follows the same
+fallback/fresh-negotiation path. The server still closes old-key leases on tunnel
+reconnection and scoped revocation, independently of the browser.
+
+Reads interrupted in flight retry through HTTPS. Message sends retry with the
+unchanged client ID/body; the exact existing "identifier already used" conflict
+counts as delivery. Abort signals and other mutations are never retried. Live
+subscriptions use the existing accepted cursor/history logic on both routes;
+callbacks from replaced subscriptions are ignored. Closing a subscription cancels
+its request, and transport changes never cancel agent execution.
+
+The browser implements the existing binary envelope without changing the wire
+protocol: 16 KiB packets, 13-byte headers, base64 bodies, 32 in-flight requests,
+eight streams per account (the installation also enforces its global limits),
+8 MB bodies, 64 KiB credited chunks and 30-second deadlines. Reassembly bounds
+incomplete transfers, aggregate buffered bytes and assembly age. The sender waits
+on `bufferedAmount` before exceeding 64 KiB; aborting a partially sent frame sends
+the existing zero-length abandonment envelope before cancellation.
+
+Following the decision recorded in #117, the web ignores mDNS `.local` candidates
+before signaling or passing them to the WebRTC implementation. Numeric host and
+server-reflexive candidates use the existing authenticated verifier and official
+STUN module. Loopback, unspecified, link-local, multicast and broadcast
+destinations are filtered too, including their IPv4-mapped IPv6 forms; private
+unicast remains useful on authenticated LAN/VPN paths. The filter applies to
+offer/answer candidate lines and trickle in both directions. A single 400/429
+candidate refusal does not abandon negotiation with other usable candidates.
+If no usable numeric path exists, the relay remains available. The
+installation resolver/listener hardening belongs to #117.
