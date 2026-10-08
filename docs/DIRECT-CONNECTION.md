@@ -241,7 +241,8 @@ an incomplete transfer without dispatch. Unknown versions, duplicate starts,
 invalid offsets, text messages or excessive sizes close the direct connection.
 
 Reassembly retains at most 32 incomplete transfers per channel and a 30-second
-assembly deadline. **All installation peers share a `2 * MAX_FRAME` reservation
+idle deadline, measured from the last valid fragment. Active interleaved uploads
+can exceed thirty seconds overall. **All installation peers share a `2 * MAX_FRAME` reservation
 budget** (about 21.5 MB). One `MAX_FRAME` is reserved for the owner; all members
 share the other. Each verified account can reserve at most `MAX_FRAME` across
 its peers, and each peer has the same declared-size cap. Each transfer reserves
@@ -249,7 +250,9 @@ its declared total before buffering; completion, abandonment, timeout,
 connection closure or panic releases that reservation. A shortage on a peer
 without incomplete assemblies applies backpressure: it retains one packet of
 at most 16 KiB while its bounded SCTP receive buffer pauses input. Expiry still
-runs during this wait and releases the holder's reservation after 30 seconds.
+runs during this wait and releases the holder's reservation after 30 seconds
+without valid fragment progress, including while a rejection waits on the
+bounded response queue.
 If the waiting channel already holds assemblies, blocking its ordered input
 would prevent their completion. Instead, only the new transfer is rejected:
 a request receives a 503 using its initial fragment's bounded request ID.

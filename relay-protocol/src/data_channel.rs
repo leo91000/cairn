@@ -147,7 +147,7 @@ struct Assembly {
     _reservation: Reservation,
     total: usize,
     bytes: Vec<u8>,
-    started: Instant,
+    last_progress: Instant,
 }
 
 #[derive(Default)]
@@ -168,7 +168,7 @@ impl FrameDecoder {
 
     pub fn expire(&mut self) {
         self.pending.retain(|id, frame| {
-            if frame.started.elapsed() < REQUEST_TIMEOUT {
+            if frame.last_progress.elapsed() < REQUEST_TIMEOUT {
                 return true;
             }
 
@@ -252,7 +252,7 @@ impl FrameDecoder {
                     _reservation: reservation,
                     total,
                     bytes: Vec::new(),
-                    started: Instant::now(),
+                    last_progress: Instant::now(),
                 },
             );
         }
@@ -267,6 +267,7 @@ impl FrameDecoder {
             frame.bytes.reserve_exact(capacity - frame.bytes.len());
         }
         frame.bytes.extend(payload);
+        frame.last_progress = Instant::now();
         self.buffered += payload.len();
         if frame.bytes.len() != total {
             return Ok(None);

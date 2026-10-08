@@ -1312,6 +1312,67 @@ async fn interleaved_uploads_on_one_peer_reject_only_the_excess_transfer() {
 }
 
 #[tokio::test]
+async fn an_upload_making_progress_survives_beyond_thirty_seconds() {
+    let router = axum::Router::new().route(
+        "/api/fixture/upload",
+        axum::routing::post(|bytes: axum::body::Bytes| async move { bytes.len().to_string() }),
+    );
+    let mut relay = RelayedInstallation::new(router).await;
+    production_connector(&mut relay).await;
+    let (peer, channel, _) = client(&relay).await;
+    let Frame::Request(mut input) = request("progressing-upload", "/api/fixture/upload") else {
+        unreachable!()
+    };
+    input.method = "POST".into();
+    input.body = vec![0xAB; 40_000];
+    let encoded =
+        leo_relay_protocol::data_channel::EncodedFrame::new(1, &Frame::Request(input)).unwrap();
+    let mut packets = encoded.packets();
+    channel
+        .send(bytes::BytesMut::from(packets.next().unwrap().as_slice()))
+        .await
+        .unwrap();
+    send_frame(channel.as_ref(), 2, &request("start-barrier", "/api/chats")).await;
+    assert!(
+        matches!(response(channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+
+    tokio::time::sleep(Duration::from_secs(16)).await;
+    channel
+        .send(bytes::BytesMut::from(packets.next().unwrap().as_slice()))
+        .await
+        .unwrap();
+    send_frame(
+        channel.as_ref(),
+        3,
+        &request("progress-barrier", "/api/chats"),
+    )
+    .await;
+    assert!(
+        matches!(response(channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+
+    // Total age exceeds thirty seconds; valid progress kept each idle gap shorter.
+    tokio::time::sleep(Duration::from_secs(16)).await;
+    for packet in packets {
+        channel
+            .send(bytes::BytesMut::from(packet.as_slice()))
+            .await
+            .unwrap();
+    }
+    assert!(
+        matches!(response(channel.as_ref()).await, Frame::Response(reply) if reply.id == "progressing-upload" && reply.status == 200 && reply.body == b"40000")
+    );
+    send_frame(channel.as_ref(), 4, &request("after-upload", "/api/chats")).await;
+    assert!(
+        matches!(response(channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
+    );
+    assert!(!relay.installation.shutdown.is_cancelled());
+    peer.close().await.unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
 async fn reservations_expire_even_when_the_peer_stops_reading_rejections() {
     let router = axum::Router::new()
         .route(
