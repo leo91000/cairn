@@ -303,18 +303,29 @@ it('starts a fresh authorized ICE negotiation on a network change while continui
   await vi.waitFor(() => expect(offer).toHaveBeenLastCalledWith({ iceRestart: true }))
 })
 
-it('signals mDNS candidates unchanged and keeps binary resources on the relay', async () => {
+it('ignores mDNS candidates, signals numeric candidates and keeps binary resources on the relay', async () => {
   const { api, apiResourceUrl } = await direct()
   const candidate = 'candidate:1 1 udp 2122260223 browser.local 1234 typ host'
   Peer.all[0].onicecandidate({ candidate: { candidate, sdpMid: '0', sdpMLineIndex: 0 } })
-  await vi.waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/installations/install/direct/connection/signal', expect.objectContaining({
-    body: JSON.stringify({
+  const signalCalls = () => vi.mocked(fetch).mock.calls.filter(([url, options]) => String(url).endsWith('/signal') && JSON.parse(String(options?.body)).kind === 'candidate')
+  await vi.advanceTimersByTimeAsync(0)
+  expect(signalCalls()).toHaveLength(0)
+  const addCandidate = vi.spyOn(Peer.prototype, 'addIceCandidate')
+  Source.all[0].dispatchEvent(new MessageEvent('signal', {
+    data: JSON.stringify({
       kind: 'candidate',
       candidate,
       sdp_mid: '0',
       sdp_m_line_index: 0,
     }),
-  })))
+  }))
+  await vi.advanceTimersByTimeAsync(0)
+  expect(addCandidate).not.toHaveBeenCalled()
+
+  const numeric = candidate.replace('browser.local', '192.168.1.10')
+  Peer.all[0].onicecandidate({ candidate: { candidate: numeric, sdpMid: '0', sdpMLineIndex: 0 } })
+  await vi.waitFor(() => expect(signalCalls()).toHaveLength(1))
+  expect(JSON.parse(String(signalCalls()[0][1]?.body)).candidate).toBe(numeric)
   expect(apiResourceUrl('/api/chats/c/attachments/file')).toBe('/api/installations/install/api/chats/c/attachments/file')
   await api('/chats/c/attachments', { method: 'POST', body: new Blob(['binary']) })
   expect(fetch).toHaveBeenLastCalledWith('/api/installations/install/api/chats/c/attachments', expect.objectContaining({ body: expect.any(Blob) }))

@@ -27,7 +27,7 @@ interface GrantResponse {
 
 // #117: no hostname resolution. Unusable mDNS candidates keep the relay available.
 function mdnsCandidate(candidate: string) {
-  return candidate.split(' ')[4]?.toLowerCase().endsWith('.local') || false
+  return candidate.trim().split(/\s+/)[4]?.toLowerCase().endsWith('.local') || false
 }
 
 // One transport per document/current installation. Signaling always uses HTTPS.
@@ -242,7 +242,8 @@ export class InstallationTransport {
       }
 
       // Send the offer before trickled candidates, using the certificate above.
-      const sdp = (offer.sdp || '').split('\r\n').filter(line => !line.startsWith('a=candidate:') || !mdnsCandidate(line.slice(2))).join('\r\n').replace(/a=fingerprint:sha-256 (.*)/g, (_, digest: string) => `a=fingerprint:sha-256 ${digest.toUpperCase()}`)
+      const numericOffer = (offer.sdp || '').split('\r\n').filter(line => !line.startsWith('a=candidate:') || !mdnsCandidate(line.slice(2))).join('\r\n')
+      const sdp = numericOffer.replace(/a=fingerprint:sha-256 (.*)/g, (_, digest: string) => `a=fingerprint:sha-256 ${digest.toUpperCase()}`)
       await peer.setLocalDescription({ type: 'offer', sdp })
       if (!current())
         return

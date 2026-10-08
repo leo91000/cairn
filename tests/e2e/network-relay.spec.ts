@@ -44,6 +44,14 @@ test('authenticated browser and Rust client keep using the observed route under 
     let service = official()
     browser = await chromium.launch({ executablePath: process.env.LEO_NETWORK_CHROMIUM })
     const page = await browser.newPage()
+    const leases: string[] = []
+    page.on('response', async (response) => {
+      if (response.url().endsWith('/direct/authorize') && response.ok()) {
+        const authorization = await response.json().catch(() => undefined)
+        if (authorization?.available)
+          leases.push(authorization.grant.claims.connection_id)
+      }
+    })
 
     interface Observation {
       route: string
@@ -182,9 +190,14 @@ test('authenticated browser and Rust client keep using the observed route under 
     }
 
     if (process.env.LEO_NETWORK_SCENARIO === 'same-lan') {
+      const oldLease = leases.at(-1)
+      const leaseCount = leases.length
       await fixture.stop(service)
       service = official()
       await expect.poll(() => fetch(`${url}/health`).then(response => response.ok).catch(() => false)).toBe(true)
+      await expect(page.getByRole('status', { name: 'Connection route' })).toHaveAttribute('data-transport-route', 'direct', { timeout: 40000 })
+      await expect.poll(() => leases.length, { timeout: 40000 }).toBeGreaterThan(leaseCount)
+      expect(leases.at(-1)).not.toBe(oldLease)
       await expect(page.getByRole('status', { name: 'Connection route' })).toHaveAttribute('data-transport-route', 'direct', { timeout: 40000 })
       // Logout below must still revoke the fresh lease signed under the new key.
     }

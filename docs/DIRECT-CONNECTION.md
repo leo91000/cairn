@@ -293,7 +293,8 @@ incomplete transfers, aggregate buffered bytes and assembly age. The sender wait
 on `bufferedAmount` before exceeding 64 KiB; aborting a partially sent frame sends
 the existing zero-length abandonment envelope before cancellation.
 
-mDNS `.local` candidates pass unchanged through the authenticated, bounded
-signaling verifier and the delivered installation resolver. #117 has no recorded
-mDNS decision yet; this delivery retains that contract and introduces no extra
-resolver or listener. Its installation-side hardening stays in #117.
+Following the decision recorded in #117, the web ignores mDNS `.local` candidates
+before signaling or passing them to the WebRTC implementation. Numeric host and
+server-reflexive candidates use the existing authenticated verifier and official
+STUN module. If no usable numeric path exists, the relay remains available. The
+installation resolver/listener hardening belongs to #117.
