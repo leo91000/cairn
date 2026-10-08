@@ -340,7 +340,7 @@ jobs:
         with:
           name: browser-backend
           path: target/debug/
-      - run: chmod +x target/debug/leo target/debug/leo-official target/debug/examples/network_direct_client
+      - run: chmod +x target/debug/leo target/debug/leo-official target/debug/examples/network_direct_client target/debug/examples/network_stun_server
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
