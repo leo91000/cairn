@@ -131,6 +131,51 @@ test('signing out closes live subscriptions before the session is revoked', asyn
   expect(unauthorized).toEqual([])
 })
 
+test('signIn settles an authenticated root redirect before reloading', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  await page.goto(workspace.url)
+  await authenticateWorkspace(page)
+  await expect(page.getByRole('heading', { name: 'Fil', exact: true })).toBeVisible()
+
+  // Keep the transient authenticated root observable before its navigation
+  // begins. A stalled destination request alone makes Playwright locators wait
+  // for navigation, hiding the race rather than exercising it.
+  await page.addInitScript((installationId) => {
+    if (location.pathname !== '/')
+      return
+    const target = window as typeof window & { releaseRootNavigation?: () => void }
+    let destination = ''
+    let blocked = true
+    window.navigation?.addEventListener('navigate', (event) => {
+      if (blocked && event.cancelable && new URL(event.destination.url).pathname === `/installations/${installationId}/`) {
+        event.preventDefault()
+        destination = event.destination.url
+      }
+    })
+    target.releaseRootNavigation = () => {
+      blocked = false
+      if (destination)
+        location.assign(destination)
+    }
+  }, workspace.installationId)
+  await page.goto(workspace.url, { waitUntil: 'commit' })
+  await expect(page.getByRole('button', { name: 'Sign out', exact: true, includeHidden: true }).first()).toBeAttached()
+  const reload = page.reload.bind(page)
+  page.reload = async (options) => {
+    expect(new URL(page.url()).pathname, 'the fixture must settle the root redirect before reload').toBe(`/installations/${workspace.installationId}/`)
+    return reload(options)
+  }
+
+  const authenticated = authenticateWorkspace(page).then(() => undefined, error => error)
+  // A controlled navigation stall exposes the transient authenticated root;
+  // this is fault injection, not extra time for a success assertion.
+  await page.waitForTimeout(500)
+  await page.evaluate(() => (window as typeof window & { releaseRootNavigation?: () => void }).releaseRootNavigation?.())
+  expect(await authenticated).toBeUndefined()
+  await expect(page).toHaveURL(new RegExp(`/installations/${workspace.installationId}/$`))
+  await expect(page.getByRole('heading', { name: 'Fil', exact: true })).toBeVisible()
+})
+
 test('two independent clients follow deltas, recover offline, refresh mid-answer and survive a server restart', async ({ page, browser, workspace }) => {
   test.setTimeout(90000)
   initializeRepository(workspace.projectPath)
@@ -166,7 +211,7 @@ test('two independent clients follow deltas, recover offline, refresh mid-answer
     requests.length = 0
     await second.setOffline(true)
     await expect(message(page)).toContainText('020')
-    await expect(other.getByRole('status').filter({ hasText: /Offline|Reconnecting/ })).toBeVisible()
+    await expect(other.getByRole('region', { name: 'Chat workspace', exact: true }).getByRole('status').filter({ hasText: /Offline|Reconnecting/ })).toBeVisible()
     await second.setOffline(false)
     await expect(message(other)).toContainText('025')
     expect(requests.some(url => /\/events\?|\/artifacts$/.test(url))).toBe(false)

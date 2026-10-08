@@ -13,6 +13,7 @@ use rtc::{
 use std::{collections::HashMap, net::IpAddr, sync::Arc};
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use webrtc::{
     data_channel::{DataChannel, DataChannelEvent},
     peer_connection::{
@@ -21,6 +22,9 @@ use webrtc::{
         RTCSessionDescription,
     },
 };
+
+/// Stable lifecycle signal, created inside each spawned peer task.
+pub const PEER_TASK_SPAN: &str = "direct_peer_task";
 
 #[derive(Clone)]
 pub struct PeerConfig {
@@ -198,6 +202,7 @@ pub async fn run(
                         let traffic = traffic.clone();
                         let reassembly = reassembly.clone();
                         let task = jobs.spawn(async move {
+                            let span = tracing::debug_span!(PEER_TASK_SPAN);
                             let failed = CancellationToken::new();
                             let negotiation = Negotiation {
                                 authorization,
@@ -212,7 +217,9 @@ pub async fn run(
                                 failed.clone(),
                                 traffic,
                                 reassembly,
-                            );
+                            )
+                            .instrument(span);
+
                             tokio::select! {
                                 biased;
                                 () = closed.cancelled() => {}
@@ -254,7 +261,6 @@ async fn serve_peer(
     traffic: DirectTraffic,
     reassembly: leo_relay_protocol::data_channel::ReassemblyBudget,
 ) -> Result<()> {
-    tracing::debug!("Authorized direct peer task started");
     let Negotiation {
         authorization,
         sdp,
@@ -378,7 +384,10 @@ async fn serve_peer(
         };
 
         let reader = async {
-            use leo_relay_protocol::data_channel::{DecodeError, FrameDecoder};
+            use leo_relay_protocol::data_channel::{
+                DecodeError, FrameDecoder, REASSEMBLY_REJECTION_CODE,
+                REASSEMBLY_REJECTION_HEADER,
+            };
             let budget = reassembly.for_account(&lease.claims.account_id, lease.claims.role);
             let mut decoder = FrameDecoder::with_budget(budget);
             let mut timeout = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -393,7 +402,7 @@ async fn serve_peer(
                     }
                     event = channel.poll() => match event {
                         Some(DataChannelEvent::OnMessage(message)) if !message.is_string => {
-                            // Keep at most one packet while another peer holds capacity.
+                            // Owner waiters keep at most one packet while capacity is busy.
                             // Self-blocking transfers are rejected so this ordered
                             // channel can finish its already reserved assemblies.
                             let frame = loop {
@@ -408,7 +417,12 @@ async fn serve_peer(
                                                 leo_relay_protocol::ApiResponse {
                                                     id,
                                                     status: 503,
-                                                    headers: Vec::new(),
+                                                    // No request entered the dispatcher: even a
+                                                    // mutation can safely use the relay once.
+                                                    headers: vec![(
+                                                        REASSEMBLY_REJECTION_HEADER.into(),
+                                                        REASSEMBLY_REJECTION_CODE.into(),
+                                                    )],
                                                     body: b"Direct reassembly busy.".to_vec(),
                                                 },
                                             );

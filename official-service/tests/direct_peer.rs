@@ -1017,10 +1017,131 @@ async fn partial_transfer(channel: &dyn DataChannel, id: u32, total: usize) {
 }
 
 #[tokio::test]
-async fn a_member_holding_reassembly_capacity_does_not_disconnect_the_owner() {
+async fn a_member_trickling_every_twenty_nine_seconds_cannot_starve_small_requests() {
     let router = axum::Router::new().route(
         "/api/fixture/echo",
         axum::routing::post(|bytes: axum::body::Bytes| async { bytes }),
+    );
+    let mut relay = RelayedInstallation::new(router).await;
+    production_connector(&mut relay).await;
+    let cookies = common::stream_accounts_with_members(&relay, 2).await;
+    let member_cookie = &cookies[1];
+    let member_session = relay
+        .app
+        .client
+        .get(format!("{}/api/account/session", relay.app.url))
+        .header("cookie", member_cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let (member, member_channel, _) =
+        client_with_fingerprint(&relay, member_cookie, &member_session, false).await;
+    let waiting_cookie = &cookies[2];
+    let waiting_session = relay
+        .app
+        .client
+        .get(format!("{}/api/account/session", relay.app.url))
+        .header("cookie", waiting_cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let (waiting, waiting_channel, _) =
+        client_with_fingerprint(&relay, waiting_cookie, &waiting_session, false).await;
+    let (owner, owner_channel, _) = client(&relay).await;
+    partial_transfer(member_channel.as_ref(), 1, leo_relay_protocol::MAX_FRAME).await;
+    // A successful request on the holder is a barrier: its reservation is live.
+    send_frame(
+        member_channel.as_ref(),
+        2,
+        &request("barrier", "/api/chats"),
+    )
+    .await;
+    assert!(
+        matches!(response(member_channel.as_ref()).await, Frame::Response(reply) if reply.id == "barrier" && reply.status == 200)
+    );
+
+    let started = tokio::time::Instant::now();
+    for offset in 1_u32..=3 {
+        if offset > 1 {
+            tokio::time::sleep_until(started + Duration::from_secs(29 * u64::from(offset - 1)))
+                .await;
+        }
+        let mut packet = vec![1];
+        packet.extend(1_u32.to_be_bytes());
+        packet.extend((leo_relay_protocol::MAX_FRAME as u32).to_be_bytes());
+        packet.extend(offset.to_be_bytes());
+        packet.push(b' ');
+        member_channel
+            .send(bytes::BytesMut::from(packet.as_slice()))
+            .await
+            .unwrap();
+
+        // Prove the slow reservation is still held, even after the second
+        // 29-second interval; otherwise expiry could hide the starvation bug.
+        let Frame::Request(mut upload) = request("still-reserved", "/api/fixture/echo") else {
+            unreachable!()
+        };
+        upload.method = "POST".into();
+        upload.body = vec![0; 20_000];
+        send_frame(
+            waiting_channel.as_ref(),
+            offset + 10,
+            &Frame::Request(upload),
+        )
+        .await;
+        let rejected =
+            tokio::time::timeout(Duration::from_secs(2), response(waiting_channel.as_ref()))
+                .await
+                .unwrap();
+        assert!(
+            matches!(rejected, Frame::Response(reply) if reply.id == "still-reserved" && reply.status == 503)
+        );
+
+        for channel in [&waiting_channel, &owner_channel, &member_channel] {
+            send_frame(
+                channel.as_ref(),
+                offset + 2,
+                &request("small-request", "/api/chats"),
+            )
+            .await;
+            let reply = tokio::time::timeout(Duration::from_secs(2), response(channel.as_ref()))
+                .await
+                .expect("a trickling member must never delay a small request beyond two seconds");
+            assert!(
+                matches!(reply, Frame::Response(reply) if reply.id == "small-request" && reply.status == 200)
+            );
+        }
+        assert_eq!(
+            relay.get("/chats").send().await.unwrap().status(),
+            StatusCode::OK
+        );
+    }
+    member.close().await.unwrap();
+    waiting.close().await.unwrap();
+    owner.close().await.unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn a_member_holding_reassembly_capacity_does_not_disconnect_the_owner() {
+    let dispatched = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = dispatched.clone();
+    let router = axum::Router::new().route(
+        "/api/fixture/echo",
+        axum::routing::post(move |bytes: axum::body::Bytes| {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Application handlers cannot forge the transport-only refusal.
+                ([("x-leo-direct-rejection", "reassembly-busy")], bytes)
+            }
+        }),
     );
     let mut relay = RelayedInstallation::new(router).await;
     production_connector(&mut relay).await;
@@ -1069,21 +1190,47 @@ async fn a_member_holding_reassembly_capacity_does_not_disconnect_the_owner() {
     assert!(
         matches!(response(member_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
     );
-    partial_transfer(waiting_channel.as_ref(), 1, 200_000).await;
+    let Frame::Request(mut busy_upload) = request("busy-member-upload", "/api/fixture/echo") else {
+        unreachable!()
+    };
+    busy_upload.method = "POST".into();
+    busy_upload.body = vec![0xAB; 200_000];
+    send_frame(waiting_channel.as_ref(), 1, &Frame::Request(busy_upload)).await;
+    let rejected = tokio::time::timeout(Duration::from_secs(2), response(waiting_channel.as_ref()))
+        .await
+        .expect("member capacity shortage must reject only the upload within a bounded delay");
+    assert!(
+        matches!(rejected, Frame::Response(reply) if reply.id == "busy-member-upload" && reply.status == 503
+            && reply.headers == vec![("x-leo-direct-rejection".into(), "reassembly-busy".into())])
+    );
+    assert_eq!(dispatched.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    // A fragmented refusal never entered the handler. Even this non-idempotent
+    // POST can therefore use the independent authenticated relay exactly once.
+    let installation_id = waiting_session["installations"][0]["id"].as_str().unwrap();
+    let echo_path = format!("/api/installations/{installation_id}/api/fixture/echo");
+    let replay = relay
+        .app
+        .authenticated(waiting_cookie, &waiting_session, Method::POST, &echo_path)
+        .body(vec![0xAB; 200_000])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert!(!replay.headers().contains_key("x-leo-direct-rejection"));
+    assert_eq!(replay.bytes().await.unwrap().as_ref(), vec![0xAB; 200_000]);
+    assert_eq!(dispatched.load(std::sync::atomic::Ordering::SeqCst), 1);
     send_frame(
         waiting_channel.as_ref(),
         2,
         &request("waiting-member", "/api/chats"),
     )
     .await;
-    assert!(
-        tokio::time::timeout(
-            Duration::from_millis(100),
-            response(waiting_channel.as_ref())
-        )
+    let small = tokio::time::timeout(Duration::from_secs(2), response(waiting_channel.as_ref()))
         .await
-        .is_err(),
-        "members share a bounded reservation pool, preserving the owner's capacity"
+        .expect("a rejected upload must not block the next small request on its ordered channel");
+    assert!(
+        matches!(small, Frame::Response(reply) if reply.id == "waiting-member" && reply.status == 200)
     );
 
     let Frame::Request(mut upload) = request("owner-upload", "/api/fixture/echo") else {
@@ -1093,8 +1240,10 @@ async fn a_member_holding_reassembly_capacity_does_not_disconnect_the_owner() {
     upload.body = vec![0xAB; 200_000];
     send_frame(owner_channel.as_ref(), 1, &Frame::Request(upload)).await;
     assert!(
-        matches!(response(owner_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200 && reply.body == vec![0xAB; 200_000])
+        matches!(response(owner_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200 && reply.body == vec![0xAB; 200_000]
+            && !reply.headers.iter().any(|(name, _)| name == "x-leo-direct-rejection"))
     );
+    assert_eq!(dispatched.load(std::sync::atomic::Ordering::SeqCst), 2);
     assert_eq!(
         relay.get("/chats").send().await.unwrap().status(),
         StatusCode::OK
@@ -1643,9 +1792,13 @@ async fn observed_certificate_is_compared_with_the_grant_without_an_sdp_check() 
 struct PanicPeerStart(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PanicPeerStart {
-    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-        if event.metadata().target() == "leo_agent_manager::direct::peer"
-            && *event.metadata().level() == tracing::Level::DEBUG
+    fn on_new_span(
+        &self,
+        attributes: &tracing::span::Attributes<'_>,
+        _: &tracing::span::Id,
+        _: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if attributes.metadata().name() == leo_agent_manager::direct::peer::PEER_TASK_SPAN
             && self.0.swap(false, std::sync::atomic::Ordering::SeqCst)
         {
             panic!("fixture peer task failure");
@@ -1668,7 +1821,7 @@ async fn a_panicking_peer_task_releases_its_authorization_and_preserves_other_pe
         stop.clone(),
     ));
     let (survivor, survivor_channel, _) = client(&relay).await;
-    // Inject a fault through the scoped logging adapter in the actual Tokio peer
+    // Inject a fault on creating the stable peer-task span in the actual Tokio peer
     // job. No production fault flag, alternate peer or SDP-induced SDK panic.
     let fingerprint = format!("sha-256 {}", vec!["AB"; 32].join(":"));
     let installation = relay.session["installations"][0]["id"].as_str().unwrap();
@@ -1698,7 +1851,7 @@ async fn a_panicking_peer_task_releases_its_authorization_and_preserves_other_pe
         .unwrap();
     // Parallel tests may first register this shared callsite with no default
     // subscriber. Rebuild its interest on this thread after the survivor has
-    // reached serve_peer, so the injected fault cannot silently be skipped.
+    // created its peer-task span, so the injected fault cannot silently be skipped.
     tracing::callsite::rebuild_interest_cache();
     panic_next.store(true, std::sync::atomic::Ordering::SeqCst);
     signal_as(&relay, &relay.cookie, &relay.session, &grant, &DirectSignal::Offer {

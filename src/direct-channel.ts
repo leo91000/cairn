@@ -10,7 +10,7 @@ export class TransportLost extends Error {
   constructor() { super('Connection interrupted. Please check the result before trying again.') }
 }
 
-// No complete request frame reached the peer: even mutations are safe on relay.
+// The peer could not dispatch this request: even mutations are safe on relay.
 export class TransportNotSent extends Error {
   constructor() { super('Direct request was not sent.') }
 }
@@ -344,6 +344,14 @@ export class DirectChannel {
       if (frame.type === 'response') {
         const body = bytes(frame.body!)
         this.release(frame.id)
+        // Reserved transport refusal, emitted before dispatch and excluded from
+        // application response headers. An ordinary application 503 is not safe
+        // to replay, even if its body has the same wording.
+        if (frame.status === 503 && headers.get('x-leo-direct-rejection') === 'reassembly-busy') {
+          pending.reject(new TransportNotSent())
+          return
+        }
+
         pending.resolve(new Response([204, 205, 304].includes(frame.status!) ? null : body, { status: frame.status, headers }))
         return
       }

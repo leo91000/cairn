@@ -8,6 +8,10 @@ use std::{
 
 pub const MAX_PACKET: usize = 16_384;
 pub const HEADER: usize = 13;
+/// Only the DataChannel reader emits this refusal, before application dispatch.
+/// Never include it in the application response-header allowlist.
+pub const REASSEMBLY_REJECTION_HEADER: &str = "x-leo-direct-rejection";
+pub const REASSEMBLY_REJECTION_CODE: &str = "reassembly-busy";
 
 /// Version byte, transfer ID, total JSON length and offset (three network-order u32s).
 /// A header with total=offset=0 aborts an incomplete transfer without dispatching it.
@@ -223,6 +227,17 @@ impl FrameDecoder {
             {
                 return Err("Too many incomplete transfers".into());
             }
+
+            // A complete member frame already fits in the bounded SCTP packet.
+            // Decode it without an assembly or a reservation that another
+            // member's trickling upload could keep indefinitely. Fragmented
+            // frames still obey every installation/account/peer allowance.
+            if self.budget.member && payload.len() == total {
+                return serde_json::from_slice(payload)
+                    .map(Some)
+                    .map_err(|_| DecodeError::Invalid("Invalid application frame"));
+            }
+
             let reserved: usize = self.pending.values().map(|frame| frame.total).sum();
             let reservation = if reserved + total > MAX_FRAME {
                 Err(DecodeError::Busy)
@@ -231,9 +246,10 @@ impl FrameDecoder {
             };
             let reservation = match reservation {
                 Ok(reservation) => reservation,
-                Err(DecodeError::Busy) if !self.pending.is_empty() => {
+                Err(DecodeError::Busy) if self.budget.member || !self.pending.is_empty() => {
                     // Backpressure here would prevent this ordered channel from
-                    // delivering the fragments that release its own reservation.
+                    // delivering the fragments that release its own reservation,
+                    // or small member frames behind a busy fragmented upload.
                     if payload.len() < total {
                         self.discarded.insert(
                             id,
