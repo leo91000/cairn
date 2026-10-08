@@ -65,6 +65,9 @@ export class DirectChannel {
   private transfer = 0
   private closed = false
   private writer = Promise.resolve()
+  private outgoing = new Map<number, number>()
+  private outgoingBytes = 0
+  private outgoingWaiters = new Set<() => void>()
   private deadline: ReturnType<typeof setInterval>
 
   constructor(private channel: RTCDataChannel, private identity: { account_id: string, role: string }, private failed: () => void) {
@@ -93,6 +96,8 @@ export class DirectChannel {
     this.assemblies.clear()
     this.buffered = 0
     this.channel.dispatchEvent(new Event('bufferedamountlow'))
+    for (const ready of this.outgoingWaiters)
+      ready()
   }
 
   private release(id: string) {
@@ -135,48 +140,77 @@ export class DirectChannel {
     return this.capacity()
   }
 
-  private send(frame: object, valid = () => true, sent = () => {}) {
+  private async send(frame: object, valid = () => true, sent = () => {}) {
     const payload = encoder.encode(JSON.stringify(frame))
     if (payload.length > MAX_FRAME)
-      return Promise.reject(new Error('Direct frame too large'))
+      throw new Error('Direct frame too large')
     const transfer = this.transfer = (this.transfer + 1) >>> 0 || 1
-    const operation = this.writer.then(async () => {
-      let offset = 0
-      while (offset < payload.length) {
-        await this.capacity()
-        if (!valid()) {
-          if (offset) {
-            const abandon = new Uint8Array(HEADER)
-            const header = new DataView(abandon.buffer)
-            header.setUint8(0, 1)
-            header.setUint32(1, transfer)
-            this.channel.send(abandon)
-          }
-
-          return
+    // Reserve whole payloads conservatively: interleaving must never exceed the
+    // existing peer's aggregate byte/transfer limits during reassembly.
+    while (this.outgoing.size >= 32 || this.outgoingBytes + payload.length > MAX_FRAME) {
+      if (this.closed)
+        throw new TransportLost()
+      if (!valid())
+        return
+      await new Promise<void>((resolve) => {
+        const ready = () => {
+          this.outgoingWaiters.delete(ready)
+          resolve()
         }
 
-        const length = Math.min(MAX_PACKET - HEADER, payload.length - offset)
-        const packet = new Uint8Array(HEADER + length)
-        const header = new DataView(packet.buffer)
-        header.setUint8(0, 1)
-        header.setUint32(1, transfer)
-        header.setUint32(5, payload.length)
-        header.setUint32(9, offset)
-        packet.set(payload.subarray(offset, offset + length), HEADER)
-        this.channel.send(packet)
-        offset += length
-        if (offset === payload.length)
-          sent()
-        // Yield between fragments so aborts/credits can make progress.
-        await Promise.resolve()
+        this.outgoingWaiters.add(ready)
+      })
+    }
+
+    this.outgoing.set(transfer, payload.length)
+    this.outgoingBytes += payload.length
+    try {
+      let offset = 0
+      while (offset < payload.length) {
+        // Serialize a single packet, then queue our next fragment behind any
+        // reads, credits or heartbeat that arrived during backpressure.
+        const operation = this.writer.then(async () => {
+          await this.capacity()
+          if (!valid()) {
+            if (offset) {
+              const abandon = new Uint8Array(HEADER)
+              const header = new DataView(abandon.buffer)
+              header.setUint8(0, 1)
+              header.setUint32(1, transfer)
+              this.channel.send(abandon)
+            }
+
+            return false
+          }
+
+          const length = Math.min(MAX_PACKET - HEADER, payload.length - offset)
+          const packet = new Uint8Array(HEADER + length)
+          const header = new DataView(packet.buffer)
+          header.setUint8(0, 1)
+          header.setUint32(1, transfer)
+          header.setUint32(5, payload.length)
+          header.setUint32(9, offset)
+          packet.set(payload.subarray(offset, offset + length), HEADER)
+          this.channel.send(packet)
+          offset += length
+          if (offset === payload.length)
+            sent()
+          return true
+        })
+        this.writer = operation.then(() => {}, () => this.failed())
+        if (!await operation)
+          return
       }
-    })
-    this.writer = operation.catch(() => this.failed())
-    return operation
+    }
+    finally {
+      this.outgoing.delete(transfer)
+      this.outgoingBytes -= payload.length
+      for (const ready of this.outgoingWaiters)
+        ready()
+    }
   }
 
-  request(path: string, options: RequestInit = {}) {
+  request(path: string, options: RequestInit = {}, onSent = () => {}) {
     if (this.closed || this.channel.readyState !== 'open')
       return Promise.reject(new TransportNotSent())
     const streaming = path.split('?')[0].endsWith('/stream')
@@ -233,8 +267,10 @@ export class DirectChannel {
         body: base64(body),
       }, () => this.pending.has(id), () => {
         const pending = this.pending.get(id)
-        if (pending)
+        if (pending) {
           pending.sent = true
+          onSent()
+        }
       }).catch(() => {})
     })
   }

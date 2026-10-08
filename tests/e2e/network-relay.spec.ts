@@ -162,7 +162,9 @@ test('authenticated browser and Rust client keep using the observed route under 
     evidence.push({ route: sent.route, operation: 'browser-send', elapsedMs: performance.now() - started })
     const cookies = await page.context().cookies()
     const cookie = cookies.map(value => `${value.name}=${value.value}`).join('; ')
-    evidence.push({ ...await rustRequest(chatsPath, cookie, 200, marker), operation: 'rust-read' })
+    const samples = process.env.LEO_NETWORK_SCENARIO === 'packet-loss' ? 3 : 1
+    for (let sample = 0; sample < samples; sample++)
+      evidence.push({ ...await rustRequest(chatsPath, cookie, 200, marker), operation: sample ? `rust-read-${sample + 1}` : 'rust-read' })
     await rustRequest(chatsPath, '', 401)
     // A loopback listener on the installation still refuses anonymous local access.
     const local = execFileSync(process.env.LEO_NETWORK_LOCAL_CLIENT!, ['http', '127.0.0.1:4399', '/api/chats', '401'], { input: '', encoding: 'utf8' })
@@ -223,6 +225,7 @@ test('authenticated browser and Rust client keep using the observed route under 
       evidence.push({ route: deniedRead!.route, operation: 'permission-denied-read', elapsedMs: performance.now() - deniedStarted })
       expect(errors).toEqual([])
       await denied.close()
+      await page.bringToFront()
 
       const beforeCut = (await observations()).length
       const cut = performance.now()

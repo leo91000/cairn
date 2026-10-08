@@ -19,6 +19,13 @@ SCENARIOS = ["same-lan", "mdns-only-client", "nat-client", "nat-installation", "
              "udp-blocked", "symmetric-nat", "symmetric-client", "same-server", "network-change", "packet-loss"]
 
 
+def participant_uses_nat(scenario, role):
+    shared_nat = scenario in {"nat-both", "symmetric-nat", "symmetric-client", "same-server"}
+    selected_nat = scenario == "nat-" + role
+    mdns_installation = scenario == "mdns-only-client" and role == "installation"
+    return shared_nat or selected_nat or mdns_installation
+
+
 def run(*args):
     command = ["sudo", "-n", *args] if args[0] in {"ip", "tc", "iptables", "sysctl"} else list(args)
     result = subprocess.run(command, check=True, capture_output=True, text=True)
@@ -174,7 +181,7 @@ class Network:
             address = f"10.102.{index}.2"
             self.address(participant, endpoint, address + "/24")
             run("ip", "-n", participant, "route", "add", "default", "via", f"10.102.{index}.1")
-            nat = scenario in {"nat-both", "symmetric-nat", "symmetric-client", "same-server"} or scenario == "nat-" + role or scenario == "mdns-only-client" and role == "installation"
+            nat = participant_uses_nat(scenario, role)
             # Private host candidates behind NAT are not internet-routable.
             # Routing them here would create inbound conntrack entries before
             # hole punching and falsely classify the reverse flow as a reply.
@@ -323,7 +330,7 @@ def main():
                       "installationProbe": network.probe(binary, "installation")}
             expected_received = 0 if args.scenario == "udp-blocked" else 8 if args.scenario == "packet-loss" else 10
             for role, probe in [("client", report["probe"]), ("installation", report["installationProbe"])]:
-                expected_nat = args.scenario in {"nat-both", "symmetric-nat", "symmetric-client", "same-server"} or args.scenario == "nat-" + role or args.scenario == "mdns-only-client" and role == "installation"
+                expected_nat = participant_uses_nat(args.scenario, role)
                 if probe["received"] != expected_received or probe["translated"] != expected_nat:
                     raise RuntimeError(f"{role}: the observed packets do not match {args.scenario}: {probe}")
                 if (args.scenario == "symmetric-nat" or args.scenario == "symmetric-client" and role == "client") and probe["mappings"] != 2:

@@ -309,6 +309,70 @@ it('fragments large bodies at 16 KiB, waits for bufferedAmount, and abandons a c
   channel.dispatchEvent(new Event('bufferedamountlow'))
 })
 
+it('serves a short read between upload fragments while respecting channel backpressure', async () => {
+  const { api, channel, state } = await direct()
+  const signal = new AbortController()
+  const upload = api('/chats/c/messages', { method: 'POST', body: JSON.stringify({ id: 'large', text: 'x'.repeat(60000) }), signal: signal.signal })
+  const rejected = expect(upload).rejects.toMatchObject({ name: 'AbortError' })
+  const send = channel.send.bind(channel)
+  channel.send = (packet) => {
+    send(packet)
+    channel.bufferedAmount = 65536
+  }
+
+  await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+  const read = api('/chats')
+  await vi.advanceTimersByTimeAsync(0)
+  for (let drain = 0; drain < 2; drain++) {
+    channel.bufferedAmount = 0
+    channel.dispatchEvent(new Event('bufferedamountlow'))
+    await vi.advanceTimersByTimeAsync(0)
+  }
+
+  const request = channel.packets.filter(packet => packet.length < 16384)
+    .map(packet => JSON.parse(new TextDecoder().decode(packet.subarray(13))))
+    .find(frame => frame.method === 'GET')
+  expect(request?.path).toBe('/api/chats')
+  reply(channel, {
+    type: 'response',
+    id: request.id,
+    status: 200,
+    headers: [],
+    body: btoa('{"marker":"direct"}'),
+  })
+  expect(await read).toEqual({ marker: 'direct' })
+  expect(state.transportRoute).toBe('direct')
+  signal.abort()
+  channel.bufferedAmount = 0
+  channel.dispatchEvent(new Event('bufferedamountlow'))
+  await rejected
+})
+
+it('starts heartbeat response timing after transmission instead of closing a backpressured peer', async () => {
+  const { channel, state } = await direct()
+  channel.bufferedAmount = 65536
+  await vi.advanceTimersByTimeAsync(15000)
+  expect(state.transportRoute).toBe('direct')
+  expect(channel.readyState).toBe('open')
+  channel.bufferedAmount = 0
+  channel.dispatchEvent(new Event('bufferedamountlow'))
+  await vi.advanceTimersByTimeAsync(10000)
+  expect(state.transportRoute).toBe('direct')
+})
+
+it('resets connection backoff after successful reconnection before another transport loss', async () => {
+  const { channel, state } = await direct()
+  channel.dispatchEvent(new Event('close'))
+  await vi.advanceTimersByTimeAsync(30000)
+  expect(Peer.all).toHaveLength(2)
+  Source.all.at(-1)!.dispatchEvent(new MessageEvent('signal', { data: JSON.stringify({ kind: 'answer', sdp: 'answer' }) }))
+  await vi.advanceTimersByTimeAsync(0)
+  expect(state.transportRoute).toBe('direct')
+  Peer.all[1].channel.dispatchEvent(new Event('close'))
+  await vi.advanceTimersByTimeAsync(30000)
+  expect(Peer.all).toHaveLength(3)
+})
+
 it('renews before expiry and keeps the current channel only after official acceptance', async () => {
   const { state, channel } = await direct()
   vi.mocked(fetch).mockImplementation(() => Promise.resolve(Response.json({

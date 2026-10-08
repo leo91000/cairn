@@ -221,6 +221,7 @@ export class InstallationTransport {
       channel.binaryType = 'arraybuffer'
       channel.addEventListener('open', () => {
         if (current()) {
+          this.failures = 0
           this.traffic = new DirectChannel(channel, this.grant!.grant.claims, () => {
             if (current())
               this.failed()
@@ -383,9 +384,11 @@ export class InstallationTransport {
       if (!current() || !traffic)
         return
       const abort = new AbortController()
-      const deadline = setTimeout(() => abort.abort(), 5000)
+      let deadline: ReturnType<typeof setTimeout> | undefined
       try {
-        await traffic.request('/api/chats', { method: 'HEAD', signal: abort.signal })
+        await traffic.request('/api/chats', { method: 'HEAD', signal: abort.signal }, () => {
+          deadline = setTimeout(() => abort.abort(), 5000)
+        })
         if (current()) {
           this.failures = 0
           this.scheduleHeartbeat(current)

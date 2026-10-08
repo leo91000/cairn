@@ -266,10 +266,11 @@ Grant renewal runs 30 seconds before the signed deadline, with a minimum
 If renewal does not extend a session-capped deadline, no further renewal is
 attempted for that lease. A 30-second negotiation deadline,
 10-second application heartbeat (a protocol HEAD request, with a
-5-second deadline), channel closure, ICE failure and signaling-reader loss all
+5-second response deadline starting after transmission), channel closure, ICE failure and signaling-reader loss all
 return traffic to the relay. Unsupported clients/installations and refused local
 network permission cause no visible connection error. Temporary failures retry
-with exponential backoff from 30 seconds to five minutes. `available: false`,
+with exponential backoff from 30 seconds to five minutes, reset when an
+authorized channel opens. `available: false`,
 403 and permission denial stop direct attempts until the session or network
 changes; a capacity 503 backs off while the relay remains usable. A recovery
 observed by the existing installation availability check also resumes
@@ -286,7 +287,10 @@ Once a complete request frame has been sent, the switching rules above apply.
 The client response deadline is 35 seconds, allowing the dispatcher's 30-second
 504 to arrive first; expiration cancels only that request, preserving other
 requests and streams on the peer. A locally saturated heartbeat waits for its
-next interval instead of closing a healthy peer.
+next interval instead of closing a healthy peer. Outgoing frames interleave one
+16 KiB fragment at a time, so large uploads do not monopolize reads, credits or
+heartbeats; conservative payload reservations preserve the peer's aggregate
+reassembly limits.
 
 Network Information `change` and browser `online` events restart ICE through a
 **fresh peer and fresh authorization**, with `iceRestart: true`, while the relay
