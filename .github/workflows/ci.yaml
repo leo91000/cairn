@@ -295,7 +295,7 @@ jobs:
           python3 tests/network_probe_test.py
           python3 tests/network_bench_test.py
           python3 tests/stun_docker_test.py
-          for scenario in same-lan mdns-only-lan nat-client nat-installation nat-both udp-blocked symmetric-nat symmetric-client same-server network-change packet-loss; do
+          for scenario in same-lan mdns-only-client nat-client nat-installation nat-both udp-blocked symmetric-nat symmetric-client same-server network-change packet-loss; do
             python3 tests/network-bench.py "$scenario" --output "test-results/network/$scenario.json"
           done
       - uses: actions/upload-artifact@v7.0.1

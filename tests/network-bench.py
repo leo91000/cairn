@@ -15,7 +15,7 @@ import time
 import uuid
 from pathlib import Path
 
-SCENARIOS = ["same-lan", "mdns-only-lan", "nat-client", "nat-installation", "nat-both",
+SCENARIOS = ["same-lan", "mdns-only-client", "nat-client", "nat-installation", "nat-both",
              "udp-blocked", "symmetric-nat", "symmetric-client", "same-server", "network-change", "packet-loss"]
 
 
@@ -174,7 +174,7 @@ class Network:
             address = f"10.102.{index}.2"
             self.address(participant, endpoint, address + "/24")
             run("ip", "-n", participant, "route", "add", "default", "via", f"10.102.{index}.1")
-            nat = scenario in {"nat-both", "symmetric-nat", "symmetric-client", "same-server"} or scenario == "nat-" + role
+            nat = scenario in {"nat-both", "symmetric-nat", "symmetric-client", "same-server"} or scenario == "nat-" + role or scenario == "mdns-only-client" and role == "installation"
             # Private host candidates behind NAT are not internet-routable.
             # Routing them here would create inbound conntrack entries before
             # hole punching and falsely classify the reverse flow as a reply.
@@ -211,7 +211,7 @@ class Network:
                 self.exec(router, "ip", "rule", "add", "iif", "lan", "lookup", "102")
             self.participants[role] = {"namespace": participant, "router": router,
                                        "link": endpoint, "address": address}
-        if scenario in {"same-lan", "mdns-only-lan"}:
+        if scenario == "same-lan":
             # Move the installation's LAN end onto the client's LAN bridge.
             installation = self.participants["installation"]
             client = self.participants["client"]
@@ -275,7 +275,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.expect_route is None:
-        args.expect_route = "relay" if args.scenario in {"mdns-only-lan", "udp-blocked", "symmetric-nat", "symmetric-client"} else "direct"
+        args.expect_route = "relay" if args.scenario in {"mdns-only-client", "udp-blocked", "symmetric-nat", "symmetric-client"} else "direct"
     if args.expect_rust_route is None:
         args.expect_rust_route = "relay" if args.scenario in {"udp-blocked", "symmetric-nat", "symmetric-client"} else "direct"
     def interrupted(_signal, _frame):
@@ -319,11 +319,11 @@ def main():
             stun = network.spawn(stun_namespace, os.sys.executable, str(Path(__file__).resolve()),
                                  "stun-server", listen_address, str(ready))
             wait_ready(ready, stun, "STUN listener before host masquerading")
-            report = {"scenario": args.scenario, "browserHostPolicy": "mdns" if args.scenario == "mdns-only-lan" else "numeric", "probe": network.probe(binary, "client"),
+            report = {"scenario": args.scenario, "browserHostPolicy": "mdns" if args.scenario == "mdns-only-client" else "numeric", "probe": network.probe(binary, "client"),
                       "installationProbe": network.probe(binary, "installation")}
             expected_received = 0 if args.scenario == "udp-blocked" else 8 if args.scenario == "packet-loss" else 10
             for role, probe in [("client", report["probe"]), ("installation", report["installationProbe"])]:
-                expected_nat = args.scenario in {"nat-both", "symmetric-nat", "symmetric-client", "same-server"} or args.scenario == "nat-" + role
+                expected_nat = args.scenario in {"nat-both", "symmetric-nat", "symmetric-client", "same-server"} or args.scenario == "nat-" + role or args.scenario == "mdns-only-client" and role == "installation"
                 if probe["received"] != expected_received or probe["translated"] != expected_nat:
                     raise RuntimeError(f"{role}: the observed packets do not match {args.scenario}: {probe}")
                 if (args.scenario == "symmetric-nat" or args.scenario == "symmetric-client" and role == "client") and probe["mappings"] != 2:
@@ -334,7 +334,7 @@ def main():
                         str(Path(__file__).resolve()), "stun-probe", network.stun_address))
                     for role in ["client", "installation"]
                 }
-            if args.scenario in {"same-lan", "mdns-only-lan", "udp-blocked"}:
+            if args.scenario in {"same-lan", "udp-blocked"}:
                 installation = network.participants["installation"]
                 for port in [49011, 49012]:
                     network.listen(binary, installation["namespace"], installation["address"], port)
@@ -357,6 +357,12 @@ def browser(network, binary, directory, args, report):
     script = str(Path(__file__).resolve())
     chromium = run("pnpm", "exec", "node", "--input-type=module", "-e",
                    "import {chromium} from '@playwright/test'; console.log(chromium.executablePath())")
+    # Chromium can emit a numeric srflx candidate even when STUN reports its
+    # untranslated host address. Deny STUN for this client only so the mDNS-only
+    # case has no numeric alternative; the installation still discovers its NAT.
+    if args.scenario == "mdns-only-client":
+        network.exec(network.participants["client"]["namespace"], "iptables", "-A", "OUTPUT",
+                     "-p", "udp", "--dport", "3478", "-j", "DROP")
     env = os.environ.copy()
     for key in ["LEO_AUTH_SOCKET", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "LEO_MCP_RUN_TOKEN",
                 "CODEX_HOME", "OPENAI_API_KEY", "CODEX_API_KEY", "CLAUDE_CONFIG_DIR",

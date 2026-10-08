@@ -42,11 +42,11 @@ test('authenticated browser and Rust client keep using the observed route under 
 
   try {
     let service = official()
-    // Exercise numeric ICE paths deterministically; the separate mDNS-only LAN
+    // Exercise numeric ICE paths deterministically; the separate mDNS-only client
     // case preserves Chromium's default privacy behavior and expects the relay.
     browser = await chromium.launch({
       executablePath: process.env.LEO_NETWORK_CHROMIUM,
-      args: process.env.LEO_NETWORK_SCENARIO === 'mdns-only-lan' ? [] : ['--disable-features=WebRtcHideLocalIpsWithMdns'],
+      args: process.env.LEO_NETWORK_SCENARIO === 'mdns-only-client' ? [] : ['--disable-features=WebRtcHideLocalIpsWithMdns'],
     })
     const page = await browser.newPage()
     const leases: string[] = []
@@ -78,6 +78,26 @@ test('authenticated browser and Rust client keep using the observed route under 
     }
 
     await capture(page)
+    if (process.env.LEO_NETWORK_SCENARIO === 'mdns-only-client') {
+      await page.addInitScript(() => {
+        const browser = window as typeof window & { iceCandidates: { mdns: boolean, type: string | null }[] }
+        browser.iceCandidates = []
+        browser.RTCPeerConnection = new Proxy(browser.RTCPeerConnection, {
+          construct(target, args) {
+            const peer = Reflect.construct(target, args) as RTCPeerConnection
+            peer.addEventListener('icecandidate', (event) => {
+              if (event.candidate && browser.iceCandidates.length < 128) {
+                browser.iceCandidates.push({
+                  mdns: event.candidate.candidate.split(' ')[4]?.endsWith('.local') || false,
+                  type: event.candidate.type,
+                })
+              }
+            })
+            return peer
+          },
+        })
+      })
+    }
 
     async function activeStream(target: Page, route: string) {
       await expect.poll(() => target.evaluate(route => (window as typeof window & { transportObservations: Observation[] }).transportObservations.some(item => item.method === 'STREAM' && item.route === route), route)).toBe(true)
@@ -283,6 +303,14 @@ test('authenticated browser and Rust client keep using the observed route under 
       revocations.push('detachment')
     }
 
+    const mdnsCandidates = process.env.LEO_NETWORK_SCENARIO === 'mdns-only-client'
+      ? await page.evaluate(() => (window as typeof window & { iceCandidates: { mdns: boolean, type: string | null }[] }).iceCandidates)
+      : undefined
+    if (mdnsCandidates) {
+      expect(mdnsCandidates.length).toBeGreaterThan(0)
+      expect(mdnsCandidates.every(candidate => candidate.mdns && candidate.type === 'host')).toBe(true)
+    }
+
     const output = process.env.LEO_NETWORK_OUTPUT!
     const report = JSON.parse(await readFile(output, 'utf8'))
     await writeFile(output, `${JSON.stringify({
@@ -291,6 +319,7 @@ test('authenticated browser and Rust client keep using the observed route under 
       expectedRustRoute: process.env.LEO_NETWORK_EXPECT_RUST_ROUTE,
       observations: evidence,
       revocations,
+      mdnsCandidates,
     })}\n`)
 
     for (const observation of evidence) {

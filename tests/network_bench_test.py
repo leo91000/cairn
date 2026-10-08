@@ -46,13 +46,14 @@ class NetworkBenchTest(unittest.TestCase):
             self.assertFalse(report["probe"]["translated"])
             self.assertEqual(report["peerProbe"]["received"], 10)
 
-    def test_mdns_only_lan_keeps_the_real_lan_topology(self):
-        report = self.probe("mdns-only-lan")
-        self.assertEqual(report["scenario"], "mdns-only-lan")
+    def test_mdns_only_client_has_no_translated_client_candidate_and_an_inbound_filtered_peer(self):
+        report = self.probe("mdns-only-client")
+        self.assertEqual(report["scenario"], "mdns-only-client")
         self.assertEqual(report["probe"]["received"], 10)
-        self.assertEqual(report["peerProbe"]["received"], 10)
+        self.assertTrue(report["installationProbe"]["translated"])
         self.assertFalse(report["probe"]["translated"])
         self.assertEqual(report["stun"]["client"]["address"], "10.102.1.2")
+        self.assertEqual(report["stun"]["installation"]["address"], "198.18.102.3")
 
     def test_nat_translates_only_the_selected_side(self):
         for scenario, client, installation in [
