@@ -93,6 +93,11 @@ official service's memory and logs; it is not end-to-end encryption against it.
   "identifier already used" counts as delivered.
 - Other mutations in flight during a switch are not replayed and fail visibly,
   as a relay disconnection does today.
+- A direct reassembly refusal explicitly guarantees that nothing was dispatched.
+  The web replays that request through the authenticated relay, including
+  mutations without an idempotency key, while keeping the direct peer open.
+  This exception requires the reserved protocol marker below; an ordinary
+  application 503 or an interrupted mutation remains subject to the rules above.
 - Both routes use the same per-pool values: 32 requests in flight, 24 streams,
   8 MB bodies, 64 KiB stream chunks with credits, 30-second response deadline.
   Application pools are separate, with the scopes and combined ceilings below;
@@ -262,13 +267,26 @@ A member's fragmented transfer that cannot reserve capacity is rejected immediat
 so it cannot hold that ordered channel ahead of later small frames. Owner channels
 already holding assemblies also reject a new excess transfer, since waiting would
 prevent completion of their own assemblies. Only that new transfer is rejected:
-a request receives a 503 using its initial fragment's bounded request ID.
+a request receives a 503 using its initial fragment's bounded request ID, with
+the reserved response header `x-leo-direct-rejection: reassembly-busy`.
+This marker is emitted only by the DataChannel reader before dispatch: the
+request was not executed and its remaining fragments will be drained. It is
+excluded from the application response-header allowlist on both routes, so an
+application handler cannot claim that a mutation was not executed. Clients must
+match both status 503 and the exact marker value; the response body is diagnostic
+text, not a replay signal. The web treats this refusal as an unsent request and
+uses the independent relay once, with the original method, body and abort signal.
+Thus two concurrent large member uploads that exceed their shared allowance
+can complete one directly and the refused one through the relay. Another member's
+trickling upload likewise cannot cause a visible reassembly error for a canonical
+web request. No direct peer is closed or owner capacity borrowed for this replay.
+Android handling of this marker is tracked separately in #130 / PR #131.
 Canonical request frames serialize `type` and `id` before the body. If that
 identity is absent from the initial fragment, the transfer is drained without
 dispatch and the caller's existing response deadline applies. Rejected and
 expired transfers retain only bounded sequence metadata to drain fragments,
 counted with pending assemblies toward the 32-transfer limit. The peer stays alive; the affected
-request uses its existing response deadline and safe retry rules. Buffers grow only as bytes
+request without a recognized refusal uses its existing response deadline and safe retry rules. Buffers grow only as bytes
 arrive and their capacity is bounded by the reservation. Sparse declarations
 therefore cannot build up 32 independent maximum-frame buffers. Application limits remain 32 requests, 24 streams globally, 8 streams per
 account, 8 MB bodies, 64 KiB credited chunks and the existing 30-second response

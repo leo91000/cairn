@@ -384,7 +384,10 @@ async fn serve_peer(
         };
 
         let reader = async {
-            use leo_relay_protocol::data_channel::{DecodeError, FrameDecoder};
+            use leo_relay_protocol::data_channel::{
+                DecodeError, FrameDecoder, REASSEMBLY_REJECTION_CODE,
+                REASSEMBLY_REJECTION_HEADER,
+            };
             let budget = reassembly.for_account(&lease.claims.account_id, lease.claims.role);
             let mut decoder = FrameDecoder::with_budget(budget);
             let mut timeout = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -414,7 +417,12 @@ async fn serve_peer(
                                                 leo_relay_protocol::ApiResponse {
                                                     id,
                                                     status: 503,
-                                                    headers: Vec::new(),
+                                                    // No request entered the dispatcher: even a
+                                                    // mutation can safely use the relay once.
+                                                    headers: vec![(
+                                                        REASSEMBLY_REJECTION_HEADER.into(),
+                                                        REASSEMBLY_REJECTION_CODE.into(),
+                                                    )],
                                                     body: b"Direct reassembly busy.".to_vec(),
                                                 },
                                             );

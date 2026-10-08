@@ -435,6 +435,17 @@ the waiting connection. Complete member frames fitting in one packet (at most
 A fragmented member transfer short of capacity, or an owner transfer whose ordered
 channel already holds an incomplete assembly, is rejected with a 503
 for its bounded request ID and drained, allowing the existing upload to finish.
+The 503 carries `x-leo-direct-rejection: reassembly-busy`, a reserved protocol
+marker guaranteeing that the dispatcher never received that request. Application
+response headers on direct and relay cannot emit this marker. The web treats
+only this exact status/marker pair as unsent and retries once over the
+authenticated relay, including non-idempotent mutations, preserving their body
+and abort signal. Application 503s and interrupted mutations keep the existing
+safe-retry restrictions. When concurrent large member uploads exceed the shared
+allowance, the refused upload uses the relay while the accepted one continues
+directly; a trickling member does not expose a reassembly shortage to another
+member's web request. Owner capacity and the direct peers stay intact. Android's
+handling is tracked in #130 / PR #131; it is not changed by #126.
 Rejected transfers retain only bounded sequence metadata. The 30-second expiry frees
 incomplete transfers without dispatching them. Completion, abandonment and peer
 termination also release reservations.

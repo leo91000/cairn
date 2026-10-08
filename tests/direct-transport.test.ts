@@ -135,7 +135,7 @@ function reply(channel: Channel, frame: object) {
   channel.dispatchEvent(new MessageEvent('message', { data: packet.buffer }))
 }
 
-async function direct() {
+async function direct(role: 'owner' | 'member' = 'owner') {
   const expiresAt = Date.now() / 1000 + 180
   vi.stubGlobal('fetch', vi.fn((url: string) => Promise.resolve(url.endsWith('/authorize')
     ? Response.json({
@@ -144,7 +144,7 @@ async function direct() {
           claims: {
             connection_id: 'connection',
             account_id: 'account',
-            role: 'owner',
+            role,
             expires_at: expiresAt,
           },
         },
@@ -152,7 +152,12 @@ async function direct() {
       })
     : Response.json({ marker: 'relay' }, { headers: { 'x-leo-transport': 'relay' } }))))
   const module = await import('../src/api')
-  Object.assign(module.state, { authenticated: true, ready: true, csrf: 'csrf' })
+  Object.assign(module.state, {
+    authenticated: true,
+    ready: true,
+    csrf: 'csrf',
+    installationRole: role,
+  })
   await vi.waitFor(() => expect(Source.all.length).toBe(1))
   Source.all[0].dispatchEvent(new MessageEvent('signal', { data: JSON.stringify({ kind: 'answer', sdp: 'answer' }) }))
   await vi.waitFor(() => expect(module.state.transportRoute).toBe('direct'))
@@ -192,6 +197,48 @@ it('sends an unsent mutation through relay when the channel is closing', async (
   channel.readyState = 'closing'
   expect(await api('/chats/c', { method: 'DELETE' })).toEqual({ marker: 'relay' })
   expect(state.error).toBe('')
+})
+
+it('replays a fragmented mutation refused before dispatch through relay without closing direct', async () => {
+  const { api, channel, state } = await direct('member')
+  const body = JSON.stringify({ name: 'Large mission', prompt: 'x'.repeat(20000) })
+  const response = api('/tasks', { method: 'POST', body })
+  await vi.waitFor(() => expect(channel.packets.length).toBeGreaterThan(1))
+  const first = channel.packets[0]
+  const id = JSON.parse(`${new TextDecoder().decode(first.subarray(13)).split(',"body":')[0]}}`).id
+  reply(channel, {
+    type: 'response',
+    id,
+    status: 503,
+    headers: [['x-leo-direct-rejection', 'reassembly-busy']],
+    body: btoa('Direct reassembly busy.'),
+  })
+  expect(await response).toEqual({ marker: 'relay' })
+  expect(fetch).toHaveBeenLastCalledWith('/api/installations/install/api/tasks', expect.objectContaining({ method: 'POST', body }))
+  expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith('/api/tasks'))).toHaveLength(1)
+  expect(state.transportRoute).toBe('direct')
+  expect(channel.readyState).toBe('open')
+})
+
+it.each([
+  [503, []],
+  [503, [['x-leo-direct-rejection', 'unknown']]],
+  [500, [['x-leo-direct-rejection', 'reassembly-busy']]],
+])('does not replay an application error or an unknown refusal (%s, %j)', async (status, headers) => {
+  const { api, channel } = await direct()
+  const response = api('/tasks', { method: 'POST', body: '{}' })
+  const rejected = expect(response).rejects.toThrow('Direct reassembly busy.')
+  await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+  const request = JSON.parse(new TextDecoder().decode(channel.packets[0].subarray(13)))
+  reply(channel, {
+    type: 'response',
+    id: request.id,
+    status,
+    headers,
+    body: btoa('{"error":"Direct reassembly busy."}'),
+  })
+  await rejected
+  expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith('/api/tasks'))).toHaveLength(0)
 })
 
 it('uses fallback capacity for unsent mutations and live streams when direct slots are full', async () => {

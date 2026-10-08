@@ -8,6 +8,10 @@ use std::{
 
 pub const MAX_PACKET: usize = 16_384;
 pub const HEADER: usize = 13;
+/// Only the DataChannel reader emits this refusal, before application dispatch.
+/// Never include it in the application response-header allowlist.
+pub const REASSEMBLY_REJECTION_HEADER: &str = "x-leo-direct-rejection";
+pub const REASSEMBLY_REJECTION_CODE: &str = "reassembly-busy";
 
 /// Version byte, transfer ID, total JSON length and offset (three network-order u32s).
 /// A header with total=offset=0 aborts an incomplete transfer without dispatching it.

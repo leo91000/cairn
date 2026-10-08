@@ -1130,9 +1130,18 @@ async fn a_member_trickling_every_twenty_nine_seconds_cannot_starve_small_reques
 
 #[tokio::test]
 async fn a_member_holding_reassembly_capacity_does_not_disconnect_the_owner() {
+    let dispatched = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = dispatched.clone();
     let router = axum::Router::new().route(
         "/api/fixture/echo",
-        axum::routing::post(|bytes: axum::body::Bytes| async { bytes }),
+        axum::routing::post(move |bytes: axum::body::Bytes| {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Application handlers cannot forge the transport-only refusal.
+                ([("x-leo-direct-rejection", "reassembly-busy")], bytes)
+            }
+        }),
     );
     let mut relay = RelayedInstallation::new(router).await;
     production_connector(&mut relay).await;
@@ -1191,8 +1200,26 @@ async fn a_member_holding_reassembly_capacity_does_not_disconnect_the_owner() {
         .await
         .expect("member capacity shortage must reject only the upload within a bounded delay");
     assert!(
-        matches!(rejected, Frame::Response(reply) if reply.id == "busy-member-upload" && reply.status == 503)
+        matches!(rejected, Frame::Response(reply) if reply.id == "busy-member-upload" && reply.status == 503
+            && reply.headers == vec![("x-leo-direct-rejection".into(), "reassembly-busy".into())])
     );
+    assert_eq!(dispatched.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    // A fragmented refusal never entered the handler. Even this non-idempotent
+    // POST can therefore use the independent authenticated relay exactly once.
+    let installation_id = waiting_session["installations"][0]["id"].as_str().unwrap();
+    let echo_path = format!("/api/installations/{installation_id}/api/fixture/echo");
+    let replay = relay
+        .app
+        .authenticated(waiting_cookie, &waiting_session, Method::POST, &echo_path)
+        .body(vec![0xAB; 200_000])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert!(!replay.headers().contains_key("x-leo-direct-rejection"));
+    assert_eq!(replay.bytes().await.unwrap().as_ref(), vec![0xAB; 200_000]);
+    assert_eq!(dispatched.load(std::sync::atomic::Ordering::SeqCst), 1);
     send_frame(
         waiting_channel.as_ref(),
         2,
@@ -1213,8 +1240,10 @@ async fn a_member_holding_reassembly_capacity_does_not_disconnect_the_owner() {
     upload.body = vec![0xAB; 200_000];
     send_frame(owner_channel.as_ref(), 1, &Frame::Request(upload)).await;
     assert!(
-        matches!(response(owner_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200 && reply.body == vec![0xAB; 200_000])
+        matches!(response(owner_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200 && reply.body == vec![0xAB; 200_000]
+            && !reply.headers.iter().any(|(name, _)| name == "x-leo-direct-rejection"))
     );
+    assert_eq!(dispatched.load(std::sync::atomic::Ordering::SeqCst), 2);
     assert_eq!(
         relay.get("/chats").send().await.unwrap().status(),
         StatusCode::OK
