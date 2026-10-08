@@ -29,7 +29,7 @@ export function workspaceRouter(base = '/') {
         component: () => import('./views/Connections.vue'),
       },
       { path: '/nodes', component: () => import('./views/Nodes.vue') },
-      { path: '/settings', component: () => import('./views/Settings.vue') },
+      { path: '/settings/:section(account|installation|sensitive)?', component: () => import('./views/Settings.vue') },
       { path: '/authorize', component: () => import('./views/Authorize.vue') },
       { path: '/:pathMatch(.*)*', redirect: '/' },
     ],

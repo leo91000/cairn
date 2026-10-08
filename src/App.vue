@@ -59,7 +59,7 @@ const atelierSections = computed(() => [
   { to: '/nodes', label: 'Nodes' },
   { to: '/settings', label: 'Settings' },
 ].filter(item => state.installationRole === 'owner' || !ownerPage(item.to)))
-const atelierSection = computed(() => atelierSections.value.find(item => route.path === item.to))
+const atelierSection = computed(() => atelierSections.value.find(item => route.path === item.to || (item.to === '/settings' && route.path.startsWith('/settings/'))))
 const places: Array<{
   to: string
   label: string
@@ -92,7 +92,7 @@ watch(() => [state.installationRole, route.path], () => {
 
 const place = computed(() => route.path === '/' || route.path.startsWith('/chats') ? 0 : route.path.startsWith('/tasks') ? 1 : atelierPaths.some(path => route.path.startsWith(path)) ? 2 : -1)
 // Reading screens take the whole phone; the dock returns on the three places.
-const reading = computed(() => route.path.startsWith('/chats') || /^\/runs\/./.test(route.path) || route.path === '/authorize')
+const reading = computed(() => route.path.startsWith('/chats') || /^\/runs\/./.test(route.path) || route.path === '/authorize' || route.path.startsWith('/settings/'))
 const chats = useChatList()
 const runs = useMissionRuns({ eager: false })
 const fil = computed(() => filOf(chats.value, state.tasks, runs.value))
@@ -292,7 +292,22 @@ function openShortcuts() {
         </RouterLink>
       </nav>
       <!-- Chats stays mounted between conversations so switching swaps content in place. -->
-      <RouterView v-if="state.installationRole === 'owner' || !ownerPage(route.path)" :key="route.path.startsWith('/chats/') ? '/chats' : route.path" />
+      <RouterView v-if="state.installationRole === 'owner' || !ownerPage(route.path)" v-slot="{ Component }">
+        <component :is="Component" :key="route.path.startsWith('/chats/') ? '/chats' : route.path">
+          <template #account>
+            <slot name="settings-account" />
+          </template>
+          <template #installation>
+            <slot name="settings-installation" />
+          </template>
+          <template v-if="$slots['settings-installation-heading']" #installation-heading>
+            <slot name="settings-installation-heading" />
+          </template>
+          <template #sensitive>
+            <slot name="settings-sensitive" />
+          </template>
+        </component>
+      </RouterView>
     </main>
     <nav v-if="!reading" class="dock fixed bottom-[max(14px,env(safe-area-inset-bottom))] left-1/2 z-30 hidden -translate-x-1/2 items-center gap-1 rounded-full border border-line bg-surface/90 p-1.5 shadow-lift backdrop-blur-md phone:flex" aria-label="Quick navigation">
       <span v-if="place >= 0" class="dock-pill absolute left-1.5 top-1.5 h-13 w-19 rounded-full bg-hover" :style="{ transform: `translateX(${place * 80}px)` }" />

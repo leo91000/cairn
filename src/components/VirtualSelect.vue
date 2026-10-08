@@ -15,6 +15,7 @@ import {
   Check,
   ChevronDown,
   LoaderCircle,
+  Plus,
   Search,
   SearchX,
   X,
@@ -36,12 +37,15 @@ const props = withDefaults(defineProps<{
   compact?: boolean
   variant?: 'default' | 'ghost'
   hideLabel?: boolean
+  actionLabel?: string
 }>(), { placeholder: 'Select an option', emptyText: 'No options available' })
+const emit = defineEmits<{ action: [] }>()
 const model = defineModel<string>({ default: '' })
 const id = useId()
 const root = ref<HTMLElement>()
 const input = ref<HTMLInputElement>()
 const popup = ref<HTMLElement>()
+const action = ref<HTMLButtonElement>()
 const viewport = ref<HTMLElement>()
 const open = ref(false)
 const query = ref('')
@@ -72,11 +76,12 @@ function positionPopup() {
   const popupWidth = Math.min(Math.max(anchor.width, 290), width - 24)
   const below = top + height - anchor.bottom - 14
   const above = anchor.top - top - 14
-  const desired = Math.min(layout.value.height || 96, 280) + 78
+  const fixedHeight = 78 + (props.actionLabel ? 52 : 0)
+  const desired = Math.min(layout.value.height || 96, 280) + fixedHeight
   const upwards = below < Math.min(desired, 210) && above > below
   const available = Math.max(90, upwards ? above : below)
-  viewportHeight.value = Math.max(44, Math.min(layout.value.height || 96, 280, available - 78))
-  const popupHeight = viewportHeight.value + 78
+  viewportHeight.value = Math.max(44, Math.min(layout.value.height || 96, 280, available - fixedHeight))
+  const popupHeight = viewportHeight.value + fixedHeight
   position.value = {
     left: `${Math.max(left + 12, Math.min(anchor.left, left + width - popupWidth - 12))}px`,
     top: `${Math.max(top + 8, upwards ? anchor.top - popupHeight - 6 : anchor.bottom + 6)}px`,
@@ -155,6 +160,12 @@ function keydown(event: KeyboardEvent) {
   if (event.isComposing)
     return
   if (event.key === 'Tab') {
+    if (open.value && props.actionLabel && !event.shiftKey) {
+      event.preventDefault()
+      action.value?.focus({ preventScroll: true })
+      return
+    }
+
     close()
     return
   }
@@ -413,6 +424,18 @@ onBeforeUnmount(() => {
           <kbd>esc</kbd> Close
         </button>
       </footer>
+      <div v-if="actionLabel" class="border-t border-line p-1">
+        <button
+          ref="action"
+          type="button"
+          :disabled="disabled || loading"
+          class="flex min-h-11 w-full items-center gap-2.5 rounded-lg px-3 text-sm text-accent hover:bg-soft focus-visible:bg-soft focus-visible:outline-none"
+          @keydown.tab="close()"
+          @click="close(); input?.focus({ preventScroll: true }); emit('action')"
+        >
+          <Icon :name="Plus" :size="17" />{{ actionLabel }}
+        </button>
+      </div>
       <span class="sr-only" role="status">{{ loading ? 'Loading options' : `${filtered.length} options available` }}</span>
     </div>
   </div>

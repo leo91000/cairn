@@ -28,6 +28,11 @@ An optional `status` supplies a label and a semantic `success`, `warning`, or
 `muted` tone. Options show a dot and badge; the closed control shows a dot and
 announces the selected status. Keep status search terms in `keywords` when needed.
 Selected names and option labels are truncated with a full-name tooltip.
+An optional `actionLabel` adds a separated final action after the options and
+emits `action` without changing the selection. The installation picker uses it
+for “Add an installation”. Tab reaches the action; Escape restores focus to the
+combobox. Single-installation headers remain plain text; adding an installation
+is also available in Settings → Installation.
 Required fields participate in native form validation and focus the visible
 combobox when missing a selection.
 

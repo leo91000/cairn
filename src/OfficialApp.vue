@@ -7,8 +7,11 @@ import {
   ref,
   watch,
 } from 'vue'
+import { useRouter } from 'vue-router'
 import { logoutAccount, redirect, state } from './api'
 import App from './App.vue'
+import AccountMenu from './components/AccountMenu.vue'
+import AccountMethods from './components/AccountMethods.vue'
 import AccountSecurity from './components/AccountSecurity.vue'
 import Icon from './components/Icon.vue'
 import InstallationSharing from './components/InstallationSharing.vue'
@@ -19,7 +22,7 @@ import ThemeControl from './components/ThemeControl.vue'
 import UiAlert from './components/UiAlert.vue'
 import UiButton from './components/UiButton.vue'
 import VirtualSelect from './components/VirtualSelect.vue'
-import { MoreHorizontal } from './icons'
+import { Settings } from './icons'
 import Authorize from './views/Authorize.vue'
 
 interface AccountSession {
@@ -35,27 +38,13 @@ interface AccountSession {
   }>
 }
 
-interface SignInMethod {
-  id: string
-  kind: 'email' | 'google' | 'github' | 'passkey'
-  label: string
-}
-
 const session = ref<AccountSession | null>(null)
 const options = ref({ google: false, github: false, passkeys: false })
-const methods = ref<SignInMethod[]>([])
 const showMethods = ref(false)
 const showSecurity = ref(false)
 const showIdentityConfirmation = ref(false)
 const confirmationTitle = ref('')
 const showNotifications = ref(false)
-const passkeyName = ref('My passkey')
-const methodNames = {
-  email: 'Email',
-  google: 'Google',
-  github: 'GitHub',
-  passkey: 'Passkey',
-}
 const ready = ref(false)
 const email = ref('')
 const code = ref('')
@@ -91,7 +80,7 @@ const installation = ref<{
   updateRequired: boolean
   role: 'owner' | 'member'
 } | null>(null)
-const installationMenu = ref<HTMLDetailsElement>()
+const router = useRouter()
 const installationOptions = computed<SelectOption[]>(() => (session.value?.installations ?? []).map(item => ({
   value: item.id,
   label: item.name,
@@ -242,19 +231,11 @@ async function signOut() {
   }
 }
 
-async function openMethods() {
-  busy.value = true
-  error.value = ''
-  try {
-    methods.value = (await accountRequest('methods')).methods
+function openMethods() {
+  if (installation.value)
+    void router.push('/settings/account')
+  else
     showMethods.value = true
-  }
-  catch (cause) {
-    error.value = cause instanceof Error ? cause.message : 'Unable to load sign-in methods.'
-  }
-  finally {
-    busy.value = false
-  }
 }
 
 function openIdentityConfirmation(title: string) {
@@ -262,48 +243,23 @@ function openIdentityConfirmation(title: string) {
   showIdentityConfirmation.value = true
 }
 
-async function removeMethod(id: string) {
-  busy.value = true
-  error.value = ''
-  try {
-    await accountRequest('methods/remove', { id })
-    methods.value = (await accountRequest('methods')).methods
-  }
-  catch (cause) {
-    error.value = cause instanceof Error ? cause.message : 'Unable to remove sign-in method.'
-  }
-  finally {
-    busy.value = false
-  }
-}
-
-async function passkey(register: boolean) {
+async function passkey() {
   busy.value = true
   error.value = ''
   try {
     if (!window.PublicKeyCredential?.parseCreationOptionsFromJSON || !PublicKeyCredential.parseRequestOptionsFromJSON)
       throw new Error('Passkeys are unavailable in this browser. Use another sign-in method.')
-    const route = register ? 'register' : 'login'
-    const start = await accountRequest(`passkeys/${route}/start`, {})
-    const credential = register
-      ? await navigator.credentials.create({ publicKey: PublicKeyCredential.parseCreationOptionsFromJSON(start.options.publicKey) })
-      : await navigator.credentials.get({ publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(start.options.publicKey) })
+    const start = await accountRequest('passkeys/login/start', {})
+    const credential = await navigator.credentials.get({ publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(start.options.publicKey) })
     if (!(credential instanceof PublicKeyCredential))
       throw new Error('Passkey operation cancelled. Please try again.')
-    const result = await accountRequest(`passkeys/${route}/finish`, {
+    const result = await accountRequest('passkeys/login/finish', {
       challenge: start.challenge,
       credential: credential.toJSON(),
-      ...(register ? { label: passkeyName.value } : {}),
     })
-    if (register) {
-      methods.value = (await accountRequest('methods')).methods
-      passkeyName.value = 'My passkey'
-    }
-    else {
-      session.value = result
-      challenge.value = ''
-      code.value = ''
-    }
+    session.value = result
+    challenge.value = ''
+    code.value = ''
   }
   catch (cause) {
     error.value = cause instanceof DOMException
@@ -464,29 +420,6 @@ async function oauth(provider: 'google' | 'github') {
   }
 }
 
-async function enableEmail() {
-  busy.value = true
-  error.value = ''
-  try {
-    if (challenge.value) {
-      session.value = await accountRequest('verify', { challenge: challenge.value, code: code.value })
-      challenge.value = ''
-      code.value = ''
-      methods.value = (await accountRequest('methods')).methods
-    }
-    else {
-      const start = await accountRequest('email-code', { email: session.value?.account?.email })
-      challenge.value = start.challenge
-    }
-  }
-  catch (cause) {
-    error.value = cause instanceof Error ? cause.message : 'Unable to enable email sign-in.'
-  }
-  finally {
-    busy.value = false
-  }
-}
-
 function openInstallation(value: { id: string, name: string }) {
   if (state.redirecting)
     return
@@ -496,11 +429,6 @@ function openInstallation(value: { id: string, name: string }) {
   catch {}
 
   redirect(`/installations/${encodeURIComponent(value.id)}/`)
-}
-
-function closeInstallationMenu() {
-  if (installationMenu.value)
-    installationMenu.value.open = false
 }
 
 async function renameInstallation() {
@@ -664,7 +592,7 @@ onMounted(async () => {
   <main v-if="session?.authenticated && authorizePage" class="min-h-dvh bg-canvas text-ink px-6 py-10">
     <Authorize />
   </main>
-  <div v-else-if="session?.authenticated && installation && !showMethods && !showSecurity && !showIdentityConfirmation" class="flex h-dvh min-h-0 flex-col bg-canvas text-ink">
+  <div v-else-if="session?.authenticated && installation" class="flex h-dvh min-h-0 flex-col bg-canvas text-ink">
     <header class="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2 text-sm phone:gap-2 phone:px-3" aria-label="Current installation">
       <VirtualSelect
         v-if="session.installations.length > 1"
@@ -674,11 +602,13 @@ onMounted(async () => {
         :disabled="busy || state.redirecting"
         compact
         hide-label
+        action-label="Add an installation"
         class="min-w-0! max-w-80! flex-1"
         @update:model-value="selectInstallation"
+        @action="addInstallation"
       />
       <span v-else class="min-w-0 truncate font-semibold" :title="installation.name">{{ installation.name }}</span>
-      <span class="flex shrink-0 items-center gap-2 text-xs text-muted" :title="`${installationStatus(installation)} · ${state.transportRoute === 'direct' ? 'Direct' : 'Relais'}`">
+      <span class="ml-auto flex shrink-0 items-center gap-2 text-xs text-muted" :title="`${installationStatus(installation)} · ${state.transportRoute === 'direct' ? 'Direct' : 'Relais'}`">
         <span
           role="status"
           aria-label="Installation availability"
@@ -693,123 +623,22 @@ onMounted(async () => {
           class="text-xs text-muted"
         >{{ state.transportRoute === 'direct' ? 'Direct' : 'Relais' }}</span>
       </span>
-      <details ref="installationMenu" class="relative ml-auto shrink-0">
-        <summary class="flex min-h-11 cursor-pointer list-none items-center justify-center rounded-lg border border-line px-3 py-2 phone:px-2.5">
-          <span class="phone:sr-only">Installation options</span>
-          <span class="hidden phone:block"><Icon :name="MoreHorizontal" :size="18" /></span>
-        </summary>
-        <div class="absolute right-0 z-50 mt-2 grid w-52 gap-2 rounded-xl border border-line bg-surface p-2 shadow-lg" @click="closeInstallationMenu">
-          <UiButton
-            v-if="installation.role === 'owner'"
-            size="small"
-            :disabled="busy"
-            @click="editingName = !editingName; installationName = installation.name"
-          >
-            Rename installation
-          </UiButton>
-          <UiButton size="small" :disabled="busy" @click="addInstallation">
-            Add an installation
-          </UiButton>
-          <UiButton
-            v-if="installation.role === 'owner'"
-            size="small"
-            :disabled="busy"
-            @click="confirmDetach = true"
-          >
-            Detach installation
-          </UiButton>
-          <UiButton
-            v-if="installation.role === 'owner'"
-            size="small"
-            :disabled="busy"
-            @click="confirmForget = true"
-          >
-            Revoke and forget installation
-          </UiButton>
-          <UiButton
-            v-if="installation.role === 'owner'"
-            size="small"
-            :disabled="busy"
-            @click="showSharing = !showSharing"
-          >
-            Share installation
-          </UiButton>
-          <UiButton
-            v-else
-            size="small"
-            :disabled="busy"
-            @click="confirmLeave = true"
-          >
-            Leave installation
-          </UiButton>
-          <UiButton size="small" :disabled="busy" @click="showInvitations = !showInvitations">
-            Invitations
-          </UiButton>
-          <UiButton size="small" :disabled="busy" @click="showNotifications = true">
-            Notifications
-          </UiButton>
-          <UiButton size="small" :disabled="busy" @click="openMethods">
-            Sign-in methods
-          </UiButton>
-          <UiButton size="small" :disabled="busy" @click="showSecurity = true">
-            Account security
-          </UiButton>
-          <UiButton size="small" :disabled="busy" @click="signOut">
-            Sign out
-          </UiButton>
-        </div>
-      </details>
+      <UiButton
+        class="size-11 p-0"
+        aria-label="Installation settings"
+        title="Installation settings"
+        :disabled="busy || state.redirecting"
+        @click="router.push('/settings/installation')"
+      >
+        <Icon :name="Settings" :size="18" />
+      </UiButton>
+      <AccountMenu
+        :email="session.account?.email || ''"
+        :disabled="busy || state.redirecting"
+        @settings="router.push('/settings/account')"
+        @sign-out="signOut"
+      />
     </header>
-    <InstallationSharing v-if="showSharing && installation.role === 'owner'" :installation-id="installation.id" @close="showSharing = false" />
-    <PendingInvitations v-if="showInvitations" class="px-4" @accepted="id => openInstallation({ id, name: '' })" />
-    <div v-if="confirmLeave" class="grid gap-3 border-b border-line px-4 py-3">
-      <p>Leave this shared installation? You will need a new invitation to return.</p>
-      <UiButton :disabled="busy" @click="leaveInstallation">
-        Confirm leaving
-      </UiButton>
-      <UiButton :disabled="busy" @click="confirmLeave = false">
-        Cancel leaving
-      </UiButton>
-    </div>
-    <div v-if="confirmDetach" class="grid gap-3 border-b border-line px-4 py-3">
-      <p>Detach this installation? Access through Leo will stop. Its data stays on the machine, which can be claimed again.</p>
-      <UiButton :disabled="busy" @click="openIdentityConfirmation('Confirm identity before detaching this installation')">
-        Confirm identity
-      </UiButton>
-      <UiButton :disabled="busy" @click="detachInstallation">
-        Confirm detachment
-      </UiButton>
-      <UiButton :disabled="busy" @click="confirmDetach = false">
-        Cancel detachment
-      </UiButton>
-    </div>
-    <div v-if="confirmForget" class="grid gap-3 border-b border-line px-4 py-3">
-      <p>Revoke this installation permanently? Its credentials and shared access will stop working. Claim the machine again to return.</p>
-      <p>Its data stays on the machine.</p>
-      <UiButton :disabled="busy" @click="openIdentityConfirmation('Confirm identity before revoking this installation')">
-        Confirm identity
-      </UiButton>
-      <UiButton :disabled="busy" @click="forgetInstallation">
-        Confirm revocation
-      </UiButton>
-      <UiButton :disabled="busy" @click="confirmForget = false">
-        Cancel revocation
-      </UiButton>
-    </div>
-    <form v-if="editingName" class="flex flex-wrap items-end gap-3 border-b border-line px-4 py-3" @submit.prevent="renameInstallation">
-      <label>Installation name<input
-        v-model="installationName"
-        required
-        maxlength="100"
-        :disabled="busy"
-      ></label>
-      <UiButton type="submit" :disabled="busy">
-        Save installation name
-      </UiButton>
-      <UiButton :disabled="busy" @click="editingName = false">
-        Cancel
-      </UiButton>
-    </form>
     <div v-if="claimCode" class="grid gap-3 border-b border-line px-4 py-3">
       <label>Installation command<textarea
         :value="installationCommand"
@@ -836,7 +665,189 @@ onMounted(async () => {
     <UiAlert v-if="installation.updateRequired" class="mx-4 my-2">
       Mise à jour nécessaire. This installation must finish updating before it can be used here.
     </UiAlert>
-    <App v-else />
+    <App v-else>
+      <template #settings-account>
+        <section aria-label="Profile" class="border-b border-line py-6">
+          <h2>Profile</h2>
+          <p class="mt-3 break-all text-muted">
+            {{ session.account?.email }}
+          </p>
+        </section>
+        <section aria-label="Notifications" class="border-b border-line py-6">
+          <h2 class="mb-4">
+            Notifications
+          </h2>
+          <NotificationSettings />
+        </section>
+        <div class="border-b border-line py-6">
+          <AccountMethods
+            :email="session.account?.email || ''"
+            :options="options"
+            :request="accountRequest"
+            embedded
+            @oauth="oauth"
+            @session-updated="session = $event"
+            @signed-out="redirect('/')"
+          />
+        </div>
+        <section aria-label="Account security" class="border-b border-line py-6">
+          <AccountSecurity
+            :email="session.account?.email || ''"
+            :passkeys="options.passkeys"
+            embedded
+            @confirm-identity="openIdentityConfirmation('Confirm identity before revoking other devices')"
+            @signed-out="redirect('/')"
+          />
+        </section>
+      </template>
+      <template #settings-installation>
+        <section aria-label="General" class="border-b border-line py-6">
+          <h2>General</h2>
+          <dl class="mt-4 grid grid-cols-[auto_minmax(0,1fr)] gap-x-5 gap-y-3 text-sm">
+            <dt class="text-muted">
+              Name
+            </dt><dd class="break-words">
+              {{ installation.name }}
+            </dd>
+            <dt class="text-muted">
+              Owner
+            </dt>
+            <dd class="break-all">
+              {{ installation.role === 'owner' ? session.account?.email : 'The account that shared this installation' }}
+            </dd>
+            <dt class="text-muted">
+              Your access
+            </dt><dd>{{ installation.role === 'owner' ? 'Owner' : 'Member' }}</dd>
+          </dl>
+          <div class="mt-5 flex flex-wrap gap-3">
+            <UiButton
+              v-if="installation.role === 'owner'"
+              size="small"
+              :disabled="busy"
+              @click="editingName = !editingName; installationName = installation.name"
+            >
+              Rename installation
+            </UiButton>
+            <UiButton size="small" :disabled="busy" @click="addInstallation">
+              Add an installation
+            </UiButton>
+          </div>
+          <form v-if="editingName" class="flex flex-wrap items-end gap-3 border-b border-line px-4 py-3" @submit.prevent="renameInstallation">
+            <label>Installation name<input
+              v-model="installationName"
+              required
+              maxlength="100"
+              :disabled="busy"
+            ></label>
+            <UiButton type="submit" :disabled="busy">
+              Save installation name
+            </UiButton>
+            <UiButton :disabled="busy" @click="editingName = false">
+              Cancel
+            </UiButton>
+          </form>
+        </section>
+        <section aria-label="Members and invitations" class="border-b border-line py-6">
+          <h2 class="mb-4">
+            Members &amp; invitations
+          </h2>
+          <UiButton
+            v-if="installation.role === 'owner'"
+            size="small"
+            :disabled="busy"
+            @click="showSharing = !showSharing"
+          >
+            Share installation
+          </UiButton>
+          <InstallationSharing v-if="showSharing && installation.role === 'owner'" :installation-id="installation.id" @close="showSharing = false" />
+          <UiButton size="small" :disabled="busy" @click="showInvitations = !showInvitations">
+            Invitations
+          </UiButton>
+          <PendingInvitations v-if="showInvitations" @accepted="id => openInstallation({ id, name: '' })" />
+        </section>
+      </template>
+      <template #settings-installation-heading>
+        <h2 class="text-xl font-heading break-words">
+          Installation “{{ installation.name }}”
+        </h2>
+      </template>
+      <template #settings-sensitive>
+        <section aria-label="Installation access" class="rounded-xl border border-danger/30 bg-danger-surface p-5">
+          <h2 class="text-danger">
+            Installation access
+          </h2>
+          <p class="my-4 text-sm text-muted">
+            These actions change access to {{ installation.name }}. Data stays on the machine.
+          </p>
+          <div class="flex flex-wrap gap-3">
+            <template v-if="installation.role === 'owner'">
+              <UiButton variant="danger-outline" :disabled="busy" @click="confirmDetach = true">
+                Detach installation
+              </UiButton>
+              <UiButton variant="danger-outline" :disabled="busy" @click="confirmForget = true">
+                Revoke and forget installation
+              </UiButton>
+            </template>
+            <UiButton
+              v-else
+              variant="danger-outline"
+              :disabled="busy"
+              @click="confirmLeave = true"
+            >
+              Leave installation
+            </UiButton>
+          </div>
+          <div v-if="confirmLeave" class="grid gap-3 border-b border-line px-4 py-3">
+            <p>Leave this shared installation? You will need a new invitation to return.</p>
+            <UiButton variant="danger" :disabled="busy" @click="leaveInstallation">
+              Confirm leaving
+            </UiButton>
+            <UiButton :disabled="busy" @click="confirmLeave = false">
+              Cancel leaving
+            </UiButton>
+          </div>
+          <div v-if="confirmDetach" class="grid gap-3 border-b border-line px-4 py-3">
+            <p>Detach this installation? Access through Leo will stop. Its data stays on the machine, which can be claimed again.</p>
+            <UiButton :disabled="busy" @click="openIdentityConfirmation('Confirm identity before detaching this installation')">
+              Confirm identity
+            </UiButton>
+            <UiButton variant="danger" :disabled="busy" @click="detachInstallation">
+              Confirm detachment
+            </UiButton>
+            <UiButton :disabled="busy" @click="confirmDetach = false">
+              Cancel detachment
+            </UiButton>
+          </div>
+          <div v-if="confirmForget" class="grid gap-3 border-b border-line px-4 py-3">
+            <p>Revoke this installation permanently? Its credentials and shared access will stop working. Claim the machine again to return.</p>
+            <p>Its data stays on the machine.</p>
+            <UiButton :disabled="busy" @click="openIdentityConfirmation('Confirm identity before revoking this installation')">
+              Confirm identity
+            </UiButton>
+            <UiButton variant="danger" :disabled="busy" @click="forgetInstallation">
+              Confirm revocation
+            </UiButton>
+            <UiButton :disabled="busy" @click="confirmForget = false">
+              Cancel revocation
+            </UiButton>
+          </div>
+        </section>
+      </template>
+    </App>
+    <Modal v-if="showIdentityConfirmation" title="Confirm identity" @close="showIdentityConfirmation = false">
+      <div class="p-6">
+        <AccountSecurity
+          :email="session.account?.email || ''"
+          :passkeys="options.passkeys"
+          confirmation-only
+          :confirmation-title="confirmationTitle"
+          return-label="Back to settings"
+          @close="showIdentityConfirmation = false"
+          @confirmed="showIdentityConfirmation = false; error = ''"
+          @signed-out="redirect('/')"
+        />
+      </div>
+    </Modal>
   </div>
   <main v-else class="min-h-dvh bg-canvas text-ink px-6 py-10 grid place-items-center">
     <div class="absolute top-5 right-5">
@@ -869,75 +880,16 @@ onMounted(async () => {
         @confirmed="showIdentityConfirmation = false; error = ''"
         @signed-out="redirect('/')"
       />
-      <template v-else-if="session?.authenticated && showMethods">
-        <h1 class="font-heading text-2xl mb-4">
-          Sign-in methods
-        </h1>
-        <p class="text-muted mb-4">
-          {{ session.account?.email }} · Keep at least one sign-in method.
-        </p>
-        <UiAlert v-if="error">
-          {{ error }}
-        </UiAlert>
-        <ul class="grid gap-4 mb-6">
-          <li v-for="method in methods" :key="method.id" class="border border-line rounded-xl p-4 grid gap-2 min-w-0">
-            <span>{{ methodNames[method.kind] }}</span>
-            <span class="text-muted break-all">{{ method.label }}</span>
-            <UiButton
-              :disabled="busy || methods.length === 1"
-              :aria-label="`Remove ${method.kind === 'passkey' ? method.label : `${methodNames[method.kind]} ${method.label}`}`"
-              @click="removeMethod(method.id)"
-            >
-              Remove
-            </UiButton>
-          </li>
-        </ul>
-        <p class="text-muted mb-3">
-          Adding or removing a sign-in method requires an email code or existing passkey confirmed in the last five minutes.
-        </p>
-        <UiButton
-          class="mb-3"
-          :disabled="busy"
-          @click="openIdentityConfirmation('Confirm identity before changing sign-in methods')"
-        >
-          Confirm identity
-        </UiButton>
-        <form v-if="options.passkeys" class="grid gap-3 mb-6" @submit.prevent="passkey(true)">
-          <label>Passkey name<input
-            v-model="passkeyName"
-            required
-            maxlength="80"
-            :disabled="busy"
-          ></label>
-          <UiButton type="submit" :disabled="busy">
-            Add passkey
-          </UiButton>
-        </form>
-        <div class="grid gap-3 mb-6">
-          <UiButton v-if="options.google && !methods.some(method => method.kind === 'google')" :disabled="busy" @click="oauth('google')">
-            Add Google
-          </UiButton>
-          <UiButton v-if="options.github && !methods.some(method => method.kind === 'github')" :disabled="busy" @click="oauth('github')">
-            Add GitHub
-          </UiButton>
-          <form v-if="!methods.some(method => method.kind === 'email')" class="grid gap-3" @submit.prevent="enableEmail">
-            <label v-if="challenge">Email code<input
-              v-model="code"
-              autocomplete="one-time-code"
-              inputmode="numeric"
-              required
-              maxlength="8"
-              :disabled="busy"
-            ></label>
-            <UiButton type="submit" :disabled="busy">
-              {{ challenge ? 'Confirm email code' : 'Enable email sign-in' }}
-            </UiButton>
-          </form>
-        </div>
-        <UiButton :disabled="busy" @click="showMethods = false; changeEmail()">
-          Back to installations
-        </UiButton>
-      </template>
+      <AccountMethods
+        v-else-if="session?.authenticated && showMethods"
+        :email="session.account?.email || ''"
+        :options="options"
+        :request="accountRequest"
+        @oauth="oauth"
+        @session-updated="session = $event"
+        @signed-out="redirect('/')"
+        @close="showMethods = false; changeEmail()"
+      />
       <template v-else-if="session?.authenticated">
         <h1 class="font-heading text-2xl mb-4">
           {{ installation?.name || (session.installations.length ? 'Your installations' : 'No installations yet') }}
@@ -1071,7 +1023,7 @@ onMounted(async () => {
           <UiButton type="submit" variant="primary" :disabled="busy">
             {{ busy ? 'Please wait…' : challenge ? 'Sign in' : 'Send code' }}
           </UiButton>
-          <UiButton v-if="!challenge && options.passkeys" :disabled="busy" @click="passkey(false)">
+          <UiButton v-if="!challenge && options.passkeys" :disabled="busy" @click="passkey()">
             Sign in with a passkey
           </UiButton>
           <UiButton v-if="challenge" :disabled="busy" @click="changeEmail">

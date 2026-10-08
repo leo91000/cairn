@@ -63,8 +63,9 @@ function expireProof(installation: InstallationFixture) {
 }
 
 async function confirmIdentity(page: Page, installation: InstallationFixture) {
-  await expect(page.getByRole('button', { name: 'Confirm identity', exact: true })).toBeVisible()
-  await page.getByRole('button', { name: 'Confirm identity', exact: true }).click()
+  const confirm = page.getByRole('region', { name: 'Account security', exact: true }).getByRole('button', { name: 'Confirm identity', exact: true }).or(page.getByRole('dialog').getByRole('button', { name: 'Confirm identity', exact: true }))
+  await expect(confirm).toBeVisible()
+  await confirm.click()
   const previousEmails = installation.messages.length
   await page.getByRole('button', { name: 'Send confirmation code', exact: true }).click()
   await expect.poll(() => installation.messages.slice(previousEmails).find(message => /\b\d{8}\b/.test(message))).toBeTruthy()
@@ -75,7 +76,7 @@ async function confirmIdentity(page: Page, installation: InstallationFixture) {
 
 test('personal token confirmation preserves its name and permissions without creating automatically', async ({ page, installation }) => {
   const { url, installationId } = installation
-  await page.goto(`${url}/installations/${installationId}/settings`)
+  await page.goto(`${url}/installations/${installationId}/settings/installation`)
   await page.getByRole('button', { name: 'New token', exact: true }).click()
   const dialog = page.getByRole('dialog')
   await dialog.getByLabel('Name', { exact: true }).fill('Confirmed personal client')
@@ -155,8 +156,9 @@ test('confirming identity keeps other devices signed in until explicit revocatio
     await other.getByLabel('Email code').fill(messages.at(-1)!.match(/\b\d{8}\b/)![0])
     await other.getByRole('button', { name: 'Sign in', exact: true }).click()
     await expect(other).toHaveURL(/\/installations\/[^/]+\/$/)
-    await page.getByText('Installation options', { exact: true }).click()
-    await page.getByRole('button', { name: 'Account security', exact: true }).click()
+    await page.getByRole('button', { name: 'Account', exact: true }).click()
+    await page.getByRole('menuitem', { name: 'Account settings', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'Account security', exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Revoke other devices', exact: true }).click()
     await expect(page.getByRole('alert')).toContainText('Confirm your identity')
     await expect(page.getByText('Lost phone browser', { exact: true })).toBeVisible()

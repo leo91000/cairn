@@ -263,7 +263,7 @@ test('approves a scoped OAuth connector and revokes its grant', async ({
   expect(token.status()).toBe(200)
   const credentials = await token.json()
   expect(credentials.scope).toBe('read run')
-  await page.goto(workspacePath('/settings'))
+  await page.goto(workspacePath('/settings/installation'))
   await expect(
     page.getByText('Browser QA connector', { exact: true }),
   ).toBeVisible()
@@ -329,7 +329,7 @@ test('dark appearance settings, empty states and connection sign-in feedback', a
   await page.goto(workspacePath('/'))
   await authenticateWorkspace(page)
   await expect(page.locator('.shell')).toBeVisible()
-  await page.goto(workspacePath('/settings'))
+  await page.goto(workspacePath('/settings/account'))
   await page.locator('.theme-control:not(.theme-compact) label').filter({ hasText: 'Light' }).click()
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
   await page.locator('.theme-control:not(.theme-compact) label').filter({ hasText: 'Dark' }).click()

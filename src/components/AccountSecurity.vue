@@ -15,6 +15,7 @@ interface AccountDevice {
 const props = defineProps<{
   email: string
   passkeys: boolean
+  embedded?: boolean
   confirmationOnly?: boolean
   confirmationTitle?: string
   returnLabel?: string
@@ -28,6 +29,7 @@ const emit = defineEmits<{
 const confirmDelete = ref(false)
 const confirmation = ref('')
 const sessions = ref<AccountDevice[]>([])
+const audit = ref<Array<{ id: string, action: string, createdAt: string }>>([])
 const busy = ref(false)
 const error = ref('')
 const challenge = ref('')
@@ -77,7 +79,9 @@ async function update(route?: string, current = false) {
       return
     }
 
-    sessions.value = (await request('sessions')).sessions
+    const [devices, history] = await Promise.all([request('sessions'), request('audit')])
+    sessions.value = devices.sessions
+    audit.value = history.events
   }
   catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Unable to update account security.'
@@ -169,9 +173,9 @@ onMounted(() => {
 
 <template>
   <div class="grid gap-4" :aria-busy="busy">
-    <h1 class="font-heading text-2xl">
+    <component :is="embedded ? 'h2' : 'h1'" class="font-heading text-2xl">
       {{ props.confirmationOnly ? 'Confirm identity' : 'Account security' }}
-    </h1>
+    </component>
     <template v-if="!props.confirmationOnly">
       <h2 class="font-semibold">
         Active sessions
@@ -196,6 +200,23 @@ onMounted(() => {
       <UiButton :disabled="busy || !sessions.some(session => !session.current)" @click="update('sessions/revoke-others')">
         Revoke other devices
       </UiButton>
+      <section aria-label="Audit log" class="border-t border-line pt-4">
+        <h3 class="font-semibold">
+          Audit log
+        </h3>
+        <p class="mt-2 text-sm text-muted">
+          Account and installation access changes from the last 90 days.
+        </p>
+        <ul class="mt-4 grid gap-3 text-sm">
+          <li v-for="event in audit" :key="event.id" class="flex flex-wrap justify-between gap-2 border-b border-line pb-3">
+            <span>{{ event.action.replaceAll('.', ' · ') }}</span>
+            <time :datetime="event.createdAt" class="text-muted">{{ date(event.createdAt) }}</time>
+          </li>
+        </ul>
+        <p v-if="!audit.length" class="mt-3 text-sm text-muted">
+          No recent access changes.
+        </p>
+      </section>
     </template>
     <section class="border-t border-line pt-4 grid gap-3">
       <h2 class="font-semibold">
@@ -255,7 +276,7 @@ onMounted(() => {
     <UiAlert v-if="error">
       {{ error }}
     </UiAlert>
-    <UiButton :disabled="busy" @click="emit('close')">
+    <UiButton v-if="!embedded || confirmationOnly" :disabled="busy" @click="emit('close')">
       {{ props.confirmationOnly ? (props.returnLabel || 'Back to sign-in methods') : 'Back to installations' }}
     </UiButton>
   </div>
