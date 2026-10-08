@@ -3,6 +3,7 @@ import {
   expect,
   expectSingleScroll,
   test,
+  useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
 
@@ -88,6 +89,7 @@ test('keeps activity scrolling inside the workspace and gives tabs breathing roo
 })
 
 test('a tab click survives completion of the cached run refresh', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto(workspacePath('/tasks'))
   await authenticateWorkspace(page)

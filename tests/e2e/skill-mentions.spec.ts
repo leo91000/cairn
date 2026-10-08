@@ -2,6 +2,7 @@ import {
   signIn as authenticateWorkspace,
   expect,
   test,
+  useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
 
@@ -69,6 +70,7 @@ test('typing $ suggests skills, inserts one with the keyboard and invokes it for
 })
 
 test('an empty skill catalog explains why $ has no suggestions without trapping the keyboard', async ({ page, workspace, hasTouch }) => {
+  await useRelayForHttpMocks(page)
   await page.route('**/api/skills', route => route.fulfill({ json: [] }))
   const chat = await workspace.api('/api/chats', 'POST', {})
   await page.goto(workspacePath(`/chats/${chat.id}`))

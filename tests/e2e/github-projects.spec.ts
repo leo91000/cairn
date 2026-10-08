@@ -2,11 +2,13 @@ import {
   signIn as authenticateWorkspace,
   expect,
   test,
+  useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
 
 test('GitHub picker handles retry, search, keyboard selection and import on a phone', async ({ page }) => {
   test.setTimeout(90000)
+  await useRelayForHttpMocks(page)
   await page.goto(workspacePath('/projects'))
   await authenticateWorkspace(page)
   let failed = true

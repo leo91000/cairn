@@ -6,6 +6,7 @@ import {
   expectSingleScroll,
   initializeRepository,
   test,
+  useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
 
@@ -234,6 +235,7 @@ test('compact mobile toolbar keeps details and workspace controls accessible', a
 })
 
 test('ordinary sends and steering stay in the transcript while only follow-ups queue', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
   test.setTimeout(90000)
   await workspace.restart()
   const chat = await workspace.api('/api/chats', 'POST', {})
@@ -293,6 +295,7 @@ test('ordinary sends and steering stay in the transcript while only follow-ups q
 })
 
 test('a rejected ordinary send preserves its draft and removes the optimistic message', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
   await workspace.restart()
   const chat = await workspace.api('/api/chats', 'POST', {})
   await page.goto(workspacePath(`/chats/${chat.id}`))

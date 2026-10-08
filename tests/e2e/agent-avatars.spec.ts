@@ -4,6 +4,7 @@ import {
   signIn as authenticateWorkspace,
   expect,
   test,
+  useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
 
@@ -54,6 +55,7 @@ test('uploads a persistent portrait, preserves it on edits and shows it in conve
 })
 
 test('shows generation progress, refreshes the portrait and falls back if an image fails to load', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
   const agent = await workspace.api('/api/agents', 'POST', { name: 'Generated identity' })
   await page.route('**/api/agent-avatars', route => route.fulfill({ json: { configured: true } }))
   // UI behavior uses a controlled completion; real provider requests and races are

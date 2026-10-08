@@ -2,6 +2,7 @@ import {
   signIn as authenticateWorkspace,
   expect,
   test,
+  useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
 
@@ -323,6 +324,7 @@ test('appearance follows the device, persists overrides, syncs tabs and paints b
 })
 
 test('dark appearance settings, empty states and connection sign-in feedback', async ({ page }, testInfo) => {
+  await useRelayForHttpMocks(page)
   await page.emulateMedia({ colorScheme: 'dark' })
   await page.goto(workspacePath('/'))
   await authenticateWorkspace(page)

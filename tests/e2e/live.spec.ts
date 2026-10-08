@@ -7,11 +7,13 @@ import {
   expectSingleScroll,
   initializeRepository,
   test,
+  useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
 
 for (const kind of ['chat', 'task'] as const) {
   test(`${kind} automatically fills folded history without a click or scroll`, async ({ page, workspace }) => {
+    await useRelayForHttpMocks(page)
     await page.setViewportSize(kind === 'chat' ? { width: 390, height: 844 } : { width: 1440, height: 1100 })
     let run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
     let path = `/runs/${run.id}`
@@ -65,6 +67,7 @@ for (const kind of ['chat', 'task'] as const) {
 }
 
 test('automatic history pauses on errors and resumes only after retry', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
   const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
   for (let i = 0; i < 220; i++) {
     workspace.service.store.event(run.id, 'item.completed', 'Checked a file', {
@@ -134,6 +137,7 @@ test('two independent clients follow deltas, recover offline, refresh mid-answer
   const chat = await workspace.api('/api/chats', 'POST', {})
   const contexts: BrowserContext[] = []
   const signIn = async (target: Page) => {
+    await useRelayForHttpMocks(target)
     await target.goto(workspacePath(workspace.url))
     await authenticateWorkspace(target)
     await expect(target.getByRole('heading', { name: 'Fil', exact: true })).toBeVisible()
@@ -207,6 +211,7 @@ test('two independent clients follow deltas, recover offline, refresh mid-answer
 })
 
 test('cached history survives reload before a delayed stream, then clear on logout', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Cache persistence proof' })
   await page.goto(workspacePath(`${workspace.url}/chats/${chat.id}`))
@@ -260,6 +265,7 @@ test('cached history survives reload before a delayed stream, then clear on logo
 })
 
 test('a cached run restores the reading offset while its stream is still connecting', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
   const run = workspace.service.store.runs()[0]
   for (let i = 0; i < 40; i++) {
     const text = `Saved reading position ${i}. A longer paragraph to exercise the scrolling activity view across reloads.`
@@ -342,6 +348,7 @@ test('a cached run restores the reading offset while its stream is still connect
 })
 
 test('recent history loads older pages without moving the reader and survives a blocked reconnect', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
   const run = workspace.service.store.runs()[0]
   for (let i = 0; i < 350; i++) {
     const text = `Paged line ${String(i).padStart(3, '0')}. A paragraph to retain a stable reading position.`
@@ -376,6 +383,7 @@ test('recent history loads older pages without moving the reader and survives a 
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 150' })).toBeAttached()
   await expect.poll(async () => Math.abs((await anchor.boundingBox())!.y - top)).toBeLessThan(2)
   await page.unrouteAll({ behavior: 'wait' })
+  await useRelayForHttpMocks(page)
   // Move back to the latest content and let its bounded disk snapshot commit.
   await page.getByLabel('Follow output').check()
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 349' })).toBeVisible()

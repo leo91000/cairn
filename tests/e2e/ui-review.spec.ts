@@ -7,6 +7,7 @@ import {
   expectSingleScroll,
   initializeRepository,
   test,
+  useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
 
@@ -130,6 +131,7 @@ test('keeps projects compact and agent summaries readable with several resources
 })
 
 test('reviews workflow permission, fresh project sources and explicit blocked outcomes', async ({ page, workspace }, testInfo) => {
+  await useRelayForHttpMocks(page)
   await page.emulateMedia({ reducedMotion: 'reduce' })
   // The server rate-limits each client; the previous journey spends this worker's budget.
   await workspace.restart()

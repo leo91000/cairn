@@ -45,6 +45,12 @@ export async function signIn(page: Page) {
   await currentWorkspace!.signIn(page)
 }
 
+// HTTP response fixtures must remain observable after background negotiation.
+// Other journeys and the network bench still exercise the real direct transport.
+export async function useRelayForHttpMocks(page: Page) {
+  await page.route('**/direct/authorize', route => route.fulfill({ json: { available: false } }))
+}
+
 // Each Playwright project owns its application, database, worker, and limiter.
 // Journeys retain their deliberately ordered persistence checks within one project.
 export const test = base.extend<object, { workspace: Workspace }>({
@@ -247,6 +253,11 @@ export const test = base.extend<object, { workspace: Workspace }>({
           child = start()
           closed = once(child, 'exit')
           await ready()
+          // Local readiness precedes reconnection to the official relay.
+          await expect.poll(async () => {
+            const response = await fetch(`${url}${apiPath('/api/agents')}`, { headers })
+            return response.ok
+          }, { timeout: 15000 }).toBe(true)
         },
         setAccountUsage: async (id, value) => {
           usage[id] = value

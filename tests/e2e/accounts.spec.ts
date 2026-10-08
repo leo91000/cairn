@@ -7,6 +7,7 @@ import {
   expect,
   expectSingleScroll,
   test,
+  useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
 
@@ -176,6 +177,7 @@ test('a Codex reconnection shows its device code, survives a reload and can be c
 })
 
 test('statuses come from the server: stale, unknown and expired accounts stay understandable', async ({ page }) => {
+  await useRelayForHttpMocks(page)
   const now = Date.now()
   const base = {
     enabled: true,

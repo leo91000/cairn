@@ -3,10 +3,12 @@ import {
   expect,
   expectSingleScroll,
   test,
+  useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
 
 test('reconnects after a temporary restart and resumes a cancelled conversation in place', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
   const agent = workspace.service.agent({ name: 'Recovery engineer' })
   const project = workspace.service.store.list('projects')[0]
   const task = workspace.service.task({

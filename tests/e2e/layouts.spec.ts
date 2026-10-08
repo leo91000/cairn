@@ -6,6 +6,7 @@ import {
   expect,
   expectSingleScroll,
   test,
+  useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
 
@@ -483,5 +484,6 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
 }
 
 test('pages, dialogs, navigation and activity', async ({ page, workspace }, testInfo) => {
+  await useRelayForHttpMocks(page)
   await checkMobileLayouts(page, workspace, testInfo, testInfo.project.use.colorScheme === 'dark' ? 'dark' : 'light')
 })
