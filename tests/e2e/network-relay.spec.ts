@@ -301,7 +301,8 @@ test('authenticated browser and Rust client keep using the observed route under 
       expect(observation.route, `${observation.operation}: actual route`).toBe(route)
     }
 
-    const logout = await page.request.post(`${url}/api/account/logout`, { headers: { 'origin': url, 'x-csrf-token': session.csrf }, data: {} })
+    const finalSession = await (await page.request.get(`${url}/api/account/session`)).json()
+    const logout = await page.request.post(`${url}/api/account/logout`, { headers: { 'origin': url, 'x-csrf-token': finalSession.csrf || session.csrf }, data: {} })
     expect([200, 204, 401]).toContain(logout.status())
     await rustRequest(chatsPath, cookie, 401)
   }
