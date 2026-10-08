@@ -1,9 +1,9 @@
 mod common;
 
-use common::browser_http::router;
+use common::relay_fixture::router;
 
 use axum::{Router, body::Body, http::StatusCode};
-use common::Session;
+use common::RelayContext;
 use leo_agent_manager::{config::id, run_status::RunStatus, service::Service};
 use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc};
@@ -15,7 +15,7 @@ struct App {
     _root: TempDir,
     router: Router,
     service: Arc<Service>,
-    session: Session,
+    session: RelayContext,
 }
 
 impl App {
@@ -23,12 +23,7 @@ impl App {
         let root = TempDir::new().unwrap();
         let service = Service::new(common::config(root.path())).await.unwrap();
         let router = router(service.clone()).await.unwrap();
-        let session = Session::new(
-            &common::browser_http::auth(&service)
-                .session()
-                .await
-                .unwrap(),
-        );
+        let session = RelayContext::new(&common::relay_fixture::context(&service).await);
         Self {
             _root: root,
             router,

@@ -1,25 +1,59 @@
 mod common;
-#[path = "../../backend/examples/support/legacy_auth.rs"]
-mod legacy_auth;
 
 use common::RelayedInstallation;
+use leo_agent_manager::{auth::digest, config::now};
 use reqwest::StatusCode;
 use serde_json::json;
 
 #[tokio::test]
 async fn installation_browser_routes_refuse_local_credentials_and_forged_identity_headers() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
-    let legacy = legacy_auth::Auth::new(
-        relay.installation.store.clone(),
-        relay.installation.config.public_url.clone(),
-    );
-    // Simulate credentials left by an installation upgraded from local access.
-    legacy.setup("legacy-password-long-enough").await.unwrap();
-    let session = legacy.session().await.unwrap();
-    let personal = legacy
-        .personal("Legacy", vec!["read", "manage"])
-        .await
-        .unwrap();
+    // Persist the old record shapes without preserving their credential issuer.
+    // The hash is the Node scrypt fixture for legacy-password-long-enough / legacy-salt.
+    let session = "old-local-session";
+    let personal = "old-local-personal-token";
+    let csrf = "old-local-csrf";
+    let expires = now() + 600_000;
+    let grant = json!({
+        "clientId": "personal",
+        "resource": format!("{}/mcp", relay.installation.config.public_url),
+        "scopes": ["read", "manage"],
+        "label": "Legacy",
+        "family": "old-local-grant",
+        "expiresAt": expires,
+        "used": false,
+    });
+    for (key, value, expiry) in [
+        (
+            "admin".to_owned(),
+            json!({
+                "salt": "legacy-salt",
+                "hash": "f135651144674b54d6faf9dc217c43ae1a296eeba56adda5fc4032b5c8bf95fc7407c283bb5f865d21dbb97eea03f46ab3a13c5520065ebc8955ffc5a72b4c8b",
+            }),
+            None,
+        ),
+        (
+            format!("session:{}", digest(session)),
+            json!({
+                "csrf": csrf,
+                "createdAt": now(),
+            }),
+            Some(expires),
+        ),
+        (
+            format!("access:{}", digest(personal)),
+            grant.clone(),
+            Some(expires),
+        ),
+        ("grant:old-local-grant".to_owned(), grant, Some(expires)),
+    ] {
+        relay
+            .installation
+            .store
+            .set(&key, value, expiry)
+            .await
+            .unwrap();
+    }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local = format!("http://{}", listener.local_addr().unwrap());
     let router = leo_agent_manager::http::router(relay.installation.clone())
@@ -52,18 +86,15 @@ async fn installation_browser_routes_refuse_local_credentials_and_forged_identit
             .app
             .client
             .request(method, format!("{local}{path}"))
-            .header(
-                "cookie",
-                format!("leo_session={}", session["value"].as_str().unwrap()),
-            )
-            .header("x-csrf-token", session["csrf"].as_str().unwrap())
-            .header(
-                "authorization",
-                format!("Bearer {}", personal["token"].as_str().unwrap()),
-            )
+            .header("cookie", format!("leo_session={session}"))
+            .header("x-csrf-token", csrf)
+            .header("authorization", format!("Bearer {personal}"))
             .header("x-leo-role", "owner")
             .header("x-leo-account-id", "fixture-owner")
-            .json(&json!({}))
+            .json(&json!({
+                "password": "legacy-password-long-enough",
+                "setupToken": "old-local-setup-token",
+            }))
             .send()
             .await
             .unwrap();

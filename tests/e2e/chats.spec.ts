@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import {
+  signIn as authenticateWorkspace,
   expect,
   expectChatReady,
   expectSingleScroll,
   initializeRepository,
   test,
+  useRelayForHttpMocks,
+  workspacePath,
 } from './fixtures'
 
 test('verbose tool calls keep their action steps with abbreviated details', async ({ page, workspace }) => {
@@ -14,9 +17,8 @@ test('verbose tool calls keep their action steps with abbreviated details', asyn
     text: 'fixture:verbose-tools',
   })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 15000 }).toBe('succeeded')
-  await page.goto(`/chats/${chat.id}`)
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
   await expect(page.getByText('Ready for the next step.', { exact: false }).last()).toBeVisible()
   const actions = page.getByTestId('agent-actions').filter({ hasText: /ran 60 commands/i })
   await expect(actions).toBeVisible()
@@ -45,9 +47,8 @@ test('a transient agent error shows a retry countdown and resumes without user i
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.retry?.attempt).toBe(1)
   const waiting = (await workspace.api(`/api/chats/${chat.id}`)).run
   expect(waiting.status).toBe('queued')
-  await page.goto(`/chats/${chat.id}`)
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
   const notice = page.getByRole('status').filter({ hasText: /Temporary agent error\. Retrying in \d+ seconds \(attempt 1\/3\)\./ })
   await expect(notice).toBeVisible()
   const before = await notice.textContent()
@@ -66,17 +67,15 @@ test('queued Claude conversation explains the missing account and continues afte
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Keep this request while connecting', provider: 'claude' })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.accountRequired).toBe('claude')
   expect((await workspace.api(`/api/chats/${chat.id}`)).run.accountWaitReason).toBe('Connect a Claude Code account in Connections before running this agent.')
-  await page.goto(`/chats/${chat.id}`)
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
   await page.setViewportSize({ width: 390, height: 844 })
-  // Password verification in the native debug backend can take several seconds.
   await expect(page.getByText('Claude Code account needed', { exact: true })).toBeVisible({ timeout: 30000 })
   await expect(page.getByText('Waiting for a Claude Code account', { exact: true })).toBeVisible()
   await expect(page.getByText('Your agent is working…', { exact: true })).toHaveCount(0)
   await expect(page.getByText('Starting agent…', { exact: true })).toHaveCount(0)
   await page.getByRole('link', { name: 'Open Connections', exact: true }).click()
-  await expect(page).toHaveURL('/connections')
+  await expect(page).toHaveURL(workspacePath('/connections'))
   await page.getByRole('button', { name: 'Add Claude Code account', exact: true }).click()
   await page.getByRole('dialog').getByRole('button', { name: 'Continue to sign-in' }).click()
   const dialog = page.getByRole('dialog', { name: 'Connect your Claude account' })
@@ -84,7 +83,7 @@ test('queued Claude conversation explains the missing account and continues afte
   await dialog.getByRole('button', { name: 'Finish sign-in' }).click()
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
   expect((await workspace.api(`/api/chats/${chat.id}`)).run.accountRequired).toBeNull()
-  await page.goto(`/chats/${chat.id}`)
+  await page.goto(workspacePath(`/chats/${chat.id}`))
   await expect(page.getByText('Claude fixture completed', { exact: true })).toBeVisible()
   await expect(page.getByText('Claude Code account needed', { exact: true })).toHaveCount(0)
   await expect(page.locator('.activity-message').getByText('Keep this request while connecting', { exact: true })).toHaveCount(1)
@@ -97,9 +96,8 @@ test('conversation switcher preserves drafts and supports search, keyboard and m
   const second = await workspace.api('/api/chats', 'POST', {})
   workspace.service.store.put('chats', { ...first, title: 'Simplify the chat navigation', updatedAt: Date.now() })
   workspace.service.store.put('chats', { ...second, title: 'Review the release notes', updatedAt: Date.now() - 86400000 })
-  await page.goto(`/chats/${first.id}`)
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath(`/chats/${first.id}`))
+  await authenticateWorkspace(page)
   await expect(page.getByRole('heading', { name: 'Simplify the chat navigation', exact: true })).toBeVisible()
   const message = page.getByRole('textbox', { name: 'Message', exact: true })
   await message.fill('Keep this unsent draft')
@@ -137,7 +135,7 @@ test('conversation switcher preserves drafts and supports search, keyboard and m
   await search.fill('release notes')
   await expect(dialog.getByRole('link')).toHaveCount(1)
   await dialog.getByRole('link', { name: /Review the release notes/ }).click()
-  await expect(page).toHaveURL(`/chats/${second.id}`)
+  await expect(page).toHaveURL(workspacePath(`/chats/${second.id}`))
   await expect(dialog).toHaveCount(0)
   await expect(message).toHaveValue('')
   await trigger.click()
@@ -145,7 +143,7 @@ test('conversation switcher preserves drafts and supports search, keyboard and m
   await expect(message).toHaveValue('Keep this unsent draft')
   await trigger.click()
   await dialog.getByRole('button', { name: 'New conversation', exact: true }).click()
-  await expect(page).toHaveURL('/chats')
+  await expect(page).toHaveURL(workspacePath('/chats'))
   await expect(dialog).toHaveCount(0)
   await expect(message).toHaveValue('')
   await workspace.restart()
@@ -157,9 +155,8 @@ test('compact mobile toolbar keeps details and workspace controls accessible', a
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Review the mobile navigation and keep the conversation easy to find.' })
   await expect.poll(() => workspace.service.chats.detail(chat.id).run?.status).toBe('succeeded')
-  await page.goto(`/chats/${chat.id}`)
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
   const details = page.getByRole('button', { name: 'Chat details', exact: true })
   const panel = page.getByRole('dialog', { name: 'Chat details', exact: true })
   const message = page.getByRole('textbox', { name: 'Message', exact: true })
@@ -175,7 +172,8 @@ test('compact mobile toolbar keeps details and workspace controls accessible', a
       const header = await page.locator('.chat-header').boundingBox()
       // Layout can report sub-pixel heights such as 60.0000007.
       expect(Math.round(header!.height)).toBeLessThanOrEqual(60)
-      expect(header!.y).toBeLessThanOrEqual(1)
+      const workspaceTop = (await page.locator('.shell').boundingBox())!.y
+      expect(Math.abs(header!.y - workspaceTop)).toBeLessThanOrEqual(1)
       await expectSingleScroll(page)
       await page.screenshot({ path: test.info().outputPath(`compact-chat-${colorScheme}-${viewport.width}.png`), animations: 'disabled' })
       await details.click()
@@ -215,7 +213,7 @@ test('compact mobile toolbar keeps details and workspace controls accessible', a
   await page.keyboard.press('Escape')
   await details.click()
   await panel.getByRole('button', { name: 'Workspace navigation', exact: true }).click()
-  await expect(page).toHaveURL('/')
+  await expect(page).toHaveURL(workspacePath('/'))
   await expect(page.getByRole('navigation', { name: 'Quick navigation' })).toBeVisible()
   await page.goBack()
   await expect(message).toHaveValue('Keep my draft while browsing details')
@@ -226,7 +224,7 @@ test('compact mobile toolbar keeps details and workspace controls accessible', a
   await expect(message).toHaveValue('Keep my draft while browsing details')
   await page.setViewportSize({ width: 390, height: 844 })
   await page.getByRole('link', { name: 'New chat', exact: true }).click()
-  await expect(page).toHaveURL('/chats')
+  await expect(page).toHaveURL(workspacePath('/chats'))
   await details.click()
   await expect(panel.getByText('New conversation', { exact: true })).toBeVisible()
   await expect(panel.getByRole('button', { name: 'Open activity fullscreen' })).toHaveCount(0)
@@ -237,12 +235,12 @@ test('compact mobile toolbar keeps details and workspace controls accessible', a
 })
 
 test('ordinary sends and steering stay in the transcript while only follow-ups queue', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
   test.setTimeout(90000)
   await workspace.restart()
   const chat = await workspace.api('/api/chats', 'POST', {})
-  await page.goto(`/chats/${chat.id}`)
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.emulateMedia({ colorScheme: 'dark' })
   const composer = page.getByRole('textbox', { name: 'Message', exact: true })
@@ -297,11 +295,11 @@ test('ordinary sends and steering stay in the transcript while only follow-ups q
 })
 
 test('a rejected ordinary send preserves its draft and removes the optimistic message', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
   await workspace.restart()
   const chat = await workspace.api('/api/chats', 'POST', {})
-  await page.goto(`/chats/${chat.id}`)
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
   await page.route(`**/api/chats/${chat.id}/messages`, route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Temporarily unavailable' }) }))
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Keep this draft on failure')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
@@ -334,9 +332,8 @@ test('task outcomes stay with the reply and expose evidence without crowding the
     messageId,
   }
   workspace.service.store.updateRun(run.id, { outcome })
-  await page.goto(`/chats/${chat.id}`)
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
   const panel = page.getByRole('region', { name: 'Task outcome', exact: true })
   await expect(panel.getByText('Task completed', { exact: true })).toBeVisible()
   expect(await panel.evaluate(element => !!element.closest('.activity-scroll'))).toBe(true)
@@ -354,7 +351,7 @@ test('task outcomes stay with the reply and expose evidence without crowding the
   await expect(panel.getByRole('link', { name: 'View workflow' })).toHaveAttribute('target', '_blank')
   await expect(panel.getByRole('link', { name: 'View workflow' })).toHaveAttribute('rel', 'noopener noreferrer')
   await expect(panel.getByRole('link', { name: 'Review notes' })).toHaveAttribute('href', 'https://example.test/review')
-  await expect(panel.getByRole('link', { name: 'View file' })).toHaveAttribute('href', artifactPath)
+  await expect(panel.getByRole('link', { name: 'View file' })).toHaveAttribute('href', `/api/installations/${workspace.installationId}${artifactPath}`)
   await expect(panel.locator('a[href^="javascript:"]')).toHaveCount(0)
   await panel.getByRole('button', { name: 'Hide evidence' }).blur()
   for (const colorScheme of ['dark', 'light'] as const) {
@@ -420,9 +417,8 @@ test('failed replies show the current error instead of an old answer and can be 
   const firstRun = workspace.service.chats.detail(chat.id).run!
   workspace.service.store.event(firstRun.id, 'error', 'Validation needs attention.', { message: 'Validation needs attention.' })
   workspace.service.store.event(firstRun.id, 'status', 'interrupted')
-  await page.goto(`/chats/${chat.id}`)
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
   await expect(page.getByRole('note').filter({ hasText: 'Validation needs attention.' })).toBeVisible()
   await expect(page.getByRole('note').filter({ hasText: 'Interrupted' })).toBeVisible()
   await expect(page.getByTestId('agent-actions').filter({ hasText: 'Followed the run' })).toHaveCount(0)
@@ -433,12 +429,12 @@ test('failed replies show the current error instead of an old answer and can be 
   }
 
   // Diagnostic run activity still has the complete lifecycle records.
-  await page.goto(`/runs/${firstRun.id}`)
+  await page.goto(workspacePath(`/runs/${firstRun.id}`))
   await page.getByTestId('agent-actions').filter({ hasText: '1 failure' }).locator(':scope > button').click()
   await expect(page.getByTestId('agent-step').filter({ hasText: 'Validation needs attention.' })).toHaveCount(1)
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:disconnect' })
   await expect.poll(() => workspace.service.chats.detail(chat.id).run?.status).toBe('failed')
-  await page.goto(`/chats/${chat.id}`)
+  await page.goto(workspacePath(`/chats/${chat.id}`))
   await expect(page.getByRole('alert')).toContainText('Codex')
   await expect(page.getByRole('alert')).not.toContainText('A successful first reply')
   for (const colorScheme of ['dark', 'light'] as const) {
@@ -461,11 +457,10 @@ test('failed replies show the current error instead of an old answer and can be 
 
 test('starts project chats, steers, edits the queue and preserves a compact mobile composer', async ({ page, workspace }) => {
   initializeRepository(workspace.projectPath)
-  await page.goto('/tasks')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/tasks'))
+  await authenticateWorkspace(page)
   await expect(page.locator('.task-focus-detail')).toBeVisible()
-  await page.goto('/projects')
+  await page.goto(workspacePath('/projects'))
   await page.getByRole('link', { name: 'Start chat' }).first().click()
   await expect(page.getByRole('combobox', { name: 'Chat agent' })).toHaveValue('Main agent')
   await expect(page.getByRole('combobox', { name: 'Chat project' })).toHaveValue('Design system')
@@ -513,7 +508,7 @@ test('starts project chats, steers, edits the queue and preserves a compact mobi
   await expect.poll(() => workspace.service.chats.detail(workspace.service.store.list('chats')[0].id).messages.filter(message => message.status !== 'delivered').length).toBe(0)
   await expectChatReady(page)
   await expect(page.locator('.activity-message').filter({ hasText: 'Add a regression test for keyboard navigation' }).last()).toBeVisible()
-  await page.goto('/agents')
+  await page.goto(workspacePath('/agents'))
   await page.locator('article').filter({ has: page.getByRole('heading', { name: 'Release engineer', exact: true }) }).getByRole('link', { name: 'Start chat' }).click()
   await expect(page.getByRole('combobox', { name: 'Chat agent' })).toHaveValue('Release engineer')
 })
@@ -523,11 +518,10 @@ test('answers in-flight questions with choices or free text on desktop and mobil
   // independent flow with a fresh limiter while preserving the seeded data.
   await workspace.restart()
   initializeRepository(workspace.projectPath)
-  await page.goto('/tasks')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/tasks'))
+  await authenticateWorkspace(page)
   await expect(page.locator('.task-focus-detail')).toBeVisible()
-  await page.goto('/chats')
+  await page.goto(workspacePath('/chats'))
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Plan the navigation refresh. fixture:question')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Answer pending questions' })).toBeVisible()
@@ -573,13 +567,12 @@ test('answers in-flight questions with choices or free text on desktop and mobil
 
 test('installation push registration is removed in favor of the official account', async ({ page, workspace }) => {
   await workspace.restart()
-  await page.goto('/chats')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/chats'))
+  await authenticateWorkspace(page)
   await page.getByRole('button', { name: 'Question notifications' }).click()
-  await expect(page.getByText('Sign in to your Leo account to manage push notifications on this device.')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Enable on this device' })).toHaveCount(0)
-  expect((await page.request.get(`${workspace.url}/api/notifications`)).status()).toBe(404)
+  await expect(page.getByText('Know when your agent needs your input, across all your installations, even with the app closed. Question content stays private.')).toBeVisible()
+  await expect(page.getByText('Sign in to your Leo account to manage push notifications on this device.')).toHaveCount(0)
+  expect((await page.request.get(`${workspace.url}/api/installations/${workspace.installationId}/api/notifications`)).status()).toBe(404)
 })
 
 test('long words and URLs wrap inside messages without widening the conversation', async ({ page, workspace }) => {
@@ -596,9 +589,8 @@ test('long words and URLs wrap inside messages without widening the conversation
   workspace.service.store.event(run.id, 'item.completed', reply, { item: { type: 'agent_message', text: reply } })
   await page.setViewportSize({ width: 390, height: 844 })
   await page.emulateMedia({ colorScheme: 'dark' })
-  await page.goto(`/chats/${chat.id}`)
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
   const user = page.locator('.activity-message').filter({ has: page.locator('p', { hasText: 'Here is the document:' }) }).first()
   await expect(user).toContainText(text)
   const scroller = page.getByRole('region', { name: 'Activity output' })
@@ -639,9 +631,8 @@ test('conversation trash stays secondary and restores a deleted conversation', a
   test.setTimeout(60000)
   const chat = await workspace.api('/api/chats', 'POST', {})
   workspace.service.store.put('chats', { ...chat, title: 'Conversation to recover' })
-  await page.goto('/chats')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/chats'))
+  await authenticateWorkspace(page)
   await page.getByRole('button', { name: 'Conversations', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: /Conversations/ })
   await expect(dialog.getByLabel('Conversation view')).toHaveValue('active')
@@ -668,9 +659,8 @@ test('deletion from another client removes the open transcript', async ({ page, 
   const message = 'Private conversation removed remotely'
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: message })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
-  await page.goto(`/chats/${chat.id}`)
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
   await expect(page.locator('.activity-message').getByText(message, { exact: true }).first()).toBeVisible({ timeout: 30000 })
   await workspace.api(`/api/chats/${chat.id}`, 'DELETE', {})
   await expect(page.getByText('This conversation is in the trash.')).toBeVisible()

@@ -1,11 +1,16 @@
 import { Buffer } from 'node:buffer'
 import { readFile } from 'node:fs/promises'
-import { expect, test } from './fixtures'
+import {
+  signIn as authenticateWorkspace,
+  expect,
+  test,
+  useRelayForHttpMocks,
+  workspacePath,
+} from './fixtures'
 
 async function signIn(page: import('@playwright/test').Page) {
-  await page.goto('/agents')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/agents'))
+  await authenticateWorkspace(page)
   await expect(page.getByRole('button', { name: 'New agent', exact: true })).toBeVisible()
 }
 
@@ -50,6 +55,7 @@ test('uploads a persistent portrait, preserves it on edits and shows it in conve
 })
 
 test('shows generation progress, refreshes the portrait and falls back if an image fails to load', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
   const agent = await workspace.api('/api/agents', 'POST', { name: 'Generated identity' })
   await page.route('**/api/agent-avatars', route => route.fulfill({ json: { configured: true } }))
   // UI behavior uses a controlled completion; real provider requests and races are
@@ -68,9 +74,9 @@ test('shows generation progress, refreshes the portrait and falls back if an ima
   await expect(portrait.getByRole('button', { name: 'Upload image', exact: true })).toBeEnabled()
   // Complete outside the editor so its pending state can only settle through
   // the app's background refresh, as it does after provider generation.
-  const session = await (await page.request.get('/api/session')).json()
-  const completed = await page.request.put(`/api/agents/${agent.id}/avatar`, {
-    headers: { 'X-CSRF-Token': session.csrf, 'Content-Type': 'image/png' },
+  const session = await (await page.request.get('/api/account/session')).json()
+  const completed = await page.request.put(`/api/installations/${workspace.installationId}/api/agents/${agent.id}/avatar`, {
+    headers: { 'Origin': workspace.url, 'X-CSRF-Token': session.csrf, 'Content-Type': 'image/png' },
     data: await readFile('tests/fixtures/artifacts/thumbnail.png'),
   })
   expect(completed.ok()).toBe(true)

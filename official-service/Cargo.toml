@@ -59,7 +59,6 @@ ring = "0.17"
 crc32fast = "=1.5.1"
 
 [dev-dependencies]
-scrypt = "0.11"
 tokio-tungstenite = "0.29"
 webauthn-authenticator-rs = { version = "0.5.4", features = [ "softpasskey" ] }
 leo-agent-manager = { path = "../backend" }

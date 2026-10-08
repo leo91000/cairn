@@ -10,7 +10,6 @@ import { clearHistoryCache } from './history-cache'
 import { InstallationTransport } from './installation-transport'
 
 // Resolve the official context before any shared view reads its local cache.
-// The native entry keeps its existing unprefixed transport and browser state.
 export const officialEntry = typeof document !== 'undefined' && document.getElementById('app')?.hasAttribute('data-official')
 const installationId = officialEntry ? /^\/installations\/([\w-]+)(?:\/|$)/.exec(window.location.pathname)?.[1] || '' : ''
 
@@ -20,7 +19,6 @@ export const state = reactive({
   authenticated: false,
   signingOut: false,
   redirecting: false,
-  setupRequired: false,
   csrf: '',
   installationId,
   installationOnline: undefined as boolean | undefined,
@@ -137,11 +135,6 @@ export function apiResourceUrl(value: string) {
   return value
 }
 
-export async function session() {
-  Object.assign(state, await api('/session'))
-  state.ready = true
-}
-
 export function ownerPage(path: string) {
   return ['/mcps', '/connections', '/nodes', '/settings', '/authorize'].includes(path)
 }
@@ -193,15 +186,22 @@ export function duration(start: number | null, end: number | null) {
 }
 
 export async function logoutAccount() {
-  const response = await fetch('/api/account/logout', {
-    method: 'POST',
-    headers: { 'X-CSRF-Token': state.csrf },
-  })
-  if (!response.ok && response.status !== 401)
-    throw new Error('Unable to sign out. Please try again.')
+  const alreadySigningOut = state.signingOut
+  state.signingOut = true
+  try {
+    const response = await fetch('/api/account/logout', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': state.csrf },
+    })
+    if (!response.ok && response.status !== 401)
+      throw new Error('Unable to sign out. Please try again.')
 
-  state.authenticated = false
-  state.csrf = ''
+    state.authenticated = false
+    state.csrf = ''
+  }
+  finally {
+    state.signingOut = alreadySigningOut
+  }
 }
 
 export async function signOut() {
@@ -209,16 +209,8 @@ export async function signOut() {
     return
   state.signingOut = true
   try {
-    if (state.installationId) {
-      await logoutAccount()
-      window.location.assign('/')
-      return
-    }
-
-    await api('/logout', { method: 'POST' })
-    state.authenticated = false
-    state.csrf = ''
-    notify('Signed out')
+    await logoutAccount()
+    window.location.assign('/')
   }
   catch (e) {
     notify((e as Error).message)

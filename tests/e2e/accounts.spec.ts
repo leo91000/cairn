@@ -2,12 +2,18 @@ import { writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { limits } from '../codex-account-fixture'
 import { codexSignInMode, seedCodexAccount } from './accounts'
-import { expect, expectSingleScroll, test } from './fixtures'
+import {
+  signIn as authenticateWorkspace,
+  expect,
+  expectSingleScroll,
+  test,
+  useRelayForHttpMocks,
+  workspacePath,
+} from './fixtures'
 
 async function signIn(page: import('@playwright/test').Page) {
-  await page.goto('/connections')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/connections'))
+  await authenticateWorkspace(page)
 }
 
 test('both coding agents share one account list, detail panel and sign-in', async ({ page, workspace }, testInfo) => {
@@ -171,6 +177,7 @@ test('a Codex reconnection shows its device code, survives a reload and can be c
 })
 
 test('statuses come from the server: stale, unknown and expired accounts stay understandable', async ({ page }) => {
+  await useRelayForHttpMocks(page)
   const now = Date.now()
   const base = {
     enabled: true,

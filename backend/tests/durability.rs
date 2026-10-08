@@ -1,9 +1,6 @@
-use common::browser_http::legacy_auth::Auth;
-
 mod common;
 
 use leo_agent_manager::{
-    auth::digest,
     config::{Config, MAIN_AGENT_ID, id, now},
     error::{Error, Result},
     execution,
@@ -313,89 +310,6 @@ async fn binary_vault_records_preserve_bytes_and_reject_wrong_scope_or_damage() 
         *damaged.last_mut().unwrap() ^= 1;
         assert!(vault.decrypt_bytes("backup-block", &damaged).is_err());
     }
-}
-
-#[tokio::test]
-async fn passwords_and_sessions_remain_compatible_with_node() {
-    let root = TempDir::new().unwrap();
-    let store = Store::open(root.path()).unwrap();
-    let script = "process.stdout.write(require('node:crypto').scryptSync('password-long-enough','salt-string',64).toString('hex'))";
-    let output = std::process::Command::new("node")
-        .args(["-e", script])
-        .output()
-        .unwrap();
-    store
-        .set(
-            "admin",
-            json!({ "salt": "salt-string", "hash": String::from_utf8(output.stdout).unwrap() }),
-            None,
-        )
-        .await
-        .unwrap();
-    let auth = Auth::new(store.clone(), "http://localhost:4310".into());
-    let session = auth.login("password-long-enough").await.unwrap();
-    let token = session["value"].as_str().unwrap();
-    assert_eq!(
-        auth.read(token).await.unwrap().unwrap()["csrf"],
-        session["csrf"]
-    );
-    assert!(auth.login("incorrect").await.is_err());
-    auth.logout(token).await.unwrap();
-    assert!(auth.read(token).await.unwrap().is_none());
-}
-
-const CALLBACK: &str = "http://localhost:9999/callback";
-
-#[tokio::test]
-async fn refresh_rotation_and_reuse_revoke_the_entire_family() {
-    let root = TempDir::new().unwrap();
-    let store = Store::open(root.path()).unwrap();
-    let auth = Auth::new(store, "http://localhost:4310".into());
-    let client = auth
-        .register(json!({ "redirect_uris": [CALLBACK] }))
-        .await
-        .unwrap();
-    let verifier = "a".repeat(43);
-    let authorization = json!({
-        "client_id": client["client_id"],
-        "redirect_uri": CALLBACK,
-        "response_type": "code",
-        "code_challenge_method": "S256",
-        "code_challenge": digest(&verifier),
-        "scope": "read run",
-    });
-    let redirect = url::Url::parse(&auth.consent(authorization, true).await.unwrap()).unwrap();
-    let code = redirect
-        .query_pairs()
-        .find(|(k, _)| k == "code")
-        .unwrap()
-        .1
-        .into_owned();
-    let exchange = json!({
-        "grant_type": "authorization_code",
-        "client_id": client["client_id"],
-        "redirect_uri": CALLBACK,
-        "code": code,
-        "code_verifier": verifier,
-    });
-    let grant = auth.exchange(exchange).await.unwrap();
-    let refresh = json!({
-        "grant_type": "refresh_token",
-        "client_id": client["client_id"],
-        "refresh_token": grant["refresh_token"],
-        "scope": "read",
-    });
-    let rotated = auth.exchange(refresh.clone()).await.unwrap();
-    let rotated = rotated["access_token"].as_str().unwrap();
-    assert!(auth.verify(rotated, Some("read")).await.is_ok());
-    assert!(auth.verify(rotated, Some("run")).await.is_err());
-    assert!(auth.exchange(refresh).await.is_err());
-    assert!(auth.verify(rotated, None).await.is_err());
-    assert!(
-        auth.verify(grant["access_token"].as_str().unwrap(), None)
-            .await
-            .is_err()
-    );
 }
 
 #[test]

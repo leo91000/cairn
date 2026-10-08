@@ -1,7 +1,14 @@
 import type { Locator, Page, TestInfo } from '@playwright/test'
 import type { RunEvent } from '../../shared/contracts'
 import type { Workspace } from './fixtures'
-import { expect, expectSingleScroll, test } from './fixtures'
+import {
+  signIn as authenticateWorkspace,
+  expect,
+  expectSingleScroll,
+  test,
+  useRelayForHttpMocks,
+  workspacePath,
+} from './fixtures'
 
 async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: TestInfo, colorScheme: 'light' | 'dark' = 'light') {
   await page.emulateMedia({ colorScheme })
@@ -12,11 +19,10 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
   // Changing WebKit's interception while a background poll is in flight can cancel it.
   // Install the route before navigation and only switch the fixture it returns.
   await page.route('**/api/agents', route => virtualAgents ? route.fulfill({ json: virtualAgents }) : route.continue())
-  await page.goto('/')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/'))
+  await authenticateWorkspace(page)
   await expect(page.locator('.shell')).toBeVisible()
-  const runs = await page.request.get('/api/runs').then(response => response.json())
+  const runs = await page.request.get(`/api/installations/${workspace.installationId}/api/runs`).then(response => response.json())
   const run = runs.find((item: { status: string }) => item.status === 'succeeded')
 
   // The rail (desktop) or the dock (phone) leads to the Fil, Missions and the Atelier.
@@ -27,7 +33,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     if (await navigation.count())
       await navigation.getByRole('link', { name: place, exact: true }).click()
     else
-      await page.goto(place === 'Atelier' ? '/atelier' : destination)
+      await page.goto(workspacePath(place === 'Atelier' ? '/atelier' : destination))
     const sections: Record<string, string> = {
       '/runs': 'Runs',
       '/agents': 'Agents',
@@ -56,7 +62,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     if (headings[destination])
       await expect(page.getByRole('heading', { name: headings[destination], exact: true }).first()).toBeVisible()
     if (url.startsWith('/runs/')) {
-      await page.locator(`.run-table a[href="${url}"]`).first().click()
+      await page.locator(`.run-table a[href="${workspacePath(url)}"]`).first().click()
       await expect(page.locator('.run-title-meta')).toBeVisible()
     }
   }
@@ -283,7 +289,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
       sandbox: 'yolo',
     },
   }))
-  await page.goto('/tasks')
+  await page.goto(workspacePath('/tasks'))
   await page.getByRole('button', { name: 'New mission', exact: true }).click()
   const agentSelect = page.getByRole('combobox', { name: 'Agent', exact: true })
   await agentSelect.click()
@@ -364,7 +370,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
       text: 'implementation-pr {"files":["src/activity.ts"',
     },
   ])
-  await page.goto(`/runs/${run.id}`)
+  await page.goto(workspacePath(`/runs/${run.id}`))
   const sheet = page.getByTestId('agent-step-sheet')
 
   async function openStep(text: string) {
@@ -462,7 +468,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
       payload: {},
     },
   ])
-  await page.goto(`/runs/${run.id}`)
+  await page.goto(workspacePath(`/runs/${run.id}`))
   // Expected outcomes and a recovered connection are not failures: only the test run counts.
   await expect(page.getByTestId('agent-actions')).toContainText('1 failure')
   for (const [step, label] of [['Connection restored', 'Recovered'], ['rg needle src', 'No matches'], ['diff before after', 'Differences found']]) {
@@ -478,5 +484,6 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
 }
 
 test('pages, dialogs, navigation and activity', async ({ page, workspace }, testInfo) => {
+  await useRelayForHttpMocks(page)
   await checkMobileLayouts(page, workspace, testInfo, testInfo.project.use.colorScheme === 'dark' ? 'dark' : 'light')
 })

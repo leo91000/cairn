@@ -17,7 +17,7 @@ import { expect, test } from '@playwright/test'
 import { config as loadConfig } from '../legacy/server/config'
 import { Service as SeedService } from '../legacy/server/service'
 import { Store } from '../legacy/server/store'
-import { expireAccountProof } from './official-relay-fixture'
+import { executeOfficialSql, expireAccountProof } from './official-relay-fixture'
 
 test('owner shares an installation and member works without management controls', async ({ page, browser }) => {
   test.setTimeout(120000)
@@ -35,6 +35,13 @@ test('owner shares an installation and member works without management controls'
   })
   mail.listen(0, '127.0.0.1')
   await once(mail, 'listening')
+  // Each account journey keeps its real limiter without consuming another
+  // journey's delivery budget when projects run concurrently.
+  const database = new URL(process.env.LEO_OFFICIAL_TEST_DATABASE_URL!)
+  const schema = `sharing_${randomUUID().replaceAll('-', '')}`
+  executeOfficialSql(database, `CREATE SCHEMA ${schema}`)
+  const isolatedDatabase = new URL(database)
+  isolatedDatabase.searchParams.set('options', `-c search_path=${schema}`)
   const url = 'http://localhost:4397'
   let seed: SeedService | undefined
   const ownerEmail = `owner-${Date.now()}@example.test`
@@ -66,7 +73,7 @@ test('owner shares an installation and member works without management controls'
   }
 
   const official = start('target/debug/leo-official', {
-    LEO_OFFICIAL_DATABASE_URL: process.env.LEO_OFFICIAL_TEST_DATABASE_URL,
+    LEO_OFFICIAL_DATABASE_URL: isolatedDatabase.toString(),
     LEO_OFFICIAL_ORIGIN: url,
     LEO_OFFICIAL_LISTEN: '127.0.0.1:4397',
     LEO_OFFICIAL_EMAIL_ENDPOINT: `http://127.0.0.1:${(mail.address() as { port: number }).port}/emails`,
@@ -114,7 +121,7 @@ test('owner shares an installation and member works without management controls'
     await page.getByText('Installation options', { exact: true }).click()
     await page.getByRole('button', { name: 'Share installation', exact: true }).click()
     await expect(page.getByText('Members use your coding-agent accounts and secrets.', { exact: true })).toBeVisible()
-    expireAccountProof(new URL(process.env.LEO_OFFICIAL_TEST_DATABASE_URL!), ownerEmail)
+    expireAccountProof(isolatedDatabase, ownerEmail)
     await page.getByLabel('Invite by email', { exact: true }).fill(memberEmail)
     await page.getByRole('button', { name: 'Send invitation', exact: true }).click()
     await expect(page.getByRole('alert')).toContainText('Confirm your identity')
@@ -296,5 +303,6 @@ test('owner shares an installation and member works without management controls'
     seed?.store.close()
     await new Promise<void>(resolve => mail.close(() => resolve()))
     await rm(root, { recursive: true, force: true })
+    executeOfficialSql(database, `DROP SCHEMA ${schema} CASCADE`)
   }
 })

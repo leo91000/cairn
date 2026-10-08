@@ -1,11 +1,15 @@
-import { expect, test } from './fixtures'
+import {
+  signIn as authenticateWorkspace,
+  expect,
+  test,
+  workspacePath,
+} from './fixtures'
 
 test('agent access editor and task inheritance work on mobile in both themes', async ({ page }, testInfo) => {
-  await page.goto('/')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/'))
+  await authenticateWorkspace(page)
   await expect(page.locator('.shell')).toBeVisible()
-  await page.goto('/agents')
+  await page.goto(workspacePath('/agents'))
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(page.getByRole('heading', { name: 'Main agent', exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'New agent', exact: true }).click()
@@ -46,11 +50,10 @@ test('agent access editor and task inheritance work on mobile in both themes', a
 })
 
 test('agents start unlimited and retain an optional limit after saving', async ({ page, workspace }) => {
-  await page.goto('/')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/'))
+  await authenticateWorkspace(page)
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30000 })
-  await page.goto('/agents')
+  await page.goto(workspacePath('/agents'))
   await page.getByRole('button', { name: 'New agent', exact: true }).click()
   const dialog = page.getByRole('dialog')
   await dialog.getByLabel('Name', { exact: true }).fill('Long running agent')

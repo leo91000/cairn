@@ -1,6 +1,14 @@
-import { expect, expectSingleScroll, test } from './fixtures'
+import {
+  signIn as authenticateWorkspace,
+  expect,
+  expectSingleScroll,
+  test,
+  useRelayForHttpMocks,
+  workspacePath,
+} from './fixtures'
 
 test('reconnects after a temporary restart and resumes a cancelled conversation in place', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
   const agent = workspace.service.agent({ name: 'Recovery engineer' })
   const project = workspace.service.store.list('projects')[0]
   const task = workspace.service.task({
@@ -12,9 +20,8 @@ test('reconnects after a temporary restart and resumes a cancelled conversation 
   })
   const run = await workspace.service.enqueue(task.id)
   await expect.poll(() => workspace.service.store.run(run.id)?.sessionId).toBe('fixture-session')
-  await page.goto('/tasks')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/tasks'))
+  await authenticateWorkspace(page)
   await expect(page.locator('.task-focus-detail')).toBeVisible()
   let available = false
   await page.route(`**/api/runs/${run.id}/stream?*`, async (route) => {
@@ -23,7 +30,7 @@ test('reconnects after a temporary restart and resumes a cancelled conversation 
     else
       await route.fulfill({ status: 503, json: { error: 'Worker is restarting' } })
   })
-  await page.goto(`/runs/${run.id}`)
+  await page.goto(workspacePath(`/runs/${run.id}`))
   await expect(page.getByRole('status').filter({ hasText: 'Reconnecting' })).toBeVisible()
   available = true
   await expect(page.getByRole('heading', { name: task.name })).toBeVisible()
@@ -61,9 +68,8 @@ test('reconnects after a temporary restart and resumes a cancelled conversation 
 })
 
 test('keeps the selected mission across reloads and runs it from its mobile sheet', async ({ page, workspace }) => {
-  await page.goto('/tasks')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/tasks'))
+  await authenticateWorkspace(page)
   await expect(page.locator('.task-focus-detail')).toBeVisible()
   const agent = workspace.service.store.list('agents')[0]
   const task = workspace.service.task({
@@ -116,9 +122,8 @@ test('mission cards and sheet show the schedule, the brief and the history, as o
   workspace.service.store.event(run.id, 'item.completed', reply, { item: { type: 'agent_message', text: reply } })
   await page.setViewportSize({ width: 390, height: 844 })
   await page.emulateMedia({ colorScheme: 'dark' })
-  await page.goto('/tasks')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/tasks'))
+  await authenticateWorkspace(page)
   await expect(page.getByRole('heading', { name: 'Missions', exact: true })).toBeVisible()
   const card = page.locator('.mission-card').filter({ hasText: task.name })
   await expect(card).toContainText('Paused · Every Thursday · 09:00')
@@ -138,7 +143,7 @@ test('mission cards and sheet show the schedule, the brief and the history, as o
   await expect(sheet.getByRole('region', { name: 'Mission brief' })).toContainText('Review upstream changes')
   await page.screenshot({ animations: 'disabled', path: test.info().outputPath('mission-sheet-mobile-dark.png') })
   await sheet.getByRole('list', { name: 'Run history' }).getByRole('link').first().click()
-  await expect(page).toHaveURL(`/runs/${run.id}`)
+  await expect(page).toHaveURL(workspacePath(`/runs/${run.id}`))
   await expect(page.getByRole('heading', { name: 'The upstream review is complete.' })).toBeVisible()
   await page.goBack()
   await page.setViewportSize({ width: 1440, height: 960 })

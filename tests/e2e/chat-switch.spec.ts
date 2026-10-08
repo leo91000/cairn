@@ -1,6 +1,11 @@
 import type { Page } from '@playwright/test'
 import { randomUUID } from 'node:crypto'
-import { expect, test } from './fixtures'
+import {
+  signIn as authenticateWorkspace,
+  expect,
+  test,
+  workspacePath,
+} from './fixtures'
 
 // Samples every animation frame while switching conversations. A seamless switch never
 // shows the loading placeholder, never empties the Fil and keeps the shell mounted.
@@ -39,9 +44,8 @@ test('switching conversations is seamless', async ({ page, workspace }) => {
   workspace.service.store.put('chats', { ...workspace.service.chats.detail(first.id), title: 'Alpha conversation' })
   workspace.service.store.put('chats', { ...workspace.service.chats.detail(second.id), title: 'Beta conversation' })
   await page.setViewportSize({ width: 1440, height: 900 })
-  await page.goto(`/chats/${first.id}`)
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath(`/chats/${first.id}`))
+  await authenticateWorkspace(page)
   await expect(page.locator('.activity-message').getByText('First conversation message', { exact: true }).first()).toBeVisible({ timeout: 30000 })
   const fil = page.getByRole('complementary', { name: 'Fil' })
   const summaries: Record<string, unknown>[] = []

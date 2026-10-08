@@ -1,4 +1,10 @@
-import { expect, test } from './fixtures'
+import {
+  signIn as authenticateWorkspace,
+  expect,
+  test,
+  useRelayForHttpMocks,
+  workspacePath,
+} from './fixtures'
 
 const skill = (name: string, description: string) => `---\nname: ${name}\ndescription: ${description}\n---\nFollow the ${name} checklist.\n`
 
@@ -7,9 +13,8 @@ test('typing $ suggests skills, inserts one with the keyboard and invokes it for
   await workspace.api('/api/skills/global/review', 'PUT', { content: skill('review', 'Review the current changes before shipping') })
   await workspace.api('/api/skills/global/deploy-app', 'PUT', { content: skill('deploy-app', 'Publish a release') })
   const chat = await workspace.api('/api/chats', 'POST', {})
-  await page.goto(`/chats/${chat.id}`)
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
   const composer = page.getByRole('textbox', { name: 'Message', exact: true })
   const menu = page.getByRole('listbox', { name: 'Skills', exact: true })
   await expect(composer).toHaveAttribute('placeholder', 'Message your agent… Type $ for skills')
@@ -65,11 +70,11 @@ test('typing $ suggests skills, inserts one with the keyboard and invokes it for
 })
 
 test('an empty skill catalog explains why $ has no suggestions without trapping the keyboard', async ({ page, workspace, hasTouch }) => {
+  await useRelayForHttpMocks(page)
   await page.route('**/api/skills', route => route.fulfill({ json: [] }))
   const chat = await workspace.api('/api/chats', 'POST', {})
-  await page.goto(`/chats/${chat.id}`)
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
   const composer = page.getByRole('textbox', { name: 'Message', exact: true })
   const empty = page.getByRole('status', { name: 'Skills', exact: true })
   await composer.pressSequentially('$')

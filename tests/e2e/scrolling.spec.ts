@@ -1,4 +1,11 @@
-import { expect, expectSingleScroll, test } from './fixtures'
+import {
+  signIn as authenticateWorkspace,
+  expect,
+  expectSingleScroll,
+  test,
+  useRelayForHttpMocks,
+  workspacePath,
+} from './fixtures'
 
 test('keeps activity scrolling inside the workspace and gives tabs breathing room', async ({ page, workspace }, testInfo) => {
   // This journey covers multiple viewports and screenshots; individual assertions retain their deadlines.
@@ -12,17 +19,16 @@ test('keeps activity scrolling inside the workspace and gives tabs breathing roo
     }
   }
 
-  await page.goto('/tasks')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/tasks'))
+  await authenticateWorkspace(page)
   await expect(page.getByRole('heading', { name: 'Missions', exact: true })).toBeVisible()
-  const runs = await page.request.get('/api/runs').then(response => response.json())
+  const runs = await page.request.get(`/api/installations/${workspace.installationId}/api/runs`).then(response => response.json())
   for (const theme of ['light', 'dark'] as const) {
     await page.emulateMedia({ colorScheme: theme })
     for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }, { width: 390, height: 664 }, { width: 320, height: 568 }, { width: 844, height: 390 }]) {
       await page.setViewportSize(viewport)
       // Missions: the list scrolls on its own and the mission's actions stay reachable.
-      await page.goto('/tasks')
+      await page.goto(workspacePath('/tasks'))
       await expect(page.getByTestId('missions')).toBeVisible()
       await expectSingleScroll(page)
       if (viewport.width <= 900)
@@ -35,7 +41,7 @@ test('keeps activity scrolling inside the workspace and gives tabs breathing roo
       await expect(detail.getByRole('button', { name: 'Run now', exact: true })).toBeInViewport()
       await page.screenshot({ path: testInfo.outputPath(`${theme}-${viewport.width}-tasks.png`), animations: 'disabled' })
       // A run: its conversation owns the scrolling below the title and tabs.
-      await page.goto(`/runs/${runs[0].id}`)
+      await page.goto(workspacePath(`/runs/${runs[0].id}`))
       await page.getByRole('button', { name: /^Conversation/ }).click()
       await expect(page.locator('.activity-message').first()).toBeAttached()
       await page.getByLabel('Follow output').uncheck()
@@ -83,14 +89,14 @@ test('keeps activity scrolling inside the workspace and gives tabs breathing roo
 })
 
 test('a tab click survives completion of the cached run refresh', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
   await page.setViewportSize({ width: 390, height: 844 })
-  await page.goto('/tasks')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/tasks'))
+  await authenticateWorkspace(page)
   await expect(page.locator('.shell')).toBeVisible()
   const runs = await workspace.api('/api/runs')
   const run = runs.find((value: { status: string }) => value.status === 'succeeded')
-  await page.goto(`/runs/${run.id}`)
+  await page.goto(workspacePath(`/runs/${run.id}`))
   await expect(page.locator('.activity-message').first()).toBeVisible()
   await page.getByRole('link', { name: 'Back to runs' }).click()
   let release!: () => void
@@ -100,7 +106,7 @@ test('a tab click survives completion of the cached run refresh', async ({ page,
     await route.continue()
   })
   try {
-    await page.locator(`.run-table a[href="/runs/${run.id}"]`).first().click()
+    await page.locator(`.run-table a[href="${workspacePath(`/runs/${run.id}`)}"]`).first().click()
     const updating = page.getByRole('status').filter({ hasText: 'Updating…' })
     await expect(updating).toBeVisible()
     const tab = page.getByRole('button', { name: 'Result', exact: true })

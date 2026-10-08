@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { api, officialEntry, redirect } from '../api'
+import { api, redirect } from '../api'
 import AccountConfirmation from '../components/AccountConfirmation.vue'
 import Icon from '../components/Icon.vue'
 import UiAlert from '../components/UiAlert.vue'
@@ -14,7 +14,7 @@ const error = ref('')
 const busy = ref(false)
 const installationId = ref('')
 const confirmingIdentity = ref(false)
-const endpoint = officialEntry ? '/mcp/oauth' : '/oauth'
+const endpoint = '/mcp/oauth'
 onMounted(async () => {
   try {
     details.value = await api(`${endpoint}/preview`, {
@@ -64,21 +64,19 @@ async function consent(approved: boolean) {
           <strong>{{ details.client.client_name }}</strong> is requesting access
           to one Leo installation.
         </p>
-        <template v-if="officialEntry">
-          <p>Redirect destination: <strong class="break-all">{{ redirectHost }}</strong></p>
-          <UiAlert>
-            Unverified client. Its name is supplied by the client and has not been checked by Leo.
-            Continue only if you trust this redirect destination.
-          </UiAlert>
-        </template>
-        <label v-if="officialEntry">Installation
+        <p>Redirect destination: <strong class="break-all">{{ redirectHost }}</strong></p>
+        <UiAlert>
+          Unverified client. Its name is supplied by the client and has not been checked by Leo.
+          Continue only if you trust this redirect destination.
+        </UiAlert>
+        <label>Installation
           <select v-model="installationId" aria-label="Installation">
             <option v-for="item in details.installations" :key="item.id" :value="item.id">
               {{ item.name }} · {{ item.online ? 'Online' : 'Offline' }}
             </option>
           </select>
         </label>
-        <p v-if="officialEntry && !details.installations.length">
+        <p v-if="!details.installations.length">
           Add an installation before granting access.
         </p>
         <ul class="consent-permissions pr-5 pl-[33px] leading-[2] bg-surface rounded-[9px] text-sm text-muted py-5 mx-0 my-6">
@@ -96,12 +94,12 @@ async function consent(approved: boolean) {
           You can revoke this connection at any time in Settings.
         </p>
         <div class="consent-actions flex flex-wrap justify-end gap-3 mt-[25px]">
-          <UiButton v-if="officialEntry" :disabled="busy" @click="confirmingIdentity = true">
+          <UiButton :disabled="busy" @click="confirmingIdentity = true">
             Confirm identity
           </UiButton>
           <UiButton :disabled="busy" @click="consent(false)">
             Deny
-          </UiButton><UiButton variant="primary" :disabled="busy || (officialEntry && !installationId)" @click="consent(true)">
+          </UiButton><UiButton variant="primary" :disabled="busy || !installationId" @click="consent(true)">
             Allow access
           </UiButton>
         </div>

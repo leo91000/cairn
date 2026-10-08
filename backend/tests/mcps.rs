@@ -1,6 +1,6 @@
 mod common;
 
-use common::browser_http::router;
+use common::relay_fixture::router;
 
 use axum::{body::Body, http::StatusCode};
 use leo_agent_manager::{
@@ -206,10 +206,7 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
     let root = TempDir::new().unwrap();
     std::fs::create_dir(root.path().join("home")).unwrap();
     let (s, origin, server) = served(&root).await;
-    let token = common::browser_http::auth(&s)
-        .personal("History reader", vec!["read"])
-        .await
-        .unwrap();
+    let token = common::relay_fixture::grant(&s, &["read"]).await;
     let run = manual_run(&s, "History", "Read history").await;
     let run_id = run["id"].as_str().unwrap();
     let output = "x".repeat(128 * 1024);
@@ -225,7 +222,7 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
     let mcp = Mcp {
         http: reqwest::Client::new(),
         endpoint: format!("{origin}/mcp"),
-        token: token["token"].as_str().unwrap().to_owned(),
+        token: token.clone(),
     };
     let after = read_every_page(&mcp, run_id, &output).await;
 
@@ -409,10 +406,7 @@ async fn agents_manage_connections_through_the_self_gateway_without_deadlocks_or
     let root = TempDir::new().unwrap();
     std::fs::create_dir(root.path().join("home")).unwrap();
     let (s, origin, server) = served(&root).await;
-    let owner = common::browser_http::auth(&s)
-        .personal("Self access", vec!["read", "manage", "run"])
-        .await
-        .unwrap();
+    let owner = common::relay_fixture::grant(&s, &["read", "manage", "run"]).await;
 
     // Self-management uses the advertised authority so the recursive-call guard applies.
     let (official_origin, _) = leo_agent_manager::relay::official_address(&s.config.data_dir)
@@ -423,7 +417,7 @@ async fn agents_manage_connections_through_the_self_gateway_without_deadlocks_or
         "name": "Self",
         "url": format!("{official_origin}/mcp"),
         "auth": "bearer",
-        "token": owner["token"],
+        "token": owner,
         "allowPrivateNetwork": true,
     });
     let connection = s.mcps.save(&s, self_connection, None).await.unwrap();
@@ -508,13 +502,7 @@ process.stdout.write('ok');
 async fn official_clients_negotiate_modern_and_legacy_protocols_and_enforce_scopes() {
     let root = TempDir::new().unwrap();
     let (s, url, server) = served(&root).await;
-    let token = common::browser_http::auth(&s)
-        .personal("Test client", vec!["read"])
-        .await
-        .unwrap()["token"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let token = common::relay_fixture::grant(&s, &["read"]).await;
     let mut child = tokio::process::Command::new("node")
         .args(["--input-type=module", "-e", OFFICIAL_CLIENTS])
         .current_dir(common::repository())
@@ -597,7 +585,7 @@ async fn oauth_consent_pkce_callback_replay_and_refresh_use_the_existing_provide
     let origin = output.next_line().await.unwrap().unwrap();
     let root = TempDir::new().unwrap();
     let s = Service::new(config(&root)).await.unwrap();
-    common::browser_http::claimed(&s).await.unwrap();
+    common::relay_fixture::claimed(&s).await.unwrap();
     let connection = json!({
         "name": "OAuth fixture",
         "url": format!("{origin}/mcp"),

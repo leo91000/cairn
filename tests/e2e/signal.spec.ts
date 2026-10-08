@@ -1,7 +1,13 @@
 import type { Page, TestInfo } from '@playwright/test'
 import type { Workspace } from './fixtures'
 import { randomUUID } from 'node:crypto'
-import { expect, expectSingleScroll, test } from './fixtures'
+import {
+  signIn as authenticateWorkspace,
+  expect,
+  expectSingleScroll,
+  test,
+  workspacePath,
+} from './fixtures'
 
 // A failed mission needs the user; a hanging conversation keeps an agent working.
 async function seed(workspace: Workspace) {
@@ -25,10 +31,8 @@ async function seed(workspace: Workspace) {
 }
 
 async function signIn(page: Page) {
-  await page.goto('/')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
-  // Password verification in the native debug backend can take several seconds.
+  await page.goto(workspacePath('/'))
+  await authenticateWorkspace(page)
   await expect(page.getByRole('heading', { name: 'Fil', exact: true }).first()).toBeVisible({ timeout: 30000 })
 }
 
@@ -59,7 +63,7 @@ test('the Fil, rail and shortcuts lead through the workspace', async ({ page, wo
   // J selects the first item and Enter opens it, like a mail client.
   await page.keyboard.press('j')
   await page.keyboard.press('Enter')
-  await expect(page).toHaveURL(`/runs/${run.id}`)
+  await expect(page).toHaveURL(workspacePath(`/runs/${run.id}`))
   await expect(rail.getByRole('link', { name: 'Atelier', exact: true })).toHaveAttribute('aria-current', 'page')
 
   // G chords move between the three places.
@@ -96,7 +100,7 @@ test('the Fil, rail and shortcuts lead through the workspace', async ({ page, wo
   await page.keyboard.press('g')
   await page.keyboard.press('f')
   await live.getByRole('button', { name: /Keep watching the build/ }).click()
-  await expect(page).toHaveURL(`/chats/${chat.id}`)
+  await expect(page).toHaveURL(workspacePath(`/chats/${chat.id}`))
   await expect(page.getByRole('complementary', { name: 'Fil' }).locator('[aria-current="page"]')).toBeVisible()
   const working = page.locator('.agent-working')
   await expect(working).toBeVisible()
@@ -110,7 +114,7 @@ test('the Fil, rail and shortcuts lead through the workspace', async ({ page, wo
   await expect(page.getByRole('textbox', { name: 'Message' })).toBeFocused()
   await page.keyboard.press('Escape')
   await page.keyboard.press('c')
-  await expect(page).toHaveURL('/chats')
+  await expect(page).toHaveURL(workspacePath('/chats'))
   await expect(page.getByRole('heading', { name: 'What are we building?' })).toBeVisible()
   // Free the runner for the next journey in this worker.
   await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
@@ -138,11 +142,11 @@ test('phones use the floating dock and read conversations full screen', async ({
   await dock.getByRole('link', { name: 'Fil' }).click()
 
   await page.getByRole('region', { name: 'Live', exact: true }).getByRole('button').first().click()
-  await expect(page).toHaveURL(`/chats/${chat.id}`)
+  await expect(page).toHaveURL(workspacePath(`/chats/${chat.id}`))
   await expect(dock).toHaveCount(0)
   await expect(page.locator('.agent-working')).toBeVisible()
   await capture(page, testInfo, 'signal-conversation-mobile')
   await page.getByRole('link', { name: 'Back to the Fil' }).click()
-  await expect(page).toHaveURL('/')
+  await expect(page).toHaveURL(workspacePath('/'))
   await expect(dock).toBeVisible()
 })

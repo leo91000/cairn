@@ -1,6 +1,6 @@
 mod common;
 
-use common::browser_http::router;
+use common::relay_fixture::router;
 
 use axum::{
     Json, Router,
@@ -9,7 +9,7 @@ use axum::{
     response::IntoResponse,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use common::Session;
+use common::RelayContext;
 use leo_agent_manager::{
     auth,
     config::{Config, MAIN_AGENT_ID, id, now},
@@ -56,7 +56,7 @@ struct Owner {
     service: Arc<Service>,
     root: TempDir,
     app: Router,
-    session: Session,
+    session: RelayContext,
     host: String,
 }
 
@@ -88,12 +88,7 @@ impl Owner {
             )
             .unwrap();
         }
-        let session = Session::new(
-            &common::browser_http::auth(&service)
-                .session()
-                .await
-                .unwrap(),
-        );
+        let session = RelayContext::new(&common::relay_fixture::context(&service).await);
         Self {
             app: router(service.clone()).await.unwrap(),
             service,

@@ -29,16 +29,16 @@ export default defineConfig({
   server: {
     port: 5178,
     proxy: {
-      '/api': 'http://127.0.0.1:4310',
-      '/oauth': 'http://127.0.0.1:4310',
+      '/api': { target: 'http://127.0.0.1:4311', ws: true },
+      '/oauth': 'http://127.0.0.1:4311',
     },
   },
   build: {
     chunkSizeWarningLimit: 400,
     rolldownOptions: {
-      input: { installation: 'index.html', official: 'official.html' },
+      input: { default: 'index.html', official: 'official.html' },
       output: {
-        // Both entries use the same workspace. Keep its initial dependencies
+        // Both documents enter the same official account shell. Keep its initial dependencies
         // together so each document loads one shared bundle; views stay lazy.
         codeSplitting: { groups: [{ name: 'workspace', tags: ['$initial'], minShareCount: 2 }] },
       },

@@ -95,9 +95,11 @@ See [formatting and readability](docs/FORMATTING.md) for setup, commands, and CI
 The official app is at `http://localhost:4311` with a development mailbox at
 `http://localhost:8025`; see [official service setup](docs/OFFICIAL-SERVICE.md).
 Build the web bundle after edits, and claim a separately running installation
-with `leo claim`. The historical `pnpm dev` manager/Vite pair no longer provides
-local browser sign-in. Legacy browser journeys use an example executable with
-synthetic authentication; that adapter is absent from production images.
+with `leo claim`. `pnpm dev` runs the official binary and Vite; configure its database, email
+delivery and `LEO_OFFICIAL_ORIGIN=http://localhost:5178` as described in that
+guide. Browser journeys use both production binaries and the real account and
+installation relay, with synthetic email delivery. Local password sign-in and
+its historical Rust fixtures have been retired.
 The UI uses Tailwind CSS and Egoist's Iconify plugin. See the
 [styling conventions](docs/UI-STYLING.md) for shared controls, theme tokens, icons,
 and responsive layout rules.
@@ -110,9 +112,9 @@ runs (`.env` is used by Compose, not loaded automatically by the development ser
 pnpm check                       # ESLint, rustfmt, types, JS tests and frontend build
 pnpm test:backend                # Native backend integration and migration tests
 cargo clippy --all-targets -- -D warnings
-cargo build --locked --workspace --bin leo --bin leo-official --example browser_fixture # Browser test binaries
+cargo build --locked --workspace --bin leo --bin leo-official --example worker_fixture # Browser and worker test binaries
 pnpm exec playwright install chromium
-pnpm test:e2e                    # Full browser journeys against the Rust backend
+pnpm test:e2e                    # Real official + installation binaries (disposable Postgres URL required)
 pnpm build:backend               # Optimized native production binary
 node --import tsx scripts/benchmark-backend.mjs # Node/Rust comparison
 pnpm lint:fix                    # ESLint fixes and Rust formatting

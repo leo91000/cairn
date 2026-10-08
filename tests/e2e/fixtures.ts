@@ -16,14 +16,39 @@ import { test as base, expect } from '@playwright/test'
 import { config as loadConfig } from '../legacy/server/config'
 import { Service as SeedService } from '../legacy/server/service'
 import { Store } from '../legacy/server/store'
+import { executeOfficialSql, officialRelayFixture } from './official-relay-fixture'
 
 export interface Workspace {
   service: Service
   restart: () => Promise<void>
   url: string
+  installationUrl: string
   projectPath: string
   api: (route: string, method?: string, body?: unknown) => Promise<any>
+  signIn: (page: Page) => Promise<void>
+  installationId: string
   setAccountUsage: (id: string, value: unknown) => Promise<void>
+}
+
+// One application per worker; navigation and sign-in share its real official context.
+let currentWorkspace: Pick<Workspace, 'url' | 'installationId' | 'signIn'> | undefined
+
+export function workspacePath(route: string) {
+  if (route.startsWith(currentWorkspace!.url))
+    route = route.slice(currentWorkspace!.url.length)
+  if (!route.startsWith('/') || route.startsWith('/installations/') || route.startsWith('/oauth') || route.startsWith('/authorize'))
+    return route
+  return `/installations/${currentWorkspace!.installationId}${route}`
+}
+
+export async function signIn(page: Page) {
+  await currentWorkspace!.signIn(page)
+}
+
+// HTTP response fixtures must remain observable after background negotiation.
+// Other journeys and the network bench still exercise the real direct transport.
+export async function useRelayForHttpMocks(page: Page) {
+  await page.route('**/direct/authorize', route => route.fulfill({ json: { available: false } }))
 }
 
 // Each Playwright project owns its application, database, worker, and limiter.
@@ -36,16 +61,23 @@ export const test = base.extend<object, { workspace: Workspace }>({
     const home = path.join(directory, 'home')
     const projectPath = path.join(directory, 'project')
     const port = 4322 + workerInfo.parallelIndex
-    const url = `http://127.0.0.1:${port}`
+    const managerUrl = `http://127.0.0.1:${port}`
+    const official = await officialRelayFixture(4422 + workerInfo.parallelIndex)
+    const url = official.url
+    const database = new URL(process.env.LEO_OFFICIAL_TEST_DATABASE_URL!)
+    const schema = `browser_${crypto.randomUUID().replaceAll('-', '')}`
+    executeOfficialSql(database, `CREATE SCHEMA ${schema}`)
+    const isolatedDatabase = new URL(database)
+    isolatedDatabase.searchParams.set('options', `-c search_path=${schema}`)
+    const accountEmail = `${schema}@example.test`
     await Promise.all([mkdir(home), mkdir(projectPath)])
     const config = loadConfig({
       dataDir: path.join(directory, 'data'),
       home,
       workspaceRoots: [projectPath],
-      setupToken: 'browser-test-setup',
       codexBin: path.resolve('tests/fixtures/codex.mjs'),
       ghBin: '/nonexistent/fixture-gh',
-      publicUrl: url,
+      publicUrl: managerUrl,
       logger: false,
       host: '127.0.0.1',
       port,
@@ -62,18 +94,31 @@ export const test = base.extend<object, { workspace: Workspace }>({
     // A developer may rebuild Cargo while this fixture is active. Keep the
     // supervisor's current executable stable for the entire browser journey.
     const binary = path.join(directory, 'leo')
-    await copyFile(process.env.LEO_TEST_BINARY || path.resolve('target/debug/examples/browser_fixture'), binary)
+    await copyFile(process.env.LEO_TEST_BINARY || path.resolve('target/debug/leo'), binary)
     let log = ''
+    let claimCode = ''
     const start = () => {
-      const child = spawn(binary, [], { env: { ...process.env, LEO_CONFIG: configuration, LEO_FIXTURE_USAGE: usageFile }, stdio: ['ignore', 'pipe', 'pipe'] })
+      const child = spawn(binary, [], {
+        env: {
+          ...process.env,
+          LEO_CONFIG: configuration,
+          LEO_FIXTURE_USAGE: usageFile,
+          LEO_OFFICIAL_ORIGIN: url,
+          LEO_INSTALLATION_CLAIM_CODE: claimCode,
+          LEO_INSTALLATION_NAME: 'Browser workspace',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
       child.stdout.on('data', chunk => log += chunk)
       child.stderr.on('data', chunk => log += chunk)
       return child
     }
 
-    let child = start()
-    let closed = once(child, 'exit')
+    let child: ReturnType<typeof start>
+    let closed: ReturnType<typeof once>
     const stop = async () => {
+      if (!child || child.exitCode !== null || child.signalCode !== null)
+        return
       child.kill('SIGTERM')
       const force = setTimeout(() => child.kill('SIGKILL'), 10000)
       await closed
@@ -84,24 +129,96 @@ export const test = base.extend<object, { workspace: Workspace }>({
       await expect.poll(async () => {
         if (child.exitCode !== null)
           throw new Error(`Native backend exited: ${log}`)
-        return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
+        return fetch(`${managerUrl}/health`).then(response => response.ok).catch(() => false)
       }, { timeout: 15000 }).toBe(true)
     }
 
-    let headers: Record<string, string> = { 'content-type': 'application/json' }
+    let headers: Record<string, string> = { 'content-type': 'application/json', 'origin': url }
+    let installationId = ''
+    const login = async () => {
+      // Request a real email proof; never weaken the service's delivery limits.
+      let challenge: { challenge: string } | undefined
+      await expect.poll(async () => {
+        const response = await fetch(`${url}/api/account/email-code`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ email: accountEmail }),
+        })
+        if (response.ok)
+          challenge = await response.json()
+        else if (response.status !== 429)
+          throw new Error(`Email sign-in failed: ${response.status}`)
+        return response.ok
+      }, { timeout: 70000 }).toBe(true)
+      const code = official.messages.at(-1)!.match(/\b\d{8}\b/)![0]
+      const response = await fetch(`${url}/api/account/verify`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ challenge: challenge!.challenge, code }),
+      })
+      expect(response.ok).toBe(true)
+      const session = await response.json()
+      headers = { ...headers, 'cookie': response.headers.get('set-cookie')!.split(';')[0]!, 'x-csrf-token': session.csrf }
+    }
+
+    const ensureSession = async () => {
+      const response = await fetch(`${url}/api/account/session`, { headers })
+      if (!(await response.json()).authenticated) {
+        // Logout revokes the shared proof. Re-sign-in must wait for the real
+        // per-address delivery cooldown; assertions keep their own deadlines.
+        const info = test.info()
+        info.setTimeout(info.timeout + 70000)
+        await login()
+      }
+    }
+
+    const apiPath = (route: string) => route.startsWith('/api/')
+      ? `/api/installations/${installationId}${route.startsWith('/api/tokens') ? route.slice(4) : route}`
+      : route
     const api = async (route: string, method = 'GET', body?: unknown) => {
-      const response = await fetch(`${url}${route}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
+      await ensureSession()
+      const response = await fetch(`${url}${apiPath(route)}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
       const result = await response.json()
       expect(response.ok, JSON.stringify(result)).toBe(true)
-      if (response.headers.has('set-cookie'))
-        headers = { ...headers, 'cookie': response.headers.get('set-cookie')!.split(';')[0], 'x-csrf-token': result.csrf }
       return result
     }
 
+    const signIn = async (page: Page) => {
+      await ensureSession()
+      const [name, value] = headers.cookie!.split('=')
+      await page.context().addCookies([{
+        name: name!,
+        value: value!,
+        url,
+        httpOnly: true,
+        sameSite: 'Lax',
+      }])
+      await page.reload()
+      await expect(page.getByLabel('Email address')).toHaveCount(0)
+    }
+
     try {
+      const officialChild = official.official(isolatedDatabase.toString())
+      await expect.poll(async () => {
+        expect(officialChild.exitCode).toBeNull()
+        return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
+      }, { timeout: 60000 }).toBe(true)
+      await login()
+      const claim = await fetch(`${url}/api/installations/claim-code`, { method: 'POST', headers, body: '{}' })
+      expect(claim.ok).toBe(true)
+      claimCode = (await claim.json()).code
+      child = start()
+      closed = once(child, 'exit')
       await ready()
+      await expect.poll(async () => {
+        const response = await fetch(`${url}/api/installations`, { headers })
+        const installations = await response.json()
+        installationId = installations[0]?.id || ''
+        return installations[0]?.online === true
+      }, { timeout: 15000 }).toBe(true)
+      currentWorkspace = { url, installationId, signIn }
+
       if (workerInfo.project.name !== 'journeys') {
-        await api('/api/setup', 'POST', { setupToken: 'browser-test-setup', password: 'browser-password-long-enough' })
         const agent = service.agent({ name: 'Release engineer' })
         const project = await service.project({ name: 'Design system', path: projectPath })
         await service.skills.save('review', '---\nname: review\ndescription: Review the project carefully\n---\nInspect the project and report checks.')
@@ -124,14 +241,23 @@ export const test = base.extend<object, { workspace: Workspace }>({
 
       await use({
         url,
+        installationUrl: managerUrl,
+        installationId,
+        signIn,
         projectPath,
         service,
         api,
         restart: async () => {
           await stop()
+          claimCode = ''
           child = start()
           closed = once(child, 'exit')
           await ready()
+          // Local readiness precedes reconnection to the official relay.
+          await expect.poll(async () => {
+            const response = await fetch(`${url}${apiPath('/api/agents')}`, { headers })
+            return response.ok
+          }, { timeout: 15000 }).toBe(true)
         },
         setAccountUsage: async (id, value) => {
           usage[id] = value
@@ -141,11 +267,14 @@ export const test = base.extend<object, { workspace: Workspace }>({
     }
     finally {
       await stop()
+      await official.close()
+      executeOfficialSql(database, `DROP SCHEMA ${schema} CASCADE`)
+      currentWorkspace = undefined
       await service.accounts.close()
       service.store.close()
       await rm(directory, { recursive: true, force: true })
     }
-  }, { scope: 'worker' }],
+  }, { scope: 'worker', timeout: 120000 }],
   baseURL: async ({ workspace }, use) => use(workspace.url),
 })
 export { expect } from '@playwright/test'

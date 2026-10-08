@@ -1,15 +1,19 @@
 import type { BrowserContext, Page } from '@playwright/test'
 import { randomUUID } from 'node:crypto'
 import {
+  signIn as authenticateWorkspace,
   expect,
   expectChatReady,
   expectSingleScroll,
   initializeRepository,
   test,
+  useRelayForHttpMocks,
+  workspacePath,
 } from './fixtures'
 
 for (const kind of ['chat', 'task'] as const) {
   test(`${kind} automatically fills folded history without a click or scroll`, async ({ page, workspace }) => {
+    await useRelayForHttpMocks(page)
     await page.setViewportSize(kind === 'chat' ? { width: 390, height: 844 } : { width: 1440, height: 1100 })
     let run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
     let path = `/runs/${run.id}`
@@ -45,9 +49,8 @@ for (const kind of ['chat', 'task'] as const) {
       if (request.url().includes('/history?'))
         requests.push(request.url())
     })
-    await page.goto(`${workspace.url}${path}`)
-    await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-    await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+    await page.goto(workspacePath(`${workspace.url}${path}`))
+    await authenticateWorkspace(page)
     await expect(page.locator('.activity-message').filter({ hasText: 'Latest short answer' })).toBeVisible()
     await expect(page.locator('.activity-message').filter({ hasText: 'Buffered message 99:' })).toBeAttached()
     expect(requests.length).toBeGreaterThanOrEqual(2)
@@ -64,6 +67,7 @@ for (const kind of ['chat', 'task'] as const) {
 }
 
 test('automatic history pauses on errors and resumes only after retry', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
   const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
   for (let i = 0; i < 220; i++) {
     workspace.service.store.event(run.id, 'item.completed', 'Checked a file', {
@@ -85,9 +89,8 @@ test('automatic history pauses on errors and resumes only after retry', async ({
     else
       await route.continue()
   })
-  await page.goto(`${workspace.url}/runs/${run.id}`)
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
+  await authenticateWorkspace(page)
   const retry = page.getByRole('button', { name: 'Retry', exact: true })
   await expect(retry).toBeVisible()
   expect(requests).toBe(1)
@@ -107,9 +110,8 @@ test('automatic history pauses on errors and resumes only after retry', async ({
 })
 
 test('signing out closes live subscriptions before the session is revoked', async ({ page, workspace }) => {
-  await page.goto(workspace.url)
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath(workspace.url))
+  await authenticateWorkspace(page)
   await page.getByRole('link', { name: 'New conversation', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'What are we building?' })).toBeVisible()
   const unauthorized: string[] = []
@@ -117,7 +119,7 @@ test('signing out closes live subscriptions before the session is revoked', asyn
     if (response.status() === 401)
       unauthorized.push(response.url())
   })
-  await page.route('**/api/logout', async (route) => {
+  await page.route('**/api/account/logout', async (route) => {
     const response = await route.fetch()
     // Leave the UI mounted after revocation: an open stream would immediately
     // close and trigger its access check before the logout response arrives.
@@ -125,7 +127,7 @@ test('signing out closes live subscriptions before the session is revoked', asyn
     await route.fulfill({ response })
   })
   await page.getByRole('button', { name: 'Sign out', exact: true }).click()
-  await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible()
+  await expect(page.getByLabel('Email address')).toBeVisible()
   expect(unauthorized).toEqual([])
 })
 
@@ -135,11 +137,11 @@ test('two independent clients follow deltas, recover offline, refresh mid-answer
   const chat = await workspace.api('/api/chats', 'POST', {})
   const contexts: BrowserContext[] = []
   const signIn = async (target: Page) => {
-    await target.goto(workspace.url)
-    await target.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-    await target.getByRole('button', { name: 'Sign in', exact: true }).click()
+    await useRelayForHttpMocks(target)
+    await target.goto(workspacePath(workspace.url))
+    await authenticateWorkspace(target)
     await expect(target.getByRole('heading', { name: 'Fil', exact: true })).toBeVisible()
-    await target.goto(`${workspace.url}/chats/${chat.id}`)
+    await target.goto(workspacePath(`${workspace.url}/chats/${chat.id}`))
   }
 
   const message = (target: Page) => target.locator('.activity-message').filter({ hasText: 'Streaming proof:' })
@@ -156,13 +158,18 @@ test('two independent clients follow deltas, recover offline, refresh mid-answer
     await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:stream' })
     await expect(message(page)).toContainText('005')
     await expect(message(other)).toContainText('005')
+    // The official transport permits one finite read before its first live batch.
+    // Once connected, deltas must arrive without recurring history/metadata reads.
+    requests.length = 0
     await second.setOffline(true)
     await expect(message(page)).toContainText('020')
     await expect(other.getByRole('status').filter({ hasText: /Offline|Reconnecting/ })).toBeVisible()
     await second.setOffline(false)
     await expect(message(other)).toContainText('025')
+    expect(requests.some(url => /\/events\?|\/artifacts$/.test(url))).toBe(false)
     await page.reload()
     await expect(message(page)).toContainText('035')
+    requests.length = 0
     await expect(message(page)).not.toContainText('100')
     await page.setViewportSize({ width: 390, height: 844 })
     await page.emulateMedia({ colorScheme: 'dark' })
@@ -172,7 +179,8 @@ test('two independent clients follow deltas, recover offline, refresh mid-answer
     await expect(message(other)).toContainText('100')
     await expect(message(page)).toHaveCount(1)
     await expect(message(other)).toHaveCount(1)
-    expect(await message(page).textContent()).toBe(await message(other).textContent())
+    // Compare streamed content: the header clock is not part of the provider output.
+    expect(await message(page).locator('.markdown').textContent()).toBe(await message(other).locator('.markdown').textContent())
     await expectChatReady(page)
     // No event/metadata polling is required while watching the conversation.
     expect(requests.some(url => /\/events\?|\/artifacts$/.test(url))).toBe(false)
@@ -191,9 +199,9 @@ test('two independent clients follow deltas, recover offline, refresh mid-answer
     await expect(late.locator('.activity-message').filter({ hasText: 'After server restart' })).toHaveCount(2)
     // Route changes dispose old streams and cannot mix conversations.
     const empty = await workspace.api('/api/chats', 'POST', {})
-    await page.goto(`${workspace.url}/chats/${empty.id}`)
+    await page.goto(workspacePath(`${workspace.url}/chats/${empty.id}`))
     await expect(message(page)).toHaveCount(0)
-    await page.goto(`${workspace.url}/chats/${chat.id}`)
+    await page.goto(workspacePath(`${workspace.url}/chats/${chat.id}`))
     await expect(message(page)).toHaveCount(1)
   }
   finally {
@@ -203,11 +211,11 @@ test('two independent clients follow deltas, recover offline, refresh mid-answer
 })
 
 test('cached history survives reload before a delayed stream, then clear on logout', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Cache persistence proof' })
-  await page.goto(`${workspace.url}/chats/${chat.id}`)
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath(`${workspace.url}/chats/${chat.id}`))
+  await authenticateWorkspace(page)
   await expect(page.locator('.activity-message').filter({ hasText: 'Cache persistence proof' }).first()).toBeVisible()
   const count = () => page.evaluate(() => new Promise<number>((resolve, reject) => {
     const request = indexedDB.open('leo-history-v1', 1)
@@ -252,20 +260,20 @@ test('cached history survives reload before a delayed stream, then clear on logo
   }
 
   await page.getByRole('button', { name: 'Sign out', exact: true }).click()
-  await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible()
+  await expect(page.getByLabel('Email address')).toBeVisible()
   await expect.poll(count).toBe(0)
 })
 
 test('a cached run restores the reading offset while its stream is still connecting', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
   const run = workspace.service.store.runs()[0]
   for (let i = 0; i < 40; i++) {
     const text = `Saved reading position ${i}. A longer paragraph to exercise the scrolling activity view across reloads.`
     workspace.service.store.event(run.id, 'item.completed', text, { item: { id: `cache-${i}`, type: 'agent_message', text } })
   }
 
-  await page.goto(`${workspace.url}/runs/${run.id}`)
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
+  await authenticateWorkspace(page)
   await page.getByRole('button', { name: /^Conversation/ }).click()
   await expect(page.locator('.activity-message').filter({ hasText: 'Saved reading position 39.' })).toBeVisible()
   await page.getByLabel('Follow output').uncheck()
@@ -283,7 +291,7 @@ test('a cached run restores the reading offset while its stream is still connect
     }
   }))).toBe(300)
   // A previous visit may have cached "running" just before the run completed.
-  await page.goto(`${workspace.url}/agents`)
+  await page.goto(workspacePath(`${workspace.url}/agents`))
   await page.evaluate(() => new Promise<void>((resolve, reject) => {
     const request = indexedDB.open('leo-history-v1', 1)
     request.onsuccess = () => {
@@ -324,7 +332,7 @@ test('a cached run restores the reading offset while its stream is still connect
     }
   })
   try {
-    await page.goto(`${workspace.url}/runs/${run.id}`)
+    await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
     // A run opens on its conversation, restoring the cached reading offset before the stream connects.
     await expect(page.getByRole('button', { name: /^Conversation/ })).toHaveAttribute('aria-pressed', 'true')
     await expect.poll(() => scroller.evaluate(element => element.scrollTop)).toBe(300)
@@ -340,15 +348,15 @@ test('a cached run restores the reading offset while its stream is still connect
 })
 
 test('recent history loads older pages without moving the reader and survives a blocked reconnect', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
   const run = workspace.service.store.runs()[0]
   for (let i = 0; i < 350; i++) {
     const text = `Paged line ${String(i).padStart(3, '0')}. A paragraph to retain a stable reading position.`
     workspace.service.store.event(run.id, 'item.completed', text, { item: { id: `page-${i}`, type: 'agent_message', text } })
   }
 
-  await page.goto(`${workspace.url}/runs/${run.id}`)
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
+  await authenticateWorkspace(page)
   await page.getByRole('button', { name: /^Conversation/ }).click()
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 349' })).toBeVisible()
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 249' })).toHaveCount(0)
@@ -375,6 +383,7 @@ test('recent history loads older pages without moving the reader and survives a 
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 150' })).toBeAttached()
   await expect.poll(async () => Math.abs((await anchor.boundingBox())!.y - top)).toBeLessThan(2)
   await page.unrouteAll({ behavior: 'wait' })
+  await useRelayForHttpMocks(page)
   // Move back to the latest content and let its bounded disk snapshot commit.
   await page.getByLabel('Follow output').check()
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 349' })).toBeVisible()

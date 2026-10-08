@@ -10,7 +10,7 @@
   },
   "scripts": {
     "prepare": "simple-git-hooks",
-    "dev": "concurrently -k 'cargo run --bin leo' 'vite --host 127.0.0.1'",
+    "dev": "concurrently -k 'cargo run --bin leo-official' 'vite --host 127.0.0.1'",
     "build": "vue-tsc --noEmit && vite build",
     "start": "target/release/leo",
     "typecheck": "vue-tsc --noEmit",

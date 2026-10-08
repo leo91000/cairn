@@ -3,10 +3,12 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import {
+  signIn as authenticateWorkspace,
   expect,
   expectSingleScroll,
   initializeRepository,
   test,
+  workspacePath,
 } from './fixtures'
 
 test('persistent deliverables have a gallery, revisions, mobile viewer, and playable media', async ({ page, browser, workspace }) => {
@@ -63,13 +65,12 @@ test('persistent deliverables have a gallery, revisions, mobile viewer, and play
   await publish('Audio notes', 'notes.wav', 'audio', await readFile('tests/fixtures/artifacts/notes.wav'))
   await publish('Printable review', 'review.pdf', 'pdf', await readFile('tests/fixtures/artifacts/review.pdf'))
   const notes = files.find(item => item.kind === 'markdown')!
-  const answer = `The review is ready. [Read the report](/api/runs/${runId}/artifacts/${notes.id}) · [View image](${workspace.url}/api/runs/${runId}/artifacts/${second.id}) · [Documentation](https://example.test/docs) · [Missing file](/api/runs/${runId}/artifacts/missing)`
+  const answer = `The review is ready. [Read the report](/api/runs/${runId}/artifacts/${notes.id}) · [View image](${workspace.url}/api/installations/${workspace.installationId}/api/runs/${runId}/artifacts/${second.id}) · [Documentation](https://example.test/docs) · [Missing file](/api/runs/${runId}/artifacts/missing)`
   workspace.service.store.event(runId, 'item.completed', answer, { type: 'item.completed', item: { id: 'deliverable-answer', type: 'agent_message', text: answer } })
-  await page.goto('/')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/'))
+  await authenticateWorkspace(page)
   await expect(page.getByRole('heading', { name: 'Fil', exact: true })).toBeVisible()
-  await page.goto(`/chats/${chat.id}`)
+  await page.goto(workspacePath(`/chats/${chat.id}`))
   await page.setViewportSize({ width: 1440, height: 1000 })
   await page.emulateMedia({ colorScheme: 'dark' })
   await expect(page.getByRole('button', { name: 'Files · 6', exact: true })).toBeVisible()
@@ -94,7 +95,7 @@ test('persistent deliverables have a gallery, revisions, mobile viewer, and play
     const response = await guest.request.get(publicUrl)
     expect(response.status()).toBe(200)
     expect(await response.text()).toContain('Mobile review')
-    expect((await guest.request.get(`${workspace.url}/api/runs/${runId}/artifacts/${notes.id}`)).status()).toBe(401)
+    expect((await guest.request.get(`${workspace.url}/api/installations/${workspace.installationId}/api/runs/${runId}/artifacts/${notes.id}`)).status()).toBe(401)
     await sharing.getByRole('button', { name: 'Disable public link', exact: true }).click()
     await expect(sharing.getByText('Private file', { exact: true })).toBeVisible()
     expect((await guest.request.get(publicUrl)).status()).toBe(404)
@@ -164,12 +165,12 @@ test('persistent deliverables have a gallery, revisions, mobile viewer, and play
   await page.reload()
   await page.getByRole('button', { name: 'Chat details', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Files 6', exact: true })).toBeVisible()
-  const content = await page.request.get(`/api/runs/${runId}/artifacts/${video.id}`, { headers: { Range: 'bytes=0-31' } })
+  const content = await page.request.get(`/api/installations/${workspace.installationId}/api/runs/${runId}/artifacts/${video.id}`, { headers: { Range: 'bytes=0-31' } })
   expect(content.status()).toBe(206)
   expect((await content.body()).length).toBe(32)
-  const download = await page.request.get(`/api/runs/${runId}/artifacts/${second.id}?download=1`)
+  const download = await page.request.get(`/api/installations/${workspace.installationId}/api/runs/${runId}/artifacts/${second.id}?download=1`)
   expect(download.headers()['content-disposition']).toContain('attachment;')
-  await page.goto(`/runs/${runId}`)
+  await page.goto(workspacePath(`/runs/${runId}`))
   await page.getByRole('button', { name: /^Conversation/ }).click()
   await page.getByRole('link', { name: 'Read the report', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Mobile review', exact: true })).toBeVisible()

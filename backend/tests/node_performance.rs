@@ -3,7 +3,7 @@
 //! Run alone with --ignored --nocapture --test-threads=1. All identities/data are fixtures.
 mod common;
 
-use common::browser_http::router;
+use common::relay_fixture::router;
 
 use axum::{
     Json, Router,

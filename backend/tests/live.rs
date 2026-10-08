@@ -1,6 +1,6 @@
 mod common;
 
-use common::browser_http::router;
+use common::relay_fixture::router;
 
 use axum::http::StatusCode;
 use leo_agent_manager::{
@@ -17,7 +17,7 @@ use std::{
 };
 use tempfile::TempDir;
 
-/// A queued run served over HTTP, with an owner session to stream it.
+/// A queued run served over HTTP, with a trusted owner context to stream it.
 struct Fixture {
     _root: TempDir,
     service: Arc<Service>,
@@ -35,14 +35,7 @@ impl Fixture {
             ..common::config(root.path())
         };
         let service = Service::new(config).await.unwrap();
-        let token = text(
-            &common::browser_http::auth(&service)
-                .session()
-                .await
-                .unwrap(),
-            "value",
-        )
-        .to_owned();
+        let token = text(&common::relay_fixture::context(&service).await, "value").to_owned();
         let task = service
             .task(
                 json!({ "name": "Live test", "prompt": "Test", "agentId": MAIN_AGENT_ID }),
@@ -76,7 +69,7 @@ impl Fixture {
     async fn open_path(&self, path: &str, last: Option<i64>) -> Stream {
         let mut request = reqwest::Client::new()
             .get(format!("{}{path}", self.url))
-            .header("cookie", format!("leo_session={}", self.token))
+            .header("x-test-relay-token", &self.token)
             .header("accept-encoding", "gzip, br");
         if let Some(last) = last {
             request = request.header("Last-Event-ID", last);
@@ -103,7 +96,7 @@ impl Fixture {
                 "{}/api/runs/{}/history?{query}",
                 self.url, self.run
             ))
-            .header("cookie", format!("leo_session={}", self.token))
+            .header("x-test-relay-token", &self.token)
             .send()
             .await
             .unwrap()
@@ -346,14 +339,7 @@ async fn metadata_shutdown_and_invalid_requests() {
             .status(),
         StatusCode::UNAUTHORIZED
     );
-    let token = text(
-        &common::browser_http::auth(&f.service)
-            .session()
-            .await
-            .unwrap(),
-        "value",
-    )
-    .to_owned();
+    let token = text(&common::relay_fixture::context(&f.service).await, "value").to_owned();
     for (path, code) in [
         (
             format!("/api/runs/{}/stream?after=-1", f.run),
@@ -365,7 +351,7 @@ async fn metadata_shutdown_and_invalid_requests() {
         assert_eq!(
             client
                 .get(format!("{}{path}", f.url))
-                .header("cookie", format!("leo_session={token}"))
+                .header("x-test-relay-token", &token)
                 .send()
                 .await
                 .unwrap()

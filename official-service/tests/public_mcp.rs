@@ -1482,3 +1482,170 @@ async fn maintenance_and_concurrent_consent_have_a_consistent_client_lifetime() 
 
     relay.close().await;
 }
+
+#[tokio::test]
+async fn native_mcp_callback_uses_official_account_authentication_instead_of_local_login() {
+    use leo_agent_manager::{auth::hex_digest, config::now};
+    use std::collections::HashMap;
+
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let connection = "00000000-0000-4000-8000-000000000099";
+    let nonce = "native-callback-test-nonce";
+    let key = format!("mcp-oauth:{}", hex_digest(nonce));
+    let expires = now() + 600_000;
+    let account = relay.session["account"]["id"].as_str().unwrap();
+    let pending = json!({
+        "native": true,
+        "connectionId": connection,
+        "session": hex_digest(&format!("leo-account:{account}")),
+        "nonce": nonce,
+        "expiresAt": expires,
+    });
+    relay
+        .installation
+        .store
+        .set(&key, pending, Some(expires))
+        .await
+        .unwrap();
+    let parameters = json!({ "state": nonce, "code": "private-fixture-code" });
+    let callback = format!("{}/mcps/oauth/callback", relay.base);
+
+    for (cookie, csrf, expected) in [
+        ("", "", StatusCode::UNAUTHORIZED),
+        (relay.cookie.as_str(), "", StatusCode::FORBIDDEN),
+    ] {
+        let response = relay
+            .app
+            .client
+            .post(&callback)
+            .header("origin", &relay.app.url)
+            .header("cookie", cookie)
+            .header("x-csrf-token", csrf)
+            .json(&parameters)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        assert!(
+            relay
+                .installation
+                .store
+                .kv(&key)
+                .await
+                .unwrap()
+                .unwrap()
+                .get("callback")
+                .is_none()
+        );
+    }
+
+    let (foreign_cookie, foreign_session) =
+        common::login(&relay.app, "foreign-mcp@example.test").await;
+    let response = relay
+        .app
+        .client
+        .post(&callback)
+        .header("origin", &relay.app.url)
+        .header("cookie", foreign_cookie)
+        .header("x-csrf-token", foreign_session["csrf"].as_str().unwrap())
+        .json(&parameters)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(
+        relay
+            .installation
+            .store
+            .kv(&key)
+            .await
+            .unwrap()
+            .unwrap()
+            .get("callback")
+            .is_none()
+    );
+
+    let response = relay
+        .app
+        .client
+        .post(&callback)
+        .header("origin", &relay.app.url)
+        .header("cookie", &relay.cookie)
+        .header("x-csrf-token", relay.session["csrf"].as_str().unwrap())
+        .json(&parameters)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.json::<Value>().await.unwrap(),
+        json!({ "result": "native" })
+    );
+    let captured = relay.installation.store.kv(&key).await.unwrap().unwrap();
+    assert_eq!(captured["callback"]["code"], "private-fixture-code");
+    assert_eq!(captured["expiresAt"], expires);
+
+    let replay = json!({ "state": nonce, "code": "replacement" });
+    let response = relay
+        .app
+        .client
+        .post(&callback)
+        .header("origin", &relay.app.url)
+        .header("cookie", &relay.cookie)
+        .header("x-csrf-token", relay.session["csrf"].as_str().unwrap())
+        .json(&replay)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        relay.installation.store.kv(&key).await.unwrap().unwrap(),
+        captured
+    );
+
+    relay
+        .app
+        .client
+        .post(format!("{}/api/account/logout", relay.app.url))
+        .header("origin", &relay.app.url)
+        .header("cookie", &relay.cookie)
+        .header("x-csrf-token", relay.session["csrf"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let finish = format!("{}/mcps/{connection}/callback", relay.base);
+    let response = relay
+        .app
+        .client
+        .post(&finish)
+        .header("origin", &relay.app.url)
+        .header("cookie", &relay.cookie)
+        .header("x-csrf-token", relay.session["csrf"].as_str().unwrap())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    relay
+        .installation
+        .store
+        .set(&key, captured, Some(now() - 1))
+        .await
+        .unwrap();
+    let replacement = HashMap::from([
+        ("state".into(), nonce.into()),
+        ("code".into(), "expired-replacement".into()),
+    ]);
+    assert!(
+        !relay
+            .installation
+            .mcps
+            .capture_native_callback(&relay.installation, &replacement)
+            .await
+            .unwrap()
+    );
+    relay.close().await;
+}

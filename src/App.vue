@@ -11,10 +11,8 @@ import {
 import { useRoute, useRouter } from 'vue-router'
 import { useAgentPortraits } from './agent-avatars'
 import {
-  api,
   ownerPage,
   refresh,
-  session,
   signOut,
   state,
 } from './api'
@@ -23,10 +21,7 @@ import CommandPalette from './components/CommandPalette.vue'
 import Icon from './components/Icon.vue'
 import ShortcutSheet from './components/ShortcutSheet.vue'
 import ThemeControl from './components/ThemeControl.vue'
-import UiAlert from './components/UiAlert.vue'
-import UiButton from './components/UiButton.vue'
 import {
-  ArrowUpRight,
   CalendarClock,
   Check,
   Inbox,
@@ -45,10 +40,6 @@ import { workspaceActionsKey } from './workspace-actions'
 useAgentPortraits()
 const router = useRouter()
 const route = useRoute()
-const password = ref('')
-const setupToken = ref('')
-const busy = ref(false)
-const error = ref('')
 const paletteOpen = ref(false)
 const shortcutsOpen = ref(false)
 provide(workspaceActionsKey, {
@@ -110,13 +101,11 @@ const missionRunning = computed(() => fil.value.live.some(item => item.taskId &&
 
 onMounted(async () => {
   try {
-    if (!state.installationId)
-      await session()
     if (state.authenticated)
       await refresh()
   }
   catch (e) {
-    error.value = (e as Error).message
+    state.error = (e as Error).message
     state.ready = true
   }
 
@@ -186,101 +175,12 @@ function openShortcuts() {
   paletteOpen.value = false
   shortcutsOpen.value = true
 }
-
-async function login() {
-  busy.value = true
-  error.value = ''
-  try {
-    const value = await api(state.setupRequired ? '/setup' : '/login', {
-      method: 'POST',
-      body: JSON.stringify({
-        password: password.value,
-        setupToken: setupToken.value,
-      }),
-    })
-    Object.assign(state, value)
-    state.setupRequired = false
-    password.value = ''
-    await refresh()
-  }
-  catch (e) {
-    error.value = (e as Error).message
-  }
-  finally {
-    busy.value = false
-  }
-}
 </script>
 
 <template>
   <div v-if="!state.ready" class="loading-screen min-h-dvh grid place-items-center text-muted">
     Loading…
   </div>
-  <main v-else-if="!state.authenticated" class="auth-screen grid grid-cols-[1fr_1fr] min-h-dvh phone:flex phone:flex-col">
-    <div class="auth-story bg-[light-dark(#eeedff,_#222033)] text-ink flex flex-col justify-between relative overflow-hidden phone:min-h-auto phone:gap-[35px] px-[65px] py-[55px] compact:p-[45px] tablet:p-7.5 phone:p-[25px]">
-      <div class="wordmark flex items-center gap-[9px] text-[#f0eff7] [font-size:29px] tracking-[-1px] font-bold font-heading tablet:[font-size:25px]">
-        <span class="logo-mark w-8 h-8 grid place-items-center bg-brand rounded-[9px] text-white [transform:rotate(-7deg)] [box-shadow:2px_2px_0_light-dark(#292943,_#0d0d18)]"><Icon :name="Zap" :size="25" /></span>leo<span
-          class="wordmark-tag [font:600_8px/1.5_'DM_Sans_Variable',_sans-serif] tracking-[1.7px] max-w-[65px] whitespace-normal ml-[3px] text-[#a7a5ba] hidden tablet:[font-size:7px]"
-        >AGENT MANAGER</span>
-      </div>
-      <div>
-        <h1>Your agents.<br>Your workspace.</h1>
-      </div>
-      <span class="auth-foot text-xs text-[#6b6892] tracking-[0.5px] phone:hidden">Leo Agent Manager</span>
-    </div>
-    <div class="auth-form flex items-center justify-center relative phone:pt-16.5 phone:pb-[35px] phone:flex-1 p-10 tablet:p-7.5 phone:px-[25px]">
-      <div class="auth-appearance absolute right-6 top-6 z-2 phone:top-3 phone:right-3">
-        <ThemeControl compact />
-      </div>
-      <div class="auth-card max-w-[345px] w-full">
-        <h2>
-          {{ state.setupRequired ? "Create workspace" : "Sign in" }}
-        </h2>
-        <p>
-          {{
-            state.setupRequired
-              ? "Create your administrator account to get started."
-              : ""
-          }}
-        </p>
-        <form @submit.prevent="login">
-          <label v-if="state.setupRequired">Setup token<input
-            v-model="setupToken"
-            type="password"
-            required
-            autocomplete="off"
-            placeholder="From your server’s setup-token file"
-          ><small>Stored in the data directory on your server.</small></label><label>Password<input
-            v-model="password"
-            type="password"
-            required
-            :minlength="state.setupRequired ? 12 : 1"
-            :autocomplete="
-              state.setupRequired ? 'new-password' : 'current-password'
-            "
-            placeholder="At least 12 characters"
-          ></label>
-          <UiAlert v-if="error">
-            {{ error }}
-          </UiAlert>
-          <UiButton
-            class="w-full"
-            variant="primary"
-            type="submit"
-            :disabled="busy"
-          >
-            {{
-              busy
-                ? "Please wait…"
-                : state.setupRequired
-                  ? "Create workspace"
-                  : "Sign in"
-            }}<Icon :name="ArrowUpRight" :size="18" />
-          </UiButton>
-        </form>
-      </div>
-    </div>
-  </main>
   <div v-else class="shell flex min-h-0 overflow-hidden" :class="state.installationId ? 'flex-1' : 'h-dvh'">
     <nav class="rail z-30 flex w-19 shrink-0 flex-col items-center gap-1 border-r border-line bg-canvas pb-4 pt-4 phone:hidden" aria-label="Workspace navigation">
       <RouterLink to="/" class="press mb-4 grid size-10 place-items-center rounded-xl bg-brand text-white shadow-[0_6px_16px_-6px_#4545ef99]" aria-label="Leo home">

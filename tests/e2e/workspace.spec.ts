@@ -1,9 +1,15 @@
-import { expect, test } from './fixtures'
+import {
+  signIn as authenticateWorkspace,
+  expect,
+  test,
+  useRelayForHttpMocks,
+  workspacePath,
+} from './fixtures'
 
 test.describe.configure({ mode: 'serial' })
 
 // One fresh application exercises persistence between screens and real child execution.
-test('set up, author skills, schedule work, inspect results, and sign out', async ({
+test('sign in, author skills, schedule work, inspect results, and sign out', async ({
   page,
   workspace,
 }) => {
@@ -21,18 +27,14 @@ test('set up, author skills, schedule work, inspect results, and sign out', asyn
       errors.push(message.text())
     }
   })
-  await page.goto('/')
+  await page.goto(workspacePath('/'))
   await page.emulateMedia({ colorScheme: 'dark' })
   await page.screenshot({ path: 'test-results/theme-setup-desktop.png', fullPage: true, animations: 'disabled' })
   await page.setViewportSize({ width: 320, height: 568 })
   await page.screenshot({ path: 'test-results/theme-setup-mobile.png', fullPage: true, animations: 'disabled' })
   await page.setViewportSize({ width: 1280, height: 720 })
   await page.emulateMedia({ colorScheme: 'light' })
-  await page.getByLabel('Setup token').fill('browser-test-setup')
-  await page
-    .getByLabel('Password', { exact: true })
-    .fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Create workspace' }).click()
+  await authenticateWorkspace(page)
   await page.getByRole('link', { name: 'Atelier', exact: true }).click()
   await page.getByRole('link', { name: 'Agents', exact: true }).click()
   await page.getByRole('button', { name: 'New agent', exact: true }).click()
@@ -132,7 +134,7 @@ test('set up, author skills, schedule work, inspect results, and sign out', asyn
   await page.getByRole('link', { name: 'Atelier', exact: true }).click()
   await page.getByRole('button', { name: 'Sign out', exact: true }).click()
   await expect(
-    page.getByRole('button', { name: 'Sign in', exact: true }),
+    page.getByLabel('Email address'),
   ).toBeVisible()
   expect(errors).toEqual([])
 })
@@ -140,11 +142,8 @@ test('set up, author skills, schedule work, inspect results, and sign out', asyn
 test('edits supporting files, cancels work, and archives without losing history', async ({
   page,
 }) => {
-  await page.goto('/')
-  await page
-    .getByLabel('Password', { exact: true })
-    .fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/'))
+  await authenticateWorkspace(page)
   await page.getByRole('link', { name: 'Atelier', exact: true }).click()
   await page.getByRole('link', { name: 'Skills', exact: true }).click()
   await page.getByRole('button', { name: 'Edit review', exact: true }).click()
@@ -227,11 +226,8 @@ test('approves a scoped OAuth connector and revokes its grant', async ({
     resource: `${workspace.url}/mcp`,
     state: 'qa-state',
   })
-  await page.goto(`/oauth/authorize?${params}`)
-  await page
-    .getByLabel('Password', { exact: true })
-    .fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath(`/oauth/authorize?${params}`))
+  await authenticateWorkspace(page)
   await expect(
     page.getByText('Browser QA connector', { exact: true }),
   ).toBeVisible()
@@ -267,7 +263,7 @@ test('approves a scoped OAuth connector and revokes its grant', async ({
   expect(token.status()).toBe(200)
   const credentials = await token.json()
   expect(credentials.scope).toBe('read run')
-  await page.goto('/settings')
+  await page.goto(workspacePath('/settings'))
   await expect(
     page.getByText('Browser QA connector', { exact: true }),
   ).toBeVisible()
@@ -284,7 +280,7 @@ test('approves a scoped OAuth connector and revokes its grant', async ({
 
 test('appearance follows the device, persists overrides, syncs tabs and paints before the app', async ({ page, context }, testInfo) => {
   await page.emulateMedia({ colorScheme: 'dark' })
-  await page.goto('/')
+  await page.goto(workspacePath('/'))
   const root = page.locator('html')
   await expect(root).toHaveAttribute('data-theme', 'dark')
   await expect(root).toHaveAttribute('data-theme-preference', 'system')
@@ -305,7 +301,7 @@ test('appearance follows the device, persists overrides, syncs tabs and paints b
   await page.emulateMedia({ colorScheme: 'dark' })
   await expect(root).toHaveAttribute('data-theme', 'light')
   const other = await context.newPage()
-  await other.goto('/')
+  await other.goto(workspacePath('/'))
   await other.getByRole('button', { name: 'Appearance: light', exact: true }).click()
   await other.locator('.theme-popover label').filter({ hasText: 'Dark' }).click()
   await expect(root).toHaveAttribute('data-theme', 'dark')
@@ -328,12 +324,12 @@ test('appearance follows the device, persists overrides, syncs tabs and paints b
 })
 
 test('dark appearance settings, empty states and connection sign-in feedback', async ({ page }, testInfo) => {
+  await useRelayForHttpMocks(page)
   await page.emulateMedia({ colorScheme: 'dark' })
-  await page.goto('/')
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath('/'))
+  await authenticateWorkspace(page)
   await expect(page.locator('.shell')).toBeVisible()
-  await page.goto('/settings')
+  await page.goto(workspacePath('/settings'))
   await page.locator('.theme-control:not(.theme-compact) label').filter({ hasText: 'Light' }).click()
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
   await page.locator('.theme-control:not(.theme-compact) label').filter({ hasText: 'Dark' }).click()
@@ -343,7 +339,7 @@ test('dark appearance settings, empty states and connection sign-in feedback', a
   await expect(page.locator('.theme-popover')).not.toBeVisible()
   await expect(page.getByRole('button', { name: 'Appearance: dark', exact: true })).toBeFocused()
   await page.route('**/api/tasks', route => route.fulfill({ json: [] }))
-  await page.goto('/tasks')
+  await page.goto(workspacePath('/tasks'))
   await expect(page.getByRole('heading', { name: 'No missions yet', exact: true })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('empty-tasks.png'), fullPage: true, animations: 'disabled' })
   await page.route('**/api/connections?*', route => route.fulfill({
@@ -364,7 +360,7 @@ test('dark appearance settings, empty states and connection sign-in feedback', a
     error: null,
   }
   await page.route('**/api/accounts', route => route.fulfill({ json: { accounts: [], signIn } }))
-  await page.goto('/connections')
+  await page.goto(workspacePath('/connections'))
   // A sign-in in progress reopens its window on page load.
   await expect(page.getByText('DEMO-CODE', { exact: true })).toBeVisible()
   for (const width of [1440, 320]) {
