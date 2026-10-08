@@ -59,11 +59,12 @@ impl Worker {
             .spawn(crate::nodes::shared_blocks::maintain(s.clone()));
         self.tasks.spawn(crate::nodes::storage::monitor(s.clone()));
         self.tasks.spawn(clean_conversations(s.clone()));
-        self.tasks.spawn(self.clone().schedule_forever(s));
+        self.tasks.spawn(schedule_tasks(s.clone()));
+        self.tasks.spawn(self.clone().run_forever(s));
         Ok(())
     }
 
-    async fn schedule_forever(self: Arc<Self>, s: Arc<Service>) {
+    async fn run_forever(self: Arc<Self>, s: Arc<Service>) {
         let mut timer = tokio::time::interval(Duration::from_secs(1));
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -127,6 +128,28 @@ impl Worker {
         let _guard = self.tick_lock.lock().await;
         self.tasks.close();
         self.tasks.wait().await;
+    }
+}
+
+/// Official author checks and snapshot preparation never hold the launch tick.
+async fn schedule_tasks(s: Arc<Service>) {
+    let mut timer = tokio::time::interval(Duration::from_secs(1));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            () = s.shutdown.cancelled() => break,
+            _ = timer.tick() => {},
+        }
+
+        tokio::select! {
+            () = s.shutdown.cancelled() => break,
+            result = s.schedule() => {
+                if let Err(error) = result {
+                    audit(&s.store, "schedule.failed", json!({ "error": error.message })).await;
+                }
+            },
+        }
     }
 }
 

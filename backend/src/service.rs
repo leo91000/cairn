@@ -381,28 +381,41 @@ impl Service {
         trigger: &str,
         dedupe: Option<String>,
     ) -> Result<Value> {
+        let run = self.prepare_run(task_id, trigger).await?;
+        if trigger == "schedule" {
+            let _guard = self.task_author_lock.lock().await;
+            self.require_task_author(&run["snapshot"]["task"]).await?;
+            return self.queue_run(run, dedupe).await;
+        }
+        self.queue_run(run, dedupe).await
+    }
+
+    async fn prepare_run(&self, task_id: &str, trigger: &str) -> Result<Value> {
         let run = self
             .snapshot(self.get("tasks", task_id).await?, trigger)
             .await?;
         crate::nodes::require_node(&run["snapshot"]["agent"])?;
+        Ok(run)
+    }
 
-        if trigger == "schedule" {
-            // Preparation may wait on filesystem I/O. It is not an admission:
-            // recheck the author's current commitment after all preparation.
-            let policy = self.synchronize_task_authors_locked().await?;
-            let task = &run["snapshot"]["task"];
-            let eligible = match policy {
-                Some(policy) => policy
-                    .grant(text(task, "authorId"))
-                    .is_some_and(|grant| task["authorAccessId"] == grant.access_id),
-                None => !task["authorId"].is_string(),
-            };
+    /// Call under the author lock, after every potentially slow preparation step.
+    async fn require_task_author(&self, task: &Value) -> Result<()> {
+        let Some(policy) = self.synchronize_task_authors_locked().await? else {
+            return Err(Error::unauthorized(
+                "Installation is not claimed. Run leo claim before scheduling work.",
+            ));
+        };
+        let eligible = policy
+            .grant(text(task, "authorId"))
+            .is_some_and(|grant| task["authorAccessId"] == grant.access_id);
 
-            if !eligible {
-                return Err(Error::conflict("The task author's access ended."));
-            }
+        if !eligible {
+            return Err(Error::conflict("The task author's access ended."));
         }
+        Ok(())
+    }
 
+    async fn queue_run(&self, run: Value, dedupe: Option<String>) -> Result<Value> {
         let result = self
             .store
             .transaction(move |db| {
@@ -426,35 +439,62 @@ impl Service {
         if !self.store.list("tasks").await?.iter().any(schedule_due) {
             return Ok(());
         }
+
         // No new scheduled work is admitted without the current official authority.
         // Already admitted work continues through a temporary official outage.
-        let Ok(policy) = self.synchronize_task_authors_locked().await else {
-            return Ok(());
+        let authority_wait_reason = match self.synchronize_task_authors_locked().await {
+            Ok(Some(_)) => None,
+            Ok(None) => Some(
+                "Installation is not claimed. Run leo claim before scheduling work.".to_owned(),
+            ),
+            Err(error) => Some(error.message),
         };
+
+        if let Some(reason) = authority_wait_reason {
+            for task in self
+                .store
+                .list("tasks")
+                .await?
+                .iter()
+                .filter(|task| schedule_due(task))
+            {
+                self.schedule_wait(task, Some(&reason)).await?;
+            }
+            return Ok(());
+        }
+
         for task in self.store.list("tasks").await? {
-            if !schedule_due(&task) || policy.is_none() && task["authorId"].is_string() {
+            if !schedule_due(&task) {
                 continue;
             }
-            if let Err(error) = self
-                .enqueue(
-                    text(&task, "id"),
-                    "schedule",
-                    Some(format!("{}:{}", text(&task, "id"), task["nextRun"])),
-                )
-                .await
-            {
-                if error.status == 503 {
-                    return Ok(());
-                }
 
-                if error.status != 409 {
-                    let detail = json!({
-                        "taskId": task["id"],
-                        "error": error.message
-                    });
-                    self.store.audit("schedule.failed", detail).await?;
+            let prepared = self.prepare_run(text(&task, "id"), "schedule").await;
+            let admission = match prepared {
+                Ok(run) => {
+                    if let Err(error) = self.require_task_author(&run["snapshot"]["task"]).await {
+                        if error.status != 409 {
+                            self.schedule_wait(&task, Some(&error.message)).await?;
+                        }
+                        continue;
+                    }
+
+                    self.schedule_wait(&task, None).await?;
+                    let dedupe = Some(format!("{}:{}", text(&task, "id"), task["nextRun"]));
+                    self.queue_run(run, dedupe).await
                 }
+                Err(error) => Err(error),
+            };
+
+            if let Err(error) = admission
+                && error.status != 409
+            {
+                let detail = json!({
+                    "taskId": task["id"],
+                    "error": error.message,
+                });
+                self.store.audit("schedule.failed", detail).await?;
             }
+
             let next = next_occurrences(text(&task, "cron"), text(&task, "timezone"), now(), 1)?[0];
             self.store
                 .write(move |db| {
@@ -469,6 +509,36 @@ impl Service {
                 .await?;
         }
         Ok(())
+    }
+
+    async fn schedule_wait(&self, task: &Value, reason: Option<&str>) -> Result<()> {
+        let task_id = text(task, "id").to_owned();
+        let reason = reason.map_or(Value::Null, Into::into);
+        self.store
+            .transaction(move |db| {
+                let Some(mut current) = db.get("tasks", &task_id)? else {
+                    return Ok(());
+                };
+                if current["scheduleWaitReason"] == reason {
+                    return Ok(());
+                }
+
+                current["scheduleWaitReason"] = reason.clone();
+                db.put("tasks", &current)?;
+                let action = if reason.is_null() {
+                    "schedule.resumed"
+                } else {
+                    "schedule.deferred"
+                };
+                db.audit(
+                    action,
+                    &json!({
+                        "taskId": task_id,
+                        "reason": reason,
+                    }),
+                )
+            })
+            .await
     }
 }
 

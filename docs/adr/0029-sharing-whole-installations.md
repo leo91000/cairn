@@ -63,3 +63,23 @@ et peut la révoquer explicitement. Les liens existants n'ont pas d'auteur fiabl
 les supprimer en masse au retrait ferait perdre des publications légitimes. Les
 autorisations explicites des agents, limitées à leur exécution, restent applicables.
 Les copies déjà téléchargées restent évidemment chez leurs destinataires.
+
+## Complément : modification et indisponibilité (2026-10-08, revue #116)
+
+L'auteur reste immuable. Seul cet auteur ou le propriétaire peut modifier le
+contenu d'une tâche ou la remettre en marche. Un membre peut seulement mettre
+en pause ou archiver la tâche d'un autre auteur, sans changer ses autres champs.
+Cela inclut les tâches anciennes attribuées au propriétaire. Pour prendre un
+engagement différent, le membre duplique la tâche et devient auteur de la copie.
+Réattribuer l'auteur à chaque modification a été écarté : une simple correction
+par le propriétaire pourrait autrement faire survivre l'engagement d'un membre
+à son retrait.
+
+La pause et l'archivage seuls ne demandent pas de contrôle de l'autorité officielle :
+ils réduisent le travail futur et restent possibles pendant son indisponibilité.
+Les nouvelles admissions planifiées attendent toujours un contrôle courant,
+y compris après leur préparation. Leur boucle est indépendante du lancement et
+de la reprise des travaux déjà admis : une attente officielle ne les retarde pas.
+Le refus d'une admission pour défaut d'autorité est indiqué sur la tâche ; une
+erreur de préparation propre à une tâche est journalisée et avance son échéance,
+sans empêcher les autres tâches de passer.

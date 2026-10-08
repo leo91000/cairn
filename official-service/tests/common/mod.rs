@@ -362,6 +362,8 @@ impl RelayedInstallation {
             .await
             .unwrap();
         let root = tempfile::tempdir().unwrap();
+        let codex_bin =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/codex.mjs");
         let config: Config = serde_json::from_value(json!({
             "dataDir": root.path().join("data"),
             "home": root.path().join("home"),
@@ -369,7 +371,7 @@ impl RelayedInstallation {
             "publicUrl": "http://localhost:4310",
             "host": "127.0.0.1",
             "port": 0,
-            "codexBin": "codex",
+            "codexBin": codex_bin,
             "claudeBin": "claude",
             "ghBin": "gh",
             "concurrency": 1,

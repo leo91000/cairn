@@ -435,6 +435,12 @@ Deploy the official service before upgrading installations for the task-author
 checks. Startup applies the additive `202610072155_task_author_access` migration
 with the existing SQLx migrator; historical migration numbers and checksums stay
 unchanged. Existing memberships receive access identifiers automatically.
+An upgraded manager cannot reconnect to an older official binary that lacks
+`/api/relay/{installation}/task-authors`: its 404 defers scheduled admissions
+and keeps the relay offline. Keep the upgraded official service while rolling
+back an installation. Rolling back the official service requires its matching
+Postgres backup and compatible managers; older managers also restore the previous
+task-author/public-link rules, so suspend shared access during that rollback.
 
 Upgrade every shared installation: older binaries do not enforce the task-author
 policy. Upgraded installations require the official task-author endpoint before

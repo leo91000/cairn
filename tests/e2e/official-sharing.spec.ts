@@ -158,6 +158,22 @@ test('owner shares an installation and member works without management controls'
     await member.getByRole('button', { name: 'Mission actions', exact: true }).click()
     await expect(member.getByRole('menuitem', { name: 'Delete', exact: true })).toHaveCount(0)
     await expect(member.getByRole('menuitem', { name: 'Duplicate (paused)', exact: true })).toBeVisible()
+    const ownerSession = await (await page.request.get(`${url}/api/account/session`)).json()
+    const ownerTaskResponse = await page.request.post(`${apiRoot}/tasks`, {
+      headers: { 'origin': url, 'x-csrf-token': ownerSession.csrf },
+      data: { ...task, name: 'Owner commitment', enabled: false },
+    })
+    expect(ownerTaskResponse.status()).toBe(200)
+    const ownerTask = await ownerTaskResponse.json()
+    await member.goto(`${installationUrl}tasks?task=${ownerTask.id}`)
+    await expect(member.getByRole('button', { name: 'Edit mission', exact: true })).toBeDisabled()
+    await expect(member.getByRole('button', { name: 'Resume schedule', exact: true })).toBeDisabled()
+    await expect(member.getByText('Only the author or installation owner can edit or resume this mission. Duplicate it to make your own commitment.', { exact: true })).toBeVisible()
+    await member.getByRole('button', { name: 'Mission actions', exact: true }).click()
+    await member.getByRole('menuitem', { name: 'Archive', exact: true }).click()
+    await expect(member.getByRole('menuitem', { name: 'Restore (paused)', exact: true })).toHaveCount(0)
+    await member.getByRole('button', { name: 'Mission actions', exact: true }).click()
+    await expect(member.getByRole('menuitem', { name: 'Restore (paused)', exact: true })).toBeDisabled()
     await member.goto(installationUrl)
     await member.getByText('Installation options', { exact: true }).click()
     await expect(member.getByRole('button', { name: 'Rename installation', exact: true })).toHaveCount(0)

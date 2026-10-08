@@ -1152,6 +1152,22 @@ async fn members_cannot_rewrite_or_resume_another_authors_task() {
     let (other_cookie, other_session) = member(&relay, "other-author@example.test").await;
     let id = relay.session["installations"][0]["id"].as_str().unwrap();
     let tasks = format!("/api/installations/{id}/api/tasks");
+    let other_agent: Value = request(
+        &relay,
+        &relay.cookie,
+        &relay.session,
+        Method::POST,
+        &format!("/api/installations/{id}/api/agents"),
+    )
+    .json(&json!({ "name": "Alternative agent" }))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert!(other_agent["id"].is_string());
+
     let input = json!({
         "name": "Paused commitment",
         "prompt": "Owner-approved work",
@@ -1192,6 +1208,7 @@ async fn members_cannot_rewrite_or_resume_another_authors_task() {
             ("timezone", json!("Europe/Paris")),
             ("enabled", json!(true)),
             ("worktree", json!(false)),
+            ("agentId", other_agent["id"].clone()),
         ] {
             let mut changed = task.clone();
             changed[field] = value;
@@ -1552,6 +1569,584 @@ async fn leaving_or_deleting_the_author_account_stops_their_schedules() {
 }
 
 #[tokio::test]
+async fn an_authority_wait_never_delays_already_admitted_work() {
+    use std::{sync::Arc, time::Duration};
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let tasks = format!("/api/installations/{id}/api/tasks");
+    let mut task: Value = request(&relay, &relay.cookie, &relay.session, Method::POST, &tasks)
+        .json(&json!({
+            "name": "Due commitment",
+            "prompt": "Approved work",
+            "agentId": leo_agent_manager::config::MAIN_AGENT_ID,
+            "cron": "0 9 * * *",
+            "enabled": true,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let queued: Value = request(
+        &relay,
+        &relay.cookie,
+        &relay.session,
+        Method::POST,
+        &format!("{tasks}/{}/run", task["id"].as_str().unwrap()),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    task["nextRun"] = 1.into();
+    relay
+        .installation
+        .store
+        .save("tasks", task, "fixture.time")
+        .await
+        .unwrap();
+    let entered = Arc::new(tokio::sync::Semaphore::new(0));
+    let arrival = entered.clone();
+    let proxy = AuthorPolicyProxy::new(
+        &relay,
+        axum::Router::new().route(
+            "/api/relay/{installation}/task-authors",
+            axum::routing::get(move || {
+                let arrival = arrival.clone();
+                async move {
+                    arrival.add_permits(1);
+                    std::future::pending::<StatusCode>().await
+                }
+            }),
+        ),
+    )
+    .await;
+    relay
+        .installation
+        .worker
+        .start(relay.installation.clone())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+
+    let launching = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let run: Value = relay
+                .get(&format!("/runs/{}", queued["id"].as_str().unwrap()))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if !run["startedAt"].is_null() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+
+    relay.installation.shutdown.cancel();
+    relay.installation.worker.close().await;
+    proxy.close().await;
+    relay.close().await;
+    launching.expect("The official authority delayed launching already admitted work");
+}
+
+#[tokio::test]
+async fn a_deferred_author_check_preserves_its_due_time_without_blocking_other_tasks() {
+    use axum::{extract::Path, http::HeaderMap, response::IntoResponse};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let tasks_path = format!("/api/installations/{id}/api/tasks");
+    for name in ["First commitment", "Second commitment"] {
+        let mut task: Value = request(
+            &relay,
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            &tasks_path,
+        )
+        .json(&json!({
+            "name": name,
+            "prompt": "Approved work",
+            "agentId": leo_agent_manager::config::MAIN_AGENT_ID,
+            "cron": "0 9 * * *",
+            "enabled": true,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        task["nextRun"] = 1.into();
+        relay
+            .installation
+            .store
+            .save("tasks", task, "fixture.time")
+            .await
+            .unwrap();
+    }
+    let tasks: Vec<Value> = relay
+        .get("/tasks")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let deferred_id = tasks[0]["id"].as_str().unwrap();
+    let admitted_id = tasks[1]["id"].as_str().unwrap();
+    let checks = Arc::new(AtomicUsize::new(0));
+    let upstream = relay.app.url.clone();
+    let proxy = AuthorPolicyProxy::new(
+        &relay,
+        axum::Router::new().route(
+            "/api/relay/{installation}/task-authors",
+            axum::routing::get(move |Path(id): Path<String>, headers: HeaderMap| {
+                let checks = checks.clone();
+                let upstream = upstream.clone();
+                async move {
+                    if checks.fetch_add(1, Ordering::SeqCst) == 1 {
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
+                    let response = reqwest::Client::new()
+                        .get(format!("{upstream}/api/relay/{id}/task-authors"))
+                        .header("authorization", headers["authorization"].clone())
+                        .send()
+                        .await
+                        .unwrap();
+                    (response.status(), response.bytes().await.unwrap()).into_response()
+                }
+            }),
+        ),
+    )
+    .await;
+
+    relay.installation.schedule().await.unwrap();
+    let runs: Vec<Value> = relay
+        .get("/runs")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        runs.len(),
+        1,
+        "One failed author check must not defer unrelated commitments"
+    );
+    assert_eq!(runs[0]["taskId"], admitted_id);
+    let tasks: Vec<Value> = relay
+        .get("/tasks")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let deferred = tasks.iter().find(|task| task["id"] == deferred_id).unwrap();
+    assert_eq!(deferred["nextRun"], 1);
+    assert_eq!(deferred["enabled"], true);
+    assert!(
+        deferred["scheduleWaitReason"]
+            .as_str()
+            .unwrap()
+            .contains("unavailable")
+    );
+
+    relay.installation.schedule().await.unwrap();
+    relay.installation.schedule().await.unwrap();
+    let runs: Vec<Value> = relay
+        .get("/runs")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        runs.len(),
+        2,
+        "Recovery must admit each occurrence only once"
+    );
+    let tasks: Vec<Value> = relay
+        .get("/tasks")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        tasks
+            .iter()
+            .all(|task| task["nextRun"].as_i64().unwrap() > 1)
+    );
+    assert!(
+        tasks
+            .iter()
+            .all(|task| task["scheduleWaitReason"].is_null())
+    );
+
+    proxy.close().await;
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn revoked_and_unclaimed_identities_explain_scheduled_work_without_audit_flooding() {
+    use std::os::unix::fs::PermissionsExt;
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let mut task: Value = request(
+        &relay,
+        &relay.cookie,
+        &relay.session,
+        Method::POST,
+        &format!("/api/installations/{id}/api/tasks"),
+    )
+    .json(&json!({
+        "name": "Waiting commitment",
+        "prompt": "Approved work",
+        "agentId": leo_agent_manager::config::MAIN_AGENT_ID,
+        "cron": "0 9 * * *",
+        "enabled": true,
+    }))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    task["nextRun"] = 1.into();
+    relay
+        .installation
+        .store
+        .save("tasks", task, "fixture.time")
+        .await
+        .unwrap();
+    let identity_path = relay
+        .installation
+        .config
+        .data_dir
+        .join("installation-relay/identity.json");
+    let original = tokio::fs::read(&identity_path).await.unwrap();
+    let mut revoked: Value = serde_json::from_slice(&original).unwrap();
+    revoked["token"] = "fixture-invalid-token".into();
+    tokio::fs::write(&identity_path, serde_json::to_vec(&revoked).unwrap())
+        .await
+        .unwrap();
+
+    relay.installation.schedule().await.unwrap();
+    relay.installation.schedule().await.unwrap();
+    let tasks: Vec<Value> = relay
+        .get("/tasks")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        tasks[0]["scheduleWaitReason"],
+        "Installation identity revoked."
+    );
+    assert_eq!(tasks[0]["nextRun"], 1);
+    assert_eq!(tasks[0]["enabled"], true);
+    let audit: Vec<Value> = relay
+        .get("/audit")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|entry| entry["action"] == "schedule.deferred")
+            .count(),
+        1
+    );
+
+    tokio::fs::remove_file(&identity_path).await.unwrap();
+    relay.installation.schedule().await.unwrap();
+    relay.installation.schedule().await.unwrap();
+    let tasks: Vec<Value> = relay
+        .get("/tasks")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        tasks[0]["scheduleWaitReason"],
+        "Installation is not claimed. Run leo claim before scheduling work."
+    );
+    let runs: Value = relay
+        .get("/runs")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(runs, json!([]));
+    let audit: Vec<Value> = relay
+        .get("/audit")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|entry| entry["action"] == "schedule.deferred")
+            .count(),
+        2
+    );
+
+    tokio::fs::write(&identity_path, original).await.unwrap();
+    tokio::fs::set_permissions(identity_path, std::fs::Permissions::from_mode(0o600))
+        .await
+        .unwrap();
+    relay.installation.schedule().await.unwrap();
+    let tasks: Vec<Value> = relay
+        .get("/tasks")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        tasks[0]["scheduleWaitReason"].is_null(),
+        "Recovery stayed deferred: {}",
+        tasks[0]["scheduleWaitReason"]
+    );
+    let runs: Vec<Value> = relay
+        .get("/runs")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(runs.len(), 1);
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn a_task_preparation_error_advances_only_its_occurrence_and_is_audited_once() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let tasks = format!("/api/installations/{id}/api/tasks");
+    for (name, skills) in [
+        ("Invalid skill", json!(["global/missing-skill"])),
+        ("Valid work", Value::Null),
+    ] {
+        let mut task: Value = request(&relay, &relay.cookie, &relay.session, Method::POST, &tasks)
+            .json(&json!({
+                "name": name,
+                "prompt": "Approved work",
+                "agentId": leo_agent_manager::config::MAIN_AGENT_ID,
+                "cron": "0 9 * * *",
+                "enabled": true,
+                "skills": skills,
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        task["nextRun"] = 1.into();
+        relay
+            .installation
+            .store
+            .save("tasks", task, "fixture.time")
+            .await
+            .unwrap();
+    }
+    relay.installation.schedule().await.unwrap();
+    relay.installation.schedule().await.unwrap();
+    let runs: Vec<Value> = relay
+        .get("/runs")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(runs.len(), 1);
+    let run: Value = relay
+        .get(&format!("/runs/{}", runs[0]["id"].as_str().unwrap()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(run["snapshot"]["task"]["name"], "Valid work");
+    let tasks: Vec<Value> = relay
+        .get("/tasks")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        tasks
+            .iter()
+            .all(|task| task["nextRun"].as_i64().unwrap() > 1)
+    );
+    let audit: Vec<Value> = relay
+        .get("/audit")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|entry| entry["action"] == "schedule.failed")
+            .count(),
+        1
+    );
+    relay.close().await;
+}
+
+// Replaces only the authority's HTTP transport; requests still use the real relay.
+struct AuthorPolicyProxy {
+    identity_path: std::path::PathBuf,
+    original: Vec<u8>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl AuthorPolicyProxy {
+    async fn new(relay: &RelayedInstallation, routes: axum::Router) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://localhost:{}", listener.local_addr().unwrap().port());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, routes).await.unwrap();
+        });
+        let identity_path = relay
+            .installation
+            .config
+            .data_dir
+            .join("installation-relay/identity.json");
+        let original = tokio::fs::read(&identity_path).await.unwrap();
+        let mut identity: Value = serde_json::from_slice(&original).unwrap();
+        identity["origin"] = origin.into();
+        tokio::fs::write(&identity_path, serde_json::to_vec(&identity).unwrap())
+            .await
+            .unwrap();
+        Self {
+            identity_path,
+            original,
+            server,
+        }
+    }
+
+    async fn close(self) {
+        tokio::fs::write(self.identity_path, self.original)
+            .await
+            .unwrap();
+        self.server.abort();
+    }
+}
+
+#[tokio::test]
+async fn task_pause_and_archive_need_no_official_round_trip() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let (cookie, session) = member(&relay, "pause-author@example.test").await;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let tasks = format!("/api/installations/{id}/api/tasks");
+    let mut commitments = Vec::new();
+    for (author_cookie, author_session) in [(&relay.cookie, &relay.session), (&cookie, &session)] {
+        let response = request(&relay, author_cookie, author_session, Method::POST, &tasks)
+            .json(&json!({
+                "name": "Active commitment",
+                "prompt": "Approved work",
+                "agentId": leo_agent_manager::config::MAIN_AGENT_ID,
+                "cron": "0 9 * * *",
+                "enabled": true,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        commitments.push(response.json::<Value>().await.unwrap());
+    }
+    let proxy = AuthorPolicyProxy::new(
+        &relay,
+        axum::Router::new().route(
+            "/api/relay/{installation}/task-authors",
+            axum::routing::get(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+        ),
+    )
+    .await;
+
+    for mut task in commitments {
+        let path = format!("{tasks}/{}", task["id"].as_str().unwrap());
+        task["enabled"] = false.into();
+        let paused = request(&relay, &cookie, &session, Method::PUT, &path)
+            .json(&task)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(paused.status(), StatusCode::OK);
+        let paused: Value = paused.json().await.unwrap();
+        assert_eq!(paused["enabled"], false);
+        assert!(paused["nextRun"].is_null());
+        assert_eq!(paused["authorId"], task["authorId"]);
+
+        task["archived"] = true.into();
+        let archived = request(&relay, &cookie, &session, Method::PUT, &path)
+            .json(&task)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(archived.status(), StatusCode::OK);
+        assert_eq!(archived.json::<Value>().await.unwrap()["archived"], true);
+
+        task["enabled"] = true.into();
+        task["archived"] = false.into();
+        assert_ne!(
+            request(&relay, &cookie, &session, Method::PUT, &path)
+                .json(&task)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+    proxy.close().await;
+    relay.close().await;
+}
+
+#[tokio::test]
 async fn temporary_authority_outage_defers_schedules_without_disabling_them() {
     use axum::{extract::Path, http::HeaderMap, response::IntoResponse, routing::get};
     use std::sync::{
@@ -1604,22 +2199,7 @@ async fn temporary_authority_outage_defers_schedules_without_disabling_them() {
             }
         }),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let origin = format!("http://localhost:{}", listener.local_addr().unwrap().port());
-    let proxy = tokio::spawn(async move {
-        axum::serve(listener, routes).await.unwrap();
-    });
-    let identity_path = relay
-        .installation
-        .config
-        .data_dir
-        .join("installation-relay/identity.json");
-    let original = tokio::fs::read(&identity_path).await.unwrap();
-    let mut identity: Value = serde_json::from_slice(&original).unwrap();
-    identity["origin"] = origin.into();
-    tokio::fs::write(&identity_path, serde_json::to_vec(&identity).unwrap())
-        .await
-        .unwrap();
+    let proxy = AuthorPolicyProxy::new(&relay, routes).await;
     relay.installation.schedule().await.unwrap();
     let stored: Vec<Value> = relay
         .get("/tasks")
@@ -1653,9 +2233,8 @@ async fn temporary_authority_outage_defers_schedules_without_disabling_them() {
     assert_eq!(runs.as_array().unwrap().len(), 1);
     assert_eq!(runs[0]["taskId"], task["id"]);
     assert_eq!(runs[0]["trigger"], "schedule");
-    tokio::fs::write(identity_path, original).await.unwrap();
+    proxy.close().await;
     relay.close().await;
-    proxy.abort();
 }
 
 #[tokio::test]

@@ -1,8 +1,9 @@
 //! Task commitments are reconciled with the official authority. No member list is stored.
 use crate::{
-    auth::InstallationIdentity,
+    auth::{InstallationIdentity, InstallationRole},
     error::{Error, Result},
     service::Service,
+    validation::parse,
 };
 use leo_relay_protocol::{TaskAuthorGrant, TaskAuthorPolicy};
 use serde_json::{Value, json};
@@ -15,6 +16,31 @@ impl Service {
         identity: Option<&InstallationIdentity>,
     ) -> Result<Value> {
         let _guard = self.task_author_lock.lock().await;
+        let input = parse("task", input)?;
+
+        if let Some(id) = existing {
+            let previous = self.get("tasks", id).await?;
+            let previous_input = parse("task", previous.clone())?;
+            let mut unchanged_content = input.clone();
+            unchanged_content["enabled"] = previous_input["enabled"].clone();
+            unchanged_content["archived"] = previous_input["archived"].clone();
+
+            let only_reduces_execution = input["enabled"] == false
+                && (input["archived"] == previous_input["archived"] || input["archived"] == true)
+                && unchanged_content == previous_input;
+            if only_reduces_execution {
+                return self.save_task(input, existing, None).await;
+            }
+
+            if let Some(identity) = identity
+                && identity.role == InstallationRole::Member
+                && previous["authorId"] != identity.account_id
+            {
+                return Err(Error::forbidden(
+                    "Only the task author or installation owner can change this task. Duplicate it to make your own commitment.",
+                ));
+            }
+        }
 
         let policy = self.synchronize_task_authors_locked().await?;
         let author = if let Some(policy) = &policy {
@@ -73,6 +99,7 @@ async fn apply(
 
                 if !eligible {
                     task["authorRemoved"] = true.into();
+                    task["scheduleWaitReason"] = Value::Null;
                     if task["cron"].is_string() {
                         task["enabled"] = false.into();
                         task["nextRun"] = Value::Null;
