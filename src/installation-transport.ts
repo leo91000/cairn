@@ -25,6 +25,11 @@ interface GrantResponse {
   iceServers: RTCIceServer[]
 }
 
+// #117: no hostname resolution. Unusable mDNS candidates keep the relay available.
+function mdnsCandidate(candidate: string) {
+  return candidate.split(' ')[4]?.toLowerCase().endsWith('.local') || false
+}
+
 // One transport per document/current installation. Signaling always uses HTTPS.
 export class InstallationTransport {
   private peer?: RTCPeerConnection
@@ -196,7 +201,7 @@ export class InstallationTransport {
             for (const candidate of candidates.splice(0))
               await peer.addIceCandidate(candidate)
           }
-          else if (signal.kind === 'candidate' && signal.candidate) {
+          else if (signal.kind === 'candidate' && signal.candidate && !mdnsCandidate(signal.candidate)) {
             const candidate = { candidate: signal.candidate, sdpMid: signal.sdp_mid, sdpMLineIndex: signal.sdp_m_line_index }
             if (remoteReady)
               await peer.addIceCandidate(candidate)
@@ -219,6 +224,8 @@ export class InstallationTransport {
       let outgoing = new Promise<void>(resolve => offerAccepted = resolve)
       peer.onicecandidate = (event) => {
         const candidate = event.candidate
+        if (candidate && mdnsCandidate(candidate.candidate))
+          return
         outgoing = outgoing.then(async () => {
           if (current()) {
             await this.control(`${path}/signal`, {
@@ -235,7 +242,7 @@ export class InstallationTransport {
       }
 
       // Send the offer before trickled candidates, using the certificate above.
-      const sdp = (offer.sdp || '').replace(/a=fingerprint:sha-256 (.*)/g, (_, digest: string) => `a=fingerprint:sha-256 ${digest.toUpperCase()}`)
+      const sdp = (offer.sdp || '').split('\r\n').filter(line => !line.startsWith('a=candidate:') || !mdnsCandidate(line.slice(2))).join('\r\n').replace(/a=fingerprint:sha-256 (.*)/g, (_, digest: string) => `a=fingerprint:sha-256 ${digest.toUpperCase()}`)
       await peer.setLocalDescription({ type: 'offer', sdp })
       if (!current())
         return

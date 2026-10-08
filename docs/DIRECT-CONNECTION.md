@@ -263,7 +263,7 @@ Binary resource URLs and non-JSON uploads continue through the relay.
 
 Grant renewal runs 30 seconds before the signed deadline; the local expiry timer
 remains armed until renewal is accepted. A 30-second negotiation deadline,
-10-second application heartbeat (a credited-protocol HEAD request, with a
+10-second application heartbeat (a protocol HEAD request, with a
 5-second deadline), channel closure, ICE failure and signaling-reader loss all
 return traffic to the relay. Unsupported clients/installations and refused local
 network permission cause no visible connection error. Failed attempts retry after

@@ -103,6 +103,7 @@ test('authenticated browser and Rust client keep using the observed route under 
       LEO_INSTALLATION_CLAIM_CODE: code,
       LEO_INSTALLATION_NAME: 'Network bench installation',
     })
+    const bootstrapStart = performance.now()
     await expect(async () => {
       expect(installation.exitCode).toBeNull()
       await page.getByRole('button', { name: 'Refresh installations', exact: true }).click()
@@ -111,9 +112,8 @@ test('authenticated browser and Rust client keep using the observed route under 
     await expect(page.getByRole('link', { name: 'New conversation', exact: true }).first()).toBeVisible()
     await expect(page.getByRole('status', { name: 'Connection route' })).toHaveAttribute('data-transport-route', 'relay')
     await expect.poll(async () => (await observations()).some(item => item.route === 'relay' && item.method === 'GET')).toBe(true)
-    evidence.push({ route: (await observations()).find(item => item.method === 'GET')!.route, operation: 'bootstrap-read', elapsedMs: 0 })
+    evidence.push({ route: (await observations()).find(item => item.method === 'GET')!.route, operation: 'bootstrap-read', elapsedMs: performance.now() - bootstrapStart })
     releaseDirect()
-    await page.unroute('**/direct/authorize')
     const installationId = new URL(page.url()).pathname.split('/')[2]!
     const chatsPath = `/api/installations/${installationId}/api/chats`
     const marker = `Network scenario ${process.env.LEO_NETWORK_SCENARIO}`
@@ -222,8 +222,11 @@ test('authenticated browser and Rust client keep using the observed route under 
       const published = await page.request.post(`${url}/api/installations/${installationId}/api/chats/${chatId}/messages`, { headers, data: { id: randomUUID(), text: afterRemoval } })
       expect(published.ok()).toBe(true)
       const queued = page.getByRole('button', { name: /^\+ \d+ other messages?$/ })
-      if (await queued.count())
+      if (process.env.LEO_NETWORK_SCENARIO === 'same-lan') {
+        await expect(queued).toBeVisible()
         await queued.click()
+      }
+
       await expect(page.getByText(afterRemoval, { exact: true })).toBeVisible()
       expect(await member.evaluate(() => (window as typeof window & { transportObservations: Observation[] }).transportObservations.filter(item => item.method === 'STREAM').length)).toBe(memberStreams)
       await expect(member.getByText(afterRemoval, { exact: true })).toHaveCount(0)
