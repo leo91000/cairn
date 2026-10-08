@@ -11,12 +11,195 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.*
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.*
 import org.junit.Test
 
 class DirectTransportTest {
+    @Test
+    fun `invalid finite response closes direct and safe read recovers on relay`() = runBlocking {
+        for (invalid in listOf("body", "status", "headers")) {
+            MockWebServer().use { server ->
+                server.enqueue(MockResponse().setBody("{\"route\":\"relay\"}"))
+                server.start()
+                val api = LeoApi(server.url("/"), MemoryVault(), installationId = "test")
+                var disposed = false
+                lateinit var channel: DirectChannel
+                channel =
+                    DirectChannel(
+                        { packet ->
+                            val request =
+                                wireJson
+                                    .parseToJsonElement(String(packet.copyOfRange(13, packet.size)))
+                                    .jsonObject
+                            if (request["type"]!!.jsonPrimitive.content == "request") {
+                                val response = buildJsonObject {
+                                    put("type", "response")
+                                    put("id", request["id"]!!)
+                                    put(
+                                        "status",
+                                        if (invalid == "status") JsonPrimitive("invalid")
+                                        else JsonPrimitive(200),
+                                    )
+                                    put(
+                                        "headers",
+                                        if (invalid == "headers") JsonPrimitive("invalid")
+                                        else buildJsonArray {},
+                                    )
+                                    put("body", if (invalid == "body") "not-base64!" else "e30=")
+                                }
+                                channel.receive(
+                                    singleFramePacket(response.toString().toByteArray())
+                                )
+                            }
+                        },
+                        { disposed = true },
+                    )
+                api.transport.attach(channel)
+                assertEquals(
+                    "{\"route\":\"relay\"}",
+                    withTimeout(5000) { api.request("GET", "/chats") },
+                )
+                assertTrue(disposed)
+                assertEquals("relay", api.transport.route.value)
+                assertEquals(1, server.requestCount)
+                api.closeStreams()
+            }
+        }
+    }
+
+    @Test
+    fun `oversized or excessive incomplete transfers close direct without blocking relay`() =
+        runBlocking {
+            for (invalid in listOf("frame", "packet", "assemblies")) {
+                MockWebServer().use { server ->
+                    server.enqueue(MockResponse().setBody("[]"))
+                    server.start()
+                    val api = LeoApi(server.url("/"), MemoryVault(), installationId = "test")
+                    var disposed = false
+                    lateinit var channel: DirectChannel
+                    channel =
+                        DirectChannel(
+                            {
+                                // Independent protocol literals: frame cap 10,732,204; packet
+                                // 16,384;
+                                // no more than 32 simultaneous incomplete transfers.
+                                when (invalid) {
+                                    "frame" ->
+                                        channel.receive(
+                                            ByteBuffer.allocate(14)
+                                                .put(1)
+                                                .putInt(99)
+                                                .putInt(10732205)
+                                                .putInt(0)
+                                                .put(123)
+                                                .array()
+                                        )
+                                    "packet" ->
+                                        channel.receive(
+                                            ByteBuffer.allocate(16385)
+                                                .put(1)
+                                                .putInt(99)
+                                                .putInt(16372)
+                                                .putInt(0)
+                                                .array()
+                                        )
+                                    "assemblies" ->
+                                        for (id in 1..33) channel.receive(
+                                            ByteBuffer.allocate(14)
+                                                .put(1)
+                                                .putInt(id)
+                                                .putInt(2)
+                                                .putInt(0)
+                                                .put(123)
+                                                .array()
+                                        )
+                                }
+                            },
+                            { disposed = true },
+                        )
+                    api.transport.attach(channel)
+                    assertEquals("[]", withTimeout(5000) { api.request("GET", "/chats") })
+                    assertTrue(disposed)
+                    assertEquals("relay", api.transport.route.value)
+                    assertEquals(1, server.requestCount)
+                }
+            }
+        }
+
+    @Test
+    fun `canceling a fragmented send aborts only its transfer and peer remains usable`() =
+        runBlocking {
+            MockWebServer().use { server ->
+                server.start()
+                val api = LeoApi(server.url("/"), MemoryVault(), installationId = "test")
+                val packets = mutableListOf<ByteArray>()
+                var canceled = false
+                var disposed = false
+                var respond = false
+                lateinit var channel: DirectChannel
+                channel =
+                    DirectChannel(
+                        { packet ->
+                            packets.add(packet)
+                            if (!respond && packet.size == 16384) canceled = true
+                            if (respond) {
+                                val frame =
+                                    wireJson
+                                        .parseToJsonElement(
+                                            String(packet.copyOfRange(13, packet.size))
+                                        )
+                                        .jsonObject
+                                if (frame["type"]!!.jsonPrimitive.content == "request")
+                                    channel.receive(
+                                        singleFramePacket(
+                                            buildJsonObject {
+                                                put("type", "response")
+                                                put("id", frame["id"]!!)
+                                                put("status", 200)
+                                                put("headers", buildJsonArray {})
+                                                put("body", "e30=")
+                                            }
+                                                .toString()
+                                                .toByteArray()
+                                        )
+                                    )
+                            }
+                        },
+                        { disposed = true },
+                    )
+                val prefix = "/api/installations/test/api/"
+                val request =
+                    Request.Builder()
+                        .url(server.url(prefix + "chats"))
+                        .post("x".repeat(25000).toRequestBody())
+                        .build()
+                val error = runCatching {
+                    channel.request(request, prefix) { canceled }
+                }
+                    .exceptionOrNull()
+                assertTrue(error is IOException && error !is DirectLost)
+                assertEquals(16384, packets.first().size)
+                assertTrue(ByteBuffer.wrap(packets.first(), 5, 4).int > 16384)
+                val abort = ByteBuffer.wrap(packets[1])
+                assertEquals(13, packets[1].size)
+                assertEquals(1.toByte(), abort.get())
+                assertEquals(ByteBuffer.wrap(packets.first(), 1, 4).int, abort.int)
+                assertEquals(0, abort.int)
+                assertEquals(0, abort.int)
+                assertFalse(disposed)
+                respond = true
+                api.transport.attach(channel)
+                assertEquals("{}", api.request("GET", "/chats"))
+                assertEquals("direct", api.transport.route.value)
+                assertEquals(0, server.requestCount)
+                api.closeStreams()
+            }
+        }
+
     @Test
     fun `unidentified messages and other mutations fail visibly without relay replay`() = runTest {
         MockWebServer().use { server ->
@@ -88,15 +271,7 @@ class DirectTransportTest {
                                 }
                                     .toString()
                                     .toByteArray()
-                                channel.receive(
-                                    ByteBuffer.allocate(13 + response.size)
-                                        .put(1)
-                                        .putInt(99)
-                                        .putInt(response.size)
-                                        .putInt(0)
-                                        .put(response)
-                                        .array()
-                                )
+                                channel.receive(singleFramePacket(response))
                             }
                         }
                     },
@@ -121,7 +296,7 @@ class DirectTransportTest {
     @Test
     fun `direct stream falls back at accepted cursor without missing or duplicate events`() =
         runBlocking {
-            for (failure in listOf("closed", "corrupt", "credit")) {
+            for (failure in listOf("closed", "corrupt", "credit", "end")) {
                 MockWebServer().use { server ->
                     fun sse(cursor: Long, events: List<RunEvent>) =
                         "event: batch\nid: $cursor\ndata: ${wireJson.encodeToString(LiveBatch(events, LiveState(run = Run("r1", status = "running")), false, false, history = "h1"))}\n\n"
@@ -139,15 +314,7 @@ class DirectTransportTest {
                     var credits = 0
                     fun deliver(frame: JsonObject) {
                         val bytes = frame.toString().toByteArray()
-                        channel.receive(
-                            ByteBuffer.allocate(13 + bytes.size)
-                                .put(1)
-                                .putInt(99)
-                                .putInt(bytes.size)
-                                .putInt(0)
-                                .put(bytes)
-                                .array()
-                        )
+                        channel.receive(singleFramePacket(bytes))
                     }
                     channel =
                         DirectChannel(
@@ -202,6 +369,14 @@ class DirectTransportTest {
                                         credits == 2
                                 ) {
                                     if (failure == "credit") throw IOException("credit send failed")
+                                    if (failure == "end")
+                                        deliver(
+                                            buildJsonObject {
+                                                put("type", "stream_end")
+                                                put("id", id)
+                                                put("failed", "invalid")
+                                            }
+                                        )
                                     if (failure == "corrupt")
                                         deliver(
                                             buildJsonObject {
@@ -272,15 +447,7 @@ class DirectTransportTest {
                         }
                             .toString()
                             .toByteArray()
-                        channel.receive(
-                            ByteBuffer.allocate(13 + response.size)
-                                .put(1)
-                                .putInt(99)
-                                .putInt(response.size)
-                                .putInt(0)
-                                .put(response)
-                                .array()
-                        )
+                        channel.receive(singleFramePacket(response))
                     },
                     {},
                 )
@@ -407,15 +574,7 @@ class DirectTransportTest {
                         }
                             .toString()
                             .toByteArray()
-                        channel.receive(
-                            ByteBuffer.allocate(13 + response.size)
-                                .put(1)
-                                .putInt(99)
-                                .putInt(response.size)
-                                .putInt(0)
-                                .put(response)
-                                .array()
-                        )
+                        channel.receive(singleFramePacket(response))
                     },
                     {},
                 )
@@ -451,4 +610,13 @@ class DirectTransportTest {
             assertEquals(2, server.requestCount)
         }
     }
+
+    private fun singleFramePacket(frame: ByteArray): ByteArray =
+        ByteBuffer.allocate(13 + frame.size)
+            .put(1)
+            .putInt(99)
+            .putInt(frame.size)
+            .putInt(0)
+            .put(frame)
+            .array()
 }

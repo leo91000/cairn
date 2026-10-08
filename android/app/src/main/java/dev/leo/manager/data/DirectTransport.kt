@@ -240,8 +240,34 @@ class DirectChannel(
             }
         val type = frame["type"]!!.jsonPrimitive.content
         require(type in setOf("response", "stream_start", "stream_chunk", "stream_end"))
-        if (type == "stream_chunk") decodeBody(frame, 65536)
-        val exchange = pending[frame["id"]!!.jsonPrimitive.content] ?: return
+        require(frame["type"]!!.jsonPrimitive.isString)
+        val id = frame["id"]!!.jsonPrimitive
+        require(id.isString)
+
+        // Validate the whole v4 response before exposing it to the HTTP/live reader.
+        // Decoder failures then follow the same connection-loss recovery as bad envelopes.
+        when (type) {
+            "response",
+            "stream_start" -> {
+                decodeBody(frame, MAX_BODY)
+                val status = frame["status"]!!.jsonPrimitive
+                require(!status.isString && status.int in 100..999)
+                val headers = okhttp3.Headers.Builder()
+                frame["headers"]!!.jsonArray.forEach {
+                    val pair = it.jsonArray
+                    require(pair.size == 2 && pair.all { value -> value.jsonPrimitive.isString })
+                    headers.add(pair[0].jsonPrimitive.content, pair[1].jsonPrimitive.content)
+                }
+            }
+            "stream_chunk" -> decodeBody(frame, 65536)
+            "stream_end" -> {
+                val failed = frame["failed"]!!.jsonPrimitive
+                require(!failed.isString && failed.booleanOrNull != null)
+            }
+        }
+
+        val exchange = pending[id.content] ?: return
+        if (type == "response") require(!exchange.stream)
         if (type == "stream_start") {
             synchronized(pending) {
                 require(!exchange.stream && pending.values.count { it.stream } < 8)
@@ -427,9 +453,14 @@ class DirectChannel(
     }
 
     private fun decodeBody(frame: JsonObject, limit: Int): ByteArray {
-        val encoded = frame["body"]!!.jsonPrimitive.content
+        val body = frame["body"]!!.jsonPrimitive
+        require(body.isString)
+        val encoded = body.content
         require(encoded.length <= ((limit + 2) / 3) * 4)
-        return Base64.getDecoder().decode(encoded).also { require(it.size <= limit) }
+        return Base64.getDecoder().decode(encoded).also {
+            require(it.size <= limit)
+            require(Base64.getEncoder().encodeToString(it) == encoded)
+        }
     }
 
     private fun await(exchange: Exchange, canceled: () -> Boolean, seconds: Long): JsonObject {

@@ -22,8 +22,10 @@ leases close on tunnel reconnection with a new key. Unsupported installations
 keep using the relay. Authorization renews before expiry through the official
 service. No TURN, local password, anonymous local access or deployment is added.
 
-Library selection, measured APK impact and validation evidence will be recorded
-here and in the implementation PR before it becomes ready for review.
+Library selection and the measured universal APK impact are documented in
+[the artifact research](../../docs/ANDROID-DIRECT-TRANSPORT.md). Device qualification
+uses the [existing network bench](../../docs/NETWORK-BENCH.md#android-native-adapter-104);
+the implementation PR links the exact-head CI and sanitized execution evidence.
 
 ## Native interoperability decisions
 
@@ -44,3 +46,16 @@ adapter, resumes reads/subscriptions over the relay, then creates a new ICE peer
 and authorization. The delivered installation accepts an offer for a fresh peer,
 not renegotiation on an established peer; Android calls native `restartIce()` and
 requests an ICE restart for the replacement. No agent execution is stopped.
+
+## Wire failure and cancellation qualification
+
+The `LeoApi` JVM tests verify relay recovery after malformed finite response
+bodies/status/headers and malformed stream endings, preserving accepted stream
+cursor/history. Wire frames are validated before reaching HTTP/live readers;
+Base64 uses the existing Rust codec's canonical standard encoding. Non-replayable
+mutations still fail visibly.
+
+Adapter tests independently verify the 16,384-byte packet and 10,732,204-byte
+frame caps, at most 32 incomplete assemblies, and the existing 13-byte abort
+envelope when cancellation happens after the first outgoing fragment. An
+individual cancellation leaves the peer available for a subsequent direct read.
