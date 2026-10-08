@@ -264,7 +264,7 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
       await page.getByRole('button', { name: 'Confirm with a passkey', exact: true }).click()
       await expect(page.getByRole('heading', { name: 'Connect an assistant', exact: true })).toBeVisible()
       expect(Object.fromEntries(new URL(page.url()).searchParams)).toEqual(Object.fromEntries(parameters))
-      await expect(page.getByLabel('Installation', { exact: true })).toHaveValue('OAuth claim machine')
+      await expect(page.getByRole('combobox', { name: 'Installation', exact: true })).toHaveValue('OAuth claim machine')
       await page.getByRole('button', { name: 'Allow access', exact: true }).click()
       await expect(page).toHaveURL(/mcp-test-callback\?state=resume-mcp-consent&code=/)
       expect(new URL(page.url()).origin).toBe(providerUrl)

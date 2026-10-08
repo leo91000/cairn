@@ -674,7 +674,7 @@ onMounted(async () => {
         :disabled="busy || state.redirecting"
         compact
         hide-label
-        class="min-w-0! max-w-80 flex-1"
+        class="min-w-0! max-w-80! flex-1"
         @update:model-value="selectInstallation"
       />
       <span v-else class="min-w-0 truncate font-semibold" :title="installation.name">{{ installation.name }}</span>
@@ -696,7 +696,7 @@ onMounted(async () => {
       <details ref="installationMenu" class="relative ml-auto shrink-0">
         <summary class="flex min-h-11 cursor-pointer list-none items-center justify-center rounded-lg border border-line px-3 py-2 phone:px-2.5">
           <span class="phone:sr-only">Installation options</span>
-          <Icon :name="MoreHorizontal" :size="18" class="hidden phone:block" />
+          <span class="hidden phone:block"><Icon :name="MoreHorizontal" :size="18" /></span>
         </summary>
         <div class="absolute right-0 z-50 mt-2 grid w-52 gap-2 rounded-xl border border-line bg-surface p-2 shadow-lg" @click="closeInstallationMenu">
           <UiButton

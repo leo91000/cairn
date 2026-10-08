@@ -122,7 +122,7 @@ test('MCP confirmation preserves the selected installation and waits for explici
   await page.getByRole('button', { name: 'Allow access', exact: true }).click()
   await expect(page.getByRole('alert').filter({ hasText: 'Confirm your identity' })).toBeVisible()
   await confirmIdentity(page, installation)
-  await expect(page.getByLabel('Installation', { exact: true })).toHaveValue('Security installation')
+  await expect(page.getByRole('combobox', { name: 'Installation', exact: true })).toHaveValue('Security installation')
   await expect(page).toHaveURL(consentUrl)
   expect(await (await page.request.get(`${url}/api/installations/${installationId}/tokens`)).json()).toEqual([])
   await page.getByRole('button', { name: 'Allow access', exact: true }).click()

@@ -21,12 +21,17 @@ import { iconButton } from '../ui'
 import Icon from './Icon.vue'
 import Modal from './Modal.vue'
 import UiButton from './UiButton.vue'
+import VirtualSelect from './VirtualSelect.vue'
 
 const props = defineProps<{ chats: ChatView[], selected?: string, anchor?: HTMLElement }>()
 const emit = defineEmits<{ close: [], create: [] }>()
 const dialog = ref<HTMLDialogElement>()
 const query = ref('')
 const view = ref<'active' | 'trash'>('active')
+const views = [
+  { value: 'active', label: 'Active conversations' },
+  { value: 'trash', label: 'Trash' },
+]
 const other = ref<ChatView[]>([])
 const loading = ref(false)
 const error = ref('')
@@ -148,14 +153,14 @@ function time(timestamp: number) {
           <Icon :name="Plus" :size="17" />New conversation
         </button>
         <div class="mb-3 flex shrink-0 items-center justify-end">
-          <select v-model="view" aria-label="Conversation view" class="w-auto! border-0! bg-transparent! py-1! text-xs! text-muted">
-            <option value="active">
-              Active conversations
-            </option>
-            <option value="trash">
-              Trash
-            </option>
-          </select>
+          <VirtualSelect
+            :model-value="view"
+            label="Conversation view"
+            :options="views"
+            compact
+            hide-label
+            @update:model-value="view = $event as 'active' | 'trash'"
+          />
         </div>
         <p v-if="error" role="alert" class="mb-3 text-xs text-danger">
           {{ error }}

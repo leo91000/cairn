@@ -27,11 +27,13 @@ import Icon from './Icon.vue'
 import Modal from './Modal.vue'
 import UiButton from './UiButton.vue'
 import UiSegments from './UiSegments.vue'
+import VirtualSelect from './VirtualSelect.vue'
 
 type Mode = 'automatic' | 'preferred' | 'fixed'
 
 const props = defineProps<{ run: Run }>()
 const nodes = ref<ExecutionNode[]>([])
+const nodeOptions = computed(() => nodes.value.map(node => ({ value: node.id, label: node.name })))
 const labels: Record<string, string> = {
   'pausing': 'Pausing the VM',
   'saving': 'Saving the environment',
@@ -81,6 +83,7 @@ const relevant = computed(() => (!!props.run.nodeId && props.run.nodeId !== LOCA
   || !!error.value
   || !!(props.run.nodeState || props.run.movementError || props.run.restoredAt || props.run.capacityWaitUntil || props.run.backup?.error))
 const destinations = computed(() => nodes.value.filter(candidate => candidate.id !== props.run.nodeId))
+const destinationOptions = computed(() => destinations.value.map(node => ({ value: node.id, label: node.name })))
 const canMove = computed(() => !!props.run.sessionId && !busy.value && !!destination.value && destination.value !== props.run.nodeId && ['running', 'succeeded'].includes(props.run.status) && !props.run.nodeState)
 const changed = computed(() => mode.value !== savedPlacement.value.mode || (mode.value !== 'automatic' && selection.value !== savedPlacement.value.selection))
 const dirtyBytes = computed(() => props.run.storage?.dirtyBytes || 0)
@@ -362,20 +365,17 @@ onUnmounted(() => {
             :options="modes"
             class="rounded-lg border border-line bg-inset p-0.5"
           />
-          <select
+          <VirtualSelect
             v-if="mode !== 'automatic'"
             v-model="selection"
-            aria-label="Node"
-            :disabled="busy"
-            class="mt-2 w-full rounded-lg border border-control bg-inset p-1.5 text-xs text-ink"
-          >
-            <option value="" disabled>
-              Select a node
-            </option>
-            <option v-for="candidate in nodes" :key="candidate.id" :value="candidate.id">
-              {{ candidate.name }}
-            </option>
-          </select>
+            label="Node"
+            :options="nodeOptions"
+            placeholder="Select a node"
+            :disabled="busy || !loaded"
+            compact
+            hide-label
+            class="mt-2 w-full!"
+          />
           <p class="m-0! mt-2!">
             {{ modeHelp[mode] }} This does not move the conversation now.
           </p>
@@ -401,9 +401,13 @@ onUnmounted(() => {
     </Teleport>
     <Modal v-if="moving && destinations.length" title="Move to another node" @close="moving = false">
       <form class="p-6 grid gap-4" @submit.prevent="move">
-        <div class="grid grid-cols-2 gap-2">
-          <label class="col-span-2 grid gap-1">Destination <select v-model="destination" :disabled="busy" class="rounded-lg border border-control bg-inset p-1.5 text-ink"><option value="" disabled>Select a node</option><option v-for="candidate in destinations" :key="candidate.id" :value="candidate.id">{{ candidate.name }}</option></select></label>
-        </div>
+        <VirtualSelect
+          v-model="destination"
+          label="Destination"
+          :options="destinationOptions"
+          placeholder="Select a node"
+          :disabled="busy"
+        />
         <p class="m-0! mt-2!">
           Reserves the destination, pauses the conversation, transfers its environment and resumes it there. Running commands are interrupted. The disk cannot shrink.
         </p>
