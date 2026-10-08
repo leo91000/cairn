@@ -103,6 +103,7 @@ class LeoApi(
     val installationId: String? = null,
 ) {
     val cacheScope = origin.toString() + installationId.orEmpty()
+    val transport = DirectTransport(installationId)
 
     private val cookies = SessionCookies(origin, vault)
     val hasSession: Boolean
@@ -112,6 +113,7 @@ class LeoApi(
         client
             .newBuilder()
             .cookieJar(cookies)
+            .addInterceptor(transport)
             .retryOnConnectionFailure(false)
             .followRedirects(false)
             .followSslRedirects(false)
