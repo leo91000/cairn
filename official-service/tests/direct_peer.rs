@@ -1066,9 +1066,11 @@ async fn a_member_trickling_every_twenty_nine_seconds_cannot_starve_small_reques
         matches!(response(member_channel.as_ref()).await, Frame::Response(reply) if reply.id == "barrier" && reply.status == 200)
     );
 
+    let started = tokio::time::Instant::now();
     for offset in 1_u32..=3 {
         if offset > 1 {
-            tokio::time::sleep(Duration::from_secs(29)).await;
+            tokio::time::sleep_until(started + Duration::from_secs(29 * u64::from(offset - 1)))
+                .await;
         }
         let mut packet = vec![1];
         packet.extend(1_u32.to_be_bytes());
@@ -1079,6 +1081,27 @@ async fn a_member_trickling_every_twenty_nine_seconds_cannot_starve_small_reques
             .send(bytes::BytesMut::from(packet.as_slice()))
             .await
             .unwrap();
+
+        // Prove the slow reservation is still held, even after the second
+        // 29-second interval; otherwise expiry could hide the starvation bug.
+        let Frame::Request(mut upload) = request("still-reserved", "/api/fixture/echo") else {
+            unreachable!()
+        };
+        upload.method = "POST".into();
+        upload.body = vec![0; 20_000];
+        send_frame(
+            waiting_channel.as_ref(),
+            offset + 10,
+            &Frame::Request(upload),
+        )
+        .await;
+        let rejected =
+            tokio::time::timeout(Duration::from_secs(2), response(waiting_channel.as_ref()))
+                .await
+                .unwrap();
+        assert!(
+            matches!(rejected, Frame::Response(reply) if reply.id == "still-reserved" && reply.status == 503)
+        );
 
         for channel in [&waiting_channel, &owner_channel, &member_channel] {
             send_frame(
@@ -1158,21 +1181,29 @@ async fn a_member_holding_reassembly_capacity_does_not_disconnect_the_owner() {
     assert!(
         matches!(response(member_channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
     );
-    partial_transfer(waiting_channel.as_ref(), 1, 200_000).await;
+    let Frame::Request(mut busy_upload) = request("busy-member-upload", "/api/fixture/echo") else {
+        unreachable!()
+    };
+    busy_upload.method = "POST".into();
+    busy_upload.body = vec![0xAB; 200_000];
+    send_frame(waiting_channel.as_ref(), 1, &Frame::Request(busy_upload)).await;
+    let rejected = tokio::time::timeout(Duration::from_secs(2), response(waiting_channel.as_ref()))
+        .await
+        .expect("member capacity shortage must reject only the upload within a bounded delay");
+    assert!(
+        matches!(rejected, Frame::Response(reply) if reply.id == "busy-member-upload" && reply.status == 503)
+    );
     send_frame(
         waiting_channel.as_ref(),
         2,
         &request("waiting-member", "/api/chats"),
     )
     .await;
-    assert!(
-        tokio::time::timeout(
-            Duration::from_millis(100),
-            response(waiting_channel.as_ref())
-        )
+    let small = tokio::time::timeout(Duration::from_secs(2), response(waiting_channel.as_ref()))
         .await
-        .is_err(),
-        "members share a bounded reservation pool, preserving the owner's capacity"
+        .expect("a rejected upload must not block the next small request on its ordered channel");
+    assert!(
+        matches!(small, Frame::Response(reply) if reply.id == "waiting-member" && reply.status == 200)
     );
 
     let Frame::Request(mut upload) = request("owner-upload", "/api/fixture/echo") else {
@@ -1731,13 +1762,14 @@ async fn observed_certificate_is_compared_with_the_grant_without_an_sdp_check() 
 
 struct PanicPeerStart(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
-impl<S> tracing_subscriber::Layer<S> for PanicPeerStart
-where
-    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
-{
-    fn on_enter(&self, id: &tracing::span::Id, context: tracing_subscriber::layer::Context<'_, S>) {
-        let span = context.span(id).unwrap();
-        if span.metadata().name() == "direct_peer_task"
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PanicPeerStart {
+    fn on_new_span(
+        &self,
+        attributes: &tracing::span::Attributes<'_>,
+        _: &tracing::span::Id,
+        _: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if attributes.metadata().name() == leo_agent_manager::direct::peer::PEER_TASK_SPAN
             && self.0.swap(false, std::sync::atomic::Ordering::SeqCst)
         {
             panic!("fixture peer task failure");
@@ -1760,7 +1792,7 @@ async fn a_panicking_peer_task_releases_its_authorization_and_preserves_other_pe
         stop.clone(),
     ));
     let (survivor, survivor_channel, _) = client(&relay).await;
-    // Inject a fault on entering the stable peer-task span in the actual Tokio peer
+    // Inject a fault on creating the stable peer-task span in the actual Tokio peer
     // job. No production fault flag, alternate peer or SDP-induced SDK panic.
     let fingerprint = format!("sha-256 {}", vec!["AB"; 32].join(":"));
     let installation = relay.session["installations"][0]["id"].as_str().unwrap();
@@ -1790,7 +1822,7 @@ async fn a_panicking_peer_task_releases_its_authorization_and_preserves_other_pe
         .unwrap();
     // Parallel tests may first register this shared callsite with no default
     // subscriber. Rebuild its interest on this thread after the survivor has
-    // entered its peer-task span, so the injected fault cannot silently be skipped.
+    // created its peer-task span, so the injected fault cannot silently be skipped.
     tracing::callsite::rebuild_interest_cache();
     panic_next.store(true, std::sync::atomic::Ordering::SeqCst);
     signal_as(&relay, &relay.cookie, &relay.session, &grant, &DirectSignal::Offer {

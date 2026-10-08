@@ -429,8 +429,11 @@ their independent four relay slots. This separation preserves fallback capacity
 when direct is saturated. All direct peers share a `2 * MAX_FRAME` reassembly
 reservation budget: one maximum frame reserved for the owner, one shared by all
 members, and at most one per verified account and per peer. Shortages apply
-backpressure without closing the waiting connection. If that ordered channel
-already holds an incomplete assembly, the new transfer is rejected with a 503
+backpressure for an owner channel without incomplete assemblies, without closing
+the waiting connection. Complete member frames fitting in one packet (at most
+16,371 JSON bytes) need no assembly reservation and remain immediately decodable.
+A fragmented member transfer short of capacity, or an owner transfer whose ordered
+channel already holds an incomplete assembly, is rejected with a 503
 for its bounded request ID and drained, allowing the existing upload to finish.
 Rejected transfers retain only bounded sequence metadata. The 30-second expiry frees
 incomplete transfers without dispatching them. Completion, abandonment and peer

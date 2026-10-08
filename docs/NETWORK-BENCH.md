@@ -175,6 +175,42 @@ scenarios sequentially without retries. JSON reports and Playwright failure diag
 Evidence contains no
 cookies, claim codes, machine credentials or conversation exports.
 
+## Residual packet-loss measurements (#126)
+
+Seven local runs on 2026-10-08 compared the merged #119 implementation with
+the #126 candidate using the unchanged `packet-loss` scenario and assertions. The
+base tree is `4427d79b47499c322862c99df07161140d90ca90`, shared by #119 head
+`43106bd` and merge `7c842df`. Base binaries/frontend came from #119's CI artifacts;
+the candidate binaries were built locally with the pinned toolchain. Each run
+used a fresh authenticated owner, installation, browser and Linux namespaces.
+
+| Build | Run | Result | Largest outbound application frame (JSON bytes) | Fragmented frames / pending transfers |
+| --- | --- | --- | --- | --- |
+| #119 | 1 | Pass; browser send + title: 9,582 ms | Not instrumented | Not instrumented |
+| #119 | 2 | Pass; browser send + title: 15,984 ms | 855 | 0 / 0 |
+| #119 | 3 | Message POST not observed within 10 s (line 165) | 685 | 0 / 0 |
+| #119 | 4 | Route stayed relay at 35 s (line 161) | 0 | 0 / 0 |
+| #126 | 1 | Message POST succeeded; title absent at 10 s (line 166) | 855 | 0 / 0 |
+| #126 | 2 | Message POST not observed within 10 s (line 165) | 855 | 0 / 0 |
+| #126 | 3 | Route stayed relay at 35 s (line 161) | 0 | 0 / 0 |
+
+A passive browser probe counted binary DataChannel sends from their 13-byte
+headers: declared total, offset and completion. It did not change packets,
+deadlines, network effects or retries. Only aggregate sizes/counts and the public
+transport observations' method, route and elapsed time were retained; no payloads
+or credentials were recorded. Run #126/1 reproduces the exact #119 title failure
+after the successful messages POST (9,515 ms after document initialization),
+with 11 packets, no fragmentation and no outstanding transfer.
+
+These results exclude reassembly waiting/rejection as the cause of that title
+failure: every request fits one packet, reservations are released synchronously
+on decoding, and this single-owner session has no competing member reservation.
+The #126 member-only admission paths are not used. Runs that never establish
+direct have not sent any application packet at all. The measurements establish
+this narrower conclusion; they do not establish general reliability under loss
+or diagnose the remaining ICE/POST/view latency. The 10-second POST/title and
+35-second route assertions are unchanged. Qualification remains #105.
+
 ## Published official STUN port
 
 `python3 tests/stun_docker_test.py` publishes a disposable Binding-only Python

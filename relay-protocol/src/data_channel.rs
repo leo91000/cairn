@@ -242,9 +242,10 @@ impl FrameDecoder {
             };
             let reservation = match reservation {
                 Ok(reservation) => reservation,
-                Err(DecodeError::Busy) if !self.pending.is_empty() => {
+                Err(DecodeError::Busy) if self.budget.member || !self.pending.is_empty() => {
                     // Backpressure here would prevent this ordered channel from
-                    // delivering the fragments that release its own reservation.
+                    // delivering the fragments that release its own reservation,
+                    // or small member frames behind a busy fragmented upload.
                     if payload.len() < total {
                         self.discarded.insert(
                             id,

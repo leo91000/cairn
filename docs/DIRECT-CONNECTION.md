@@ -246,16 +246,22 @@ idle deadline, measured from the last valid fragment. Active interleaved uploads
 can exceed thirty seconds overall. **All installation peers share a `2 * MAX_FRAME` reservation
 budget** (about 21.5 MB). One `MAX_FRAME` is reserved for the owner; all members
 share the other. Each verified account can reserve at most `MAX_FRAME` across
-its peers, and each peer has the same declared-size cap. Each transfer reserves
-its declared total before buffering; completion, abandonment, timeout,
-connection closure or panic releases that reservation. A shortage on a peer
+its peers, and each peer has the same declared-size cap. A complete member frame
+that fits in one packet (at most 16,371 JSON bytes) is decoded directly from that
+packet, without creating an assembly or holding a reservation. Thus a member
+trickling a maximum-sized upload cannot block another member's small requests,
+credits or cancellations. Packet size and bounded application ingress still apply.
+Fragmented transfers reserve their declared total before buffering; completion, abandonment, timeout,
+connection closure or panic releases that reservation. A shortage on an owner peer
 without incomplete assemblies applies backpressure: it retains one packet of
 at most 16 KiB while its bounded SCTP receive buffer pauses input. Expiry still
 runs during this wait and releases the holder's reservation after 30 seconds
 without valid fragment progress, including while a rejection waits on the
 bounded response queue.
-If the waiting channel already holds assemblies, blocking its ordered input
-would prevent their completion. Instead, only the new transfer is rejected:
+A member's fragmented transfer that cannot reserve capacity is rejected immediately,
+so it cannot hold that ordered channel ahead of later small frames. Owner channels
+already holding assemblies also reject a new excess transfer, since waiting would
+prevent completion of their own assemblies. Only that new transfer is rejected:
 a request receives a 503 using its initial fragment's bounded request ID.
 Canonical request frames serialize `type` and `id` before the body. If that
 identity is absent from the initial fragment, the transfer is drained without

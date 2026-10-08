@@ -192,6 +192,17 @@ export const test = base.extend<object, { workspace: Workspace }>({
       )
       await expect(initialAccountView.first()).toBeAttached()
 
+      // An authenticated root briefly renders Sign out before choosing its
+      // installation. Settle that redirect before cookies or reload, while
+      // keeping accounts without installations on their stable account page.
+      if (new URL(page.url()).pathname === '/' && await page.getByRole('button', { name: 'Sign out', exact: true, includeHidden: true }).count()) {
+        const existing = await (await page.request.get(`${url}/api/account/session`)).json()
+        if (existing.authenticated && existing.installations.length) {
+          await page.waitForURL(url => url.pathname.startsWith('/installations/'))
+          await expect(initialAccountView.first()).toBeAttached()
+        }
+      }
+
       await ensureSession()
       const [name, value] = headers.cookie!.split('=')
       await page.context().addCookies([{
