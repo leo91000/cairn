@@ -270,10 +270,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("scenario", choices=SCENARIOS)
     parser.add_argument("--probe-only", action="store_true")
-    parser.add_argument("--expect-route", choices=["direct", "relay"], default="relay")
+    parser.add_argument("--expect-route", choices=["direct", "relay"])
     parser.add_argument("--expect-rust-route", choices=["direct", "relay"])
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.expect_route is None:
+        args.expect_route = "relay" if args.scenario in {"udp-blocked", "symmetric-nat", "symmetric-client"} else "direct"
     if args.expect_rust_route is None:
         args.expect_rust_route = "relay" if args.scenario in {"udp-blocked", "symmetric-nat", "symmetric-client"} else "direct"
     def interrupted(_signal, _frame):
@@ -409,6 +411,18 @@ def browser(network, binary, directory, args, report):
     command = [python, script, "change-network", participant["namespace"], participant["link"], str(directory / "client-proxy")]
     change.write_text("#!/bin/sh\nexec " + shlex.join(command) + "\n")
     change.chmod(0o700)
+    cut = directory / "cut-direct"
+    restore = directory / "restore-direct"
+    for path, action in [(cut, "-I"), (restore, "-D")]:
+        commands = []
+        for chain in ["INPUT", "OUTPUT"]:
+            command = ["sudo", "-n", "ip", "netns", "exec", participant["namespace"],
+                       "iptables", action, chain, "-p", "udp", "-j", "DROP"]
+            commands.append(shlex.join(command))
+        path.write_text("#!/bin/sh\nset -e\n" + "\n".join(commands) + "\n")
+        path.chmod(0o700)
+    env["LEO_NETWORK_CUT_DIRECT"] = str(cut)
+    env["LEO_NETWORK_RESTORE_DIRECT"] = str(restore)
     env["LEO_NETWORK_CHANGE"] = str(change)
     process = subprocess.Popen(["pnpm", "exec", "playwright", "test", "--config", "playwright.network.config.ts"], env=env, start_new_session=True)
     network.children.append(process)

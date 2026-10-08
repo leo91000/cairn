@@ -85,32 +85,37 @@ content and are not a WebRTC peer or an anonymous local installation interface.
 The JSON report contains the topology probes, expected route and successful
 application observations: browser send, Rust read, and stream resume after a
 network change. Each includes `route`, `operation` and monotonic `elapsedMs`.
-Browser evidence comes from successful requests to the actual official
-`/api/installations/{id}/api/...` endpoint, followed by visible conversation data;
-Rust first verifies the same conversation marker through that endpoint, then
-requests a signed grant and negotiates with the real installation DataChannel.
-It records `direct` only after receiving the API response on that channel and
-observing its selected UDP ICE pair (`candidatePair.local` / `.remote`).
-The Rust negotiation uses the protocol's 30-second request deadline, matching
-the installation peer and allowing ICE/DTLS retransmissions under packet loss.
-Relay evidence reads the official response's `x-leo-transport` header; neither
-client uses a fixed route label. Anonymous
-requests fail, anonymous installation loopback access fails, and the old official
-cookie fails after logout. The network-change scenario measures from the address
-change to a fresh message observed through the resumed stream, with a 30-second
-upper bound, then checks a Rust read and the retained conversation. The address
-really changes; restarting only the test TCP forwarder closes old sockets even
-on kernels without socket-destroy support. The browser and session stay alive.
+Browser evidence comes from the web transport's `leo-transport-observation`
+events after successful API responses and accepted live batches, followed by
+visible conversation data. Finite relay responses use `x-leo-transport: relay`;
+direct responses arrive through the real authorized DataChannel. The observer
+contains no payload or credentials. The default-route indicator alone is not
+evidence of a successful application request.
 
-The browser stays on **relay** until #103. The installation peer (#101) and real
-Rust DataChannel client expect **direct** for LAN, ordinary NAT, network change
-and packet loss; UDP blocked, symmetric NAT and symmetric client expect **relay**. The Rust read
-falls back only to its already successful safe HTTPS read; it never retries a
-mutation. `--expect-rust-route` can specify a scenario's expectation;
-`--expect-route` controls the browser expectation. A route mismatch fails the
-bench. Network-change duration remains **browser relay stream recovery**, not a
-direct-to-relay measurement; the subsequent Rust read negotiates a fresh peer.
-Client route switching and direct stream recovery qualification remain #103–#105.
+Rust first verifies the same conversation marker through HTTPS, then requests a
+signed grant and negotiates with the real installation DataChannel. It records
+`direct` only after the API response arrives on that channel and a selected UDP
+ICE pair is observed (`candidatePair.local` / `.remote`). Both clients expect
+**direct** for LAN, ordinary NAT, network change, same-server and packet loss;
+UDP blocked, symmetric NAT and symmetric client expect **relay**. Neither uses
+a fixed route label. `--expect-route` and `--expect-rust-route` override the
+scenario defaults; a mismatch fails the bench.
+
+The network-change scenario measures the real direct-to-relay stream recovery,
+then checks reestablishment of direct and a Rust read. Same-LAN also blocks all
+client UDP during a browser message send: the message must arrive once, the
+live stream must resume on relay within 25 seconds, and the message list must
+contain one client submission. Restoring UDP must reestablish direct. An official
+restart then replaces the signing key; fresh negotiation and subsequent logout
+revocation are exercised without restarting the browser or installation.
+
+Same-LAN and UDP-blocked exercise member removal, logout (including another tab
+of the same session) and detachment during active browser streams on the selected
+route. The removed member receives no further accepted batches, while the owner's
+stream continues. Access checks deny the removed/detached account immediately;
+logout redirects the session's pages to sign-in. Reports retain the checked
+revocation scopes. Anonymous requests and installation loopback access still
+fail. Qualification across Android and production hosts remains #105.
 
 `udp-blocked` demonstrates that the existing relay remains usable even when every
 UDP probe fails. The existing `journeys-official-relay` and Rust relay/security

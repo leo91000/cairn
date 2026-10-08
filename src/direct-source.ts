@@ -1,5 +1,6 @@
 // Adapt the existing credited SSE body to the live client's EventSource seam.
 export class DirectSource extends EventTarget {
+  readonly transportRoute = 'direct'
   onerror: (() => void) | null = null
   private abort = new AbortController()
 

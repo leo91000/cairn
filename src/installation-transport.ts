@@ -1,5 +1,6 @@
 import { DirectChannel, TransportLost } from './direct-channel'
 import { DirectSource } from './direct-source'
+import { observeTransport } from './transport-observation'
 
 export type TransportRoute = 'direct' | 'relay'
 
@@ -37,6 +38,9 @@ export class InstallationTransport {
   private stopped = true
   private grant?: GrantResponse
   private traffic?: DirectChannel
+  private handshake?: ReturnType<typeof setTimeout>
+  private heartbeat?: ReturnType<typeof setTimeout>
+  private controlAbort?: AbortController
 
   constructor(private readonly context: Context) {}
 
@@ -47,9 +51,12 @@ export class InstallationTransport {
   private async control(path: string, body: unknown) {
     const response = await fetch(`${this.base}${path}`, {
       method: 'POST',
+      signal: this.controlAbort?.signal,
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': this.context.csrf },
       body: JSON.stringify(body),
     })
+    if (response.status === 401)
+      this.context.authenticated = false
     if (!response.ok)
       throw new Error('Direct signaling unavailable')
     return response.status === 204 ? undefined : response.json()
@@ -64,13 +71,13 @@ export class InstallationTransport {
     window.addEventListener('offline', this.networkChanged)
     const network = (navigator as Navigator & { connection?: EventTarget }).connection
     network?.addEventListener('change', this.networkChanged)
-    void this.connect()
+    void this.connect(false)
   }
 
   private networkChanged = () => {
     this.fallback()
     if (navigator.onLine)
-      void this.connect()
+      void this.connect(true)
   }
 
   private route(route: TransportRoute) {
@@ -82,6 +89,9 @@ export class InstallationTransport {
 
   private fallback() {
     this.generation++
+    this.controlAbort?.abort()
+    clearTimeout(this.handshake)
+    clearTimeout(this.heartbeat)
     this.traffic?.close()
     this.traffic = undefined
     this.route('relay')
@@ -100,7 +110,7 @@ export class InstallationTransport {
   private failed() {
     this.fallback()
     if (!this.stopped && navigator.onLine)
-      this.retry = setTimeout(() => void this.connect(), 15000)
+      this.retry = setTimeout(() => void this.connect(false), 30000)
   }
 
   stop() {
@@ -113,10 +123,11 @@ export class InstallationTransport {
     network?.removeEventListener('change', this.networkChanged)
   }
 
-  private async connect() {
+  private async connect(iceRestart: boolean) {
     if (this.stopped || !navigator.onLine)
       return
     this.fallback()
+    this.controlAbort = new AbortController()
     const generation = this.generation
     const current = () => !this.stopped && this.generation === generation
     try {
@@ -131,7 +142,9 @@ export class InstallationTransport {
             if (current())
               this.failed()
           })
+          clearTimeout(this.handshake)
           this.route('direct')
+          this.scheduleHeartbeat(current)
         }
       })
       channel.addEventListener('close', () => {
@@ -147,7 +160,11 @@ export class InstallationTransport {
           this.failed()
       }
 
-      const offer = await peer.createOffer()
+      this.handshake = setTimeout(() => {
+        if (current())
+          this.failed()
+      }, 30000)
+      const offer = await peer.createOffer({ iceRestart })
       const fingerprint = /^a=fingerprint:(sha-256 [A-Fa-f0-9:]+)\r?$/m.exec(offer.sdp || '')?.[1]?.toUpperCase().replace('SHA-256', 'sha-256')
       if (!fingerprint)
         throw new Error('Missing DTLS fingerprint')
@@ -198,7 +215,8 @@ export class InstallationTransport {
           this.failed()
       }
 
-      let outgoing = Promise.resolve()
+      let offerAccepted: () => void = () => {}
+      let outgoing = new Promise<void>(resolve => offerAccepted = resolve)
       peer.onicecandidate = (event) => {
         const candidate = event.candidate
         outgoing = outgoing.then(async () => {
@@ -218,10 +236,13 @@ export class InstallationTransport {
 
       // Send the offer before trickled candidates, using the certificate above.
       const sdp = (offer.sdp || '').replace(/a=fingerprint:sha-256 (.*)/g, (_, digest: string) => `a=fingerprint:sha-256 ${digest.toUpperCase()}`)
-      await this.control(`${path}/signal`, { kind: 'offer', sdp })
+      await peer.setLocalDescription({ type: 'offer', sdp })
       if (!current())
         return
-      await peer.setLocalDescription({ type: 'offer', sdp })
+      await this.control(`${path}/signal`, { kind: 'offer', sdp })
+      offerAccepted()
+      if (!current())
+        return
       this.scheduleRenewal(authorization, path, current)
     }
     catch {
@@ -230,8 +251,8 @@ export class InstallationTransport {
     }
   }
 
-  async request(path: string, url: string, options: RequestInit = {}) {
-    const traffic = this.context.transportRoute === 'direct' ? this.traffic : undefined
+  private async sendRequest(path: string, url: string, options: RequestInit = {}) {
+    const traffic = this.context.transportRoute === 'direct' && (options.body == null || typeof options.body === 'string') ? this.traffic : undefined
     if (traffic) {
       try {
         return await traffic.request(`/api${path}`, options)
@@ -245,7 +266,7 @@ export class InstallationTransport {
         if (message && response.status === 409) {
           const data = await response.clone().json()
           if (data.error === 'This message identifier has already been used.')
-            return Response.json({})
+            return Response.json({}, { headers: response.headers })
         }
 
         return response
@@ -255,10 +276,41 @@ export class InstallationTransport {
     return fetch(url, options)
   }
 
+  async request(path: string, url: string, options: RequestInit = {}) {
+    const response = await this.sendRequest(path, url, options)
+    if (response.ok) {
+      const route = response.headers.get('x-leo-transport')
+      if (route === 'direct' || route === 'relay')
+        observeTransport(route, path, options.method || 'GET')
+    }
+
+    return response
+  }
+
+  private scheduleHeartbeat(current: () => boolean) {
+    this.heartbeat = setTimeout(async () => {
+      const traffic = this.traffic
+      if (!current() || !traffic)
+        return
+      const abort = new AbortController()
+      const deadline = setTimeout(() => abort.abort(), 5000)
+      try {
+        await traffic.request('/api/chats', { method: 'HEAD', signal: abort.signal })
+        if (current())
+          this.scheduleHeartbeat(current)
+      }
+      catch {
+        if (current())
+          this.failed()
+      }
+      finally { clearTimeout(deadline) }
+    }, 10000)
+  }
+
   source(path: string, url: string): EventSource {
     const traffic = this.context.transportRoute === 'direct' ? this.traffic : undefined
     if (!traffic)
-      return new EventSource(url)
+      return Object.assign(new EventSource(url), { transportRoute: 'relay' as const })
     return new DirectSource(signal => traffic.request(`/api${path}`, { signal, headers: { accept: 'text/event-stream' } })) as unknown as EventSource
   }
 

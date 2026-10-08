@@ -1,5 +1,6 @@
 import type { LiveBatch } from '../shared/live'
 import { apiUrl, installationTransport } from './api'
+import { observeTransport } from './transport-observation'
 
 export type LiveStatus = 'connecting' | 'live' | 'reconnecting' | 'offline'
 
@@ -80,6 +81,9 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
           throw error
         }
 
+        const transport = (current as EventSource & { transportRoute?: 'direct' | 'relay' }).transportRoute
+        if (transport)
+          observeTransport(transport, path, 'STREAM', Number(event.lastEventId))
         cursor = event.lastEventId
         history = batch.history
         failures = 0
