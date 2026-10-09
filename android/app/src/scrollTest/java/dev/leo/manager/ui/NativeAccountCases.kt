@@ -2,10 +2,15 @@ package dev.leo.manager.ui
 
 import android.app.Application
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.datastore.preferences.core.edit
 import androidx.test.core.app.ApplicationProvider
 import dev.leo.manager.data.*
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
@@ -187,33 +192,57 @@ abstract class NativeAccountCases {
             val vm = LeoViewModel(application, vault, origin)
             val currentVm = mutableStateOf(vm)
             val showingHome = mutableStateOf(false)
+            lateinit var pushScope: CoroutineScope
             compose.setContent {
+                pushScope = rememberCoroutineScope()
                 LeoTheme {
                     if (showingHome.value) LeoApp(vm = currentVm.value)
                     else NotificationSettings(currentVm.value)
                 }
             }
+
+            fun runPushAction(action: suspend () -> Unit) {
+                val operation = pushScope.async { action() }
+                try {
+                    // Keep Compose's scheduler moving: a foreground DataStore edit may hold
+                    // its write lock while waiting to resume on this same scheduler.
+                    compose.waitUntil(10_000) { operation.isCompleted }
+                    kotlinx.coroutines.runBlocking { operation.await() }
+                } finally {
+                    operation.cancel()
+                }
+            }
+
             compose.waitUntil(10_000) {
                 compose.onAllNodes(pushToggle and isOn()).fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithText("Notifications push").assertIsOn()
 
+            // Reproduce a foreground preference write whose continuation needs Compose's
+            // scheduler while the background renewal is handling its refusal.
+            val preferenceWriteStarted = CompletableDeferred<Unit>()
+            val finishPreferenceWrite = CompletableDeferred<Unit>()
+            val preferenceWrite = pushScope.async {
+                application.dataStore.edit {
+                    preferenceWriteStarted.complete(Unit)
+                    finishPreferenceWrite.await()
+                }
+            }
+            compose.waitUntil(10_000) { preferenceWriteStarted.isCompleted }
+            finishPreferenceWrite.complete(Unit)
+
             registered.set(false)
-            kotlinx.coroutines.runBlocking {
-                println("[DEBUG-138] renewal starts")
+            runPushAction {
                 try {
                     registrar.register()
                 } catch (error: ApiException) {
                     assertEquals(403, error.status)
                 }
-                println("[DEBUG-138] refusal handled; reading enabled")
                 assertFalse(preferences.enabled.first())
-                println("[DEBUG-138] disabled; reading recovery")
                 assertTrue(NotificationPreferences(application).nativeReenrollmentRequired.first())
-                println("[DEBUG-138] recovery read; disabled callback starts")
                 // A later background token callback must not silently re-enroll this device.
                 registrar.register()
-                println("[DEBUG-138] disabled callback finished")
+                preferenceWrite.await()
             }
             assertEquals(2, registrationAttempts.get())
             compose.waitUntil(10_000) {
@@ -242,7 +271,7 @@ abstract class NativeAccountCases {
             compose.runOnIdle { showingHome.value = false }
 
             registered.set(true)
-            kotlinx.coroutines.runBlocking {
+            runPushAction {
                 registrar.enable()
                 assertTrue(preferences.enabled.first())
             }
@@ -252,7 +281,7 @@ abstract class NativeAccountCases {
             }
             compose.onNodeWithText("Notifications push").assertIsOn()
             assertEquals(3, registrationAttempts.get())
-            kotlinx.coroutines.runBlocking { registrar.disable() }
+            runPushAction { registrar.disable() }
         }
     }
 
