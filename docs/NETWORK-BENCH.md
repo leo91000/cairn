@@ -276,20 +276,62 @@ and retains only these sanitized reports.
 
 ## Packet-loss investigation (#141)
 
-The reported baseline is 8 failed network jobs out of 29 completed runs
+The reported CI baseline is 8 failed network jobs out of 29 completed runs
 (27.6%). Run [37907266093](https://github.com/leo91000/leo-agent-manager/actions/runs/37907266093)
-reproduces the browser route remaining `relay` for the entire 35-second
-assertion window. Its retained Playwright artifact contains an error context,
-not ICE/DataChannel timing evidence.
+shows the browser remaining `relay` for the unchanged 35-second assertion.
+The eight local, fresh-session promotion-only runs reproduced that exact symptom
+once (1/8, 12.5%), before any message send or Rust read. The temporary
+promotion-only mode was removed after diagnosis. The original full baseline run
+passed with one of three Rust negotiations direct; a pass therefore does not
+mean every negotiation used direct.
 
-Reproduce with the existing authenticated seam, without retries or changed
+The failing browser's ICE pair was connected at 1,936 ms, but DTLS stayed
+`connecting`, the DataChannel never opened, and no application message was sent.
+Cairn's unchanged negotiation deadline closed it at 30,661 ms. This is a product
+handshake failure, rather than a reason to relax the route assertion.
+
+The pinned `rtc-dtls` 0.21.0 `wait()` cleared its retransmission timer as soon as
+it received handshake traffic, even when a partial or repeated previous flight
+could not advance the handshake. If a certificate flight was lost and the peer
+repeated its previous flight, retransmission stopped permanently. A targeted
+loss in the real authenticated bench dropped a 659-byte client certificate
+packet: before the fix it was sent only once and the route assertion failed;
+after the fix it was retransmitted at 1,000 ms and 2,001 ms, and the DataChannel
+opened at 4,210 ms. This extra targeted loss was removed; the normal router still
+drops exactly every fifth outgoing packet on each side.
+
+The public DTLS endpoint regressions simulate time and lose one whole flight,
+then deliver the peer's repeated previous flight before the affected timer.
+Both client/server cases failed deterministically before the change (0.08 s),
+then passed (0.07 s), including application delivery and replay rejection:
+
+```sh
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=4 pnpm test:backend --test direct_dtls_loss
+```
+
+The fix retains the timer until a complete next flight advances the handshake.
+It changes no deadline, signed grant, certificate verification, revocation,
+replay detector or fallback condition. Only this patch is applied to the original
+0.21.0 source, whose provenance and licenses are retained in
+[`vendor/rtc-dtls/CAIRN-PATCH.md`](../vendor/rtc-dtls/CAIRN-PATCH.md); no WebRTC
+version or other dependency pin is upgraded.
+
+Reproduce with the original full authenticated seam, without retries or changed
 route expectations:
 
 ```sh
 CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=4 python3 tests/network-bench.py packet-loss --output test-results/network/packet-loss.json
 ```
 
-A fresh namespace topology, owner, installation and browser are used per run.
-Measure failures before a transport change, then repeat the same loop after it.
-The 35-second route assertion and authenticated fallback remain unchanged while
-the cause is investigated. Release qualification remains blocked by #141.
+Each run writes a sibling `packet-loss.transport.json`, even on an assertion
+failure. It contains bounded browser ICE/DTLS/DataChannel state transitions and
+counters with monotonic timings, never candidates, SDP, URLs, certificates,
+credentials or application content. Rust observations include `directDiagnostics`
+with ICE, DTLS and SCTP states before closure. The existing `directFailure.phase`
+label `ice` denotes the wait for DataChannel opening; these separate states
+avoid mistaking every opening timeout for an ICE failure. Existing route/fallback
+assertions remain unchanged.
+
+Exact-head CI, all post-fix rates, every qualification run/attempt and the final
+Standards/Spec review are recorded in [PR #142](https://github.com/leo91000/leo-agent-manager/pull/142).
+Release qualification remains #105; this change performs no release or deployment.

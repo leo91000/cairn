@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import process from 'node:process'
 import { chromium, expect, test } from '@playwright/test'
 import { beaconRelayFixture } from './beacon-relay-fixture'
+import { captureNetworkTransport, networkTransportDiagnostics } from './network-transport-diagnostics'
 
 test('authenticated browser and Rust client keep using the observed route under network constraints', async () => {
   test.setTimeout(240000)
@@ -71,6 +72,7 @@ test('authenticated browser and Rust client keep using the observed route under 
     }
 
     async function capture(targetPage: Page) {
+      await captureNetworkTransport(targetPage)
       await targetPage.addInitScript(() => {
         const target = window as typeof window & { transportObservations: unknown[] }
         target.transportObservations = []
@@ -406,7 +408,18 @@ test('authenticated browser and Rust client keep using the observed route under 
     await rustRequest(chatsPath, cookie, 401)
   }
   finally {
-    await browser?.close()
-    await fixture.close()
+    try {
+      const output = process.env.CAIRN_NETWORK_OUTPUT
+      if (browser && output) {
+        const diagnostics = await Promise.all(browser.contexts().flatMap(context => context.pages())
+          .map(page => networkTransportDiagnostics(page).catch(() => [])))
+        const diagnosticsOutput = output.endsWith('.json') ? `${output.slice(0, -5)}.transport.json` : `${output}.transport.json`
+        await writeFile(diagnosticsOutput, `${JSON.stringify(diagnostics)}\n`)
+      }
+    }
+    finally {
+      await browser?.close()
+      await fixture.close()
+    }
   }
 })

@@ -5,6 +5,11 @@ members = [
   "crates/protocol"
 ]
 resolver = "3"
+exclude = [ "vendor/rtc-dtls" ]
+
+[patch.crates-io]
+# Preserve the pinned 0.21.0 stack; fix only DTLS retransmission under loss.
+rtc-dtls = { path = "vendor/rtc-dtls" }
 
 [profile.release]
 lto = "thin"
