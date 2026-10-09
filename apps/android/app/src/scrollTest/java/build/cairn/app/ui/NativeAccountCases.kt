@@ -209,8 +209,9 @@ abstract class NativeAccountCases {
             }
 
             // On Robolectric, waitUntil advances only Compose's scheduler. ViewModel DataStore
-            // edits resume on the main looper while holding the write lock, so drain it too.
-            fun waitForForeground(condition: () -> Boolean) =
+            // edits resume on the main looper while holding the write lock, so drain it too
+            // (harmless on devices, where the main looper keeps running).
+            fun waitUntilDrainingMainLooper(condition: () -> Boolean) =
                 compose.waitUntil(10_000) {
                     compose.waitForIdle()
                     condition()
@@ -219,9 +220,7 @@ abstract class NativeAccountCases {
             fun runPushAction(action: suspend () -> Unit) {
                 val operation = pushScope.async { action() }
                 try {
-                    // Keep the foreground moving: a ViewModel DataStore edit may hold its write
-                    // lock while waiting to resume on the main thread.
-                    waitForForeground { operation.isCompleted }
+                    waitUntilDrainingMainLooper { operation.isCompleted }
                     kotlinx.coroutines.runBlocking { operation.await() }
                 } finally {
                     operation.cancel()
@@ -244,7 +243,7 @@ abstract class NativeAccountCases {
                         finishPreferenceWrite.await()
                     }
                 }
-            waitForForeground { preferenceWriteStarted.isCompleted }
+            waitUntilDrainingMainLooper { preferenceWriteStarted.isCompleted }
             finishPreferenceWrite.complete(Unit)
 
             registered.set(false)
