@@ -15,7 +15,7 @@ const records = [
     name: 'Sign-in methods',
     what: 'For Google or GitHub: the account identifier and email address they return. For passkeys: the public key, its identifier and the name you give it. Cairn has no passwords and keeps no Google or GitHub access token.',
     why: 'To recognise you when you sign in.',
-    kept: 'Until you delete your account. A removed method keeps only its identifier and label, without any credential.',
+    kept: 'Until you delete your account. A removed method keeps its identifier and label (the email address for email, Google and GitHub methods), without any credential.',
   },
   {
     name: 'Sign-ins in progress',
@@ -49,9 +49,9 @@ const records = [
   },
   {
     name: 'External app authorizations (MCP)',
-    what: 'When an owner allows an external app to use an installation: the app’s name and redirect addresses, the authorization label, its rights and its expiry. Tokens are stored hashed.',
+    what: 'When an owner allows an external app to use an installation, or creates an access token for it: the app’s name and redirect addresses, the authorization label, its rights and its expiry. Tokens are stored hashed.',
     why: 'To let that app act on the installation within the rights granted.',
-    kept: '30 days from the last renewal. Expired authorizations are deleted every hour; unused app registrations after 30 days.',
+    kept: 'App authorizations last 30 days from their last renewal; access tokens created by an owner last 30 days. Expired ones are deleted every hour, and unused app registrations after 30 days.',
   },
   {
     name: 'Audit log',
@@ -74,7 +74,7 @@ const providers = [
   },
   {
     name: 'Google',
-    use: 'Sign in with Google, only if you choose it. Cairn requests the openid and email scopes and receives your Google account identifier, your email address, whether Google has verified it and, for Google Workspace accounts, the domain, used only to check the address. Google also delivers Android notifications through Firebase Cloud Messaging; these messages contain only identifiers, no text.',
+    use: 'Sign in with Google, only if you choose it. Cairn requests the openid and email scopes. It uses only your Google account identifier, your email address, whether Google has verified it and, for Google Workspace accounts, the domain, used only to check the address; nothing else from your Google profile is kept. Google also delivers Android notifications through Firebase Cloud Messaging; these messages contain only identifiers, no text.',
   },
   {
     name: 'GitHub',
@@ -131,7 +131,7 @@ const cookies = [
         </h2>
         <p>
           An installation is the part of Cairn you deploy on your own machines.
-          Your conversations, projects, files, coding-agent accounts and secrets are stored there, not on Beacon.
+          Your conversations, projects, files, coding-agent accounts and secrets are stored there, not on Beacon. When you are a member of an installation shared with you, they are stored on its owner’s machines.
         </p>
         <ul class="grid list-disc gap-2 pl-5">
           <li>
@@ -207,7 +207,7 @@ const cookies = [
           including the Limited Use requirements.
         </p>
         <p>
-          Google Sign-In provides your Google account identifier and email address. Cairn uses them only to sign you in to your Cairn account and to identify that account, as described above.
+          From Google Sign-In, Cairn uses your Google account identifier and email address. It uses them only to sign you in to your Cairn account and to identify that account, as described above.
           They are not sold, not used for advertising, and not transferred to others except as this policy describes, for example when owners of installations you join see your email address.
         </p>
       </section>
@@ -221,7 +221,7 @@ const cookies = [
           <li>
             <strong>Delete your account</strong> from Account security in your account settings. Deletion removes your account, sign-in methods, sessions, notification devices, memberships, external app authorizations and pending invitations to your address.
             Installations you own become unclaimed: their data stays on their machines and Beacon keeps their record so they can be claimed again.
-            Audit entries that mention your account identifier remain until their 90 days are over, and abuse-protection counters for up to two days.
+            Audit entries that mention your account identifier remain until their 90 days are over, and abuse-protection counters for about two days.
           </li>
           <li>
             For a copy of your data or any other request, write to
