@@ -2,6 +2,7 @@
 import type { SelectOption } from './select'
 import {
   computed,
+  defineAsyncComponent,
   onMounted,
   onScopeDispose,
   ref,
@@ -25,6 +26,8 @@ import UiButton from './components/UiButton.vue'
 import VirtualSelect from './components/VirtualSelect.vue'
 import { Settings } from './icons'
 import Authorize from './views/Authorize.vue'
+
+const PrivacyPolicy = defineAsyncComponent(() => import('./views/PrivacyPolicy.vue'))
 
 interface AccountSession {
   authenticated: boolean
@@ -96,6 +99,7 @@ const installationOptions = computed<SelectOption[]>(() => (session.value?.insta
 const beaconReturnKey = 'cairn-installation-return'
 const authorizePage = window.location.pathname === '/authorize'
 const claimPage = window.location.pathname === '/claim'
+const privacyPage = window.location.pathname === '/privacy'
 
 watch(deviceCode, () => deviceReview.value = null)
 
@@ -556,6 +560,10 @@ function changeEmail() {
 }
 
 onMounted(async () => {
+  // The public privacy policy never needs or reveals the account session.
+  if (privacyPage)
+    return
+
   const url = new URL(window.location.href)
   // OAuth callbacks return to the beacon root. Restore this tab's explicit
   // account or installation page before the session chooses an installation.
@@ -594,7 +602,8 @@ onMounted(async () => {
 </script>
 
 <template>
-  <main v-if="session?.authenticated && authorizePage" class="min-h-dvh bg-canvas text-ink px-6 py-10">
+  <PrivacyPolicy v-if="privacyPage" />
+  <main v-else-if="session?.authenticated && authorizePage" class="min-h-dvh bg-canvas text-ink px-6 py-10">
     <Authorize />
   </main>
   <div v-else-if="session?.authenticated && installation" class="flex h-dvh min-h-0 flex-col bg-canvas text-ink">
@@ -1042,6 +1051,9 @@ onMounted(async () => {
             Use another email or request a new code
           </UiButton>
         </form>
+        <p class="mt-8 text-sm text-muted">
+          <a class="underline underline-offset-2 hover:text-ink" href="/privacy">Privacy Policy</a>
+        </p>
       </template>
     </section>
   </main>
