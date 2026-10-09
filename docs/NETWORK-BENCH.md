@@ -67,7 +67,7 @@ only the standard library and never serves installation data.
 | symmetric-client | Destination-dependent client NAT faces an installation with ordinary Docker-like NAT/filtering; relay expected, no installation port published. |
 | same-server | Beacon STUN behind a directly published DNAT port on the installation host; external client source preserved, installation hairpin reports a gateway; explicit public-IP alias restores the authorized direct route. |
 | network-change | The client moves to a new source address during a live stream; old-address sockets are closed. |
-| packet-loss | A userspace TUN router drops every fifth outgoing IPv4 packet on both sides, including TCP; no random seed or optional netfilter/netem module. |
+| packet-loss | A userspace TUN router drops one outgoing IPv4 packet per five-packet block on both sides, including TCP. A fixed, side-specific BLAKE2s seed varies its position; no optional netfilter/netem module. |
 
 UDP probes send fixed sequence markers to two diagnostic listeners. Reports show
 sent/received counts, whether the source was translated and the number of observed
@@ -378,10 +378,54 @@ after transmission. A metadata-only `cairn-direct-heartbeat-timeout` event recor
 that existing decision, and a public web regression verifies the timeout, relay
 selection and preservation of the idempotent message body.
 
+### Periodic loss aliasing after DTLS recovery
+
+Exact-head CI [37969386136](https://github.com/leo91000/cairn/actions/runs/37969386136)
+still reproduced the initial 35 s failure: ICE connected at 2,253 ms and DTLS
+connected by 3,376 ms, but its DataChannel stayed connecting until 31,377 ms.
+Only three incoming transport packets were observed throughout that interval.
+This is a different failure mode from DTLS remaining connecting.
+
+A temporary phase sweep reproduced the same trace locally (one failure in eleven
+phase-controlled cases; four follow-up controls passed, so phase alone does not
+pin timing). Header-only traces show a delivered first native SCTP INIT, followed
+by retries at approximately +1, +3, +7 and +15 seconds. Every retry was dropped:
+packet ordinals 83, 88, 93 and 103 all landed on the installation router's shifted
+five-packet boundary. Chromium's first INIT-ACK was also dropped. Native INIT
+retransmission is running, not missing. Moving a packet in the background changes
+the result. An extra targeted INIT loss was separately recovered at the existing
+backoff times. These controlled cases are not rates of the original profile.
+
+The fixed every-fifth pattern can therefore turn 20% aggregate loss into 100%
+loss of a periodic control exchange. A finite opening timeout correctly leaves
+that connection on relay; the bench's unconditional initial direct expectation
+is unrealistic for this synchronized pattern. Increasing deadlines would not
+repair the model and is deliberately avoided.
+
+The bench retains 20% loss, both directions and TCP/UDP, but varies the dropped
+position in each five-packet block. BLAKE2s of the fixed domain
+`cairn-network-loss-v1`, participant role and block ordinal makes the profile
+reproducible and separates the two sides. It is a stratified deterministic loss
+profile, not a claim to model independent random loss. It does not inspect DTLS,
+SCTP or application content and has no special control-packet exemption. Initial
+direct promotion is still required under 35 s, and all existing product timers
+and fallback policies remain unchanged.
+
+A regression through the real namespace/router interface sends 125 UDP packets
+on each side, checks exactly four survivors in every five-packet block, and
+replays the observed periodic retry positions after two background packets.
+Before the change every retry was lost on both sides (red in 9.18 s); after the
+change at least one retry survives, while the aggregate loss remains exactly
+25/125 per side. The ordinary public CLI also retains its reproducible 8/10 probe.
+The temporary phase control, header logger and promotion-only return were removed
+before qualification. This regression is about the network fixture's loss model;
+it does not promise that every SCTP handshake can recover arbitrary correlated
+loss.
+
 ### Reproduction and qualification
 
-The normal router still discards exactly every fifth outgoing IPv4 packet on
-both sides. There are no retries inside a scenario. Run the complete authenticated
+The router discards exactly one outgoing IPv4 packet in each five-packet block
+on both sides, including TCP. There are no retries inside a scenario. Run the complete authenticated
 seam with the original network topology:
 
 ```sh
