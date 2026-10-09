@@ -273,3 +273,23 @@ written only to a private fixture file/app storage and removed in cleanup; no
 SDP, cookies, authorization IDs or logcat are uploaded. The **Android direct-relay
 device bench** CI job runs all three cases on API 36, fails on any failed case
 and retains only these sanitized reports.
+
+## Packet-loss investigation (#141)
+
+The reported baseline is 8 failed network jobs out of 29 completed runs
+(27.6%). Run [37907266093](https://github.com/leo91000/leo-agent-manager/actions/runs/37907266093)
+reproduces the browser route remaining `relay` for the entire 35-second
+assertion window. Its retained Playwright artifact contains an error context,
+not ICE/DataChannel timing evidence.
+
+Reproduce with the existing authenticated seam, without retries or changed
+route expectations:
+
+```sh
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=4 python3 tests/network-bench.py packet-loss --output test-results/network/packet-loss.json
+```
+
+A fresh namespace topology, owner, installation and browser are used per run.
+Measure failures before a transport change, then repeat the same loop after it.
+The 35-second route assertion and authenticated fallback remain unchanged while
+the cause is investigated. Release qualification remains blocked by #141.
