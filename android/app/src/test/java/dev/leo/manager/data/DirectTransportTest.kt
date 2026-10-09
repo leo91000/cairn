@@ -228,6 +228,177 @@ class DirectTransportTest {
         }
 
     @Test
+    fun `reassembly refusal sends a mutation on relay and preserves the healthy peer`() =
+        runBlocking {
+            MockWebServer().use { server ->
+                server.enqueue(MockResponse().setBody("{\"route\":\"relay\"}"))
+                server.start()
+                val api = LeoApi(server.url("/"), MemoryVault(), installationId = "test")
+                var disposed = false
+                val sent = java.io.ByteArrayOutputStream()
+                var packets = 0
+                var fragmented = false
+                val title = "x".repeat(20000)
+                lateinit var channel: DirectChannel
+                channel =
+                    DirectChannel(
+                        { packet, _, _ ->
+                            val envelope = ByteBuffer.wrap(packet)
+                            val total = envelope.getInt(5)
+                            sent.write(packet, 13, packet.size - 13)
+                            packets++
+                            if (sent.size() == total) {
+                                val request =
+                                    wireJson
+                                        .parseToJsonElement(sent.toString(Charsets.UTF_8))
+                                        .jsonObject
+                                sent.reset()
+                                if (request["type"]!!.jsonPrimitive.content == "request") {
+                                    val rejected =
+                                        request["method"]!!.jsonPrimitive.content == "POST"
+                                    if (rejected) fragmented = packets > 1
+                                    channel.receive(
+                                        singleFramePacket(
+                                            buildJsonObject {
+                                                put("type", "response")
+                                                put("id", request["id"]!!)
+                                                put("status", if (rejected) 503 else 200)
+                                                put(
+                                                    "headers",
+                                                    buildJsonArray {
+                                                        if (rejected)
+                                                            add(
+                                                                buildJsonArray {
+                                                                    add("x-leo-direct-rejection")
+                                                                    add("reassembly-busy")
+                                                                }
+                                                            )
+                                                    },
+                                                )
+                                                put("body", "e30=")
+                                            }
+                                                .toString()
+                                                .toByteArray()
+                                        )
+                                    )
+                                }
+                                packets = 0
+                            }
+                        },
+                        { disposed = true },
+                    )
+                api.transport.attach(channel)
+                try {
+                    assertEquals(
+                        "{\"route\":\"relay\"}",
+                        api.request("POST", "/chats", body("title" to title)),
+                    )
+                    val relay = server.takeRequest()
+                    assertEquals("POST", relay.method)
+                    assertEquals("/api/installations/test/api/chats", relay.path)
+                    assertEquals(
+                        title,
+                        wireJson
+                            .parseToJsonElement(relay.body.readUtf8())
+                            .jsonObject["title"]!!
+                            .jsonPrimitive
+                            .content,
+                    )
+                    assertTrue("The rejected mutation must span multiple packets", fragmented)
+                    assertEquals("{}", api.request("GET", "/chats"))
+                    assertEquals(1, server.requestCount)
+                    assertEquals("direct", api.transport.route.value)
+                    assertFalse(disposed)
+                } finally {
+                    api.closeStreams()
+                }
+            }
+        }
+
+    @Test
+    fun `application errors and stream responses never authorize mutation replay`() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            val api = LeoApi(server.url("/"), MemoryVault(), installationId = "test")
+            try {
+                for ((type, status, markers) in
+                    listOf(
+                        Triple("response", 503, emptyList()),
+                        Triple("response", 503, listOf("unknown")),
+                        Triple("response", 500, listOf("reassembly-busy")),
+                        Triple("response", 503, listOf("reassembly-busy", "reassembly-busy")),
+                        Triple("stream_start", 503, listOf("reassembly-busy")),
+                    )) {
+                    var disposed = false
+                    lateinit var channel: DirectChannel
+                    channel =
+                        DirectChannel(
+                            { packet, _, _ ->
+                                val request =
+                                    wireJson
+                                        .parseToJsonElement(
+                                            String(packet.copyOfRange(13, packet.size))
+                                        )
+                                        .jsonObject
+                                if (request["type"]!!.jsonPrimitive.content == "request") {
+                                    channel.receive(
+                                        singleFramePacket(
+                                            buildJsonObject {
+                                                put("type", type)
+                                                put("id", request["id"]!!)
+                                                put("status", status)
+                                                put(
+                                                    "headers",
+                                                    buildJsonArray {
+                                                        markers.forEach { marker ->
+                                                            add(
+                                                                buildJsonArray {
+                                                                    add("x-leo-direct-rejection")
+                                                                    add(marker)
+                                                                }
+                                                            )
+                                                        }
+                                                    },
+                                                )
+                                                put("body", "e30=")
+                                            }
+                                                .toString()
+                                                .toByteArray()
+                                        )
+                                    )
+                                    if (type == "stream_start")
+                                        channel.receive(
+                                            singleFramePacket(
+                                                buildJsonObject {
+                                                    put("type", "stream_end")
+                                                    put("id", request["id"]!!)
+                                                    put("failed", false)
+                                                }
+                                                    .toString()
+                                                    .toByteArray()
+                                            )
+                                        )
+                                }
+                            },
+                            { disposed = true },
+                        )
+                    api.transport.attach(channel)
+                    val error = runCatching {
+                        api.request("POST", "/chats", body("title" to "New chat"))
+                    }
+                        .exceptionOrNull()
+                    assertTrue("$type $status $markers", error is ApiException)
+                    assertEquals(status, (error as ApiException).status)
+                    assertEquals(0, server.requestCount)
+                    assertFalse(disposed)
+                }
+            } finally {
+                api.closeStreams()
+            }
+        }
+    }
+
+    @Test
     fun `local saturation sends a mutation on relay and preserves the healthy peer`() =
         runBlocking {
             MockWebServer().use { server ->

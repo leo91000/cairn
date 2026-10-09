@@ -170,7 +170,11 @@ waiting callbacks. The existing protocol still limits assemblies, credited strea
 and body sizes.
 
 A locally full request table or a channel closed before any packet is accepted
-uses the relay even for a mutation. Once a request may have been delivered, only
+uses the relay even for a mutation. The server's reserved finite response
+`503` with `x-leo-direct-rejection: reassembly-busy` also permits this recovery:
+the fragmented member request was refused before dispatch. The healthy peer
+remains available. Ordinary 503 responses, unknown markers and stream responses
+retain the usual replay rules. Once a request may have been delivered, only
 reads and messages with client identifiers may recover automatically. The
 ordinary call retains its 30-second deadline. Only a call bound to an available
 direct peer before enqueue permits 65 seconds overall, leaving time for a relay

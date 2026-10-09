@@ -428,10 +428,24 @@ class DirectChannel(
                     .protocol(Protocol.HTTP_1_1)
                     .code(response["status"]!!.jsonPrimitive.int)
                     .message("Direct")
+            val headers = okhttp3.Headers.Builder()
             response["headers"]!!.jsonArray.forEach {
                 val pair = it.jsonArray
-                builder.addHeader(pair[0].jsonPrimitive.content, pair[1].jsonPrimitive.content)
+                headers.add(pair[0].jsonPrimitive.content, pair[1].jsonPrimitive.content)
             }
+            val responseHeaders = headers.build()
+            builder.headers(responseHeaders)
+
+            // Reserved refusal before dispatch: even a mutation is safe to send on relay.
+            // Ordinary application errors and stream responses retain their replay rules.
+            if (
+                response["type"]!!.jsonPrimitive.content == "response" &&
+                    response["status"]!!.jsonPrimitive.int == 503 &&
+                    responseHeaders.values("x-leo-direct-rejection").singleOrNull() ==
+                        "reassembly-busy"
+            )
+                throw DirectNotSent("Réassemblage direct indisponible")
+
             if (response["type"]!!.jsonPrimitive.content == "stream_start") {
                 streaming = true
                 val input =
