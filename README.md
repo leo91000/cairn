@@ -1,7 +1,14 @@
 # Cairn
 
-A self-hosted Vue control room with a native Rust backend for Codex and Claude Code agents, recurring work, and reusable skills.
-Run it on a VPS so schedules keep working when your laptop is off.
+Cairn runs Codex and Claude Code agents on machines you own, and you drive them
+from the web or the Android app. Each installation keeps its conversations,
+projects, secrets and agent workspaces on its own disk, and agents execute in
+private Firecracker microVMs. Schedules keep running when your laptop is off.
+
+Beacon, the hosted service at [cairn.build](https://cairn.build), provides Cairn
+accounts, the web and mobile interface, and access to every installation of an
+account. It connects your devices to an installation directly when the network
+allows it, through its relay otherwise, and does not keep the agents' work.
 
 ![Workspace overview](docs/screenshots/overview-desktop.png)
 
@@ -18,8 +25,9 @@ Run it on a VPS so schedules keep working when your laptop is off.
 - Add remote and command MCP servers from the UI, sign in with OAuth on any device, discover tools, and choose each agent’s connections and tool access.
 - Expose scoped tools through a **stateless MCP 2026-07-28** endpoint, with stateless compatibility for older Streamable HTTP clients, OAuth, PKCE, refresh rotation, and revocation.
 
-The application serves one private owner workspace. The repository is public;
-your credentials, projects, task instructions, and run history stay on your server.
+An installation belongs to the Cairn account that claimed it; its owner can invite
+members. The repository is public; your credentials, projects, task instructions,
+and run history stay on your installation.
 There is no external telemetry or font/CDN dependency. Storage and VM performance
 timings stay in local service logs; disk I/O counters are available in storage status.
 
